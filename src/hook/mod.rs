@@ -58,7 +58,11 @@ pub fn allow_with_noop(context: &str) -> serde_json::Value {
     let tmp = env::temp_dir().join(format!("gm-out-{}.txt", ts));
     let _ = fs::write(&tmp, context);
     let tmp_str = tmp.to_string_lossy();
-    let cmd = format!("cat '{}' && rm -f '{}'", tmp_str, tmp_str);
+    let cmd = if cfg!(windows) {
+        format!("Get-Content '{}'; Remove-Item '{}' -ErrorAction SilentlyContinue", tmp_str, tmp_str)
+    } else {
+        format!("cat '{}' && rm -f '{}'", tmp_str, tmp_str)
+    };
     serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
