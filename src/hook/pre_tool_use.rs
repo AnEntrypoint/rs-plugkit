@@ -15,9 +15,9 @@ pub fn run() {
 fn dispatch(tool_name: &str, tool_input: &Value) -> Value {
     if tool_name.is_empty() { return allow(None); }
 
-    const FORBIDDEN: &[&str] = &["find", "Find"];
+    const FORBIDDEN: &[&str] = &["find", "Find", "Glob", "Grep"];
     if FORBIDDEN.contains(&tool_name) {
-        return deny("Use the code-search skill for codebase exploration instead of find. Describe what you need in plain language — it understands intent, not just patterns.");
+        return deny("Use the code-search skill for codebase exploration instead of Grep/Glob/find. Describe what you need in plain language — it understands intent, not just patterns.");
     }
 
     const WRITE_TOOLS: &[&str] = &["Write", "write_file"];
@@ -34,7 +34,7 @@ fn dispatch(tool_name: &str, tool_input: &Value) -> Value {
         }
     }
 
-    const SEARCH_TOOLS: &[&str] = &["Glob", "Grep", "glob", "search_file_content", "Search", "search"];
+    const SEARCH_TOOLS: &[&str] = &["glob", "search_file_content", "Search", "search"];
     if SEARCH_TOOLS.contains(&tool_name) { return allow(None); }
 
     if tool_name == "Task" && tool_input["subagent_type"].as_str().unwrap_or("") == "Explore" {
