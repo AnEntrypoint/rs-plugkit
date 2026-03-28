@@ -1,3 +1,5 @@
+mod hook;
+
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::{env, fs, path::PathBuf, time::Duration};
@@ -18,7 +20,7 @@ fn self_exe() -> String {
 }
 
 #[derive(Parser)]
-#[command(name = "plugkit", about = "plugkit — exec + codeinsight CLI")]
+#[command(name = "plugkit", about = "plugkit — exec + codeinsight CLI", version)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
@@ -51,6 +53,9 @@ enum Cmd {
     Search {
         #[arg(long)] path: Option<String>,
         query: Vec<String>,
+    },
+    Hook {
+        event: String,
     },
 }
 
@@ -303,6 +308,16 @@ async fn main() {
                 println!("{}", output.text);
                 if cache {
                     let _ = fs::write(root_path.join(".codeinsight"), &output.text);
+                }
+            }
+            Cmd::Hook { event } => {
+                match event.as_str() {
+                    "session-start" => { hook::session_start(); return Ok(()); }
+                    "pre-tool-use" => { hook::pre_tool_use(); return Ok(()); }
+                    "prompt-submit" => { hook::prompt_submit(); return Ok(()); }
+                    "stop" => { hook::run_stop(); return Ok(()); }
+                    "stop-git" => { hook::run_stop_git(); return Ok(()); }
+                    other => { eprintln!("Unknown hook event: {}", other); exit_code = 1; return Ok(()); }
                 }
             }
             Cmd::Search { path, query } => {
