@@ -4,6 +4,7 @@ use std::{env, fs, path::PathBuf, time::Duration};
 
 use rs_exec::{daemon, rpc_client};
 use rs_codeinsight::{analyze, AnalyzeOptions};
+use rs_search::{bm25, context, mcp as search_mcp, mtime_cache, run_search, scanner};
 
 const HARD_CEILING_MS: u64 = 15000;
 const RUNNER_NAME: &str = "rs-exec-runner";
@@ -46,6 +47,10 @@ enum Cmd {
         #[arg(long)] json: bool,
         #[arg(long)] cache: bool,
         #[arg(long)] read_cache: bool,
+    },
+    Search {
+        #[arg(long)] path: Option<String>,
+        query: Vec<String>,
     },
 }
 
@@ -269,6 +274,27 @@ async fn main() {
                 println!("{}", output.text);
                 if cache {
                     let _ = fs::write(root_path.join(".codeinsight"), &output.text);
+                }
+            }
+            Cmd::Search { path, query } => {
+                if query.is_empty() {
+                    search_mcp::run_mcp_server();
+                    return Ok(());
+                }
+                let q = query.join(" ");
+                let root = std::path::PathBuf::from(path.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string()));
+                if !root.exists() { eprintln!("Path does not exist: {}", root.display()); exit_code = 1; return Ok(()); }
+                let chunks = scanner::scan_repository(&root);
+                let results = bm25::search(&q, &chunks);
+                if results.is_empty() { println!("No results found."); return Ok(()); }
+                println!("\nFound {} result{}:\n", results.len(), if results.len() != 1 { "s" } else { "" });
+                for (i, r) in results.iter().enumerate() {
+                    let total = context::get_file_total_lines(&root, &r.chunk.file_path).map(|n| format!(" [{}L]", n)).unwrap_or_default();
+                    let ctx = context::find_enclosing_context(&r.chunk.content, r.chunk.line_start).map(|c| format!(" (in: {})", c)).unwrap_or_default();
+                    println!("{}. {}{}: {}-{}{} (score: {:.1}%)", i + 1, r.chunk.file_path, total, r.chunk.line_start, r.chunk.line_end, ctx, r.score * 100.0);
+                    println!("   BM25: {:.2}", r.bm25_raw);
+                    for line in r.chunk.content.split('\n').take(3) { println!("   > {}", &line[..line.len().min(80)]); }
+                    println!();
                 }
             }
         }
