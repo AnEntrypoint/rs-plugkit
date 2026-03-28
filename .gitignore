@@ -2,3 +2,4 @@
 .prd
 .gm-stop-verified
 .code-search/
+*.stackdump
