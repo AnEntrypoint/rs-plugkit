@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, process::{Command, Stdio}};
+use std::process::{Command, Stdio};
 use super::{allow_with_noop, tools_dir};
 
 pub fn dispatch(code: &str) -> serde_json::Value {

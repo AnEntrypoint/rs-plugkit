@@ -158,7 +158,7 @@ fn run_with_file(lang: &str, code: &str, cwd: Option<&str>) -> String {
     let tmp_str = tmp.to_string_lossy();
     let mut args = vec!["exec".to_string(), format!("--lang={}", lang), format!("--file={}", tmp_str)];
     if let Some(c) = cwd { args.push(format!("--cwd={}", c)); }
-    let r = run_self_args(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let r = run_self(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
     let _ = std::fs::remove_file(&tmp);
     strip_footer(&r).to_string()
 }
