@@ -4,7 +4,7 @@ use std::{env, fs, path::PathBuf, time::Duration};
 
 use rs_exec::{daemon, rpc_client};
 use rs_codeinsight::{analyze, AnalyzeOptions};
-use rs_search::{bm25, context, mcp as search_mcp, mtime_cache, run_search, scanner};
+use rs_search::{bm25, context, mcp as search_mcp, scanner};
 
 const HARD_CEILING_MS: u64 = 15000;
 const RUNNER_NAME: &str = "rs-exec-runner";
@@ -134,14 +134,26 @@ async fn cmd_status(task_id_str: &str) -> anyhow::Result<()> {
     let task = rpc_client::rpc_call("getTask", json!({ "taskId": raw_id }), 10000).await?;
     let task = &task["task"];
     if task.is_null() { eprintln!("Task not found"); std::process::exit(1); }
-    println!("Status: {}", task["status"].as_str().unwrap_or("unknown"));
+    let status = task["status"].as_str().unwrap_or("unknown");
+    println!("Status: {}", status);
     if let Some(r) = task["result"].as_object() {
         if let Some(s) = r.get("stdout").and_then(|v| v.as_str()) { if !s.is_empty() { print!("{}", s); } }
         if let Some(s) = r.get("stderr").and_then(|v| v.as_str()) { if !s.is_empty() { eprint!("{}", s); } }
+        if let Some(e) = r.get("error").and_then(|v| v.as_str()) { if !e.is_empty() { eprintln!("Error: {}", e); } }
     }
     let output = rpc_client::rpc_call("getAndClearOutput", json!({ "taskId": raw_id }), 5000).await?;
     if let Some(arr) = output["output"].as_array() {
         for e in arr { let d = e["d"].as_str().unwrap_or(""); if e["s"] == "stdout" { print!("{}", d); } else { eprint!("{}", d); } }
+    }
+    if status == "running" {
+        println!("\nTask still running. Options:");
+        println!("  plugkit sleep {}      # wait for completion (up to 30s) — recommended", task_id_str);
+        println!("  plugkit type {} <input>  # send stdin to running task", task_id_str);
+        println!("  plugkit status {}     # check status again (snapshot)", task_id_str);
+    } else if status == "completed" || status == "failed" {
+        println!("\nTask finished. Clean up:");
+        println!("  plugkit close {}      # delete task", task_id_str);
+        println!("  plugkit runner stop          # stop runner if no more tasks");
     }
     Ok(())
 }
@@ -162,17 +174,22 @@ async fn cmd_sleep(task_id_str: &str, secs: u64, next_output: bool) -> anyhow::R
         }
         let status = task["status"].as_str().unwrap_or("");
         if status != "running" && status != "pending" {
-            println!("\nTask finished ({}).\n  plugkit close {}      # delete task", status, task_id_str);
+            if let Some(e) = task["result"]["error"].as_str() { if !e.is_empty() { eprintln!("Error: {}", e); } }
+            println!("\nTask finished ({}). Clean up:", status);
+            println!("  plugkit close {}      # delete task", task_id_str);
+            println!("  plugkit runner stop          # stop runner if no more tasks");
             return Ok(());
         }
         if next_output {
-            let remaining = timeout.saturating_sub(start.elapsed()).min(Duration::from_secs(30));
+            let remaining = timeout.saturating_sub(start.elapsed()).min(Duration::from_secs(900));
             let _ = rpc_client::rpc_call("waitForOutput", json!({ "taskId": raw_id, "timeoutMs": remaining.as_millis() as u64 }), remaining.as_millis() as u64 + 5000).await;
         } else {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
-    println!("\nTimeout after {}s. Task still running.\n  plugkit sleep {}       # wait again", secs, task_id_str);
+    println!("\nTimeout after {}s. Task still running.", secs);
+    println!("  plugkit sleep {}       # wait again (up to 15m) — recommended", task_id_str);
+    println!("  plugkit status {}      # check current status (snapshot)", task_id_str);
     Ok(())
 }
 
@@ -209,6 +226,18 @@ async fn main() {
                 ensure_runner().await?;
                 rpc_client::rpc_call("deleteTask", json!({ "taskId": parse_task_id(&task_id) }), 10000).await?;
                 println!("Task {} closed", task_id);
+                let res = rpc_client::rpc_call("listTasks", json!({}), 5000).await.unwrap_or_default();
+                let remaining: Vec<_> = res["tasks"].as_array().map(|a| {
+                    a.iter().filter(|t| matches!(t["status"].as_str(), Some("running") | Some("pending"))).collect()
+                }).unwrap_or_default();
+                if !remaining.is_empty() {
+                    println!("\n{} task(s) still running:", remaining.len());
+                    for t in &remaining {
+                        println!("  plugkit sleep task_{}       # wait for completion (up to 30s)", t["id"]);
+                    }
+                } else {
+                    println!("  plugkit runner stop          # no more tasks — stop runner");
+                }
             }
             Cmd::Type { task_id, input } => {
                 ensure_runner().await?;
@@ -287,12 +316,10 @@ async fn main() {
                 let chunks = scanner::scan_repository(&root);
                 let results = bm25::search(&q, &chunks);
                 if results.is_empty() { println!("No results found."); return Ok(()); }
-                println!("\nFound {} result{}:\n", results.len(), if results.len() != 1 { "s" } else { "" });
-                for (i, r) in results.iter().enumerate() {
+                for r in results.iter() {
                     let total = context::get_file_total_lines(&root, &r.chunk.file_path).map(|n| format!(" [{}L]", n)).unwrap_or_default();
                     let ctx = context::find_enclosing_context(&r.chunk.content, r.chunk.line_start).map(|c| format!(" (in: {})", c)).unwrap_or_default();
-                    println!("{}. {}{}: {}-{}{} (score: {:.1}%)", i + 1, r.chunk.file_path, total, r.chunk.line_start, r.chunk.line_end, ctx, r.score * 100.0);
-                    println!("   BM25: {:.2}", r.bm25_raw);
+                    println!("{}:{}-{}{}{} ({:.1}%)", r.chunk.file_path, r.chunk.line_start, r.chunk.line_end, total, ctx, r.score * 100.0);
                     for line in r.chunk.content.split('\n').take(3) { println!("   > {}", &line[..line.len().min(80)]); }
                     println!();
                 }

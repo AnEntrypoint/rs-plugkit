@@ -1,21 +1,22 @@
-name: Build
+name: Release
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    tags:
+      - 'v*'
 
 jobs:
-  build:
+  release:
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            asset_name: plugkit
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            asset_name: plugkit.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -28,16 +29,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: release-${{ matrix.target }}
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Strip binary (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: strip target/${{ matrix.target }}/release/plugkit
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
         with:
-          name: plugkit-${{ matrix.target }}
-          path: |
-            target/${{ matrix.target }}/release/plugkit
-            target/${{ matrix.target }}/release/plugkit.exe
-          if-no-files-found: ignore
+          files: target/${{ matrix.target }}/release/${{ matrix.asset_name }}
