@@ -2,8 +2,9 @@ use serde_json::json;
 use std::{env, fs, path::Path, process::Command};
 
 pub fn run_stop() {
-    let cwd = env::current_dir().unwrap_or_default();
-    let prd = cwd.join(".prd");
+    let project_dir = env::var("CLAUDE_PROJECT_DIR")
+        .unwrap_or_else(|_| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
+    let prd = std::path::Path::new(&project_dir).join(".prd");
 
     if prd.exists() {
         let content = fs::read_to_string(&prd).unwrap_or_default();
