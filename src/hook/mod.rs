@@ -109,12 +109,39 @@ pub fn deny(reason: &str) -> serde_json::Value {
 
 pub fn run_self(args: &[&str]) -> String {
     let bin = env::current_exe().unwrap_or_else(|_| plugkit_bin());
-    match std::process::Command::new(&bin).args(args).output() {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            format!("{}{}", stdout, stderr).trim().to_string()
+    let child = match std::process::Command::new(&bin).args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn() {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    let timeout = std::time::Duration::from_secs(20);
+    let start = std::time::Instant::now();
+    let mut child = child;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                if let Some(mut o) = child.stdout.take() { let _ = std::io::Read::read_to_end(&mut o, &mut stdout); }
+                if let Some(mut e) = child.stderr.take() { let _ = std::io::Read::read_to_end(&mut e, &mut stderr); }
+                let _ = status;
+                let so = String::from_utf8_lossy(&stdout).to_string();
+                let se = String::from_utf8_lossy(&stderr).to_string();
+                return format!("{}{}", so, se).trim().to_string();
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return "Error: exec timed out after 20s".to_string();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return String::new(),
         }
-        Err(_) => String::new(),
     }
 }
