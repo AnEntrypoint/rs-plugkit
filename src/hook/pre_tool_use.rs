@@ -85,7 +85,7 @@ fn handle_bash(tool_input: &Value) -> Value {
         }
     }
 
-    if command.contains("bun") && (command.contains("gm-exec") || command.contains("rs-exec") || command.contains("plugkit") || command.contains("codebasesearch")) {
+    if command.contains("bun") && (command.contains("gm-exec") || command.contains("plugkit") || command.contains("codebasesearch")) {
         let pkg = command.split_whitespace().nth(2).unwrap_or("plugkit");
         return deny(&format!("Do not call {} directly. Use exec:<lang> syntax instead.\n\nexec:nodejs\nconsole.log(\"hello\")\n\nexec:codesearch\nfind all database queries", pkg));
     }

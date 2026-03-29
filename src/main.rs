@@ -9,7 +9,7 @@ use rs_codeinsight::{analyze, AnalyzeOptions};
 use rs_search::{bm25, context, mcp as search_mcp, scanner};
 
 const HARD_CEILING_MS: u64 = 15000;
-const RUNNER_NAME: &str = "rs-exec-runner";
+const RUNNER_NAME: &str = "plugkit-runner";
 
 fn port_file() -> PathBuf {
     env::temp_dir().join("glootie-runner.port")
