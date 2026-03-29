@@ -60,13 +60,15 @@ enum Cmd {
 }
 
 async fn ensure_runner() -> anyhow::Result<()> {
-    if rpc_client::health_check().await { return Ok(()); }
-    daemon::start(RUNNER_NAME, &self_exe(), &["--runner-mode"])?;
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::time::timeout(Duration::from_millis(5000), async {
         if rpc_client::health_check().await { return Ok(()); }
-    }
-    Err(anyhow::anyhow!("Runner did not become healthy in time"))
+        daemon::start(RUNNER_NAME, &self_exe(), &["--runner-mode"])?;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            if rpc_client::health_check().await { return Ok(()); }
+        }
+        Err(anyhow::anyhow!("Runner did not become healthy in time"))
+    }).await.unwrap_or_else(|_| Err(anyhow::anyhow!("Runner startup timed out")))
 }
 
 fn parse_task_id(s: &str) -> u64 {
@@ -81,16 +83,22 @@ async fn run_code(code: &str, runtime: &str, cwd: &str) -> anyhow::Result<i32> {
     let safety = tokio::time::sleep(Duration::from_millis(HARD_CEILING_MS));
     tokio::pin!(safety);
 
-    let exec_fut = rpc_client::rpc_call(
-        "execute",
-        json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "timeout": HARD_CEILING_MS, "backgroundTaskId": task_id }),
-        HARD_CEILING_MS + 5000,
-    );
+    let exec_fut = async {
+        tokio::time::timeout(
+            Duration::from_millis(HARD_CEILING_MS),
+            rpc_client::rpc_call(
+                "execute",
+                json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "timeout": HARD_CEILING_MS, "backgroundTaskId": task_id }),
+                HARD_CEILING_MS + 5000,
+            )
+        ).await
+    };
 
     let result = tokio::select! {
         r = exec_fut => match r {
-            Ok(v) => v["result"].clone(),
-            Err(e) => json!({ "error": e.to_string() }),
+            Ok(Ok(v)) => v["result"].clone(),
+            Ok(Err(e)) => json!({ "error": e.to_string() }),
+            Err(_) => json!({ "backgroundTaskId": task_id, "persisted": true }),
         },
         _ = safety => json!({ "backgroundTaskId": task_id, "persisted": true }),
     };
