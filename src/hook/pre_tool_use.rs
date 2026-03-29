@@ -153,7 +153,7 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>) -> Value {
 fn run_with_file(lang: &str, code: &str, cwd: Option<&str>) -> String {
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
     let ext = lang_ext(lang);
-    let tmp = std::env::temp_dir().join(format!("gm-exec-{}.{}", ts, ext));
+    let tmp = std::env::temp_dir().join(format!("plugkit-exec-{}.{}", ts, ext));
     let _ = std::fs::write(&tmp, code);
     let tmp_str = tmp.to_string_lossy();
     let mut args = vec!["exec".to_string(), format!("--lang={}", lang), format!("--file={}", tmp_str)];

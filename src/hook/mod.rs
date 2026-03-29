@@ -55,7 +55,7 @@ pub fn is_kilo() -> bool {
 pub fn allow_with_noop(context: &str) -> serde_json::Value {
     use std::{fs, time::{SystemTime, UNIX_EPOCH}};
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
-    let tmp = env::temp_dir().join(format!("gm-out-{}.txt", ts));
+    let tmp = env::temp_dir().join(format!("plugkit-out-{}.txt", ts));
     let _ = fs::write(&tmp, context);
     let tmp_str = tmp.to_string_lossy();
     let tmp_unix = to_unix_path(&tmp_str);
