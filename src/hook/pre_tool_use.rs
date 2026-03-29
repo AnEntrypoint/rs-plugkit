@@ -57,7 +57,7 @@ fn dispatch(tool_name: &str, tool_input: &Value) -> Value {
         return handle_bash(tool_input);
     }
 
-    const ALLOWED: &[&str] = &["agent-browser", "Skill", "code-search", "electron", "TaskOutput", "ReadMcpResourceTool", "ListMcpResourcesTool"];
+    const ALLOWED: &[&str] = &["browser", "Skill", "code-search", "electron", "TaskOutput", "ReadMcpResourceTool", "ListMcpResourcesTool"];
     if ALLOWED.contains(&tool_name) { return allow(None); }
 
     allow(None)
@@ -67,8 +67,8 @@ fn handle_bash(tool_input: &Value) -> Value {
     let command = tool_input["command"].as_str().unwrap_or("").trim().to_string();
     let cwd = tool_input["cwd"].as_str();
 
-    if let Some(ab_code) = command.strip_prefix("agent-browser:\n") {
-        return super::agent_browser::dispatch(ab_code);
+    if let Some(ab_code) = command.strip_prefix("browser:\n") {
+        return handle_exec("browser", ab_code, cwd);
     }
 
     if let Some(rest) = command.strip_prefix("exec") {
@@ -77,8 +77,8 @@ fn handle_bash(tool_input: &Value) -> Value {
             let code = &rest[nl + 1..];
             let raw_lang = lang_part.trim_start_matches(':').trim().to_lowercase();
 
-            if raw_lang == "agent-browser" || code.trim_start().starts_with("agent-browser ") {
-                return deny("Do not call agent-browser via exec:bash. Use agent-browser: for CLI commands:\n\nagent-browser:\nopen http://example.com");
+            if (raw_lang == "bash" || raw_lang == "sh") && code.trim_start().starts_with("playwriter ") {
+                return deny("Do not call playwriter via exec:bash. Use exec:browser:\n\nexec:browser\nawait page.goto('https://example.com')");
             }
 
             return handle_exec(&raw_lang, code, cwd);
@@ -90,7 +90,7 @@ fn handle_bash(tool_input: &Value) -> Value {
         return deny(&format!("Do not call {} directly. Use exec:<lang> syntax instead.\n\nexec:nodejs\nconsole.log(\"hello\")\n\nexec:codesearch\nfind all database queries", pkg));
     }
 
-    if !command.starts_with("exec") && !command.starts_with("agent-browser:") && !command.starts_with("git ") && !command.contains("claude") {
+    if !command.starts_with("exec") && !command.starts_with("browser:") && !command.starts_with("git ") && !command.contains("claude") {
         return deny(BASH_DENY_MSG);
     }
 
@@ -98,7 +98,7 @@ fn handle_bash(tool_input: &Value) -> Value {
 }
 
 fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>) -> Value {
-    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","ab","agent-browser","codesearch","search","status","sleep","close","runner","type"];
+    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","status","sleep","close","runner","type"];
 
     if !raw_lang.is_empty() && !BUILTINS.contains(&raw_lang) {
         if let Some(result) = try_lang_plugin(raw_lang, code, cwd) {
@@ -195,7 +195,7 @@ fn normalize_lang(raw: &str, code: &str) -> String {
         "py" | "python" => "python".to_string(),
         "sh" | "shell" | "bash" | "zsh" => "bash".to_string(),
         "powershell" | "ps1" => "powershell".to_string(),
-        "browser" | "ab" | "agent-browser" => "agent-browser".to_string(),
+        "browser" => "browser".to_string(),
         "codesearch" | "search" => "codesearch".to_string(),
         other => other.to_string(),
     }
@@ -269,4 +269,4 @@ fn strip_footer(s: &str) -> &str {
     if let Some(idx) = s.find("\n[Running tools]") { s[..idx].trim_end() } else { s.trim_end() }
 }
 
-const BASH_DENY_MSG: &str = "Bash is restricted to exec:<lang>, agent-browser:, and git.\n\nexec:<lang> syntax:\n  exec:nodejs / exec:python / exec:bash / exec:typescript\n  exec:go / exec:rust / exec:java / exec:c / exec:cpp\n  exec:codesearch\n  exec:status / exec:sleep / exec:close / exec:runner / exec:type\n\nAll other Bash commands are blocked.";
+const BASH_DENY_MSG: &str = "Bash is restricted to exec:<lang>, browser:, and git.\n\nexec:<lang> syntax:\n  exec:nodejs / exec:python / exec:bash / exec:typescript\n  exec:go / exec:rust / exec:java / exec:c / exec:cpp\n  exec:codesearch\n  exec:status / exec:sleep / exec:close / exec:runner / exec:type\n\nAll other Bash commands are blocked.";
