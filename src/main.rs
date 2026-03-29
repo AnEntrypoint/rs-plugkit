@@ -200,6 +200,11 @@ async fn cmd_sleep(task_id_str: &str, secs: u64, next_output: bool) -> anyhow::R
 
 #[tokio::main]
 async fn main() {
+    if env::args().any(|a| a == "--exec-process-mode") {
+        rs_exec::run_exec_process();
+        return;
+    }
+
     if env::args().any(|a| a == "--runner-mode") {
         rs_exec::runner::run_server().await.expect("Runner failed");
         return;
