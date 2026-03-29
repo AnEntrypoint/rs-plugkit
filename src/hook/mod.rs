@@ -58,7 +58,7 @@ pub fn allow_with_noop(context: &str) -> serde_json::Value {
     let tmp = env::temp_dir().join(format!("gm-out-{}.txt", ts));
     let _ = fs::write(&tmp, context);
     let tmp_str = tmp.to_string_lossy();
-    let tmp_unix = tmp_str.replace('\\', "/");
+    let tmp_unix = to_unix_path(&tmp_str);
     let cmd = format!("cat '{}' && rm -f '{}'", tmp_unix, tmp_unix);
     serde_json::json!({
         "hookSpecificOutput": {
@@ -67,6 +67,17 @@ pub fn allow_with_noop(context: &str) -> serde_json::Value {
             "updatedInput": { "command": cmd }
         }
     })
+}
+
+fn to_unix_path(p: &str) -> String {
+    // Convert Windows path (C:\foo\bar) to Git Bash path (/c/foo/bar)
+    if cfg!(windows) {
+        if let Some(rest) = p.strip_prefix(|c: char| c.is_ascii_alphabetic()).and_then(|r| r.strip_prefix(':')) {
+            let drive = p.chars().next().unwrap().to_ascii_lowercase();
+            return format!("/{}{}", drive, rest.replace('\\', "/"));
+        }
+    }
+    p.replace('\\', "/")
 }
 
 pub fn allow(additional_context: Option<&str>) -> serde_json::Value {
