@@ -61,14 +61,9 @@ enum Cmd {
 
 async fn ensure_runner() -> anyhow::Result<()> {
     if rpc_client::health_check().await { return Ok(()); }
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-    if rpc_client::health_check().await { return Ok(()); }
-    tokio::time::sleep(Duration::from_millis(2000)).await;
-    if rpc_client::health_check().await { return Ok(()); }
-    eprintln!("Auto-starting runner...");
     daemon::start(RUNNER_NAME, &self_exe(), &["--runner-mode"])?;
     for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
         if rpc_client::health_check().await { return Ok(()); }
     }
     Err(anyhow::anyhow!("Runner did not become healthy in time"))
