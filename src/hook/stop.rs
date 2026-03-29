@@ -10,10 +10,15 @@ pub fn run_stop() {
 
     if prd.exists() {
         let content = fs::read_to_string(&prd).unwrap_or_default();
-        if !content.trim().is_empty() {
+        let trimmed = content.trim();
+        let is_empty_array = serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .and_then(|v| v.as_array().map(|a| a.is_empty()))
+            .unwrap_or(false);
+        if !trimmed.is_empty() && !is_empty_array {
             let out = json!({
                 "decision": "block",
-                "reason": format!("Work items remain in {}. Remove completed items as they finish. Delete the file when all items are done.\n\n{}", prd.display(), content.trim())
+                "reason": format!("Work items remain in {}. Remove completed items as they finish. Delete the file when all items are done.\n\n{}", prd.display(), trimmed)
             });
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             std::process::exit(2);
