@@ -76,6 +76,11 @@ fn parse_task_id(s: &str) -> u64 {
 }
 
 async fn run_code(code: &str, runtime: &str, cwd: &str) -> anyhow::Result<i32> {
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(HARD_CEILING_MS + 2000));
+        std::process::exit(0);
+    });
+
     ensure_runner().await?;
     let task_id_val = rpc_client::rpc_call("createTask", json!({ "code": code, "runtime": runtime, "workingDirectory": cwd }), 10000).await?;
     let task_id = task_id_val["taskId"].as_u64().unwrap_or(0);
@@ -105,7 +110,7 @@ async fn run_code(code: &str, runtime: &str, cwd: &str) -> anyhow::Result<i32> {
 
     if result["persisted"].as_bool().unwrap_or(false) || (result["backgroundTaskId"].is_u64() && !result["completed"].as_bool().unwrap_or(false)) {
         let id = format!("task_{}", result["backgroundTaskId"].as_u64().unwrap_or(task_id));
-        let partial = rpc_client::rpc_call("getAndClearOutput", json!({ "taskId": task_id }), 5000).await.ok();
+        let partial = tokio::time::timeout(Duration::from_millis(2000), rpc_client::rpc_call("getAndClearOutput", json!({ "taskId": task_id }), 2000)).await.ok().and_then(|r| r.ok());
         if let Some(out) = partial {
             if let Some(arr) = out["output"].as_array() {
                 for entry in arr {
@@ -118,7 +123,7 @@ async fn run_code(code: &str, runtime: &str, cwd: &str) -> anyhow::Result<i32> {
         println!("  plugkit sleep {}       # wait for completion", id);
         println!("  plugkit status {}      # drain output buffer", id);
         println!("  plugkit close {}       # delete task when done", id);
-        return Ok(0);
+        std::process::exit(0);
     }
 
     if result["backgroundTaskId"].is_u64() && result["completed"].as_bool().unwrap_or(false) {
