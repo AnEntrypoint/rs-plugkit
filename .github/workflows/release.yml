@@ -38,7 +38,13 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: strip target/${{ matrix.target }}/release/plugkit
 
+      - name: List built files
+        shell: bash
+        run: ls -la target/${{ matrix.target }}/release/${{ matrix.asset_name }} || echo "FILE NOT FOUND"
+
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
           files: target/${{ matrix.target }}/release/${{ matrix.asset_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
