@@ -14,9 +14,9 @@ pub fn close_all_sessions() {
         for line in text.lines().skip(1) {
             if let Some(id) = line.split_whitespace().next() {
                 if id.parse::<u32>().is_ok() {
-                    let mut reset_args = prefix.clone();
-                    reset_args.extend(["session".into(), "reset".into(), id.to_string()]);
-                    let _ = Command::new(&bin).args(&reset_args).output();
+                    let mut del_args = prefix.clone();
+                    del_args.extend(["session".into(), "delete".into(), id.to_string()]);
+                    let _ = Command::new(&bin).args(&del_args).stdout(Stdio::null()).stderr(Stdio::null()).output();
                 }
             }
         }
