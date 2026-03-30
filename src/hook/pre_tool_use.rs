@@ -117,10 +117,8 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
         "codesearch" | "search" => {
             let mut cmd = format!("{} search", bin_unix);
             if let Some(c) = cwd { cmd.push_str(&format!(" --path {}", to_unix_path(c))); }
-            let ts2 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-            let qtmp = std::env::temp_dir().join(format!("plugkit-query-{}.txt", ts2));
-            let _ = std::fs::write(&qtmp, safe_code.trim());
-            cmd.push_str(&format!(" --file={}", to_unix_path(&qtmp.to_string_lossy())));
+            let query = safe_code.trim().replace('\n', " ");
+            cmd.push_str(&format!(" {}", query));
             return delegate_to_bash(&cmd);
         }
         "status" => return delegate_to_bash(&format!("{} status {}", bin_unix, safe_code.trim())),
