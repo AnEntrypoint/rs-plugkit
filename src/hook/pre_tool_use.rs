@@ -164,12 +164,23 @@ fn run_with_file(lang: &str, code: &str, cwd: Option<&str>) -> String {
 }
 
 
+fn find_lang_plugin(lang: &str) -> Option<std::path::PathBuf> {
+    let filename = format!("{}.js", lang);
+    if let Some(project) = project_dir() {
+        let candidate = std::path::Path::new(&project).join("lang").join(&filename);
+        if candidate.exists() { return Some(candidate); }
+    }
+    if let Ok(plugin_root) = std::env::var("CLAUDE_PLUGIN_ROOT") {
+        let candidate = std::path::Path::new(&plugin_root).join("lang").join(&filename);
+        if candidate.exists() { return Some(candidate); }
+    }
+    None
+}
+
 fn try_lang_plugin(lang: &str, code: &str, cwd: Option<&str>) -> Option<Value> {
-    let project = project_dir()?;
-    let lang_dir = std::path::Path::new(&project).join("lang");
-    if !lang_dir.exists() { return None; }
-    let plugin_file = lang_dir.join(format!("{}.js", lang));
-    if !plugin_file.exists() { return None; }
+    let plugin_file = find_lang_plugin(lang)?;
+    let project = project_dir().unwrap_or_default();
+    let project = if project.is_empty() { ".".to_string() } else { project };
     let runner = format!(
         "const plugin = require({});\nPromise.resolve(plugin.exec.run({}, {})).then(out => process.stdout.write(String(out||''))).catch(e=>{{process.stderr.write(e.message||String(e));process.exit(1)}});",
         serde_json::to_string(&plugin_file.to_string_lossy().to_string()).unwrap_or_default(),
