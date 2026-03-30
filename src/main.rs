@@ -361,7 +361,7 @@ async fn main() {
                         if count > 0 { eprintln!("Cleaned up {} task(s) for session {}", count, session); }
                     }
                 }
-                super::hook::agent_browser::close_all_sessions();
+                hook::agent_browser::close_all_sessions();
             }
             Cmd::Hook { event } => {
                 match event.as_str() {
