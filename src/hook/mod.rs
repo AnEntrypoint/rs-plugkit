@@ -69,7 +69,7 @@ pub fn allow_with_noop(context: &str) -> serde_json::Value {
     })
 }
 
-fn to_unix_path(p: &str) -> String {
+pub fn to_unix_path(p: &str) -> String {
     // Convert Windows path (C:\foo\bar) to Git Bash path (/c/foo/bar)
     if cfg!(windows) {
         if let Some(rest) = p.strip_prefix(|c: char| c.is_ascii_alphabetic()).and_then(|r| r.strip_prefix(':')) {

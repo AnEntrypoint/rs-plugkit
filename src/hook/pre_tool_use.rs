@@ -1,4 +1,4 @@
-use super::{allow, allow_with_noop, deny, project_dir, run_self};
+use super::{allow, deny, plugkit_bin, project_dir, to_unix_path};
 use serde_json::Value;
 use std::io::Read;
 
@@ -109,60 +109,56 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>) -> Value {
     let lang = normalize_lang(raw_lang, code);
     let safe_code = decode_b64(code);
 
+    let bin = plugkit_bin();
+    let bin_unix = to_unix_path(&bin.to_string_lossy());
+
     match lang.as_str() {
         "codesearch" | "search" => {
-            let mut args = vec!["search".to_string()];
-            if let Some(c) = cwd { args.push("--path".to_string()); args.push(c.to_string()); }
-            args.push(safe_code.trim().to_string());
-            let r = run_self(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
-            return allow_with_noop(&format!("exec:{} output:\n\n{}", lang, if r.is_empty() { "(no results)" } else { &r }));
+            let mut cmd = format!("'{}' search", bin_unix);
+            if let Some(c) = cwd { cmd.push_str(&format!(" --path '{}'", to_unix_path(c))); }
+            cmd.push_str(&format!(" '{}'", safe_code.trim().replace('\'', "'\\''")));
+            return delegate_to_bash(&cmd);
         }
-        "status" => {
-            let r = run_self(&["status", safe_code.trim()]);
-            return allow_with_noop(&format!("exec:status output:\n\n{}", r));
-        }
-        "sleep" => {
-            let parts: Vec<&str> = safe_code.trim().split_whitespace().collect();
-            let mut args = vec!["sleep"];
-            args.extend_from_slice(&parts);
-            let r = run_self(&args);
-            return allow_with_noop(&format!("exec:sleep output:\n\n{}", r));
-        }
-        "close" => {
-            let r = run_self(&["close", safe_code.trim()]);
-            return allow_with_noop(&format!("exec:close output:\n\n{}", r));
-        }
-        "runner" => {
-            let r = run_self(&["runner", safe_code.trim()]);
-            return allow_with_noop(&format!("exec:runner output:\n\n{}", r));
-        }
+        "status" => return delegate_to_bash(&format!("'{}' status {}", bin_unix, safe_code.trim())),
+        "sleep" => return delegate_to_bash(&format!("'{}' sleep {}", bin_unix, safe_code.trim())),
+        "close" => return delegate_to_bash(&format!("'{}' close {}", bin_unix, safe_code.trim())),
+        "runner" => return delegate_to_bash(&format!("'{}' runner {}", bin_unix, safe_code.trim())),
         "type" => {
             let mut lines = safe_code.splitn(2, '\n');
             let task_id = lines.next().unwrap_or("").trim();
             let input = lines.next().unwrap_or("").trim();
-            let r = run_self(&["type", task_id, input]);
-            return allow_with_noop(&format!("exec:type output:\n\n{}", r));
+            return delegate_to_bash(&format!("'{}' type {} {}", bin_unix, task_id, input));
         }
         _ => {}
     }
 
-    let r = run_with_file(&lang, &safe_code, cwd);
-    allow_with_noop(&format!("exec:{} output:\n\n{}", lang, r))
-}
-
-fn run_with_file(lang: &str, code: &str, cwd: Option<&str>) -> String {
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-    let ext = lang_ext(lang);
+    let ext = lang_ext(&lang);
     let tmp = std::env::temp_dir().join(format!("plugkit-exec-{}.{}", ts, ext));
-    let _ = std::fs::write(&tmp, code);
-    let tmp_str = tmp.to_string_lossy();
-    let mut args = vec!["exec".to_string(), format!("--lang={}", lang), format!("--file={}", tmp_str)];
-    if let Some(c) = cwd { args.push(format!("--cwd={}", c)); }
-    let r = run_self(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
-    let _ = std::fs::remove_file(&tmp);
-    strip_footer(&r).to_string()
+    let _ = std::fs::write(&tmp, &safe_code);
+    let tmp_unix = to_unix_path(&tmp.to_string_lossy());
+    let mut cmd = format!("'{}' exec --lang={} --file='{}'", bin_unix, lang, tmp_unix);
+    if let Some(c) = cwd { cmd.push_str(&format!(" --cwd='{}'", to_unix_path(c))); }
+    cmd.push_str(&format!(" ; rm -f '{}'", tmp_unix));
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": { "command": cmd }
+        }
+    })
 }
 
+
+fn delegate_to_bash(cmd: &str) -> Value {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": { "command": cmd }
+        }
+    })
+}
 
 fn find_lang_plugin(lang: &str) -> Option<std::path::PathBuf> {
     let filename = format!("{}.js", lang);
@@ -181,38 +177,15 @@ fn try_lang_plugin(lang: &str, code: &str, cwd: Option<&str>) -> Option<Value> {
     let plugin_file = find_lang_plugin(lang)?;
     let project = project_dir().unwrap_or_default();
     let project = if project.is_empty() { ".".to_string() } else { project };
+    let plugin_path = serde_json::to_string(&plugin_file.to_string_lossy().to_string()).unwrap_or_default();
+    let code_json = serde_json::to_string(code).unwrap_or_default();
+    let cwd_json = serde_json::to_string(cwd.unwrap_or(&project)).unwrap_or_default();
     let runner = format!(
         "const plugin = require({});\nPromise.resolve(plugin.exec.run({}, {})).then(out => process.stdout.write(String(out||''))).catch(e=>{{process.stderr.write(e.message||String(e));process.exit(1)}});",
-        serde_json::to_string(&plugin_file.to_string_lossy().to_string()).unwrap_or_default(),
-        serde_json::to_string(code).unwrap_or_default(),
-        serde_json::to_string(cwd.unwrap_or(&project)).unwrap_or_default()
+        plugin_path, code_json, cwd_json
     );
-    let mut child = std::process::Command::new("bun").args(["-e", &runner])
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().ok()?;
-    let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(15);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Some(allow_with_noop(&format!("exec:{} error:\n\nlang plugin timed out after 15s", lang)));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(_) => return Some(allow_with_noop(&format!("exec:{} error:\n\nlang plugin failed", lang))),
-        }
-    }
-    let r = child.wait_with_output().ok()?;
-    let out = String::from_utf8_lossy(&r.stdout).trim_end().to_string();
-    let err = String::from_utf8_lossy(&r.stderr).trim_end().to_string();
-    if r.status.success() {
-        Some(allow_with_noop(&format!("exec:{} output:\n\n{}", lang, if out.is_empty() { "(no output)" } else { &out })))
-    } else {
-        Some(allow_with_noop(&format!("exec:{} error:\n\n{}", lang, if err.is_empty() { "exec failed" } else { &err })))
-    }
+    let escaped = runner.replace('\'', "'\\''");
+    Some(delegate_to_bash(&format!("bun -e '{}'", escaped)))
 }
 
 fn normalize_lang(raw: &str, code: &str) -> String {
@@ -294,8 +267,5 @@ fn is_test_file(base: &str, fp: &str) -> bool {
         || fp.contains("/fixtures/") || fp.contains("/__mocks__/")
 }
 
-fn strip_footer(s: &str) -> &str {
-    if let Some(idx) = s.find("\n[Running tools]") { s[..idx].trim_end() } else { s.trim_end() }
-}
 
 const BASH_DENY_MSG: &str = "Bash is restricted to exec:<lang>, browser:, and git.\n\nexec:<lang> syntax:\n  exec:nodejs / exec:python / exec:bash / exec:typescript\n  exec:go / exec:rust / exec:java / exec:c / exec:cpp\n  exec:codesearch\n  exec:status / exec:sleep / exec:close / exec:runner / exec:type\n\nAll other Bash commands are blocked.";
