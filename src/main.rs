@@ -32,6 +32,7 @@ enum Cmd {
         #[arg(long)] lang: Option<String>,
         #[arg(long)] cwd: Option<String>,
         #[arg(long)] file: Option<String>,
+        #[arg(long)] session: Option<String>,
         code: Vec<String>,
     },
     Bash {
@@ -53,6 +54,9 @@ enum Cmd {
     Search {
         #[arg(long)] path: Option<String>,
         query: Vec<String>,
+    },
+    SessionCleanup {
+        #[arg(long)] session: String,
     },
     Hook {
         event: String,
@@ -101,9 +105,11 @@ fn parse_task_id(s: &str) -> u64 {
     s.trim_start_matches("task_").parse().unwrap_or(0)
 }
 
-async fn run_code(code: &str, runtime: &str, cwd: &str) -> anyhow::Result<i32> {
+async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>) -> anyhow::Result<i32> {
     ensure_runner().await?;
-    let task_id_val = rpc_client::rpc_call("createTask", json!({ "code": code, "runtime": runtime, "workingDirectory": cwd }), 10000).await?;
+    let mut create_params = json!({ "code": code, "runtime": runtime, "workingDirectory": cwd });
+    if let Some(sid) = session_id { create_params["sessionId"] = json!(sid); }
+    let task_id_val = rpc_client::rpc_call("createTask", create_params, 10000).await?;
     let task_id = task_id_val["taskId"].as_u64().unwrap_or(0);
 
     let safety = tokio::time::sleep(Duration::from_millis(HARD_CEILING_MS));
@@ -114,7 +120,7 @@ async fn run_code(code: &str, runtime: &str, cwd: &str) -> anyhow::Result<i32> {
             Duration::from_millis(HARD_CEILING_MS),
             rpc_client::rpc_call(
                 "execute",
-                json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "timeout": HARD_CEILING_MS, "backgroundTaskId": task_id }),
+                json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "timeout": HARD_CEILING_MS, "backgroundTaskId": task_id, "sessionId": session_id }),
                 HARD_CEILING_MS + 5000,
             )
         ).await
@@ -244,21 +250,21 @@ async fn main() {
 
     let result: anyhow::Result<()> = async {
         match cli.command {
-            Cmd::Exec { lang, cwd, file, code } => {
+            Cmd::Exec { lang, cwd, file, session, code } => {
                 let code_str = if let Some(ref f) = file { fs::read_to_string(f)? } else { code.join(" ") };
                 if let Some(ref f) = file { let _ = fs::remove_file(f); }
                 if code_str.trim().is_empty() { eprintln!("No code provided"); exit_code = 1; return Ok(()); }
                 let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
                 let mut runtime = lang.unwrap_or_else(|| "nodejs".into());
                 if runtime == "typescript" || runtime == "auto" { runtime = "nodejs".into(); }
-                exit_code = run_code(&code_str, &runtime, &cwd).await?;
+                exit_code = run_code(&code_str, &runtime, &cwd, session.as_deref()).await?;
             }
             Cmd::Bash { cwd, commands } => {
                 let cmd = commands.join(" ");
                 if cmd.trim().is_empty() { eprintln!("No commands provided"); exit_code = 1; return Ok(()); }
                 let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
                 let runtime = if cfg!(windows) { "powershell" } else { "bash" };
-                exit_code = run_code(&cmd, runtime, &cwd).await?;
+                exit_code = run_code(&cmd, runtime, &cwd, None).await?;
             }
             Cmd::Status { task_id } => cmd_status(&task_id).await?,
             Cmd::Sleep { task_id, seconds, next_output } => cmd_sleep(&task_id, seconds.unwrap_or(30), next_output).await?,
@@ -347,11 +353,22 @@ async fn main() {
                     let _ = fs::write(root_path.join(".codeinsight"), &output.text);
                 }
             }
+            Cmd::SessionCleanup { session } => {
+                if rpc_client::health_check().await {
+                    let res = rpc_client::rpc_call("deleteSessionTasks", json!({ "sessionId": session }), 10000).await;
+                    if let Ok(v) = res {
+                        let count = v["deleted"].as_u64().unwrap_or(0);
+                        if count > 0 { eprintln!("Cleaned up {} task(s) for session {}", count, session); }
+                    }
+                }
+                super::hook::agent_browser::close_all_sessions();
+            }
             Cmd::Hook { event } => {
                 match event.as_str() {
                     "session-start" => { hook::session_start(); return Ok(()); }
                     "pre-tool-use" => { hook::pre_tool_use(); return Ok(()); }
                     "prompt-submit" => { hook::prompt_submit(); return Ok(()); }
+                    "session-end" => { hook::session_end(); return Ok(()); }
                     "stop" => { hook::run_stop(); return Ok(()); }
                     "stop-git" => { hook::run_stop_git(); return Ok(()); }
                     other => { eprintln!("Unknown hook event: {}", other); exit_code = 1; return Ok(()); }

@@ -1,10 +1,12 @@
 mod session_start;
+mod session_end;
 mod pre_tool_use;
 mod prompt_submit;
 mod stop;
 pub mod agent_browser;
 
 pub use session_start::run as session_start;
+pub use session_end::run as session_end;
 pub use pre_tool_use::run as pre_tool_use;
 pub use prompt_submit::run as prompt_submit;
 pub use stop::run_stop;

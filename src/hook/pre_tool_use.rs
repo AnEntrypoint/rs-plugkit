@@ -8,11 +8,12 @@ pub fn run() {
     let data: Value = serde_json::from_str(&stdin).unwrap_or_default();
     let tool_name = data["tool_name"].as_str().unwrap_or("");
     let tool_input = &data["tool_input"];
-    let result = dispatch(tool_name, tool_input);
+    let session_id = data["session_id"].as_str().unwrap_or("");
+    let result = dispatch(tool_name, tool_input, session_id);
     println!("{}", serde_json::to_string(&result).unwrap_or_default());
 }
 
-fn dispatch(tool_name: &str, tool_input: &Value) -> Value {
+fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
     if tool_name.is_empty() { return allow(None); }
 
     const FORBIDDEN: &[&str] = &["find", "Find", "Glob", "Grep"];
@@ -54,7 +55,7 @@ fn dispatch(tool_name: &str, tool_input: &Value) -> Value {
     }
 
     if tool_name == "Bash" {
-        return handle_bash(tool_input);
+        return handle_bash(tool_input, session_id);
     }
 
     const ALLOWED: &[&str] = &["browser", "Skill", "code-search", "electron", "TaskOutput", "ReadMcpResourceTool", "ListMcpResourcesTool"];
@@ -63,12 +64,12 @@ fn dispatch(tool_name: &str, tool_input: &Value) -> Value {
     allow(None)
 }
 
-fn handle_bash(tool_input: &Value) -> Value {
+fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
     let command = tool_input["command"].as_str().unwrap_or("").trim().to_string();
     let cwd = tool_input["cwd"].as_str();
 
     if let Some(ab_code) = command.strip_prefix("browser:\n") {
-        return handle_exec("browser", ab_code, cwd);
+        return handle_exec("browser", ab_code, cwd, session_id);
     }
 
     if let Some(rest) = command.strip_prefix("exec") {
@@ -81,7 +82,7 @@ fn handle_bash(tool_input: &Value) -> Value {
                 return deny("Do not call playwriter via exec:bash. Use exec:browser:\n\nexec:browser\nawait page.goto('https://example.com')");
             }
 
-            return handle_exec(&raw_lang, code, cwd);
+            return handle_exec(&raw_lang, code, cwd, session_id);
         }
     }
 
@@ -97,7 +98,7 @@ fn handle_bash(tool_input: &Value) -> Value {
     allow(None)
 }
 
-fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>) -> Value {
+fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) -> Value {
     const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","status","sleep","close","runner","type"];
 
     if !raw_lang.is_empty() && !BUILTINS.contains(&raw_lang) {
@@ -142,6 +143,7 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>) -> Value {
     let tmp_unix = to_unix_path(&tmp.to_string_lossy());
     let mut cmd = format!("{} exec --lang={} --file={}", bin_unix, lang, tmp_unix);
     if let Some(c) = cwd { cmd.push_str(&format!(" --cwd={}", to_unix_path(c))); }
+    if !session_id.is_empty() { cmd.push_str(&format!(" --session={}", session_id)); }
     delegate_to_bash(&cmd)
 }
 
