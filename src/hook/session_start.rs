@@ -19,7 +19,7 @@ pub fn run() {
         }
     }
 
-    let additional_context = parts.join("\n\n");
+    let additional_context = parts.join("\n\n").replace("${", "$\\{");
 
     let output = if is_gemini() {
         json!({ "systemMessage": additional_context })

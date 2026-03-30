@@ -2,6 +2,10 @@ use super::{is_gemini, is_kilo, is_opencode, project_dir, run_self};
 use serde_json::json;
 use std::io::Read;
 
+fn sanitize_bash_patterns(s: &str) -> String {
+    s.replace("${", "$\\{")
+}
+
 pub fn run() {
     let mut stdin = String::new();
     let _ = std::io::stdin().read_to_string(&mut stdin);
@@ -34,7 +38,7 @@ pub fn run() {
         }
     }
 
-    let additional_context = parts.join("\n\n");
+    let additional_context = sanitize_bash_patterns(&parts.join("\n\n"));
 
     let output = if is_gemini() {
         json!({ "systemMessage": additional_context })
