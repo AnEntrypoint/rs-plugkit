@@ -59,10 +59,36 @@ enum Cmd {
     },
 }
 
+fn runner_exe_stamp() -> PathBuf {
+    env::temp_dir().join("plugkit-runner.exe-stamp")
+}
+
+fn current_exe_stamp() -> String {
+    let exe = self_exe();
+    let meta = fs::metadata(&exe).ok();
+    let mtime = meta.as_ref().and_then(|m| m.modified().ok()).map(|t| format!("{:?}", t)).unwrap_or_default();
+    let size = meta.map(|m| m.len()).unwrap_or(0);
+    format!("{}|{}|{}", exe, size, mtime)
+}
+
+fn runner_needs_restart() -> bool {
+    let stamp_file = runner_exe_stamp();
+    let current = current_exe_stamp();
+    match fs::read_to_string(&stamp_file) {
+        Ok(stored) => stored.trim() != current,
+        Err(_) => true,
+    }
+}
+
 async fn ensure_runner() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_millis(5000), async {
-        if rpc_client::health_check().await { return Ok(()); }
+        if rpc_client::health_check().await {
+            if !runner_needs_restart() { return Ok(()); }
+            daemon::kill(RUNNER_NAME);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
         daemon::start(RUNNER_NAME, &self_exe(), &["--runner-mode"])?;
+        let _ = fs::write(runner_exe_stamp(), current_exe_stamp());
         for _ in 0..20 {
             tokio::time::sleep(Duration::from_millis(150)).await;
             if rpc_client::health_check().await { return Ok(()); }
@@ -265,11 +291,13 @@ async fn main() {
             }
             Cmd::Runner { sub } => match sub.as_str() {
                 "start" => {
-                    if rpc_client::health_check().await {
+                    if rpc_client::health_check().await && !runner_needs_restart() {
                         println!("Runner already healthy on port {}", fs::read_to_string(port_file()).unwrap_or_default().trim().to_string());
                         return Ok(());
                     }
+                    if rpc_client::health_check().await { daemon::kill(RUNNER_NAME); tokio::time::sleep(Duration::from_millis(200)).await; }
                     daemon::start(RUNNER_NAME, &self_exe(), &["--runner-mode"])?;
+                    let _ = fs::write(runner_exe_stamp(), current_exe_stamp());
                     for _ in 0..20 {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         if rpc_client::health_check().await {
