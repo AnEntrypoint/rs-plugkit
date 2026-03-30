@@ -187,7 +187,25 @@ fn try_lang_plugin(lang: &str, code: &str, cwd: Option<&str>) -> Option<Value> {
         serde_json::to_string(code).unwrap_or_default(),
         serde_json::to_string(cwd.unwrap_or(&project)).unwrap_or_default()
     );
-    let r = std::process::Command::new("bun").args(["-e", &runner]).output().ok()?;
+    let mut child = std::process::Command::new("bun").args(["-e", &runner])
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().ok()?;
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Some(allow_with_noop(&format!("exec:{} error:\n\nlang plugin timed out after 15s", lang)));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return Some(allow_with_noop(&format!("exec:{} error:\n\nlang plugin failed", lang))),
+        }
+    }
+    let r = child.wait_with_output().ok()?;
     let out = String::from_utf8_lossy(&r.stdout).trim_end().to_string();
     let err = String::from_utf8_lossy(&r.stderr).trim_end().to_string();
     if r.status.success() {

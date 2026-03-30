@@ -117,7 +117,7 @@ pub fn run_self(args: &[&str]) -> String {
         Err(_) => return String::new(),
     };
 
-    let timeout = std::time::Duration::from_secs(20);
+    let timeout = std::time::Duration::from_secs(16);
     let start = std::time::Instant::now();
     let mut child = child;
 
