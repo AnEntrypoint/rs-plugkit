@@ -24,13 +24,16 @@ pub fn close_all_sessions() {
 }
 
 fn find_pw() -> (String, Vec<String>) {
-    if let Ok(p) = which::which("playwriter") {
-        let dir = p.parent().unwrap_or(std::path::Path::new("."));
+    let npm_dir = if cfg!(windows) {
+        std::env::var("APPDATA").map(|d| std::path::PathBuf::from(d).join("npm")).ok()
+    } else {
+        None
+    };
+    if let Some(ref dir) = npm_dir {
         let bin_js = dir.join("node_modules").join("playwriter").join("bin.js");
         if bin_js.exists() {
             return ("node".to_string(), vec![bin_js.to_string_lossy().to_string()]);
         }
-        return (p.to_string_lossy().to_string(), vec![]);
     }
     ("playwriter".to_string(), vec![])
 }
