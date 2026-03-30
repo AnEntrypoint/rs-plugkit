@@ -102,11 +102,6 @@ fn parse_task_id(s: &str) -> u64 {
 }
 
 async fn run_code(code: &str, runtime: &str, cwd: &str) -> anyhow::Result<i32> {
-    std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_millis(HARD_CEILING_MS + 2000));
-        std::process::exit(0);
-    });
-
     ensure_runner().await?;
     let task_id_val = rpc_client::rpc_call("createTask", json!({ "code": code, "runtime": runtime, "workingDirectory": cwd }), 10000).await?;
     let task_id = task_id_val["taskId"].as_u64().unwrap_or(0);
