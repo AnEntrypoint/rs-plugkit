@@ -245,7 +245,8 @@ async fn main() {
     let result: anyhow::Result<()> = async {
         match cli.command {
             Cmd::Exec { lang, cwd, file, code } => {
-                let code_str = if let Some(f) = file { fs::read_to_string(f)? } else { code.join(" ") };
+                let code_str = if let Some(ref f) = file { fs::read_to_string(f)? } else { code.join(" ") };
+                if let Some(ref f) = file { let _ = fs::remove_file(f); }
                 if code_str.trim().is_empty() { eprintln!("No code provided"); exit_code = 1; return Ok(()); }
                 let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
                 let mut runtime = lang.unwrap_or_else(|| "nodejs".into());

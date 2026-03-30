@@ -114,20 +114,23 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>) -> Value {
 
     match lang.as_str() {
         "codesearch" | "search" => {
-            let mut cmd = format!("'{}' search", bin_unix);
-            if let Some(c) = cwd { cmd.push_str(&format!(" --path '{}'", to_unix_path(c))); }
-            cmd.push_str(&format!(" '{}'", safe_code.trim().replace('\'', "'\\''")));
+            let mut cmd = format!("{} search", bin_unix);
+            if let Some(c) = cwd { cmd.push_str(&format!(" --path {}", to_unix_path(c))); }
+            let ts2 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+            let qtmp = std::env::temp_dir().join(format!("plugkit-query-{}.txt", ts2));
+            let _ = std::fs::write(&qtmp, safe_code.trim());
+            cmd.push_str(&format!(" --file={}", to_unix_path(&qtmp.to_string_lossy())));
             return delegate_to_bash(&cmd);
         }
-        "status" => return delegate_to_bash(&format!("'{}' status {}", bin_unix, safe_code.trim())),
-        "sleep" => return delegate_to_bash(&format!("'{}' sleep {}", bin_unix, safe_code.trim())),
-        "close" => return delegate_to_bash(&format!("'{}' close {}", bin_unix, safe_code.trim())),
-        "runner" => return delegate_to_bash(&format!("'{}' runner {}", bin_unix, safe_code.trim())),
+        "status" => return delegate_to_bash(&format!("{} status {}", bin_unix, safe_code.trim())),
+        "sleep" => return delegate_to_bash(&format!("{} sleep {}", bin_unix, safe_code.trim())),
+        "close" => return delegate_to_bash(&format!("{} close {}", bin_unix, safe_code.trim())),
+        "runner" => return delegate_to_bash(&format!("{} runner {}", bin_unix, safe_code.trim())),
         "type" => {
             let mut lines = safe_code.splitn(2, '\n');
             let task_id = lines.next().unwrap_or("").trim();
             let input = lines.next().unwrap_or("").trim();
-            return delegate_to_bash(&format!("'{}' type {} {}", bin_unix, task_id, input));
+            return delegate_to_bash(&format!("{} type {} {}", bin_unix, task_id, input));
         }
         _ => {}
     }
@@ -137,16 +140,9 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>) -> Value {
     let tmp = std::env::temp_dir().join(format!("plugkit-exec-{}.{}", ts, ext));
     let _ = std::fs::write(&tmp, &safe_code);
     let tmp_unix = to_unix_path(&tmp.to_string_lossy());
-    let mut cmd = format!("'{}' exec --lang={} --file='{}'", bin_unix, lang, tmp_unix);
-    if let Some(c) = cwd { cmd.push_str(&format!(" --cwd='{}'", to_unix_path(c))); }
-    cmd.push_str(&format!(" ; rm -f '{}'", tmp_unix));
-    serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-            "updatedInput": { "command": cmd }
-        }
-    })
+    let mut cmd = format!("{} exec --lang={} --file={}", bin_unix, lang, tmp_unix);
+    if let Some(c) = cwd { cmd.push_str(&format!(" --cwd={}", to_unix_path(c))); }
+    delegate_to_bash(&cmd)
 }
 
 
