@@ -865,7 +865,7 @@ dependencies = [
 [[package]]
 name = "rs-exec"
 version = "0.1.3"
-source = "git+https://github.com/AnEntrypoint/rs-exec?branch=main#dbe51d1911cd98d1031dddd2ee83f330a66b549e"
+source = "git+https://github.com/AnEntrypoint/rs-exec?branch=main#58dfb0a1dcfcde1b8bb619a1687b54714553df36"
 dependencies = [
  "anyhow",
  "axum",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "rs-plugkit"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "anyhow",
  "clap",
