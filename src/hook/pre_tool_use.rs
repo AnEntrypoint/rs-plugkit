@@ -29,7 +29,7 @@ fn dispatch(tool_name: &str, tool_input: &Value) -> Value {
         if (ext == "md" || ext == "txt" || base.starts_with("features_list")) && !base.starts_with("claude") && !base.starts_with("readme") && !in_skills {
             return deny("Cannot create documentation files. Only CLAUDE.md and readme.md are maintained. For task-specific notes, use .prd. For permanent reference material, add to CLAUDE.md.");
         }
-        if is_test_file(&base, fp) {
+        if !in_skills && is_test_file(&base, fp) {
             return deny("Test files forbidden on disk. Use Bash tool with real services for all testing.");
         }
     }
