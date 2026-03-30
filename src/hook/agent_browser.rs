@@ -1,10 +1,11 @@
 use std::process::{Command, Stdio};
-use super::tools_dir;
 
 pub fn close_all_sessions() {
-    let bin = find_pw_bin();
+    let (bin, prefix) = find_pw();
+    let mut args = prefix.clone();
+    args.extend(["session".into(), "list".into()]);
     let out = Command::new(&bin)
-        .args(["session", "list"])
+        .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output();
@@ -13,17 +14,23 @@ pub fn close_all_sessions() {
         for line in text.lines().skip(1) {
             if let Some(id) = line.split_whitespace().next() {
                 if id.parse::<u32>().is_ok() {
-                    let _ = Command::new(&bin).args(["session", "reset", id]).output();
+                    let mut reset_args = prefix.clone();
+                    reset_args.extend(["session".into(), "reset".into(), id.to_string()]);
+                    let _ = Command::new(&bin).args(&reset_args).output();
                 }
             }
         }
     }
 }
 
-fn find_pw_bin() -> String {
-    let dir = tools_dir();
-    let ext = if cfg!(windows) { ".cmd" } else { "" };
-    let local = dir.join("node_modules").join(".bin").join(format!("playwriter{}", ext));
-    if local.exists() { return local.to_string_lossy().to_string(); }
-    "playwriter".to_string()
+fn find_pw() -> (String, Vec<String>) {
+    if let Ok(p) = which::which("playwriter") {
+        let dir = p.parent().unwrap_or(std::path::Path::new("."));
+        let bin_js = dir.join("node_modules").join("playwriter").join("bin.js");
+        if bin_js.exists() {
+            return ("node".to_string(), vec![bin_js.to_string_lossy().to_string()]);
+        }
+        return (p.to_string_lossy().to_string(), vec![]);
+    }
+    ("playwriter".to_string(), vec![])
 }
