@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 jobs:
-  release:
+  build:
     strategy:
       fail-fast: false
       matrix:
@@ -71,12 +71,9 @@ jobs:
       - name: Rename binary
         shell: bash
         run: |
-          src="target/${{ matrix.target }}/release/plugkit"
-          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
-            src="${src}.exe"
-          fi
-          cp "$src" "${{ matrix.asset_name }}"
-          ls -la "${{ matrix.asset_name }}"
+          ext=""
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then ext=".exe"; fi
+          cp "target/${{ matrix.target }}/release/plugkit${ext}" "${{ matrix.asset_name }}"
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
@@ -84,3 +81,78 @@ jobs:
           files: ${{ matrix.asset_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  publish-binaries:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bins/
+
+      - name: Checkout plugforge
+        uses: actions/checkout@v4
+        with:
+          repository: AnEntrypoint/plugforge
+          token: ${{ secrets.PUBLISHER_TOKEN }}
+          path: plugforge
+
+      - name: Copy binaries into plugforge
+        shell: bash
+        run: |
+          mkdir -p plugforge/plugforge-starter/bin
+          for d in bins/*/; do
+            f=$(ls "$d")
+            cp "$d$f" "plugforge/plugforge-starter/bin/$f"
+          done
+          cd plugforge/plugforge-starter/bin
+          chmod +x plugkit-linux-x64 plugkit-linux-arm64 plugkit-darwin-x64 plugkit-darwin-arm64
+          cp plugkit-win32-x64.exe plugkit.exe
+          cat > plugkit << 'EOF'
+#!/bin/sh
+DIR="$(cd "$(dirname "$0")" && pwd)"
+case "$(uname -s)" in
+  Darwin) OS=darwin ;;
+  *)      OS=linux  ;;
+esac
+case "$(uname -m)" in
+  arm64|aarch64) ARCH=arm64 ;;
+  *)             ARCH=x64   ;;
+esac
+exec "$DIR/plugkit-$OS-$ARCH" "$@"
+EOF
+          chmod +x plugkit
+          ls -la
+
+      - name: Squash-commit binaries to plugforge
+        shell: bash
+        working-directory: plugforge
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
+        run: |
+          git config user.name "plugforge-bot"
+          git config user.email "noreply@github.com"
+          git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+          git fetch origin main
+          git checkout main
+          git add plugforge-starter/bin/
+          if git diff --cached --quiet; then
+            echo "No binary changes"
+            exit 0
+          fi
+          TAG="${{ github.ref_name }}"
+          FIRST_BIN=$(git log --oneline --grep="^chore: update plugkit binaries" --format="%H" | tail -1)
+          if [ -n "$FIRST_BIN" ]; then
+            PARENT=$(git rev-parse "${FIRST_BIN}^")
+            git reset --soft "$PARENT"
+            git add plugforge-starter/bin/
+          fi
+          git commit -m "chore: update plugkit binaries to $TAG [skip ci]"
+          git push origin main --force-with-lease

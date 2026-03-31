@@ -21,5 +21,6 @@ clap = { version = "4", features = ["derive"] }
 name = "plugkit"
 path = "src/main.rs"
 
+
 [profile.release]
 strip = true
