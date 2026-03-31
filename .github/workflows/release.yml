@@ -27,9 +27,6 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset_name: plugkit-win32-x64.exe
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            asset_name: plugkit-win32-arm64.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -51,9 +48,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
-
-      - name: Update git dependencies
-        run: cargo update -p rs-exec -p rs-codeinsight -p rs-search
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
