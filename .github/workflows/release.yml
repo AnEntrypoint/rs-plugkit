@@ -54,7 +54,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Strip binary (Linux x64)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
