@@ -10,8 +10,15 @@ pub fn run() {
     ];
 
     if let Some(ref dir) = project {
-        let insight = run_self(&["codeinsight", dir]);
-        if !insight.is_empty() {
+        let insight = {
+            let cached = run_self(&["codeinsight", dir, "--read-cache"]);
+            if cached.is_empty() || cached.starts_with("No cache") || cached.starts_with("Error") {
+                run_self(&["codeinsight", dir, "--cache"])
+            } else {
+                cached
+            }
+        };
+        if !insight.is_empty() && !insight.starts_with("Error") && !insight.starts_with("No cache") {
             parts.push(format!(
                 "=== This is your initial insight of the repository, look at every possible aspect of this for initial opinionation and to offset the need for code exploration ===\n{}",
                 insight

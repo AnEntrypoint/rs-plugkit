@@ -4,6 +4,7 @@ mod pre_tool_use;
 mod prompt_submit;
 mod stop;
 pub mod agent_browser;
+pub mod bootstrap;
 
 pub use session_start::run as session_start;
 pub use session_end::run as session_end;

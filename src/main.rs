@@ -61,6 +61,7 @@ enum Cmd {
     Hook {
         event: String,
     },
+    Bootstrap,
 }
 
 fn runner_exe_stamp() -> PathBuf {
@@ -375,6 +376,10 @@ async fn main() {
                     "stop-git" => { hook::run_stop_git(); return Ok(()); }
                     other => { eprintln!("Unknown hook event: {}", other); exit_code = 1; return Ok(()); }
                 }
+            }
+            Cmd::Bootstrap => {
+                hook::bootstrap::run();
+                return Ok(());
             }
             Cmd::Search { path, query } => {
                 if query.is_empty() {
