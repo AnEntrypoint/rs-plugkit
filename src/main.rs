@@ -109,6 +109,17 @@ fn normalize_code_input(raw: String) -> String {
     raw.trim_start_matches('\u{feff}').to_string()
 }
 
+async fn drain_output(task_id: u64) {
+    if let Ok(out) = rpc_client::rpc_call("getAndClearOutput", json!({ "taskId": task_id }), 2000).await {
+        if let Some(arr) = out["output"].as_array() {
+            for e in arr {
+                let d = e["d"].as_str().unwrap_or("");
+                if e["s"] == "stdout" { print!("{}", d); } else { eprint!("{}", d); }
+            }
+        }
+    }
+}
+
 async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>) -> anyhow::Result<i32> {
     ensure_runner().await?;
     let mut create_params = json!({ "code": code, "runtime": runtime, "workingDirectory": cwd });
@@ -116,51 +127,39 @@ async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>
     let task_id_val = rpc_client::rpc_call("createTask", create_params, 10000).await?;
     let task_id = task_id_val["taskId"].as_u64().unwrap_or(0);
 
-    let safety = tokio::time::sleep(Duration::from_millis(HARD_CEILING_MS));
-    tokio::pin!(safety);
+    let _ = rpc_client::rpc_call(
+        "execute",
+        json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "timeout": HARD_CEILING_MS, "backgroundTaskId": task_id, "sessionId": session_id }),
+        500,
+    ).await;
 
-    let exec_fut = async {
-        tokio::time::timeout(
-            Duration::from_millis(HARD_CEILING_MS),
-            rpc_client::rpc_call(
-                "execute",
-                json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "timeout": HARD_CEILING_MS, "backgroundTaskId": task_id, "sessionId": session_id }),
-                HARD_CEILING_MS + 5000,
-            )
-        ).await
-    };
-
-    let result = tokio::select! {
-        r = exec_fut => match r {
-            Ok(Ok(v)) => v["result"].clone(),
-            Ok(Err(e)) => json!({ "error": e.to_string() }),
-            Err(_) => json!({ "backgroundTaskId": task_id, "persisted": true }),
-        },
-        _ = safety => json!({ "backgroundTaskId": task_id, "persisted": true }),
-    };
-
-    if result["persisted"].as_bool().unwrap_or(false) || (result["backgroundTaskId"].is_u64() && !result["completed"].as_bool().unwrap_or(false)) {
-        let id = format!("task_{}", result["backgroundTaskId"].as_u64().unwrap_or(task_id));
-        println!("\nStill running after 15s — backgrounded.\nTask ID: {}\n", id);
-        println!("  plugkit sleep {}       # wait for completion", id);
-        println!("  plugkit status {}      # drain output buffer", id);
-        println!("  plugkit close {}       # delete task when done", id);
-        std::process::exit(0);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(HARD_CEILING_MS);
+    loop {
+        drain_output(task_id).await;
+        if let Ok(t) = rpc_client::rpc_call("getTask", json!({ "taskId": task_id }), 2000).await {
+            let status = t["task"]["status"].as_str().unwrap_or("");
+            if status == "completed" || status == "failed" {
+                let result = t["task"]["result"].clone();
+                if let Some(s) = result["stdout"].as_str() { if !s.is_empty() { print!("{}", s); } }
+                if let Some(s) = result["stderr"].as_str() { if !s.is_empty() { eprint!("{}", s); } }
+                if let Some(e) = result["error"].as_str() { if !e.is_empty() { eprintln!("Error: {}", e); } }
+                let _ = rpc_client::rpc_call("deleteTask", json!({ "taskId": task_id }), 5000).await;
+                let exit_code = result["exitCode"].as_i64().unwrap_or(0) as i32;
+                if result["success"].as_bool() == Some(false) { return Ok(if exit_code != 0 { exit_code } else { 1 }); }
+                return Ok(exit_code);
+            }
+        }
+        if tokio::time::Instant::now() >= deadline { break; }
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
-    if result["backgroundTaskId"].is_u64() && result["completed"].as_bool().unwrap_or(false) {
-        let _ = rpc_client::rpc_call("deleteTask", json!({ "taskId": result["backgroundTaskId"] }), 5000).await;
-    } else {
-        let _ = rpc_client::rpc_call("deleteTask", json!({ "taskId": task_id }), 5000).await;
-    }
-
-    if let Some(s) = result["stdout"].as_str() { if !s.is_empty() { print!("{}", s); } }
-    if let Some(s) = result["stderr"].as_str() { if !s.is_empty() { eprint!("{}", s); } }
-    if let Some(e) = result["error"].as_str() { if !e.is_empty() { eprintln!("Error: {}", e); return Ok(1); } }
-
-    let exit_code = result["exitCode"].as_i64().unwrap_or(0) as i32;
-    if result["success"].as_bool() == Some(false) { return Ok(if exit_code != 0 { exit_code } else { 1 }); }
-    Ok(exit_code)
+    drain_output(task_id).await;
+    let id = format!("task_{}", task_id);
+    println!("\nStill running after 15s — backgrounded.\nTask ID: {}\n", id);
+    println!("  plugkit sleep {}       # wait for completion", id);
+    println!("  plugkit status {}      # drain output buffer", id);
+    println!("  plugkit close {}       # delete task when done", id);
+    std::process::exit(0);
 }
 
 async fn cmd_status(task_id_str: &str) -> anyhow::Result<()> {
