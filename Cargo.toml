@@ -20,3 +20,7 @@ clap = { version = "4", features = ["derive"] }
 [[bin]]
 name = "plugkit"
 path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+strip = true
