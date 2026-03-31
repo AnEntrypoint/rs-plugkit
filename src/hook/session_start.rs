@@ -6,7 +6,7 @@ pub fn run() {
     let project = project_dir();
     ensure_gitignore(project.as_deref());
     let mut parts: Vec<String> = vec![
-        "Use the Skill tool with skill: \"gm\" to begin — do NOT use the Agent tool to load skills. Skills are invoked via the Skill tool only, never as agents. All code execution uses exec:<lang> via the Bash tool — never direct Bash(node ...) or Bash(npm ...) or Bash(npx ...) or Bash(plugkit ...).".into()
+        "=== TOOL RULES ===\n\nSkill tool: invoke skills by name (e.g. skill: \"gm\"). Never use the Agent tool to load skills.\n\nBash tool: only these formats are allowed —\n  exec:nodejs / exec:python / exec:bash / exec:typescript / exec:go / exec:rust / exec:c / exec:cpp / exec:java\n  exec:browser  (JS automation against `page`)\n  exec:codesearch  (natural language search)\n  exec:status / exec:sleep / exec:close / exec:runner / exec:type\n  git <args>  (git commands directly, no exec: prefix)\n  Everything else is blocked. Never Bash(node ...) or Bash(npm ...) or Bash(npx ...).\n\nGlob/Grep/Find/Explore: blocked — use exec:codesearch instead.\n\nStart work: invoke the gm skill first.".into()
     ];
 
     if let Some(ref dir) = project {

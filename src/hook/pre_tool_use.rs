@@ -18,7 +18,7 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
 
     const FORBIDDEN: &[&str] = &["find", "Find", "Glob", "Grep"];
     if FORBIDDEN.contains(&tool_name) {
-        return deny("Use the code-search skill for codebase exploration instead of Grep/Glob/find. Describe what you need in plain language — it understands intent, not just patterns.");
+        return deny("Glob/Grep/Find are blocked. Use exec:codesearch in the Bash tool instead:\n\n  exec:codesearch\n  <natural language description of what to find>\n\nExample:\n  exec:codesearch\n  find all database query functions");
     }
 
     const WRITE_TOOLS: &[&str] = &["Write", "write_file"];
@@ -39,7 +39,7 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
     if SEARCH_TOOLS.contains(&tool_name) { return allow(None); }
 
     if tool_name == "Task" && tool_input["subagent_type"].as_str().unwrap_or("") == "Explore" {
-        return deny("Use the code-search skill for codebase exploration. Describe what you need in plain language.");
+        return deny("The Explore agent is blocked. Use exec:codesearch in the Bash tool instead:\n\n  exec:codesearch\n  <natural language description of what to find>");
     }
 
     if tool_name == "EnterPlanMode" {
@@ -50,7 +50,7 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
         let skill = tool_input["skill"].as_str().unwrap_or("").to_lowercase();
         let skill = skill.trim_start_matches("gm:");
         if skill == "explore" || skill == "search" {
-            return deny("Use the code-search skill for codebase exploration. Describe what you need in plain language — it understands intent, not just patterns.");
+            return deny("The search/explore skill is blocked. Use exec:codesearch in the Bash tool instead:\n\n  exec:codesearch\n  <natural language description of what to find>");
         }
     }
 
@@ -264,4 +264,4 @@ fn is_test_file(base: &str, fp: &str) -> bool {
 }
 
 
-const BASH_DENY_MSG: &str = "Bash is restricted to exec:<lang>, browser:, and git.\n\nexec:<lang> syntax:\n  exec:nodejs / exec:python / exec:bash / exec:typescript\n  exec:go / exec:rust / exec:java / exec:c / exec:cpp\n  exec:codesearch\n  exec:status / exec:sleep / exec:close / exec:runner / exec:type\n\nAll other Bash commands are blocked.";
+const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — first line is exec:<lang>, rest is the code:\n   exec:nodejs\n   console.log('hello')\n\n   exec:python\n   print('hello')\n\n   exec:bash\n   echo hello\n\n   Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java\n\n2. Browser automation — first line is exec:browser, rest is JS against `page`:\n   exec:browser\n   await page.goto('https://example.com')\n   console.log(await page.title())\n\n3. Utility commands — exec:<cmd> with args on next line:\n   exec:codesearch        (natural language codebase search)\n   exec:status            (check background task status)\n   exec:sleep             (sleep N seconds)\n   exec:close             (close background task)\n   exec:runner            (start/stop/status the runner daemon)\n   exec:type              (send stdin: task_id on line 1, input on line 2)\n\n4. Git commands — git <args> directly (no exec: prefix needed):\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.";
