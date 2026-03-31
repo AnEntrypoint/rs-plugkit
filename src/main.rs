@@ -361,7 +361,11 @@ async fn main() {
                         if count > 0 { eprintln!("Cleaned up {} task(s) for session {}", count, session); }
                     }
                 }
-                hook::agent_browser::close_all_sessions();
+                if session.is_empty() {
+                    hook::agent_browser::close_all_sessions();
+                } else {
+                    hook::agent_browser::close_sessions_for(&session);
+                }
             }
             Cmd::Hook { event } => {
                 match event.as_str() {
