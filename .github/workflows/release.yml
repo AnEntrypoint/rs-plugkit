@@ -27,6 +27,9 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset_name: plugkit-win32-x64.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            asset_name: plugkit-win32-arm64.exe
 
     runs-on: ${{ matrix.os }}
 
