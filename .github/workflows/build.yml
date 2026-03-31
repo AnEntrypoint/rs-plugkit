@@ -28,10 +28,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: build-${{ runner.os }}-${{ matrix.target }}
+          cache-on-failure: true
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
