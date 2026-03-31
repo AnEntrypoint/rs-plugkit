@@ -120,19 +120,7 @@ jobs:
           cd plugforge/plugforge-starter/bin
           chmod +x plugkit-linux-x64 plugkit-linux-arm64 plugkit-darwin-x64 plugkit-darwin-arm64
           cp plugkit-win32-x64.exe plugkit.exe
-          cat > plugkit << 'EOF'
-#!/bin/sh
-DIR="$(cd "$(dirname "$0")" && pwd)"
-case "$(uname -s)" in
-  Darwin) OS=darwin ;;
-  *)      OS=linux  ;;
-esac
-case "$(uname -m)" in
-  arm64|aarch64) ARCH=arm64 ;;
-  *)             ARCH=x64   ;;
-esac
-exec "$DIR/plugkit-$OS-$ARCH" "$@"
-EOF
+          printf '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\ncase "$(uname -s)" in\n  Darwin) OS=darwin ;;\n  *)      OS=linux  ;;\nesac\ncase "$(uname -m)" in\n  arm64|aarch64) ARCH=arm64 ;;\n  *)             ARCH=x64   ;;\nesac\nexec "$DIR/plugkit-$OS-$ARCH" "$@"\n' > plugkit
           chmod +x plugkit
           ls -la
 
