@@ -114,7 +114,10 @@ fn bash_banned_tool(code: &str) -> Option<&'static str> {
     }
     for line in code.lines() {
         let t = line.trim();
-        if t == "grep" || t == "rg" || t == "find" || t == "glob" { return Some(t); }
+        if t == "grep" { return Some("grep"); }
+        if t == "rg" { return Some("rg"); }
+        if t == "find" { return Some("find"); }
+        if t == "glob" { return Some("glob"); }
         for cmd in &["grep", "rg", "find", "glob"] {
             if t.starts_with(&format!("{} ", cmd)) || t.starts_with(&format!("{}\t", cmd)) {
                 return Some(cmd);
