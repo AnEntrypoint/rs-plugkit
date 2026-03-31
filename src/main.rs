@@ -367,6 +367,7 @@ async fn main() {
                 }
             }
             Cmd::Hook { event } => {
+                hook::bootstrap::run();
                 match event.as_str() {
                     "session-start" => { hook::session_start(); return Ok(()); }
                     "pre-tool-use" => { hook::pre_tool_use(); return Ok(()); }
