@@ -82,6 +82,15 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
                 return deny("Do not call playwriter via exec:bash. Use exec:browser:\n\nexec:browser\nawait page.goto('https://example.com')");
             }
 
+            if raw_lang == "bash" || raw_lang == "sh" {
+                if let Some(banned) = bash_banned_tool(code) {
+                    return deny(&format!(
+                        "`{}` is blocked in exec:bash. Use exec:codesearch instead:\n\n  exec:codesearch\n  <natural language description of what to find>\n\nExample:\n  exec:codesearch\n  find all database query functions",
+                        banned
+                    ));
+                }
+            }
+
             return handle_exec(&raw_lang, code, cwd, session_id);
         }
     }
@@ -96,6 +105,23 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
     }
 
     allow(None)
+}
+
+fn bash_banned_tool(code: &str) -> Option<&'static str> {
+    const BANNED: &[&str] = &["grep ", "grep\t", " grep\n", "\ngrep\n", "rg ", "rg\t", " find ", "\nfind ", "find\t", "glob "];
+    for pat in BANNED {
+        if code.contains(pat) { return Some(pat.trim()); }
+    }
+    for line in code.lines() {
+        let t = line.trim();
+        if t == "grep" || t == "rg" || t == "find" || t == "glob" { return Some(t); }
+        for cmd in &["grep", "rg", "find", "glob"] {
+            if t.starts_with(&format!("{} ", cmd)) || t.starts_with(&format!("{}\t", cmd)) {
+                return Some(cmd);
+            }
+        }
+    }
+    None
 }
 
 fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) -> Value {
