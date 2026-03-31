@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - main
 
 jobs:
   build:
@@ -76,6 +78,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/plugkit${ext}" "${{ matrix.asset_name }}"
 
       - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.asset_name }}
@@ -90,6 +93,7 @@ jobs:
 
   publish-binaries:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
