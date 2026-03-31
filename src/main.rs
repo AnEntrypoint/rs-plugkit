@@ -105,6 +105,10 @@ fn parse_task_id(s: &str) -> u64 {
     s.trim_start_matches("task_").parse().unwrap_or(0)
 }
 
+fn normalize_code_input(raw: String) -> String {
+    raw.trim_start_matches('\u{feff}').to_string()
+}
+
 async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>) -> anyhow::Result<i32> {
     ensure_runner().await?;
     let mut create_params = json!({ "code": code, "runtime": runtime, "workingDirectory": cwd });
@@ -137,15 +141,6 @@ async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>
 
     if result["persisted"].as_bool().unwrap_or(false) || (result["backgroundTaskId"].is_u64() && !result["completed"].as_bool().unwrap_or(false)) {
         let id = format!("task_{}", result["backgroundTaskId"].as_u64().unwrap_or(task_id));
-        let partial = tokio::time::timeout(Duration::from_millis(2000), rpc_client::rpc_call("getAndClearOutput", json!({ "taskId": task_id }), 2000)).await.ok().and_then(|r| r.ok());
-        if let Some(out) = partial {
-            if let Some(arr) = out["output"].as_array() {
-                for entry in arr {
-                    let d = entry["d"].as_str().unwrap_or("");
-                    if entry["s"] == "stdout" { print!("{}", d); } else { eprint!("{}", d); }
-                }
-            }
-        }
         println!("\nStill running after 15s — backgrounded.\nTask ID: {}\n", id);
         println!("  plugkit sleep {}       # wait for completion", id);
         println!("  plugkit status {}      # drain output buffer", id);
@@ -176,14 +171,18 @@ async fn cmd_status(task_id_str: &str) -> anyhow::Result<()> {
     if task.is_null() { eprintln!("Task not found"); std::process::exit(1); }
     let status = task["status"].as_str().unwrap_or("unknown");
     println!("Status: {}", status);
-    if let Some(r) = task["result"].as_object() {
-        if let Some(s) = r.get("stdout").and_then(|v| v.as_str()) { if !s.is_empty() { print!("{}", s); } }
-        if let Some(s) = r.get("stderr").and_then(|v| v.as_str()) { if !s.is_empty() { eprint!("{}", s); } }
-        if let Some(e) = r.get("error").and_then(|v| v.as_str()) { if !e.is_empty() { eprintln!("Error: {}", e); } }
-    }
     let output = rpc_client::rpc_call("getAndClearOutput", json!({ "taskId": raw_id }), 5000).await?;
+    let mut drained_any = false;
     if let Some(arr) = output["output"].as_array() {
         for e in arr { let d = e["d"].as_str().unwrap_or(""); if e["s"] == "stdout" { print!("{}", d); } else { eprint!("{}", d); } }
+        drained_any = !arr.is_empty();
+    }
+    if !drained_any {
+        if let Some(r) = task["result"].as_object() {
+            if let Some(s) = r.get("stdout").and_then(|v| v.as_str()) { if !s.is_empty() { print!("{}", s); } }
+            if let Some(s) = r.get("stderr").and_then(|v| v.as_str()) { if !s.is_empty() { eprint!("{}", s); } }
+            if let Some(e) = r.get("error").and_then(|v| v.as_str()) { if !e.is_empty() { eprintln!("Error: {}", e); } }
+        }
     }
     if status == "running" {
         println!("\nTask still running. Options:");
@@ -251,7 +250,7 @@ async fn main() {
     let result: anyhow::Result<()> = async {
         match cli.command {
             Cmd::Exec { lang, cwd, file, session, code } => {
-                let code_str = if let Some(ref f) = file { fs::read_to_string(f)? } else { code.join(" ") };
+                let code_str = if let Some(ref f) = file { normalize_code_input(fs::read_to_string(f)?) } else { normalize_code_input(code.join(" ")) };
                 if let Some(ref f) = file { let _ = fs::remove_file(f); }
                 if code_str.trim().is_empty() { eprintln!("No code provided"); exit_code = 1; return Ok(()); }
                 let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
