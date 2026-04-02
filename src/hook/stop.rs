@@ -93,7 +93,10 @@ pub fn run_stop_git() {
     let mut issues: Vec<String> = vec![];
 
     if let Some(status) = git(&["status", "--porcelain"], &project_dir) {
-        if !status.is_empty() {
+        let tracked_changes = status.lines()
+            .filter(|l| !l.starts_with("??"))
+            .count();
+        if tracked_changes > 0 {
             issues.push("Uncommitted changes exist".into());
         }
     }
