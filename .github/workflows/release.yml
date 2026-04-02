@@ -111,14 +111,15 @@ jobs:
       - name: Copy binaries into plugforge
         shell: bash
         run: |
-          mkdir -p plugforge/plugforge-starter/bin
-          for d in bins/*/; do
-            f=$(ls "$d")
-            cp "$d$f" "plugforge/plugforge-starter/bin/$f"
+          for target in plugforge/gm-build/gm-cc/bin plugforge/gm-build-latest/gm-cc/bin plugforge/plugforge-starter/bin; do
+            mkdir -p "$target"
+            for d in bins/*/; do
+              f=$(ls "$d")
+              cp "$d$f" "$target/$f"
+            done
+            chmod +x "$target/plugkit-linux-x64" "$target/plugkit-linux-arm64" "$target/plugkit-darwin-x64" "$target/plugkit-darwin-arm64" 2>/dev/null || true
           done
-          cd plugforge/plugforge-starter/bin
-          chmod +x plugkit-linux-x64 plugkit-linux-arm64 plugkit-darwin-x64 plugkit-darwin-arm64
-          ls -la
+          ls -la plugforge/gm-build/gm-cc/bin
 
       - name: Squash-commit binaries to plugforge
         shell: bash
@@ -131,7 +132,7 @@ jobs:
           git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
           git fetch origin main
           git checkout main
-          git add plugforge-starter/bin/
+          git add gm-build/gm-cc/bin/ gm-build-latest/gm-cc/bin/ plugforge-starter/bin/
           if git diff --cached --quiet; then
             echo "No binary changes"
             exit 0
@@ -141,7 +142,7 @@ jobs:
           if [ -n "$FIRST_BIN" ]; then
             PARENT=$(git rev-parse "${FIRST_BIN}^")
             git reset --soft "$PARENT"
-            git add plugforge-starter/bin/
+            git add gm-build/gm-cc/bin/ gm-build-latest/gm-cc/bin/ plugforge-starter/bin/
           fi
           git commit -m "chore: update plugkit binaries to $TAG [skip ci]"
           git push origin main --force-with-lease
