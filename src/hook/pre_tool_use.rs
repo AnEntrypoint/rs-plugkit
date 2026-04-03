@@ -18,7 +18,7 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
 
     const FORBIDDEN: &[&str] = &["find", "Find", "Glob", "Grep"];
     if FORBIDDEN.contains(&tool_name) {
-        return deny("Glob/Grep/Find are blocked. Use exec:codesearch in the Bash tool instead:\n\n  exec:codesearch\n  <natural language description of what to find>\n\nExample:\n  exec:codesearch\n  find all database query functions");
+        return deny("Glob/Grep/Find are blocked. Use exec:codesearch with the mandatory two-word start protocol:\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Iterate until found (min 4 attempts). See code-search skill for full protocol.");
     }
 
     const WRITE_TOOLS: &[&str] = &["Write", "write_file"];
@@ -39,7 +39,7 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
     if SEARCH_TOOLS.contains(&tool_name) { return allow(None); }
 
     if (tool_name == "Task" || tool_name == "Agent") && tool_input["subagent_type"].as_str().unwrap_or("") == "Explore" {
-        return deny("The Explore agent is blocked. Use exec:codesearch in the Bash tool instead:\n\n  exec:codesearch\n  <natural language description of what to find>");
+        return deny("The Explore agent is blocked. Use exec:codesearch with the mandatory two-word start protocol:\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Iterate until found (min 4 attempts). See code-search skill for full protocol.");
     }
 
     if tool_name == "EnterPlanMode" {
@@ -50,7 +50,7 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
         let skill = tool_input["skill"].as_str().unwrap_or("").to_lowercase();
         let skill = skill.trim_start_matches("gm:");
         if skill == "explore" || skill == "search" {
-            return deny("The search/explore skill is blocked. Use exec:codesearch in the Bash tool instead:\n\n  exec:codesearch\n  <natural language description of what to find>");
+            return deny("The search/explore skill is blocked. Use exec:codesearch with the mandatory two-word start protocol:\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Iterate until found (min 4 attempts). See code-search skill for full protocol.");
         }
     }
 
