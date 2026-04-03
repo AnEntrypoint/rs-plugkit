@@ -38,7 +38,7 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
     const SEARCH_TOOLS: &[&str] = &["glob", "search_file_content", "Search", "search"];
     if SEARCH_TOOLS.contains(&tool_name) { return allow(None); }
 
-    if tool_name == "Task" && tool_input["subagent_type"].as_str().unwrap_or("") == "Explore" {
+    if (tool_name == "Task" || tool_name == "Agent") && tool_input["subagent_type"].as_str().unwrap_or("") == "Explore" {
         return deny("The Explore agent is blocked. Use exec:codesearch in the Bash tool instead:\n\n  exec:codesearch\n  <natural language description of what to find>");
     }
 
