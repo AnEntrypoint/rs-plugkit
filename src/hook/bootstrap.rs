@@ -36,11 +36,18 @@ fn asset_name() -> String {
     format!("plugkit-{}-{}{}", os, arch, ext)
 }
 
+fn old_bin_path(root: &str) -> PathBuf {
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    PathBuf::from(root).join("bin").join(format!("plugkit{}.old", ext))
+}
+
 fn apply_pending(root: &str) {
     let pending = pending_path(root);
     if !pending.exists() { return; }
     let bin = bin_path(root);
-    let _ = fs::remove_file(&bin);
+    let old = old_bin_path(root);
+    let _ = fs::remove_file(&old);
+    let _ = fs::rename(&bin, &old);
     let _ = fs::rename(&pending, &bin);
     #[cfg(unix)]
     { use std::os::unix::fs::PermissionsExt; let _ = fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)); }
