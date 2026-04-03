@@ -163,5 +163,6 @@ jobs:
           fi
           TAG="${{ github.ref_name }}"
           git commit -m "chore: update plugkit binaries to $TAG [skip ci]"
-          git pull --rebase origin main
+          git fetch origin main
+          git rebase -s recursive -X theirs origin/main
           git push origin main
