@@ -123,13 +123,18 @@ jobs:
           done
           ls -la plugforge/gm-build-latest/gm-cc/bin
 
+      - name: Checkout rs-plugkit for version
+        uses: actions/checkout@v4
+        with:
+          path: rs-plugkit-src
+
       - name: Update plugkitVersion in gm.json
         shell: bash
         run: |
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
           if [ -z "$VERSION" ] || [ "$TAG" = "$VERSION" ]; then
-            VERSION=$(cat plugforge/plugforge-starter/Cargo.toml 2>/dev/null | grep '^version' | head -1 | sed 's/.*= *"//;s/"//' || echo "")
+            VERSION=$(grep '^version' rs-plugkit-src/Cargo.toml | head -1 | sed 's/.*= *"//;s/"//')
           fi
           if [ -n "$VERSION" ]; then
             node -e "
