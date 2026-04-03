@@ -162,7 +162,7 @@ jobs:
             git commit -m "chore: auto-bump version to $NEW_VERSION [skip ci]"
             git fetch origin main
             git rebase -s recursive -X theirs origin/main
-            git push origin main
+            git push origin HEAD:main
           fi
           echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
 
