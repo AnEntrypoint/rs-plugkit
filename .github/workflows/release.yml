@@ -119,8 +119,28 @@ jobs:
               cp "$d$f" "$target/$f"
             done
             chmod +x "$target/plugkit-linux-x64" "$target/plugkit-linux-arm64" "$target/plugkit-darwin-x64" "$target/plugkit-darwin-arm64" 2>/dev/null || true
+            cp "$target/plugkit-win32-x64.exe" "$target/plugkit.exe" 2>/dev/null || true
           done
           ls -la plugforge/gm-build-latest/gm-cc/bin
+
+      - name: Update plugkitVersion in gm.json
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          if [ -z "$VERSION" ] || [ "$TAG" = "$VERSION" ]; then
+            VERSION=$(cat plugforge/plugforge-starter/Cargo.toml 2>/dev/null | grep '^version' | head -1 | sed 's/.*= *"//;s/"//' || echo "")
+          fi
+          if [ -n "$VERSION" ]; then
+            node -e "
+              const fs = require('fs');
+              const p = 'plugforge/plugforge-starter/gm.json';
+              const j = JSON.parse(fs.readFileSync(p,'utf8'));
+              j.plugkitVersion = '$VERSION';
+              fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
+              console.log('plugkitVersion set to', '$VERSION');
+            "
+          fi
 
       - name: Squash-commit binaries to plugforge
         shell: bash
@@ -133,17 +153,12 @@ jobs:
           git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
           git fetch origin main
           git checkout main
-          git add gm-build-latest/gm-cc/bin/ plugforge-starter/bin/
+          git pull --rebase origin main
+          git add gm-build-latest/gm-cc/bin/ plugforge-starter/bin/ plugforge-starter/gm.json
           if git diff --cached --quiet; then
             echo "No binary changes"
             exit 0
           fi
           TAG="${{ github.ref_name }}"
-          FIRST_BIN=$(git log --oneline --grep="^chore: update plugkit binaries" --format="%H" | tail -1)
-          if [ -n "$FIRST_BIN" ]; then
-            PARENT=$(git rev-parse "${FIRST_BIN}^")
-            git reset --soft "$PARENT"
-            git add gm-build-latest/gm-cc/bin/ plugforge-starter/bin/
-          fi
           git commit -m "chore: update plugkit binaries to $TAG [skip ci]"
-          git push origin main --force-with-lease
+          git push origin main
