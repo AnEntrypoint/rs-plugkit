@@ -151,9 +151,6 @@ jobs:
           git config user.name "plugforge-bot"
           git config user.email "noreply@github.com"
           git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
-          git fetch origin main
-          git checkout main
-          git pull --rebase origin main
           git add gm-build-latest/gm-cc/bin/ plugforge-starter/bin/ plugforge-starter/gm.json
           if git diff --cached --quiet; then
             echo "No binary changes"
