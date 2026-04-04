@@ -171,9 +171,43 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
     let mut cmd = format!("{} exec --lang={} --file={}", bin_unix, lang, tmp_unix);
     if let Some(c) = cwd { cmd.push_str(&format!(" --cwd={}", to_unix_path(c))); }
     if !session_id.is_empty() { cmd.push_str(&format!(" --session={}", session_id)); }
-    delegate_to_bash(&cmd)
+    delegate_to_bash_with_reminder(&cmd)
 }
 
+
+fn open_sessions_reminder() -> String {
+    let port_file = std::env::temp_dir().join("glootie-runner.port");
+    let port: u16 = match std::fs::read_to_string(&port_file).ok().and_then(|s| s.trim().parse().ok()) {
+        Some(p) => p,
+        None => return String::new(),
+    };
+    let tasks = match rs_exec::rpc_client::rpc_call_sync(port, "listTasks", serde_json::json!({}), 2000) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    let open: Vec<String> = tasks["tasks"].as_array().unwrap_or(&vec![]).iter()
+        .filter(|t| matches!(t["status"].as_str(), Some("running") | Some("pending")))
+        .map(|t| format!("  task_{} ({})", t["id"].as_u64().unwrap_or(0), t["status"].as_str().unwrap_or("?")))
+        .collect();
+    if open.is_empty() { return String::new(); }
+    format!("\n[OPEN BACKGROUND TASKS — monitor these, do not lose track]\n{}\n", open.join("\n"))
+}
+
+fn delegate_to_bash_with_reminder(cmd: &str) -> Value {
+    let reminder = open_sessions_reminder();
+    if reminder.is_empty() {
+        return delegate_to_bash(cmd);
+    }
+    let escaped = reminder.replace('\'', "'\\''");
+    let full = format!("printf '%s' '{}' && {}", escaped, cmd);
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": { "command": full }
+        }
+    })
+}
 
 fn delegate_to_bash(cmd: &str) -> Value {
     serde_json::json!({
