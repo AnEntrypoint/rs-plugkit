@@ -15,11 +15,18 @@ pub fn close_sessions_for(claude_session_id: &str) {
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
-    for id in &sessions {
+    let mut children: Vec<std::process::Child> = sessions.iter().filter_map(|id| {
         let mut del_args = prefix.clone();
         del_args.extend(["session".into(), "delete".into(), id.clone()]);
-        let _ = Command::new(&bin).args(&del_args).stdout(Stdio::null()).stderr(Stdio::null()).output();
+        Command::new(&bin).args(&del_args).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()
+    }).collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        children.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+        if children.is_empty() || std::time::Instant::now() > deadline { break; }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    for c in &mut children { let _ = c.kill(); }
     if !sessions.is_empty() {
         map.remove(claude_session_id);
         let _ = std::fs::write(&path, serde_json::to_string(&map).unwrap_or_default());
@@ -30,23 +37,44 @@ pub fn close_all_sessions() {
     let (bin, prefix) = find_pw();
     let mut args = prefix.clone();
     args.extend(["session".into(), "list".into()]);
-    let out = Command::new(&bin)
+    let mut list_child = match Command::new(&bin)
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output();
-    if let Ok(o) = out {
-        let text = String::from_utf8_lossy(&o.stdout);
-        for line in text.lines().skip(1) {
-            if let Some(id) = line.split_whitespace().next() {
-                if id.parse::<u32>().is_ok() {
-                    let mut del_args = prefix.clone();
-                    del_args.extend(["session".into(), "delete".into(), id.to_string()]);
-                    let _ = Command::new(&bin).args(&del_args).stdout(Stdio::null()).stderr(Stdio::null()).output();
-                }
-            }
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match list_child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() > deadline => { let _ = list_child.kill(); return; }
+            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
         }
     }
+    let text = match list_child.wait_with_output() {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Err(_) => return,
+    };
+    let ids: Vec<String> = text.lines().skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|id| id.parse::<u32>().is_ok())
+        .map(|s| s.to_string())
+        .collect();
+    let mut children: Vec<std::process::Child> = ids.iter().filter_map(|id| {
+        let mut del_args = prefix.clone();
+        del_args.extend(["session".into(), "delete".into(), id.clone()]);
+        Command::new(&bin).args(&del_args).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()
+    }).collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        children.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+        if children.is_empty() || std::time::Instant::now() > deadline { break; }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    for c in &mut children { let _ = c.kill(); }
 }
 
 fn find_pw() -> (String, Vec<String>) {
