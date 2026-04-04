@@ -18,10 +18,10 @@ fn kill_relay_server() {
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
     for (_pid, proc) in sys.processes() {
         let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().to_lowercase()).collect();
-        let is_relay = cmd.iter().any(|a| a.contains("playwriter") && (a.contains("bin.js") || a.ends_with("playwriter")))
-            && cmd.iter().any(|a| a == "server" || a.contains("cdp-relay") || a.contains("relay"));
-        let is_node_playwriter = cmd.iter().any(|a| a.contains("playwriter"))
-            && cmd.first().map(|s| s.contains("node")).unwrap_or(false);
+        let is_relay = cmd.iter().any(|a: &String| a.contains("playwriter") && (a.contains("bin.js") || a.ends_with("playwriter")))
+            && cmd.iter().any(|a: &String| a == "server" || a.contains("cdp-relay") || a.contains("relay"));
+        let is_node_playwriter = cmd.iter().any(|a: &String| a.contains("playwriter"))
+            && cmd.first().map(|s: &String| s.contains("node")).unwrap_or(false);
         if is_relay || is_node_playwriter {
             proc.kill();
         }
