@@ -128,7 +128,7 @@ fn bash_banned_tool(code: &str) -> Option<&'static str> {
 }
 
 fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) -> Value {
-    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","status","sleep","close","runner","type"];
+    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","status","sleep","close","runner","type","kill-port"];
 
     if !raw_lang.is_empty() && !BUILTINS.contains(&raw_lang) {
         if let Some(result) = try_lang_plugin(raw_lang, code, cwd) {
@@ -154,6 +154,7 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
         "sleep" => return delegate_to_bash(&format!("{} sleep {}", bin_unix, safe_code.trim())),
         "close" => return delegate_to_bash(&format!("{} close {}", bin_unix, safe_code.trim())),
         "runner" => return delegate_to_bash(&format!("{} runner {}", bin_unix, safe_code.trim())),
+        "kill-port" => return delegate_to_bash(&format!("{} kill-port {}", bin_unix, safe_code.trim())),
         "type" => {
             let mut lines = safe_code.splitn(2, '\n');
             let task_id = lines.next().unwrap_or("").trim();
@@ -327,4 +328,4 @@ fn is_test_file(base: &str, fp: &str) -> bool {
 }
 
 
-const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — first line is exec:<lang>, rest is the code:\n   exec:nodejs\n   console.log('hello')\n\n   exec:python\n   print('hello')\n\n   exec:bash\n   echo hello\n\n   Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java\n\n2. Browser automation — first line is exec:browser, rest is JS against `page`:\n   exec:browser\n   await page.goto('https://example.com')\n   console.log(await page.title())\n\n3. Utility commands — exec:<cmd> with args on next line:\n   exec:codesearch        (natural language codebase search)\n   exec:status            (check background task status)\n   exec:sleep             (sleep N seconds)\n   exec:close             (close background task)\n   exec:runner            (start/stop/status the runner daemon)\n   exec:type              (send stdin: task_id on line 1, input on line 2)\n\n4. Git commands — git <args> directly (no exec: prefix needed):\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.";
+const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — first line is exec:<lang>, rest is the code:\n   exec:nodejs\n   console.log('hello')\n\n   exec:python\n   print('hello')\n\n   exec:bash\n   echo hello\n\n   Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java\n\n2. Browser automation — first line is exec:browser, rest is JS against `page`:\n   exec:browser\n   await page.goto('https://example.com')\n   console.log(await page.title())\n\n3. Utility commands — exec:<cmd> with args on next line:\n   exec:codesearch        (natural language codebase search)\n   exec:status            (check background task status)\n   exec:sleep             (sleep N seconds)\n   exec:close             (close background task)\n   exec:runner            (start/stop/status the runner daemon)\n   exec:type              (send stdin: task_id on line 1, input on line 2)\n   exec:kill-port         (kill process listening on port: port number on next line)\n\n4. Git commands — git <args> directly (no exec: prefix needed):\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.";
