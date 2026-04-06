@@ -150,16 +150,16 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
             cmd.push_str(&format!(" {}", query));
             return delegate_to_bash(&cmd);
         }
-        "status" => return delegate_to_bash(&format!("{} status {}", bin_unix, safe_code.trim())),
-        "sleep" => return delegate_to_bash(&format!("{} sleep {}", bin_unix, safe_code.trim())),
-        "close" => return delegate_to_bash(&format!("{} close {}", bin_unix, safe_code.trim())),
-        "runner" => return delegate_to_bash(&format!("{} runner {}", bin_unix, safe_code.trim())),
-        "kill-port" => return delegate_to_bash(&format!("{} kill-port {}", bin_unix, safe_code.trim())),
+        "status" => return delegate_with_drain(&format!("{} status {}", bin_unix, safe_code.trim()), session_id),
+        "sleep" => return delegate_with_drain(&format!("{} sleep {}", bin_unix, safe_code.trim()), session_id),
+        "close" => return delegate_with_drain(&format!("{} close {}", bin_unix, safe_code.trim()), session_id),
+        "runner" => return delegate_with_drain(&format!("{} runner {}", bin_unix, safe_code.trim()), session_id),
+        "kill-port" => return delegate_with_drain(&format!("{} kill-port {}", bin_unix, safe_code.trim()), session_id),
         "type" => {
             let mut lines = safe_code.splitn(2, '\n');
             let task_id = lines.next().unwrap_or("").trim();
             let input = lines.next().unwrap_or("").trim();
-            return delegate_to_bash(&format!("{} type {} {}", bin_unix, task_id, input));
+            return delegate_with_drain(&format!("{} type {} {}", bin_unix, task_id, input), session_id);
         }
         _ => {}
     }
@@ -172,34 +172,65 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
     let mut cmd = format!("{} exec --lang={} --file={}", bin_unix, lang, tmp_unix);
     if let Some(c) = cwd { cmd.push_str(&format!(" --cwd={}", to_unix_path(c))); }
     if !session_id.is_empty() { cmd.push_str(&format!(" --session={}", session_id)); }
-    delegate_to_bash_with_reminder(&cmd)
+    delegate_with_drain(&cmd, session_id)
 }
 
-
-fn open_sessions_reminder() -> String {
+fn session_log_drain(session_id: &str) -> String {
+    if session_id.is_empty() { return String::new(); }
     let port_file = std::env::temp_dir().join("glootie-runner.port");
     let port: u16 = match std::fs::read_to_string(&port_file).ok().and_then(|s| s.trim().parse().ok()) {
         Some(p) => p,
         None => return String::new(),
     };
-    let tasks = match rs_exec::rpc_client::rpc_call_sync(port, "listTasks", serde_json::json!({}), 2000) {
+
+    let drain = match rs_exec::rpc_client::rpc_call_sync(port, "drainSessionOutput", serde_json::json!({ "sessionId": session_id }), 2000) {
         Ok(v) => v,
         Err(_) => return String::new(),
     };
-    let open: Vec<String> = tasks["tasks"].as_array().unwrap_or(&vec![]).iter()
-        .filter(|t| matches!(t["status"].as_str(), Some("running") | Some("pending")))
-        .map(|t| format!("  task_{} ({})", t["id"].as_u64().unwrap_or(0), t["status"].as_str().unwrap_or("?")))
-        .collect();
-    if open.is_empty() { return String::new(); }
-    format!("\n[OPEN BACKGROUND TASKS — monitor these, do not lose track]\n{}\n", open.join("\n"))
+
+    let mut out = String::new();
+    let mut running_ids: Vec<u64> = Vec::new();
+
+    if let Some(tasks) = drain["tasks"].as_array() {
+        for task in tasks {
+            let id = task["id"].as_u64().unwrap_or(0);
+            let status = task["status"].as_str().unwrap_or("");
+            let output = task["output"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+            let text: String = output.iter().map(|e| e["d"].as_str().unwrap_or("")).collect::<Vec<_>>().join("");
+            let text = text.trim_end();
+            match status {
+                "running" | "pending" => {
+                    running_ids.push(id);
+                    if !text.is_empty() {
+                        out.push_str(&format!("\n[task_{} — live output]\n{}\n", id, text));
+                    }
+                }
+                _ => {
+                    if !text.is_empty() {
+                        out.push_str(&format!("\n[task_{} {} — output]\n{}\n", id, status, text));
+                    }
+                }
+            }
+        }
+    }
+
+    if !running_ids.is_empty() {
+        let ids_str: Vec<String> = running_ids.iter().map(|id| format!("  task_{} (running)", id)).collect();
+        out.push_str(&format!("\n[OPEN BACKGROUND TASKS — monitor these, do not lose track]\n{}\n", ids_str.join("\n")));
+        for id in &running_ids {
+            out.push_str(&format!("  plugkit sleep task_{}       # wait for completion\n  plugkit status task_{}      # drain output buffer\n  plugkit close task_{}       # delete task when done\n", id, id, id));
+        }
+    }
+
+    out
 }
 
-fn delegate_to_bash_with_reminder(cmd: &str) -> Value {
-    let reminder = open_sessions_reminder();
-    if reminder.is_empty() {
+fn delegate_with_drain(cmd: &str, session_id: &str) -> Value {
+    let drain = session_log_drain(session_id);
+    if drain.is_empty() {
         return delegate_to_bash(cmd);
     }
-    let escaped = reminder.replace('\'', "'\\''");
+    let escaped = drain.replace('\'', "'\\''");
     let full = format!("printf '%s' '{}' && {}", escaped, cmd);
     serde_json::json!({
         "hookSpecificOutput": {
