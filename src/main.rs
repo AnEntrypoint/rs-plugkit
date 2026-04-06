@@ -62,6 +62,7 @@ enum Cmd {
         event: String,
     },
     Bootstrap,
+    #[command(name = "kill-port")] KillPort { port: u16 },
 }
 
 fn runner_exe_stamp() -> PathBuf {
@@ -381,6 +382,16 @@ async fn main() {
             Cmd::Bootstrap => {
                 hook::bootstrap::run();
                 return Ok(());
+            }
+            Cmd::KillPort { port } => {
+                ensure_runner().await?;
+                let res = rpc_client::rpc_call("killPort", json!({ "port": port }), 10000).await?;
+                if res["ok"].as_bool().unwrap_or(false) {
+                    println!("Killed process on port {} (pid {})", port, res["killedPid"]);
+                } else {
+                    eprintln!("No process found listening on port {}", port);
+                    exit_code = 1;
+                }
             }
             Cmd::Search { path, query } => {
                 if query.is_empty() {
