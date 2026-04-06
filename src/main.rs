@@ -86,14 +86,77 @@ fn runner_needs_restart() -> bool {
     }
 }
 
+fn runner_start_lock() -> PathBuf {
+    env::temp_dir().join("plugkit-runner-start.lock")
+}
+
 async fn ensure_runner() -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_millis(5000), async {
+    // Fast path: runner is already healthy and binary hasn't changed.
+    if rpc_client::health_check().await && !runner_needs_restart() {
+        return Ok(());
+    }
+
+    // Slow path: acquire a file-based lock so only one process starts the runner.
+    // This prevents multiple concurrent plugkit invocations from each spawning a runner.
+    tokio::time::timeout(Duration::from_millis(8000), async {
+        // Wait up to 4s for an existing concurrent start to finish.
+        let lock_path = runner_start_lock();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(4000);
+        loop {
+            // Remove stale lock files left by crashed processes (older than 10s).
+            if let Ok(meta) = fs::metadata(&lock_path) {
+                let stale = meta.modified().ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|age| age.as_secs() > 10)
+                    .unwrap_or(false);
+                if stale { let _ = fs::remove_file(&lock_path); }
+            }
+            match fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+                Ok(_) => break, // We hold the lock
+                Err(_) => {
+                    // Another process is starting the runner; wait and re-check.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    if rpc_client::health_check().await && !runner_needs_restart() {
+                        return Ok(()); // Other process finished starting it
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        // Give up waiting for the lock; try anyway
+                        let _ = fs::remove_file(&lock_path);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Re-check under lock: another process may have started it while we waited.
+        if rpc_client::health_check().await && !runner_needs_restart() {
+            let _ = fs::remove_file(&lock_path);
+            return Ok(());
+        }
+
         if rpc_client::health_check().await {
-            if !runner_needs_restart() { return Ok(()); }
+            // Healthy but stale binary — only restart if no tasks are currently running,
+            // to avoid orphaning active background tasks.
+            let has_active = rpc_client::rpc_call("listTasks", json!({}), 2000).await
+                .ok()
+                .and_then(|v| v["tasks"].as_array().map(|a| {
+                    a.iter().any(|t| matches!(t["status"].as_str(), Some("running") | Some("pending")))
+                }))
+                .unwrap_or(false);
+            if has_active {
+                // Defer restart: update the stamp so we don't keep trying this tick,
+                // and let the caller proceed with the running instance.
+                let _ = fs::write(runner_exe_stamp(), current_exe_stamp());
+                let _ = fs::remove_file(&lock_path);
+                return Ok(());
+            }
             daemon::kill(RUNNER_NAME);
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        daemon::start(RUNNER_NAME, &self_exe(), &["--runner-mode"])?;
+
+        let result = daemon::start(RUNNER_NAME, &self_exe(), &["--runner-mode"]);
+        let _ = fs::remove_file(&lock_path); // Release lock before polling
+        result?;
         let _ = fs::write(runner_exe_stamp(), current_exe_stamp());
         for _ in 0..20 {
             tokio::time::sleep(Duration::from_millis(150)).await;
@@ -124,16 +187,17 @@ async fn drain_output(task_id: u64) {
 
 async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>) -> anyhow::Result<i32> {
     ensure_runner().await?;
-    let mut create_params = json!({ "code": code, "runtime": runtime, "workingDirectory": cwd });
-    if let Some(sid) = session_id { create_params["sessionId"] = json!(sid); }
-    let task_id_val = rpc_client::rpc_call("createTask", create_params, 10000).await?;
-    let task_id = task_id_val["taskId"].as_u64().unwrap_or(0);
-
-    let _ = rpc_client::rpc_call(
-        "execute",
-        json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "timeout": HARD_CEILING_MS, "backgroundTaskId": task_id, "sessionId": session_id }),
-        500,
-    ).await;
+    // Use a single atomic execute call: runner creates + starts the task in one step.
+    // The original two-call pattern (createTask then execute) had a race window: if the
+    // runner restarted between those two calls, the task was created on the old (now dead)
+    // runner and execute would either fail or spawn on a different instance.
+    // The execute handler returns the backgroundTaskId immediately after spawning, so 2s
+    // is more than enough even on a slow machine.
+    let mut exec_params = json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "timeout": HARD_CEILING_MS });
+    if let Some(sid) = session_id { exec_params["sessionId"] = json!(sid); }
+    let exec_result = rpc_client::rpc_call("execute", exec_params, 2000).await?;
+    let task_id = exec_result["result"]["backgroundTaskId"].as_u64()
+        .ok_or_else(|| anyhow::anyhow!("execute did not return a task ID"))?;
 
     let deadline = tokio::time::Instant::now() + Duration::from_millis(HARD_CEILING_MS);
     loop {
