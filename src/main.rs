@@ -334,8 +334,13 @@ async fn main() {
             Cmd::Sleep { task_id, seconds, next_output } => cmd_sleep(&task_id, seconds.unwrap_or(30), next_output).await?,
             Cmd::Close { task_id } => {
                 ensure_runner().await?;
-                rpc_client::rpc_call("deleteTask", json!({ "taskId": parse_task_id(&task_id) }), 10000).await?;
-                println!("Task {} closed", task_id);
+                let del = rpc_client::rpc_call("deleteTask", json!({ "taskId": parse_task_id(&task_id) }), 10000).await?;
+                let proc_killed = del["processKilled"].as_bool().unwrap_or(false);
+                let browser_released = del["browserSessionReleased"].as_bool().unwrap_or(false);
+                print!("Task {} closed", task_id);
+                if proc_killed { print!(" — process killed"); }
+                if browser_released { print!(", browser session released"); }
+                println!();
                 let res = rpc_client::rpc_call("listTasks", json!({}), 5000).await.unwrap_or_default();
                 let remaining: Vec<_> = res["tasks"].as_array().map(|a| {
                     a.iter().filter(|t| matches!(t["status"].as_str(), Some("running") | Some("pending"))).collect()
