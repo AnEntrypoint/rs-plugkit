@@ -220,6 +220,19 @@ async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>
     }
 
     drain_output(task_id).await;
+    if let Ok(t) = rpc_client::rpc_call("getTask", json!({ "taskId": task_id }), 2000).await {
+        let status = t["task"]["status"].as_str().unwrap_or("");
+        if status == "completed" || status == "failed" {
+            let result = t["task"]["result"].clone();
+            if let Some(s) = result["stdout"].as_str() { if !s.is_empty() { print!("{}", s); } }
+            if let Some(s) = result["stderr"].as_str() { if !s.is_empty() { eprint!("{}", s); } }
+            if let Some(e) = result["error"].as_str() { if !e.is_empty() { eprintln!("Error: {}", e); } }
+            let _ = rpc_client::rpc_call("deleteTask", json!({ "taskId": task_id }), 5000).await;
+            let exit_code = result["exitCode"].as_i64().unwrap_or(0) as i32;
+            if result["success"].as_bool() == Some(false) { std::process::exit(if exit_code != 0 { exit_code } else { 1 }); }
+            std::process::exit(exit_code);
+        }
+    }
     let id = format!("task_{}", task_id);
     println!("\nStill running after 15s — backgrounded.\nTask ID: {}\n", id);
     println!("  plugkit sleep {}       # wait for completion", id);
