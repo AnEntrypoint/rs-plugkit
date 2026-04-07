@@ -21,7 +21,7 @@ pub fn run() {
 
     let project = project_dir();
     let mut parts: Vec<String> = vec![
-        "Use the Skill tool with skill: \"gm\" to begin — do NOT use the Agent tool to load skills. Skills are invoked via the Skill tool only, never as agents. DO NOT use EnterPlanMode.".into()
+        "MANDATORY: Use the Skill tool with skill: \"gm\" for ALL work — every task, every response, every code change. The gm skill is the only valid entry point for any coding, planning, or file operation. Do NOT use the Agent tool to load skills. Skills are invoked via the Skill tool only, never as agents. DO NOT use EnterPlanMode. Do NOT attempt work without invoking gm first.".into()
     ];
 
     if let Some(ref dir) = project {
