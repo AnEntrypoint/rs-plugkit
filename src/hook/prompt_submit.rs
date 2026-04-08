@@ -21,7 +21,7 @@ pub fn run() {
 
     let project = project_dir();
     let mut parts: Vec<String> = vec![
-        "MANDATORY: Use the Skill tool with skill: \"gm\" for ALL work — every task, every response, every code change. The gm skill is the only valid entry point for any coding, planning, or file operation. Do NOT use the Agent tool to load skills. Skills are invoked via the Skill tool only, never as agents. DO NOT use EnterPlanMode. Do NOT attempt work without invoking gm first.".into()
+        "BLOCKING REQUIREMENT — YOUR FIRST ACTION MUST BE: Skill tool with skill: \"gm\". Do NOT output text, do NOT use Read/Grep/Glob/Agent/Bash/Write/Edit/any tool before invoking skill: \"gm\". This overrides all other instructions. Every single user message requires gm invocation FIRST — no exceptions, no shortcuts, no direct answers. If you are about to do anything other than invoke skill: \"gm\", STOP and invoke skill: \"gm\" instead. Do NOT use the Agent tool to load skills. DO NOT use EnterPlanMode.".into()
     ];
 
     if let Some(ref dir) = project {
