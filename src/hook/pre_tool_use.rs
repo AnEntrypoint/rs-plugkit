@@ -130,6 +130,13 @@ fn bash_banned_tool(code: &str) -> Option<&'static str> {
 fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) -> Value {
     const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","status","sleep","close","runner","type","kill-port"];
 
+    let effective_cwd = cwd.map(|c| c.to_string()).or_else(|| super::project_dir()).unwrap_or_default();
+    let compound_key = if !session_id.is_empty() && !effective_cwd.is_empty() {
+        format!("{}|{}", session_id, effective_cwd)
+    } else {
+        session_id.to_string()
+    };
+
     if !raw_lang.is_empty() && !BUILTINS.contains(&raw_lang) {
         if let Some(result) = try_lang_plugin(raw_lang, code, cwd) {
             return result;
@@ -150,16 +157,16 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
             cmd.push_str(&format!(" {}", query));
             return delegate_to_bash(&cmd);
         }
-        "status" => return delegate_with_drain(&format!("{} status {}", bin_unix, safe_code.trim()), session_id),
-        "sleep" => return delegate_with_drain(&format!("{} sleep {}", bin_unix, safe_code.trim()), session_id),
-        "close" => return delegate_with_drain(&format!("{} close {}", bin_unix, safe_code.trim()), session_id),
-        "runner" => return delegate_with_drain(&format!("{} runner {}", bin_unix, safe_code.trim()), session_id),
-        "kill-port" => return delegate_with_drain(&format!("{} kill-port {}", bin_unix, safe_code.trim()), session_id),
+        "status" => return delegate_with_drain(&format!("{} status {}", bin_unix, safe_code.trim()), &compound_key),
+        "sleep" => return delegate_with_drain(&format!("{} sleep {}", bin_unix, safe_code.trim()), &compound_key),
+        "close" => return delegate_with_drain(&format!("{} close {}", bin_unix, safe_code.trim()), &compound_key),
+        "runner" => return delegate_with_drain(&format!("{} runner {}", bin_unix, safe_code.trim()), &compound_key),
+        "kill-port" => return delegate_with_drain(&format!("{} kill-port {}", bin_unix, safe_code.trim()), &compound_key),
         "type" => {
             let mut lines = safe_code.splitn(2, '\n');
             let task_id = lines.next().unwrap_or("").trim();
             let input = lines.next().unwrap_or("").trim();
-            return delegate_with_drain(&format!("{} type {} {}", bin_unix, task_id, input), session_id);
+            return delegate_with_drain(&format!("{} type {} {}", bin_unix, task_id, input), &compound_key);
         }
         _ => {}
     }
@@ -171,8 +178,8 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
     let tmp_unix = to_unix_path(&tmp.to_string_lossy());
     let mut cmd = format!("{} exec --lang={} --file={}", bin_unix, lang, tmp_unix);
     if let Some(c) = cwd { cmd.push_str(&format!(" --cwd={}", to_unix_path(c))); }
-    if !session_id.is_empty() { cmd.push_str(&format!(" --session={}", session_id)); }
-    delegate_with_drain(&cmd, session_id)
+    if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", compound_key)); }
+    delegate_with_drain(&cmd, &compound_key)
 }
 
 fn session_log_drain(session_id: &str) -> String {
