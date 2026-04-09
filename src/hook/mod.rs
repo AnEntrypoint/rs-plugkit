@@ -35,6 +35,21 @@ pub fn plugkit_bin() -> PathBuf {
     if cfg!(windows) { dir.join("plugkit.exe") } else { dir.join("plugkit") }
 }
 
+pub fn find_playwriter() -> String {
+    for candidate in &["playwriter", "playwriter.cmd"] {
+        if std::process::Command::new(candidate)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .is_ok()
+        {
+            return candidate.to_string();
+        }
+    }
+    "playwriter".to_string()
+}
+
 pub fn project_dir() -> Option<String> {
     env::var("CLAUDE_PROJECT_DIR")
         .or_else(|_| env::var("GEMINI_PROJECT_DIR"))

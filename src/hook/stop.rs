@@ -2,7 +2,21 @@ use serde_json::json;
 use std::{env, fs, path::Path, process::Command};
 
 pub fn run_stop() {
-    super::agent_browser::close_all_sessions();
+    let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
+    let open = if !session_id.is_empty() {
+        super::agent_browser::get_open_session_ids(&session_id)
+    } else {
+        vec![]
+    };
+    if !open.is_empty() {
+        let ids = open.join(", ");
+        let out = json!({
+            "decision": "block",
+            "reason": format!("Open browser session(s): [{}]. Close them before stopping:\n  exec:browser\n  await page.close()\n\nOr use `exec:close` to clean up background tasks.\n\nHousekeeping policy: always close browser sessions and background tasks before ending a conversation.", ids)
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+        std::process::exit(2);
+    }
 
     let project_dir = env::var("CLAUDE_PROJECT_DIR")
         .unwrap_or_else(|_| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
