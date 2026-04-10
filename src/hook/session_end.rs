@@ -8,6 +8,7 @@ pub fn run() {
 
     if !session_id.is_empty() {
         super::agent_browser::close_sessions_for(session_id);
+        rs_exec::runtime::kill_session_browser(session_id);
         let bin = super::plugkit_bin();
         let _ = std::process::Command::new(&bin)
             .args(["session-cleanup", &format!("--session={}", session_id)])
