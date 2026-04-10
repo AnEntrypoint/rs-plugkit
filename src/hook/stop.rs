@@ -39,7 +39,7 @@ pub fn run_stop() {
         }
     }
 
-    println!("{}", json!({ "decision": "approve" }));
+    run_stop_git();
 }
 
 fn hash_path(s: &str) -> String {
