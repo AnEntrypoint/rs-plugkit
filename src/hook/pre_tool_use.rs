@@ -162,16 +162,30 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
             cmd.push_str(&format!(" {}", query));
             return delegate_to_bash(&cmd);
         }
-        "status" => return delegate_with_drain(&format!("{} status {}", bin_unix, safe_code.trim()), &compound_key),
-        "sleep" => return delegate_with_drain(&format!("{} sleep {}", bin_unix, safe_code.trim()), &compound_key),
-        "close" => return delegate_with_drain(&format!("{} close {}", bin_unix, safe_code.trim()), &compound_key),
+        "status" => {
+            let mut cmd = format!("{} status {}", bin_unix, safe_code.trim());
+            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", compound_key)); }
+            return delegate_with_drain(&cmd, &compound_key);
+        }
+        "sleep" => {
+            let mut cmd = format!("{} sleep {}", bin_unix, safe_code.trim());
+            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", compound_key)); }
+            return delegate_with_drain(&cmd, &compound_key);
+        }
+        "close" => {
+            let mut cmd = format!("{} close {}", bin_unix, safe_code.trim());
+            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", compound_key)); }
+            return delegate_with_drain(&cmd, &compound_key);
+        }
         "runner" => return delegate_with_drain(&format!("{} runner {}", bin_unix, safe_code.trim()), &compound_key),
         "kill-port" => return delegate_with_drain(&format!("{} kill-port {}", bin_unix, safe_code.trim()), &compound_key),
         "type" => {
-            let mut lines = safe_code.splitn(2, '\n');
-            let task_id = lines.next().unwrap_or("").trim();
-            let input = lines.next().unwrap_or("").trim();
-            return delegate_with_drain(&format!("{} type {} {}", bin_unix, task_id, input), &compound_key);
+            let mut lines_iter = safe_code.splitn(2, '\n');
+            let task_id = lines_iter.next().unwrap_or("").trim();
+            let input = lines_iter.next().unwrap_or("").trim();
+            let mut cmd = format!("{} type {} {}", bin_unix, task_id, input);
+            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", compound_key)); }
+            return delegate_with_drain(&cmd, &compound_key);
         }
         _ => {}
     }

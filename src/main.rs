@@ -39,10 +39,10 @@ enum Cmd {
         #[arg(long)] cwd: Option<String>,
         commands: Vec<String>,
     },
-    Status { task_id: String },
-    Sleep { task_id: String, seconds: Option<u64>, #[arg(long)] next_output: bool },
-    Close { task_id: String },
-    #[command(name = "type")] Type { task_id: String, input: Vec<String> },
+    Status { task_id: String, #[arg(long)] session: Option<String> },
+    Sleep { task_id: String, seconds: Option<u64>, #[arg(long)] next_output: bool, #[arg(long)] session: Option<String> },
+    Close { task_id: String, #[arg(long)] session: Option<String> },
+    #[command(name = "type")] Type { task_id: String, input: Vec<String>, #[arg(long)] session: Option<String> },
     Runner { sub: String },
     Pm2list,
     Codeinsight {
@@ -241,15 +241,19 @@ async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>
     std::process::exit(0);
 }
 
-async fn cmd_status(task_id_str: &str) -> anyhow::Result<()> {
+async fn cmd_status(task_id_str: &str, session: Option<&str>) -> anyhow::Result<()> {
     ensure_runner().await?;
     let raw_id = parse_task_id(task_id_str);
-    let task = rpc_client::rpc_call("getTask", json!({ "taskId": raw_id }), 10000).await?;
+    let mut get_params = json!({ "taskId": raw_id });
+    if let Some(sid) = session { get_params["sessionId"] = json!(sid); }
+    let task = rpc_client::rpc_call("getTask", get_params, 10000).await?;
     let task = &task["task"];
     if task.is_null() { eprintln!("Task not found"); std::process::exit(1); }
     let status = task["status"].as_str().unwrap_or("unknown");
     println!("Status: {}", status);
-    let output = rpc_client::rpc_call("getAndClearOutput", json!({ "taskId": raw_id }), 5000).await?;
+    let mut out_params = json!({ "taskId": raw_id });
+    if let Some(sid) = session { out_params["sessionId"] = json!(sid); }
+    let output = rpc_client::rpc_call("getAndClearOutput", out_params, 5000).await?;
     let mut drained_any = false;
     if let Some(arr) = output["output"].as_array() {
         for e in arr { let d = e["d"].as_str().unwrap_or(""); if e["s"] == "stdout" { print!("{}", d); } else { eprint!("{}", d); } }
@@ -275,17 +279,21 @@ async fn cmd_status(task_id_str: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_sleep(task_id_str: &str, secs: u64, next_output: bool) -> anyhow::Result<()> {
+async fn cmd_sleep(task_id_str: &str, secs: u64, next_output: bool, session: Option<&str>) -> anyhow::Result<()> {
     ensure_runner().await?;
     let raw_id = parse_task_id(task_id_str);
     let timeout = Duration::from_secs(secs);
     let start = std::time::Instant::now();
     loop {
         if start.elapsed() >= timeout { break; }
-        let task = rpc_client::rpc_call("getTask", json!({ "taskId": raw_id }), 5000).await?;
+        let mut get_params = json!({ "taskId": raw_id });
+        if let Some(sid) = session { get_params["sessionId"] = json!(sid); }
+        let task = rpc_client::rpc_call("getTask", get_params, 5000).await?;
         let task = &task["task"];
         if task.is_null() { println!("Task not found or already completed."); return Ok(()); }
-        let output = rpc_client::rpc_call("getAndClearOutput", json!({ "taskId": raw_id }), 5000).await?;
+        let mut out_params = json!({ "taskId": raw_id });
+        if let Some(sid) = session { out_params["sessionId"] = json!(sid); }
+        let output = rpc_client::rpc_call("getAndClearOutput", out_params, 5000).await?;
         if let Some(arr) = output["output"].as_array() {
             for e in arr { let d = e["d"].as_str().unwrap_or(""); if e["s"] == "stdout" { print!("{}", d); } else { eprint!("{}", d); } }
         }
@@ -299,7 +307,9 @@ async fn cmd_sleep(task_id_str: &str, secs: u64, next_output: bool) -> anyhow::R
         }
         if next_output {
             let remaining = timeout.saturating_sub(start.elapsed()).min(Duration::from_secs(900));
-            let _ = rpc_client::rpc_call("waitForOutput", json!({ "taskId": raw_id, "timeoutMs": remaining.as_millis() as u64 }), remaining.as_millis() as u64 + 5000).await;
+            let mut wait_params = json!({ "taskId": raw_id, "timeoutMs": remaining.as_millis() as u64 });
+            if let Some(sid) = session { wait_params["sessionId"] = json!(sid); }
+            let _ = rpc_client::rpc_call("waitForOutput", wait_params, remaining.as_millis() as u64 + 5000).await;
         } else {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -343,11 +353,13 @@ async fn main() {
                 let runtime = if cfg!(windows) { "powershell" } else { "bash" };
                 exit_code = run_code(&cmd, runtime, &cwd, None).await?;
             }
-            Cmd::Status { task_id } => cmd_status(&task_id).await?,
-            Cmd::Sleep { task_id, seconds, next_output } => cmd_sleep(&task_id, seconds.unwrap_or(30), next_output).await?,
-            Cmd::Close { task_id } => {
+            Cmd::Status { task_id, session } => cmd_status(&task_id, session.as_deref()).await?,
+            Cmd::Sleep { task_id, seconds, next_output, session } => cmd_sleep(&task_id, seconds.unwrap_or(30), next_output, session.as_deref()).await?,
+            Cmd::Close { task_id, session } => {
                 ensure_runner().await?;
-                let del = rpc_client::rpc_call("deleteTask", json!({ "taskId": parse_task_id(&task_id) }), 10000).await?;
+                let mut del_params = json!({ "taskId": parse_task_id(&task_id) });
+                if let Some(ref sid) = session { del_params["sessionId"] = json!(sid); }
+                let del = rpc_client::rpc_call("deleteTask", del_params, 10000).await?;
                 let proc_killed = del["processKilled"].as_bool().unwrap_or(false);
                 let browser_released = del["browserSessionReleased"].as_bool().unwrap_or(false);
                 print!("Task {} closed", task_id);
@@ -367,9 +379,11 @@ async fn main() {
                     println!("  plugkit runner stop          # no more tasks — stop runner");
                 }
             }
-            Cmd::Type { task_id, input } => {
+            Cmd::Type { task_id, input, session } => {
                 ensure_runner().await?;
-                let res = rpc_client::rpc_call("sendStdin", json!({ "taskId": parse_task_id(&task_id), "data": format!("{}\n", input.join(" ")) }), 10000).await?;
+                let mut stdin_params = json!({ "taskId": parse_task_id(&task_id), "data": format!("{}\n", input.join(" ")) });
+                if let Some(ref sid) = session { stdin_params["sessionId"] = json!(sid); }
+                let res = rpc_client::rpc_call("sendStdin", stdin_params, 10000).await?;
                 if res["ok"].as_bool().unwrap_or(false) { println!("Sent to task {}", task_id); }
                 else { eprintln!("Task {} not found or not running", task_id); }
             }
