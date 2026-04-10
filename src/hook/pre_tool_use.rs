@@ -131,10 +131,15 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
     const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","status","sleep","close","runner","type","kill-port"];
 
     let effective_cwd = cwd.map(|c| c.to_string()).or_else(|| super::project_dir()).unwrap_or_default();
-    let compound_key = if !session_id.is_empty() && !effective_cwd.is_empty() {
-        format!("{}|{}", session_id, effective_cwd)
-    } else {
+    let resolved_session = if !session_id.is_empty() {
         session_id.to_string()
+    } else {
+        std::env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| format!("pid-{}", std::process::id()))
+    };
+    let compound_key = if !resolved_session.is_empty() && !effective_cwd.is_empty() {
+        format!("{}|{}", resolved_session, effective_cwd)
+    } else {
+        resolved_session.clone()
     };
 
     if !raw_lang.is_empty() && !BUILTINS.contains(&raw_lang) {
