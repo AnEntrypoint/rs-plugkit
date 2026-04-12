@@ -105,18 +105,18 @@ jobs:
         with:
           path: bins/
 
-      - name: Checkout plugforge
+      - name: Checkout gm
         uses: actions/checkout@v4
         with:
-          repository: AnEntrypoint/plugforge
+          repository: AnEntrypoint/gm
           token: ${{ secrets.PUBLISHER_TOKEN }}
           path: plugforge
           fetch-depth: 0
 
-      - name: Copy binaries into plugforge
+      - name: Copy binaries into gm
         shell: bash
         run: |
-          for target in plugforge/gm-build-latest/gm-cc/bin plugforge/plugforge-starter/bin; do
+          for target in plugforge/gm-build-latest/gm-cc/bin plugforge/gm-starter/bin; do
             mkdir -p "$target"
             for d in bins/*/; do
               f=$(ls "$d")
@@ -139,7 +139,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
         run: |
-          git config user.name "plugforge-bot"
+          git config user.name "gm-bot"
           git config user.email "noreply@github.com"
           git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
           CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"//;s/"//')
@@ -173,7 +173,7 @@ jobs:
           if [ -n "$VERSION" ]; then
             node -e "
               const fs = require('fs');
-              const p = 'plugforge/plugforge-starter/gm.json';
+              const p = 'plugforge/gm-starter/gm.json';
               const j = JSON.parse(fs.readFileSync(p,'utf8'));
               j.plugkitVersion = '$VERSION';
               fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
@@ -187,10 +187,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
         run: |
-          git config user.name "plugforge-bot"
+          git config user.name "gm-bot"
           git config user.email "noreply@github.com"
           git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
-          git add -f gm-build-latest/gm-cc/bin/ plugforge-starter/bin/ plugforge-starter/gm.json
+          git add -f gm-build-latest/gm-cc/bin/ gm-starter/bin/ gm-starter/gm.json
           if git diff --cached --quiet; then
             echo "No binary changes"
             exit 0
