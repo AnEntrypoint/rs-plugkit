@@ -142,10 +142,18 @@ pub fn run_stop_git() {
     write_counter(&cpath, &counter);
 
     let reason = format!("{}, must push to remote", issues.join(", "));
+    let auth_hint = if counter.count >= 2 {
+        let gh_ok = git(&["config", "--get", "credential.helper"], &project_dir)
+            .map(|s| s.trim().contains("gh"))
+            .unwrap_or(false);
+        if gh_ok {
+            "\n\nIf git push keeps prompting for password, your gh token may be expired. Check with: gh auth status. Re-auth: gh auth login -h github.com"
+        } else { "" }
+    } else { "" };
     if counter.count == 1 {
-        println!("{}", serde_json::to_string_pretty(&json!({ "decision": "block", "reason": format!("Git: {}", reason) })).unwrap_or_default());
+        println!("{}", serde_json::to_string_pretty(&json!({ "decision": "block", "reason": format!("Git: {}{}", reason, auth_hint) })).unwrap_or_default());
         std::process::exit(2);
     } else {
-        println!("{}", json!({ "decision": "approve", "reason": format!("⚠️ Git warning (attempt #{}): {} - Please commit and push your changes.", counter.count, reason) }));
+        println!("{}", json!({ "decision": "approve", "reason": format!("⚠️ Git warning (attempt #{}): {}{} - Please commit and push your changes.", counter.count, reason, auth_hint) }));
     }
 }

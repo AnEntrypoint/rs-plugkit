@@ -27,8 +27,10 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
         let base = std::path::Path::new(fp).file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
         let ext = std::path::Path::new(fp).extension().and_then(|e| e.to_str()).unwrap_or("");
         let in_skills = fp.contains("/skills/") || fp.contains("\\skills\\");
-        if (ext == "md" || ext == "txt" || base.starts_with("features_list")) && !base.starts_with("claude") && !base.starts_with("readme") && !in_skills {
-            return deny("Cannot create documentation files. Only CLAUDE.md and readme.md are maintained. For task-specific notes, use .prd. For permanent reference material, add to CLAUDE.md.");
+        const DOC_ALLOWLIST: &[&str] = &["claude.md", "readme.md", "agents.md", "contributing.md", "changelog.md", "license", "license.md"];
+        let is_allowed_doc = DOC_ALLOWLIST.iter().any(|a| base == *a);
+        if (ext == "md" || ext == "txt" || base.starts_with("features_list")) && !is_allowed_doc && !in_skills {
+            return deny("Cannot create documentation files. Allowed: CLAUDE.md, readme.md, AGENTS.md, CONTRIBUTING.md, CHANGELOG.md, LICENSE. For task-specific notes use .prd. For permanent reference add to CLAUDE.md or AGENTS.md.");
         }
         if !in_skills && is_test_file(&base, fp) {
             return deny("Test files forbidden on disk. Use Bash tool with real services for all testing.");
@@ -85,7 +87,7 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
             if raw_lang == "bash" || raw_lang == "sh" {
                 if let Some(banned) = bash_banned_tool(code) {
                     return deny(&format!(
-                        "`{}` is blocked in exec:bash. Use exec:codesearch instead:\n\n  exec:codesearch\n  <natural language description of what to find>\n\nExample:\n  exec:codesearch\n  find all database query functions",
+                        "`{}` is blocked in exec:bash. Options:\n\n1. Semantic search (preferred for most queries):\n   exec:codesearch\n   <natural language description>\n\n2. Exact-match / regex (when you need it):\n   exec:nodejs\n   const {{ execSync }} = require('child_process');\n   console.log(execSync(`rg --no-heading -n 'PATTERN'`, {{ encoding: 'utf8' }}));\n\n3. File/symbol lookup: use the Grep or Glob tools directly (available to you).",
                         banned
                     ));
                 }
