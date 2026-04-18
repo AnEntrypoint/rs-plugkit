@@ -20,16 +20,12 @@ pub fn run_stop() {
 
     let project_dir = env::var("CLAUDE_PROJECT_DIR")
         .unwrap_or_else(|_| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
-    let prd = std::path::Path::new(&project_dir).join(".prd");
+    let prd = std::path::Path::new(&project_dir).join(".gm").join("prd.yml");
 
     if prd.exists() {
         let content = fs::read_to_string(&prd).unwrap_or_default();
         let trimmed = content.trim();
-        let is_empty_array = serde_json::from_str::<serde_json::Value>(trimmed)
-            .ok()
-            .and_then(|v| v.as_array().map(|a| a.is_empty()))
-            .unwrap_or(false);
-        if !trimmed.is_empty() && !is_empty_array {
+        if !trimmed.is_empty() {
             let out = json!({
                 "decision": "block",
                 "reason": format!("Work items remain in {}. Remove completed items as they finish. Delete the file when all items are done.\n\n{}", prd.display(), trimmed)
