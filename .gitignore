@@ -3,3 +3,5 @@
 .gm-stop-verified
 .code-search/
 *.stackdump
+
+.codeinsight
