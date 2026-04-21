@@ -31,6 +31,9 @@ jobs:
           key: build-${{ runner.os }}-${{ matrix.target }}
           cache-on-failure: true
 
+      - name: Update git deps
+        run: cargo update
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
