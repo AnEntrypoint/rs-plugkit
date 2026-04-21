@@ -268,6 +268,13 @@ fn delegate_with_drain(cmd: &str, session_id: &str) -> Value {
 }
 
 fn delegate_to_bash(cmd: &str) -> Value {
+    let log = std::env::temp_dir().join("plugkit-hook-debug.log");
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let entry = format!("[{}] len={} nl={} cmd={:?}\n", ts, cmd.len(), cmd.matches('\n').count(), cmd);
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(&log) {
+        let _ = f.write_all(entry.as_bytes());
+    }
     serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -276,6 +283,7 @@ fn delegate_to_bash(cmd: &str) -> Value {
         }
     })
 }
+
 
 fn find_lang_plugin(lang: &str) -> Option<std::path::PathBuf> {
     let filename = format!("{}.js", lang);
