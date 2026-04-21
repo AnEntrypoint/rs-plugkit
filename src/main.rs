@@ -173,8 +173,10 @@ fn normalize_code_input(raw: String) -> String {
     raw.trim_start_matches('\u{feff}').to_string()
 }
 
-async fn drain_output(task_id: u64) {
-    if let Ok(out) = rpc_client::rpc_call("getAndClearOutput", json!({ "taskId": task_id }), 2000).await {
+async fn drain_output(task_id: u64, session_id: &str) {
+    let mut params = json!({ "taskId": task_id });
+    if !session_id.is_empty() { params["sessionId"] = json!(session_id); }
+    if let Ok(out) = rpc_client::rpc_call("getAndClearOutput", params, 2000).await {
         if let Some(arr) = out["output"].as_array() {
             for e in arr {
                 let d = e["d"].as_str().unwrap_or("");
@@ -198,17 +200,29 @@ async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>
     let task_id = exec_result["result"]["backgroundTaskId"].as_u64()
         .ok_or_else(|| anyhow::anyhow!("execute did not return a task ID"))?;
 
+    let sid = session_id.unwrap_or("");
+    let get_task_params = || {
+        let mut p = json!({ "taskId": task_id });
+        if !sid.is_empty() { p["sessionId"] = json!(sid); }
+        p
+    };
+    let delete_task_params = || {
+        let mut p = json!({ "taskId": task_id });
+        if !sid.is_empty() { p["sessionId"] = json!(sid); }
+        p
+    };
+
     let deadline = tokio::time::Instant::now() + Duration::from_millis(HARD_CEILING_MS);
     loop {
-        drain_output(task_id).await;
-        if let Ok(t) = rpc_client::rpc_call("getTask", json!({ "taskId": task_id }), 2000).await {
+        drain_output(task_id, sid).await;
+        if let Ok(t) = rpc_client::rpc_call("getTask", get_task_params(), 2000).await {
             let status = t["task"]["status"].as_str().unwrap_or("");
             if status == "completed" || status == "failed" {
                 let result = t["task"]["result"].clone();
                 if let Some(s) = result["stdout"].as_str() { if !s.is_empty() { print!("{}", s); } }
                 if let Some(s) = result["stderr"].as_str() { if !s.is_empty() { eprint!("{}", s); } }
                 if let Some(e) = result["error"].as_str() { if !e.is_empty() { eprintln!("Error: {}", e); } }
-                let _ = rpc_client::rpc_call("deleteTask", json!({ "taskId": task_id }), 5000).await;
+                let _ = rpc_client::rpc_call("deleteTask", delete_task_params(), 5000).await;
                 let exit_code = result["exitCode"].as_i64().unwrap_or(0) as i32;
                 if result["success"].as_bool() == Some(false) { return Ok(if exit_code != 0 { exit_code } else { 1 }); }
                 return Ok(exit_code);
@@ -218,15 +232,15 @@ async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
-    drain_output(task_id).await;
-    if let Ok(t) = rpc_client::rpc_call("getTask", json!({ "taskId": task_id }), 2000).await {
+    drain_output(task_id, sid).await;
+    if let Ok(t) = rpc_client::rpc_call("getTask", get_task_params(), 2000).await {
         let status = t["task"]["status"].as_str().unwrap_or("");
         if status == "completed" || status == "failed" {
             let result = t["task"]["result"].clone();
             if let Some(s) = result["stdout"].as_str() { if !s.is_empty() { print!("{}", s); } }
             if let Some(s) = result["stderr"].as_str() { if !s.is_empty() { eprint!("{}", s); } }
             if let Some(e) = result["error"].as_str() { if !e.is_empty() { eprintln!("Error: {}", e); } }
-            let _ = rpc_client::rpc_call("deleteTask", json!({ "taskId": task_id }), 5000).await;
+            let _ = rpc_client::rpc_call("deleteTask", delete_task_params(), 5000).await;
             let exit_code = result["exitCode"].as_i64().unwrap_or(0) as i32;
             if result["success"].as_bool() == Some(false) { std::process::exit(if exit_code != 0 { exit_code } else { 1 }); }
             std::process::exit(exit_code);
