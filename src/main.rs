@@ -469,6 +469,7 @@ async fn main() {
                     "session-start" => { hook::session_start(); return Ok(()); }
                     "pre-tool-use" => { hook::pre_tool_use(); return Ok(()); }
                     "prompt-submit" => { hook::prompt_submit(); return Ok(()); }
+                    "pre-compact" => { hook::pre_compact(); return Ok(()); }
                     "session-end" => { hook::session_end(); return Ok(()); }
                     "stop" => { hook::run_stop(); return Ok(()); }
                     "stop-git" => { hook::run_stop_git(); return Ok(()); }
