@@ -229,9 +229,7 @@ fn session_log_drain(session_id: &str) -> String {
             match status {
                 "running" | "pending" => {
                     running_ids.push(id);
-                    if !text.is_empty() {
-                        out.push_str(&format!("\n[task_{} — live output]\n{}\n", id, text));
-                    }
+                    let _ = text;
                 }
                 _ => {
                     if !text.is_empty() {
