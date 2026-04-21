@@ -129,6 +129,10 @@ fn bash_banned_tool(code: &str) -> Option<&'static str> {
     None
 }
 
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) -> Value {
     const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","status","sleep","close","runner","type","kill-port"];
 
@@ -159,24 +163,24 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
     match lang.as_str() {
         "codesearch" | "search" => {
             let mut cmd = format!("{} search", bin_unix);
-            if let Some(c) = cwd { cmd.push_str(&format!(" --path {}", to_unix_path(c))); }
+            if let Some(c) = cwd { cmd.push_str(&format!(" --path {}", shell_quote(&to_unix_path(c)))); }
             let query = safe_code.trim().replace('\n', " ");
-            cmd.push_str(&format!(" {}", query));
+            cmd.push_str(&format!(" {}", shell_quote(&query)));
             return delegate_to_bash(&cmd);
         }
         "status" => {
             let mut cmd = format!("{} status {}", bin_unix, safe_code.trim());
-            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", compound_key)); }
+            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
             return delegate_with_drain(&cmd, &compound_key);
         }
         "sleep" => {
             let mut cmd = format!("{} sleep {}", bin_unix, safe_code.trim());
-            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", compound_key)); }
+            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
             return delegate_with_drain(&cmd, &compound_key);
         }
         "close" => {
             let mut cmd = format!("{} close {}", bin_unix, safe_code.trim());
-            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", compound_key)); }
+            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
             return delegate_with_drain(&cmd, &compound_key);
         }
         "runner" => return delegate_with_drain(&format!("{} runner {}", bin_unix, safe_code.trim()), &compound_key),
@@ -185,8 +189,8 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
             let mut lines_iter = safe_code.splitn(2, '\n');
             let task_id = lines_iter.next().unwrap_or("").trim();
             let input = lines_iter.next().unwrap_or("").trim();
-            let mut cmd = format!("{} type {} {}", bin_unix, task_id, input);
-            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", compound_key)); }
+            let mut cmd = format!("{} type {} {}", bin_unix, shell_quote(task_id), shell_quote(input));
+            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
             return delegate_with_drain(&cmd, &compound_key);
         }
         _ => {}
@@ -198,8 +202,8 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
     let _ = std::fs::write(&tmp, &safe_code);
     let tmp_unix = to_unix_path(&tmp.to_string_lossy());
     let mut cmd = format!("{} exec --lang={} --file={}", bin_unix, lang, tmp_unix);
-    if let Some(c) = cwd { cmd.push_str(&format!(" --cwd={}", to_unix_path(c))); }
-    if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", compound_key)); }
+    if let Some(c) = cwd { cmd.push_str(&format!(" --cwd={}", shell_quote(&to_unix_path(c)))); }
+    if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
     delegate_with_drain(&cmd, &compound_key)
 }
 
