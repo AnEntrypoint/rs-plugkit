@@ -10,7 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 rs-exec = { git = "https://github.com/AnEntrypoint/rs-exec", branch = "main" }
 rs-codeinsight = { git = "https://github.com/AnEntrypoint/rs-codeinsight", branch = "main" }
-rs-search = { git = "https://github.com/AnEntrypoint/rs-search", branch = "main" }
+rs-search = { git = "https://github.com/AnEntrypoint/rs-search", branch = "main", default-features = false, features = ["vector", "perf"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 serde_json = "1"
