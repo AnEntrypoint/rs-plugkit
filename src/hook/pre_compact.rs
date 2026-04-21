@@ -11,10 +11,7 @@ pub fn run() {
     let additional_context = format!("{}{}", caveman, tag);
 
     let output = json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreCompact",
-            "additionalContext": additional_context
-        }
+        "systemMessage": additional_context
     });
 
     println!("{}", serde_json::to_string(&output).unwrap_or_default());
