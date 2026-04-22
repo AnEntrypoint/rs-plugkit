@@ -129,7 +129,15 @@ pub fn run_stop_git() {
             counter.count = 0;
             write_counter(&cpath, &counter);
         }
-        println!("{}", json!({ "decision": "approve" }));
+        let ci = watch_gh_runs_for_head(&project_dir);
+        match ci {
+            CiOutcome::None => println!("{}", json!({ "decision": "approve" })),
+            CiOutcome::AllGreen(report) => println!("{}", json!({ "decision": "approve", "reason": format!("CI: {}", report) })),
+            CiOutcome::Failures(report) => {
+                println!("{}", serde_json::to_string_pretty(&json!({ "decision": "block", "reason": format!("CI failure(s) on this push:\n{}\n\nInvestigate, fix, push again. Use `gh run view <id> --log-failed` for details.", report) })).unwrap_or_default());
+                std::process::exit(2);
+            }
+        }
         return;
     }
 
@@ -152,4 +160,55 @@ pub fn run_stop_git() {
     } else {
         println!("{}", json!({ "decision": "approve", "reason": format!("⚠️ Git warning (attempt #{}): {}{} - Please commit and push your changes.", counter.count, reason, auth_hint) }));
     }
+}
+
+enum CiOutcome { None, AllGreen(String), Failures(String) }
+
+#[derive(serde::Deserialize)]
+struct GhRun {
+    #[serde(rename = "databaseId")]
+    database_id: u64,
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    #[serde(rename = "headSha")]
+    head_sha: String,
+}
+
+fn watch_gh_runs_for_head(project_dir: &str) -> CiOutcome {
+    if which::which("gh").is_err() { return CiOutcome::None; }
+    let head = match git(&["rev-parse", "HEAD"], project_dir) { Some(h) => h, None => return CiOutcome::None };
+    let deadline_secs: u64 = env::var("GM_CI_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(180);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(deadline_secs);
+    let initial = match list_runs_for_head(project_dir, &head) { Some(v) => v, None => return CiOutcome::None };
+    let pending: Vec<GhRun> = initial.into_iter().filter(|r| r.conclusion.as_deref().unwrap_or("").is_empty()).collect();
+    if pending.is_empty() { return CiOutcome::None; }
+    let pending_ids: Vec<u64> = pending.iter().map(|r| r.database_id).collect();
+    eprintln!("[ci-watch] {} run(s) in flight on {}; watching up to {}s.", pending_ids.len(), &head[..7.min(head.len())], deadline_secs);
+    let mut last_runs: Vec<GhRun> = pending;
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_secs(8));
+        let now = match list_runs_for_head(project_dir, &head) { Some(v) => v, None => continue };
+        last_runs = now.into_iter().filter(|r| pending_ids.contains(&r.database_id)).collect();
+        if last_runs.iter().all(|r| !r.conclusion.as_deref().unwrap_or("").is_empty()) { break; }
+    }
+    let lines: Vec<String> = last_runs.iter().map(|r| {
+        let c = r.conclusion.as_deref().unwrap_or("");
+        let state = if c.is_empty() { format!("still {}", r.status) } else { c.to_string() };
+        format!("  {} [{}] (id {})", r.name, state, r.database_id)
+    }).collect();
+    let report = lines.join("\n");
+    let any_failed = last_runs.iter().any(|r| matches!(r.conclusion.as_deref(), Some("failure" | "cancelled" | "timed_out" | "action_required")));
+    let any_unfinished = last_runs.iter().any(|r| r.conclusion.as_deref().unwrap_or("").is_empty());
+    if any_failed { CiOutcome::Failures(report) }
+    else if any_unfinished { CiOutcome::AllGreen(format!("watch deadline reached, still in progress:\n{}", report)) }
+    else { CiOutcome::AllGreen(format!("all green on this push:\n{}", report)) }
+}
+
+fn list_runs_for_head(project_dir: &str, head: &str) -> Option<Vec<GhRun>> {
+    let out = Command::new("gh").args(["run", "list", "--limit", "20", "--json", "databaseId,name,status,conclusion,headSha"])
+        .current_dir(project_dir).output().ok()?;
+    if !out.status.success() { return None; }
+    let runs: Vec<GhRun> = serde_json::from_slice(&out.stdout).ok()?;
+    Some(runs.into_iter().filter(|r| r.head_sha == head).collect())
 }
