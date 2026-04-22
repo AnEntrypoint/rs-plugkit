@@ -335,11 +335,11 @@ async fn cmd_sleep(task_id_str: &str, secs: u64, next_output: bool, session: Opt
 
 #[tokio::main]
 async fn main() {
-    rs_exec::install_broken_pipe_handler();
     if env::args().any(|a| a == "--exec-process-mode") {
         rs_exec::run_exec_process();
         return;
     }
+    rs_exec::install_broken_pipe_handler();
 
     if env::args().any(|a| a == "--runner-mode") {
         rs_exec::runner::run_server().await.expect("Runner failed");
