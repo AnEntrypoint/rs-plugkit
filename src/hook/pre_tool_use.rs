@@ -171,17 +171,17 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
         "status" => {
             let mut cmd = format!("{} status {}", bin_unix, safe_code.trim());
             if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
-            return delegate_with_drain(&cmd, &compound_key);
+            return delegate_to_bash(&cmd);
         }
         "sleep" => {
             let mut cmd = format!("{} sleep {}", bin_unix, safe_code.trim());
             if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
-            return delegate_with_drain(&cmd, &compound_key);
+            return delegate_to_bash(&cmd);
         }
         "close" => {
             let mut cmd = format!("{} close {}", bin_unix, safe_code.trim());
             if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
-            return delegate_with_drain(&cmd, &compound_key);
+            return delegate_to_bash(&cmd);
         }
         "runner" => return delegate_with_drain(&format!("{} runner {}", bin_unix, safe_code.trim()), &compound_key),
         "kill-port" => return delegate_with_drain(&format!("{} kill-port {}", bin_unix, safe_code.trim()), &compound_key),
