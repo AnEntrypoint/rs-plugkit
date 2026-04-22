@@ -18,7 +18,7 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
 
     const FORBIDDEN: &[&str] = &["find", "Find", "Glob", "Grep"];
     if FORBIDDEN.contains(&tool_name) {
-        return deny("Glob/Grep/Find are blocked. Use exec:codesearch with the mandatory two-word start protocol:\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Iterate until found (min 4 attempts). See code-search skill for full protocol.");
+        return deny("Glob/Grep/Find are blocked. exec:codesearch is the ONLY codebase-exploration tool — it handles exact strings, symbols, regex patterns, file-name fragments, and PDF pages. Do not reach for Grep/Glob/Find for any lookup.\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Minimum 4 attempts before concluding absent. See code-search skill.\n\nFor a KNOWN absolute file path, use the Read tool. For directory listing at a known path, use exec:nodejs + fs.readdirSync.");
     }
 
     const WRITE_TOOLS: &[&str] = &["Write", "write_file"];
@@ -87,7 +87,7 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
             if raw_lang == "bash" || raw_lang == "sh" {
                 if let Some(banned) = bash_banned_tool(code) {
                     return deny(&format!(
-                        "`{}` is blocked in exec:bash. Options:\n\n1. Semantic search (preferred for most queries):\n   exec:codesearch\n   <natural language description>\n\n2. Exact-match / regex (when you need it):\n   exec:nodejs\n   const {{ execSync }} = require('child_process');\n   console.log(execSync(`rg --no-heading -n 'PATTERN'`, {{ encoding: 'utf8' }}));\n\n3. File/symbol lookup: use the Grep or Glob tools directly (available to you).",
+                        "`{}` is blocked. Use exec:codesearch for ALL codebase lookups — it handles exact strings, symbols, regex patterns, file-name fragments, and PDF pages.\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Minimum 4 attempts before concluding absent. See code-search skill for full protocol.\n\nGrep, Glob, Find, and rg/grep/find-in-bash are ALL blocked. There is no exception path — codesearch is the replacement for every exact-match / regex / file-name-pattern need. For a known absolute path, use the Read tool.",
                         banned
                     ));
                 }
