@@ -75,6 +75,21 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
     }
 
     if let Some(rest) = command.strip_prefix("exec") {
+        if rest.find('\n').is_none() && rest.starts_with(':') {
+            // Single-line exec:<verb> <args> — user forgot to put args on next line.
+            // Rewrite to two-line form so the hook path below handles it correctly.
+            let inline = &rest[1..];
+            let (verb, args) = match inline.find(|c: char| c.is_whitespace()) {
+                Some(i) => (&inline[..i], inline[i..].trim()),
+                None => (inline, ""),
+            };
+            let verb = verb.trim().to_lowercase();
+            const UTILITIES: &[&str] = &["status","sleep","close","runner","type","kill-port","codesearch","search"];
+            if UTILITIES.contains(&verb.as_str()) {
+                return handle_exec(&verb, args, cwd, session_id);
+            }
+            return deny(&format!("exec:{} requires args on the next line, not same-line. Use:\n\n  exec:{}\n  {}\n\nAll utility verbs (status, sleep, close, runner, type, kill-port, codesearch) take their argument on line 2.", verb, verb, args));
+        }
         if let Some(nl) = rest.find('\n') {
             let lang_part = &rest[..nl];
             let code = &rest[nl + 1..];

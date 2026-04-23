@@ -69,11 +69,16 @@ fn runner_exe_stamp() -> PathBuf {
 }
 
 fn current_exe_stamp() -> String {
+    // Identity by content (size + mtime), NOT by path. Multiple plugin-cache versions
+    // of the same build (e.g. concurrent worktrees, different session cwds) produce
+    // byte-identical plugkit.exe files at different paths; including the path here
+    // made every cross-path invocation flag "binary changed" and restart the shared
+    // runner, wiping every other session's live background tasks.
     let exe = self_exe();
     let meta = fs::metadata(&exe).ok();
     let mtime = meta.as_ref().and_then(|m| m.modified().ok()).map(|t| format!("{:?}", t)).unwrap_or_default();
     let size = meta.map(|m| m.len()).unwrap_or(0);
-    format!("{}|{}|{}", exe, size, mtime)
+    format!("{}|{}", size, mtime)
 }
 
 fn runner_needs_restart() -> bool {
