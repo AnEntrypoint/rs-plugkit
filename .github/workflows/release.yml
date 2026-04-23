@@ -191,28 +191,42 @@ jobs:
           git config user.email "noreply@github.com"
           git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
 
-          git fetch origin main
-
-          LAST_MSG=$(git log -1 --format=%s origin/main 2>/dev/null || echo "")
-          case "$LAST_MSG" in
-            "chore: update plugkit binaries"*)
-              BASE="origin/main~1"
-              echo "Prior binary commit at origin/main tip — will squash over it"
-              ;;
-            *)
-              BASE="origin/main"
-              echo "No prior binary commit at tip — will commit on top"
-              ;;
-          esac
-
-          git reset --mixed "$BASE"
-          git add -f gm-build-latest/gm-cc/bin/ gm-starter/bin/ gm-starter/gm.json
-
-          if git diff --cached --quiet; then
-            echo "No binary changes"
-            exit 0
-          fi
-
           TAG="${{ github.ref_name }}"
-          git commit -m "chore: update plugkit binaries to $TAG"
-          git push --force-with-lease origin HEAD:main
+
+          attempt_push() {
+            git fetch origin main
+
+            LAST_MSG=$(git log -1 --format=%s origin/main 2>/dev/null || echo "")
+            case "$LAST_MSG" in
+              "chore: update plugkit binaries"*)
+                BASE="origin/main~1"
+                echo "Prior binary commit at origin/main tip — will squash over it"
+                ;;
+              *)
+                BASE="origin/main"
+                echo "No prior binary commit at tip — will commit on top"
+                ;;
+            esac
+
+            git reset --mixed "$BASE"
+            git add -f gm-build-latest/gm-cc/bin/ gm-starter/bin/ gm-starter/gm.json
+
+            if git diff --cached --quiet; then
+              echo "No binary changes"
+              return 0
+            fi
+
+            git commit -m "chore: update plugkit binaries to $TAG"
+            git push --force-with-lease origin HEAD:main
+          }
+
+          for i in 1 2 3 4 5; do
+            if attempt_push; then
+              echo "Push succeeded on attempt $i"
+              exit 0
+            fi
+            echo "Push attempt $i failed (likely concurrent commit on origin/main); re-fetching and retrying in $((i*2))s"
+            sleep $((i*2))
+          done
+          echo "All push attempts exhausted" >&2
+          exit 1
