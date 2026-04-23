@@ -117,7 +117,12 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
         return deny(&format!("Do not call {} directly. Use exec:<lang> syntax instead.\n\nexec:nodejs\nconsole.log(\"hello\")\n\nexec:codesearch\nfind all database queries", pkg));
     }
 
-    if !command.starts_with("exec") && !command.starts_with("browser:") && !command.starts_with("git ") && !command.contains("claude") {
+    if !command.starts_with("exec")
+        && !command.starts_with("browser:")
+        && !command.starts_with("git ")
+        && !command.starts_with("gh ")
+        && !command.contains("claude")
+    {
         return deny(BASH_DENY_MSG);
     }
 
@@ -125,12 +130,9 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
 }
 
 fn bash_banned_tool(code: &str) -> Option<&'static str> {
-    const BANNED: &[&str] = &["grep ", "grep\t", " grep\n", "\ngrep\n", "rg ", "rg\t", " find ", "\nfind ", "find\t", "glob "];
-    for pat in BANNED {
-        if code.contains(pat) { return Some(pat.trim()); }
-    }
     for line in code.lines() {
         let t = line.trim();
+        if t.is_empty() { continue; }
         if t == "grep" { return Some("grep"); }
         if t == "rg" { return Some("rg"); }
         if t == "find" { return Some("find"); }
@@ -142,6 +144,37 @@ fn bash_banned_tool(code: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod bash_banned_tests {
+    use super::bash_banned_tool;
+
+    #[test]
+    fn blocks_start_of_line_grep() {
+        assert_eq!(bash_banned_tool("grep foo file.txt"), Some("grep"));
+        assert_eq!(bash_banned_tool("  rg pattern"), Some("rg"));
+        assert_eq!(bash_banned_tool("find . -name '*.rs'"), Some("find"));
+    }
+
+    #[test]
+    fn allows_grep_in_pipe() {
+        assert_eq!(bash_banned_tool("echo x | grep y"), None);
+        assert_eq!(bash_banned_tool("cat f | rg pattern"), None);
+        assert_eq!(bash_banned_tool("ls | grep foo | sort"), None);
+    }
+
+    #[test]
+    fn allows_grep_as_substring() {
+        assert_eq!(bash_banned_tool("mygrep tool"), None);
+        assert_eq!(bash_banned_tool("echo grepping"), None);
+    }
+
+    #[test]
+    fn allows_empty_and_whitespace() {
+        assert_eq!(bash_banned_tool(""), None);
+        assert_eq!(bash_banned_tool("\n\n"), None);
+    }
 }
 
 fn shell_quote(s: &str) -> String {
