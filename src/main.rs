@@ -62,6 +62,85 @@ enum Cmd {
         event: String,
     },
     #[command(name = "kill-port")] KillPort { port: u16 },
+    Deps,
+    Doctor,
+}
+
+const RS_EXEC_SHA: &str = env!("DEP_RS_EXEC_SHA");
+const RS_SEARCH_SHA: &str = env!("DEP_RS_SEARCH_SHA");
+const RS_CODEINSIGHT_SHA: &str = env!("DEP_RS_CODEINSIGHT_SHA");
+
+fn cmd_deps() -> anyhow::Result<()> {
+    println!("plugkit {}", env!("CARGO_PKG_VERSION"));
+    println!("rs-exec         {}", RS_EXEC_SHA);
+    println!("rs-search       {}", RS_SEARCH_SHA);
+    println!("rs-codeinsight  {}", RS_CODEINSIGHT_SHA);
+    Ok(())
+}
+
+fn cmd_doctor() -> anyhow::Result<()> {
+    use std::process::Command;
+    let mut fail = 0u32;
+    println!("=== plugkit doctor ===");
+    println!("plugkit {}", env!("CARGO_PKG_VERSION"));
+    println!("deps: rs-exec={} rs-search={} rs-codeinsight={}", RS_EXEC_SHA, RS_SEARCH_SHA, RS_CODEINSIGHT_SHA);
+
+    let port_path = port_file();
+    if port_path.exists() {
+        match fs::read_to_string(&port_path) {
+            Ok(s) => println!("runner port_file: {} (port {})", port_path.display(), s.trim()),
+            Err(e) => { println!("runner port_file: read error: {}", e); fail += 1; }
+        }
+    } else {
+        println!("runner port_file: absent (runner not started this boot)");
+    }
+
+    let crash_path = env::temp_dir().join("rs-exec-daemon-crash.log");
+    if crash_path.exists() {
+        println!("daemon crash log: {} (EXISTS — inspect)", crash_path.display());
+        fail += 1;
+    } else {
+        println!("daemon crash log: absent");
+    }
+
+    let chrome_name = if cfg!(windows) { "chrome.exe" } else { "chrome" };
+    let chrome_count = if cfg!(windows) {
+        Command::new("tasklist").args(["/FI", &format!("IMAGENAME eq {}", chrome_name)]).output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.contains(chrome_name)).count())
+            .unwrap_or(0)
+    } else {
+        Command::new("pgrep").args(["-fc", chrome_name]).output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<usize>().unwrap_or(0))
+            .unwrap_or(0)
+    };
+    println!("chrome processes visible: {}", chrome_count);
+
+    if let Ok(cwd) = env::current_dir() {
+        let d = cwd.join(".code-search");
+        if d.exists() {
+            let size_bytes: u64 = walk_size(&d).unwrap_or(0);
+            println!(".code-search: {} ({} KB)", d.display(), size_bytes / 1024);
+        } else {
+            println!(".code-search: not present in cwd");
+        }
+    }
+
+    if fail > 0 {
+        eprintln!("doctor: {} check(s) failed", fail);
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn walk_size(p: &std::path::Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(p)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        if meta.is_file() { total += meta.len(); }
+        else if meta.is_dir() { total += walk_size(&entry.path()).unwrap_or(0); }
+    }
+    Ok(total)
 }
 
 fn runner_exe_stamp() -> PathBuf {
@@ -504,6 +583,8 @@ async fn main() {
                     exit_code = 1;
                 }
             }
+            Cmd::Deps => { cmd_deps()?; }
+            Cmd::Doctor => { cmd_doctor()?; }
             Cmd::Search { path, query } => {
                 if query.is_empty() {
                     search_mcp::run_mcp_server();
