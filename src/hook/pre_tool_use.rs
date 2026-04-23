@@ -126,6 +126,17 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
         return deny(BASH_DENY_MSG);
     }
 
+    if cfg!(windows) && (command.contains(" && ") || command.contains(" || ") || command.contains(" ; ")) {
+        let escaped = command.replace('\'', "'\\''");
+        return serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "updatedInput": { "command": format!("bash -lc '{}'", escaped) }
+            }
+        });
+    }
+
     allow(None)
 }
 

@@ -1,0 +1,62 @@
+name: Cascade Smoke
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch: {}
+
+permissions:
+  issues: write
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe PUBLISHER_TOKEN across upstream repos
+        env:
+          PUBLISHER_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          if [ -z "$PUBLISHER_TOKEN" ]; then
+            echo "::error::PUBLISHER_TOKEN secret is not set in rs-plugkit"
+            failures="PUBLISHER_TOKEN missing in rs-plugkit"
+          else
+            failures=""
+          fi
+
+          for repo in AnEntrypoint/rs-exec AnEntrypoint/rs-codeinsight AnEntrypoint/rs-search; do
+            echo "Checking token reach for $repo..."
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: token ${PUBLISHER_TOKEN:-invalid}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$repo")
+            if [ "$code" != "200" ]; then
+              echo "::warning::$repo API returned $code with PUBLISHER_TOKEN"
+              failures="$failures\n$repo: HTTP $code"
+            else
+              echo "  OK ($code)"
+            fi
+          done
+
+          if [ -n "$failures" ]; then
+            echo "FAIL"
+            printf 'failures<<EOF\n%b\nEOF\n' "$failures" >> "$GITHUB_ENV"
+            echo "has_failures=true" >> "$GITHUB_ENV"
+          else
+            echo "has_failures=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Open issue on failure
+        if: env.has_failures == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="cascade-smoke: PUBLISHER_TOKEN auth degraded"
+          body="PUBLISHER_TOKEN could not reach one or more upstream repositories.\n\nFailures:\n${{ env.failures }}\n\nFix: \`gh secret set PUBLISHER_TOKEN --repo AnEntrypoint/rs-plugkit\` with a PAT that has \`repo\` and \`workflow\` scopes for each upstream."
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --search "$title in:title state:open" --json number --jq '.[0].number' || true)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --label "ci"
+          fi
