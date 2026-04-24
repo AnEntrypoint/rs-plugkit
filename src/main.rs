@@ -611,3 +611,70 @@ async fn main() {
     if let Err(e) = result { eprintln!("Error: {}", e); exit_code = 1; }
     std::process::exit(exit_code);
 }
+
+#[cfg(test)]
+mod exec_lang_flag_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn exec_parses_lang_flag_then_positional_code() {
+        let cli = Cli::try_parse_from(["plugkit", "exec", "--lang", "nodejs", "console.log(1)"]).unwrap();
+        match cli.command {
+            Cmd::Exec { lang, code, .. } => {
+                assert_eq!(lang.as_deref(), Some("nodejs"));
+                assert_eq!(code, vec!["console.log(1)".to_string()]);
+            }
+            _ => panic!("expected Cmd::Exec"),
+        }
+    }
+
+    #[test]
+    fn exec_parses_multi_word_code() {
+        let cli = Cli::try_parse_from(["plugkit", "exec", "--lang", "python", "print(1)", "print(2)"]).unwrap();
+        match cli.command {
+            Cmd::Exec { lang, code, .. } => {
+                assert_eq!(lang.as_deref(), Some("python"));
+                assert_eq!(code, vec!["print(1)".to_string(), "print(2)".to_string()]);
+            }
+            _ => panic!("expected Cmd::Exec"),
+        }
+    }
+
+    #[test]
+    fn exec_requires_lang_as_flag_not_positional() {
+        let cli = Cli::try_parse_from(["plugkit", "exec", "nodejs", "console.log(1)"]).unwrap();
+        match cli.command {
+            Cmd::Exec { lang, code, .. } => {
+                assert_eq!(lang, None, "first positional should NOT be treated as lang");
+                assert_eq!(code, vec!["nodejs".to_string(), "console.log(1)".to_string()]);
+            }
+            _ => panic!("expected Cmd::Exec"),
+        }
+    }
+
+    #[test]
+    fn exec_with_file_flag() {
+        let cli = Cli::try_parse_from(["plugkit", "exec", "--lang", "bash", "--file", "/tmp/x.sh"]).unwrap();
+        match cli.command {
+            Cmd::Exec { lang, file, code, .. } => {
+                assert_eq!(lang.as_deref(), Some("bash"));
+                assert_eq!(file.as_deref(), Some("/tmp/x.sh"));
+                assert!(code.is_empty());
+            }
+            _ => panic!("expected Cmd::Exec"),
+        }
+    }
+
+    #[test]
+    fn exec_with_session_flag() {
+        let cli = Cli::try_parse_from(["plugkit", "exec", "--lang", "nodejs", "--session=sid-1", "code"]).unwrap();
+        match cli.command {
+            Cmd::Exec { lang, session, .. } => {
+                assert_eq!(lang.as_deref(), Some("nodejs"));
+                assert_eq!(session.as_deref(), Some("sid-1"));
+            }
+            _ => panic!("expected Cmd::Exec"),
+        }
+    }
+}
