@@ -10,4 +10,5 @@ Also added NEXT ACTION hint to all block reason strings.
 
 ## Unreleased
 
+- fix: session-end hook preserves browser + background tasks across session handoff. Previously closed on every SessionEnd regardless of reason — including `/compact`, `resume`, and background-agent handoffs — which killed the Chrome process tree that tests and agents were driving. Now only fires cleanup when `reason` is one of `clear | logout | prompt_input_exit`.
 - fix: stop hook checks `.gm/prd.yml` (YAML) instead of legacy `.prd` (JSON)
