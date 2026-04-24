@@ -1,6 +1,17 @@
 use serde_json::json;
+use std::{env, fs, path::Path};
+
+fn write_needs_gm() {
+    let project_dir = env::var("CLAUDE_PROJECT_DIR")
+        .unwrap_or_else(|_| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
+    if project_dir.is_empty() { return; }
+    let gm_dir = Path::new(&project_dir).join(".gm");
+    let _ = fs::create_dir_all(&gm_dir);
+    let _ = fs::write(gm_dir.join("needs-gm"), "1");
+}
 
 pub fn run() {
+    write_needs_gm();
     let caveman = "=== RESPONSE POLICY — ALWAYS ACTIVE (post-compact reinforcement) ===\n\nTerse like smart caveman. Technical substance stays. Fluff dies. Default: full. Switch: /caveman lite|full|ultra.\n\nDrop: articles, filler, pleasantries, hedging. Fragments OK. Short synonyms. Technical terms exact. Code unchanged. Pattern: [thing] [action] [reason]. [next step].\n\nLevels: lite = no filler, full sentences | full = drop articles, fragments OK | ultra = abbreviate all, arrows for causality | wenyan-full = 文言文, 80-90% compression | wenyan-ultra = max classical terse.\n\nAuto-Clarity: drop caveman for security warnings, irreversible confirmations, ambiguous sequences. Resume after. Code/commits/PRs write normal. \"stop caveman\" / \"normal mode\": revert.\n\n=== COMPACT OUTPUT CAVEMAN ===\n\nApply the same caveman policy to the compacted summary itself. Strip articles/filler from the summary. Keep technical identifiers, paths, line numbers, error messages, decisions verbatim. Fragments over sentences.\n\n=== MEMORIZE SELF-CHECK (mandatory before closing this response) ===\n\nScan the conversation above for every exec: output, code read, CI result, or user preference that resolved an unknown but was NOT followed by an Agent(subagent_type='memorize') call. For each one found:\n\n  Agent(subagent_type='memorize', model='haiku', run_in_background=true, prompt='## CONTEXT TO MEMORIZE\\n<fact>')\n\nSpawn ALL missed memorize calls NOW, in parallel, before this response closes. One call per fact. Missing one = memory leak = bug.\n\n=== COMPACT TAG ===\n";
 
     let nums: Vec<String> = (0..20)
