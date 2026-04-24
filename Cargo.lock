@@ -965,7 +965,7 @@ dependencies = [
 [[package]]
 name = "rs-search"
 version = "0.1.0"
-source = "git+https://github.com/AnEntrypoint/rs-search?branch=main#d446a50056e522cb07f0ba296c939f6b16b97240"
+source = "git+https://github.com/AnEntrypoint/rs-search?branch=main#d05d7bc0adacac7fc7492fce5bc5e2c41654d1ef"
 dependencies = [
  "arc-swap",
  "blake3",
@@ -974,7 +974,6 @@ dependencies = [
  "mimalloc",
  "regex",
  "serde_json",
- "simsimd",
 ]
 
 [[package]]
@@ -1103,15 +1102,6 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
-]
-
-[[package]]
-name = "simsimd"
-version = "6.5.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4fb3bc3cdce07a7d7d4caa4c54f8aa967f6be41690482b54b24100a2253fa70"
-dependencies = [
- "cc",
 ]
 
 [[package]]
