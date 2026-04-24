@@ -929,7 +929,7 @@ dependencies = [
 [[package]]
 name = "rs-exec"
 version = "0.1.3"
-source = "git+https://github.com/AnEntrypoint/rs-exec?branch=main#d9d47ca61f1df4fdd809ceb394c1c54ff3ef7652"
+source = "git+https://github.com/AnEntrypoint/rs-exec?branch=main#f6a74a296eb7f7e4d6fa4cdcf4ceb85bc1836291"
 dependencies = [
  "anyhow",
  "axum",
