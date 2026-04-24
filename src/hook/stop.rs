@@ -1,6 +1,12 @@
 use serde_json::json;
 use std::{env, fs, path::Path, process::Command};
 
+fn write_needs_gm(project_dir: &str) {
+    let gm_dir = Path::new(project_dir).join(".gm");
+    let _ = fs::create_dir_all(&gm_dir);
+    let _ = fs::write(gm_dir.join("needs-gm"), "1");
+}
+
 pub fn run_stop() {
     let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
     let open = if !session_id.is_empty() {
@@ -8,27 +14,30 @@ pub fn run_stop() {
     } else {
         vec![]
     };
+    let project_dir = env::var("CLAUDE_PROJECT_DIR")
+        .unwrap_or_else(|_| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
+
     if !open.is_empty() {
         let ids = open.join(", ");
+        write_needs_gm(&project_dir);
         let out = json!({
             "decision": "block",
-            "reason": format!("Open browser session(s): [{}]. Close them before stopping:\n  exec:browser\n  await page.close()\n\nOr use `exec:close` to clean up background tasks.\n\nHousekeeping policy: always close browser sessions and background tasks before ending a conversation.", ids)
+            "reason": format!("Open browser session(s): [{}]. Close them before stopping:\n  exec:browser\n  await page.close()\n\nOr use `exec:close` to clean up background tasks.\n\nHousekeeping policy: always close browser sessions and background tasks before ending a conversation.\n\nNEXT ACTION: invoke Skill(gm) first.", ids)
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
         std::process::exit(2);
     }
 
-    let project_dir = env::var("CLAUDE_PROJECT_DIR")
-        .unwrap_or_else(|_| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
     let prd = std::path::Path::new(&project_dir).join(".gm").join("prd.yml");
 
     if prd.exists() {
         let content = fs::read_to_string(&prd).unwrap_or_default();
         let trimmed = content.trim();
         if !trimmed.is_empty() {
+            write_needs_gm(&project_dir);
             let out = json!({
                 "decision": "block",
-                "reason": format!("Work items remain in {}. Remove completed items as they finish. Delete the file when all items are done.\n\n{}", prd.display(), trimmed)
+                "reason": format!("Work items remain in {}. Remove completed items as they finish. Delete the file when all items are done.\n\n{}\n\nNEXT ACTION: invoke Skill(gm) first.", prd.display(), trimmed)
             });
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             std::process::exit(2);
@@ -134,7 +143,8 @@ pub fn run_stop_git() {
             CiOutcome::None => println!("{}", json!({ "decision": "approve" })),
             CiOutcome::AllGreen(report) => println!("{}", json!({ "decision": "approve", "reason": format!("CI: {}", report) })),
             CiOutcome::Failures(report) => {
-                println!("{}", serde_json::to_string_pretty(&json!({ "decision": "block", "reason": format!("CI failure(s) on this push:\n{}\n\nInvestigate, fix, push again. Use `gh run view <id> --log-failed` for details.", report) })).unwrap_or_default());
+                write_needs_gm(&project_dir);
+                println!("{}", serde_json::to_string_pretty(&json!({ "decision": "block", "reason": format!("CI failure(s) on this push:\n{}\n\nInvestigate, fix, push again. Use `gh run view <id> --log-failed` for details.\n\nNEXT ACTION: invoke Skill(gm) first.", report) })).unwrap_or_default());
                 std::process::exit(2);
             }
         }
@@ -155,7 +165,8 @@ pub fn run_stop_git() {
         } else { "" }
     } else { "" };
     if counter.count == 1 {
-        println!("{}", serde_json::to_string_pretty(&json!({ "decision": "block", "reason": format!("Git: {}{}", reason, auth_hint) })).unwrap_or_default());
+        write_needs_gm(&project_dir);
+        println!("{}", serde_json::to_string_pretty(&json!({ "decision": "block", "reason": format!("Git: {}{}\n\nNEXT ACTION: invoke Skill(gm) first.", reason, auth_hint) })).unwrap_or_default());
         std::process::exit(2);
     } else {
         println!("{}", json!({ "decision": "approve", "reason": format!("⚠️ Git warning (attempt #{}): {}{} - Please commit and push your changes.", counter.count, reason, auth_hint) }));
