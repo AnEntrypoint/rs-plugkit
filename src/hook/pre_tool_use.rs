@@ -84,11 +84,11 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
                 None => (inline, ""),
             };
             let verb = verb.trim().to_lowercase();
-            const UTILITIES: &[&str] = &["runner","type","kill-port","codesearch","search","recall","feedback","learn-status","learn:status","learn-debug","learn:debug","learn-build","learn:build"];
+            const UTILITIES: &[&str] = &["runner","type","kill-port","codesearch","search","recall","feedback","learn-status","learn:status","learn-debug","learn:debug","learn-build","learn:build","wait","pause","sleep","status","close","memorize","forget"];
             if UTILITIES.contains(&verb.as_str()) {
                 return handle_exec(&verb, args, cwd, session_id);
             }
-            return deny(&format!("exec:{} requires args on the next line, not same-line. Use:\n\n  exec:{}\n  {}\n\nAll utility verbs (runner, type, kill-port, codesearch, recall, memorize, forget) take their argument on line 2.", verb, verb, args));
+            return deny(&format!("exec:{} requires args on the next line, not same-line. Use:\n\n  exec:{}\n  {}\n\nAll utility verbs (runner, type, kill-port, codesearch, recall, memorize, forget, wait, pause, sleep, status, close) take their argument on line 2.", verb, verb, args));
         }
         if let Some(nl) = rest.find('\n') {
             let lang_part = &rest[..nl];
@@ -106,9 +106,20 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
                         banned
                     ));
                 }
+                if bash_has_raw_sleep(code) {
+                    return deny("Raw `sleep N` in exec:bash is blocked. Use exec:wait for raw timer waits (max 3600s):\n\n  exec:wait\n  30\n\nFor waiting on a specific background task to produce output, use exec:sleep <task_id>.");
+                }
+                if looks_like_benchmark(code) {
+                    if let Some(ref dir) = project_dir() {
+                        if !recall_fired_this_turn(dir) {
+                            return deny("This looks like a benchmark/diagnostic. Run `exec:recall <2-6 word query>` first — past sessions may have already diagnosed it. After recall, re-run your benchmark if still needed. Recall is ~200 tokens / 5ms; cheaper than re-investigating.");
+                        }
+                    }
+                }
             }
 
-            return handle_exec(&raw_lang, code, cwd, session_id);
+            let normalized = if raw_lang == "bash" || raw_lang == "sh" { normalize_windows_paths(code) } else { code.to_string() };
+            return handle_exec(&raw_lang, &normalized, cwd, session_id);
         }
     }
 
@@ -168,6 +179,74 @@ fn bash_banned_tool(code: &str) -> Option<&'static str> {
     None
 }
 
+fn looks_like_benchmark(code: &str) -> bool {
+    let lc = code.to_lowercase();
+    let signals = [
+        "date +%s", "/usr/bin/time", "performance.now", "process.hrtime",
+        "benchmark", "perf check", "how slow", "why is ", "is it slow",
+    ];
+    let mut hits = 0;
+    for s in &signals {
+        if lc.contains(s) { hits += 1; }
+        if hits >= 1 { return true; }
+    }
+    false
+}
+
+fn recall_fired_this_turn(project: &str) -> bool {
+    let path = std::path::Path::new(project).join(".gm").join("turn-state.json");
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    content.contains("\"recallFiredThisTurn\":true")
+}
+
+fn bash_has_raw_sleep(code: &str) -> bool {
+    for line in code.lines() {
+        let t = line.trim();
+        if t == "sleep" { return true; }
+        if t.starts_with("sleep ") || t.starts_with("sleep\t") {
+            let rest = t[5..].trim();
+            if rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn normalize_windows_paths(code: &str) -> String {
+    if !cfg!(windows) { return code.to_string(); }
+    let mut out = String::with_capacity(code.len());
+    let bytes = code.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if (b.is_ascii_uppercase() || b.is_ascii_lowercase())
+            && i + 2 < bytes.len()
+            && bytes[i+1] == b':'
+            && (bytes[i+2] == b'\\' || bytes[i+2] == b'/')
+        {
+            let prev = if i > 0 { bytes[i-1] } else { b' ' };
+            let path_boundary = matches!(prev, b' ' | b'"' | b'\'' | b'(' | b'`' | b'\n' | b'=' | b':');
+            if path_boundary || i == 0 {
+                out.push('/');
+                out.push((b as char).to_ascii_lowercase());
+                out.push('/');
+                i += 3;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    if c == b'\\' { out.push('/'); i += 1; }
+                    else if c == b' ' || c == b'"' || c == b'\'' || c == b'\n' || c == b'\r' || c == b')' || c == b'`' { break; }
+                    else { out.push(c as char); i += 1; }
+                }
+                continue;
+            }
+        }
+        out.push(b as char);
+        i += 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod bash_banned_tests {
     use super::bash_banned_tool;
@@ -204,9 +283,9 @@ fn shell_quote(s: &str) -> String {
 }
 
 fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) -> Value {
-    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","runner","type","kill-port","recall","memorize","forget","feedback","learn-status","learn:status","learn-debug","learn:debug","learn-build","learn:build"];
+    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","runner","type","kill-port","recall","memorize","forget","feedback","learn-status","learn:status","learn-debug","learn:debug","learn-build","learn:build","wait","pause","sleep","status","close"];
 
-    let effective_cwd = cwd.map(|c| c.to_string()).or_else(|| super::project_dir()).unwrap_or_default();
+    let effective_cwd = cwd.map(|c| c.to_string()).or_else(|| project_dir()).unwrap_or_default();
     let resolved_session = if !session_id.is_empty() {
         session_id.to_string()
     } else {
@@ -315,6 +394,45 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
             let mut cmd = format!("{} type {} {}", bin_unix, shell_quote(task_id), shell_quote(input));
             if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
             return delegate_with_drain(&cmd, &compound_key);
+        }
+        "wait" => {
+            let body = safe_code.trim();
+            let secs: u64 = body.parse().unwrap_or(0);
+            if secs == 0 { return deny("exec:wait requires <seconds> on next line.\n\n  exec:wait\n  30\n\nMax 3600s. For waiting on a background task to produce output, use exec:sleep <task_id>."); }
+            let secs = secs.min(3600);
+            let cmd = format!("sleep {}", secs);
+            return delegate_to_bash(&cmd);
+        }
+        "pause" => {
+            let body = safe_code.trim();
+            if body.is_empty() { return deny("exec:pause requires a question/reason on next line. Renames .gm/prd.yml → .gm/prd.paused.yml; question lives in the file's header comment until the user responds.\n\n  exec:pause\n  <question text>"); }
+            let project = project_dir().unwrap_or_default();
+            if project.is_empty() { return deny("exec:pause requires a project directory."); }
+            let gm_dir = std::path::Path::new(&project).join(".gm");
+            let _ = std::fs::create_dir_all(&gm_dir);
+            let live = gm_dir.join("prd.yml");
+            let paused = gm_dir.join("prd.paused.yml");
+            let existing = std::fs::read_to_string(&live).unwrap_or_default();
+            let header = format!("# PAUSED — awaiting user response\n# Question: {}\n# Saved-at: {}\n\n", body.replace('\n', " "), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+            let combined = format!("{}{}", header, existing);
+            let _ = std::fs::write(&paused, combined);
+            let _ = std::fs::remove_file(&live);
+            let reason = format!("Paused. .gm/prd.yml → .gm/prd.paused.yml. Question recorded:\n\n{}\n\nThe Stop hook will now permit stopping. On the next user message, prompt-submit will rename prd.paused.yml back to prd.yml automatically.", body);
+            return serde_json::json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}});
+        }
+        "sleep" => {
+            let body = safe_code.trim();
+            if body.is_empty() { return deny("exec:sleep requires a task_id on next line (waits for the task to produce output). For raw timer waits, use exec:wait <seconds> instead.\n\n  exec:sleep\n  <task_id>"); }
+            let cmd = format!("{} sleep {}", bin_unix, shell_quote(body));
+            return delegate_to_bash(&cmd);
+        }
+        "status" => {
+            let cmd = format!("{} status", bin_unix);
+            return delegate_to_bash(&cmd);
+        }
+        "close" => {
+            let cmd = format!("{} close", bin_unix);
+            return delegate_to_bash(&cmd);
         }
         _ => {}
     }
@@ -503,4 +621,4 @@ fn is_test_file(base: &str, fp: &str) -> bool {
 }
 
 
-const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — first line is exec:<lang>, rest is the code:\n   exec:nodejs\n   console.log('hello')\n\n   exec:python\n   print('hello')\n\n   exec:bash\n   echo hello\n\n   Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java\n\n2. Browser automation — first line is exec:browser, rest is JS against `page`:\n   exec:browser\n   await page.goto('https://example.com')\n   console.log(await page.title())\n\n3. Utility commands — exec:<cmd> with args on next line:\n   exec:codesearch        (natural language codebase search)\n   exec:runner            (start/stop/status the runner daemon)\n   exec:type              (send stdin: task_id on line 1, input on line 2)\n   exec:kill-port         (kill process listening on port: port number on next line)\n\n4. Git commands — git <args> directly (no exec: prefix needed):\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.";
+const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — first line is exec:<lang>, rest is the code:\n   exec:nodejs\n   console.log('hello')\n\n   exec:python\n   print('hello')\n\n   exec:bash\n   echo hello\n\n   Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java\n\n2. Browser automation — first line is exec:browser, rest is JS against `page`:\n   exec:browser\n   await page.goto('https://example.com')\n   console.log(await page.title())\n\n3. Utility commands — exec:<cmd> with args on next line:\n   exec:codesearch        (natural language codebase search)\n   exec:runner            (start/stop/status the runner daemon)\n   exec:type              (send stdin: task_id on line 1, input on line 2)\n   exec:kill-port         (kill process listening on port: port number on next line)\n   exec:wait              (raw timer: <seconds> on next line, max 3600)\n   exec:sleep             (wait for task output: <task_id> on next line)\n   exec:pause             (rename .gm/prd.yml↔prd.paused.yml; <question> on next line)\n   exec:status / exec:close\n   exec:recall / exec:memorize / exec:forget\n\n4. Git commands — git <args> directly (no exec: prefix needed):\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.\n\nNotes on exec:bash environment:\n- Bash builtins `time`, `pushd`, `popd`, `source` are NOT available. For timing use `START=$(date +%s%3N); ...; END=$(date +%s%3N); echo \"$((END-START))ms\"`.\n- Raw `sleep N` is blocked — use exec:wait <seconds> instead.\n- Windows paths: prefer /c/Users/foo over C:\\\\Users\\\\foo inside heredocs (auto-normalized but heredoc parser can choke on backslash escapes).";
