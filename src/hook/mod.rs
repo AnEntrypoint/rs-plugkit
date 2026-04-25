@@ -126,6 +126,12 @@ pub fn deny(reason: &str) -> serde_json::Value {
     }
 }
 
+pub fn load_prompt(key: &str) -> Option<String> {
+    let plugin_root = env::var("CLAUDE_PLUGIN_ROOT").ok()?;
+    let path = PathBuf::from(plugin_root).join("prompts").join(format!("{}.txt", key));
+    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 pub fn run_self(args: &[&str]) -> String {
     let bin = env::current_exe().unwrap_or_else(|_| plugkit_bin());
     let child = match std::process::Command::new(&bin).args(args)

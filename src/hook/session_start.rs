@@ -1,13 +1,12 @@
-use super::{is_gemini, is_kilo, is_opencode, project_dir, run_self};
+use super::{is_gemini, is_kilo, is_opencode, load_prompt, project_dir, run_self};
 use serde_json::json;
 use std::fs;
 
 pub fn run() {
     let project = project_dir();
     ensure_gitignore(project.as_deref());
-    let mut parts: Vec<String> = vec![
-        "BLOCKING REQUIREMENT — READ THIS FIRST: Your VERY FIRST action on EVERY user message MUST be to invoke the Skill tool with skill: \"gm\". Do NOT read files, do NOT search, do NOT answer, do NOT plan, do NOT use any other tool before invoking skill: \"gm\". This is non-negotiable. If you respond without invoking gm first, you are violating a hard constraint.\n\n=== TOOL RULES ===\n\nSkill tool: invoke skills by name (e.g. skill: \"gm\"). Never use the Agent tool to load skills.\n\nBash tool: only these formats are allowed —\n  exec:nodejs / exec:python / exec:bash / exec:typescript / exec:go / exec:rust / exec:c / exec:cpp / exec:java\n  exec:browser  (JS automation against `page`)\n  exec:codesearch  (natural language search)\n  exec:status / exec:sleep / exec:close / exec:runner / exec:type\n  git <args>  (git commands directly, no exec: prefix)\n  Everything else is blocked. Never Bash(node ...) or Bash(npm ...) or Bash(npx ...).\n\nGlob/Grep/Find/Explore: blocked — use exec:codesearch instead.".into()
-    ];
+    let session_start_msg = load_prompt("session-start").unwrap_or_else(|| "BLOCKING REQUIREMENT — READ THIS FIRST: Your VERY FIRST action on EVERY user message MUST be to invoke the Skill tool with skill: \"gm:gm\". Do NOT read files, do NOT search, do NOT answer, do NOT plan, do NOT use any other tool before invoking skill: \"gm:gm\". This is non-negotiable. If you respond without invoking gm:gm first, you are violating a hard constraint.\n\n=== TOOL RULES ===\n\nSkill tool: invoke skills by name (e.g. skill: \"gm:gm\"). Never use the Agent tool to load skills.\n\nBash tool: only these formats are allowed —\n  exec:nodejs / exec:python / exec:bash / exec:typescript / exec:go / exec:rust / exec:c / exec:cpp / exec:java\n  exec:browser  (JS automation against `page`)\n  exec:codesearch  (natural language search)\n  exec:status / exec:sleep / exec:close / exec:runner / exec:type\n  git <args>  (git commands directly, no exec: prefix)\n  Everything else is blocked. Never Bash(node ...) or Bash(npm ...) or Bash(npx ...).\n\nGlob/Grep/Find/Explore: blocked — use exec:codesearch instead.".to_string());
+    let mut parts: Vec<String> = vec![session_start_msg];
 
     if let Some(ref dir) = project {
         let insight = {

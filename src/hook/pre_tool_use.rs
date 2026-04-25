@@ -1,4 +1,4 @@
-use super::{allow, deny, plugkit_bin, project_dir, to_unix_path};
+use super::{allow, deny, load_prompt, plugkit_bin, project_dir, to_unix_path};
 use serde_json::Value;
 use std::io::Read;
 
@@ -123,7 +123,8 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
         && !command.starts_with("gh ")
         && !command.contains("claude")
     {
-        return deny(BASH_DENY_MSG);
+        let bash_deny = load_prompt("bash-deny").unwrap_or_else(|| BASH_DENY_MSG.to_string());
+        return deny(&bash_deny);
     }
 
     if cfg!(windows) && (command.contains(" && ") || command.contains(" || ") || command.contains(" ; ")) {
