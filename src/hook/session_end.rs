@@ -24,7 +24,7 @@ pub fn run() {
     super::agent_browser::close_sessions_for(session_id);
     rs_exec::runtime::kill_session_browser(session_id);
     let bin = super::plugkit_bin();
-    let _ = std::process::Command::new(&bin)
+    let _ = super::no_window_cmd(&bin)
         .args([rs_exec::SUBCMD_SESSION_CLEANUP, &format!("--session={}", session_id)])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

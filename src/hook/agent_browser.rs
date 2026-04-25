@@ -20,7 +20,7 @@ pub fn close_sessions_for(claude_session_id: &str) {
     if !session_ids.is_empty() {
         let pw = super::find_playwriter();
         for sid in &session_ids {
-            let _ = std::process::Command::new(&pw)
+            let _ = super::no_window_cmd(&pw)
                 .args(["session", "delete", sid])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())

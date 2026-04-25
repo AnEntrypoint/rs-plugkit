@@ -14,7 +14,20 @@ pub use pre_compact::run as pre_compact;
 pub use stop::run_stop;
 pub use stop::run_stop_git;
 
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, process::Command};
+
+#[cfg(target_os = "windows")]
+pub fn no_window_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = Command::new(program);
+    cmd.creation_flags(0x08000000);
+    cmd
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn no_window_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    Command::new(program)
+}
 
 pub fn tools_dir() -> PathBuf {
     let home = env::var("HOME")
@@ -38,7 +51,7 @@ pub fn plugkit_bin() -> PathBuf {
 
 pub fn find_playwriter() -> String {
     for candidate in &["playwriter", "playwriter.cmd"] {
-        if std::process::Command::new(candidate)
+        if no_window_cmd(candidate)
             .arg("--version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -134,7 +147,7 @@ pub fn load_prompt(key: &str) -> Option<String> {
 
 pub fn run_self(args: &[&str]) -> String {
     let bin = env::current_exe().unwrap_or_else(|_| plugkit_bin());
-    let child = match std::process::Command::new(&bin).args(args)
+    let child = match no_window_cmd(&bin).args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn() {

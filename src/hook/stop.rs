@@ -1,5 +1,6 @@
 use serde_json::json;
-use std::{env, fs, path::Path, process::Command};
+use std::{env, fs, path::Path};
+use super::no_window_cmd;
 
 fn write_needs_gm(project_dir: &str) {
     let gm_dir = Path::new(project_dir).join(".gm");
@@ -79,7 +80,7 @@ fn write_counter(path: &Path, c: &Counter) {
 }
 
 fn git(args: &[&str], dir: &str) -> Option<String> {
-    Command::new("git")
+    no_window_cmd("git")
         .args(args)
         .current_dir(dir)
         .output()
@@ -217,7 +218,7 @@ fn watch_gh_runs_for_head(project_dir: &str) -> CiOutcome {
 }
 
 fn list_runs_for_head(project_dir: &str, head: &str) -> Option<Vec<GhRun>> {
-    let out = Command::new("gh").args(["run", "list", "--limit", "20", "--json", "databaseId,name,status,conclusion,headSha"])
+    let out = no_window_cmd("gh").args(["run", "list", "--limit", "20", "--json", "databaseId,name,status,conclusion,headSha"])
         .current_dir(project_dir).output().ok()?;
     if !out.status.success() { return None; }
     let runs: Vec<GhRun> = serde_json::from_slice(&out.stdout).ok()?;

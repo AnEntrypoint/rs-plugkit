@@ -75,7 +75,7 @@ fn cmd_deps() -> anyhow::Result<()> {
 }
 
 fn cmd_doctor() -> anyhow::Result<()> {
-    use std::process::Command;
+    use hook::no_window_cmd;
     let mut fail = 0u32;
     println!("=== plugkit doctor ===");
     println!("plugkit {}", env!("CARGO_PKG_VERSION"));
@@ -101,11 +101,11 @@ fn cmd_doctor() -> anyhow::Result<()> {
 
     let chrome_name = if cfg!(windows) { "chrome.exe" } else { "chrome" };
     let chrome_count = if cfg!(windows) {
-        Command::new("tasklist").args(["/FI", &format!("IMAGENAME eq {}", chrome_name)]).output()
+        no_window_cmd("tasklist").args(["/FI", &format!("IMAGENAME eq {}", chrome_name)]).output()
             .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.contains(chrome_name)).count())
             .unwrap_or(0)
     } else {
-        Command::new("pgrep").args(["-fc", chrome_name]).output()
+        no_window_cmd("pgrep").args(["-fc", chrome_name]).output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<usize>().unwrap_or(0))
             .unwrap_or(0)
     };

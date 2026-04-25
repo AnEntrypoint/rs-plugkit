@@ -1,5 +1,6 @@
 use serde_json::json;
-use std::{env, fs, io::Read, path::Path, process::Command};
+use std::{env, fs, io::Read, path::Path};
+use super::no_window_cmd;
 
 fn write_needs_gm() {
     let project_dir = env::var("CLAUDE_PROJECT_DIR")
@@ -21,7 +22,7 @@ fn extract_search_query(summary: &str) -> String {
 
 fn run_codeinsight(project_dir: &str) -> String {
     let bin = super::plugkit_bin();
-    let out = Command::new(&bin)
+    let out = no_window_cmd(&bin)
         .args(["codeinsight", project_dir])
         .output();
     match out {
@@ -33,7 +34,7 @@ fn run_codeinsight(project_dir: &str) -> String {
 fn run_search(project_dir: &str, query: &str) -> String {
     if query.is_empty() { return String::new(); }
     let bin = super::plugkit_bin();
-    let out = Command::new(&bin)
+    let out = no_window_cmd(&bin)
         .args(["search", "--path", project_dir, query])
         .output();
     match out {
