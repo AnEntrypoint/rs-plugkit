@@ -130,6 +130,7 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
         && !command.starts_with("browser:")
         && !command.starts_with("git ")
         && !command.starts_with("gh ")
+        && !command.starts_with("rtk ")
         && !command.contains("claude")
     {
         let bash_deny = load_prompt("bash-deny").unwrap_or_else(|| BASH_DENY_MSG.to_string());
