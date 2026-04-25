@@ -112,9 +112,18 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
         }
     }
 
-    if command.contains("bun") && (command.contains("gm-exec") || command.contains("plugkit") || command.contains("codebasesearch")) {
-        let pkg = command.split_whitespace().nth(2).unwrap_or("plugkit");
-        return deny(&format!("Do not call {} directly. Use exec:<lang> syntax instead.\n\nexec:nodejs\nconsole.log(\"hello\")\n\nexec:codesearch\nfind all database queries", pkg));
+    // Block direct `bun ... <our-tool>` invocations only when bun is the command verb,
+    // not when the words appear inside a quoted commit message or path argument.
+    {
+        let first_word = command.split_whitespace().next().unwrap_or("");
+        let second_word = command.split_whitespace().nth(1).unwrap_or("");
+        let third_word = command.split_whitespace().nth(2).unwrap_or("");
+        let invokes_bun = matches!(first_word, "bun" | "bun.exe" | "bunx" | "npx");
+        let target = if first_word == "npx" { second_word } else { third_word };
+        const BLOCKED_TARGETS: &[&str] = &["gm-exec", "plugkit", "codebasesearch"];
+        if invokes_bun && BLOCKED_TARGETS.iter().any(|t| target == *t) {
+            return deny(&format!("Do not call {} directly. Use exec:<lang> syntax instead.\n\nexec:nodejs\nconsole.log(\"hello\")\n\nexec:codesearch\nfind all database queries", target));
+        }
     }
 
     if !command.starts_with("exec")
