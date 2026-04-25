@@ -207,19 +207,55 @@ fn watch_gh_runs_for_head(project_dir: &str) -> CiOutcome {
     if which::which("gh").is_err() { return CiOutcome::None; }
     let head = match git(&["rev-parse", "HEAD"], project_dir) { Some(h) => h, None => return CiOutcome::None };
     let deadline_secs: u64 = env::var("GM_CI_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(180);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(deadline_secs);
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(deadline_secs);
     let initial = match list_runs_for_head(project_dir, &head) { Some(v) => v, None => return CiOutcome::None };
     let pending: Vec<GhRun> = initial.into_iter().filter(|r| r.conclusion.as_deref().unwrap_or("").is_empty()).collect();
     if pending.is_empty() { return CiOutcome::None; }
     let pending_ids: Vec<u64> = pending.iter().map(|r| r.database_id).collect();
-    eprintln!("[ci-watch] {} run(s) in flight on {}; watching up to {}s.", pending_ids.len(), &head[..7.min(head.len())], deadline_secs);
+    let head_short = &head[..7.min(head.len())];
+    let n_total = pending_ids.len();
+
+    // Progress is surfaced two ways so the user always sees something happening:
+    //   1. stderr — Claude Code shows hook stderr in the running-hook status row.
+    //   2. stdout — when stop concludes, the final message includes a timing summary.
+    eprintln!("[gm:ci-watch] {} run(s) in flight on {}; watching up to {}s.", n_total, head_short, deadline_secs);
+    eprintln!("[gm:ci-watch] runs:");
+    for r in pending.iter() {
+        eprintln!("[gm:ci-watch]   {} (id {})", r.name, r.database_id);
+    }
+
     let mut last_runs: Vec<GhRun> = pending;
+    let mut tick: u32 = 0;
     while std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_secs(8));
-        let now = match list_runs_for_head(project_dir, &head) { Some(v) => v, None => continue };
-        last_runs = now.into_iter().filter(|r| pending_ids.contains(&r.database_id)).collect();
+        tick += 1;
+        let now_iter = match list_runs_for_head(project_dir, &head) { Some(v) => v, None => {
+            eprintln!("[gm:ci-watch] [{}s] gh list failed, retrying...", started.elapsed().as_secs());
+            continue;
+        }};
+        last_runs = now_iter.into_iter().filter(|r| pending_ids.contains(&r.database_id)).collect();
+        let done = last_runs.iter().filter(|r| !r.conclusion.as_deref().unwrap_or("").is_empty()).count();
+        let elapsed = started.elapsed().as_secs();
+        // Compact per-run state line every tick — short enough to fit the hook status row.
+        let states: Vec<String> = last_runs.iter().map(|r| {
+            let s = match r.conclusion.as_deref() {
+                Some("success") => "✓",
+                Some("failure") | Some("cancelled") | Some("timed_out") | Some("action_required") => "✗",
+                _ => match r.status.as_str() {
+                    "queued" | "waiting" => "…",
+                    "in_progress" => "▶",
+                    other if !other.is_empty() => other,
+                    _ => "?",
+                },
+            };
+            format!("{}{}", s, r.name.chars().take(12).collect::<String>())
+        }).collect();
+        eprintln!("[gm:ci-watch] [{}s {}/{}] {}", elapsed, done, n_total, states.join(" "));
+        let _ = tick;
         if last_runs.iter().all(|r| !r.conclusion.as_deref().unwrap_or("").is_empty()) { break; }
     }
+    eprintln!("[gm:ci-watch] settled after {}s.", started.elapsed().as_secs());
     let lines: Vec<String> = last_runs.iter().map(|r| {
         let c = r.conclusion.as_deref().unwrap_or("");
         let state = if c.is_empty() { format!("still {}", r.status) } else { c.to_string() };
