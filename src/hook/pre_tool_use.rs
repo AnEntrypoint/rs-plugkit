@@ -16,9 +16,9 @@ pub fn run() {
 fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
     if tool_name.is_empty() { return allow(None); }
 
-    const FORBIDDEN: &[&str] = &["find", "Find", "Glob", "Grep"];
+    const FORBIDDEN: &[&str] = &["find", "Find", "Glob", "glob", "Grep", "grep", "Search", "search", "search_file_content", "Explore", "explore"];
     if FORBIDDEN.contains(&tool_name) {
-        return deny("Glob/Grep/Find are blocked. exec:codesearch is the ONLY codebase-exploration tool — it handles exact strings, symbols, regex patterns, file-name fragments, and PDF pages. Do not reach for Grep/Glob/Find for any lookup.\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Minimum 4 attempts before concluding absent. See code-search skill.\n\nFor a KNOWN absolute file path, use the Read tool. For directory listing at a known path, use exec:nodejs + fs.readdirSync.");
+        return deny("Glob/Grep/Find/Search/Explore are blocked. exec:codesearch is the ONLY codebase-exploration tool — it handles exact strings, symbols, regex patterns, file-name fragments, and PDF pages. Do not reach for Grep/Glob/Find/Search/Explore for any lookup.\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Minimum 4 attempts before concluding absent. See code-search skill.\n\nFor a KNOWN absolute file path, use the Read tool. For directory listing at a known path, use exec:nodejs + fs.readdirSync.");
     }
 
     const WRITE_TOOLS: &[&str] = &["Write", "write_file"];
@@ -37,11 +37,11 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
         }
     }
 
-    const SEARCH_TOOLS: &[&str] = &["glob", "search_file_content", "Search", "search"];
-    if SEARCH_TOOLS.contains(&tool_name) { return allow(None); }
-
-    if (tool_name == "Task" || tool_name == "Agent") && tool_input["subagent_type"].as_str().unwrap_or("") == "Explore" {
-        return deny("The Explore agent is blocked. Use exec:codesearch with the mandatory two-word start protocol:\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Iterate until found (min 4 attempts). See code-search skill for full protocol.");
+    if tool_name == "Task" || tool_name == "Agent" {
+        let st = tool_input["subagent_type"].as_str().unwrap_or("").to_lowercase();
+        if st == "explore" || st == "search" || st == "general-purpose" || st.contains("explore") || st.contains("search") {
+            return deny("The Explore/Search agent is blocked. Use exec:codesearch with the mandatory two-word start protocol:\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Iterate until found (min 4 attempts). See code-search skill for full protocol.");
+        }
     }
 
     if tool_name == "EnterPlanMode" {
