@@ -84,11 +84,11 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
                 None => (inline, ""),
             };
             let verb = verb.trim().to_lowercase();
-            const UTILITIES: &[&str] = &["status","sleep","close","runner","type","kill-port","codesearch","search"];
+            const UTILITIES: &[&str] = &["runner","type","kill-port","codesearch","search"];
             if UTILITIES.contains(&verb.as_str()) {
                 return handle_exec(&verb, args, cwd, session_id);
             }
-            return deny(&format!("exec:{} requires args on the next line, not same-line. Use:\n\n  exec:{}\n  {}\n\nAll utility verbs (status, sleep, close, runner, type, kill-port, codesearch) take their argument on line 2.", verb, verb, args));
+            return deny(&format!("exec:{} requires args on the next line, not same-line. Use:\n\n  exec:{}\n  {}\n\nAll utility verbs (runner, type, kill-port, codesearch) take their argument on line 2.", verb, verb, args));
         }
         if let Some(nl) = rest.find('\n') {
             let lang_part = &rest[..nl];
@@ -193,7 +193,7 @@ fn shell_quote(s: &str) -> String {
 }
 
 fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) -> Value {
-    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","status","sleep","close","runner","type","kill-port"];
+    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","runner","type","kill-port"];
 
     let effective_cwd = cwd.map(|c| c.to_string()).or_else(|| super::project_dir()).unwrap_or_default();
     let resolved_session = if !session_id.is_empty() {
@@ -225,21 +225,6 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
             if let Some(c) = cwd { cmd.push_str(&format!(" --path {}", shell_quote(&to_unix_path(c)))); }
             let query = safe_code.trim().replace('\n', " ");
             cmd.push_str(&format!(" {}", shell_quote(&query)));
-            return delegate_to_bash(&cmd);
-        }
-        "status" => {
-            let mut cmd = format!("{} status {}", bin_unix, safe_code.trim());
-            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
-            return delegate_to_bash(&cmd);
-        }
-        "sleep" => {
-            let mut cmd = format!("{} sleep {}", bin_unix, safe_code.trim());
-            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
-            return delegate_to_bash(&cmd);
-        }
-        "close" => {
-            let mut cmd = format!("{} close {}", bin_unix, safe_code.trim());
-            if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
             return delegate_to_bash(&cmd);
         }
         "runner" => return delegate_with_drain(&format!("{} runner {}", bin_unix, safe_code.trim()), &compound_key),
@@ -280,7 +265,6 @@ fn session_log_drain(session_id: &str) -> String {
     };
 
     let mut out = String::new();
-    let mut running_ids: Vec<u64> = Vec::new();
 
     if let Some(tasks) = drain["tasks"].as_array() {
         for task in tasks {
@@ -289,25 +273,9 @@ fn session_log_drain(session_id: &str) -> String {
             let output = task["output"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
             let text: String = output.iter().map(|e| e["d"].as_str().unwrap_or("")).collect::<Vec<_>>().join("");
             let text = text.trim_end();
-            match status {
-                "running" | "pending" => {
-                    running_ids.push(id);
-                    let _ = text;
-                }
-                _ => {
-                    if !text.is_empty() {
-                        out.push_str(&format!("\n[task_{} {} — output]\n{}\n", id, status, text));
-                    }
-                }
+            if !matches!(status, "running" | "pending") && !text.is_empty() {
+                out.push_str(&format!("\n[task_{} {} — output]\n{}\n", id, status, text));
             }
-        }
-    }
-
-    if !running_ids.is_empty() {
-        let ids_str: Vec<String> = running_ids.iter().map(|id| format!("  task_{} (running)", id)).collect();
-        out.push_str(&format!("\n[OPEN BACKGROUND TASKS — monitor these, do not lose track]\n{}\n", ids_str.join("\n")));
-        for id in &running_ids {
-            out.push_str(&format!("  plugkit sleep task_{}       # wait for completion\n  plugkit status task_{}      # drain output buffer\n  plugkit close task_{}       # delete task when done\n", id, id, id));
         }
     }
 
@@ -456,4 +424,4 @@ fn is_test_file(base: &str, fp: &str) -> bool {
 }
 
 
-const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — first line is exec:<lang>, rest is the code:\n   exec:nodejs\n   console.log('hello')\n\n   exec:python\n   print('hello')\n\n   exec:bash\n   echo hello\n\n   Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java\n\n2. Browser automation — first line is exec:browser, rest is JS against `page`:\n   exec:browser\n   await page.goto('https://example.com')\n   console.log(await page.title())\n\n3. Utility commands — exec:<cmd> with args on next line:\n   exec:codesearch        (natural language codebase search)\n   exec:status            (check background task status)\n   exec:sleep             (sleep N seconds)\n   exec:close             (close background task)\n   exec:runner            (start/stop/status the runner daemon)\n   exec:type              (send stdin: task_id on line 1, input on line 2)\n   exec:kill-port         (kill process listening on port: port number on next line)\n\n4. Git commands — git <args> directly (no exec: prefix needed):\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.";
+const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — first line is exec:<lang>, rest is the code:\n   exec:nodejs\n   console.log('hello')\n\n   exec:python\n   print('hello')\n\n   exec:bash\n   echo hello\n\n   Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java\n\n2. Browser automation — first line is exec:browser, rest is JS against `page`:\n   exec:browser\n   await page.goto('https://example.com')\n   console.log(await page.title())\n\n3. Utility commands — exec:<cmd> with args on next line:\n   exec:codesearch        (natural language codebase search)\n   exec:runner            (start/stop/status the runner daemon)\n   exec:type              (send stdin: task_id on line 1, input on line 2)\n   exec:kill-port         (kill process listening on port: port number on next line)\n\n4. Git commands — git <args> directly (no exec: prefix needed):\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.";
