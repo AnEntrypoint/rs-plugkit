@@ -84,11 +84,11 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
                 None => (inline, ""),
             };
             let verb = verb.trim().to_lowercase();
-            const UTILITIES: &[&str] = &["runner","type","kill-port","codesearch","search"];
+            const UTILITIES: &[&str] = &["runner","type","kill-port","codesearch","search","recall"];
             if UTILITIES.contains(&verb.as_str()) {
                 return handle_exec(&verb, args, cwd, session_id);
             }
-            return deny(&format!("exec:{} requires args on the next line, not same-line. Use:\n\n  exec:{}\n  {}\n\nAll utility verbs (runner, type, kill-port, codesearch) take their argument on line 2.", verb, verb, args));
+            return deny(&format!("exec:{} requires args on the next line, not same-line. Use:\n\n  exec:{}\n  {}\n\nAll utility verbs (runner, type, kill-port, codesearch, recall, memorize, forget) take their argument on line 2.", verb, verb, args));
         }
         if let Some(nl) = rest.find('\n') {
             let lang_part = &rest[..nl];
@@ -203,7 +203,7 @@ fn shell_quote(s: &str) -> String {
 }
 
 fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) -> Value {
-    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","runner","type","kill-port"];
+    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","runner","type","kill-port","recall","memorize","forget"];
 
     let effective_cwd = cwd.map(|c| c.to_string()).or_else(|| super::project_dir()).unwrap_or_default();
     let resolved_session = if !session_id.is_empty() {
@@ -239,6 +239,46 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
         }
         "runner" => return delegate_with_drain(&format!("{} runner {}", bin_unix, safe_code.trim()), &compound_key),
         "kill-port" => return delegate_with_drain(&format!("{} kill-port {}", bin_unix, safe_code.trim()), &compound_key),
+        "recall" => {
+            let query = safe_code.trim().replace('\n', " ");
+            if query.is_empty() { return deny("exec:recall requires a query.\n\n  exec:recall\n  <2-6 word query>"); }
+            let mut cmd = format!("{} recall --limit 5", bin_unix);
+            if let Some(c) = cwd { cmd.push_str(&format!(" --cwd {}", shell_quote(&to_unix_path(c)))); }
+            cmd.push_str(&format!(" {}", shell_quote(&query)));
+            return delegate_to_bash(&cmd);
+        }
+        "memorize" => {
+            // First line = source tag, rest = fact body. Or whole body if first line doesn't look like a tag.
+            let trimmed = safe_code.trim_start();
+            let (source, body) = if let Some(nl) = trimmed.find('\n') {
+                let first = trimmed[..nl].trim();
+                let looks_like_tag = !first.is_empty() && first.len() < 64 && !first.contains(' ');
+                if looks_like_tag {
+                    (first.to_string(), trimmed[nl+1..].to_string())
+                } else {
+                    ("memorize".to_string(), trimmed.to_string())
+                }
+            } else {
+                ("memorize".to_string(), trimmed.to_string())
+            };
+            if body.trim().is_empty() { return deny("exec:memorize requires content.\n\n  exec:memorize\n  <source-tag>\n  <fact body>\n\nOr just:\n\n  exec:memorize\n  <fact body>"); }
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+            let tmp = std::env::temp_dir().join(format!("plugkit-memorize-{}.txt", ts));
+            let _ = std::fs::write(&tmp, &body);
+            let tmp_unix = to_unix_path(&tmp.to_string_lossy());
+            let mut cmd = format!("{} memorize --source {} --file {}", bin_unix, shell_quote(&source), shell_quote(&tmp_unix));
+            if let Some(c) = cwd { cmd.push_str(&format!(" --cwd {}", shell_quote(&to_unix_path(c)))); }
+            return delegate_to_bash(&cmd);
+        }
+        "forget" => {
+            // Body: "by-source <tag>" | "by-query <query>" | "by-id <episode_id>"
+            let body = safe_code.trim();
+            if body.is_empty() { return deny("exec:forget requires a directive.\n\n  exec:forget\n  by-source <source-tag>\n\n  exec:forget\n  by-query <terms>\n\n  exec:forget\n  by-id <episode_id>"); }
+            let mut cmd = format!("{} forget", bin_unix);
+            if let Some(c) = cwd { cmd.push_str(&format!(" --cwd {}", shell_quote(&to_unix_path(c)))); }
+            cmd.push_str(&format!(" {}", shell_quote(body)));
+            return delegate_to_bash(&cmd);
+        }
         "type" => {
             let mut lines_iter = safe_code.splitn(2, '\n');
             let task_id = lines_iter.next().unwrap_or("").trim();

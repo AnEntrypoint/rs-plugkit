@@ -57,6 +57,12 @@ fn hash_path(s: &str) -> String {
 }
 
 fn counter_path(project_dir: &str) -> std::path::PathBuf {
+    let gm_dir = std::path::Path::new(project_dir).join(".gm");
+    let _ = fs::create_dir_all(&gm_dir);
+    let candidate = gm_dir.join("git-block-counter.json");
+    if candidate.parent().map(|p| p.exists()).unwrap_or(false) {
+        return candidate;
+    }
     let hash = hash_path(project_dir);
     env::temp_dir().join(format!("gm-git-block-counter-{}.json", hash))
 }

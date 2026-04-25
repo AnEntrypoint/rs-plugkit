@@ -73,6 +73,11 @@ enum Cmd {
         content: Vec<String>,
         #[arg(long)] cwd: Option<String>,
     },
+    /// Invalidate / unlearn previously-memorized facts. Directives: `by-source <tag>` | `by-query <query>` | `by-id <episode_id>`.
+    Forget {
+        directive: Vec<String>,
+        #[arg(long)] cwd: Option<String>,
+    },
 }
 
 const RS_EXEC_SHA: &str = env!("DEP_RS_EXEC_SHA");
@@ -456,6 +461,21 @@ async fn main() {
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
                 hook::rs_learn::ingest_fast(&body, &src, &dir);
                 println!("ingested ({} bytes) source={}", body.len(), src);
+            }
+            Cmd::Forget { directive, cwd } => {
+                let joined = directive.join(" ");
+                let mut parts = joined.splitn(2, ' ');
+                let kind = parts.next().unwrap_or("").trim();
+                let target = parts.next().unwrap_or("").trim();
+                if kind.is_empty() || target.is_empty() {
+                    eprintln!("usage: plugkit forget by-source <tag> | by-query <terms> | by-id <uuid>");
+                    exit_code = 1; return Ok(());
+                }
+                let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
+                match hook::rs_learn::forget(kind, target, &dir) {
+                    Ok(n) => println!("forgot {} episode(s)", n),
+                    Err(e) => { eprintln!("forget failed: {}", e); exit_code = 1; }
+                }
             }
             Cmd::Search { path, query } => {
                 if query.is_empty() {
