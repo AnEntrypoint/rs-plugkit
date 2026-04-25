@@ -150,6 +150,7 @@ fn ensure_gitignore(project_dir: Option<&str>) {
     let block = format!(
         "{START}\n\
          .gm-stop-verified\n\
+         .gm/prd-state.json\n\
          .gm/rslearn-counter.json\n\
          .gm/git-block-counter.json\n\
          .gm/learning-state.md\n\
@@ -157,6 +158,9 @@ fn ensure_gitignore(project_dir: Option<&str>) {
          .gm/ingest-drafts/\n\
          .gm/needs-gm\n\
          .gm/lastskill\n\
+         .gm/turn-state.json\n\
+         .gm/no-memorize-this-turn\n\
+         .gm/prd.paused.yml\n\
          # tracked: .gm/rs-learn.db, .gm/code-search/, AGENTS.md, .gm/prd.yml\n\
          {END}\n"
     );
