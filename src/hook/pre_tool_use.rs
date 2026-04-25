@@ -84,7 +84,7 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
                 None => (inline, ""),
             };
             let verb = verb.trim().to_lowercase();
-            const UTILITIES: &[&str] = &["runner","type","kill-port","codesearch","search","recall"];
+            const UTILITIES: &[&str] = &["runner","type","kill-port","codesearch","search","recall","feedback","learn-status","learn:status","learn-debug","learn:debug","learn-build","learn:build"];
             if UTILITIES.contains(&verb.as_str()) {
                 return handle_exec(&verb, args, cwd, session_id);
             }
@@ -203,7 +203,7 @@ fn shell_quote(s: &str) -> String {
 }
 
 fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) -> Value {
-    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","runner","type","kill-port","recall","memorize","forget"];
+    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","runner","type","kill-port","recall","memorize","forget","feedback","learn-status","learn:status","learn-debug","learn:debug","learn-build","learn:build"];
 
     let effective_cwd = cwd.map(|c| c.to_string()).or_else(|| super::project_dir()).unwrap_or_default();
     let resolved_session = if !session_id.is_empty() {
@@ -277,6 +277,34 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
             let mut cmd = format!("{} forget", bin_unix);
             if let Some(c) = cwd { cmd.push_str(&format!(" --cwd {}", shell_quote(&to_unix_path(c)))); }
             cmd.push_str(&format!(" {}", shell_quote(body)));
+            return delegate_to_bash(&cmd);
+        }
+        "feedback" => {
+            // Line 1 = request_id <quality 0..1>, optional line 2 = signal
+            let body = safe_code.trim();
+            if body.is_empty() {
+                return deny("exec:feedback requires <request_id> <quality 0..1> [signal]");
+            }
+            let mut cmd = format!("{} learn feedback", bin_unix);
+            if let Some(c) = cwd { cmd.push_str(&format!(" --cwd {}", shell_quote(&to_unix_path(c)))); }
+            cmd.push_str(&format!(" {}", shell_quote(body)));
+            return delegate_to_bash(&cmd);
+        }
+        "learn-debug" | "learn:debug" => {
+            let subsystem = safe_code.trim();
+            let mut cmd = format!("{} learn debug", bin_unix);
+            if let Some(c) = cwd { cmd.push_str(&format!(" --cwd {}", shell_quote(&to_unix_path(c)))); }
+            if !subsystem.is_empty() { cmd.push_str(&format!(" {}", shell_quote(subsystem))); }
+            return delegate_to_bash(&cmd);
+        }
+        "learn-status" | "learn:status" => {
+            let mut cmd = format!("{} learn status", bin_unix);
+            if let Some(c) = cwd { cmd.push_str(&format!(" --cwd {}", shell_quote(&to_unix_path(c)))); }
+            return delegate_to_bash(&cmd);
+        }
+        "learn-build" | "learn:build" => {
+            let mut cmd = format!("{} learn build-communities", bin_unix);
+            if let Some(c) = cwd { cmd.push_str(&format!(" --cwd {}", shell_quote(&to_unix_path(c)))); }
             return delegate_to_bash(&cmd);
         }
         "type" => {

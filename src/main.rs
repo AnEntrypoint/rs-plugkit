@@ -78,6 +78,12 @@ enum Cmd {
         directive: Vec<String>,
         #[arg(long)] cwd: Option<String>,
     },
+    /// Pass-through to rs-learn for status/debug/feedback/build-communities. HTTP-preferred, bun fallback.
+    Learn {
+        action: String,
+        rest: Vec<String>,
+        #[arg(long)] cwd: Option<String>,
+    },
 }
 
 const RS_EXEC_SHA: &str = env!("DEP_RS_EXEC_SHA");
@@ -475,6 +481,16 @@ async fn main() {
                 match hook::rs_learn::forget(kind, target, &dir) {
                     Ok(n) => println!("forgot {} episode(s)", n),
                     Err(e) => { eprintln!("forget failed: {}", e); exit_code = 1; }
+                }
+            }
+            Cmd::Learn { action, rest, cwd } => {
+                let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
+                let out = hook::rs_learn::learn_passthrough(&action, &rest, &dir);
+                if out.is_empty() {
+                    eprintln!("learn {} returned no output (rs-learn may not be available)", action);
+                    exit_code = 1;
+                } else {
+                    println!("{}", out);
                 }
             }
             Cmd::Search { path, query } => {

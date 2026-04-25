@@ -388,6 +388,25 @@ fn http_delete(base: &str, path: &str, timeout: Duration) -> Option<String> {
     Some(resp[body_start..].to_string())
 }
 
+/// Pass through arbitrary rs-learn subcommands when the right HTTP endpoint
+/// doesn't exist (status/debug/feedback/build-communities). Falls through to
+/// bun subprocess. Returns stdout.
+pub fn learn_passthrough(action: &str, rest: &[String], project_dir: &str) -> String {
+    // Try HTTP for known endpoints first.
+    if action == "build-communities" {
+        if let Some(out) = http_post(&http_base(), "/build-communities", "{}", Duration::from_secs(30)) {
+            return out;
+        }
+    }
+
+    let action = action.to_string();
+    let mut args: Vec<&str> = vec![&action];
+    let rest_refs: Vec<&str> = rest.iter().map(|s| s.as_str()).collect();
+    args.extend(rest_refs.iter());
+    let out = run_bun_rs_learn(&args, project_dir, Duration::from_secs(30));
+    out
+}
+
 /// Fast-path ingest. Tries HTTP first, falls back to bun. Best-effort, never blocks.
 pub fn ingest_fast(content: &str, source: &str, project_dir: &str) {
     if content.trim().is_empty() { return; }
