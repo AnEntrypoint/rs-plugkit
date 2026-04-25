@@ -23,6 +23,15 @@ pub fn run() {
                 insight
             ));
         }
+
+        let recall_q = super::rs_learn::project_query(dir);
+        let recall = super::rs_learn::recall(&recall_q, dir, 3);
+        if !recall.is_empty() {
+            parts.push(format!(
+                "=== rs-learn recall (project memory — past decisions, feedback, and lessons) ===\n{}",
+                recall
+            ));
+        }
     }
 
     let additional_context = parts.join("\n\n").replace("${", "$\\{");

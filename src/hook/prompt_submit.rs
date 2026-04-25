@@ -29,12 +29,19 @@ pub fn run() {
             if !search_out.is_empty() {
                 parts.push(format!("=== search ===\n{}", search_out));
             }
+
+            let recall = super::rs_learn::recall(&prompt, dir, 5);
+            if !recall.is_empty() {
+                parts.push(format!("=== rs-learn recall (cross-session memory for this prompt) ===\n{}", recall));
+            }
         }
 
         let insight = run_self(&["codeinsight", dir]);
         if !insight.is_empty() {
             parts.push(format!("=== codeinsight ===\n{}", insight));
         }
+
+        super::rs_learn::tick_and_maybe_run_deep_cycles(dir);
     }
 
     let additional_context = sanitize_bash_patterns(&parts.join("\n\n"));

@@ -72,6 +72,14 @@ pub fn run() {
         additional_context.push_str(&search_results);
     }
 
+    let recall = super::rs_learn::recall(&query, &project_dir, 5);
+    if !recall.is_empty() {
+        additional_context.push_str("\n\n=== RS-LEARN RECALL (cross-session memory, query: ");
+        additional_context.push_str(&query);
+        additional_context.push_str(") ===\n");
+        additional_context.push_str(&recall);
+    }
+
     let output = json!({
         "systemMessage": additional_context
     });

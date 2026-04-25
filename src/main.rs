@@ -60,6 +60,19 @@ enum Cmd {
     #[command(name = "kill-port")] KillPort { port: u16 },
     Deps,
     Doctor,
+    /// Recall episodes from rs-learn (HTTP-preferred, bun fallback). Prints formatted text.
+    Recall {
+        query: Vec<String>,
+        #[arg(long, default_value_t = 5)] limit: u32,
+        #[arg(long)] cwd: Option<String>,
+    },
+    /// Ingest a fact into rs-learn fast-path (HTTP-preferred, bun fallback). Detached.
+    Memorize {
+        #[arg(long)] source: Option<String>,
+        #[arg(long)] file: Option<String>,
+        content: Vec<String>,
+        #[arg(long)] cwd: Option<String>,
+    },
 }
 
 const RS_EXEC_SHA: &str = env!("DEP_RS_EXEC_SHA");
@@ -424,6 +437,26 @@ async fn main() {
             }
             Cmd::Deps => { cmd_deps()?; }
             Cmd::Doctor => { cmd_doctor()?; }
+            Cmd::Recall { query, limit, cwd } => {
+                let q = query.join(" ");
+                if q.trim().is_empty() { eprintln!("No query provided"); exit_code = 1; return Ok(()); }
+                let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
+                let out = hook::rs_learn::recall(&q, &dir, limit);
+                if out.is_empty() { eprintln!("No recall results"); exit_code = 1; return Ok(()); }
+                println!("{}", out);
+            }
+            Cmd::Memorize { source, file, content, cwd } => {
+                let body = if let Some(f) = file {
+                    fs::read_to_string(&f)?
+                } else {
+                    content.join(" ")
+                };
+                if body.trim().is_empty() { eprintln!("No content provided"); exit_code = 1; return Ok(()); }
+                let src = source.unwrap_or_else(|| "memorize".into());
+                let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
+                hook::rs_learn::ingest_fast(&body, &src, &dir);
+                println!("ingested ({} bytes) source={}", body.len(), src);
+            }
             Cmd::Search { path, query } => {
                 if query.is_empty() {
                     search_mcp::run_mcp_server();

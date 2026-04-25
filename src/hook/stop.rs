@@ -139,11 +139,19 @@ pub fn run_stop_git() {
             counter.count = 0;
             write_counter(&cpath, &counter);
         }
+        let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
         let ci = watch_gh_runs_for_head(&project_dir);
         match ci {
-            CiOutcome::None => println!("{}", json!({ "decision": "approve" })),
-            CiOutcome::AllGreen(report) => println!("{}", json!({ "decision": "approve", "reason": format!("CI: {}", report) })),
+            CiOutcome::None => {
+                super::rs_learn::record_quality(&session_id, &project_dir, 0.7, "no-ci");
+                println!("{}", json!({ "decision": "approve" }));
+            }
+            CiOutcome::AllGreen(report) => {
+                super::rs_learn::record_quality(&session_id, &project_dir, 0.9, "ci-green");
+                println!("{}", json!({ "decision": "approve", "reason": format!("CI: {}", report) }));
+            }
             CiOutcome::Failures(report) => {
+                super::rs_learn::record_quality(&session_id, &project_dir, 0.2, "ci-fail");
                 write_needs_gm(&project_dir);
                 println!("{}", serde_json::to_string_pretty(&json!({ "decision": "block", "reason": format!("CI failure(s) on this push:\n{}\n\nInvestigate, fix, push again. Use `gh run view <id> --log-failed` for details.\n\nNEXT ACTION: invoke Skill(gm) first.", report) })).unwrap_or_default());
                 std::process::exit(2);
@@ -166,6 +174,8 @@ pub fn run_stop_git() {
         } else { "" }
     } else { "" };
     if counter.count == 1 {
+        let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
+        super::rs_learn::record_quality(&session_id, &project_dir, 0.4, "stop-blocked-git");
         write_needs_gm(&project_dir);
         println!("{}", serde_json::to_string_pretty(&json!({ "decision": "block", "reason": format!("Git: {}{}\n\nNEXT ACTION: invoke Skill(gm) first.", reason, auth_hint) })).unwrap_or_default());
         std::process::exit(2);

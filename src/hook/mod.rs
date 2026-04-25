@@ -5,6 +5,7 @@ mod prompt_submit;
 mod pre_compact;
 mod stop;
 pub mod agent_browser;
+pub mod rs_learn;
 
 pub use session_start::run as session_start;
 pub use session_end::run as session_end;
