@@ -35,6 +35,9 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
         if !in_skills && is_test_file(&base, fp) {
             return deny("Test files forbidden on disk. Use Bash tool with real services for all testing.");
         }
+        if !in_skills && is_smoke_page(&base, fp) {
+            return deny("Smoke/test/demo pages forbidden. Per paper II §5.4 the in-page observability surface is `window.__debug` — modules register on mount, deregister on unmount. Creating dedicated smoke.js, smoke-*.js, test.html, demo.html, *-playground.html, sandbox.html is a parallel test runner that fights the discipline. Register the surface in `window.__debug.<moduleName>` and assert via the project-root `test.js` integration test.");
+        }
     }
 
     if tool_name == "Task" || tool_name == "Agent" {
@@ -618,6 +621,41 @@ fn is_test_file(base: &str, fp: &str) -> bool {
     (base.ends_with(".test.js") || base.ends_with(".spec.js") || base.ends_with(".test.ts") || base.ends_with(".spec.ts"))
         || fp.contains("/__tests__/") || fp.contains("/test/") || fp.contains("/tests/")
         || fp.contains("/fixtures/") || fp.contains("/__mocks__/")
+}
+
+fn is_smoke_page(base: &str, fp: &str) -> bool {
+    let fp_norm = fp.replace('\\', "/").to_lowercase();
+    if base == "test.js" || base == "test.mjs" || base == "test.ts" { return false; }
+    if base.starts_with("smoke.") || base.starts_with("smoke-") || base.contains("-smoke.") { return true; }
+    if base == "demo.html" || base == "test.html" || base == "sandbox.html" { return true; }
+    if base.ends_with("-playground.html") || base.starts_with("playground.") { return true; }
+    if fp_norm.contains("/docs/smoke") || fp_norm.contains("/docs/demo.") || fp_norm.contains("/docs/test.html") || fp_norm.contains("/docs/sandbox.") || fp_norm.contains("/docs/playground.") { return true; }
+    false
+}
+
+#[cfg(test)]
+mod smoke_page_tests {
+    use super::is_smoke_page;
+    #[test]
+    fn blocks_smoke_files() {
+        assert!(is_smoke_page("smoke.js", "C:/p/docs/smoke.js"));
+        assert!(is_smoke_page("smoke-network.js", "C:/p/docs/smoke-network.js"));
+        assert!(is_smoke_page("test.html", "C:/p/docs/test.html"));
+        assert!(is_smoke_page("demo.html", "C:/p/docs/demo.html"));
+        assert!(is_smoke_page("sandbox.html", "C:/p/docs/sandbox.html"));
+        assert!(is_smoke_page("foo-playground.html", "C:/p/docs/foo-playground.html"));
+        assert!(is_smoke_page("voice-smoke.js", "C:/p/voice-smoke.js"));
+    }
+    #[test]
+    fn allows_canonical_test_js() {
+        assert!(!is_smoke_page("test.js", "C:/p/test.js"));
+        assert!(!is_smoke_page("test.ts", "C:/p/test.ts"));
+    }
+    #[test]
+    fn allows_unrelated() {
+        assert!(!is_smoke_page("index.html", "C:/p/docs/index.html"));
+        assert!(!is_smoke_page("client.js", "C:/p/agentgui/client.js"));
+    }
 }
 
 
