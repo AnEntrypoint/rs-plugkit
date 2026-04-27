@@ -32,7 +32,12 @@ jobs:
           cache-on-failure: true
 
       - name: Update git deps
-        run: cargo update
+        run: |
+          cargo update -p rs-learn || true
+          cargo update -p rs-search || true
+          cargo update -p rs-codeinsight || true
+          cargo update -p rs-exec || true
+          cargo update
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
