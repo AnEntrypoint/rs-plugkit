@@ -4,10 +4,11 @@
 // Transport priority:
 //   1. HTTP — if `rs-learn serve` is running (env RS_LEARN_HTTP_URL or default :8000), use it.
 //      Single shared embedder, ~5ms latency. Best for hot hooks.
-//   2. bun x rs-learn — always-available subprocess fallback. ~500ms latency.
+//   2. Direct rs-learn lib call via shared tokio runtime. No subprocess. No window flash.
 
-use std::{env, fs, io::{Read, Write}, net::TcpStream, path::PathBuf, process::Command, time::Duration};
+use std::{env, fs, io::{Read, Write}, net::TcpStream, path::PathBuf, sync::OnceLock, time::Duration};
 use super::no_window_cmd;
+use tokio::runtime::Runtime;
 
 const DEFAULT_RECALL_TIMEOUT_SECS: u64 = 6;
 const HTTP_DEFAULT_URL: &str = "http://127.0.0.1:8000";
@@ -50,76 +51,62 @@ fn write_counter(p: &std::path::Path, c: &CycleCounter) {
     let _ = fs::write(p, serde_json::to_string_pretty(c).unwrap_or_default());
 }
 
-fn run_bun_rs_learn(args: &[&str], cwd: &str, timeout: Duration) -> String {
-    let bun = match which::which("bun.exe").or_else(|_| which::which("bun")) {
-        Ok(p) => p,
-        Err(_) => return String::new(),
-    };
-    let mut full_args: Vec<&str> = vec!["x", "rs-learn"];
-    full_args.extend_from_slice(args);
-    let child = match no_window_cmd(&bun)
-        .args(&full_args)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return String::new(),
-    };
-    wait_with_timeout(child, timeout)
+/// Shared tokio runtime for rs-learn direct calls. Created once per plugkit invocation.
+fn rt() -> &'static Runtime {
+    static RT: OnceLock<Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("rs-learn tokio runtime")
+    })
 }
 
-fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> String {
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                let mut so = Vec::new();
-                if let Some(mut o) = child.stdout.take() { let _ = std::io::Read::read_to_end(&mut o, &mut so); }
-                return String::from_utf8_lossy(&so).trim().to_string();
-            }
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return String::new();
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(_) => return String::new(),
+/// Run a future against rs-learn lib with a wall-clock timeout. Returns None on timeout/error.
+fn run_with_timeout<F, T>(timeout: Duration, fut: F) -> Option<T>
+where
+    F: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    rt().block_on(async move {
+        match tokio::time::timeout(timeout, fut).await {
+            Ok(Ok(v)) => Some(v),
+            _ => None,
         }
-    }
+    })
 }
 
-fn spawn_detached_bun_rs_learn(args: &[&str], cwd: &str) {
-    let Ok(bun) = which::which("bun.exe").or_else(|_| which::which("bun")) else { return };
-    let mut full_args: Vec<&str> = vec!["x", "rs-learn"];
-    full_args.extend_from_slice(args);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x00000008;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let _ = Command::new(&bun)
-            .args(&full_args)
-            .current_dir(cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
-            .spawn();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = Command::new(&bun)
-            .args(&full_args)
-            .current_dir(cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
+/// Detached fire-and-forget lib call. Spawns onto the shared runtime; never blocks the hook.
+fn spawn_detached<F>(fut: F)
+where
+    F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    rt().spawn(async move { let _ = fut.await; });
+}
+
+/// Open store + embedder + llm against the project's rs-learn DB. Honors RS_LEARN_DB_PATH /
+/// project .gm/rs-learn.db resolution. Done once-per-call (no caching across hooks because
+/// each plugkit invocation is a fresh process).
+async fn open_graph(project_dir: &str) -> anyhow::Result<(
+    std::sync::Arc<rs_learn::Store>,
+    std::sync::Arc<rs_learn::Embedder>,
+    std::sync::Arc<rs_learn::graph::llm::LlmJson>,
+)> {
+    // Resolve relative to project_dir by setting CWD via env override; rs_learn::resolve_db_path()
+    // uses RS_LEARN_DB_PATH if set, otherwise <cwd>/.gm/rs-learn.db.
+    let db_path = if let Ok(p) = std::env::var("RS_LEARN_DB_PATH") {
+        std::path::PathBuf::from(p)
+    } else {
+        std::path::PathBuf::from(project_dir).join(".gm").join("rs-learn.db")
+    };
+    let db_str = db_path.to_string_lossy().to_string();
+    let store = std::sync::Arc::new(rs_learn::Store::open(&db_str).await?);
+    let embedder = std::sync::Arc::new(rs_learn::Embedder::new());
+    let backend = rs_learn::backend::from_env()
+        .map_err(|e| anyhow::anyhow!("backend: {e}"))?;
+    let llm = std::sync::Arc::new(rs_learn::graph::llm::LlmJson::new(backend));
+    Ok((store, embedder, llm))
 }
 
 fn http_base() -> String {
@@ -177,13 +164,18 @@ pub fn recall(query: &str, project_dir: &str, limit: u32) -> String {
         if !formatted.is_empty() { return formatted; }
     }
 
-    let limit_str = limit.to_string();
-    let raw = run_bun_rs_learn(
-        &["search", query, "--scope", "episodes", "--limit", &limit_str],
-        project_dir,
-        Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS),
-    );
-    if raw.is_empty() { return String::new(); }
+    let q = query.to_string();
+    let pd = project_dir.to_string();
+    let lim = limit as usize;
+    let hits = run_with_timeout(Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS), async move {
+        let (store, embedder, llm) = open_graph(&pd).await?;
+        let searcher = rs_learn::graph::search::Searcher::with_llm(store, embedder, llm);
+        let cfg = rs_learn::graph::search::SearchConfig { limit: lim, ..Default::default() };
+        let hits = searcher.search_episodes(&q, &cfg).await?;
+        Ok(hits)
+    });
+    let Some(hits) = hits else { return String::new() };
+    let raw = match serde_json::to_string(&hits) { Ok(s) => s, Err(_) => return String::new() };
     format_recall(&raw, limit)
 }
 
@@ -232,7 +224,13 @@ pub fn tick_and_maybe_run_deep_cycles(project_dir: &str) {
         .and_then(|s| s.parse().ok()).unwrap_or(50);
 
     if counter.prompts.saturating_sub(counter.last_communities) >= communities_every {
-        spawn_detached_bun_rs_learn(&["build-communities"], project_dir);
+        let pd = project_dir.to_string();
+        spawn_detached(async move {
+            let (store, embedder, llm) = open_graph(&pd).await?;
+            let ops = rs_learn::graph::communities::CommunityOps::new(store, embedder, llm);
+            let _ = ops.build_communities().await?;
+            Ok(())
+        });
         counter.last_communities = counter.prompts;
     }
 
@@ -264,17 +262,26 @@ fn spawn_trajectory_ingest(project_dir: &str) {
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
     let path = drafts_dir.join(format!("{}.txt", ts));
     if fs::write(&path, &summary).is_err() { return; }
-    let path_str = path.to_string_lossy().to_string();
-    spawn_detached_bun_rs_learn(
-        &["add", "--file", &path_str, "--source", "trajectory/recent-commits", "--no-extract"],
-        project_dir,
-    );
+    let pd = project_dir.to_string();
+    let summary_text = summary.clone();
+    spawn_detached(async move {
+        let (store, embedder, llm) = open_graph(&pd).await?;
+        let ingestor = rs_learn::graph::ingest::Ingestor::new(store, embedder, llm);
+        let _ = ingestor.add_episode_fast(&summary_text, "trajectory/recent-commits", None).await?;
+        Ok(())
+    });
 }
 
 fn spawn_debug_snapshot(project_dir: &str) {
     let gm_dir = std::path::Path::new(project_dir).join(".gm");
     let _ = fs::create_dir_all(&gm_dir);
-    let out = run_bun_rs_learn(&["debug"], project_dir, Duration::from_secs(8));
+    let pd = project_dir.to_string();
+    let snap = run_with_timeout(Duration::from_secs(8), async move {
+        let _ = open_graph(&pd).await?; // ensure subsystems init
+        let v = rs_learn::observability::dump();
+        Ok(serde_json::to_string_pretty(&v).unwrap_or_default())
+    });
+    let Some(out) = snap else { return };
     if out.is_empty() { return; }
     let _ = fs::write(gm_dir.join("learning-state.md"), out);
 }
@@ -284,12 +291,17 @@ fn spawn_debug_snapshot(project_dir: &str) {
 /// in the http router today; subprocess is fine for end-of-session events.
 pub fn record_quality(session_id: &str, project_dir: &str, quality: f32, note: &str) {
     if session_id.is_empty() { return; }
-    let q = format!("{:.2}", quality.clamp(0.0, 1.0));
-    if note.is_empty() {
-        spawn_detached_bun_rs_learn(&["feedback", session_id, &q], project_dir);
-    } else {
-        spawn_detached_bun_rs_learn(&["feedback", session_id, &q, note], project_dir);
-    }
+    let sid = session_id.to_string();
+    let pd = project_dir.to_string();
+    let q = quality.clamp(0.0, 1.0);
+    let signal = if note.is_empty() { None } else { Some(note.to_string()) };
+    spawn_detached(async move {
+        let db = std::path::PathBuf::from(&pd).join(".gm").join("rs-learn.db");
+        std::env::set_var("RS_LEARN_DB_PATH", &db);
+        let orch = rs_learn::Orchestrator::new_default().await?;
+        orch.feedback(&sid, rs_learn::learn::instant::FeedbackPayload { quality: q, signal }).await?;
+        Ok(())
+    });
 }
 
 /// Forget memories. Returns number of episodes invalidated. Directives:
@@ -321,34 +333,37 @@ pub fn forget(directive: &str, target: &str, project_dir: &str) -> Result<usize,
 }
 
 fn list_episode_ids(source: Option<&str>, query: Option<&str>, limit: u32, project_dir: &str) -> Result<Vec<String>, String> {
+    let pd = project_dir.to_string();
+    let lim = limit as usize;
     if let Some(q) = query {
-        let raw = if let Some(r) = http_search(q, limit) { r } else {
-            let limit_str = limit.to_string();
-            run_bun_rs_learn(&["search", q, "--scope", "episodes", "--limit", &limit_str], project_dir, Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS))
-        };
-        if raw.is_empty() { return Ok(vec![]); }
-        let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        let arr = v.as_array().cloned()
-            .or_else(|| v["hits"].as_array().cloned())
-            .unwrap_or_default();
-        let ids: Vec<String> = arr.iter().filter_map(|item| {
-            let row = if item["row"].is_object() { &item["row"] } else { item };
-            row["id"].as_str().map(|s| s.to_string())
+        let qs = q.to_string();
+        let pdc = pd.clone();
+        let hits = run_with_timeout(Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS), async move {
+            let (store, embedder, llm) = open_graph(&pdc).await?;
+            let searcher = rs_learn::graph::search::Searcher::with_llm(store, embedder, llm);
+            let cfg = rs_learn::graph::search::SearchConfig { limit: lim, ..Default::default() };
+            Ok(searcher.search_episodes(&qs, &cfg).await?)
+        }).ok_or_else(|| "search timed out or failed".to_string())?;
+        let ids: Vec<String> = hits.iter().filter_map(|h| {
+            h.row.get("id").and_then(|v| v.as_str()).map(|s| s.to_string())
         }).collect();
         return Ok(ids);
     }
     if let Some(s) = source {
-        let raw = run_bun_rs_learn(
-            &["episodes", "--source", s, "--limit", &limit.to_string()],
-            project_dir,
-            Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS),
-        );
-        if raw.is_empty() { return Ok(vec![]); }
-        let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        let arr = v.as_array().cloned().unwrap_or_default();
-        let ids: Vec<String> = arr.iter().filter_map(|item| {
-            item["id"].as_str().map(|s| s.to_string())
-        }).collect();
+        let src = s.to_string();
+        let ids = run_with_timeout(Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS), async move {
+            let (store, _embedder, _llm) = open_graph(&pd).await?;
+            let mut rows = store.conn.query(
+                "SELECT id FROM episodes WHERE source = ?1 AND (invalid_at IS NULL OR invalid_at = 0) \
+                 ORDER BY created_at DESC LIMIT ?2",
+                libsql::params![src, lim as i64],
+            ).await?;
+            let mut out: Vec<String> = Vec::new();
+            while let Some(row) = rows.next().await? {
+                if let Ok(id) = row.get::<String>(0) { out.push(id); }
+            }
+            Ok(out)
+        }).ok_or_else(|| "episode list timed out or failed".to_string())?;
         return Ok(ids);
     }
     Ok(vec![])
@@ -363,9 +378,19 @@ fn forget_by_ids(ids: &[String], project_dir: &str) -> Result<usize, String> {
             count += 1;
             continue;
         }
-        // Fallback: bun subprocess
-        let out = run_bun_rs_learn(&["forget", id], project_dir, Duration::from_secs(4));
-        if !out.is_empty() && !out.contains("error") { count += 1; }
+        let id_owned = id.clone();
+        let pd = project_dir.to_string();
+        let ok = run_with_timeout(Duration::from_secs(4), async move {
+            let (store, _embedder, _llm) = open_graph(&pd).await?;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64).unwrap_or(0);
+            let r = store.conn.execute(
+                "UPDATE episodes SET invalid_at = ?1 WHERE id = ?2 AND (invalid_at IS NULL OR invalid_at = 0)",
+                libsql::params![now, id_owned],
+            ).await?;
+            Ok(r > 0)
+        }).unwrap_or(false);
+        if ok { count += 1; }
     }
     Ok(count)
 }
@@ -399,12 +424,46 @@ pub fn learn_passthrough(action: &str, rest: &[String], project_dir: &str) -> St
         }
     }
 
-    let action = action.to_string();
-    let mut args: Vec<&str> = vec![&action];
-    let rest_refs: Vec<&str> = rest.iter().map(|s| s.as_str()).collect();
-    args.extend(rest_refs.iter());
-    let out = run_bun_rs_learn(&args, project_dir, Duration::from_secs(30));
-    out
+    let pd = project_dir.to_string();
+    let action_owned = action.to_string();
+    let rest_owned: Vec<String> = rest.to_vec();
+    run_with_timeout(Duration::from_secs(30), async move {
+        match action_owned.as_str() {
+            "build-communities" => {
+                let (store, embedder, llm) = open_graph(&pd).await?;
+                let ops = rs_learn::graph::communities::CommunityOps::new(store, embedder, llm);
+                let r = ops.build_communities().await?;
+                Ok(format!("communities={} members={}", r.community_count, r.member_count))
+            }
+            "debug" => {
+                let _ = open_graph(&pd).await?;
+                let v = match rest_owned.first() {
+                    Some(name) => rs_learn::observability::dump()
+                        .get(name.as_str()).cloned()
+                        .ok_or_else(|| anyhow::anyhow!("unknown subsystem '{}'", name))?,
+                    None => rs_learn::observability::dump(),
+                };
+                Ok(serde_json::to_string_pretty(&v).unwrap_or_default())
+            }
+            "feedback" => {
+                let request_id = rest_owned.first().ok_or_else(|| anyhow::anyhow!("feedback requires request_id"))?;
+                let q_str = rest_owned.get(1).ok_or_else(|| anyhow::anyhow!("feedback requires quality"))?;
+                let quality: f32 = q_str.parse().map_err(|_| anyhow::anyhow!("quality must be f32"))?;
+                let signal = rest_owned.get(2).cloned();
+                let db = std::path::PathBuf::from(&pd).join(".gm").join("rs-learn.db");
+                std::env::set_var("RS_LEARN_DB_PATH", &db);
+                let orch = rs_learn::Orchestrator::new_default().await?;
+                orch.feedback(request_id, rs_learn::learn::instant::FeedbackPayload { quality, signal }).await?;
+                Ok("ok".to_string())
+            }
+            "clear" => {
+                let (store, embedder, llm) = open_graph(&pd).await?;
+                rs_learn::graph::ingest::Ingestor::new(store, embedder, llm).clear_graph(None).await?;
+                Ok("cleared".to_string())
+            }
+            other => Err(anyhow::anyhow!("unsupported passthrough action '{}'", other)),
+        }
+    }).unwrap_or_default()
 }
 
 /// Fast-path ingest. Tries HTTP first, falls back to bun. Best-effort, never blocks.
@@ -419,15 +478,14 @@ pub fn ingest_fast(content: &str, source: &str, project_dir: &str) {
         return;
     }
 
-    // Fallback: subprocess. Write under .gm/ingest-drafts/ so it's auditable, then auto-clean.
-    let drafts_dir = gm_state_dir(project_dir).join("ingest-drafts");
-    let _ = fs::create_dir_all(&drafts_dir);
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-    let path = drafts_dir.join(format!("{}.txt", ts));
-    if fs::write(&path, content).is_err() { return; }
-    let path_str = path.to_string_lossy().to_string();
-    spawn_detached_bun_rs_learn(
-        &["add", "--file", &path_str, "--source", source, "--no-extract"],
-        project_dir,
-    );
+    // Fallback: direct lib call, fire-and-forget on shared runtime.
+    let pd = project_dir.to_string();
+    let content_owned = content.to_string();
+    let source_owned = source.to_string();
+    spawn_detached(async move {
+        let (store, embedder, llm) = open_graph(&pd).await?;
+        let ingestor = rs_learn::graph::ingest::Ingestor::new(store, embedder, llm);
+        let _ = ingestor.add_episode_fast(&content_owned, &source_owned, None).await?;
+        Ok(())
+    });
 }
