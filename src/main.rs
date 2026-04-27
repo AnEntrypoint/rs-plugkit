@@ -136,12 +136,15 @@ fn cmd_doctor() -> anyhow::Result<()> {
     println!("chrome processes visible: {}", chrome_count);
 
     if let Ok(cwd) = env::current_dir() {
-        let d = cwd.join(".code-search");
-        if d.exists() {
-            let size_bytes: u64 = walk_size(&d).unwrap_or(0);
-            println!(".code-search: {} ({} KB)", d.display(), size_bytes / 1024);
-        } else {
-            println!(".code-search: not present in cwd");
+        let d = cwd.join(".gm").join("code-search");
+        let legacy = cwd.join(".code-search");
+        let path = if d.exists() { Some(d) } else if legacy.exists() { Some(legacy) } else { None };
+        match path {
+            Some(p) => {
+                let size_bytes: u64 = walk_size(&p).unwrap_or(0);
+                println!("code-search: {} ({} KB)", p.display(), size_bytes / 1024);
+            }
+            None => println!("code-search: not present in cwd"),
         }
     }
 
