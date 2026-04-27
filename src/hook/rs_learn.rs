@@ -6,9 +6,10 @@
 //      Single shared embedder, ~5ms latency. Best for hot hooks.
 //   2. Direct rs-learn lib call via shared tokio runtime. No subprocess. No window flash.
 
-use std::{env, fs, io::{Read, Write}, net::TcpStream, path::PathBuf, sync::OnceLock, time::Duration};
+use std::{env, fs, io::{Read, Write}, net::TcpStream, path::PathBuf, sync::{Arc, OnceLock}, time::Duration};
 use super::no_window_cmd;
 use tokio::runtime::Runtime;
+use tokio::sync::Semaphore;
 
 const DEFAULT_RECALL_TIMEOUT_SECS: u64 = 6;
 const HTTP_DEFAULT_URL: &str = "http://127.0.0.1:8000";
@@ -63,13 +64,32 @@ fn rt() -> &'static Runtime {
     })
 }
 
+/// In-process semaphore that serializes rs-learn lib work to avoid local CPU/IO thrash from
+/// concurrent embedder/community-build runs. Default permits=1 (strict sequential). Override
+/// via env GM_RSLEARN_MAX_PARALLEL (clamped [1,3]). Cross-process gating still requires routing
+/// through `rs-learn serve` (HTTP), which has its own LLM_GATE; this semaphore handles the
+/// in-process case so a single plugkit hook invocation that fans out doesn't trigger N parallel
+/// embedder loads.
+fn gate() -> Arc<Semaphore> {
+    static GATE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    GATE.get_or_init(|| {
+        let raw = std::env::var("GM_RSLEARN_MAX_PARALLEL")
+            .ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+        let permits = raw.clamp(1, 3) as usize;
+        Arc::new(Semaphore::new(permits))
+    }).clone()
+}
+
 /// Run a future against rs-learn lib with a wall-clock timeout. Returns None on timeout/error.
+/// Acquires the in-process gate to serialize concurrent rs-learn work.
 fn run_with_timeout<F, T>(timeout: Duration, fut: F) -> Option<T>
 where
     F: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
     T: Send + 'static,
 {
+    let gate = gate();
     rt().block_on(async move {
+        let _permit = gate.acquire().await.ok()?;
         match tokio::time::timeout(timeout, fut).await {
             Ok(Ok(v)) => Some(v),
             _ => None,
@@ -78,11 +98,16 @@ where
 }
 
 /// Detached fire-and-forget lib call. Spawns onto the shared runtime; never blocks the hook.
+/// Acquires the in-process gate so concurrent fire-and-forget calls run sequentially.
 fn spawn_detached<F>(fut: F)
 where
     F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
 {
-    rt().spawn(async move { let _ = fut.await; });
+    let gate = gate();
+    rt().spawn(async move {
+        let Ok(_permit) = gate.acquire_owned().await else { return };
+        let _ = fut.await;
+    });
 }
 
 /// Open store + embedder + llm against the project's rs-learn DB. Honors RS_LEARN_DB_PATH /
