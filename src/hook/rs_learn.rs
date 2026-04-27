@@ -8,7 +8,7 @@
 
 use std::{env, fs, io::{Read, Write}, net::TcpStream, path::PathBuf, sync::{Arc, OnceLock}, time::Duration};
 use super::no_window_cmd;
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 use tokio::sync::Semaphore;
 
 const DEFAULT_RECALL_TIMEOUT_SECS: u64 = 6;
@@ -82,32 +82,45 @@ fn gate() -> Arc<Semaphore> {
 
 /// Run a future against rs-learn lib with a wall-clock timeout. Returns None on timeout/error.
 /// Acquires the in-process gate to serialize concurrent rs-learn work.
+///
+/// Runtime resolution: prefers the ambient tokio runtime (when called from `#[tokio::main]` or
+/// any tokio task) via `Handle::try_current()` + `block_in_place`. Falls back to the dedicated
+/// shared runtime when called from a non-tokio context (rare; legacy hook entry points).
 fn run_with_timeout<F, T>(timeout: Duration, fut: F) -> Option<T>
 where
     F: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
     T: Send + 'static,
 {
     let gate = gate();
-    rt().block_on(async move {
+    let work = async move {
         let _permit = gate.acquire().await.ok()?;
         match tokio::time::timeout(timeout, fut).await {
             Ok(Ok(v)) => Some(v),
             _ => None,
         }
-    })
+    };
+    match Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(work)),
+        Err(_) => rt().block_on(work),
+    }
 }
 
-/// Detached fire-and-forget lib call. Spawns onto the shared runtime; never blocks the hook.
-/// Acquires the in-process gate so concurrent fire-and-forget calls run sequentially.
+/// Detached fire-and-forget lib call. Spawns onto the ambient runtime when available, falling
+/// back to the dedicated shared runtime. Acquires the in-process gate so concurrent fire-and-forget
+/// calls run sequentially.
 fn spawn_detached<F>(fut: F)
 where
     F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
 {
     let gate = gate();
-    rt().spawn(async move {
+    let work = async move {
         let Ok(_permit) = gate.acquire_owned().await else { return };
         let _ = fut.await;
-    });
+    };
+    match Handle::try_current() {
+        Ok(handle) => { handle.spawn(work); }
+        Err(_) => { rt().spawn(work); }
+    }
 }
 
 /// Open store + embedder + llm against the project's rs-learn DB. Honors RS_LEARN_DB_PATH /
