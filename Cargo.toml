@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 rs-exec = { git = "https://github.com/AnEntrypoint/rs-exec", branch = "main" }
-rs-codeinsight = { git = "https://github.com/AnEntrypoint/rs-codeinsight", branch = "main", default-features = false, features = ["javascript","typescript","python","rust","go","json"] }
+rs-codeinsight = { git = "https://github.com/AnEntrypoint/rs-codeinsight", branch = "main", features = ["all-languages"] }
 rs-search = { git = "https://github.com/AnEntrypoint/rs-search", branch = "main", default-features = false, features = ["perf"] }
 rs-learn = { git = "https://github.com/AnEntrypoint/rs-learn", branch = "main", default-features = false }
 libsql = { version = "0.9", default-features = false, features = ["core", "serde"] }
