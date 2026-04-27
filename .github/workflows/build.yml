@@ -41,6 +41,36 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Show binary size
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          ls -la target/${{ matrix.target }}/release/plugkit
+          du -h target/${{ matrix.target }}/release/plugkit
+
+      - name: Install cargo-bloat
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo install cargo-bloat --locked
+
+      - name: Run cargo bloat
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          mkdir -p bloat-report
+          cargo bloat --release --target ${{ matrix.target }} --crates -n 30 > bloat-report/bloat-by-crate.txt 2>&1 || true
+          cargo bloat --release --target ${{ matrix.target }} -n 50 > bloat-report/bloat-by-fn.txt 2>&1 || true
+          echo "=== TOP CRATES ==="
+          head -40 bloat-report/bloat-by-crate.txt
+          echo "=== TOP FUNCTIONS ==="
+          head -60 bloat-report/bloat-by-fn.txt
+
+      - name: Upload bloat report
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bloat-report
+          path: bloat-report/
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
