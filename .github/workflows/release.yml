@@ -85,14 +85,6 @@ jobs:
           if [[ "${{ matrix.target }}" == *"windows"* ]]; then ext=".exe"; fi
           cp "target/${{ matrix.target }}/release/plugkit${ext}" "${{ matrix.asset_name }}"
 
-      - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ matrix.asset_name }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -104,40 +96,15 @@ jobs:
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: bins/
-
-      - name: Checkout gm
-        uses: actions/checkout@v4
-        with:
-          repository: AnEntrypoint/gm
-          token: ${{ secrets.PUBLISHER_TOKEN }}
-          path: plugforge
-          fetch-depth: 0
-
-      - name: Copy binaries into gm
-        shell: bash
-        run: |
-          for target in plugforge/gm-build-latest/gm-cc/bin plugforge/gm-starter/bin; do
-            mkdir -p "$target"
-            for d in bins/*/; do
-              f=$(ls "$d")
-              cp "$d$f" "$target/$f"
-            done
-            chmod +x "$target/plugkit-linux-x64" "$target/plugkit-linux-arm64" "$target/plugkit-darwin-x64" "$target/plugkit-darwin-arm64" 2>/dev/null || true
-            cp "$target/plugkit-win32-x64.exe" "$target/plugkit.exe" 2>/dev/null || true
-          done
-          ls -la plugforge/gm-build-latest/gm-cc/bin
-
       - name: Checkout rs-plugkit for version
         uses: actions/checkout@v4
         with:
           path: rs-plugkit-src
           token: ${{ secrets.PUBLISHER_TOKEN }}
+          fetch-depth: 0
 
       - name: Auto-bump rs-plugkit patch version
+        id: bump
         shell: bash
         working-directory: rs-plugkit-src
         env:
@@ -151,86 +118,112 @@ jobs:
           NEW_PATCH=$((PATCH + 1))
           NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
           sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$NEW_VERSION\"/}" Cargo.toml
-          sed -i "s/name = \"rs-plugkit\"\nversion = \"$CURRENT\"/name = \"rs-plugkit\"\nversion = \"$NEW_VERSION\"/" Cargo.lock || true
           node -e "
             const fs = require('fs');
             let lock = fs.readFileSync('Cargo.lock', 'utf8');
             lock = lock.replace('name = \"rs-plugkit\"\nversion = \"$CURRENT\"', 'name = \"rs-plugkit\"\nversion = \"$NEW_VERSION\"');
             fs.writeFileSync('Cargo.lock', lock);
-            console.log('Cargo.lock version bumped from $CURRENT to $NEW_VERSION');
           "
           git add Cargo.toml Cargo.lock
           if git diff --cached --quiet; then
             echo "No version change needed"
+            echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
           else
             git commit -m "chore: auto-bump version to $NEW_VERSION [skip ci]"
             git fetch origin main
             git rebase -s recursive -X theirs origin/main
             git push origin HEAD:main
+            echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           fi
-          echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
 
-      - name: Update plugkitVersion in gm.json
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bins/
+
+      - name: Stage release assets
+        id: stage
         shell: bash
+        env:
+          VER: ${{ steps.bump.outputs.version }}
         run: |
-          VERSION="${VERSION:-$(grep '^version' rs-plugkit-src/Cargo.toml | head -1 | sed 's/.*= *"//;s/"//')}"
-          if [ -n "$VERSION" ]; then
-            node -e "
-              const fs = require('fs');
-              const p = 'plugforge/gm-starter/gm.json';
-              const j = JSON.parse(fs.readFileSync(p,'utf8'));
-              j.plugkitVersion = '$VERSION';
-              fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
-              console.log('plugkitVersion set to', '$VERSION');
-            "
-          fi
+          set -e
+          mkdir -p release-assets
+          cp bins/plugkit-win32-x64.exe/plugkit-win32-x64.exe     release-assets/
+          cp bins/plugkit-win32-arm64.exe/plugkit-win32-arm64.exe release-assets/
+          cp bins/plugkit-darwin-x64/plugkit-darwin-x64           release-assets/
+          cp bins/plugkit-darwin-arm64/plugkit-darwin-arm64       release-assets/
+          cp bins/plugkit-linux-x64/plugkit-linux-x64             release-assets/
+          cp bins/plugkit-linux-arm64/plugkit-linux-arm64         release-assets/
+          chmod +x release-assets/plugkit-darwin-* release-assets/plugkit-linux-* || true
+          cd release-assets
+          # Portable sha256 manifest: "<hex>  <filename>" (no leading * for binary mode)
+          sha256sum plugkit-win32-x64.exe plugkit-win32-arm64.exe \
+                    plugkit-darwin-x64 plugkit-darwin-arm64 \
+                    plugkit-linux-x64 plugkit-linux-arm64 \
+            | sed 's/ \*/  /' > plugkit.sha256
+          echo "$VER" > plugkit.version
+          ls -la
+          cat plugkit.sha256
 
-      - name: Squash-commit binaries to gm
-        shell: bash
-        working-directory: plugforge
+      - name: Upload to plugkit-bin Release
         env:
           GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
+          VER: ${{ steps.bump.outputs.version }}
         run: |
-          git config user.name "gm-bot"
-          git config user.email "noreply@github.com"
-          git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+          set -e
+          if ! gh release view "v$VER" --repo AnEntrypoint/plugkit-bin >/dev/null 2>&1; then
+            gh release create "v$VER" \
+              --repo AnEntrypoint/plugkit-bin \
+              --title "plugkit v$VER" \
+              --notes "Auto-published by rs-plugkit CI from $GITHUB_SHA"
+          fi
+          gh release upload "v$VER" \
+            --repo AnEntrypoint/plugkit-bin \
+            --clobber \
+            release-assets/plugkit-win32-x64.exe \
+            release-assets/plugkit-win32-arm64.exe \
+            release-assets/plugkit-darwin-x64 \
+            release-assets/plugkit-darwin-arm64 \
+            release-assets/plugkit-linux-x64 \
+            release-assets/plugkit-linux-arm64 \
+            release-assets/plugkit.sha256 \
+            release-assets/plugkit.version
 
-          TAG="${{ github.ref_name }}"
-
-          attempt_push() {
-            git fetch origin main
-
-            LAST_MSG=$(git log -1 --format=%s origin/main 2>/dev/null || echo "")
-            case "$LAST_MSG" in
-              "chore: update plugkit binaries"*)
-                BASE="origin/main~1"
-                echo "Prior binary commit at origin/main tip — will squash over it"
-                ;;
-              *)
-                BASE="origin/main"
-                echo "No prior binary commit at tip — will commit on top"
-                ;;
-            esac
-
-            git reset --mixed "$BASE"
-            git add -f gm-build-latest/gm-cc/bin/ gm-starter/bin/ gm-starter/gm.json
-
-            if git diff --cached --quiet; then
-              echo "No binary changes"
-              return 0
-            fi
-
-            git commit -m "chore: update plugkit binaries to $TAG"
-            git push --force-with-lease origin HEAD:main
-          }
-
+      - name: Bump gm-starter metadata
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
+          VER: ${{ steps.bump.outputs.version }}
+        run: |
+          set -e
+          git config --global user.name "rs-plugkit-bot"
+          git config --global user.email "noreply@github.com"
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/AnEntrypoint/gm.git" gm-src
+          cd gm-src
+          CURR=$(jq -r '.plugkitVersion' gm-starter/gm.json)
+          if [ "$CURR" = "$VER" ]; then
+            echo "plugkitVersion already at $VER, no metadata bump needed"
+            exit 0
+          fi
+          jq --arg v "$VER" '.plugkitVersion = $v' gm-starter/gm.json > /tmp/gm.json
+          mv /tmp/gm.json gm-starter/gm.json
+          echo "$VER" > gm-starter/bin/plugkit.version
+          # Sync sha256 manifest from the just-uploaded release
+          cp ../release-assets/plugkit.sha256 gm-starter/bin/plugkit.sha256 2>/dev/null || \
+            curl -sL "https://github.com/AnEntrypoint/plugkit-bin/releases/download/v${VER}/plugkit.sha256" -o gm-starter/bin/plugkit.sha256
+          git add gm-starter/gm.json gm-starter/bin/plugkit.version gm-starter/bin/plugkit.sha256
+          if git diff --cached --quiet; then
+            echo "No metadata changes"
+            exit 0
+          fi
+          git commit -m "chore: bump plugkitVersion to $VER [skip ci]"
           for i in 1 2 3 4 5; do
-            if attempt_push; then
-              echo "Push succeeded on attempt $i"
+            if git push origin main; then
+              echo "Pushed metadata bump on attempt $i"
               exit 0
             fi
-            echo "Push attempt $i failed (likely concurrent commit on origin/main); re-fetching and retrying in $((i*2))s"
-            sleep $((i*2))
+            echo "Push attempt $i failed; rebasing"
+            git pull --rebase origin main || true
           done
           echo "All push attempts exhausted" >&2
           exit 1
