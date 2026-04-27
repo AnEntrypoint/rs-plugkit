@@ -1,10 +1,23 @@
 /target
 .prd
-.gm-stop-verified
-.code-search/
 *.stackdump
 
 .codeinsight
 .plugkit-browser-profile/
 .plugkit-browser-profile-*/
 .plugkit-agent-worktree/
+# >>> gm managed (do not edit between markers)
+.gm-stop-verified
+.gm/prd-state.json
+.gm/rslearn-counter.json
+.gm/git-block-counter.json
+.gm/learning-state.md
+.gm/trajectory-drafts/
+.gm/ingest-drafts/
+.gm/needs-gm
+.gm/lastskill
+.gm/turn-state.json
+.gm/no-memorize-this-turn
+.gm/prd.paused.yml
+# tracked: .gm/rs-learn.db, .code-search/, AGENTS.md, .gm/prd.yml
+# <<< gm managed
