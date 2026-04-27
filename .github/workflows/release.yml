@@ -56,13 +56,12 @@ jobs:
           key: release-${{ runner.os }}-${{ matrix.target }}
           cache-on-failure: true
 
-      - name: Update git dependencies to latest
+      - name: Wipe cargo git cache and lockfile (force fresh dep resolution)
+        shell: bash
         run: |
-          cargo update -p rs-learn || true
-          cargo update -p rs-search || true
-          cargo update -p rs-codeinsight || true
-          cargo update -p rs-exec || true
-          cargo update
+          rm -rf ~/.cargo/git/db ~/.cargo/git/checkouts || true
+          rm -f Cargo.lock
+          cargo generate-lockfile
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
