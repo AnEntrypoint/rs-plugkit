@@ -200,11 +200,11 @@ jobs:
           git config --global user.email "noreply@github.com"
           git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/AnEntrypoint/gm.git" gm-src
           cd gm-src
-          CURR=$(jq -r '.plugkitVersion' gm-starter/gm.json)
-          if [ "$CURR" = "$VER" ]; then
-            echo "plugkitVersion already at $VER, no metadata bump needed"
-            exit 0
-          fi
+          # Always re-sync sha256 + version, even if plugkitVersion unchanged.
+          # Windows MSVC builds are non-reproducible: a re-run of the same version
+          # uploads new binaries (gh release upload --clobber) with new hashes,
+          # so the manifest in gm-starter must always be re-synced or downstream
+          # sha verification on Windows clients fails.
           jq --arg v "$VER" '.plugkitVersion = $v' gm-starter/gm.json > /tmp/gm.json
           mv /tmp/gm.json gm-starter/gm.json
           echo "$VER" > gm-starter/bin/plugkit.version
