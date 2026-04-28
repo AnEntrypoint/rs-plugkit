@@ -1,0 +1,23 @@
+id: home
+title: Home
+hero:
+  heading: "rs-plugkit"
+  subheading: "plugin scaffolding for the rs-* family"
+  body: "shared scaffolding so every rs-* plug-in for gm looks and behaves the same."
+  badges:
+    - { label: "rust" }
+    - { label: "plugins" }
+    - { label: "gm" }
+  ctas:
+    - { label: "GitHub", href: "https://github.com/AnEntrypoint/rs-plugkit", primary: true }
+    - { label: "247420", href: "https://247420.xyz" }
+features:
+  heading: "Why rs-plugkit"
+  items:
+    - { name: "rust", desc: "flagship trait of rs-plugkit." }
+    - { name: "plugins", desc: "core capability of rs-plugkit." }
+quickstart:
+  heading: Quick start
+  lines:
+    - { kind: "cmt", text: "# source" }
+    - { kind: "cmd", text: "git clone https://github.com/AnEntrypoint/rs-plugkit.git" }
