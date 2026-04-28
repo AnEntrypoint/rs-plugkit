@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "rs-plugkit"
-version = "0.1.237"
+version = "0.1.238"
 dependencies = [
  "anyhow",
  "clap",
