@@ -140,6 +140,7 @@ async fn open_graph(project_dir: &str) -> anyhow::Result<(
     };
     let db_str = db_path.to_string_lossy().to_string();
     let store = std::sync::Arc::new(rs_learn::Store::open(&db_str).await?);
+    rs_search::embed_cache::set_shared_connection(store.conn.clone());
     let embedder = std::sync::Arc::new(rs_learn::Embedder::new());
     let backend = rs_learn::backend::from_env()
         .map_err(|e| anyhow::anyhow!("backend: {e}"))?;
