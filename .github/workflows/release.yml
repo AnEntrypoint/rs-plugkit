@@ -8,6 +8,10 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   build:
     strategy:
@@ -216,7 +220,7 @@ jobs:
             echo "No metadata changes"
             exit 0
           fi
-          git commit -m "chore: bump plugkitVersion to $VER [skip ci]"
+          git commit -m "chore: bump plugkitVersion to $VER"
           for i in 1 2 3 4 5; do
             if git push origin main; then
               echo "Pushed metadata bump on attempt $i"
