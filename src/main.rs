@@ -56,6 +56,19 @@ enum Cmd {
     SessionCleanup {
         #[arg(long)] session: String,
     },
+    /// Wait for a background task to produce new output (or finish). Polls listTasks.
+    Sleep {
+        task_id: String,
+        #[arg(long, default_value_t = 30)] max_secs: u64,
+    },
+    /// Show status of a background task (or all tasks if none specified).
+    Status {
+        task_id: Option<String>,
+    },
+    /// Terminate a background task by id (best-effort via listTasks + kill).
+    Close {
+        task_id: String,
+    },
     Hook {
         event: String,
     },
@@ -411,6 +424,61 @@ async fn main() {
                     if let Some(arr) = res["processes"].as_array() {
                         for p in arr { println!("{}  status={}  pid={}", p["name"].as_str().unwrap_or("?"), p["status"].as_str().unwrap_or("?"), p["pid"]); }
                     }
+                }
+            }
+            Cmd::Sleep { task_id, max_secs } => {
+                ensure_runner().await?;
+                let id = parse_task_id(&task_id);
+                let deadline = std::time::Instant::now() + Duration::from_secs(max_secs.min(3600));
+                let mut last_output_len = 0usize;
+                loop {
+                    let res = rpc_client::rpc_call("listTasks", json!({}), 5000).await?;
+                    let task = res["tasks"].as_array().and_then(|arr| arr.iter().find(|t| t["id"].as_u64() == Some(id))).cloned();
+                    let Some(task) = task else {
+                        eprintln!("Task task_{} not found", id);
+                        exit_code = 1; return Ok(());
+                    };
+                    let output = task["output"].as_array().map(|a| a.iter().map(|e| e["d"].as_str().unwrap_or("")).collect::<String>()).unwrap_or_default();
+                    if output.len() > last_output_len {
+                        print!("{}", &output[last_output_len..]);
+                        last_output_len = output.len();
+                    }
+                    let status = task["status"].as_str().unwrap_or("");
+                    if status == "completed" || status == "failed" || status == "killed" {
+                        println!("\n[task task_{} {}]", id, status);
+                        return Ok(());
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        println!("\n[task task_{} still {} after {}s]", id, status, max_secs);
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+            Cmd::Status { task_id } => {
+                ensure_runner().await?;
+                let res = rpc_client::rpc_call("listTasks", json!({}), 5000).await?;
+                let arr = res["tasks"].as_array().cloned().unwrap_or_default();
+                if let Some(tid) = task_id {
+                    let id = parse_task_id(&tid);
+                    match arr.iter().find(|t| t["id"].as_u64() == Some(id)) {
+                        Some(t) => println!("task_{}  status={}  exitCode={}", id, t["status"].as_str().unwrap_or("?"), t["exitCode"]),
+                        None => { eprintln!("Task task_{} not found", id); exit_code = 1; }
+                    }
+                } else {
+                    if arr.is_empty() { println!("No background tasks."); }
+                    else { for t in &arr { println!("task_{}  status={}  exitCode={}", t["id"].as_u64().unwrap_or(0), t["status"].as_str().unwrap_or("?"), t["exitCode"]); } }
+                }
+            }
+            Cmd::Close { task_id } => {
+                ensure_runner().await?;
+                let id = parse_task_id(&task_id);
+                let res = rpc_client::rpc_call("deleteTask", json!({ "taskId": id }), 5000).await?;
+                if res["ok"].as_bool().unwrap_or(false) || res["deleted"].as_bool().unwrap_or(false) {
+                    println!("task_{} closed", id);
+                } else {
+                    eprintln!("Could not close task_{}: {}", id, res);
+                    exit_code = 1;
                 }
             }
             Cmd::Codeinsight { path, json, cache, read_cache } => {
