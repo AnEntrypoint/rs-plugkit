@@ -103,6 +103,12 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
             }
 
             if raw_lang == "bash" || raw_lang == "sh" {
+                if let Some(nested_verb) = bash_body_starts_with_exec_verb(code) {
+                    return deny(&format!(
+                        "exec:{} cannot be nested inside exec:bash. Call it at the top level instead:\n\n  exec:{}\n  <args on next line>\n\nThe wrapping `exec:bash` block forwards the body to /usr/bin/bash, which sees `exec:{}` as a literal command and fails with `command not found`. All exec:<verb> utility calls (memorize, recall, codesearch, browser, runner, type, kill-port, wait, sleep, status, close, pause, forget, feedback, learn-status, learn-debug, learn-build) must be the first line of the Bash tool input — never inside another exec block.",
+                        nested_verb, nested_verb, nested_verb
+                    ));
+                }
                 if let Some(banned) = bash_banned_tool(code) {
                     return deny(&format!(
                         "`{}` is blocked. Use exec:codesearch for ALL codebase lookups — it handles exact strings, symbols, regex patterns, file-name fragments, and PDF pages.\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Minimum 4 attempts before concluding absent. See code-search skill for full protocol.\n\nGrep, Glob, Find, and rg/grep/find-in-bash are ALL blocked. There is no exception path — codesearch is the replacement for every exact-match / regex / file-name-pattern need. For a known absolute path, use the Read tool.",
@@ -216,6 +222,29 @@ fn bash_has_raw_sleep(code: &str) -> bool {
     false
 }
 
+fn bash_body_starts_with_exec_verb(code: &str) -> Option<String> {
+    const VERBS: &[&str] = &[
+        "memorize","recall","forget","feedback",
+        "codesearch","search",
+        "browser","runner","type","kill-port",
+        "wait","pause","sleep","status","close",
+        "learn-status","learn:status","learn-debug","learn:debug","learn-build","learn:build",
+        "nodejs","python","typescript","go","rust","c","cpp","java","cmd","powershell","deno","bash","sh",
+    ];
+    for line in code.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') { continue; }
+        if let Some(rest) = t.strip_prefix("exec:") {
+            let verb = rest.split(|c: char| c.is_whitespace() || c == ';' || c == '|' || c == '&').next().unwrap_or("").trim().to_lowercase();
+            if VERBS.iter().any(|v| *v == verb.as_str()) {
+                return Some(verb);
+            }
+        }
+        return None;
+    }
+    None
+}
+
 fn normalize_windows_paths(code: &str) -> String {
     if !cfg!(windows) { return code.to_string(); }
     let mut out = String::with_capacity(code.len());
@@ -278,6 +307,46 @@ mod bash_banned_tests {
     fn allows_empty_and_whitespace() {
         assert_eq!(bash_banned_tool(""), None);
         assert_eq!(bash_banned_tool("\n\n"), None);
+    }
+}
+
+#[cfg(test)]
+mod nested_exec_verb_tests {
+    use super::bash_body_starts_with_exec_verb;
+
+    #[test]
+    fn detects_nested_memorize() {
+        assert_eq!(bash_body_starts_with_exec_verb("exec:memorize\nfoo/bar\nfact body"), Some("memorize".into()));
+    }
+
+    #[test]
+    fn detects_nested_recall_browser_codesearch() {
+        assert_eq!(bash_body_starts_with_exec_verb("exec:recall\nthebird"), Some("recall".into()));
+        assert_eq!(bash_body_starts_with_exec_verb("exec:browser\nawait page.goto('x')"), Some("browser".into()));
+        assert_eq!(bash_body_starts_with_exec_verb("exec:codesearch\nfoo bar"), Some("codesearch".into()));
+    }
+
+    #[test]
+    fn ignores_blank_lines_and_comments_at_top() {
+        assert_eq!(bash_body_starts_with_exec_verb("\n\n# comment\nexec:memorize\nfoo"), Some("memorize".into()));
+    }
+
+    #[test]
+    fn allows_normal_bash() {
+        assert_eq!(bash_body_starts_with_exec_verb("ls -la"), None);
+        assert_eq!(bash_body_starts_with_exec_verb("echo exec:memorize"), None);
+        assert_eq!(bash_body_starts_with_exec_verb("for i in 1 2 3; do echo $i; done"), None);
+    }
+
+    #[test]
+    fn allows_unknown_verb() {
+        assert_eq!(bash_body_starts_with_exec_verb("exec:notaverb\nfoo"), None);
+    }
+
+    #[test]
+    fn allows_empty() {
+        assert_eq!(bash_body_starts_with_exec_verb(""), None);
+        assert_eq!(bash_body_starts_with_exec_verb("\n\n"), None);
     }
 }
 
