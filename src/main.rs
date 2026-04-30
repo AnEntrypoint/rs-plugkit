@@ -32,10 +32,12 @@ enum Cmd {
         #[arg(long)] cwd: Option<String>,
         #[arg(long)] file: Option<String>,
         #[arg(long)] session: Option<String>,
+        #[arg(long = "timeout-ms")] timeout_ms: Option<u64>,
         code: Vec<String>,
     },
     Bash {
         #[arg(long)] cwd: Option<String>,
+        #[arg(long = "timeout-ms")] timeout_ms: Option<u64>,
         commands: Vec<String>,
     },
     #[command(name = "type")] Type { task_id: String, input: Vec<String>, #[arg(long)] session: Option<String> },
@@ -281,9 +283,18 @@ fn normalize_code_input(raw: String) -> String {
 }
 
 
-async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>) -> anyhow::Result<i32> {
+const DEFAULT_EXEC_TIMEOUT_MS: u64 = 300_000;
+
+async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>, timeout_ms: Option<u64>) -> anyhow::Result<i32> {
     ensure_runner().await?;
-    let mut exec_params = json!({ "code": code, "runtime": runtime, "workingDirectory": cwd });
+    let effective_timeout = match timeout_ms {
+        Some(n) if n > 0 => n,
+        _ => {
+            eprintln!("[plugkit] warn: --timeout-ms not set; applying transitional default {} ms (set --timeout-ms explicitly to silence)", DEFAULT_EXEC_TIMEOUT_MS);
+            DEFAULT_EXEC_TIMEOUT_MS
+        }
+    };
+    let mut exec_params = json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "timeoutMs": effective_timeout });
     if let Some(sid) = session_id { exec_params["sessionId"] = json!(sid); }
     let exec_result = rpc_client::rpc_call("execute", exec_params, 0).await?;
     let result = &exec_result["result"];
@@ -301,9 +312,14 @@ async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>
         if let Some(s) = result["stdout"].as_str() { if !s.is_empty() { print!("{}", s); } }
         if let Some(s) = result["stderr"].as_str() { if !s.is_empty() { eprint!("{}", s); } }
     }
-    if let Some(e) = result["error"].as_str() { if !e.is_empty() { eprintln!("Error: {}", e); return Ok(1); } }
+    let timed_out = result["timedOut"].as_bool().unwrap_or(false);
+    if timed_out {
+        eprintln!("[exec timed out after {} ms; partial output above]", effective_timeout);
+    }
+    if let Some(e) = result["error"].as_str() { if !e.is_empty() && !timed_out { eprintln!("Error: {}", e); return Ok(1); } }
 
     let exit_code = result["exitCode"].as_i64().unwrap_or(0) as i32;
+    if timed_out { return Ok(if exit_code != 0 { exit_code } else { 124 }); }
     if result["success"].as_bool() == Some(false) { return Ok(if exit_code != 0 { exit_code } else { 1 }); }
     Ok(exit_code)
 }
@@ -327,21 +343,21 @@ async fn main() {
 
     let result: anyhow::Result<()> = async {
         match cli.command {
-            Cmd::Exec { lang, cwd, file, session, code } => {
+            Cmd::Exec { lang, cwd, file, session, timeout_ms, code } => {
                 let code_str = if let Some(ref f) = file { normalize_code_input(fs::read_to_string(f)?) } else { normalize_code_input(code.join(" ")) };
                 if let Some(ref f) = file { let _ = fs::remove_file(f); }
                 if code_str.trim().is_empty() { eprintln!("No code provided"); exit_code = 1; return Ok(()); }
                 let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
                 let mut runtime = lang.unwrap_or_else(|| "nodejs".into());
                 if runtime == "typescript" || runtime == "auto" { runtime = "nodejs".into(); }
-                exit_code = run_code(&code_str, &runtime, &cwd, session.as_deref()).await?;
+                exit_code = run_code(&code_str, &runtime, &cwd, session.as_deref(), timeout_ms).await?;
             }
-            Cmd::Bash { cwd, commands } => {
+            Cmd::Bash { cwd, timeout_ms, commands } => {
                 let cmd = commands.join(" ");
                 if cmd.trim().is_empty() { eprintln!("No commands provided"); exit_code = 1; return Ok(()); }
                 let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
                 let runtime = if cfg!(windows) { "powershell" } else { "bash" };
-                exit_code = run_code(&cmd, runtime, &cwd, None).await?;
+                exit_code = run_code(&cmd, runtime, &cwd, None, timeout_ms).await?;
             }
             Cmd::Type { task_id, input, session } => {
                 ensure_runner().await?;
