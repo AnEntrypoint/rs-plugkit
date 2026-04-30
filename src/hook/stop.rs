@@ -127,17 +127,21 @@ pub fn run_stop_git() {
         }
     }
 
-    match git(&["rev-list", "--count", "@{u}..HEAD"], &project_dir) {
-        Some(s) => {
-            let n: u64 = s.parse().unwrap_or(0);
-            if n > 0 { issues.push(format!("{} commit(s) not pushed", n)); }
-        }
-        None => issues.push("Unable to verify push status - may have unpushed commits".into()),
-    }
+    let in_reach = super::user_can_push_to_remote(&project_dir);
 
-    if let Some(s) = git(&["rev-list", "--count", "HEAD..@{u}"], &project_dir) {
-        let n: u64 = s.parse().unwrap_or(0);
-        if n > 0 { issues.push(format!("{} upstream change(s) not pulled", n)); }
+    if in_reach {
+        match git(&["rev-list", "--count", "@{u}..HEAD"], &project_dir) {
+            Some(s) => {
+                let n: u64 = s.parse().unwrap_or(0);
+                if n > 0 { issues.push(format!("{} commit(s) not pushed", n)); }
+            }
+            None => issues.push("Unable to verify push status - may have unpushed commits".into()),
+        }
+
+        if let Some(s) = git(&["rev-list", "--count", "HEAD..@{u}"], &project_dir) {
+            let n: u64 = s.parse().unwrap_or(0);
+            if n > 0 { issues.push(format!("{} upstream change(s) not pulled", n)); }
+        }
     }
 
     if issues.is_empty() {
@@ -146,6 +150,11 @@ pub fn run_stop_git() {
             write_counter(&cpath, &counter);
         }
         let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
+        if !in_reach {
+            super::rs_learn::record_quality(&session_id, &project_dir, 0.8, "out-of-reach-remote");
+            println!("{}", json!({ "decision": "approve", "reason": "remote is out of user reach (no push permission); local commits accepted, no push attempted, no CI watch" }));
+            return;
+        }
         let ci = watch_gh_runs_for_head(&project_dir);
         match ci {
             CiOutcome::None => {

@@ -146,6 +146,50 @@ pub fn load_prompt(key: &str) -> Option<String> {
     std::fs::read_to_string(path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+fn reach_cache() -> &'static Mutex<HashMap<String, bool>> {
+    static C: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn parse_owner_repo(url: &str) -> Option<(String, String)> {
+    let u = url.trim().trim_end_matches(".git");
+    let stripped = if let Some(rest) = u.strip_prefix("git@github.com:") { rest.to_string() }
+        else if let Some(rest) = u.strip_prefix("https://github.com/") { rest.to_string() }
+        else if let Some(rest) = u.strip_prefix("ssh://git@github.com/") { rest.to_string() }
+        else { return None };
+    let mut parts = stripped.splitn(2, '/');
+    let owner = parts.next()?.to_string();
+    let repo = parts.next()?.to_string();
+    if owner.is_empty() || repo.is_empty() { return None }
+    Some((owner, repo))
+}
+
+pub fn user_can_push_to_remote(project_dir: &str) -> bool {
+    if which::which("gh").is_err() { return false }
+    {
+        let cache = reach_cache().lock().ok();
+        if let Some(map) = cache.as_deref() { if let Some(v) = map.get(project_dir) { return *v } }
+    }
+    let url = no_window_cmd("git").args(["remote", "get-url", "origin"]).current_dir(project_dir).output().ok()
+        .filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let result = match url.as_deref().and_then(parse_owner_repo) {
+        None => false,
+        Some((owner, repo)) => {
+            let api_path = format!("repos/{}/{}", owner, repo);
+            let out = no_window_cmd("gh").args(["api", &api_path, "--jq", ".permissions.push"]).current_dir(project_dir).output().ok();
+            out.filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+                .unwrap_or(false)
+        }
+    };
+    if let Ok(mut m) = reach_cache().lock() { m.insert(project_dir.to_string(), result); }
+    result
+}
+
 pub fn run_self(args: &[&str]) -> String {
     let bin = env::current_exe().unwrap_or_else(|_| plugkit_bin());
     let child = match no_window_cmd(&bin).args(args)
