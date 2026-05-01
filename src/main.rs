@@ -101,14 +101,16 @@ enum Cmd {
     },
     /// Inspect the gm-log JSONL stream under ~/.claude/gm-log/.
     Log {
-        /// tail | grep | stats | path
+        /// tail | grep | stats | path | prune | subsystems
         action: String,
         /// Filter terms (grep) or subsystem (tail/stats); supports plain substring match.
         rest: Vec<String>,
         /// Limit lines (tail/grep). Default 50.
         #[arg(long, default_value_t = 50)] limit: usize,
-        /// Date YYYY-MM-DD. Default = today.
+        /// Date YYYY-MM-DD. Default = today (tail/grep/stats/subsystems).
         #[arg(long)] date: Option<String>,
+        /// Retention window in days (prune: delete older; stats: aggregate range).
+        #[arg(long, default_value_t = 14)] days: u32,
     },
 }
 
@@ -116,11 +118,31 @@ const RS_EXEC_SHA: &str = env!("DEP_RS_EXEC_SHA");
 const RS_SEARCH_SHA: &str = env!("DEP_RS_SEARCH_SHA");
 const RS_CODEINSIGHT_SHA: &str = env!("DEP_RS_CODEINSIGHT_SHA");
 
-fn cmd_log(action: &str, rest: &[String], limit: usize, date: Option<&str>) -> i32 {
+fn cmd_log(action: &str, rest: &[String], limit: usize, date: Option<&str>, days: u32) -> i32 {
     let root = rs_exec::obs::root_dir();
     if action == "path" { println!("{}", root.display()); return 0; }
+    if action == "prune" { return cmd_log_prune(&root, days); }
+
     let day = date.map(String::from).unwrap_or_else(today_ymd);
     let day_dir = root.join(&day);
+
+    if action == "subsystems" {
+        if !day_dir.exists() { eprintln!("no logs for {} at {}", day, day_dir.display()); return 0; }
+        let mut subs: Vec<String> = std::fs::read_dir(&day_dir).ok()
+            .map(|it| it.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+                .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from))
+                .collect())
+            .unwrap_or_default();
+        subs.sort();
+        for s in &subs { println!("{}", s); }
+        return 0;
+    }
+
+    if action == "stats" && date.is_none() && days > 1 {
+        return cmd_log_stats_range(&root, days);
+    }
+
     if !day_dir.exists() {
         eprintln!("no logs for {} at {}", day, day_dir.display());
         return 0;
@@ -136,17 +158,19 @@ fn cmd_log(action: &str, rest: &[String], limit: usize, date: Option<&str>) -> i
     }
     match action {
         "tail" => {
-            let mut lines: Vec<String> = vec![];
+            let mut entries: Vec<(String, String, String)> = vec![];
             for f in &files {
                 if let Ok(content) = std::fs::read_to_string(f) {
-                    let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                    let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
                     for line in content.lines() {
-                        lines.push(format!("[{}] {}", stem, line));
+                        let ts = extract_ts(line).unwrap_or_default();
+                        entries.push((ts, stem.clone(), line.to_string()));
                     }
                 }
             }
-            let start = lines.len().saturating_sub(limit);
-            for l in &lines[start..] { println!("{}", l); }
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let start = entries.len().saturating_sub(limit);
+            for (_, stem, line) in &entries[start..] { println!("[{}] {}", stem, line); }
             0
         }
         "grep" => {
@@ -178,8 +202,104 @@ fn cmd_log(action: &str, rest: &[String], limit: usize, date: Option<&str>) -> i
             }
             0
         }
-        other => { eprintln!("unknown log action: {} (use tail|grep|stats|path)", other); 1 }
+        other => { eprintln!("unknown log action: {} (use tail|grep|stats|path|prune|subsystems)", other); 1 }
     }
+}
+
+fn extract_ts(line: &str) -> Option<String> {
+    let key = "\"ts\":\"";
+    let s = line.find(key)? + key.len();
+    let rest = &line[s..];
+    let e = rest.find('"')?;
+    Some(rest[..e].to_string())
+}
+
+fn cmd_log_prune(root: &std::path::Path, days: u32) -> i32 {
+    if !root.exists() { return 0; }
+    let cutoff = today_minus_days(days);
+    let mut removed = 0u32;
+    let mut kept = 0u32;
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_dir() { continue; }
+            let name = match p.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if !is_ymd(&name) { continue; }
+            if name.as_str() < cutoff.as_str() {
+                if std::fs::remove_dir_all(&p).is_ok() { removed += 1; }
+            } else {
+                kept += 1;
+            }
+        }
+    }
+    println!("pruned {} day-dir(s) older than {} ({} kept)", removed, cutoff, kept);
+    0
+}
+
+fn cmd_log_stats_range(root: &std::path::Path, days: u32) -> i32 {
+    use std::collections::BTreeMap;
+    if !root.exists() { eprintln!("no logs at {}", root.display()); return 0; }
+    let mut totals: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut day_count = 0u32;
+    for d in last_n_days(days) {
+        let day_dir = root.join(&d);
+        if !day_dir.exists() { continue; }
+        day_count += 1;
+        if let Ok(entries) = std::fs::read_dir(&day_dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("jsonl") { continue; }
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+                if let Ok(content) = std::fs::read_to_string(&p) {
+                    let n = content.lines().count() as u64;
+                    let sz = content.len() as u64;
+                    let entry = totals.entry(stem).or_insert((0, 0));
+                    entry.0 += n; entry.1 += sz;
+                }
+            }
+        }
+    }
+    println!("=== {} day(s), {} active ===", days, day_count);
+    for (sub, (n, sz)) in &totals {
+        println!("{:24} {:>10} lines  {:>12} bytes", sub, n, sz);
+    }
+    0
+}
+
+fn is_ymd(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10 && b[4] == b'-' && b[7] == b'-'
+        && b[..4].iter().all(|c| c.is_ascii_digit())
+        && b[5..7].iter().all(|c| c.is_ascii_digit())
+        && b[8..].iter().all(|c| c.is_ascii_digit())
+}
+
+fn today_minus_days(days: u32) -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = secs.saturating_sub((days as u64) * 86_400);
+    ymd_from_secs(secs)
+}
+
+fn last_n_days(days: u32) -> Vec<String> {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    (0..days).map(|i| ymd_from_secs(secs.saturating_sub((i as u64) * 86_400))).collect()
+}
+
+fn ymd_from_secs(secs: u64) -> String {
+    let day = (secs / 86_400) as i64 + 719_468;
+    let era = if day >= 0 { day } else { day - 146_096 } / 146_097;
+    let doe = (day - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
 fn today_ymd() -> String {
@@ -694,8 +814,8 @@ async fn main() {
                     println!("{}", out);
                 }
             }
-            Cmd::Log { action, rest, limit, date } => {
-                exit_code = cmd_log(&action, &rest, limit, date.as_deref());
+            Cmd::Log { action, rest, limit, date, days } => {
+                exit_code = cmd_log(&action, &rest, limit, date.as_deref(), days);
             }
             Cmd::Search { path, query } => {
                 if query.is_empty() {

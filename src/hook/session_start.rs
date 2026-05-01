@@ -7,6 +7,7 @@ pub fn run() {
     ensure_gitignore(project.as_deref());
     ensure_claude_md_pointer(project.as_deref());
     ensure_tools_current();
+    prune_gm_log_once_per_day();
     let session_start_msg = load_prompt("session-start").unwrap_or_else(|| "BLOCKING REQUIREMENT — READ THIS FIRST: Your VERY FIRST action on EVERY user message MUST be to invoke the Skill tool with skill: \"gm:gm\". Do NOT read files, do NOT search, do NOT answer, do NOT plan, do NOT use any other tool before invoking skill: \"gm:gm\". This is non-negotiable. If you respond without invoking gm:gm first, you are violating a hard constraint.\n\n=== TOOL RULES ===\n\nSkill tool: invoke skills by name (e.g. skill: \"gm:gm\"). Never use the Agent tool to load skills.\n\nBash tool: only these formats are allowed —\n  exec:nodejs / exec:python / exec:bash / exec:typescript / exec:go / exec:rust / exec:c / exec:cpp / exec:java\n  exec:browser  (JS automation against `page`)\n  exec:codesearch  (natural language search)\n  exec:status / exec:sleep / exec:close / exec:runner / exec:type\n  git <args>  (git commands directly, no exec: prefix)\n  Everything else is blocked. Never Bash(node ...) or Bash(npm ...) or Bash(npx ...).\n\nGlob/Grep/Find/Explore: blocked — use exec:codesearch instead.".to_string());
     let mut parts: Vec<String> = vec![session_start_msg];
 
@@ -112,6 +113,64 @@ fn should_copy(src: &std::path::Path, dst: &std::path::Path) -> Option<&'static 
     let dst_mt = dst_meta.modified().ok()?;
     if src_mt > dst_mt { return Some("newer"); }
     None
+}
+
+fn prune_gm_log_once_per_day() {
+    let root = rs_exec::obs::root_dir();
+    if !root.exists() { return; }
+    let today = today_ymd();
+    let sentinel = root.join(".pruned-on");
+    if let Ok(prev) = fs::read_to_string(&sentinel) {
+        if prev.trim() == today { return; }
+    }
+    let cutoff = ymd_minus_days(&today, 14);
+    if let Ok(entries) = fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_dir() { continue; }
+            let name = match p.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if !is_ymd_str(&name) { continue; }
+            if name.as_str() < cutoff.as_str() {
+                let _ = fs::remove_dir_all(&p);
+            }
+        }
+    }
+    let _ = fs::write(&sentinel, today.as_bytes());
+}
+
+fn today_ymd() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    ymd_from_secs(secs)
+}
+
+fn ymd_minus_days(_today: &str, days: u32) -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    ymd_from_secs(secs.saturating_sub((days as u64) * 86_400))
+}
+
+fn ymd_from_secs(secs: u64) -> String {
+    let day = (secs / 86_400) as i64 + 719_468;
+    let era = if day >= 0 { day } else { day - 146_096 } / 146_097;
+    let doe = (day - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+fn is_ymd_str(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10 && b[4] == b'-' && b[7] == b'-'
+        && b[..4].iter().all(|c| c.is_ascii_digit())
+        && b[5..7].iter().all(|c| c.is_ascii_digit())
+        && b[8..].iter().all(|c| c.is_ascii_digit())
 }
 
 fn copy_with_fallback(src: &std::path::Path, dst: &std::path::Path) {
