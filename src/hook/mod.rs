@@ -195,6 +195,18 @@ pub fn user_can_push_to_remote(project_dir: &str) -> bool {
 }
 
 pub fn run_self(args: &[&str]) -> String {
+    let started = std::time::Instant::now();
+    let result = run_self_inner(args);
+    rs_exec::obs::event("plugkit", "run_self", serde_json::json!({
+        "subcmd": args.first().copied().unwrap_or(""),
+        "argc": args.len(),
+        "out_len": result.len(),
+        "dur_ms": started.elapsed().as_millis() as u64
+    }));
+    result
+}
+
+fn run_self_inner(args: &[&str]) -> String {
     let bin = env::current_exe().unwrap_or_else(|_| plugkit_bin());
     let child = match no_window_cmd(&bin).args(args)
         .stdout(std::process::Stdio::piped())

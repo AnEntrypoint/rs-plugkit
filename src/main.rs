@@ -99,11 +99,103 @@ enum Cmd {
         rest: Vec<String>,
         #[arg(long)] cwd: Option<String>,
     },
+    /// Inspect the gm-log JSONL stream under ~/.claude/gm-log/.
+    Log {
+        /// tail | grep | stats | path
+        action: String,
+        /// Filter terms (grep) or subsystem (tail/stats); supports plain substring match.
+        rest: Vec<String>,
+        /// Limit lines (tail/grep). Default 50.
+        #[arg(long, default_value_t = 50)] limit: usize,
+        /// Date YYYY-MM-DD. Default = today.
+        #[arg(long)] date: Option<String>,
+    },
 }
 
 const RS_EXEC_SHA: &str = env!("DEP_RS_EXEC_SHA");
 const RS_SEARCH_SHA: &str = env!("DEP_RS_SEARCH_SHA");
 const RS_CODEINSIGHT_SHA: &str = env!("DEP_RS_CODEINSIGHT_SHA");
+
+fn cmd_log(action: &str, rest: &[String], limit: usize, date: Option<&str>) -> i32 {
+    let root = rs_exec::obs::root_dir();
+    if action == "path" { println!("{}", root.display()); return 0; }
+    let day = date.map(String::from).unwrap_or_else(today_ymd);
+    let day_dir = root.join(&day);
+    if !day_dir.exists() {
+        eprintln!("no logs for {} at {}", day, day_dir.display());
+        return 0;
+    }
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&day_dir).ok()
+        .map(|it| it.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl")).collect())
+        .unwrap_or_default();
+    files.sort();
+    if let Some(sub) = rest.first() {
+        if !sub.is_empty() && action != "grep" {
+            files.retain(|p| p.file_stem().and_then(|s| s.to_str()).map(|n| n == sub).unwrap_or(false));
+        }
+    }
+    match action {
+        "tail" => {
+            let mut lines: Vec<String> = vec![];
+            for f in &files {
+                if let Ok(content) = std::fs::read_to_string(f) {
+                    let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                    for line in content.lines() {
+                        lines.push(format!("[{}] {}", stem, line));
+                    }
+                }
+            }
+            let start = lines.len().saturating_sub(limit);
+            for l in &lines[start..] { println!("{}", l); }
+            0
+        }
+        "grep" => {
+            let needle = rest.join(" ");
+            if needle.is_empty() { eprintln!("usage: plugkit log grep <terms...>"); return 1; }
+            let mut count = 0;
+            'outer: for f in &files {
+                if let Ok(content) = std::fs::read_to_string(f) {
+                    let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                    for line in content.lines() {
+                        if line.contains(&needle) {
+                            println!("[{}] {}", stem, line);
+                            count += 1;
+                            if count >= limit { break 'outer; }
+                        }
+                    }
+                }
+            }
+            0
+        }
+        "stats" => {
+            for f in &files {
+                if let Ok(content) = std::fs::read_to_string(f) {
+                    let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                    let n = content.lines().count();
+                    let size = content.len();
+                    println!("{:24} {:>8} lines  {:>10} bytes", stem, n, size);
+                }
+            }
+            0
+        }
+        other => { eprintln!("unknown log action: {} (use tail|grep|stats|path)", other); 1 }
+    }
+}
+
+fn today_ymd() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let day = (secs / 86_400) as i64 + 719_468;
+    let era = if day >= 0 { day } else { day - 146_096 } / 146_097;
+    let doe = (day - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
 
 fn cmd_deps() -> anyhow::Result<()> {
     println!("plugkit {}", env!("CARGO_PKG_VERSION"));
@@ -485,6 +577,9 @@ async fn main() {
                 let root = path.unwrap_or_else(|| ".".into());
                 let root_path = std::path::Path::new(&root);
                 if !root_path.exists() { eprintln!("Path does not exist: {}", root); exit_code = 1; return Ok(()); }
+                rs_exec::obs::event("rs_codeinsight", "analyze.start", serde_json::json!({
+                    "root": root, "json": json, "cache": cache, "read_cache": read_cache
+                }));
                 if read_cache {
                     match fs::read_to_string(root_path.join(".codeinsight")) {
                         Ok(c) => { print!("{}", c); return Ok(()); }
@@ -512,18 +607,31 @@ async fn main() {
                 }
             }
             Cmd::Hook { event } => {
-                match event.as_str() {
-                    "session-start" => { hook::session_start(); return Ok(()); }
-                    "pre-tool-use" => { hook::pre_tool_use(); return Ok(()); }
-                    "post-tool-use" => { hook::post_tool_use(); return Ok(()); }
-                    "prompt-submit" => { hook::prompt_submit(); return Ok(()); }
-                    "pre-compact" => { hook::pre_compact(); return Ok(()); }
-                    "post-compact" => { hook::post_compact(); return Ok(()); }
-                    "session-end" => { hook::session_end(); return Ok(()); }
-                    "stop" => { hook::run_stop(); return Ok(()); }
-                    "stop-git" => { hook::run_stop_git(); return Ok(()); }
-                    other => { eprintln!("Unknown hook event: {}", other); exit_code = 1; return Ok(()); }
+                let ev = event.as_str();
+                let known = matches!(ev,
+                    "session-start" | "pre-tool-use" | "post-tool-use" | "prompt-submit" |
+                    "pre-compact" | "post-compact" | "session-end" | "stop" | "stop-git"
+                );
+                if !known {
+                    eprintln!("Unknown hook event: {}", ev);
+                    exit_code = 1;
+                    return Ok(());
                 }
+                rs_exec::obs::span("hook", ev, serde_json::json!({}), || {
+                    match ev {
+                        "session-start" => hook::session_start(),
+                        "pre-tool-use" => hook::pre_tool_use(),
+                        "post-tool-use" => hook::post_tool_use(),
+                        "prompt-submit" => hook::prompt_submit(),
+                        "pre-compact" => hook::pre_compact(),
+                        "post-compact" => hook::post_compact(),
+                        "session-end" => hook::session_end(),
+                        "stop" => hook::run_stop(),
+                        "stop-git" => hook::run_stop_git(),
+                        _ => {}
+                    }
+                });
+                return Ok(());
             }
             Cmd::KillPort { port } => {
                 ensure_runner().await?;
@@ -555,6 +663,10 @@ async fn main() {
                 let src = source.unwrap_or_else(|| "memorize".into());
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
                 hook::rs_learn::ingest_fast(&body, &src, &dir);
+                rs_exec::obs::event("rs_learn", "memorize", serde_json::json!({
+                    "bytes": body.len(),
+                    "source": src
+                }));
                 println!("ingested ({} bytes) source={}", body.len(), src);
             }
             Cmd::Forget { directive, cwd } => {
@@ -582,6 +694,9 @@ async fn main() {
                     println!("{}", out);
                 }
             }
+            Cmd::Log { action, rest, limit, date } => {
+                exit_code = cmd_log(&action, &rest, limit, date.as_deref());
+            }
             Cmd::Search { path, query } => {
                 if query.is_empty() {
                     search_mcp::run_mcp_server();
@@ -590,8 +705,16 @@ async fn main() {
                 let q = query.join(" ");
                 let root = std::path::PathBuf::from(path.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string()));
                 if !root.exists() { eprintln!("Path does not exist: {}", root.display()); exit_code = 1; return Ok(()); }
+                let started = std::time::Instant::now();
                 let chunks = scanner::scan_repository(&root);
                 let results = bm25::search(&q, &chunks);
+                rs_exec::obs::event("rs_search", "query", serde_json::json!({
+                    "root": root.display().to_string(),
+                    "q_len": q.len(),
+                    "n_chunks": chunks.len(),
+                    "n_results": results.len(),
+                    "dur_ms": started.elapsed().as_millis() as u64
+                }));
                 if results.is_empty() { println!("No results found."); return Ok(()); }
                 for r in results.iter() {
                     let total = context::get_file_total_lines(&root, &r.chunk.file_path).map(|n| format!(" [{}L]", n)).unwrap_or_default();

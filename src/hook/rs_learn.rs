@@ -197,7 +197,17 @@ fn http_search(query: &str, limit: u32) -> Option<String> {
 /// Tries HTTP first (fast), falls back to bun subprocess.
 pub fn recall(query: &str, project_dir: &str, limit: u32) -> String {
     if query.trim().is_empty() { return String::new(); }
+    let result = recall_inner(query, project_dir, limit);
+    rs_exec::obs::event("rs_learn", "recall", serde_json::json!({
+        "query_len": query.len(),
+        "limit": limit,
+        "result_len": result.len(),
+        "hit": !result.is_empty()
+    }));
+    result
+}
 
+fn recall_inner(query: &str, project_dir: &str, limit: u32) -> String {
     if let Some(raw) = http_search(query, limit) {
         let formatted = format_recall(&raw, limit);
         if !formatted.is_empty() { return formatted; }
