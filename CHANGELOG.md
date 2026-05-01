@@ -1,3 +1,7 @@
+## 2026-05-02 - obs: trajectory_ingest event + prompt-submit-detail with project_dir/sess
+
+spawn_trajectory_ingest now emits trajectory_ingest (pre-spawn) and trajectory_ingest_done (post-ingest) obs events to rs_learn.jsonl. prompt_submit now emits prompt-submit-detail to hook.jsonl with project_dir, sess, autonomous, and prompt_len fields — enabling correlation between hook fires and ccsniff session audits.
+
 ## 2026-04-24 - write needs-gm sentinel on stop-hook blocks
 
 ccsniff audit found: stop hook feedback messages arrive as isMeta:true user messages, bypassing UserPromptSubmit hook. Model responds to git/CI block messages directly with Bash instead of Skill(gm).
