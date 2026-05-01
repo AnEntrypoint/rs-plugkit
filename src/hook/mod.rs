@@ -89,6 +89,7 @@ pub fn is_kilo() -> bool {
     env::var("KILO_PROJECT_DIR").is_ok()
 }
 
+#[allow(dead_code)]
 pub fn allow_with_noop(context: &str) -> serde_json::Value {
     use std::{fs, time::{SystemTime, UNIX_EPOCH}};
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();

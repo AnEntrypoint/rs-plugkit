@@ -697,13 +697,28 @@ async fn main() {
                 let root = path.unwrap_or_else(|| ".".into());
                 let root_path = std::path::Path::new(&root);
                 if !root_path.exists() { eprintln!("Path does not exist: {}", root); exit_code = 1; return Ok(()); }
+                let started = std::time::Instant::now();
                 rs_exec::obs::event("rs_codeinsight", "analyze.start", serde_json::json!({
                     "root": root, "json": json, "cache": cache, "read_cache": read_cache
                 }));
                 if read_cache {
                     match fs::read_to_string(root_path.join(".codeinsight")) {
-                        Ok(c) => { print!("{}", c); return Ok(()); }
-                        Err(_) => { eprintln!("No cache found"); exit_code = 1; return Ok(()); }
+                        Ok(c) => {
+                            print!("{}", c);
+                            rs_exec::obs::event("rs_codeinsight", "analyze.end", serde_json::json!({
+                                "root": root, "dur_ms": started.elapsed().as_millis() as u64,
+                                "out_len": c.len(), "source": "cache"
+                            }));
+                            return Ok(());
+                        }
+                        Err(_) => {
+                            eprintln!("No cache found");
+                            rs_exec::obs::event("rs_codeinsight", "analyze.end", serde_json::json!({
+                                "root": root, "dur_ms": started.elapsed().as_millis() as u64,
+                                "out_len": 0, "source": "cache_miss", "ok": false
+                            }));
+                            exit_code = 1; return Ok(());
+                        }
                     }
                 }
                 let output = analyze(root_path, AnalyzeOptions { json_mode: json });
@@ -711,6 +726,10 @@ async fn main() {
                 if cache {
                     let _ = fs::write(root_path.join(".codeinsight"), &output.text);
                 }
+                rs_exec::obs::event("rs_codeinsight", "analyze.end", serde_json::json!({
+                    "root": root, "dur_ms": started.elapsed().as_millis() as u64,
+                    "out_len": output.text.len(), "source": "fresh"
+                }));
             }
             Cmd::SessionCleanup { session } => {
                 if rpc_client::health_check().await {

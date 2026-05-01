@@ -9,6 +9,7 @@ pub fn run() {
     let tool_name = data["tool_name"].as_str()
         .or_else(|| data["tool_use"]["name"].as_str())
         .unwrap_or("");
+    rs_exec::obs::event("hook", "pre-tool-use.tool", serde_json::json!({ "tool_name": tool_name }));
     let tool_input = if data["tool_input"].is_object() || data["tool_input"].is_array() {
         &data["tool_input"]
     } else {

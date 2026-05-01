@@ -27,6 +27,7 @@ pub fn run() {
     let tool_output = data["tool_result"].as_str()
         .or_else(|| data["output"].as_str())
         .unwrap_or("");
+    rs_exec::obs::event("hook", "post-tool-use.tool", serde_json::json!({ "tool_name": tool_name, "out_len": tool_output.len() }));
 
     let project = match super::project_dir() {
         Some(p) if !p.is_empty() => p,
