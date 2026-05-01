@@ -1,8 +1,10 @@
 mod session_start;
 mod session_end;
 mod pre_tool_use;
+mod post_tool_use;
 mod prompt_submit;
 mod pre_compact;
+mod post_compact;
 mod stop;
 pub mod agent_browser;
 pub mod rs_learn;
@@ -10,8 +12,10 @@ pub mod rs_learn;
 pub use session_start::run as session_start;
 pub use session_end::run as session_end;
 pub use pre_tool_use::run as pre_tool_use;
+pub use post_tool_use::run as post_tool_use;
 pub use prompt_submit::run as prompt_submit;
 pub use pre_compact::run as pre_compact;
+pub use post_compact::run as post_compact;
 pub use stop::run_stop;
 pub use stop::run_stop_git;
 

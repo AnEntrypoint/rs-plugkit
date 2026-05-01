@@ -6,11 +6,89 @@ pub fn run() {
     let mut stdin = String::new();
     let _ = std::io::stdin().read_to_string(&mut stdin);
     let data: Value = serde_json::from_str(&stdin).unwrap_or_default();
-    let tool_name = data["tool_name"].as_str().unwrap_or("");
-    let tool_input = &data["tool_input"];
+    let tool_name = data["tool_name"].as_str()
+        .or_else(|| data["tool_use"]["name"].as_str())
+        .unwrap_or("");
+    let tool_input = if data["tool_input"].is_object() || data["tool_input"].is_array() {
+        &data["tool_input"]
+    } else {
+        &data["tool_use"]["input"]
+    };
     let session_id = data["session_id"].as_str().unwrap_or("");
+
+    if let Some(early) = needs_gm_and_skill_tracking(tool_name, tool_input) {
+        println!("{}", serde_json::to_string(&early).unwrap_or_default());
+        return;
+    }
+
     let result = dispatch(tool_name, tool_input, session_id);
     println!("{}", serde_json::to_string(&result).unwrap_or_default());
+}
+
+fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Value> {
+    let project = match project_dir() {
+        Some(p) if !p.is_empty() => p,
+        _ => return None,
+    };
+    let gm_dir = std::path::Path::new(&project).join(".gm");
+    let needs_gm = gm_dir.join("needs-gm");
+    let lastskill = gm_dir.join("lastskill");
+    let prd = gm_dir.join("prd.yml");
+    let autonomous = prd.exists();
+
+    let skill_name = tool_input["skill"].as_str()
+        .or_else(|| tool_input["name"].as_str())
+        .unwrap_or("");
+    let is_skill = matches!(tool_name, "Skill" | "skill");
+
+    if is_skill && !skill_name.is_empty() {
+        let _ = std::fs::create_dir_all(&gm_dir);
+        let _ = std::fs::write(&lastskill, skill_name);
+        if skill_name == "gm" || skill_name == "gm:gm" {
+            let _ = std::fs::remove_file(&needs_gm);
+        }
+        return Some(allow(None));
+    }
+
+    if autonomous {
+        let _ = std::fs::remove_file(&needs_gm);
+    }
+
+    if needs_gm.exists() {
+        return Some(deny("HARD CONSTRAINT: invoke the Skill tool with skill: \"gm:gm\" before any other tool. The gm:gm skill must be the first action after every user message."));
+    }
+
+    let no_memo = gm_dir.join("no-memorize-this-turn");
+    if !no_memo.exists() {
+        let ts_path = gm_dir.join("turn-state.json");
+        if let Some(counter) = read_counter(&ts_path) {
+            if counter >= 3 {
+                let is_mem_agent = tool_name == "Agent"
+                    && tool_input.to_string().to_lowercase().contains("memorize");
+                if !is_mem_agent {
+                    return Some(deny("3+ exec results have resolved unknowns without a memorize call. HARD BLOCK until you spawn at least one Agent(subagent_type='gm:memorize', model='haiku', run_in_background=true, prompt='## CONTEXT TO MEMORIZE\\n<fact>') OR write file .gm/no-memorize-this-turn (containing reason) to declare nothing memorable. Saying \"I will memorize\" is NOT a memorize call \u{2014} only the Agent tool counts."));
+                }
+            }
+        }
+    }
+
+    let last_skill = std::fs::read_to_string(&lastskill).map(|s| s.trim().to_string()).unwrap_or_default();
+    let is_file_edit = matches!(tool_name, "Write" | "Edit" | "NotebookEdit");
+    let write_blocked = matches!(last_skill.as_str(), "gm-complete" | "update-docs" | "gm:gm-complete" | "gm:update-docs");
+    if is_file_edit && write_blocked {
+        return Some(deny(&format!(
+            "File edits are not permitted in {} phase. Regress to gm-execute if changes are needed, or invoke gm-emit to re-emit.",
+            last_skill
+        )));
+    }
+
+    None
+}
+
+fn read_counter(path: &std::path::Path) -> Option<u64> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    v["execCallsSinceMemorize"].as_u64()
 }
 
 fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {

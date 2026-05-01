@@ -20,6 +20,7 @@ pub fn run() {
         .unwrap_or_default();
 
     let project = project_dir();
+    let mut autonomous = false;
     if let Some(ref dir) = project {
         let gm = std::path::Path::new(dir).join(".gm");
         let live = gm.join("prd.yml");
@@ -27,7 +28,37 @@ pub fn run() {
         if paused.exists() && !live.exists() {
             let _ = std::fs::rename(&paused, &live);
         }
+        autonomous = live.exists();
+        let needs_gm = gm.join("needs-gm");
+        let _ = std::fs::create_dir_all(&gm);
+        if autonomous {
+            let _ = std::fs::remove_file(&needs_gm);
+        } else {
+            let _ = std::fs::write(&needs_gm, "1");
+        }
+        let turn_state = serde_json::json!({
+            "turnId": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
+            "firstToolFired": false,
+            "execCallsSinceMemorize": 0,
+            "recallFiredThisTurn": false
+        });
+        let _ = std::fs::write(gm.join("turn-state.json"), turn_state.to_string());
+        let _ = std::fs::remove_file(gm.join("no-memorize-this-turn"));
     }
+
+    if autonomous {
+        let msg = "AUTONOMOUS MODE \u{2014} .gm/prd.yml exists. Continue executing without re-invoking gm:gm. Resolve doubts via witnessed probe, recall, or PRD; never ask the user. Spawn Agent(gm:memorize) for any unknown\u{2192}known transition same turn. When .prd is empty + git clean + pushed, invoke update-docs to close out.";
+        let out = if is_gemini() {
+            json!({ "systemMessage": msg })
+        } else if is_opencode() || is_kilo() {
+            json!({ "hookSpecificOutput": { "hookEventName": "message.updated", "additionalContext": msg } })
+        } else {
+            json!({ "systemMessage": msg })
+        };
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+        return;
+    }
+
     let parallel_hint = {
         let q_count = prompt.matches('?').count();
         let numbered = prompt.lines().filter(|l| {
