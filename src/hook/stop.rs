@@ -215,7 +215,7 @@ struct GhRun {
 fn watch_gh_runs_for_head(project_dir: &str) -> CiOutcome {
     if which::which("gh").is_err() { return CiOutcome::None; }
     let head = match git(&["rev-parse", "HEAD"], project_dir) { Some(h) => h, None => return CiOutcome::None };
-    let deadline_secs: u64 = env::var("GM_CI_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(180);
+    let deadline_secs: u64 = env::var("GM_CI_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
     let started = std::time::Instant::now();
     let deadline = started + std::time::Duration::from_secs(deadline_secs);
     let initial = match list_runs_for_head(project_dir, &head) { Some(v) => v, None => return CiOutcome::None };

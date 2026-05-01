@@ -81,9 +81,21 @@ pub fn run() {
             }
 
             let recall_q = super::rs_learn::short_recall_query(&prompt, dir);
+            let proj_q = super::rs_learn::project_query(dir);
             let recall = super::rs_learn::recall(&recall_q, dir, 5);
-            if !recall.is_empty() {
-                parts.push(format!("=== rs-learn recall (cross-session memory for this prompt) ===\n{}", recall));
+            let proj_recall = if proj_q != recall_q {
+                super::rs_learn::recall(&proj_q, dir, 3)
+            } else {
+                String::new()
+            };
+            let combined = match (recall.is_empty(), proj_recall.is_empty()) {
+                (false, false) => format!("{}\n\n---\n{}", recall, proj_recall),
+                (false, true) => recall,
+                (true, false) => proj_recall,
+                (true, true) => String::new(),
+            };
+            if !combined.is_empty() {
+                parts.push(format!("=== rs-learn recall (cross-session memory for this prompt) ===\n{}", combined));
             }
         }
 
