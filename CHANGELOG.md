@@ -1,3 +1,11 @@
+## 2026-05-02 - global needs-gm sentinel + fix ensure_tools_current + bootstrap stale partial cleanup
+
+Global sentinel: prompt_submit and session_start now write ~/.claude/gm-tools/needs-gm in addition to the project-local .gm/needs-gm. pre_tool_use checks both, so non-gm projects (no AGENTS.md/.gm/) and non-gm-project sessions are now enforced just as strictly as gm projects. Sentinel cleared on gm:gm Skill invocation or autonomous mode.
+
+ensure_tools_current: was copying from $CLAUDE_PLUGIN_ROOT/bin/ (JS wrappers only — no binaries). Now reads version from plugkit.version, resolves bootstrap cache dir (LOCALAPPDATA/plugkit/bin/v<ver>/ on Windows), copies platform-named binaries (plugkit-win32-x64.exe → plugkit.exe etc.) from there.
+
+bootstrap.js stale partial: pruneOldVersions now detects stale locks (age > 5min or dead PID) and forces pruning of stale-locked dirs instead of skipping them. Also clears stale .partial files inside the current version dir before download to unblock stuck download retries.
+
 ## 2026-05-02 - session-start writes needs-gm to cover continuation-message bypass
 
 session_start hook now writes .gm/needs-gm for every gm project (AGENTS.md or .gm/ present) at session start, unless prd.yml exists with content (autonomous mode). This closes the isMeta:true bypass where stop-hook feedback and short continuation messages skip UserPromptSubmit, leaving needs-gm unwritten and pre_tool_use unable to enforce gm:gm invocation first.

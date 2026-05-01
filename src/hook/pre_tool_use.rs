@@ -54,6 +54,7 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
     };
     let gm_dir = std::path::Path::new(&project).join(".gm");
     let needs_gm = gm_dir.join("needs-gm");
+    let global_needs_gm = super::tools_dir().join("needs-gm");
     let lastskill = gm_dir.join("lastskill");
     let prd = gm_dir.join("prd.yml");
     let autonomous = prd.exists();
@@ -68,15 +69,17 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
         let _ = std::fs::write(&lastskill, skill_name);
         if skill_name == "gm" || skill_name == "gm:gm" {
             let _ = std::fs::remove_file(&needs_gm);
+            let _ = std::fs::remove_file(&global_needs_gm);
         }
         return Some(allow(None));
     }
 
     if autonomous {
         let _ = std::fs::remove_file(&needs_gm);
+        let _ = std::fs::remove_file(&global_needs_gm);
     }
 
-    if needs_gm.exists() {
+    if needs_gm.exists() || global_needs_gm.exists() {
         return Some(deny("HARD CONSTRAINT: invoke the Skill tool with skill: \"gm:gm\" before any other tool. The gm:gm skill must be the first action after every user message."));
     }
 

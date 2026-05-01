@@ -31,10 +31,13 @@ pub fn run() {
         autonomous = live.exists();
         let needs_gm = gm.join("needs-gm");
         let _ = std::fs::create_dir_all(&gm);
+        let global_needs_gm = super::tools_dir().join("needs-gm");
         if autonomous {
             let _ = std::fs::remove_file(&needs_gm);
+            let _ = std::fs::remove_file(&global_needs_gm);
         } else {
             let _ = std::fs::write(&needs_gm, "1");
+            let _ = std::fs::write(&global_needs_gm, "1");
         }
         let turn_state = serde_json::json!({
             "turnId": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),

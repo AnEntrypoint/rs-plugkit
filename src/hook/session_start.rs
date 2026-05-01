@@ -55,7 +55,11 @@ fn write_needs_gm_if_gm_project(project_dir: Option<&str>) {
     let Some(dir) = project_dir else { return };
     let gm_dir = std::path::Path::new(dir).join(".gm");
     let agents_md = std::path::Path::new(dir).join("AGENTS.md");
-    if !gm_dir.exists() && !agents_md.exists() { return; }
+    let global_needs_gm = super::tools_dir().join("needs-gm");
+    if !gm_dir.exists() && !agents_md.exists() {
+        let _ = fs::write(&global_needs_gm, "1");
+        return;
+    }
     let _ = fs::create_dir_all(&gm_dir);
     let prd = gm_dir.join("prd.yml");
     if prd.exists() {
@@ -63,6 +67,7 @@ fn write_needs_gm_if_gm_project(project_dir: Option<&str>) {
         if !content.trim().is_empty() { return; }
     }
     let _ = fs::write(gm_dir.join("needs-gm"), "1");
+    let _ = fs::write(&global_needs_gm, "1");
 }
 
 /// Auto-update gm-tools binaries from the active plugin cache when newer.
@@ -78,22 +83,55 @@ fn write_needs_gm_if_gm_project(project_dir: Option<&str>) {
 /// current one to <name>.old (best-effort, ignored on lock) and renaming
 /// .new into place. Old copies accumulate as .old; that's fine — they
 /// get cleaned on the next update cycle when not held.
+fn bootstrap_cache_dir() -> Option<std::path::PathBuf> {
+    let version_file = {
+        let plugin_root = std::env::var("CLAUDE_PLUGIN_ROOT").ok()?;
+        std::path::Path::new(&plugin_root).join("bin").join("plugkit.version")
+    };
+    let version = fs::read_to_string(&version_file).ok()?.trim().to_string();
+    if version.is_empty() { return None; }
+    let cache_root = if cfg!(windows) {
+        let base = std::env::var("LOCALAPPDATA")
+            .unwrap_or_else(|_| format!("{}\\AppData\\Local", std::env::var("USERPROFILE").unwrap_or_default()));
+        std::path::PathBuf::from(base).join("plugkit").join("bin")
+    } else if cfg!(target_os = "macos") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        std::path::PathBuf::from(home).join("Library").join("Caches").join("plugkit").join("bin")
+    } else {
+        let xdg = std::env::var("XDG_CACHE_HOME")
+            .unwrap_or_else(|_| format!("{}/.cache", std::env::var("HOME").unwrap_or_default()));
+        std::path::PathBuf::from(xdg).join("plugkit").join("bin")
+    };
+    let ver_dir = cache_root.join(format!("v{}", version));
+    if ver_dir.join(".ok").exists() { Some(ver_dir) } else { None }
+}
+
 fn ensure_tools_current() {
-    let Some(plugin_root) = std::env::var("CLAUDE_PLUGIN_ROOT").ok() else { return };
-    let src_dir = std::path::Path::new(&plugin_root).join("bin");
+    let src_dir = match bootstrap_cache_dir() {
+        Some(d) => d,
+        None => return,
+    };
     let dst_dir = super::tools_dir();
     if let Err(_) = fs::create_dir_all(&dst_dir) { return; }
 
-    let names = if cfg!(windows) {
-        &["plugkit.exe", "rs-exec.exe", "rs-exec-process.exe"][..]
+    let (platform_key, ext) = if cfg!(windows) {
+        if cfg!(target_arch = "aarch64") { ("win32-arm64", ".exe") } else { ("win32-x64", ".exe") }
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") { ("darwin-arm64", "") } else { ("darwin-x64", "") }
     } else {
-        &["plugkit", "rs-exec", "rs-exec-process"][..]
+        if cfg!(target_arch = "aarch64") { ("linux-arm64", "") } else { ("linux-x64", "") }
     };
 
-    for name in names {
-        let src = src_dir.join(name);
+    let binary_names = [
+        (format!("plugkit-{}{}", platform_key, ext), format!("plugkit{}", ext)),
+        (format!("rs-exec-{}{}", platform_key, ext), format!("rs-exec{}", ext)),
+        (format!("rs-exec-process-{}{}", platform_key, ext), format!("rs-exec-process{}", ext)),
+    ];
+
+    for (src_name, dst_name) in &binary_names {
+        let src = src_dir.join(src_name);
         if !src.exists() { continue; }
-        let dst = dst_dir.join(name);
+        let dst = dst_dir.join(dst_name);
         if let Some(reason) = should_copy(&src, &dst) {
             let _ = reason;
             copy_with_fallback(&src, &dst);
