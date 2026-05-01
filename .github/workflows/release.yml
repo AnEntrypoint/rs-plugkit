@@ -70,6 +70,28 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Build rtk from source (same toolchain, all targets including win-arm64)
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          set -e
+          # Pin to a known-good rtk tag so we don't drift unexpectedly on cargo install --git
+          RTK_REF="${RTK_REF:-master}"
+          mkdir -p rtk-build
+          cargo install \
+            --git https://github.com/rtk-ai/rtk \
+            --branch "$RTK_REF" \
+            --target ${{ matrix.target }} \
+            --root rtk-build \
+            --locked || \
+          cargo install \
+            --git https://github.com/rtk-ai/rtk \
+            --branch "$RTK_REF" \
+            --target ${{ matrix.target }} \
+            --root rtk-build
+          ls rtk-build/bin/
+
       - name: Strip binary (Linux x64)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: strip target/${{ matrix.target }}/release/plugkit
@@ -82,18 +104,28 @@ jobs:
         if: contains(matrix.target, 'apple')
         run: strip target/${{ matrix.target }}/release/plugkit
 
-      - name: Rename binary
+      - name: Rename binaries (plugkit + rtk)
         shell: bash
         run: |
           ext=""
           if [[ "${{ matrix.target }}" == *"windows"* ]]; then ext=".exe"; fi
           cp "target/${{ matrix.target }}/release/plugkit${ext}" "${{ matrix.asset_name }}"
+          # rtk asset uses the same naming convention with rtk- prefix
+          rtk_asset="$(echo '${{ matrix.asset_name }}' | sed 's/^plugkit-/rtk-/')"
+          cp "rtk-build/bin/rtk${ext}" "$rtk_asset"
+          echo "rtk_asset=$rtk_asset" >> "$GITHUB_ENV"
 
-      - name: Upload build artifact
+      - name: Upload plugkit build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}
+
+      - name: Upload rtk build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.rtk_asset }}
+          path: ${{ env.rtk_asset }}
 
   publish-binaries:
     needs: build
@@ -145,11 +177,23 @@ jobs:
         with:
           path: bins/
 
+      - name: Resolve rtk version from source
+        id: rtk
+        shell: bash
+        run: |
+          set -e
+          # rtk version comes from the source we just built (Cargo.toml of rtk-ai/rtk@master)
+          ver=$(curl -sL https://raw.githubusercontent.com/rtk-ai/rtk/master/Cargo.toml \
+                  | awk -F\" '/^version/ {print $2; exit}')
+          echo "rtk_version=$ver" >> "$GITHUB_OUTPUT"
+          echo "Built rtk version: $ver"
+
       - name: Stage release assets
         id: stage
         shell: bash
         env:
           VER: ${{ steps.bump.outputs.version }}
+          RTK_VER: ${{ steps.rtk.outputs.rtk_version }}
         run: |
           set -e
           mkdir -p release-assets
@@ -159,16 +203,30 @@ jobs:
           cp bins/plugkit-darwin-arm64/plugkit-darwin-arm64       release-assets/
           cp bins/plugkit-linux-x64/plugkit-linux-x64             release-assets/
           cp bins/plugkit-linux-arm64/plugkit-linux-arm64         release-assets/
-          chmod +x release-assets/plugkit-darwin-* release-assets/plugkit-linux-* || true
+          # rtk binaries built from source in our matrix — covers ALL targets including win-arm64
+          cp bins/rtk-win32-x64.exe/rtk-win32-x64.exe         release-assets/
+          cp bins/rtk-win32-arm64.exe/rtk-win32-arm64.exe     release-assets/
+          cp bins/rtk-darwin-x64/rtk-darwin-x64               release-assets/
+          cp bins/rtk-darwin-arm64/rtk-darwin-arm64           release-assets/
+          cp bins/rtk-linux-x64/rtk-linux-x64                 release-assets/
+          cp bins/rtk-linux-arm64/rtk-linux-arm64             release-assets/
+          chmod +x release-assets/plugkit-darwin-* release-assets/plugkit-linux-* \
+                   release-assets/rtk-darwin-* release-assets/rtk-linux-* 2>/dev/null || true
           cd release-assets
-          # Portable sha256 manifest: "<hex>  <filename>" (no leading * for binary mode)
+          # Portable sha256 manifests: "<hex>  <filename>" (no leading * for binary mode)
           sha256sum plugkit-win32-x64.exe plugkit-win32-arm64.exe \
                     plugkit-darwin-x64 plugkit-darwin-arm64 \
                     plugkit-linux-x64 plugkit-linux-arm64 \
             | sed 's/ \*/  /' > plugkit.sha256
+          sha256sum rtk-win32-x64.exe rtk-win32-arm64.exe \
+                    rtk-darwin-x64 rtk-darwin-arm64 \
+                    rtk-linux-x64 rtk-linux-arm64 \
+            | sed 's/ \*/  /' > rtk.sha256
           echo "$VER" > plugkit.version
+          echo "$RTK_VER" > rtk.version
           ls -la
           cat plugkit.sha256
+          cat rtk.sha256
 
       - name: Upload to plugkit-bin Release
         env:
@@ -182,6 +240,7 @@ jobs:
               --title "plugkit v$VER" \
               --notes "Auto-published by rs-plugkit CI from $GITHUB_SHA"
           fi
+          # plugkit binaries (always present)
           gh release upload "v$VER" \
             --repo AnEntrypoint/plugkit-bin \
             --clobber \
@@ -193,6 +252,18 @@ jobs:
             release-assets/plugkit-linux-arm64 \
             release-assets/plugkit.sha256 \
             release-assets/plugkit.version
+          # rtk binaries (built from source in the same matrix — every target covered)
+          gh release upload "v$VER" \
+            --repo AnEntrypoint/plugkit-bin \
+            --clobber \
+            release-assets/rtk-win32-x64.exe \
+            release-assets/rtk-win32-arm64.exe \
+            release-assets/rtk-darwin-x64 \
+            release-assets/rtk-darwin-arm64 \
+            release-assets/rtk-linux-x64 \
+            release-assets/rtk-linux-arm64 \
+            release-assets/rtk.sha256 \
+            release-assets/rtk.version
 
       - name: Bump gm-starter metadata
         env:
@@ -212,10 +283,14 @@ jobs:
           jq --arg v "$VER" '.plugkitVersion = $v' gm-starter/gm.json > /tmp/gm.json
           mv /tmp/gm.json gm-starter/gm.json
           echo "$VER" > gm-starter/bin/plugkit.version
-          # Sync sha256 manifest from the just-uploaded release
+          # Sync sha256 manifest from the just-uploaded release (plugkit + rtk)
           cp ../release-assets/plugkit.sha256 gm-starter/bin/plugkit.sha256 2>/dev/null || \
             curl -sL "https://github.com/AnEntrypoint/plugkit-bin/releases/download/v${VER}/plugkit.sha256" -o gm-starter/bin/plugkit.sha256
-          git add gm-starter/gm.json gm-starter/bin/plugkit.version gm-starter/bin/plugkit.sha256
+          cp ../release-assets/rtk.sha256 gm-starter/bin/rtk.sha256 2>/dev/null || \
+            curl -sL "https://github.com/AnEntrypoint/plugkit-bin/releases/download/v${VER}/rtk.sha256" -o gm-starter/bin/rtk.sha256
+          cp ../release-assets/rtk.version gm-starter/bin/rtk.version 2>/dev/null || \
+            curl -sL "https://github.com/AnEntrypoint/plugkit-bin/releases/download/v${VER}/rtk.version" -o gm-starter/bin/rtk.version
+          git add gm-starter/gm.json gm-starter/bin/plugkit.version gm-starter/bin/plugkit.sha256 gm-starter/bin/rtk.sha256 gm-starter/bin/rtk.version
           if git diff --cached --quiet; then
             echo "No metadata changes"
             exit 0
