@@ -368,10 +368,20 @@ fn spawn_trajectory_ingest(project_dir: &str) {
     if fs::write(&path, &summary).is_err() { return; }
     let pd = project_dir.to_string();
     let summary_text = summary.clone();
+    let summary_len = summary.len();
+    rs_exec::obs::event("rs_learn", "trajectory_ingest", serde_json::json!({
+        "project_dir": project_dir,
+        "content_len": summary_len
+    }));
     spawn_detached(async move {
+        let t = std::time::Instant::now();
         let (store, embedder, llm) = open_graph(&pd).await?;
         let ingestor = rs_learn::graph::ingest::Ingestor::new(store, embedder, llm);
         let _ = ingestor.add_episode_fast(&summary_text, "trajectory/recent-commits", None).await?;
+        rs_exec::obs::event("rs_learn", "trajectory_ingest_done", serde_json::json!({
+            "project_dir": &pd,
+            "dur_ms": t.elapsed().as_millis() as u64
+        }));
         Ok(())
     });
 }

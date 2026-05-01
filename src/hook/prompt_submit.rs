@@ -1,6 +1,6 @@
 use super::{is_gemini, is_kilo, is_opencode, load_prompt, project_dir, run_self};
 use serde_json::json;
-use std::io::Read;
+use std::{env, io::Read};
 
 fn sanitize_bash_patterns(s: &str) -> String {
     s.replace("${", "$\\{")
@@ -117,5 +117,13 @@ pub fn run() {
         json!({ "systemMessage": additional_context })
     };
 
+    let sess = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
+    let project_str = project.as_deref().unwrap_or("");
+    rs_exec::obs::event("hook", "prompt-submit-detail", serde_json::json!({
+        "project_dir": project_str,
+        "sess": sess,
+        "autonomous": autonomous,
+        "prompt_len": prompt.len()
+    }));
     println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
 }
