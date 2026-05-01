@@ -199,7 +199,9 @@ pub fn recall(query: &str, project_dir: &str, limit: u32) -> String {
     if query.trim().is_empty() { return String::new(); }
     let started = std::time::Instant::now();
     let result = recall_inner(query, project_dir, limit);
+    let query_preview: String = query.chars().take(80).collect();
     rs_exec::obs::event("rs_learn", "recall", serde_json::json!({
+        "query": query_preview,
         "query_len": query.len(),
         "limit": limit,
         "result_len": result.len(),
@@ -521,14 +523,28 @@ pub fn learn_passthrough(action: &str, rest: &[String], project_dir: &str) -> St
 pub fn ingest_fast(content: &str, source: &str, project_dir: &str) {
     if content.trim().is_empty() { return; }
 
+    let ingest_start = std::time::Instant::now();
+    let content_len = content.len();
     let body = serde_json::json!({
         "content": content,
         "source": source,
     }).to_string();
     if let Some(_) = http_post(&http_base(), "/messages", &body, Duration::from_secs(2)) {
+        rs_exec::obs::event("rs_learn", "ingest", serde_json::json!({
+            "source": source,
+            "content_len": content_len,
+            "path": "http",
+            "dur_ms": ingest_start.elapsed().as_millis() as u64
+        }));
         return;
     }
 
+    rs_exec::obs::event("rs_learn", "ingest", serde_json::json!({
+        "source": source,
+        "content_len": content_len,
+        "path": "lib",
+        "dur_ms": ingest_start.elapsed().as_millis() as u64
+    }));
     // Fallback: direct lib call, fire-and-forget on shared runtime.
     let pd = project_dir.to_string();
     let content_owned = content.to_string();

@@ -9,7 +9,6 @@ pub fn run() {
     let tool_name = data["tool_name"].as_str()
         .or_else(|| data["tool_use"]["name"].as_str())
         .unwrap_or("");
-    rs_exec::obs::event("hook", "pre-tool-use.tool", serde_json::json!({ "tool_name": tool_name }));
     let tool_input = if data["tool_input"].is_object() || data["tool_input"].is_array() {
         &data["tool_input"]
     } else {
@@ -18,11 +17,33 @@ pub fn run() {
     let session_id = data["session_id"].as_str().unwrap_or("");
 
     if let Some(early) = needs_gm_and_skill_tracking(tool_name, tool_input) {
+        let is_deny = early["hookSpecificOutput"]["permissionDecision"].as_str() == Some("deny");
+        let reason = if is_deny {
+            early["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").chars().take(120).collect::<String>()
+        } else {
+            String::new()
+        };
+        rs_exec::obs::event("hook", "pre-tool-use.tool", serde_json::json!({
+            "tool_name": tool_name,
+            "outcome": if is_deny { "deny" } else { "allow" },
+            "reason_preview": reason,
+        }));
         println!("{}", serde_json::to_string(&early).unwrap_or_default());
         return;
     }
 
     let result = dispatch(tool_name, tool_input, session_id);
+    let is_deny = result["hookSpecificOutput"]["permissionDecision"].as_str() == Some("deny");
+    let reason = if is_deny {
+        result["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").chars().take(120).collect::<String>()
+    } else {
+        String::new()
+    };
+    rs_exec::obs::event("hook", "pre-tool-use.tool", serde_json::json!({
+        "tool_name": tool_name,
+        "outcome": if is_deny { "deny" } else { "allow" },
+        "reason_preview": reason,
+    }));
     println!("{}", serde_json::to_string(&result).unwrap_or_default());
 }
 
