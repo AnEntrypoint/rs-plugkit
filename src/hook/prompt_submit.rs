@@ -80,7 +80,8 @@ pub fn run() {
                 parts.push(format!("=== search ===\n{}", search_out));
             }
 
-            let recall = super::rs_learn::recall(&prompt, dir, 5);
+            let recall_q = super::rs_learn::short_recall_query(&prompt, dir);
+            let recall = super::rs_learn::recall(&recall_q, dir, 5);
             if !recall.is_empty() {
                 parts.push(format!("=== rs-learn recall (cross-session memory for this prompt) ===\n{}", recall));
             }

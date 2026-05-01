@@ -262,6 +262,37 @@ pub fn project_query(project_dir: &str) -> String {
     format!("{} feedback project decisions", name)
 }
 
+/// Derive a short 2-6 word recall query from a raw prompt.
+/// Strips leading slash-command tokens, takes the first meaningful words, caps at 40 chars.
+/// Falls back to project_query when the prompt yields nothing useful.
+pub fn short_recall_query(prompt: &str, project_dir: &str) -> String {
+    let s = prompt.trim();
+    let s = if s.starts_with('/') {
+        s.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim()
+    } else {
+        s
+    };
+    let words: Vec<&str> = s.split_whitespace()
+        .filter(|w| w.len() > 1)
+        .take(6)
+        .collect();
+    if words.is_empty() {
+        return project_query(project_dir);
+    }
+    let mut q = words.join(" ");
+    if q.len() > 40 {
+        q.truncate(40);
+        if let Some(pos) = q.rfind(' ') {
+            q.truncate(pos);
+        }
+    }
+    if q.trim().is_empty() {
+        project_query(project_dir)
+    } else {
+        q
+    }
+}
+
 /// Counter-driven deep cycles. Increments prompt counter; spawns background work at thresholds.
 /// Returns nothing (fire-and-forget). Safe: detached, never blocks the hook.
 pub fn tick_and_maybe_run_deep_cycles(project_dir: &str) {
