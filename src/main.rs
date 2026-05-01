@@ -514,10 +514,7 @@ async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>
     ensure_runner().await?;
     let effective_timeout = match timeout_ms {
         Some(n) if n > 0 => n,
-        _ => {
-            eprintln!("[plugkit] warn: --timeout-ms not set; applying transitional default {} ms (set --timeout-ms explicitly to silence)", DEFAULT_EXEC_TIMEOUT_MS);
-            DEFAULT_EXEC_TIMEOUT_MS
-        }
+        _ => DEFAULT_EXEC_TIMEOUT_MS,
     };
     let mut exec_params = json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "timeoutMs": effective_timeout });
     if let Some(sid) = session_id { exec_params["sessionId"] = json!(sid); }
