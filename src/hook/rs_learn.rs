@@ -267,13 +267,16 @@ pub fn project_query(project_dir: &str) -> String {
 /// Falls back to project_query when the prompt yields nothing useful.
 pub fn short_recall_query(prompt: &str, project_dir: &str) -> String {
     let s = prompt.trim();
+    if s.starts_with('<') {
+        return project_query(project_dir);
+    }
     let s = if s.starts_with('/') {
         s.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim()
     } else {
         s
     };
     let words: Vec<&str> = s.split_whitespace()
-        .filter(|w| w.len() > 1)
+        .filter(|w| w.len() > 1 && !w.starts_with('<'))
         .take(6)
         .collect();
     if words.is_empty() {
