@@ -1,3 +1,7 @@
+## 2026-05-02 - session-start writes needs-gm to cover continuation-message bypass
+
+session_start hook now writes .gm/needs-gm for every gm project (AGENTS.md or .gm/ present) at session start, unless prd.yml exists with content (autonomous mode). This closes the isMeta:true bypass where stop-hook feedback and short continuation messages skip UserPromptSubmit, leaving needs-gm unwritten and pre_tool_use unable to enforce gm:gm invocation first.
+
 ## 2026-05-02 - obs: trajectory_ingest event + prompt-submit-detail with project_dir/sess
 
 spawn_trajectory_ingest now emits trajectory_ingest (pre-spawn) and trajectory_ingest_done (post-ingest) obs events to rs_learn.jsonl. prompt_submit now emits prompt-submit-detail to hook.jsonl with project_dir, sess, autonomous, and prompt_len fields — enabling correlation between hook fires and ccsniff session audits.

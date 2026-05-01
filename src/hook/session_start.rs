@@ -8,6 +8,7 @@ pub fn run() {
     ensure_claude_md_pointer(project.as_deref());
     ensure_tools_current();
     prune_gm_log_once_per_day();
+    write_needs_gm_if_gm_project(project.as_deref());
     let session_start_msg = load_prompt("session-start").unwrap_or_else(|| "BLOCKING REQUIREMENT — READ THIS FIRST: Your VERY FIRST action on EVERY user message MUST be to invoke the Skill tool with skill: \"gm:gm\". Do NOT read files, do NOT search, do NOT answer, do NOT plan, do NOT use any other tool before invoking skill: \"gm:gm\". This is non-negotiable. If you respond without invoking gm:gm first, you are violating a hard constraint.\n\n=== TOOL RULES ===\n\nSkill tool: invoke skills by name (e.g. skill: \"gm:gm\"). Never use the Agent tool to load skills.\n\nBash tool: only these formats are allowed —\n  exec:nodejs / exec:python / exec:bash / exec:typescript / exec:go / exec:rust / exec:c / exec:cpp / exec:java\n  exec:browser  (JS automation against `page`)\n  exec:codesearch  (natural language search)\n  exec:status / exec:sleep / exec:close / exec:runner / exec:type\n  git <args>  (git commands directly, no exec: prefix)\n  Everything else is blocked. Never Bash(node ...) or Bash(npm ...) or Bash(npx ...).\n\nGlob/Grep/Find/Explore: blocked — use exec:codesearch instead.".to_string());
     let mut parts: Vec<String> = vec![session_start_msg];
 
@@ -48,6 +49,20 @@ pub fn run() {
     };
 
     println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
+}
+
+fn write_needs_gm_if_gm_project(project_dir: Option<&str>) {
+    let Some(dir) = project_dir else { return };
+    let gm_dir = std::path::Path::new(dir).join(".gm");
+    let agents_md = std::path::Path::new(dir).join("AGENTS.md");
+    if !gm_dir.exists() && !agents_md.exists() { return; }
+    let _ = fs::create_dir_all(&gm_dir);
+    let prd = gm_dir.join("prd.yml");
+    if prd.exists() {
+        let content = fs::read_to_string(&prd).unwrap_or_default();
+        if !content.trim().is_empty() { return; }
+    }
+    let _ = fs::write(gm_dir.join("needs-gm"), "1");
 }
 
 /// Auto-update gm-tools binaries from the active plugin cache when newer.
