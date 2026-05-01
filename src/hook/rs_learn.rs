@@ -255,17 +255,28 @@ fn format_recall(raw: &str, max: u32) -> String {
     out
 }
 
-/// Default project-grounding query for session-start.
 pub fn project_query(project_dir: &str) -> String {
     let name = std::path::Path::new(project_dir)
         .file_name().and_then(|n| n.to_str()).unwrap_or("project");
-    format!("{} feedback project decisions", name)
+    let is_semantic = name.len() >= 3
+        && name.chars().any(|c| c.is_alphabetic())
+        && !name.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '_');
+    if is_semantic {
+        format!("{} feedback project decisions", name)
+    } else {
+        "coding harness feedback decisions".to_string()
+    }
 }
 
-/// Derive a short 2-6 word recall query from a raw prompt.
-/// Strips leading slash-command tokens, takes the first meaningful words, caps at 40 chars.
-/// Falls back to project_query when the prompt yields nothing useful.
 pub fn short_recall_query(prompt: &str, project_dir: &str) -> String {
+    const STOP: &[&str] = &[
+        "a","an","the","is","it","of","and","in","to","we","our","my","i","you",
+        "be","do","go","on","up","or","if","so","as","at","by","no","ok",
+        "1h","2h","alright","want","check","make","sure","also","must","next",
+        "please","just","then","now","here","there","this","that","these","those",
+        "all","any","some","can","will","would","should","could","have","has",
+        "had","get","got","let","set","put","run","use","see","try","fix",
+    ];
     let s = prompt.trim();
     if s.starts_with('<') {
         return project_query(project_dir);
@@ -276,10 +287,16 @@ pub fn short_recall_query(prompt: &str, project_dir: &str) -> String {
         s
     };
     let words: Vec<&str> = s.split_whitespace()
-        .filter(|w| w.len() > 1 && !w.starts_with('<'))
+        .filter(|w| {
+            if w.len() < 3 { return false; }
+            if w.starts_with('<') || w.starts_with("http") || w.starts_with("C:\\") || w.starts_with("c:/") || w.starts_with('/') { return false; }
+            let lower = w.to_ascii_lowercase();
+            let stripped = lower.trim_matches(|c: char| !c.is_alphanumeric());
+            !stripped.is_empty() && !STOP.contains(&stripped)
+        })
         .take(6)
         .collect();
-    if words.is_empty() {
+    if words.len() < 2 {
         return project_query(project_dir);
     }
     let mut q = words.join(" ");
@@ -289,7 +306,7 @@ pub fn short_recall_query(prompt: &str, project_dir: &str) -> String {
             q.truncate(pos);
         }
     }
-    if q.trim().is_empty() {
+    if q.trim().split_whitespace().count() < 2 {
         project_query(project_dir)
     } else {
         q
