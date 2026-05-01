@@ -162,6 +162,8 @@ fn ensure_gitignore(project_dir: Option<&str>) {
          .gm/turn-state.json\n\
          .gm/no-memorize-this-turn\n\
          .gm/prd.paused.yml\n\
+         .gm/rs-learn.db-shm\n\
+         .gm/rs-learn.db-wal\n\
          # tracked: .gm/rs-learn.db, .gm/code-search/, AGENTS.md, .gm/prd.yml\n\
          {END}\n"
     );
