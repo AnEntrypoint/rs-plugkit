@@ -39,14 +39,6 @@ pub fn run() {
             let _ = std::fs::write(&needs_gm, "1");
             let _ = std::fs::write(&global_needs_gm, "1");
         }
-        let turn_state = serde_json::json!({
-            "turnId": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
-            "firstToolFired": false,
-            "execCallsSinceMemorize": 0,
-            "recallFiredThisTurn": false
-        });
-        let _ = std::fs::write(gm.join("turn-state.json"), turn_state.to_string());
-        let _ = std::fs::remove_file(gm.join("no-memorize-this-turn"));
     }
 
     if autonomous {

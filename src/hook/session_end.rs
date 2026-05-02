@@ -1,3 +1,4 @@
+use super::project_dir;
 use std::io::Read;
 
 pub fn run() {
@@ -23,6 +24,13 @@ pub fn run() {
     eprintln!("[session-end] reason={:?} — full cleanup.", reason);
     super::agent_browser::close_sessions_for(session_id);
     rs_exec::runtime::kill_session_browser(session_id);
+
+    if let Some(dir) = project_dir() {
+        let gm = std::path::Path::new(&dir).join(".gm");
+        let _ = std::fs::write(gm.join("turn-state.json"), "{}");
+        let _ = std::fs::remove_file(gm.join("no-memorize-this-turn"));
+    }
+
     let bin = super::plugkit_bin();
     let _ = super::no_window_cmd(&bin)
         .args([rs_exec::SUBCMD_SESSION_CLEANUP, &format!("--session={}", session_id)])
