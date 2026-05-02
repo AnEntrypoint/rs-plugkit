@@ -1,4 +1,4 @@
-use super::{is_gemini, is_kilo, is_opencode, load_prompt, project_dir, run_self};
+use super::{is_kilo, is_opencode, load_prompt, project_dir, run_self};
 use serde_json::json;
 use std::{env, io::Read};
 
@@ -43,12 +43,10 @@ pub fn run() {
 
     if autonomous {
         let msg = "AUTONOMOUS MODE \u{2014} .gm/prd.yml exists. Continue executing without re-invoking gm:gm. Resolve doubts via witnessed probe, recall, or PRD; never ask the user. Spawn Agent(gm:memorize) for any unknown\u{2192}known transition same turn. When .prd is empty + git clean + pushed, invoke update-docs to close out.";
-        let out = if is_gemini() {
-            json!({ "systemMessage": msg })
-        } else if is_opencode() || is_kilo() {
+        let out = if is_opencode() || is_kilo() {
             json!({ "hookSpecificOutput": { "hookEventName": "message.updated", "additionalContext": msg } })
         } else {
-            json!({ "systemMessage": msg })
+            json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": msg } })
         };
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
         return;
@@ -133,8 +131,8 @@ pub fn run() {
             "autonomous": autonomous,
             "prompt_len": prompt.len()
         }));
-        println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": system_message })).unwrap_or_default());
+        println!("{}", serde_json::to_string_pretty(&json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": system_message } })).unwrap_or_default());
     } else {
-        println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": "" })).unwrap_or_default());
+        println!("{}", serde_json::to_string_pretty(&json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": "" } })).unwrap_or_default());
     }
 }
