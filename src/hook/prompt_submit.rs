@@ -117,11 +117,13 @@ pub fn run() {
             prd_path.display()
         );
 
-        let agent_output = json!({
-            "type": "subagent_invoke",
-            "subagent_type": "gm:gm",
-            "prompt": subagent_prompt
-        });
+        let system_message = format!(
+            "User prompt: {}\n\n{}\n\nWorkspace: {}\nPRD path: {}\n\nInvoke Skill(gm:gm) first. Resolve unknowns with witnessed probes, recall, or the PRD. Never ask the user when the PRD is present.",
+            prompt_for_subagent,
+            if workspace_context.is_empty() { String::new() } else { format!("Initial context:\n{}", workspace_context) },
+            dir_for_prd,
+            prd_path.display()
+        );
 
         let sess = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
         let project_str = project.as_deref().unwrap_or("");
@@ -131,8 +133,8 @@ pub fn run() {
             "autonomous": autonomous,
             "prompt_len": prompt.len()
         }));
-        println!("{}", serde_json::to_string_pretty(&agent_output).unwrap_or_default());
+        println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": system_message })).unwrap_or_default());
     } else {
-        println!("{{}}");
+        println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": "" })).unwrap_or_default());
     }
 }

@@ -39,23 +39,16 @@ pub fn run() {
 
         let prd_path = std::path::Path::new(dir).join(".gm").join("prd.yml");
         let workspace_context = context_parts.join("\n\n");
-
-        let subagent_prompt = format!(
-            "Session start for workspace: {}\n\n{}\n\nPRD path: {}",
+        let system_message = format!(
+            "Session start for workspace: {}\n\n{}\n\nPRD path: {}\n\nInvoke Skill(gm:gm) first. Resolve unknowns with witnessed probes, recall, or the PRD. Never ask the user when the PRD is present.",
             dir,
             if workspace_context.is_empty() { "No prior context loaded.".to_string() } else { workspace_context },
             prd_path.display()
         );
 
-        let agent_output = json!({
-            "type": "subagent_invoke",
-            "subagent_type": "gm:gm",
-            "prompt": subagent_prompt
-        });
-
-        println!("{}", serde_json::to_string_pretty(&agent_output).unwrap_or_default());
+        println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": system_message })).unwrap_or_default());
     } else {
-        println!("{{}}");
+        println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": "" })).unwrap_or_default());
     }
 }
 
