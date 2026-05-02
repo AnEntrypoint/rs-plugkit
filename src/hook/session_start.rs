@@ -8,8 +8,6 @@ pub fn run() {
     ensure_claude_md_pointer(project.as_deref());
     ensure_tools_current();
     write_needs_gm_if_gm_project(project.as_deref());
-    let session_start_msg = load_prompt("session-start").unwrap_or_else(|| "BLOCKING REQUIREMENT — READ THIS FIRST: Your VERY FIRST action on EVERY user message MUST be to invoke the Skill tool with skill: \"gm:gm\". Do NOT read files, do NOT search, do NOT answer, do NOT plan, do NOT use any other tool before invoking skill: \"gm:gm\". This is non-negotiable. If you respond without invoking gm:gm first, you are violating a hard constraint.\n\n=== TOOL RULES ===\n\nSkill tool: invoke skills by name (e.g. skill: \"gm:gm\"). Never use the Agent tool to load skills.\n\nBash tool: only these formats are allowed —\n  exec:nodejs / exec:python / exec:bash / exec:typescript / exec:go / exec:rust / exec:c / exec:cpp / exec:java\n  exec:browser  (JS automation against `page`)\n  exec:codesearch  (natural language search)\n  exec:status / exec:sleep / exec:close / exec:runner / exec:type\n  git <args>  (git commands directly, no exec: prefix)\n  Everything else is blocked. Never Bash(node ...) or Bash(npm ...) or Bash(npx ...).\n\nGlob/Grep/Find/Explore: blocked — use exec:codesearch instead.".to_string());
-    let mut parts: Vec<String> = vec![session_start_msg];
 
     if let Some(ref dir) = project {
         let insight = {
@@ -20,8 +18,11 @@ pub fn run() {
                 cached
             }
         };
+
+        let mut context_parts: Vec<String> = Vec::new();
+
         if !insight.is_empty() && !insight.starts_with("Error") && !insight.starts_with("No cache") {
-            parts.push(format!(
+            context_parts.push(format!(
                 "=== This is your initial insight of the repository, look at every possible aspect of this for initial opinionation and to offset the need for code exploration ===\n{}",
                 insight
             ));
@@ -30,24 +31,35 @@ pub fn run() {
         let recall_q = super::rs_learn::project_query(dir);
         let recall = super::rs_learn::recall(&recall_q, dir, 3);
         if !recall.is_empty() {
-            parts.push(format!(
+            context_parts.push(format!(
                 "=== rs-learn recall (project memory — past decisions, feedback, and lessons) ===\n{}",
                 recall
             ));
         }
-    }
 
-    let additional_context = parts.join("\n\n").replace("${", "$\\{");
+        let prd_path = std::path::Path::new(dir).join(".gm").join("prd.yml");
+        let workspace_context = context_parts.join("\n\n");
 
-    let output = if is_gemini() {
-        json!({ "systemMessage": additional_context })
-    } else if is_opencode() || is_kilo() {
-        json!({ "hookSpecificOutput": { "hookEventName": "session.created", "additionalContext": additional_context } })
+        let subagent_prompt = format!(
+            "Session start for workspace: {}\n\n{}\n\nPRD path: {}",
+            dir,
+            if workspace_context.is_empty() { "No prior context loaded.".to_string() } else { workspace_context },
+            prd_path.display()
+        );
+
+        let agent_output = json!({
+            "type": "subagent_invoke",
+            "subagent_type": "gm:gm",
+            "prompt": subagent_prompt
+        });
+
+        println!("{}", serde_json::to_string_pretty(&agent_output).unwrap_or_default());
     } else {
-        json!({ "hookSpecificOutput": { "hookEventName": "SessionStart", "additionalContext": additional_context } })
-    };
-
-    println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
+        let fallback_output = json!({
+            "systemMessage": "gm: no project directory detected"
+        });
+        println!("{}", serde_json::to_string_pretty(&fallback_output).unwrap_or_default());
+    }
 }
 
 fn write_needs_gm_if_gm_project(project_dir: Option<&str>) {

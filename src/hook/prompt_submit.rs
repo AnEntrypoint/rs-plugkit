@@ -62,24 +62,12 @@ pub fn run() {
         return;
     }
 
-    let parallel_hint = {
-        let q_count = prompt.matches('?').count();
-        let numbered = prompt.lines().filter(|l| {
-            let t = l.trim_start();
-            t.starts_with("1.") || t.starts_with("2.") || t.starts_with("- ") || t.starts_with("1)") || t.starts_with("2)")
-        }).count();
-        if q_count >= 2 || numbered >= 2 {
-            Some(format!("\n\n=== PARALLELISM HINT ===\n\nThis prompt contains {} questions / {} list items — they appear independent. After invoking gm and writing the PRD, launch parallel Agent(subagent_type=\"gm:gm\") subagents (≤3 concurrent) for independent items in ONE message. Sequential execution of independent work is a critical violation.", q_count, numbered))
-        } else { None }
-    };
-    let blocking_req = load_prompt("prompt-submit").unwrap_or_else(|| "BLOCKING REQUIREMENT — YOUR FIRST ACTION MUST BE: Skill tool with skill: \"gm:gm\". Every new user message requires gm invocation FIRST. (canonical text missing: $CLAUDE_PLUGIN_ROOT/prompts/prompt-submit.txt unreadable; reinstall plugkit)".to_string());
-    let mut parts: Vec<String> = vec![blocking_req];
-    if let Some(hint) = parallel_hint { parts.push(hint); }
-
     if let Some(ref dir) = project {
         let dir_for_search = dir.clone();
         let dir_for_insight = dir.clone();
         let prompt_for_search = prompt.clone();
+        let dir_for_prd = dir.clone();
+        let prompt_for_subagent = prompt.clone();
 
         let search_handle = if !prompt.is_empty() {
             Some(std::thread::spawn(move || {
@@ -89,6 +77,8 @@ pub fn run() {
         let insight_handle = std::thread::spawn(move || {
             run_self(&["codeinsight", &dir_for_insight])
         });
+
+        let mut context_parts: Vec<String> = Vec::new();
 
         if !prompt.is_empty() {
             let recall_q = super::rs_learn::short_recall_query(&prompt, dir);
@@ -109,39 +99,51 @@ pub fn run() {
             if let Some(h) = search_handle {
                 let search_out = h.join().unwrap_or_default();
                 if !search_out.is_empty() {
-                    parts.push(format!("=== search ===\n{}", search_out));
+                    context_parts.push(format!("=== search ===\n{}", search_out));
                 }
             }
             if !combined.is_empty() {
-                parts.push(format!("=== rs-learn recall (cross-session memory for this prompt) ===\n{}", combined));
+                context_parts.push(format!("=== rs-learn recall (cross-session memory for this prompt) ===\n{}", combined));
             }
         }
 
         let insight = insight_handle.join().unwrap_or_default();
         if !insight.is_empty() {
-            parts.push(format!("=== codeinsight ===\n{}", insight));
+            context_parts.push(format!("=== codeinsight ===\n{}", insight));
         }
 
         super::rs_learn::tick_and_maybe_run_deep_cycles(dir);
-    }
 
-    let additional_context = sanitize_bash_patterns(&parts.join("\n\n"));
+        let prd_path = std::path::Path::new(&dir_for_prd).join(".gm").join("prd.yml");
+        let workspace_context = context_parts.join("\n\n");
 
-    let output = if is_gemini() {
-        json!({ "systemMessage": additional_context })
-    } else if is_opencode() || is_kilo() {
-        json!({ "hookSpecificOutput": { "hookEventName": "message.updated", "additionalContext": additional_context } })
+        let subagent_prompt = format!(
+            "User prompt: {}\n\n{}\n\nWorkspace: {}\nPRD path: {}",
+            prompt_for_subagent,
+            if workspace_context.is_empty() { String::new() } else { format!("Initial context:\n{}", workspace_context) },
+            dir_for_prd,
+            prd_path.display()
+        );
+
+        let agent_output = json!({
+            "type": "subagent_invoke",
+            "subagent_type": "gm:gm",
+            "prompt": subagent_prompt
+        });
+
+        let sess = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
+        let project_str = project.as_deref().unwrap_or("");
+        rs_exec::obs::event("hook", "prompt-submit-detail", serde_json::json!({
+            "project_dir": project_str,
+            "sess": sess,
+            "autonomous": autonomous,
+            "prompt_len": prompt.len()
+        }));
+        println!("{}", serde_json::to_string_pretty(&agent_output).unwrap_or_default());
     } else {
-        json!({ "systemMessage": additional_context })
-    };
-
-    let sess = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
-    let project_str = project.as_deref().unwrap_or("");
-    rs_exec::obs::event("hook", "prompt-submit-detail", serde_json::json!({
-        "project_dir": project_str,
-        "sess": sess,
-        "autonomous": autonomous,
-        "prompt_len": prompt.len()
-    }));
-    println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
+        let fallback_output = json!({
+            "systemMessage": "gm: no project directory detected"
+        });
+        println!("{}", serde_json::to_string_pretty(&fallback_output).unwrap_or_default());
+    }
 }
