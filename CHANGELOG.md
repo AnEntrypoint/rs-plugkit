@@ -1,3 +1,7 @@
+## 2026-05-02 - prompt_submit: parallelize search + codeinsight subprocess spawns
+
+prompt_submit.rs witnessed at 7007ms end-to-end in gm-log 5-min window. search and codeinsight subprocess spawns now run in parallel std::thread::spawn handles, joined after recall finishes. Output ordering preserved (search → recall → codeinsight). Expected reduction in hook latency for sessions where both contribute is roughly the cost of the shorter spawn.
+
 ## 2026-05-02 - hook obs: pre-tool autonomy field + dedupe prompt-submit fallback
 
 pre_tool_use obs events now include `autonomous` (prd.yml exists) and `stage` (early|dispatch) so ccsniff gm-audit can distinguish legitimate autonomous-mode resumption from MISS first-action violations. prompt_submit fallback string for missing $CLAUDE_PLUGIN_ROOT/prompts/prompt-submit.txt shrunk from 5KB duplicate of canonical text to a 325-char pointer that fails loud, removing drift risk between rs-plugkit hardcoded copy and gm-starter canonical.

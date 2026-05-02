@@ -77,12 +77,20 @@ pub fn run() {
     if let Some(hint) = parallel_hint { parts.push(hint); }
 
     if let Some(ref dir) = project {
-        if !prompt.is_empty() {
-            let search_out = run_self(&["search", "--path", dir, &prompt]);
-            if !search_out.is_empty() {
-                parts.push(format!("=== search ===\n{}", search_out));
-            }
+        let dir_for_search = dir.clone();
+        let dir_for_insight = dir.clone();
+        let prompt_for_search = prompt.clone();
 
+        let search_handle = if !prompt.is_empty() {
+            Some(std::thread::spawn(move || {
+                run_self(&["search", "--path", &dir_for_search, &prompt_for_search])
+            }))
+        } else { None };
+        let insight_handle = std::thread::spawn(move || {
+            run_self(&["codeinsight", &dir_for_insight])
+        });
+
+        if !prompt.is_empty() {
             let recall_q = super::rs_learn::short_recall_query(&prompt, dir);
             let proj_q = super::rs_learn::project_query(dir);
             let recall = super::rs_learn::recall(&recall_q, dir, 5);
@@ -97,12 +105,19 @@ pub fn run() {
                 (true, false) => proj_recall,
                 (true, true) => String::new(),
             };
+
+            if let Some(h) = search_handle {
+                let search_out = h.join().unwrap_or_default();
+                if !search_out.is_empty() {
+                    parts.push(format!("=== search ===\n{}", search_out));
+                }
+            }
             if !combined.is_empty() {
                 parts.push(format!("=== rs-learn recall (cross-session memory for this prompt) ===\n{}", combined));
             }
         }
 
-        let insight = run_self(&["codeinsight", dir]);
+        let insight = insight_handle.join().unwrap_or_default();
         if !insight.is_empty() {
             parts.push(format!("=== codeinsight ===\n{}", insight));
         }
