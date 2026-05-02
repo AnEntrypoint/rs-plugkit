@@ -63,26 +63,22 @@ fn sanitize_for_host(mut v: Value) -> Value {
     if decision != "allow" {
         return v;
     }
-
-    // Runtime compatibility:
-    // - Codex rejects updatedInput in PreToolUse responses.
-    // - gm-cc style hosts rely on updatedInput for command rewrites.
-    // Keep deny behavior unchanged.
     let has_update = hso.get("updatedInput").is_some();
-    let is_cc_family = std::env::var("CLAUDE_PROJECT_DIR").is_ok()
-        || std::env::var("GEMINI_PROJECT_DIR").is_ok()
-        || std::env::var("OC_PROJECT_DIR").is_ok()
-        || std::env::var("KILO_PROJECT_DIR").is_ok();
-
-    if has_update && is_cc_family {
+    if !has_update {
+        return v;
+    }
+    let host_allows_updated_input = std::env::var("GM_ALLOW_UPDATED_INPUT")
+        .ok()
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if host_allows_updated_input {
         if let Some(obj) = hso.as_object_mut() {
             obj.remove("permissionDecision");
             obj.remove("permissionDecisionReason");
         }
-        v
-    } else {
-        serde_json::json!({})
+        return v;
     }
+    allow(None)
 }
 
 fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Value> {

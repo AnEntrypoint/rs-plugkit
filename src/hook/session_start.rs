@@ -55,10 +55,7 @@ pub fn run() {
 
         println!("{}", serde_json::to_string_pretty(&agent_output).unwrap_or_default());
     } else {
-        let fallback_output = json!({
-            "systemMessage": "gm: no project directory detected"
-        });
-        println!("{}", serde_json::to_string_pretty(&fallback_output).unwrap_or_default());
+        println!("{{}}");
     }
 }
 
