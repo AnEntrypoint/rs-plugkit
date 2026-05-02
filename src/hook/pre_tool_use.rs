@@ -33,7 +33,7 @@ pub fn run() {
             "autonomous": autonomous,
             "stage": "early",
         }));
-        println!("{}", serde_json::to_string(&early).unwrap_or_default());
+        println!("{}", serde_json::to_string(&sanitize_for_host(early)).unwrap_or_default());
         return;
     }
 
@@ -54,7 +54,30 @@ pub fn run() {
         "autonomous": autonomous,
         "stage": "dispatch",
     }));
-    println!("{}", serde_json::to_string(&result).unwrap_or_default());
+    println!("{}", serde_json::to_string(&sanitize_for_host(result)).unwrap_or_default());
+}
+
+fn sanitize_for_host(mut v: Value) -> Value {
+    let Some(hso) = v.get_mut("hookSpecificOutput") else { return v };
+    let decision = hso.get("permissionDecision").and_then(|d| d.as_str()).unwrap_or("");
+    if decision != "allow" {
+        return v;
+    }
+
+    // Host runtime rejects permissionDecision:"allow" in PreToolUse responses.
+    // Keep deny behavior unchanged; for allow:
+    // - If updatedInput exists, preserve rewrite payload and drop explicit allow decision.
+    // - Otherwise return empty object to indicate no-op allow.
+    let has_update = hso.get("updatedInput").is_some();
+    if has_update {
+        if let Some(obj) = hso.as_object_mut() {
+            obj.remove("permissionDecision");
+            obj.remove("permissionDecisionReason");
+        }
+        v
+    } else {
+        serde_json::json!({})
+    }
 }
 
 fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Value> {
@@ -665,6 +688,11 @@ fn session_log_drain(session_id: &str) -> String {
 }
 
 fn delegate_with_drain(cmd: &str, session_id: &str) -> Value {
+    if cfg!(windows) {
+        // Windows Bash tool commands are executed via PowerShell in this stack.
+        // Avoid shell chaining forms like `printf ... && ...` that are not portable.
+        return delegate_to_bash(cmd);
+    }
     let drain = session_log_drain(session_id);
     if drain.is_empty() {
         return delegate_to_bash(cmd);
