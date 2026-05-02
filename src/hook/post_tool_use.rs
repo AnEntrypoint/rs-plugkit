@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::io::Read;
 use std::path::Path;
 
@@ -68,12 +68,10 @@ pub fn run() {
     write_state(&gm, &ts_path, &state);
 
     if should_emit_hint {
-        let msg = format!(
-            "exec: run completed. MEMORIZE CHECK: did this output resolve any prior unknown? If YES \u{2192} spawn Agent(subagent_type='gm:memorize', model='haiku', run_in_background=true, prompt='## CONTEXT TO MEMORIZE\\n<fact>') NOW. Skipping = memory leak. (Counter: {}/{} before hard block.)",
-            state.exec_calls_since_memorize, HARD_BLOCK_AT
-        );
-        let out = json!({ "systemMessage": msg });
-        println!("{}", serde_json::to_string(&out).unwrap_or_default());
+        rs_exec::obs::event("hook", "post-tool-use.hint", serde_json::json!({
+            "counter": state.exec_calls_since_memorize,
+            "hard_block_at": HARD_BLOCK_AT
+        }));
     }
 }
 

@@ -8,6 +8,47 @@ fn write_needs_gm(project_dir: &str) {
     let _ = fs::write(gm_dir.join("needs-gm"), "1");
 }
 
+fn is_claude_family() -> bool {
+    env::var("CLAUDE_PROJECT_DIR").is_ok()
+        || env::var("GEMINI_PROJECT_DIR").is_ok()
+        || env::var("OC_PROJECT_DIR").is_ok()
+        || env::var("KILO_PROJECT_DIR").is_ok()
+}
+
+fn stop_allow(reason: Option<String>) -> serde_json::Value {
+    if is_claude_family() {
+        let mut output = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "Stop",
+                "permissionDecision": "allow"
+            }
+        });
+        if let Some(reason) = reason {
+            output["hookSpecificOutput"]["permissionDecisionReason"] = serde_json::Value::String(reason);
+        }
+        output
+    } else {
+        match reason {
+            Some(reason) => json!({ "decision": "approve", "reason": reason }),
+            None => json!({ "decision": "approve" }),
+        }
+    }
+}
+
+fn stop_block(reason: String) -> serde_json::Value {
+    if is_claude_family() {
+        json!({
+            "hookSpecificOutput": {
+                "hookEventName": "Stop",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason
+            }
+        })
+    } else {
+        json!({ "decision": "block", "reason": reason })
+    }
+}
+
 pub fn run_stop() {
     let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
     let open = if !session_id.is_empty() {
@@ -21,10 +62,7 @@ pub fn run_stop() {
     if !open.is_empty() {
         let ids = open.join(", ");
         write_needs_gm(&project_dir);
-        let out = json!({
-            "decision": "block",
-            "reason": format!("Open browser session(s): [{}]. Close them before stopping:\n  exec:browser\n  await page.close()\n\nOr use `exec:close` to clean up background tasks.\n\nHousekeeping policy: always close browser sessions and background tasks before ending a conversation.\n\nNEXT ACTION: invoke Skill(gm) first.", ids)
-        });
+        let out = stop_block(format!("Open browser session(s): [{}]. Close them before stopping:\n  exec:browser\n  await page.close()\n\nOr use `exec:close` to clean up background tasks.\n\nHousekeeping policy: always close browser sessions and background tasks before ending a conversation.\n\nNEXT ACTION: invoke Skill(gm) first.", ids));
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
         std::process::exit(2);
     }
@@ -36,16 +74,13 @@ pub fn run_stop() {
         let trimmed = content.trim();
         if !trimmed.is_empty() {
             write_needs_gm(&project_dir);
-            let out = json!({
-                "decision": "block",
-                "reason": format!("Work items remain in {}. Remove completed items as they finish. Delete the file when all items are done.\n\n{}\n\nNEXT ACTION: invoke Skill(gm) first.", prd.display(), trimmed)
-            });
+            let out = stop_block(format!("Work items remain in {}. Remove completed items as they finish. Delete the file when all items are done.\n\n{}\n\nNEXT ACTION: invoke Skill(gm) first.", prd.display(), trimmed));
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             std::process::exit(2);
         }
     }
 
-    println!("{}", json!({ "decision": "approve" }));
+    println!("{}", serde_json::to_string(&stop_allow(None)).unwrap_or_default());
 }
 
 fn hash_path(s: &str) -> String {
@@ -86,7 +121,13 @@ fn write_counter(path: &Path, c: &Counter) {
 }
 
 fn git(args: &[&str], dir: &str) -> Option<String> {
-    no_window_cmd("git")
+    let mut cmd = no_window_cmd("git");
+    if cfg!(windows) {
+        cmd.arg("-c").arg("core.excludesFile=NUL");
+    } else {
+        cmd.arg("-c").arg("core.excludesFile=/dev/null");
+    }
+    cmd
         .args(args)
         .current_dir(dir)
         .output()
@@ -100,7 +141,7 @@ pub fn run_stop_git() {
         .unwrap_or_else(|_| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
 
     if git(&["rev-parse", "--git-dir"], &project_dir).is_none() {
-        println!("{}", json!({ "decision": "approve" }));
+        println!("{}", serde_json::to_string(&stop_allow(None)).unwrap_or_default());
         return;
     }
 
@@ -152,23 +193,23 @@ pub fn run_stop_git() {
         let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
         if !in_reach {
             super::rs_learn::record_quality(&session_id, &project_dir, 0.8, "out-of-reach-remote");
-            println!("{}", json!({ "decision": "approve", "reason": "remote is out of user reach (no push permission); local commits accepted, no push attempted, no CI watch" }));
+            println!("{}", serde_json::to_string(&stop_allow(Some("remote is out of user reach (no push permission); local commits accepted, no push attempted, no CI watch".to_string()))).unwrap_or_default());
             return;
         }
         let ci = watch_gh_runs_for_head(&project_dir);
         match ci {
             CiOutcome::None => {
                 super::rs_learn::record_quality(&session_id, &project_dir, 0.7, "no-ci");
-                println!("{}", json!({ "decision": "approve" }));
+                println!("{}", serde_json::to_string(&stop_allow(None)).unwrap_or_default());
             }
             CiOutcome::AllGreen(report) => {
                 super::rs_learn::record_quality(&session_id, &project_dir, 0.9, "ci-green");
-                println!("{}", json!({ "decision": "approve", "reason": format!("CI: {}", report) }));
+                println!("{}", serde_json::to_string(&stop_allow(Some(format!("CI: {}", report)))).unwrap_or_default());
             }
             CiOutcome::Failures(report) => {
                 super::rs_learn::record_quality(&session_id, &project_dir, 0.2, "ci-fail");
                 write_needs_gm(&project_dir);
-                println!("{}", serde_json::to_string_pretty(&json!({ "decision": "block", "reason": format!("CI failure(s) on this push:\n{}\n\nInvestigate, fix, push again. Use `gh run view <id> --log-failed` for details.\n\nNEXT ACTION: invoke Skill(gm) first.", report) })).unwrap_or_default());
+                println!("{}", serde_json::to_string_pretty(&stop_block(format!("CI failure(s) on this push:\n{}\n\nInvestigate, fix, push again. Use `gh run view <id> --log-failed` for details.\n\nNEXT ACTION: invoke Skill(gm) first.", report))).unwrap_or_default());
                 std::process::exit(2);
             }
         }
@@ -192,10 +233,10 @@ pub fn run_stop_git() {
         let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
         super::rs_learn::record_quality(&session_id, &project_dir, 0.4, "stop-blocked-git");
         write_needs_gm(&project_dir);
-        println!("{}", serde_json::to_string_pretty(&json!({ "decision": "block", "reason": format!("Git: {}{}\n\nNEXT ACTION: invoke Skill(gm) first.", reason, auth_hint) })).unwrap_or_default());
+        println!("{}", serde_json::to_string_pretty(&stop_block(format!("Git: {}{}\n\nNEXT ACTION: invoke Skill(gm) first.", reason, auth_hint))).unwrap_or_default());
         std::process::exit(2);
     } else {
-        println!("{}", json!({ "decision": "approve", "reason": format!("⚠️ Git warning (attempt #{}): {}{} - Please commit and push your changes.", counter.count, reason, auth_hint) }));
+        println!("{}", serde_json::to_string(&stop_allow(Some(format!("⚠️ Git warning (attempt #{}): {}{} - Please commit and push your changes.", counter.count, reason, auth_hint)))).unwrap_or_default());
     }
 }
 
