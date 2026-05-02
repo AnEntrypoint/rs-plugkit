@@ -23,10 +23,15 @@ pub fn run() {
         } else {
             String::new()
         };
+        let autonomous = project_dir()
+            .map(|d| std::path::Path::new(&d).join(".gm").join("prd.yml").exists())
+            .unwrap_or(false);
         rs_exec::obs::event("hook", "pre-tool-use.tool", serde_json::json!({
             "tool_name": tool_name,
             "outcome": if is_deny { "deny" } else { "allow" },
             "reason_preview": reason,
+            "autonomous": autonomous,
+            "stage": "early",
         }));
         println!("{}", serde_json::to_string(&early).unwrap_or_default());
         return;
@@ -39,10 +44,15 @@ pub fn run() {
     } else {
         String::new()
     };
+    let autonomous = project_dir()
+        .map(|d| std::path::Path::new(&d).join(".gm").join("prd.yml").exists())
+        .unwrap_or(false);
     rs_exec::obs::event("hook", "pre-tool-use.tool", serde_json::json!({
         "tool_name": tool_name,
         "outcome": if is_deny { "deny" } else { "allow" },
         "reason_preview": reason,
+        "autonomous": autonomous,
+        "stage": "dispatch",
     }));
     println!("{}", serde_json::to_string(&result).unwrap_or_default());
 }

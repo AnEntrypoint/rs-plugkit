@@ -1,3 +1,7 @@
+## 2026-05-02 - hook obs: prompt-submit.start + autonomy field + dedupe fallback
+
+prompt_submit emits prompt-submit.start before run_self/search/recall calls so hook latency can be measured (start→detail duration). pre_tool_use obs events now include `autonomous` (prd.yml exists) and `stage` (early|dispatch) so ccsniff gm-audit can distinguish legitimate autonomous-mode resumption from MISS first-action violations. prompt_submit fallback string for missing $CLAUDE_PLUGIN_ROOT/prompts/prompt-submit.txt shrunk from 5KB duplicate of canonical text to a 325-char pointer that fails loud, removing drift risk between rs-plugkit hardcoded copy and gm-starter canonical.
+
 ## 2026-05-02 - global needs-gm sentinel + fix ensure_tools_current + bootstrap stale partial cleanup
 
 Global sentinel: prompt_submit and session_start now write ~/.claude/gm-tools/needs-gm in addition to the project-local .gm/needs-gm. pre_tool_use checks both, so non-gm projects (no AGENTS.md/.gm/) and non-gm-project sessions are now enforced just as strictly as gm projects. Sentinel cleared on gm:gm Skill invocation or autonomous mode.
