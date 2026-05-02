@@ -1,6 +1,8 @@
-## 2026-05-02 - hook obs: prompt-submit.start + autonomy field + dedupe fallback
+## 2026-05-02 - hook obs: pre-tool autonomy field + dedupe prompt-submit fallback
 
-prompt_submit emits prompt-submit.start before run_self/search/recall calls so hook latency can be measured (start→detail duration). pre_tool_use obs events now include `autonomous` (prd.yml exists) and `stage` (early|dispatch) so ccsniff gm-audit can distinguish legitimate autonomous-mode resumption from MISS first-action violations. prompt_submit fallback string for missing $CLAUDE_PLUGIN_ROOT/prompts/prompt-submit.txt shrunk from 5KB duplicate of canonical text to a 325-char pointer that fails loud, removing drift risk between rs-plugkit hardcoded copy and gm-starter canonical.
+pre_tool_use obs events now include `autonomous` (prd.yml exists) and `stage` (early|dispatch) so ccsniff gm-audit can distinguish legitimate autonomous-mode resumption from MISS first-action violations. prompt_submit fallback string for missing $CLAUDE_PLUGIN_ROOT/prompts/prompt-submit.txt shrunk from 5KB duplicate of canonical text to a 325-char pointer that fails loud, removing drift risk between rs-plugkit hardcoded copy and gm-starter canonical.
+
+(Earlier commit added a prompt-submit.start event; reverted same day after witnessing the dispatcher-level wrapper already emits prompt-submit phase=start/end with dur_ms. The added event was duplicate observability fighting the no-parallel-surfaces rule.)
 
 ## 2026-05-02 - global needs-gm sentinel + fix ensure_tools_current + bootstrap stale partial cleanup
 

@@ -9,11 +9,6 @@ fn sanitize_bash_patterns(s: &str) -> String {
 pub fn run() {
     let mut stdin = String::new();
     let _ = std::io::stdin().read_to_string(&mut stdin);
-    let sess_start = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
-    rs_exec::obs::event("hook", "prompt-submit.start", serde_json::json!({
-        "sess": sess_start,
-        "stdin_len": stdin.len()
-    }));
     let prompt = serde_json::from_str::<serde_json::Value>(&stdin)
         .ok()
         .and_then(|v| {
