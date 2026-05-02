@@ -64,12 +64,17 @@ fn sanitize_for_host(mut v: Value) -> Value {
         return v;
     }
 
-    // Host runtime rejects permissionDecision:"allow" in PreToolUse responses.
-    // Keep deny behavior unchanged; for allow:
-    // - If updatedInput exists, preserve rewrite payload and drop explicit allow decision.
-    // - Otherwise return empty object to indicate no-op allow.
+    // Runtime compatibility:
+    // - Codex rejects updatedInput in PreToolUse responses.
+    // - gm-cc style hosts rely on updatedInput for command rewrites.
+    // Keep deny behavior unchanged.
     let has_update = hso.get("updatedInput").is_some();
-    if has_update {
+    let is_cc_family = std::env::var("CLAUDE_PROJECT_DIR").is_ok()
+        || std::env::var("GEMINI_PROJECT_DIR").is_ok()
+        || std::env::var("OC_PROJECT_DIR").is_ok()
+        || std::env::var("KILO_PROJECT_DIR").is_ok();
+
+    if has_update && is_cc_family {
         if let Some(obj) = hso.as_object_mut() {
             obj.remove("permissionDecision");
             obj.remove("permissionDecisionReason");
