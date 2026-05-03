@@ -200,13 +200,15 @@ pub fn recall(query: &str, project_dir: &str, limit: u32) -> String {
     let started = std::time::Instant::now();
     let result = recall_inner(query, project_dir, limit);
     let query_preview: String = query.chars().take(80).collect();
+    let project_name = std::path::Path::new(project_dir).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
     rs_exec::obs::event("rs_learn", "recall", serde_json::json!({
         "query": query_preview,
         "query_len": query.len(),
         "limit": limit,
         "result_len": result.len(),
         "hit": !result.is_empty(),
-        "dur_ms": started.elapsed().as_millis() as u64
+        "dur_ms": started.elapsed().as_millis() as u64,
+        "project": project_name
     }));
     result
 }
@@ -586,6 +588,7 @@ pub fn ingest_fast(content: &str, source: &str, project_dir: &str) {
 
     let ingest_start = std::time::Instant::now();
     let content_len = content.len();
+    let project_name = std::path::Path::new(project_dir).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
     let body = serde_json::json!({
         "content": content,
         "source": source,
@@ -595,7 +598,8 @@ pub fn ingest_fast(content: &str, source: &str, project_dir: &str) {
             "source": source,
             "content_len": content_len,
             "path": "http",
-            "dur_ms": ingest_start.elapsed().as_millis() as u64
+            "dur_ms": ingest_start.elapsed().as_millis() as u64,
+            "project": project_name
         }));
         return;
     }
@@ -604,7 +608,8 @@ pub fn ingest_fast(content: &str, source: &str, project_dir: &str) {
         "source": source,
         "content_len": content_len,
         "path": "lib",
-        "dur_ms": ingest_start.elapsed().as_millis() as u64
+        "dur_ms": ingest_start.elapsed().as_millis() as u64,
+        "project": project_name
     }));
     // Fallback: direct lib call, fire-and-forget on shared runtime.
     let pd = project_dir.to_string();

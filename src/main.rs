@@ -799,9 +799,11 @@ async fn main() {
                 let src = source.unwrap_or_else(|| "memorize".into());
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
                 hook::rs_learn::ingest_fast(&body, &src, &dir);
+                let project_name = std::path::Path::new(&dir).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
                 rs_exec::obs::event("rs_learn", "memorize", serde_json::json!({
                     "bytes": body.len(),
-                    "source": src
+                    "source": src,
+                    "project": project_name
                 }));
                 println!("ingested ({} bytes) source={}", body.len(), src);
             }
