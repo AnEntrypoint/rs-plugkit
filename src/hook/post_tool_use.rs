@@ -72,6 +72,11 @@ pub fn run() {
             "counter": state.exec_calls_since_memorize,
             "hard_block_at": HARD_BLOCK_AT
         }));
+        let msg = format!(
+            "exec: run completed. MEMORIZE CHECK: did this output resolve any prior unknown? If YES → spawn Agent(subagent_type='gm:memorize', model='haiku', run_in_background=true, prompt='## CONTEXT TO MEMORIZE\\n<fact>') NOW. Skipping = memory leak. (Counter: {}/3 before hard block.)",
+            state.exec_calls_since_memorize
+        );
+        println!("{}", serde_json::json!({ "systemMessage": msg }));
     }
 }
 
