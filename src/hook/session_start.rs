@@ -62,11 +62,6 @@ fn write_needs_gm_if_gm_project(project_dir: Option<&str>) {
         return;
     }
     let _ = fs::create_dir_all(&gm_dir);
-    let prd = gm_dir.join("prd.yml");
-    if prd.exists() {
-        let content = fs::read_to_string(&prd).unwrap_or_default();
-        if !content.trim().is_empty() { return; }
-    }
     let _ = fs::write(gm_dir.join("needs-gm"), "1");
     let _ = fs::write(&global_needs_gm, "1");
 }
