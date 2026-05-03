@@ -100,11 +100,7 @@ fn write_counter(path: &Path, c: &Counter) {
 
 fn git(args: &[&str], dir: &str) -> Option<String> {
     let mut cmd = no_window_cmd("git");
-    if cfg!(windows) {
-        cmd.arg("-c").arg("core.excludesFile=NUL");
-    } else {
-        cmd.arg("-c").arg("core.excludesFile=/dev/null");
-    }
+    cmd.arg("-c").arg("core.excludesFile=/dev/null");
     cmd
         .args(args)
         .current_dir(dir)
