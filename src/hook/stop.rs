@@ -16,37 +16,15 @@ fn is_claude_family() -> bool {
 }
 
 fn stop_allow(reason: Option<String>) -> serde_json::Value {
-    if is_claude_family() {
-        let mut output = serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": "Stop",
-                "permissionDecision": "allow"
-            }
-        });
-        if let Some(reason) = reason {
-            output["hookSpecificOutput"]["permissionDecisionReason"] = serde_json::Value::String(reason);
-        }
-        output
-    } else {
-        match reason {
-            Some(reason) => json!({ "decision": "approve", "reason": reason }),
-            None => json!({ "decision": "approve" }),
-        }
+    let _ = is_claude_family();
+    match reason {
+        Some(reason) => json!({ "decision": "approve", "reason": reason }),
+        None => json!({ "decision": "approve" }),
     }
 }
 
 fn stop_block(reason: String) -> serde_json::Value {
-    if is_claude_family() {
-        json!({
-            "hookSpecificOutput": {
-                "hookEventName": "Stop",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason
-            }
-        })
-    } else {
-        json!({ "decision": "block", "reason": reason })
-    }
+    json!({ "decision": "block", "reason": reason })
 }
 
 pub fn run_stop() {
