@@ -323,16 +323,12 @@ fn bash_banned_tool(code: &str) -> Option<&'static str> {
 
 fn looks_like_benchmark(code: &str) -> bool {
     let lc = code.to_lowercase();
-    let signals = [
-        "date +%s", "/usr/bin/time", "performance.now", "process.hrtime",
-        "benchmark", "perf check", "how slow", "why is ", "is it slow",
-    ];
-    let mut hits = 0;
-    for s in &signals {
-        if lc.contains(s) { hits += 1; }
-        if hits >= 1 { return true; }
-    }
-    false
+    let strong = ["date +%s", "/usr/bin/time", "performance.now", "process.hrtime"];
+    let weak = ["perf check", "how slow", "why is ", "is it slow"];
+    let has_strong = strong.iter().any(|s| lc.contains(s));
+    if has_strong { return true; }
+    let weak_hits = weak.iter().filter(|s| lc.contains(*s)).count();
+    weak_hits >= 2
 }
 
 fn recall_fired_this_turn(project: &str) -> bool {
