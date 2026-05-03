@@ -32,6 +32,7 @@ pub fn run() {
         let needs_gm = gm.join("needs-gm");
         let _ = std::fs::create_dir_all(&gm);
         let global_needs_gm = super::tools_dir().join("needs-gm");
+        let _ = std::fs::remove_file(gm.join("gm-fired-this-turn"));
         if autonomous {
             let _ = std::fs::remove_file(&needs_gm);
             let _ = std::fs::remove_file(&global_needs_gm);

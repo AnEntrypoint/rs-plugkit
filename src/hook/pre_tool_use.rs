@@ -87,12 +87,15 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
         .unwrap_or("");
     let is_skill = matches!(tool_name, "Skill" | "skill");
 
+    let gm_fired_marker = gm_dir.join("gm-fired-this-turn");
+
     if is_skill && !skill_name.is_empty() {
         let _ = std::fs::create_dir_all(&gm_dir);
         let _ = std::fs::write(&lastskill, skill_name);
         if skill_name == "gm" || skill_name == "gm:gm" {
             let _ = std::fs::remove_file(&needs_gm);
             let _ = std::fs::remove_file(&global_needs_gm);
+            let _ = std::fs::write(&gm_fired_marker, "1");
         }
         return Some(allow(None));
     }
@@ -106,7 +109,7 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
         let cmd = tool_input["command"].as_str().unwrap_or("").trim_start();
         cmd.starts_with("exec:memorize")
     };
-    if !is_memorize_bash && (needs_gm.exists() || global_needs_gm.exists()) {
+    if !is_memorize_bash && (needs_gm.exists() || global_needs_gm.exists()) && !gm_fired_marker.exists() {
         return Some(deny("HARD CONSTRAINT: invoke the Skill tool with skill: \"gm:gm\" before any other tool. The gm:gm skill must be the first action after every user message."));
     }
 
