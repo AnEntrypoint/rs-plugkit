@@ -102,7 +102,11 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
         let _ = std::fs::remove_file(&global_needs_gm);
     }
 
-    if needs_gm.exists() || global_needs_gm.exists() {
+    let is_memorize_bash = tool_name == "Bash" && {
+        let cmd = tool_input["command"].as_str().unwrap_or("").trim_start();
+        cmd.starts_with("exec:memorize")
+    };
+    if !is_memorize_bash && (needs_gm.exists() || global_needs_gm.exists()) {
         return Some(deny("HARD CONSTRAINT: invoke the Skill tool with skill: \"gm:gm\" before any other tool. The gm:gm skill must be the first action after every user message."));
     }
 
