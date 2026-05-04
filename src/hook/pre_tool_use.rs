@@ -100,6 +100,18 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
         return Some(allow(None));
     }
 
+    if matches!(tool_name, "Task" | "Agent") {
+        let st = tool_input["subagent_type"].as_str().unwrap_or("");
+        if st == "gm" || st == "gm:gm" {
+            let _ = std::fs::create_dir_all(&gm_dir);
+            let _ = std::fs::write(&lastskill, st);
+            let _ = std::fs::remove_file(&needs_gm);
+            let _ = std::fs::remove_file(&global_needs_gm);
+            let _ = std::fs::write(&gm_fired_marker, "1");
+            return Some(allow(None));
+        }
+    }
+
     if autonomous {
         let _ = std::fs::remove_file(&needs_gm);
         let _ = std::fs::remove_file(&global_needs_gm);
@@ -110,7 +122,7 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
         cmd.starts_with("exec:memorize")
     };
     if !is_memorize_bash && (needs_gm.exists() || global_needs_gm.exists()) && !gm_fired_marker.exists() {
-        return Some(deny("HARD CONSTRAINT: invoke the Skill tool with skill: \"gm:gm\" before any other tool. The gm:gm skill must be the first action after every user message."));
+        return Some(deny("HARD CONSTRAINT: invoke gm before any other tool. Either Skill(skill=\"gm:gm\") OR Agent(subagent_type=\"gm:gm\") satisfies the gate. Subagent form is preferred — it isolates the orchestration loop in its own context. Must be the first action after every user message."));
     }
 
     let no_memo = gm_dir.join("no-memorize-this-turn");

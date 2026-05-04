@@ -25,6 +25,17 @@ pub fn run() {
     super::agent_browser::close_sessions_for(session_id);
     rs_exec::runtime::kill_session_browser(session_id);
 
+    let killed = match rs_exec::rpc_client::rpc_call_sync(
+        rs_exec_port().unwrap_or(0),
+        "killSessionTasks",
+        serde_json::json!({ "sessionId": session_id }),
+        5000,
+    ) {
+        Ok(v) => v.get("killed").and_then(|n| n.as_u64()).unwrap_or(0),
+        Err(_) => 0,
+    };
+    if killed > 0 { eprintln!("[session-end] killed {} background tasks", killed); }
+
     if let Some(dir) = project_dir() {
         let gm = std::path::Path::new(&dir).join(".gm");
         let _ = std::fs::write(gm.join("turn-state.json"), "{}");
@@ -37,4 +48,10 @@ pub fn run() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+fn rs_exec_port() -> Option<u16> {
+    let pf = std::env::var("RS_EXEC_PORT_FILE").map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("glootie-runner.port"));
+    std::fs::read_to_string(pf).ok()?.trim().parse().ok()
 }
