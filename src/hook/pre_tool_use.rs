@@ -256,7 +256,7 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
                 }
                 if let Some(banned) = bash_banned_tool(code) {
                     return deny(&format!(
-                        "`{}` is blocked. Use exec:codesearch for ALL codebase lookups — it handles exact strings, symbols, regex patterns, file-name fragments, and PDF pages.\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Minimum 4 attempts before concluding absent. See code-search skill for full protocol.\n\nGrep, Glob, Find, and rg/grep/find-in-bash are ALL blocked. There is no exception path — codesearch is the replacement for every exact-match / regex / file-name-pattern need. For a known absolute path, use the Read tool.",
+                        "`{}` is blocked for codebase lookups. Use exec:codesearch — it handles exact strings, symbols, regex patterns, file-name fragments, and PDF pages.\n\n  exec:codesearch\n  <two words>\n\nNo results → change one word. Still no results → add a third word. Minimum 4 attempts before concluding absent.\n\nFor a known absolute file path, use the Read tool.\n\nException: grep/rg/find IS allowed when every targeted path is runtime data (substring on the command line: `gm-log`, `.claude/`, `/tmp/`, `.jsonl`, `.log`, `.ndjson`, `~/.claude`, `.gm/log`). Codebase lookups still go through codesearch.",
                         banned
                     ));
                 }
@@ -326,11 +326,23 @@ fn bash_banned_tool(code: &str) -> Option<&'static str> {
         if t == "glob" { return Some("glob"); }
         for cmd in &["grep", "rg", "find", "glob"] {
             if t.starts_with(&format!("{} ", cmd)) || t.starts_with(&format!("{}\t", cmd)) {
+                if line_targets_runtime_data(t) { continue; }
                 return Some(cmd);
             }
         }
     }
     None
+}
+
+fn line_targets_runtime_data(line: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "gm-log", ".claude/", ".claude\\",
+        "/tmp/", "\\tmp\\", "/var/log",
+        ".jsonl", ".log", ".ndjson",
+        "$HOME/.claude", "~/.claude",
+        ".gm/log", ".gm\\log",
+    ];
+    MARKERS.iter().any(|m| line.contains(m))
 }
 
 fn looks_like_benchmark(code: &str) -> bool {
@@ -448,6 +460,21 @@ mod bash_banned_tests {
     fn allows_empty_and_whitespace() {
         assert_eq!(bash_banned_tool(""), None);
         assert_eq!(bash_banned_tool("\n\n"), None);
+    }
+
+    #[test]
+    fn allows_runtime_log_targets() {
+        assert_eq!(bash_banned_tool("grep error ~/.claude/gm-log/2026-05-04/hook.jsonl"), None);
+        assert_eq!(bash_banned_tool("grep -iE 'fail|warn' /tmp/output.log"), None);
+        assert_eq!(bash_banned_tool("rg panic .gm/log/*.jsonl"), None);
+        assert_eq!(bash_banned_tool("find ~/.claude/gm-log -name '*.jsonl'"), None);
+    }
+
+    #[test]
+    fn still_blocks_codebase_grep_when_no_runtime_marker() {
+        assert_eq!(bash_banned_tool("grep foo src/lib.rs"), Some("grep"));
+        assert_eq!(bash_banned_tool("rg TODO ./crates"), Some("rg"));
+        assert_eq!(bash_banned_tool("find . -name '*.rs'"), Some("find"));
     }
 }
 
