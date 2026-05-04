@@ -26,10 +26,18 @@ pub fn run() {
         let autonomous = project_dir()
             .map(|d| std::path::Path::new(&d).join(".gm").join("prd.yml").exists())
             .unwrap_or(false);
+        let cmd_preview: String = if tool_name == "Bash" {
+            tool_input["command"].as_str().unwrap_or("")
+                .chars().take(120).collect::<String>()
+                .replace('\n', " ⏎ ")
+        } else {
+            String::new()
+        };
         rs_exec::obs::event("hook", "pre-tool-use.tool", serde_json::json!({
             "tool_name": tool_name,
             "outcome": if is_deny { "deny" } else { "allow" },
             "reason_preview": reason,
+            "command_preview": cmd_preview,
             "autonomous": autonomous,
             "stage": "early",
         }));
@@ -47,10 +55,18 @@ pub fn run() {
     let autonomous = project_dir()
         .map(|d| std::path::Path::new(&d).join(".gm").join("prd.yml").exists())
         .unwrap_or(false);
+    let cmd_preview: String = if tool_name == "Bash" {
+        tool_input["command"].as_str().unwrap_or("")
+            .chars().take(120).collect::<String>()
+            .replace('\n', " ⏎ ")
+    } else {
+        String::new()
+    };
     rs_exec::obs::event("hook", "pre-tool-use.tool", serde_json::json!({
         "tool_name": tool_name,
         "outcome": if is_deny { "deny" } else { "allow" },
         "reason_preview": reason,
+        "command_preview": cmd_preview,
         "autonomous": autonomous,
         "stage": "dispatch",
     }));
