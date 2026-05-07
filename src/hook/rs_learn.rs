@@ -312,7 +312,7 @@ fn recall_aggregate(query: &str, project_dir: &str, limit: u32, disciplines: &[S
     let mut targets: Vec<Option<String>> = vec![None];
     for d in disciplines { targets.push(Some(d.clone())); }
     let work = async move {
-        let mut set: tokio::task::JoinSet<(String, Vec<rs_learn::graph::search::EpisodeHit>)> = tokio::task::JoinSet::new();
+        let mut set: tokio::task::JoinSet<(String, serde_json::Value)> = tokio::task::JoinSet::new();
         let cap = 16usize;
         let sem = Arc::new(Semaphore::new(cap));
         for tgt in targets {
@@ -323,35 +323,40 @@ fn recall_aggregate(query: &str, project_dir: &str, limit: u32, disciplines: &[S
             set.spawn(async move {
                 let _permit = sem.acquire_owned().await.ok();
                 let cfg = rs_learn::graph::search::SearchConfig { limit: lim, ..Default::default() };
-                match open_graph_disc(&pd, tgt.as_deref()).await {
+                let json = match open_graph_disc(&pd, tgt.as_deref()).await {
                     Ok((store, embedder, llm)) => {
                         let searcher = rs_learn::graph::search::Searcher::with_llm(store, embedder, llm);
                         match searcher.search_episodes(&q, &cfg).await {
-                            Ok(hits) => (label, hits),
-                            Err(_) => (label, Vec::new()),
+                            Ok(hits) => serde_json::to_value(&hits).unwrap_or(serde_json::Value::Array(Vec::new())),
+                            Err(_) => serde_json::Value::Array(Vec::new()),
                         }
                     }
-                    Err(_) => (label, Vec::new()),
-                }
+                    Err(_) => serde_json::Value::Array(Vec::new()),
+                };
+                (label, json)
             });
         }
-        let mut all: Vec<(String, rs_learn::graph::search::EpisodeHit)> = Vec::new();
+        let mut all: Vec<(String, serde_json::Value)> = Vec::new();
         while let Some(res) = set.join_next().await {
-            if let Ok((label, hits)) = res {
-                for h in hits { all.push((label.clone(), h)); }
+            if let Ok((label, json)) = res {
+                if let Some(arr) = json.as_array() {
+                    for h in arr.iter() { all.push((label.clone(), h.clone())); }
+                }
             }
         }
         Ok::<_, anyhow::Error>(all)
     };
     let Some(mut all) = run_with_timeout(Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS), work) else { return String::new() };
     all.sort_by(|a, b| {
-        let sa = a.1.row.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let sb = b.1.row.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let row_a = if a.1["row"].is_object() { &a.1["row"] } else { &a.1 };
+        let row_b = if b.1["row"].is_object() { &b.1["row"] } else { &b.1 };
+        let sa = row_a.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let sb = row_b.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
         sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut out = String::new();
-    for (i, (label, hit)) in all.iter().take(limit as usize).enumerate() {
-        let row = &hit.row;
+    for (i, (label, item)) in all.iter().take(limit as usize).enumerate() {
+        let row = if item["row"].is_object() { &item["row"] } else { item };
         let content = row.get("content").and_then(|v| v.as_str()).unwrap_or("").trim();
         if content.is_empty() { continue; }
         let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("").trim();
@@ -786,7 +791,7 @@ pub fn recall_enabled(query: &str, project_dir: &str, limit: u32) -> String {
     let pd = project_dir.to_string();
     let lim = limit as usize;
     let work = async move {
-        let mut set: tokio::task::JoinSet<(String, Vec<rs_learn::graph::search::EpisodeHit>)> = tokio::task::JoinSet::new();
+        let mut set: tokio::task::JoinSet<(String, serde_json::Value)> = tokio::task::JoinSet::new();
         let cap = 8usize;
         let sem = Arc::new(Semaphore::new(cap));
         for tgt in targets {
@@ -797,35 +802,40 @@ pub fn recall_enabled(query: &str, project_dir: &str, limit: u32) -> String {
             set.spawn(async move {
                 let _permit = sem.acquire_owned().await.ok();
                 let cfg = rs_learn::graph::search::SearchConfig { limit: lim, ..Default::default() };
-                match open_graph_disc(&pd, tgt.as_deref()).await {
+                let json = match open_graph_disc(&pd, tgt.as_deref()).await {
                     Ok((store, embedder, llm)) => {
                         let searcher = rs_learn::graph::search::Searcher::with_llm(store, embedder, llm);
                         match searcher.search_episodes(&q, &cfg).await {
-                            Ok(hits) => (label, hits),
-                            Err(_) => (label, Vec::new()),
+                            Ok(hits) => serde_json::to_value(&hits).unwrap_or(serde_json::Value::Array(Vec::new())),
+                            Err(_) => serde_json::Value::Array(Vec::new()),
                         }
                     }
-                    Err(_) => (label, Vec::new()),
-                }
+                    Err(_) => serde_json::Value::Array(Vec::new()),
+                };
+                (label, json)
             });
         }
-        let mut all: Vec<(String, rs_learn::graph::search::EpisodeHit)> = Vec::new();
+        let mut all: Vec<(String, serde_json::Value)> = Vec::new();
         while let Some(res) = set.join_next().await {
-            if let Ok((label, hits)) = res {
-                for h in hits { all.push((label.clone(), h)); }
+            if let Ok((label, json)) = res {
+                if let Some(arr) = json.as_array() {
+                    for h in arr.iter() { all.push((label.clone(), h.clone())); }
+                }
             }
         }
         Ok::<_, anyhow::Error>(all)
     };
     let Some(mut all) = run_with_timeout(Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS), work) else { return String::new() };
     all.sort_by(|a, b| {
-        let sa = a.1.row.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let sb = b.1.row.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let row_a = if a.1["row"].is_object() { &a.1["row"] } else { &a.1 };
+        let row_b = if b.1["row"].is_object() { &b.1["row"] } else { &b.1 };
+        let sa = row_a.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let sb = row_b.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
         sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut out = String::new();
-    for (i, (label, hit)) in all.iter().take(limit as usize).enumerate() {
-        let row = &hit.row;
+    for (i, (label, item)) in all.iter().take(limit as usize).enumerate() {
+        let row = if item["row"].is_object() { &item["row"] } else { item };
         let content = row.get("content").and_then(|v| v.as_str()).unwrap_or("").trim();
         if content.is_empty() { continue; }
         let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("").trim();
