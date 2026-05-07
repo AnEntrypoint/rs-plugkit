@@ -908,7 +908,7 @@ async fn main() {
                 if q.trim().is_empty() { eprintln!("No query provided"); exit_code = 1; return Ok(()); }
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
                 let out = hook::rs_learn::recall_disc(&q, &dir, limit, disc.as_deref());
-                if out.is_empty() { eprintln!("No recall results"); exit_code = 1; return Ok(()); }
+                if out.is_empty() { println!("No recall results."); return Ok(()); }
                 println!("{}", out);
             }
             Cmd::Memorize { source, file, content, cwd, discipline } => {
