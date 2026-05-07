@@ -773,3 +773,73 @@ pub fn ingest_fast_disc(content: &str, source: &str, project_dir: &str, discipli
         Ok(())
     });
 }
+
+pub fn recall_enabled(query: &str, project_dir: &str, limit: u32) -> String {
+    if query.trim().is_empty() { return String::new(); }
+    let enabled = read_enabled_disciplines(project_dir);
+    if enabled.is_empty() {
+        return recall_disc(query, project_dir, limit, None);
+    }
+    let mut targets: Vec<Option<String>> = vec![None];
+    for d in &enabled { targets.push(Some(d.clone())); }
+    let q = query.to_string();
+    let pd = project_dir.to_string();
+    let lim = limit as usize;
+    let work = async move {
+        let mut set: tokio::task::JoinSet<(String, Vec<rs_learn::graph::search::EpisodeHit>)> = tokio::task::JoinSet::new();
+        let cap = 8usize;
+        let sem = Arc::new(Semaphore::new(cap));
+        for tgt in targets {
+            let q = q.clone();
+            let pd = pd.clone();
+            let sem = sem.clone();
+            let label = tgt.clone().unwrap_or_else(|| "default".to_string());
+            set.spawn(async move {
+                let _permit = sem.acquire_owned().await.ok();
+                let cfg = rs_learn::graph::search::SearchConfig { limit: lim, ..Default::default() };
+                match open_graph_disc(&pd, tgt.as_deref()).await {
+                    Ok((store, embedder, llm)) => {
+                        let searcher = rs_learn::graph::search::Searcher::with_llm(store, embedder, llm);
+                        match searcher.search_episodes(&q, &cfg).await {
+                            Ok(hits) => (label, hits),
+                            Err(_) => (label, Vec::new()),
+                        }
+                    }
+                    Err(_) => (label, Vec::new()),
+                }
+            });
+        }
+        let mut all: Vec<(String, rs_learn::graph::search::EpisodeHit)> = Vec::new();
+        while let Some(res) = set.join_next().await {
+            if let Ok((label, hits)) = res {
+                for h in hits { all.push((label.clone(), h)); }
+            }
+        }
+        Ok::<_, anyhow::Error>(all)
+    };
+    let Some(mut all) = run_with_timeout(Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS), work) else { return String::new() };
+    all.sort_by(|a, b| {
+        let sa = a.1.row.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let sb = b.1.row.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut out = String::new();
+    for (i, (label, hit)) in all.iter().take(limit as usize).enumerate() {
+        let row = &hit.row;
+        let content = row.get("content").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if content.is_empty() { continue; }
+        let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let snippet: String = content.chars().take(400).collect();
+        let suffix = if content.chars().count() > 400 { "…" } else { "" };
+        let src = if source.is_empty() { String::new() } else { format!(" [{}]", source) };
+        out.push_str(&format!("{}. [discipline:{}]{}\n   {}{}\n", i + 1, label, src, snippet, suffix));
+    }
+    out
+}
+
+fn read_enabled_disciplines(project_dir: &str) -> Vec<String> {
+    let p = PathBuf::from(project_dir).join(".gm").join("disciplines").join("enabled.txt");
+    fs::read_to_string(&p)
+        .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty() && !l.starts_with('#')).collect())
+        .unwrap_or_default()
+}

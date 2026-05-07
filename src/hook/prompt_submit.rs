@@ -84,9 +84,9 @@ pub fn run() {
         if !prompt.is_empty() {
             let recall_q = super::rs_learn::short_recall_query(&prompt, dir);
             let proj_q = super::rs_learn::project_query(dir);
-            let recall = super::rs_learn::recall(&recall_q, dir, 5);
+            let recall = super::rs_learn::recall_enabled(&recall_q, dir, 5);
             let proj_recall = if proj_q != recall_q {
-                super::rs_learn::recall(&proj_q, dir, 3)
+                super::rs_learn::recall_enabled(&proj_q, dir, 3)
             } else {
                 String::new()
             };
