@@ -970,7 +970,7 @@ async fn main() {
             }
             Cmd::Search { path, query, discipline } => {
                 let mut q_parts = query;
-                let _disc = extract_discipline_sigil(&mut q_parts, discipline);
+                let disc = extract_discipline_sigil(&mut q_parts, discipline);
                 if q_parts.is_empty() {
                     search_mcp::run_mcp_server();
                     return Ok(());
@@ -978,24 +978,55 @@ async fn main() {
                 let q = q_parts.join(" ");
                 let root = std::path::PathBuf::from(path.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string()));
                 if !root.exists() { eprintln!("Path does not exist: {}", root.display()); exit_code = 1; return Ok(()); }
+                let project_dir = root.to_string_lossy().to_string();
+                let enabled = list_enabled_disciplines(&project_dir);
                 let started = std::time::Instant::now();
-                let chunks = scanner::scan_repository(&root);
-                let results = bm25::search(&q, &chunks);
+                let labels: Vec<String> = if let Some(name) = disc.as_deref() {
+                    vec![name.to_string()]
+                } else if enabled.is_empty() {
+                    vec!["default".to_string()]
+                } else {
+                    let mut v = vec!["default".to_string()];
+                    for d in &enabled { v.push(d.clone()); }
+                    v
+                };
+                let mut total_chunks: usize = 0;
+                let mut total_results: usize = 0;
+                let mut printed_any = false;
+                for label in &labels {
+                    let cs_dir = if label == "default" {
+                        root.join(".gm").join("code-search")
+                    } else {
+                        root.join(".gm").join("disciplines").join(label).join("code-search")
+                    };
+                    std::env::set_var("RS_CODEINSIGHT_CACHE_DIR", &cs_dir);
+                    std::env::set_var("RS_SEARCH_DISCIPLINE", label);
+                    let chunks = scanner::scan_repository(&root);
+                    let results = bm25::search(&q, &chunks);
+                    total_chunks += chunks.len();
+                    total_results += results.len();
+                    if results.is_empty() { continue; }
+                    printed_any = true;
+                    for r in results.iter() {
+                        let total = context::get_file_total_lines(&root, &r.chunk.file_path).map(|n| format!(" [{}L]", n)).unwrap_or_default();
+                        let ctx = context::find_enclosing_context(&r.chunk.content, r.chunk.line_start).map(|c| format!(" (in: {})", c)).unwrap_or_default();
+                        println!("[discipline:{}] {}:{}-{}{}{} ({:.1}%)", label, r.chunk.file_path, r.chunk.line_start, r.chunk.line_end, total, ctx, r.score * 100.0);
+                        for line in r.chunk.content.split('\n').take(3) { println!("   > {}", &line[..line.len().min(80)]); }
+                        println!();
+                    }
+                }
+                std::env::remove_var("RS_CODEINSIGHT_CACHE_DIR");
+                std::env::remove_var("RS_SEARCH_DISCIPLINE");
                 rs_exec::obs::event("rs_search", "query", serde_json::json!({
                     "root": root.display().to_string(),
                     "q_len": q.len(),
-                    "n_chunks": chunks.len(),
-                    "n_results": results.len(),
+                    "n_chunks": total_chunks,
+                    "n_results": total_results,
+                    "n_disciplines": labels.len(),
+                    "discipline": disc.clone().unwrap_or_else(|| "default".into()),
                     "dur_ms": started.elapsed().as_millis() as u64
                 }));
-                if results.is_empty() { println!("No results found."); return Ok(()); }
-                for r in results.iter() {
-                    let total = context::get_file_total_lines(&root, &r.chunk.file_path).map(|n| format!(" [{}L]", n)).unwrap_or_default();
-                    let ctx = context::find_enclosing_context(&r.chunk.content, r.chunk.line_start).map(|c| format!(" (in: {})", c)).unwrap_or_default();
-                    println!("{}:{}-{}{}{} ({:.1}%)", r.chunk.file_path, r.chunk.line_start, r.chunk.line_end, total, ctx, r.score * 100.0);
-                    for line in r.chunk.content.split('\n').take(3) { println!("   > {}", &line[..line.len().min(80)]); }
-                    println!();
-                }
+                if !printed_any { println!("No results found."); return Ok(()); }
             }
         }
         Ok(())
