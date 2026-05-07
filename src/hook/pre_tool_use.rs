@@ -191,8 +191,8 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
         const DOC_ALLOWLIST: &[&str] = &["claude.md", "readme.md", "agents.md", "contributing.md", "changelog.md", "license", "license.md"];
         let is_allowed_doc = DOC_ALLOWLIST.iter().any(|a| base == *a);
         let already_exists = !fp.is_empty() && std::path::Path::new(fp).exists();
-        if (ext == "md" || ext == "txt" || base.starts_with("features_list")) && !is_allowed_doc && !in_skills && !already_exists {
-            return deny("Cannot create new documentation files. Allowed: CLAUDE.md, readme.md, AGENTS.md, CONTRIBUTING.md, CHANGELOG.md, LICENSE. Edits to existing .md files are allowed. For task-specific notes use .prd. For permanent reference add to CLAUDE.md or AGENTS.md.");
+        if (ext == "txt" || base.starts_with("features_list")) && !is_allowed_doc && !in_skills && !already_exists {
+            return deny("Cannot create new plain-text documentation files. For task-specific notes use .prd. For permanent reference add to CLAUDE.md or AGENTS.md.");
         }
         if !in_skills && is_test_file(&base, fp) {
             return deny("Test files forbidden on disk. Use Bash tool with real services for all testing.");
