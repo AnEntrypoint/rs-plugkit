@@ -52,6 +52,7 @@ enum Cmd {
     Search {
         #[arg(long)] path: Option<String>,
         query: Vec<String>,
+        #[arg(long)] discipline: Option<String>,
     },
     SessionCleanup {
         #[arg(long)] session: String,
@@ -80,6 +81,7 @@ enum Cmd {
         query: Vec<String>,
         #[arg(long, default_value_t = 5)] limit: u32,
         #[arg(long)] cwd: Option<String>,
+        #[arg(long)] discipline: Option<String>,
     },
     /// Ingest a fact into rs-learn fast-path (HTTP-preferred, bun fallback). Detached.
     Memorize {
@@ -87,15 +89,25 @@ enum Cmd {
         #[arg(long)] file: Option<String>,
         content: Vec<String>,
         #[arg(long)] cwd: Option<String>,
+        #[arg(long)] discipline: Option<String>,
     },
     /// Invalidate / unlearn previously-memorized facts. Directives: `by-source <tag>` | `by-query <query>` | `by-id <episode_id>`.
     Forget {
         directive: Vec<String>,
         #[arg(long)] cwd: Option<String>,
+        #[arg(long)] discipline: Option<String>,
     },
     /// Pass-through to rs-learn for status/debug/feedback/build-communities. HTTP-preferred, bun fallback.
     Learn {
         action: String,
+        rest: Vec<String>,
+        #[arg(long)] cwd: Option<String>,
+        #[arg(long)] discipline: Option<String>,
+    },
+    /// Manage knowledge disciplines under <project>/.gm/disciplines/.
+    Discipline {
+        /// list | new <name> | info <name> | enable <name> | disable <name>
+        sub: String,
         rest: Vec<String>,
         #[arg(long)] cwd: Option<String>,
     },
@@ -112,6 +124,114 @@ enum Cmd {
         /// Retention window in days (prune: delete older; stats: aggregate range).
         #[arg(long, default_value_t = 14)] days: u32,
     },
+}
+
+fn extract_discipline_sigil(args: &mut Vec<String>, flag: Option<String>) -> Option<String> {
+    if let Some(d) = flag {
+        let trimmed = d.trim_start_matches('@').trim().to_string();
+        if !trimmed.is_empty() { return Some(trimmed); }
+    }
+    if let Some(first) = args.first() {
+        if let Some(rest) = first.strip_prefix('@') {
+            let name = rest.trim().to_string();
+            if !name.is_empty() {
+                args.remove(0);
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn discipline_root(project_dir: &str) -> PathBuf {
+    PathBuf::from(project_dir).join(".gm").join("disciplines")
+}
+
+fn discipline_db_path(project_dir: &str, name: Option<&str>) -> PathBuf {
+    match name {
+        Some(n) => discipline_root(project_dir).join(n).join("rs-learn.db"),
+        None => PathBuf::from(project_dir).join(".gm").join("rs-learn.db"),
+    }
+}
+
+fn list_enabled_disciplines(project_dir: &str) -> Vec<String> {
+    let p = discipline_root(project_dir).join("enabled.txt");
+    fs::read_to_string(&p)
+        .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty() && !l.starts_with('#')).collect())
+        .unwrap_or_default()
+}
+
+fn list_all_disciplines(project_dir: &str) -> Vec<String> {
+    let root = discipline_root(project_dir);
+    if !root.exists() { return Vec::new(); }
+    let mut out: Vec<String> = Vec::new();
+    if let Ok(rd) = fs::read_dir(&root) {
+        for e in rd.flatten() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if let Some(name) = e.file_name().to_str() {
+                    out.push(name.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn cmd_discipline(sub: &str, rest: &[String], project_dir: &str) -> i32 {
+    let root = discipline_root(project_dir);
+    match sub {
+        "list" => {
+            let all = list_all_disciplines(project_dir);
+            let enabled: std::collections::HashSet<String> = list_enabled_disciplines(project_dir).into_iter().collect();
+            if all.is_empty() {
+                println!("(no disciplines under {})", root.display());
+                return 0;
+            }
+            for name in &all {
+                let mark = if enabled.contains(name) { "*" } else { " " };
+                println!("{} {}", mark, name);
+            }
+            0
+        }
+        "new" => {
+            let Some(name) = rest.first() else { eprintln!("usage: plugkit discipline new <name>"); return 1; };
+            let d = root.join(name);
+            if let Err(e) = fs::create_dir_all(d.join("code-search")) { eprintln!("mkdir failed: {}", e); return 1; }
+            println!("created {}", d.display());
+            0
+        }
+        "info" => {
+            let Some(name) = rest.first() else { eprintln!("usage: plugkit discipline info <name>"); return 1; };
+            let d = root.join(name);
+            let db = d.join("rs-learn.db");
+            let cs = d.join("code-search");
+            println!("name: {}", name);
+            println!("dir: {}", d.display());
+            println!("rs-learn.db: {}", if db.exists() { format!("present ({} bytes)", fs::metadata(&db).map(|m| m.len()).unwrap_or(0)) } else { "absent".to_string() });
+            println!("code-search: {}", if cs.exists() { "present" } else { "absent" });
+            let enabled: std::collections::HashSet<String> = list_enabled_disciplines(project_dir).into_iter().collect();
+            println!("enabled: {}", enabled.contains(name.as_str()));
+            0
+        }
+        "enable" => {
+            let Some(name) = rest.first() else { eprintln!("usage: plugkit discipline enable <name>"); return 1; };
+            let _ = fs::create_dir_all(&root);
+            let mut cur = list_enabled_disciplines(project_dir);
+            if !cur.iter().any(|n| n == name) { cur.push(name.clone()); }
+            let _ = fs::write(root.join("enabled.txt"), cur.join("\n") + "\n");
+            println!("enabled {}", name);
+            0
+        }
+        "disable" => {
+            let Some(name) = rest.first() else { eprintln!("usage: plugkit discipline disable <name>"); return 1; };
+            let cur: Vec<String> = list_enabled_disciplines(project_dir).into_iter().filter(|n| n != name).collect();
+            let _ = fs::write(root.join("enabled.txt"), cur.join("\n") + "\n");
+            println!("disabled {}", name);
+            0
+        }
+        other => { eprintln!("unknown discipline action: {} (use list|new|info|enable|disable)", other); 1 }
+    }
 }
 
 const RS_EXEC_SHA: &str = env!("DEP_RS_EXEC_SHA");
@@ -781,34 +901,41 @@ async fn main() {
             }
             Cmd::Deps => { cmd_deps()?; }
             Cmd::Doctor => { cmd_doctor()?; }
-            Cmd::Recall { query, limit, cwd } => {
-                let q = query.join(" ");
+            Cmd::Recall { query, limit, cwd, discipline } => {
+                let mut q_parts = query;
+                let disc = extract_discipline_sigil(&mut q_parts, discipline);
+                let q = q_parts.join(" ");
                 if q.trim().is_empty() { eprintln!("No query provided"); exit_code = 1; return Ok(()); }
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
-                let out = hook::rs_learn::recall(&q, &dir, limit);
+                let out = hook::rs_learn::recall_disc(&q, &dir, limit, disc.as_deref());
                 if out.is_empty() { eprintln!("No recall results"); exit_code = 1; return Ok(()); }
                 println!("{}", out);
             }
-            Cmd::Memorize { source, file, content, cwd } => {
+            Cmd::Memorize { source, file, content, cwd, discipline } => {
+                let mut body_parts = content;
+                let disc = extract_discipline_sigil(&mut body_parts, discipline);
                 let body = if let Some(f) = file {
                     fs::read_to_string(&f)?
                 } else {
-                    content.join(" ")
+                    body_parts.join(" ")
                 };
                 if body.trim().is_empty() { eprintln!("No content provided"); exit_code = 1; return Ok(()); }
                 let src = source.unwrap_or_else(|| "memorize".into());
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
-                hook::rs_learn::ingest_fast(&body, &src, &dir);
+                hook::rs_learn::ingest_fast_disc(&body, &src, &dir, disc.as_deref());
                 let project_name = std::path::Path::new(&dir).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
                 rs_exec::obs::event("rs_learn", "memorize", serde_json::json!({
                     "bytes": body.len(),
                     "source": src,
-                    "project": project_name
+                    "project": project_name,
+                    "discipline": disc.clone().unwrap_or_else(|| "default".into())
                 }));
-                println!("ingested ({} bytes) source={}", body.len(), src);
+                println!("ingested ({} bytes) source={} discipline={}", body.len(), src, disc.unwrap_or_else(|| "default".into()));
             }
-            Cmd::Forget { directive, cwd } => {
-                let joined = directive.join(" ");
+            Cmd::Forget { directive, cwd, discipline } => {
+                let mut directive_parts = directive;
+                let disc = extract_discipline_sigil(&mut directive_parts, discipline);
+                let joined = directive_parts.join(" ");
                 let mut parts = joined.splitn(2, ' ');
                 let kind = parts.next().unwrap_or("").trim();
                 let target = parts.next().unwrap_or("").trim();
@@ -817,14 +944,16 @@ async fn main() {
                     exit_code = 1; return Ok(());
                 }
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
-                match hook::rs_learn::forget(kind, target, &dir) {
+                match hook::rs_learn::forget_disc(kind, target, &dir, disc.as_deref()) {
                     Ok(n) => println!("forgot {} episode(s)", n),
                     Err(e) => { eprintln!("forget failed: {}", e); exit_code = 1; }
                 }
             }
-            Cmd::Learn { action, rest, cwd } => {
+            Cmd::Learn { action, rest, cwd, discipline } => {
+                let mut rest_parts = rest;
+                let disc = extract_discipline_sigil(&mut rest_parts, discipline);
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
-                let out = hook::rs_learn::learn_passthrough(&action, &rest, &dir);
+                let out = hook::rs_learn::learn_passthrough_disc(&action, &rest_parts, &dir, disc.as_deref());
                 if out.is_empty() {
                     eprintln!("learn {} returned no output (rs-learn may not be available)", action);
                     exit_code = 1;
@@ -832,15 +961,21 @@ async fn main() {
                     println!("{}", out);
                 }
             }
+            Cmd::Discipline { sub, rest, cwd } => {
+                let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
+                exit_code = cmd_discipline(&sub, &rest, &dir);
+            }
             Cmd::Log { action, rest, limit, date, days } => {
                 exit_code = cmd_log(&action, &rest, limit, date.as_deref(), days);
             }
-            Cmd::Search { path, query } => {
-                if query.is_empty() {
+            Cmd::Search { path, query, discipline } => {
+                let mut q_parts = query;
+                let _disc = extract_discipline_sigil(&mut q_parts, discipline);
+                if q_parts.is_empty() {
                     search_mcp::run_mcp_server();
                     return Ok(());
                 }
-                let q = query.join(" ");
+                let q = q_parts.join(" ");
                 let root = std::path::PathBuf::from(path.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string()));
                 if !root.exists() { eprintln!("Path does not exist: {}", root.display()); exit_code = 1; return Ok(()); }
                 let started = std::time::Instant::now();

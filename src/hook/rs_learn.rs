@@ -6,10 +6,29 @@
 //      Single shared embedder, ~5ms latency. Best for hot hooks.
 //   2. Direct rs-learn lib call via shared tokio runtime. No subprocess. No window flash.
 
-use std::{env, fs, io::{Read, Write}, net::TcpStream, path::PathBuf, sync::{Arc, OnceLock}, time::Duration};
+use std::{collections::HashMap, env, fs, io::{Read, Write}, net::TcpStream, path::PathBuf, sync::{Arc, Mutex, OnceLock}, time::Duration};
 use super::no_window_cmd;
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::Semaphore;
+
+type SearcherKey = (PathBuf, Option<String>);
+type SearcherTriple = (
+    std::sync::Arc<rs_learn::Store>,
+    std::sync::Arc<rs_learn::Embedder>,
+    std::sync::Arc<rs_learn::graph::llm::LlmJson>,
+);
+
+fn searcher_cache() -> &'static Mutex<HashMap<SearcherKey, SearcherTriple>> {
+    static CACHE: OnceLock<Mutex<HashMap<SearcherKey, SearcherTriple>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn discipline_db_path(project_dir: &str, discipline: Option<&str>) -> PathBuf {
+    match discipline {
+        Some(name) => PathBuf::from(project_dir).join(".gm").join("disciplines").join(name).join("rs-learn.db"),
+        None => PathBuf::from(project_dir).join(".gm").join("rs-learn.db"),
+    }
+}
 
 const DEFAULT_RECALL_TIMEOUT_SECS: u64 = 6;
 const HTTP_DEFAULT_URL: &str = "http://127.0.0.1:8000";
@@ -126,18 +145,29 @@ where
 /// Open store + embedder + llm against the project's rs-learn DB. Honors RS_LEARN_DB_PATH /
 /// project .gm/rs-learn.db resolution. Done once-per-call (no caching across hooks because
 /// each plugkit invocation is a fresh process).
-async fn open_graph(project_dir: &str) -> anyhow::Result<(
-    std::sync::Arc<rs_learn::Store>,
-    std::sync::Arc<rs_learn::Embedder>,
-    std::sync::Arc<rs_learn::graph::llm::LlmJson>,
-)> {
-    // Resolve relative to project_dir by setting CWD via env override; rs_learn::resolve_db_path()
-    // uses RS_LEARN_DB_PATH if set, otherwise <cwd>/.gm/rs-learn.db.
-    let db_path = if let Ok(p) = std::env::var("RS_LEARN_DB_PATH") {
-        std::path::PathBuf::from(p)
+async fn open_graph(project_dir: &str) -> anyhow::Result<SearcherTriple> {
+    open_graph_disc(project_dir, None).await
+}
+
+async fn open_graph_disc(project_dir: &str, discipline: Option<&str>) -> anyhow::Result<SearcherTriple> {
+    let db_path = if discipline.is_none() {
+        if let Ok(p) = std::env::var("RS_LEARN_DB_PATH") {
+            PathBuf::from(p)
+        } else {
+            discipline_db_path(project_dir, None)
+        }
     } else {
-        std::path::PathBuf::from(project_dir).join(".gm").join("rs-learn.db")
+        discipline_db_path(project_dir, discipline)
     };
+    let key: SearcherKey = (db_path.clone(), discipline.map(|s| s.to_string()));
+    {
+        let cache = searcher_cache().lock().unwrap();
+        if let Some(triple) = cache.get(&key) {
+            rs_search::embed_cache::set_shared_connection(triple.0.conn.clone());
+            return Ok(triple.clone());
+        }
+    }
+    if let Some(parent) = db_path.parent() { let _ = fs::create_dir_all(parent); }
     let db_str = db_path.to_string_lossy().to_string();
     let store = std::sync::Arc::new(rs_learn::Store::open(&db_str).await?);
     rs_search::embed_cache::set_shared_connection(store.conn.clone());
@@ -145,7 +175,10 @@ async fn open_graph(project_dir: &str) -> anyhow::Result<(
     let backend = rs_learn::backend::from_env()
         .map_err(|e| anyhow::anyhow!("backend: {e}"))?;
     let llm = std::sync::Arc::new(rs_learn::graph::llm::LlmJson::new(backend));
-    Ok((store, embedder, llm))
+    let triple: SearcherTriple = (store, embedder, llm);
+    let mut cache = searcher_cache().lock().unwrap();
+    cache.insert(key, triple.clone());
+    Ok(triple)
 }
 
 fn http_base() -> String {
@@ -194,11 +227,26 @@ fn http_search(query: &str, limit: u32) -> Option<String> {
 }
 
 /// Recall episodes for a query. Returns formatted markdown or empty string on failure.
-/// Tries HTTP first (fast), falls back to bun subprocess.
+/// When discipline is None and disciplines exist, fans out across default + every
+/// discipline under <project>/.gm/disciplines/* (JoinSet cap 16) and merges by score.
+/// When Some(name), strict isolation — reads only that discipline's db.
 pub fn recall(query: &str, project_dir: &str, limit: u32) -> String {
+    recall_disc(query, project_dir, limit, None)
+}
+
+pub fn recall_disc(query: &str, project_dir: &str, limit: u32, discipline: Option<&str>) -> String {
     if query.trim().is_empty() { return String::new(); }
     let started = std::time::Instant::now();
-    let result = recall_inner(query, project_dir, limit);
+    let result = if let Some(name) = discipline {
+        recall_single(query, project_dir, limit, Some(name))
+    } else {
+        let disciplines = list_project_disciplines(project_dir);
+        if disciplines.is_empty() {
+            recall_single(query, project_dir, limit, None)
+        } else {
+            recall_aggregate(query, project_dir, limit, &disciplines)
+        }
+    };
     let query_preview: String = query.chars().take(80).collect();
     let project_name = std::path::Path::new(project_dir).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
     rs_exec::obs::event("rs_learn", "recall", serde_json::json!({
@@ -208,22 +256,45 @@ pub fn recall(query: &str, project_dir: &str, limit: u32) -> String {
         "result_len": result.len(),
         "hit": !result.is_empty(),
         "dur_ms": started.elapsed().as_millis() as u64,
-        "project": project_name
+        "project": project_name,
+        "discipline": discipline.unwrap_or("default")
     }));
     result
 }
 
-fn recall_inner(query: &str, project_dir: &str, limit: u32) -> String {
-    if let Some(raw) = http_search(query, limit) {
-        let formatted = format_recall(&raw, limit);
-        if !formatted.is_empty() { return formatted; }
+fn list_project_disciplines(project_dir: &str) -> Vec<String> {
+    let root = PathBuf::from(project_dir).join(".gm").join("disciplines");
+    if !root.exists() { return Vec::new(); }
+    let mut out: Vec<String> = Vec::new();
+    if let Ok(rd) = fs::read_dir(&root) {
+        for e in rd.flatten() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if let Some(name) = e.file_name().to_str() {
+                    if discipline_db_path(project_dir, Some(name)).exists() {
+                        out.push(name.to_string());
+                    }
+                }
+            }
+        }
     }
+    out.sort();
+    out
+}
 
+fn recall_single(query: &str, project_dir: &str, limit: u32, discipline: Option<&str>) -> String {
+    let label = discipline.unwrap_or("default").to_string();
+    if discipline.is_none() {
+        if let Some(raw) = http_search(query, limit) {
+            let formatted = format_recall_with_label(&raw, limit, &label);
+            if !formatted.is_empty() { return formatted; }
+        }
+    }
     let q = query.to_string();
     let pd = project_dir.to_string();
+    let disc = discipline.map(|s| s.to_string());
     let lim = limit as usize;
     let hits = run_with_timeout(Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS), async move {
-        let (store, embedder, llm) = open_graph(&pd).await?;
+        let (store, embedder, llm) = open_graph_disc(&pd, disc.as_deref()).await?;
         let searcher = rs_learn::graph::search::Searcher::with_llm(store, embedder, llm);
         let cfg = rs_learn::graph::search::SearchConfig { limit: lim, ..Default::default() };
         let hits = searcher.search_episodes(&q, &cfg).await?;
@@ -231,20 +302,76 @@ fn recall_inner(query: &str, project_dir: &str, limit: u32) -> String {
     });
     let Some(hits) = hits else { return String::new() };
     let raw = match serde_json::to_string(&hits) { Ok(s) => s, Err(_) => return String::new() };
-    format_recall(&raw, limit)
+    format_recall_with_label(&raw, limit, &label)
 }
 
-fn format_recall(raw: &str, max: u32) -> String {
+fn recall_aggregate(query: &str, project_dir: &str, limit: u32, disciplines: &[String]) -> String {
+    let q = query.to_string();
+    let pd = project_dir.to_string();
+    let lim = limit as usize;
+    let mut targets: Vec<Option<String>> = vec![None];
+    for d in disciplines { targets.push(Some(d.clone())); }
+    let work = async move {
+        let mut set: tokio::task::JoinSet<(String, Vec<rs_learn::graph::search::EpisodeHit>)> = tokio::task::JoinSet::new();
+        let cap = 16usize;
+        let sem = Arc::new(Semaphore::new(cap));
+        for tgt in targets {
+            let q = q.clone();
+            let pd = pd.clone();
+            let sem = sem.clone();
+            let label = tgt.clone().unwrap_or_else(|| "default".to_string());
+            set.spawn(async move {
+                let _permit = sem.acquire_owned().await.ok();
+                let cfg = rs_learn::graph::search::SearchConfig { limit: lim, ..Default::default() };
+                match open_graph_disc(&pd, tgt.as_deref()).await {
+                    Ok((store, embedder, llm)) => {
+                        let searcher = rs_learn::graph::search::Searcher::with_llm(store, embedder, llm);
+                        match searcher.search_episodes(&q, &cfg).await {
+                            Ok(hits) => (label, hits),
+                            Err(_) => (label, Vec::new()),
+                        }
+                    }
+                    Err(_) => (label, Vec::new()),
+                }
+            });
+        }
+        let mut all: Vec<(String, rs_learn::graph::search::EpisodeHit)> = Vec::new();
+        while let Some(res) = set.join_next().await {
+            if let Ok((label, hits)) = res {
+                for h in hits { all.push((label.clone(), h)); }
+            }
+        }
+        Ok::<_, anyhow::Error>(all)
+    };
+    let Some(mut all) = run_with_timeout(Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS), work) else { return String::new() };
+    all.sort_by(|a, b| {
+        let sa = a.1.row.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let sb = b.1.row.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut out = String::new();
+    for (i, (label, hit)) in all.iter().take(limit as usize).enumerate() {
+        let row = &hit.row;
+        let content = row.get("content").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if content.is_empty() { continue; }
+        let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let snippet: String = content.chars().take(400).collect();
+        let suffix = if content.chars().count() > 400 { "…" } else { "" };
+        let src = if source.is_empty() { String::new() } else { format!(" [{}]", source) };
+        out.push_str(&format!("{}. [discipline:{}]{}\n   {}{}\n", i + 1, label, src, snippet, suffix));
+    }
+    out
+}
+
+fn format_recall_with_label(raw: &str, max: u32, label: &str) -> String {
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(raw);
     let Ok(v) = parsed else { return String::new() };
-    // HTTP shape: {"hits":[...]}, bun CLI shape: [...]
     let arr = v.as_array().cloned()
         .or_else(|| v["hits"].as_array().cloned())
         .unwrap_or_default();
     if arr.is_empty() { return String::new(); }
     let mut out = String::new();
     for (i, item) in arr.iter().take(max as usize).enumerate() {
-        // Try both shapes: {row: {...}} (CLI) or flattened (HTTP)
         let row = if item["row"].is_object() { &item["row"] } else { item };
         let content = row["content"].as_str().unwrap_or("").trim();
         let source = row["source"].as_str().unwrap_or("").trim();
@@ -252,7 +379,7 @@ fn format_recall(raw: &str, max: u32) -> String {
         let snippet: String = content.chars().take(400).collect();
         let suffix = if content.chars().count() > 400 { "…" } else { "" };
         let src = if source.is_empty() { String::new() } else { format!(" [{}]", source) };
-        out.push_str(&format!("{}.{}\n   {}{}\n", i + 1, src, snippet, suffix));
+        out.push_str(&format!("{}. [discipline:{}]{}\n   {}{}\n", i + 1, label, src, snippet, suffix));
     }
     out
 }
@@ -428,34 +555,40 @@ pub fn record_quality(session_id: &str, project_dir: &str, quality: f32, note: &
 /// Invalidation = mark `invalid_at = now()` rather than hard-delete, so the audit trail is preserved
 /// and the operation is reversible. Search filters out invalidated episodes by default.
 pub fn forget(directive: &str, target: &str, project_dir: &str) -> Result<usize, String> {
+    forget_disc(directive, target, project_dir, None)
+}
+
+pub fn forget_disc(directive: &str, target: &str, project_dir: &str, discipline: Option<&str>) -> Result<usize, String> {
     let target = target.trim();
     if target.is_empty() {
         return Err("forget target is empty".into());
     }
     match directive {
-        "by-id" => forget_by_ids(&[target.to_string()], project_dir),
+        "by-id" => forget_by_ids(&[target.to_string()], project_dir, discipline),
         "by-source" => {
-            let ids = list_episode_ids(Some(target), None, 200, project_dir)?;
+            let ids = list_episode_ids(Some(target), None, 200, project_dir, discipline)?;
             if ids.is_empty() { return Ok(0); }
-            forget_by_ids(&ids, project_dir)
+            forget_by_ids(&ids, project_dir, discipline)
         }
         "by-query" => {
-            let ids = list_episode_ids(None, Some(target), 20, project_dir)?;
+            let ids = list_episode_ids(None, Some(target), 20, project_dir, discipline)?;
             if ids.is_empty() { return Ok(0); }
-            forget_by_ids(&ids, project_dir)
+            forget_by_ids(&ids, project_dir, discipline)
         }
         other => Err(format!("unknown directive '{}'. Use by-source | by-query | by-id", other)),
     }
 }
 
-fn list_episode_ids(source: Option<&str>, query: Option<&str>, limit: u32, project_dir: &str) -> Result<Vec<String>, String> {
+fn list_episode_ids(source: Option<&str>, query: Option<&str>, limit: u32, project_dir: &str, discipline: Option<&str>) -> Result<Vec<String>, String> {
     let pd = project_dir.to_string();
     let lim = limit as usize;
+    let disc = discipline.map(|s| s.to_string());
     if let Some(q) = query {
         let qs = q.to_string();
         let pdc = pd.clone();
+        let disc_q = disc.clone();
         let hits = run_with_timeout(Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS), async move {
-            let (store, embedder, llm) = open_graph(&pdc).await?;
+            let (store, embedder, llm) = open_graph_disc(&pdc, disc_q.as_deref()).await?;
             let searcher = rs_learn::graph::search::Searcher::with_llm(store, embedder, llm);
             let cfg = rs_learn::graph::search::SearchConfig { limit: lim, ..Default::default() };
             Ok(searcher.search_episodes(&qs, &cfg).await?)
@@ -467,8 +600,9 @@ fn list_episode_ids(source: Option<&str>, query: Option<&str>, limit: u32, proje
     }
     if let Some(s) = source {
         let src = s.to_string();
+        let disc_s = disc.clone();
         let ids = run_with_timeout(Duration::from_secs(DEFAULT_RECALL_TIMEOUT_SECS), async move {
-            let (store, _embedder, _llm) = open_graph(&pd).await?;
+            let (store, _embedder, _llm) = open_graph_disc(&pd, disc_s.as_deref()).await?;
             let mut rows = store.conn.query(
                 "SELECT id FROM episodes WHERE source = ?1 AND (invalid_at IS NULL OR invalid_at = 0) \
                  ORDER BY created_at DESC LIMIT ?2",
@@ -485,19 +619,22 @@ fn list_episode_ids(source: Option<&str>, query: Option<&str>, limit: u32, proje
     Ok(vec![])
 }
 
-fn forget_by_ids(ids: &[String], project_dir: &str) -> Result<usize, String> {
+fn forget_by_ids(ids: &[String], project_dir: &str, discipline: Option<&str>) -> Result<usize, String> {
     let mut count = 0usize;
     for id in ids {
-        let base = http_base();
-        let path = format!("/episode/{}", id);
-        if http_delete(&base, &path, Duration::from_secs(2)).is_some() {
-            count += 1;
-            continue;
+        if discipline.is_none() {
+            let base = http_base();
+            let path = format!("/episode/{}", id);
+            if http_delete(&base, &path, Duration::from_secs(2)).is_some() {
+                count += 1;
+                continue;
+            }
         }
         let id_owned = id.clone();
         let pd = project_dir.to_string();
+        let disc_owned = discipline.map(|s| s.to_string());
         let ok = run_with_timeout(Duration::from_secs(4), async move {
-            let (store, _embedder, _llm) = open_graph(&pd).await?;
+            let (store, _embedder, _llm) = open_graph_disc(&pd, disc_owned.as_deref()).await?;
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64).unwrap_or(0);
             let r = store.conn.execute(
@@ -533,8 +670,11 @@ fn http_delete(base: &str, path: &str, timeout: Duration) -> Option<String> {
 /// doesn't exist (status/debug/feedback/build-communities). Falls through to
 /// bun subprocess. Returns stdout.
 pub fn learn_passthrough(action: &str, rest: &[String], project_dir: &str) -> String {
-    // Try HTTP for known endpoints first.
-    if action == "build-communities" {
+    learn_passthrough_disc(action, rest, project_dir, None)
+}
+
+pub fn learn_passthrough_disc(action: &str, rest: &[String], project_dir: &str, discipline: Option<&str>) -> String {
+    if discipline.is_none() && action == "build-communities" {
         if let Some(out) = http_post(&http_base(), "/build-communities", "{}", Duration::from_secs(30)) {
             return out;
         }
@@ -543,16 +683,17 @@ pub fn learn_passthrough(action: &str, rest: &[String], project_dir: &str) -> St
     let pd = project_dir.to_string();
     let action_owned = action.to_string();
     let rest_owned: Vec<String> = rest.to_vec();
+    let disc_owned = discipline.map(|s| s.to_string());
     run_with_timeout(Duration::from_secs(30), async move {
         match action_owned.as_str() {
             "build-communities" => {
-                let (store, embedder, llm) = open_graph(&pd).await?;
+                let (store, embedder, llm) = open_graph_disc(&pd, disc_owned.as_deref()).await?;
                 let ops = rs_learn::graph::communities::CommunityOps::new(store, embedder, llm);
                 let r = ops.build_communities().await?;
                 Ok(format!("communities={} members={}", r.community_count, r.member_count))
             }
             "debug" => {
-                let _ = open_graph(&pd).await?;
+                let _ = open_graph_disc(&pd, disc_owned.as_deref()).await?;
                 let v = match rest_owned.first() {
                     Some(name) => rs_learn::observability::dump()
                         .get(name.as_str()).cloned()
@@ -566,14 +707,14 @@ pub fn learn_passthrough(action: &str, rest: &[String], project_dir: &str) -> St
                 let q_str = rest_owned.get(1).ok_or_else(|| anyhow::anyhow!("feedback requires quality"))?;
                 let quality: f32 = q_str.parse().map_err(|_| anyhow::anyhow!("quality must be f32"))?;
                 let signal = rest_owned.get(2).cloned();
-                let db = std::path::PathBuf::from(&pd).join(".gm").join("rs-learn.db");
+                let db = discipline_db_path(&pd, disc_owned.as_deref());
                 std::env::set_var("RS_LEARN_DB_PATH", &db);
                 let orch = rs_learn::Orchestrator::new_default().await?;
                 orch.feedback(request_id, rs_learn::learn::instant::FeedbackPayload { quality, signal }).await?;
                 Ok("ok".to_string())
             }
             "clear" => {
-                let (store, embedder, llm) = open_graph(&pd).await?;
+                let (store, embedder, llm) = open_graph_disc(&pd, disc_owned.as_deref()).await?;
                 rs_learn::graph::ingest::Ingestor::new(store, embedder, llm).clear_graph(None).await?;
                 Ok("cleared".to_string())
             }
@@ -582,26 +723,35 @@ pub fn learn_passthrough(action: &str, rest: &[String], project_dir: &str) -> St
     }).unwrap_or_default()
 }
 
-/// Fast-path ingest. Tries HTTP first, falls back to bun. Best-effort, never blocks.
+/// Fast-path ingest. Tries HTTP first, falls back to lib. Best-effort, never blocks.
+/// Writes go to default (None) or the specified discipline only.
 pub fn ingest_fast(content: &str, source: &str, project_dir: &str) {
+    ingest_fast_disc(content, source, project_dir, None);
+}
+
+pub fn ingest_fast_disc(content: &str, source: &str, project_dir: &str, discipline: Option<&str>) {
     if content.trim().is_empty() { return; }
 
     let ingest_start = std::time::Instant::now();
     let content_len = content.len();
     let project_name = std::path::Path::new(project_dir).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-    let body = serde_json::json!({
-        "content": content,
-        "source": source,
-    }).to_string();
-    if let Some(_) = http_post(&http_base(), "/messages", &body, Duration::from_secs(2)) {
-        rs_exec::obs::event("rs_learn", "ingest", serde_json::json!({
+    let disc_label = discipline.unwrap_or("default").to_string();
+    if discipline.is_none() {
+        let body = serde_json::json!({
+            "content": content,
             "source": source,
-            "content_len": content_len,
-            "path": "http",
-            "dur_ms": ingest_start.elapsed().as_millis() as u64,
-            "project": project_name
-        }));
-        return;
+        }).to_string();
+        if let Some(_) = http_post(&http_base(), "/messages", &body, Duration::from_secs(2)) {
+            rs_exec::obs::event("rs_learn", "ingest", serde_json::json!({
+                "source": source,
+                "content_len": content_len,
+                "path": "http",
+                "dur_ms": ingest_start.elapsed().as_millis() as u64,
+                "project": project_name,
+                "discipline": disc_label
+            }));
+            return;
+        }
     }
 
     rs_exec::obs::event("rs_learn", "ingest", serde_json::json!({
@@ -609,14 +759,15 @@ pub fn ingest_fast(content: &str, source: &str, project_dir: &str) {
         "content_len": content_len,
         "path": "lib",
         "dur_ms": ingest_start.elapsed().as_millis() as u64,
-        "project": project_name
+        "project": project_name,
+        "discipline": disc_label
     }));
-    // Fallback: direct lib call, fire-and-forget on shared runtime.
     let pd = project_dir.to_string();
     let content_owned = content.to_string();
     let source_owned = source.to_string();
+    let disc_owned = discipline.map(|s| s.to_string());
     spawn_detached(async move {
-        let (store, embedder, llm) = open_graph(&pd).await?;
+        let (store, embedder, llm) = open_graph_disc(&pd, disc_owned.as_deref()).await?;
         let ingestor = rs_learn::graph::ingest::Ingestor::new(store, embedder, llm);
         let _ = ingestor.add_episode_fast(&content_owned, &source_owned, None).await?;
         Ok(())
