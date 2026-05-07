@@ -188,10 +188,8 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
         let base = std::path::Path::new(fp).file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
         let ext = std::path::Path::new(fp).extension().and_then(|e| e.to_str()).unwrap_or("");
         let in_skills = fp.contains("/skills/") || fp.contains("\\skills\\");
-        const DOC_ALLOWLIST: &[&str] = &["claude.md", "readme.md", "agents.md", "contributing.md", "changelog.md", "license", "license.md"];
-        let is_allowed_doc = DOC_ALLOWLIST.iter().any(|a| base == *a);
         let already_exists = !fp.is_empty() && std::path::Path::new(fp).exists();
-        if (ext == "txt" || base.starts_with("features_list")) && !is_allowed_doc && !in_skills && !already_exists {
+        if (ext == "txt" || base.starts_with("features_list")) && !in_skills && !already_exists {
             return deny("Cannot create new plain-text documentation files. For task-specific notes use .prd. For permanent reference add to CLAUDE.md or AGENTS.md.");
         }
         if !in_skills && is_test_file(&base, fp) {
