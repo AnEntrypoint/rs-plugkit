@@ -33,6 +33,7 @@ pub fn run() {
         let _ = std::fs::create_dir_all(&gm);
         let global_needs_gm = super::tools_dir().join("needs-gm");
         let _ = std::fs::remove_file(gm.join("gm-fired-this-turn"));
+        let _ = std::fs::remove_file(gm.join("residual-check-fired"));
         if autonomous {
             let _ = std::fs::remove_file(&needs_gm);
             let _ = std::fs::remove_file(&global_needs_gm);

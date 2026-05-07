@@ -58,6 +58,19 @@ pub fn run_stop() {
         }
     }
 
+    let gm_dir = std::path::Path::new(&project_dir).join(".gm");
+    let residual_marker = gm_dir.join("residual-check-fired");
+    if !residual_marker.exists() {
+        let _ = fs::create_dir_all(&gm_dir);
+        let _ = fs::write(&residual_marker, "1");
+        write_needs_gm(&project_dir);
+        let out = stop_block(
+            "Residual scan before stop. PRD is empty, but the user's ask may still have reachable in-spirit residuals not yet captured. Enumerate every residual that is (a) within the spirit of the original ask AND (b) reachable from this session: pre-existing build breaks surfaced this turn, neighboring lint/test/lockfile failures, obvious refactor wins, observability gaps, doc drift, hand-rolled code an existing library covers, follow-on work the user clearly implied.\n\nIf any reachable in-spirit residual exists: re-enter Skill(gm:planning), append PRD items, execute through to COMPLETE. Do not ask the user. Do not name-and-stop. The user's original authorization covers every reachable in-spirit residual.\n\nIf zero reachable in-spirit residuals exist: state that explicitly in one line (e.g. \"residual scan: none reachable in-spirit\") and stop again. The next stop will be allowed.\n\nNEXT ACTION: invoke Skill(gm) first.".to_string()
+        );
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+        std::process::exit(2);
+    }
+
     println!("{}", serde_json::to_string(&stop_allow(None)).unwrap_or_default());
 }
 
