@@ -725,14 +725,14 @@ async fn main() {
             None => {
                 let code_str = normalize_code_input(read_stdin().await);
                 if code_str.trim().is_empty() { eprintln!("No code provided via stdin"); exit_code = 1; return Ok(()); }
-                let lang = detect_lang_from_content(&code_str).await;
+                let runtime = detect_lang_from_content(&code_str);
                 let cwd = env::current_dir().unwrap().to_string_lossy().to_string();
-                exit_code = run_code(&code_str, &lang, &cwd, None, None).await?;
+                exit_code = run_code(&code_str, &runtime, &cwd, None, None).await?;
             }
             Some(Cmd::Run { lang, cwd }) => {
                 let code_str = normalize_code_input(read_stdin().await);
                 if code_str.trim().is_empty() { eprintln!("No code provided via stdin"); exit_code = 1; return Ok(()); }
-                let runtime = lang.unwrap_or_else(|| detect_lang_from_content(&code_str).await);
+                let runtime = lang.unwrap_or_else(|| detect_lang_from_content(&code_str));
                 let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
                 exit_code = run_code(&code_str, &runtime, &cwd, None, None).await?;
             }
@@ -745,14 +745,14 @@ async fn main() {
                 if runtime == "typescript" || runtime == "auto" { runtime = "nodejs".into(); }
                 exit_code = run_code(&code_str, &runtime, &cwd, session.as_deref(), timeout_ms).await?;
             }
-            Cmd::Bash { cwd, timeout_ms, commands } => {
+            Some(Cmd::Bash { cwd, timeout_ms, commands }) => {
                 let cmd = commands.join(" ");
                 if cmd.trim().is_empty() { eprintln!("No commands provided"); exit_code = 1; return Ok(()); }
                 let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
                 let runtime = if cfg!(windows) { "powershell" } else { "bash" };
                 exit_code = run_code(&cmd, runtime, &cwd, None, timeout_ms).await?;
             }
-            Cmd::Type { task_id, input, session } => {
+            Some(Cmd::Type { task_id, input, session }) => {
                 ensure_runner().await?;
                 let mut stdin_params = json!({ "taskId": parse_task_id(&task_id), "data": format!("{}\n", input.join(" ")) });
                 if let Some(ref sid) = session { stdin_params["sessionId"] = json!(sid); }
@@ -760,7 +760,7 @@ async fn main() {
                 if res["ok"].as_bool().unwrap_or(false) { println!("Sent to task {}", task_id); }
                 else { eprintln!("Task {} not found or not running", task_id); }
             }
-            Cmd::Runner { sub } => match sub.as_str() {
+            Some(Cmd::Runner { sub }) => match sub.as_str() {
                 "start" => {
                     if rpc_client::health_check().await && !runner_needs_restart() {
                         println!("Runner already healthy on port {}", fs::read_to_string(port_file()).unwrap_or_default().trim().to_string());
@@ -792,7 +792,7 @@ async fn main() {
                 }
                 _ => { eprintln!("Unknown runner subcommand: {}", sub); exit_code = 1; }
             }
-            Cmd::Pm2list => {
+            Some(Cmd::Pm2list) => {
                 ensure_runner().await?;
                 let res = rpc_client::rpc_call("pm2list", json!({}), 10000).await?;
                 let procs = daemon::list();
@@ -806,7 +806,7 @@ async fn main() {
                     }
                 }
             }
-            Cmd::Sleep { task_id, max_secs } => {
+            Some(Cmd::Sleep { task_id, max_secs }) => {
                 ensure_runner().await?;
                 let id = parse_task_id(&task_id);
                 let deadline = std::time::Instant::now() + Duration::from_secs(max_secs.min(3600));
@@ -835,7 +835,7 @@ async fn main() {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             }
-            Cmd::Status { task_id } => {
+            Some(Cmd::Status { task_id }) => {
                 ensure_runner().await?;
                 let res = rpc_client::rpc_call("listTasks", json!({}), 5000).await?;
                 let arr = res["tasks"].as_array().cloned().unwrap_or_default();
@@ -850,7 +850,7 @@ async fn main() {
                     else { for t in &arr { println!("task_{}  status={}  exitCode={}", t["id"].as_u64().unwrap_or(0), t["status"].as_str().unwrap_or("?"), t["exitCode"]); } }
                 }
             }
-            Cmd::Close { task_id } => {
+            Some(Cmd::Close { task_id }) => {
                 ensure_runner().await?;
                 let id = parse_task_id(&task_id);
                 let res = rpc_client::rpc_call("deleteTask", json!({ "taskId": id }), 5000).await?;
@@ -861,7 +861,7 @@ async fn main() {
                     exit_code = 1;
                 }
             }
-            Cmd::Codeinsight { path, json, cache, read_cache } => {
+            Some(Cmd::Codeinsight { path, json, cache, read_cache }) => {
                 let root = path.unwrap_or_else(|| ".".into());
                 let root_path = std::path::Path::new(&root);
                 if !root_path.exists() { eprintln!("Path does not exist: {}", root); exit_code = 1; return Ok(()); }
@@ -899,7 +899,7 @@ async fn main() {
                     "out_len": output.text.len(), "source": "fresh"
                 }));
             }
-            Cmd::SessionCleanup { session } => {
+            Some(Cmd::SessionCleanup { session }) => {
                 if rpc_client::health_check().await {
                     let res = rpc_client::rpc_call("deleteSessionTasks", json!({ "sessionId": session }), 10000).await;
                     if let Ok(v) = res {
@@ -913,7 +913,7 @@ async fn main() {
                     hook::agent_browser::close_sessions_for(&session);
                 }
             }
-            Cmd::Hook { event } => {
+            Some(Cmd::Hook { event }) => {
                 let ev = event.as_str();
                 let known = matches!(ev,
                     "session-start" | "pre-tool-use" | "post-tool-use" | "prompt-submit" |
@@ -940,7 +940,7 @@ async fn main() {
                 });
                 return Ok(());
             }
-            Cmd::KillPort { port } => {
+            Some(Cmd::KillPort { port }) => {
                 ensure_runner().await?;
                 let res = rpc_client::rpc_call("killPort", json!({ "port": port }), 10000).await?;
                 if res["ok"].as_bool().unwrap_or(false) {
@@ -950,9 +950,9 @@ async fn main() {
                     exit_code = 1;
                 }
             }
-            Cmd::Deps => { cmd_deps()?; }
-            Cmd::Doctor => { cmd_doctor()?; }
-            Cmd::Recall { query, limit, cwd, discipline } => {
+            Some(Cmd::Deps) => { cmd_deps()?; }
+            Some(Cmd::Doctor) => { cmd_doctor()?; }
+            Some(Cmd::Recall { query, limit, cwd, discipline }) => {
                 let mut q_parts = query;
                 let disc = extract_discipline_sigil(&mut q_parts, discipline);
                 let q = q_parts.join(" ");
@@ -962,7 +962,7 @@ async fn main() {
                 if out.is_empty() { println!("No recall results."); return Ok(()); }
                 println!("{}", out);
             }
-            Cmd::Memorize { source, file, content, cwd, discipline } => {
+            Some(Cmd::Memorize { source, file, content, cwd, discipline }) => {
                 let mut body_parts = content;
                 let disc = extract_discipline_sigil(&mut body_parts, discipline);
                 let body = if let Some(f) = file {
@@ -983,7 +983,7 @@ async fn main() {
                 }));
                 println!("ingested ({} bytes) source={} discipline={}", body.len(), src, disc.unwrap_or_else(|| "default".into()));
             }
-            Cmd::Forget { directive, cwd, discipline } => {
+            Some(Cmd::Forget { directive, cwd, discipline }) => {
                 let mut directive_parts = directive;
                 let disc = extract_discipline_sigil(&mut directive_parts, discipline);
                 let joined = directive_parts.join(" ");
@@ -1000,7 +1000,7 @@ async fn main() {
                     Err(e) => { eprintln!("forget failed: {}", e); exit_code = 1; }
                 }
             }
-            Cmd::Learn { action, rest, cwd, discipline } => {
+            Some(Cmd::Learn { action, rest, cwd, discipline }) => {
                 let mut rest_parts = rest;
                 let disc = extract_discipline_sigil(&mut rest_parts, discipline);
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
@@ -1012,14 +1012,14 @@ async fn main() {
                     println!("{}", out);
                 }
             }
-            Cmd::Discipline { sub, rest, cwd } => {
+            Some(Cmd::Discipline { sub, rest, cwd }) => {
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
                 exit_code = cmd_discipline(&sub, &rest, &dir);
             }
-            Cmd::Log { action, rest, limit, date, days } => {
+            Some(Cmd::Log { action, rest, limit, date, days }) => {
                 exit_code = cmd_log(&action, &rest, limit, date.as_deref(), days);
             }
-            Cmd::Search { path, query, discipline } => {
+            Some(Cmd::Search { path, query, discipline }) => {
                 let mut q_parts = query;
                 let disc = extract_discipline_sigil(&mut q_parts, discipline);
                 if q_parts.is_empty() {

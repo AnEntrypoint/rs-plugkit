@@ -306,6 +306,37 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
         }
     }
 
+    // Allow piping raw code to plugkit/rs-exec for JIT execution.
+    // This enables: cat <<EOF | plugkit (raw lines without encapsulation)
+    let pipes_to_plugkit = command.contains("| plugkit") || command.contains("| plugkit.exe")
+        || command.contains("| rs-exec") || command.contains("| rs-exec.exe");
+    if pipes_to_plugkit {
+        return allow(None);
+    }
+
+    // On Windows, commands with heredocs, pipes, redirections, or shell operators need bash -lc wrapper
+    // since cmd.exe doesn't support these bash features correctly. Reminder: && in cmd.exe is different
+    // from bash && - use `bash -lc` wrapper or separate commands.
+    if cfg!(windows) && !pipes_to_plugkit && (command.contains("<<") || command.contains(" | ") || command.contains(" > ") || command.contains(" < ")
+        || command.contains(" && ") || command.contains(" || ") || command.contains(" ; ")) {
+        let escaped = command.replace('\'', "'\\''");
+        return serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "updatedInput": { "command": format!("bash -lc '{}'", escaped) }
+            }
+        });
+    }
+
+    // Allow simple shell commands: heredocs, pipes, basic utilities
+    // These don't need exec: prefix - they're just shell operations
+    if is_simple_shell_command(&command) {
+        // On Windows, heredocs require bash (Git Bash/WSL), not cmd.exe
+        // For cmd.exe, use (echo ... && echo ...) | command pattern
+        return allow(None);
+    }
+
     if !command.starts_with("exec")
         && !command.starts_with("browser:")
         && !command.starts_with("git ")
@@ -315,17 +346,6 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
     {
         let bash_deny = load_prompt("bash-deny").unwrap_or_else(|| BASH_DENY_MSG.to_string());
         return deny(&bash_deny);
-    }
-
-    if cfg!(windows) && (command.contains(" && ") || command.contains(" || ") || command.contains(" ; ")) {
-        let escaped = command.replace('\'', "'\\''");
-        return serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "updatedInput": { "command": format!("bash -lc '{}'", escaped) }
-            }
-        });
     }
 
     allow(None)
@@ -447,6 +467,61 @@ fn normalize_windows_paths(code: &str) -> String {
     out
 }
 
+fn is_simple_shell_command(cmd: &str) -> bool {
+    // Allows heredocs, pipes, redirections, and basic shell utilities
+    // Works on Windows (PowerShell/git-bash), macOS, WSL, Linux
+    // Returns true if this is a "just shell" command that doesn't need exec: prefix
+
+    let first_word = cmd.split_whitespace().next().unwrap_or("");
+
+    // Git and gh are already handled elsewhere, but check here too
+    if first_word == "git" || first_word == "gh" {
+        return true;
+    }
+
+    // Heredoc patterns: cat <<EOF, <<'EOF', etc.
+    if cmd.contains("<<") {
+        return true;
+    }
+
+    // Pipe chains: anything with | is shell plumbing
+    if cmd.contains(" | ") || cmd.contains("||") {
+        return true;
+    }
+
+    // Redirections
+    if cmd.contains(" > ") || cmd.contains(" < ") || cmd.contains(" >> ") || cmd.contains("2>") {
+        return true;
+    }
+
+    // Common shell utilities that are "just shell"
+    const SIMPLE_SHELL_UTILS: &[&str] = &[
+        "cat", "echo", "sort", "uniq", "head", "tail", "wc", "cut", "sed", "awk",
+        "tr", "grep", "rg", "find", "ls", "pwd", "cd", "mkdir", "rm", "cp", "mv",
+        "tar", "curl", "wget", "jq", "tee", "xargs", "diff", "patch", "date",
+        "which", "where", "whoami", "hostname", "uname", "env", "printenv",
+    ];
+
+    if SIMPLE_SHELL_UTILS.contains(&first_word) {
+        return true;
+    }
+
+    // Variable assignments and shell expansions
+    if first_word.ends_with("=") || first_word == "export" || first_word == "unset" {
+        return true;
+    }
+
+    // Windows/cmd compatibility: basic cmd.exe commands
+    const CMD_UTILS: &[&str] = &[
+        "dir", "type", "copy", "move", "del", "ren", "md", "rd", "echo.", "set", "path",
+    ];
+    if CMD_UTILS.contains(&first_word) {
+        return true;
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod bash_banned_tests {
     use super::bash_banned_tool;
@@ -490,6 +565,49 @@ mod bash_banned_tests {
         assert_eq!(bash_banned_tool("grep foo src/lib.rs"), Some("grep"));
         assert_eq!(bash_banned_tool("rg TODO ./crates"), Some("rg"));
         assert_eq!(bash_banned_tool("find . -name '*.rs'"), Some("find"));
+    }
+}
+
+#[cfg(test)]
+mod simple_shell_command_tests {
+    use super::is_simple_shell_command;
+
+    #[test]
+    fn allows_heredocs() {
+        assert!(is_simple_shell_command("cat <<EOF\nline 3\nline 1\nline 2\nEOF | sort"));
+        assert!(is_simple_shell_command("cat <<'EOF' | grep foo"));
+    }
+
+    #[test]
+    fn allows_pipes() {
+        assert!(is_simple_shell_command("ls -la | head -5"));
+        assert!(is_simple_shell_command("cat file.txt | sort | uniq"));
+    }
+
+    #[test]
+    fn allows_redirections() {
+        assert!(is_simple_shell_command("echo hello > output.txt"));
+        assert!(is_simple_shell_command("cat < input.txt"));
+        assert!(is_simple_shell_command("ls 2>&1"));
+    }
+
+    #[test]
+    fn allows_shell_utils() {
+        assert!(is_simple_shell_command("cat file.txt"));
+        assert!(is_simple_shell_command("sort -n"));
+        assert!(is_simple_shell_command("echo hello"));
+        assert!(is_simple_shell_command("ls -la"));
+    }
+
+    #[test]
+    fn allows_cmd_utils() {
+        assert!(is_simple_shell_command("dir"));
+        assert!(is_simple_shell_command("echo hello"));
+    }
+
+    #[test]
+    fn blocks_exec_prefix() {
+        assert!(!is_simple_shell_command("exec:nodejs\nconsole.log('hi')"));
     }
 }
 
