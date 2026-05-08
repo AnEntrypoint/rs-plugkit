@@ -315,9 +315,8 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
     }
 
     // On Windows, commands with heredocs, pipes, redirections, or shell operators need bash -lc wrapper
-    // since cmd.exe doesn't support these bash features correctly. Reminder: && in cmd.exe is different
-    // from bash && - use `bash -lc` wrapper or separate commands.
-    if cfg!(windows) && !pipes_to_plugkit && (command.contains("<<") || command.contains(" | ") || command.contains(" > ") || command.contains(" < ")
+    // since cmd.exe doesn't support these bash features
+    if cfg!(windows) && (command.contains("<<") || command.contains(" | ") || command.contains(" > ") || command.contains(" < ")
         || command.contains(" && ") || command.contains(" || ") || command.contains(" ; ")) {
         let escaped = command.replace('\'', "'\\''");
         return serde_json::json!({
