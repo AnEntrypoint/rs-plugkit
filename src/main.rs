@@ -22,11 +22,18 @@ fn self_exe() -> String {
 #[command(name = "plugkit", about = "plugkit — exec + codeinsight CLI", version)]
 struct Cli {
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Execute code from stdin when no subcommand provided (piped mode).
+    /// Auto-detects language from shebang or content patterns.
+    Run {
+        #[arg(long)] lang: Option<String>,
+        #[arg(long)] cwd: Option<String>,
+    },
+    /// Execute code with explicit command.
     Exec {
         #[arg(long)] lang: Option<String>,
         #[arg(long)] cwd: Option<String>,
@@ -627,6 +634,36 @@ fn normalize_code_input(raw: String) -> String {
     raw.trim_start_matches('\u{feff}').to_string()
 }
 
+async fn read_stdin() -> String {
+    use tokio::io::{self, AsyncReadExt};
+    let mut buf = String::new();
+    match io::stdin().read_to_string(&mut buf).await {
+        Ok(_) => buf,
+        Err(_) => String::new(),
+    }
+}
+
+fn detect_lang_from_content(code: &str) -> String {
+    let first_line = code.lines().next().unwrap_or("").trim();
+    if first_line.starts_with("#!") {
+        let shebang = first_line.trim_start_matches("#!").to_lowercase();
+        if shebang.contains("python") || shebang.contains("python3") { return "python".into(); }
+        if shebang.contains("node") || shebang.contains("bun") { return "nodejs".into(); }
+        if shebang.contains("ruby") { return "ruby".into(); }
+        if shebang.contains("perl") { return "perl".into(); }
+        if shebang.contains("bash") || shebang.contains("sh") { return if cfg!(windows) { "powershell" } else { "bash" }.into(); }
+    }
+    let code_lower = code.to_lowercase();
+    if code_lower.contains("import ") && code_lower.contains("def ") { return "python".into(); }
+    if code_lower.contains("function ") || code_lower.contains("const ") || code_lower.contains("let ") { return "nodejs".into(); }
+    if code_lower.contains("fn ") || code_lower.contains("let mut") { return "rust".into(); }
+    if code_lower.contains("def ") && !code_lower.contains("function ") { return "python".into(); }
+    if code.contains("#include") { return "cpp".into(); }
+    if code.contains("<?php") { return "php".into(); }
+    if code.contains("<%=") || code.contains("<%-") { return "nodejs".into(); }
+    "nodejs".into()
+}
+
 
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 300_000;
 
@@ -685,7 +722,21 @@ async fn main() {
 
     let result: anyhow::Result<()> = async {
         match cli.command {
-            Cmd::Exec { lang, cwd, file, session, timeout_ms, code } => {
+            None => {
+                let code_str = normalize_code_input(read_stdin().await);
+                if code_str.trim().is_empty() { eprintln!("No code provided via stdin"); exit_code = 1; return Ok(()); }
+                let lang = detect_lang_from_content(&code_str).await;
+                let cwd = env::current_dir().unwrap().to_string_lossy().to_string();
+                exit_code = run_code(&code_str, &lang, &cwd, None, None).await?;
+            }
+            Some(Cmd::Run { lang, cwd }) => {
+                let code_str = normalize_code_input(read_stdin().await);
+                if code_str.trim().is_empty() { eprintln!("No code provided via stdin"); exit_code = 1; return Ok(()); }
+                let runtime = lang.unwrap_or_else(|| detect_lang_from_content(&code_str).await);
+                let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
+                exit_code = run_code(&code_str, &runtime, &cwd, None, None).await?;
+            }
+            Some(Cmd::Exec { lang, cwd, file, session, timeout_ms, code }) => {
                 let code_str = if let Some(ref f) = file { normalize_code_input(fs::read_to_string(f)?) } else { normalize_code_input(code.join(" ")) };
                 if let Some(ref f) = file { let _ = fs::remove_file(f); }
                 if code_str.trim().is_empty() { eprintln!("No code provided"); exit_code = 1; return Ok(()); }
