@@ -66,9 +66,11 @@ fn start_exec_spool() {
     let started = gm.join("exec-spool.started");
     if started.exists() { return; }
     let _ = fs::create_dir_all(&gm);
+    let spool_dir = gm.join("exec-spool");
     let rs_exec = super::rs_exec_bin();
     let mut cmd = super::no_window_cmd(rs_exec);
     cmd.arg("spool");
+    cmd.env("RS_EXEC_SPOOL_DIR", &spool_dir);
     if let Ok(child) = cmd.spawn() {
         let _ = fs::write(started, child.id().to_string());
     }
@@ -221,7 +223,7 @@ fn ensure_gitignore(project_dir: Option<&str>) {
 
     const START: &str = "# >>> gm managed (do not edit between markers)";
     const END:   &str = "# <<< gm managed";
-    let block = format!(
+let block = format!(
         "{START}\n\
          .gm-stop-verified\n\
          .gm/prd-state.json\n\
@@ -237,6 +239,9 @@ fn ensure_gitignore(project_dir: Option<&str>) {
          .gm/prd.paused.yml\n\
          .gm/rs-learn.db-shm\n\
          .gm/rs-learn.db-wal\n\
+         .gm/exec-spool.in\n\
+         .gm/exec-spool.out\n\
+         .gm/exec-spool.started\n\
          # tracked: .gm/rs-learn.db, .gm/code-search/, AGENTS.md, .gm/prd.yml\n\
          {END}\n"
     );
