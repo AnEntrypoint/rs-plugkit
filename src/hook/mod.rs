@@ -19,7 +19,7 @@ pub use post_compact::run as post_compact;
 pub use stop::run_stop;
 pub use stop::run_stop_git;
 
-use std::{env, path::PathBuf, process::Command};
+use std::{env, fs, path::PathBuf, process::Command};
 
 #[cfg(target_os = "windows")]
 pub fn no_window_cmd(program: impl AsRef<std::ffi::OsStr>) -> Command {
@@ -119,6 +119,43 @@ pub fn runtime_instruction() -> String {
         "Resolve unknowns with witnessed probes, recall, the PRD, or the exec spool. Treat the `exec:` preamble as authoritative; host auto-detection is fallback only. {shell}",
         shell = shell_guidance()
     )
+}
+
+pub fn running_tasks_summary(session_id: &str) -> String {
+    if session_id.trim().is_empty() {
+        return String::new();
+    }
+    let port_file = std::env::temp_dir().join("glootie-runner.port");
+    let port: u16 = match fs::read_to_string(&port_file).ok().and_then(|s| s.trim().parse().ok()) {
+        Some(p) => p,
+        None => return String::new(),
+    };
+    let result = rs_exec::rpc_client::rpc_call_sync(
+        port,
+        "listSessionTasks",
+        serde_json::json!({ "sessionId": session_id }),
+        2000,
+    );
+    let Ok(v) = result else { return String::new() };
+    let tasks = v["tasks"].as_array().cloned().unwrap_or_default();
+    if tasks.is_empty() {
+        return String::new();
+    }
+    let mut lines = Vec::new();
+    for task in tasks {
+        let status = task["status"].as_str().unwrap_or("unknown");
+        if status != "running" && status != "pending" {
+            continue;
+        }
+        let id = task["id"].as_u64().unwrap_or(0);
+        let cmd = task["cmd"].as_str().unwrap_or("");
+        lines.push(format!("- task {} [{}] {}", id, status, cmd));
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("=== running tasks ===\n{}", lines.join("\n"))
+    }
 }
 
 #[allow(dead_code)]

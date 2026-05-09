@@ -115,13 +115,16 @@ pub fn run() {
         let prd_path = std::path::Path::new(&dir_for_prd).join(".gm").join("prd.yml");
         let workspace_context = context_parts.join("\n\n");
 
+        let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
+        let running_tasks = super::running_tasks_summary(&session_id);
         let system_message = format!(
-            "User prompt: {}\n\n{}\n\nWorkspace: {}\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}",
+            "User prompt: {}\n\n{}\n\nWorkspace: {}\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}\n{}\n",
             prompt_for_subagent,
             if workspace_context.is_empty() { String::new() } else { format!("Initial context:\n{}", workspace_context) },
             dir_for_prd,
             prd_path.display(),
-            super::runtime_instruction()
+            super::runtime_instruction(),
+            if running_tasks.is_empty() { String::new() } else { format!("\n{}\n", running_tasks) }
         );
 
         let sess = env::var("CLAUDE_SESSION_ID").unwrap_or_default();

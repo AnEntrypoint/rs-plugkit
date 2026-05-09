@@ -40,12 +40,15 @@ pub fn run() {
 
         let prd_path = std::path::Path::new(dir).join(".gm").join("prd.yml");
         let workspace_context = context_parts.join("\n\n");
+        let session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_default();
+        let running_tasks = super::running_tasks_summary(&session_id);
         let system_message = format!(
-            "Session start for workspace: {}\n\n{}\n\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}\nWrite raw exec code into .gm/exec-spool/in/<task>.json when you need JIT execution. The spool watcher executes that file, writes output to .gm/exec-spool/out/<task>.json and the task log, then deletes the request file. Do not wrap code in shell transcripts.",
+            "Session start for workspace: {}\n\n{}\n\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}\nWrite raw exec code into .gm/exec-spool/in/<task>.json when you need JIT execution. The spool watcher executes that file, writes output to .gm/exec-spool/out/<task>.json and the task log, then deletes the request file. Do not wrap code in shell transcripts.{}\n",
             dir,
             if workspace_context.is_empty() { "No prior context loaded.".to_string() } else { workspace_context },
             prd_path.display(),
             super::runtime_instruction(),
+            if running_tasks.is_empty() { String::new() } else { format!("\n{}\n", running_tasks) },
         );
 
         println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": system_message })).unwrap_or_default());
