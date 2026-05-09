@@ -308,39 +308,22 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
 
     // Allow piping raw code to plugkit/rs-exec for JIT execution.
     // This enables: cat <<EOF | plugkit (raw lines without encapsulation)
+    // Only plugkit and git are allowed via bash without exec: syntax.
     let pipes_to_plugkit = command.contains("| plugkit") || command.contains("| plugkit.exe")
         || command.contains("| rs-exec") || command.contains("| rs-exec.exe");
     if pipes_to_plugkit {
         return allow(None);
     }
 
-    // On Windows, commands with heredocs, pipes, redirections, or shell operators need bash -lc wrapper
-    // since cmd.exe doesn't support these bash features
-    if cfg!(windows) && (command.contains("<<") || command.contains(" | ") || command.contains(" > ") || command.contains(" < ")
-        || command.contains(" && ") || command.contains(" || ") || command.contains(" ; ")) {
-        let escaped = command.replace('\'', "'\\''");
-        return serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "updatedInput": { "command": format!("bash -lc '{}'", escaped) }
-            }
-        });
-    }
-
-    // Allow simple shell commands: heredocs, pipes, basic utilities
-    // These don't need exec: prefix - they're just shell operations
-    if is_simple_shell_command(&command) {
-        // On Windows, heredocs require bash (Git Bash/WSL), not cmd.exe
-        // For cmd.exe, use (echo ... && echo ...) | command pattern
+    // Allow piping to git (e.g., `cat <<EOF | git commit -m "msg"`)
+    let pipes_to_git = command.contains("| git ") || command.contains("| \"git ") || command.contains("| git.exe ");
+    if pipes_to_git {
         return allow(None);
     }
 
     if !command.starts_with("exec")
         && !command.starts_with("browser:")
-        && !command.starts_with("git ")
-        && !command.starts_with("gh ")
-        && !command.starts_with("rtk ")
+        && !is_git_or_gh(&command)
         && !command.contains("claude")
     {
         let bash_deny = load_prompt("bash-deny").unwrap_or_else(|| BASH_DENY_MSG.to_string());
@@ -466,55 +449,20 @@ fn normalize_windows_paths(code: &str) -> String {
     out
 }
 
-fn is_simple_shell_command(cmd: &str) -> bool {
-    // Allows heredocs, pipes, redirections, and basic shell utilities
-    // Works on Windows (PowerShell/git-bash), macOS, WSL, Linux
-    // Returns true if this is a "just shell" command that doesn't need exec: prefix
-
+fn is_git_or_gh(cmd: &str) -> bool {
     let first_word = cmd.split_whitespace().next().unwrap_or("");
 
-    // Git and gh are already handled elsewhere, but check here too
-    if first_word == "git" || first_word == "gh" {
+    // Direct commands: git, gh, git.exe, gh.exe
+    if first_word == "git" || first_word == "gh" || first_word == "git.exe" || first_word == "gh.exe" {
         return true;
     }
 
-    // Heredoc patterns: cat <<EOF, <<'EOF', etc.
-    if cmd.contains("<<") {
-        return true;
-    }
-
-    // Pipe chains: anything with | is shell plumbing
-    if cmd.contains(" | ") || cmd.contains("||") {
-        return true;
-    }
-
-    // Redirections
-    if cmd.contains(" > ") || cmd.contains(" < ") || cmd.contains(" >> ") || cmd.contains("2>") {
-        return true;
-    }
-
-    // Common shell utilities that are "just shell"
-    const SIMPLE_SHELL_UTILS: &[&str] = &[
-        "cat", "echo", "sort", "uniq", "head", "tail", "wc", "cut", "sed", "awk",
-        "tr", "grep", "rg", "find", "ls", "pwd", "cd", "mkdir", "rm", "cp", "mv",
-        "tar", "curl", "wget", "jq", "tee", "xargs", "diff", "patch", "date",
-        "which", "where", "whoami", "hostname", "uname", "env", "printenv",
-    ];
-
-    if SIMPLE_SHELL_UTILS.contains(&first_word) {
-        return true;
-    }
-
-    // Variable assignments and shell expansions
-    if first_word.ends_with("=") || first_word == "export" || first_word == "unset" {
-        return true;
-    }
-
-    // Windows/cmd compatibility: basic cmd.exe commands
-    const CMD_UTILS: &[&str] = &[
-        "dir", "type", "copy", "move", "del", "ren", "md", "rd", "echo.", "set", "path",
-    ];
-    if CMD_UTILS.contains(&first_word) {
+    // Windows Git for Windows full paths (Git Bash shims, usr/bin, cmd directories)
+    // Note: cmd may be quoted, so check full command for git path patterns
+    let lower_cmd = cmd.to_lowercase();
+    if lower_cmd.contains(r"\git\cmd\git.exe") || lower_cmd.contains(r"\git\usr\bin\git.exe")
+        || lower_cmd.contains(r"\git\cmd\gh.exe") || lower_cmd.contains(r"\git\usr\bin\gh.exe")
+    {
         return true;
     }
 
@@ -852,6 +800,15 @@ fn session_log_drain(session_id: &str) -> String {
 }
 
 fn delegate_with_drain(cmd: &str, session_id: &str) -> Value {
+    if super::is_codex() {
+        return serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "additionalContext": "Codex does not accept rewritten tool input here. Run the requested command directly."
+            }
+        });
+    }
     if cfg!(windows) {
         // Windows Bash tool commands are executed via PowerShell in this stack.
         // Avoid shell chaining forms like `printf ... && ...` that are not portable.
@@ -873,6 +830,15 @@ fn delegate_with_drain(cmd: &str, session_id: &str) -> Value {
 }
 
 fn delegate_to_bash(cmd: &str) -> Value {
+    if super::is_codex() {
+        return serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "additionalContext": "Codex does not accept rewritten tool input here. Run the requested command directly."
+            }
+        });
+    }
     serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

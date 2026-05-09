@@ -128,11 +128,12 @@ pub fn run() {
         );
 
         let system_message = format!(
-            "User prompt: {}\n\n{}\n\nWorkspace: {}\nPRD path: {}\n\nInvoke Skill(gm:gm) first. Resolve unknowns with witnessed probes, recall, or the PRD. Never ask the user when the PRD is present.",
+            "User prompt: {}\n\n{}\n\nWorkspace: {}\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}",
             prompt_for_subagent,
             if workspace_context.is_empty() { String::new() } else { format!("Initial context:\n{}", workspace_context) },
             dir_for_prd,
-            prd_path.display()
+            prd_path.display(),
+            super::runtime_instruction()
         );
 
         let sess = env::var("CLAUDE_SESSION_ID").unwrap_or_default();

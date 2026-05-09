@@ -89,6 +89,25 @@ pub fn is_kilo() -> bool {
     env::var("KILO_PROJECT_DIR").is_ok()
 }
 
+pub fn is_codex() -> bool {
+    env::var("CODEX_PROJECT_DIR").is_ok()
+}
+
+pub fn shell_guidance() -> String {
+    if cfg!(windows) {
+        "Use the host's native Windows shell syntax. Prefer one command per line. In PowerShell, use `;` for sequencing and avoid `&&`; in cmd.exe, `&&` is valid. Do not paste `exec:*` markers into the terminal.".to_string()
+    } else {
+        "Use the host's native POSIX shell syntax. Prefer one command per line and `&&` only when the next step should depend on success. Do not paste `exec:*` markers into the terminal.".to_string()
+    }
+}
+
+pub fn runtime_instruction() -> String {
+    format!(
+        "Resolve unknowns with witnessed probes, recall, or the PRD. {shell}",
+        shell = shell_guidance()
+    )
+}
+
 #[allow(dead_code)]
 pub fn allow_with_noop(context: &str) -> serde_json::Value {
     use std::{fs, time::{SystemTime, UNIX_EPOCH}};
@@ -98,10 +117,20 @@ pub fn allow_with_noop(context: &str) -> serde_json::Value {
     let tmp_str = tmp.to_string_lossy();
     let tmp_unix = to_unix_path(&tmp_str);
     let cmd = format!("cat '{}' && rm -f '{}'", tmp_unix, tmp_unix);
+    if is_codex() {
+        return serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "additionalContext": context,
+            }
+        });
+    }
     serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
+            "additionalContext": context,
             "updatedInput": { "command": cmd }
         }
     })
