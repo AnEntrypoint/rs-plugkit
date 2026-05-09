@@ -116,7 +116,7 @@ pub fn shell_guidance() -> String {
 
 pub fn runtime_instruction() -> String {
     format!(
-        "Resolve unknowns with witnessed probes, recall, the PRD, or the exec spool. {shell}",
+        "Resolve unknowns with witnessed probes, recall, the PRD, or the exec spool. Treat the `exec:` preamble as authoritative; host auto-detection is fallback only. {shell}",
         shell = shell_guidance()
     )
 }
