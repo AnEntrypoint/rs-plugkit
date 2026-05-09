@@ -805,7 +805,7 @@ fn delegate_with_drain(cmd: &str, session_id: &str) -> Value {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
-                "additionalContext": "Codex does not accept rewritten tool input here. Run the requested command directly."
+                "additionalContext": "Codex does not accept rewritten tool input here. Write raw code to .gm/exec-spool/in/<task>.json and let the spool watcher execute it."
             }
         });
     }
@@ -835,7 +835,7 @@ fn delegate_to_bash(cmd: &str) -> Value {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
-                "additionalContext": "Codex does not accept rewritten tool input here. Run the requested command directly."
+                "additionalContext": "Codex does not accept rewritten tool input here. Write raw code to .gm/exec-spool/in/<task>.json and let the spool watcher execute it."
             }
         });
     }

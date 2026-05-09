@@ -1,10 +1,6 @@
-use super::{is_kilo, is_opencode, load_prompt, project_dir, run_self};
+use super::{is_kilo, is_opencode, project_dir, run_self};
 use serde_json::json;
 use std::{env, io::Read};
-
-fn sanitize_bash_patterns(s: &str) -> String {
-    s.replace("${", "$\\{")
-}
 
 pub fn run() {
     let mut stdin = String::new();
@@ -118,14 +114,6 @@ pub fn run() {
 
         let prd_path = std::path::Path::new(&dir_for_prd).join(".gm").join("prd.yml");
         let workspace_context = context_parts.join("\n\n");
-
-        let subagent_prompt = format!(
-            "User prompt: {}\n\n{}\n\nWorkspace: {}\nPRD path: {}",
-            prompt_for_subagent,
-            if workspace_context.is_empty() { String::new() } else { format!("Initial context:\n{}", workspace_context) },
-            dir_for_prd,
-            prd_path.display()
-        );
 
         let system_message = format!(
             "User prompt: {}\n\n{}\n\nWorkspace: {}\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}",

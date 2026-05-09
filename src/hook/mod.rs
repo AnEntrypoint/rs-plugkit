@@ -89,6 +89,19 @@ pub fn is_kilo() -> bool {
     env::var("KILO_PROJECT_DIR").is_ok()
 }
 
+pub fn rs_exec_bin() -> PathBuf {
+    if let Ok(plugin_root) = env::var("CLAUDE_PLUGIN_ROOT") {
+        let p = if cfg!(windows) {
+            PathBuf::from(&plugin_root).join("bin").join("rs-exec.exe")
+        } else {
+            PathBuf::from(&plugin_root).join("bin").join("rs-exec")
+        };
+        if p.exists() { return p; }
+    }
+    let dir = tools_dir();
+    if cfg!(windows) { dir.join("rs-exec.exe") } else { dir.join("rs-exec") }
+}
+
 pub fn is_codex() -> bool {
     env::var("CODEX_PROJECT_DIR").is_ok()
 }
@@ -103,7 +116,7 @@ pub fn shell_guidance() -> String {
 
 pub fn runtime_instruction() -> String {
     format!(
-        "Resolve unknowns with witnessed probes, recall, or the PRD. {shell}",
+        "Resolve unknowns with witnessed probes, recall, the PRD, or the exec spool. {shell}",
         shell = shell_guidance()
     )
 }

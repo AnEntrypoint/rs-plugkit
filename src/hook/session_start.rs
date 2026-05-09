@@ -1,4 +1,4 @@
-use super::{is_gemini, is_kilo, is_opencode, load_prompt, project_dir, run_self};
+use super::{project_dir, run_self};
 use serde_json::json;
 use std::fs;
 
@@ -7,6 +7,7 @@ pub fn run() {
     ensure_gitignore(project.as_deref());
     ensure_claude_md_pointer(project.as_deref());
     ensure_tools_current();
+    start_exec_spool();
     write_needs_gm_if_gm_project(project.as_deref());
 
     if let Some(ref dir) = project {
@@ -40,7 +41,7 @@ pub fn run() {
         let prd_path = std::path::Path::new(dir).join(".gm").join("prd.yml");
         let workspace_context = context_parts.join("\n\n");
         let system_message = format!(
-            "Session start for workspace: {}\n\n{}\n\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}",
+            "Session start for workspace: {}\n\n{}\n\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}\nWrite raw exec code into .gm/exec-spool/in/<task>.json when you need JIT execution. The spool watcher executes that file, writes output to .gm/exec-spool/out/<task>.json and the task log, then deletes the request file. Do not wrap code in shell transcripts.",
             dir,
             if workspace_context.is_empty() { "No prior context loaded.".to_string() } else { workspace_context },
             prd_path.display(),
@@ -50,6 +51,23 @@ pub fn run() {
         println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": system_message })).unwrap_or_default());
     } else {
         println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": "" })).unwrap_or_default());
+    }
+}
+
+fn start_exec_spool() {
+    let project = match project_dir() {
+        Some(p) if !p.is_empty() => p,
+        _ => return,
+    };
+    let gm = std::path::Path::new(&project).join(".gm");
+    let started = gm.join("exec-spool.started");
+    if started.exists() { return; }
+    let _ = fs::create_dir_all(&gm);
+    let rs_exec = super::rs_exec_bin();
+    let mut cmd = super::no_window_cmd(rs_exec);
+    cmd.arg("spool");
+    if let Ok(child) = cmd.spawn() {
+        let _ = fs::write(started, child.id().to_string());
     }
 }
 
