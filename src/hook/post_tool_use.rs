@@ -75,10 +75,18 @@ fn handle_write(tool_input: &Value) -> Option<(String, bool)> {
 
         if std::time::Instant::now() >= deadline {
             let partial = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log_disp = log_path.display();
+            let out_disp = out_path.display();
             let msg = if partial.is_empty() {
-                format!("[exec task={}] still running (30s window elapsed, no output yet). Is the spool watcher running?", task_id)
+                format!(
+                    "[exec task={tid}] still running after 30s window (no output yet). Continue with: `exec:wait\\n<seconds>` to block on a timer, `exec:sleep\\n{tid}` to block until this task emits more output, `exec:status\\n{tid}` to poll, or `exec:close\\n{tid}` to terminate. Streaming log: {log}. Final result will land at: {out}. If the watcher is not running, no output will ever arrive — start it via `exec:runner\\nstart`.",
+                    tid = task_id, log = log_disp, out = out_disp
+                )
             } else {
-                format!("[exec task={} partial output — still running]\n{}", task_id, partial)
+                format!(
+                    "[exec task={tid} partial output after 30s — still running]\n{partial}\n--- end partial ---\nTask is NOT finished. Continue with: `exec:sleep\\n{tid}` (block until next output chunk), `exec:wait\\n<seconds>` (pure timer), `exec:status\\n{tid}` (poll), or `exec:close\\n{tid}` (terminate). Streaming log keeps growing at: {log}. Final result will land at: {out} — read that file once it exists for the complete output.",
+                    tid = task_id, partial = partial, log = log_disp, out = out_disp
+                )
             };
             return Some((msg, !partial.is_empty() && partial.len() > MIN_OUTPUT_LEN));
         }
