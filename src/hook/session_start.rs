@@ -78,8 +78,8 @@ fn start_exec_spool() {
     let _ = fs::remove_file(gm.join("exec-spool.started"));
     let _ = fs::remove_file(&pid_file);
 
-    let rs_exec = super::rs_exec_bin();
-    let mut cmd = super::no_window_cmd(rs_exec);
+    let plugkit = super::plugkit_bin();
+    let mut cmd = super::no_window_cmd(plugkit);
     cmd.arg("spool");
     cmd.env("RS_EXEC_SPOOL_DIR", &spool_dir);
     if let Ok(child) = cmd.spawn() {

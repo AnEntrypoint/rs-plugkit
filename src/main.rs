@@ -64,6 +64,10 @@ enum Cmd {
     SessionCleanup {
         #[arg(long)] session: String,
     },
+    /// Run the file-spool watcher daemon (reads .gm/exec-spool/in/, writes out/).
+    Spool {
+        #[arg(long)] once: bool,
+    },
     /// Wait for a background task to produce new output (or finish). Polls listTasks.
     Sleep {
         task_id: String,
@@ -912,6 +916,9 @@ async fn main() {
                 } else {
                     hook::agent_browser::close_sessions_for(&session);
                 }
+            }
+            Some(Cmd::Spool { once }) => {
+                if once { rs_exec::spool::watch_once(); } else { rs_exec::spool::run_daemon(); }
             }
             Some(Cmd::Hook { event }) => {
                 let ev = event.as_str();
