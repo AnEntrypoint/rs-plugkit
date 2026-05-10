@@ -141,15 +141,23 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
         return Some(deny("HARD CONSTRAINT: invoke gm before any other tool. Either Skill(skill=\"gm:gm\") OR Agent(subagent_type=\"gm:gm\") satisfies the gate. Subagent form is preferred — it isolates the orchestration loop in its own context. Must be the first action after every user message."));
     }
 
+    let is_no_memo_write = matches!(tool_name, "Write" | "write_file") && {
+        let fp = tool_input["file_path"].as_str().unwrap_or("").replace('\\', "/");
+        fp.ends_with(".gm/no-memorize-this-turn")
+    };
+    let is_mutables_or_prd_write = matches!(tool_name, "Write" | "Edit" | "NotebookEdit" | "write_file") && {
+        let fp = tool_input["file_path"].as_str().unwrap_or("").replace('\\', "/");
+        fp.ends_with(".gm/mutables.yml") || fp.ends_with(".gm/prd.yml")
+    };
     let no_memo = gm_dir.join("no-memorize-this-turn");
-    if !no_memo.exists() {
+    if !no_memo.exists() && !is_no_memo_write && !is_mutables_or_prd_write {
         let ts_path = gm_dir.join("turn-state.json");
         if let Some(counter) = read_counter(&ts_path) {
-            if counter >= 3 {
+            if counter >= 10 {
                 let is_mem_agent = tool_name == "Agent"
                     && tool_input.to_string().to_lowercase().contains("memorize");
                 if !is_mem_agent {
-                    return Some(deny("3+ exec results have resolved unknowns without a memorize call. HARD BLOCK until you spawn at least one Agent(subagent_type='gm:memorize', model='haiku', run_in_background=true, prompt='## CONTEXT TO MEMORIZE\\n<fact>') OR write file .gm/no-memorize-this-turn (containing reason) to declare nothing memorable. Saying \"I will memorize\" is NOT a memorize call \u{2014} only the Agent tool counts."));
+                    return Some(deny("10+ exec results have resolved unknowns without a memorize call. HARD BLOCK until you spawn at least one Agent(subagent_type='gm:memorize', model='haiku', run_in_background=true, prompt='## CONTEXT TO MEMORIZE\\n<fact>') OR write file .gm/no-memorize-this-turn (containing reason) to declare nothing memorable. Saying \"I will memorize\" is NOT a memorize call \u{2014} only the Agent tool counts."));
                 }
             }
         }
@@ -939,4 +947,4 @@ mod smoke_page_tests {
 }
 
 
-const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — write a file to the spool, NOT via Bash:\n     .gm/exec-spool/in/<lang>/<N>.<ext>     (e.g. in/nodejs/42.js, in/python/43.py, in/bash/44.sh)\n   Spool watcher executes and writes out/<N>.json; result returns as systemMessage.\n   Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno, cmd.\n   Lang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface.\n\n2. Browser automation — exec:browser:\n   exec:browser\n   await page.goto('https://example.com')\n\n3. Utility commands — exec:<cmd> with arg on next line:\n   exec:codesearch / exec:recall / exec:memorize / exec:forget\n   exec:runner / exec:type / exec:kill-port\n   exec:wait / exec:sleep / exec:pause / exec:status / exec:close\n   exec:feedback / exec:learn-status / exec:learn-debug / exec:learn-build\n   exec:discipline / exec:browser\n\n4. Git commands — git <args> directly:\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.";
+const BASH_DENY_MSG: &str = "The Bash tool accepts ONLY git commands directly (no exec: prefix): `git status`, `git commit -m \"msg\"`, `git push`, etc.\n\nEverything else — code execution AND utility verbs — goes through the file-spool. Write a file at:\n\n  .gm/exec-spool/in/<lang-or-verb>/<N>.<ext>\n\nExamples:\n  in/nodejs/42.js              in/python/43.py            in/bash/44.sh\n  in/codesearch/45.txt         in/recall/46.txt           in/memorize/47.md\n  in/wait/48.txt               in/browser/49.js           in/runner/50.txt\n\nLanguages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno\nVerbs: codesearch, recall, memorize, wait, sleep, status, close, browser, runner, type, kill-port, forget, feedback, learn-status, learn-debug, learn-build, discipline, pause\n\nThe spool watcher executes the request and writes out/<N>.json; result returns as systemMessage on next tool use.\n\nAnything else via Bash is blocked.";

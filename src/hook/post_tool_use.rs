@@ -5,7 +5,7 @@ use std::time::Duration;
 
 const EXEC_TOOL: &str = "Bash";
 const MIN_OUTPUT_LEN: usize = 20;
-const HARD_BLOCK_AT: u64 = 3;
+const HARD_BLOCK_AT: u64 = 10;
 const SPOOL_POLL_INTERVAL_MS: u64 = 100;
 const SPOOL_STREAM_WINDOW_MS: u64 = 30_000;
 
@@ -17,6 +17,10 @@ const UTILITY_VERBS: &[&str] = &[
 
 fn handle_write(tool_input: &Value) -> Option<(String, bool)> {
     let file_path = tool_input["file_path"].as_str()?;
+    let fp_norm = file_path.replace('\\', "/");
+    if fp_norm.ends_with(".gm/mutables.yml") || fp_norm.ends_with(".gm/prd.yml") || fp_norm.ends_with(".gm/no-memorize-this-turn") {
+        return None;
+    }
     let path = Path::new(file_path);
 
     // Locate "exec-spool/in" window anywhere in path components.
@@ -173,7 +177,7 @@ pub fn run() {
             "hard_block_at": HARD_BLOCK_AT
         }));
         let msg = format!(
-            "exec: run completed. MEMORIZE CHECK: did this output resolve any prior unknown? If YES → spawn Agent(subagent_type='gm:memorize', model='haiku', run_in_background=true, prompt='## CONTEXT TO MEMORIZE\\n<fact>') NOW. Skipping = memory leak. (Counter: {}/3 before hard block.)",
+            "exec: run completed. MEMORIZE CHECK: did this output resolve any prior unknown? If YES → spawn Agent(subagent_type='gm:memorize', model='haiku', run_in_background=true, prompt='## CONTEXT TO MEMORIZE\\n<fact>') NOW. Skipping = memory leak. (Counter: {}/10 before hard block.)",
             state.exec_calls_since_memorize
         );
         println!("{}", serde_json::json!({ "systemMessage": msg }));
