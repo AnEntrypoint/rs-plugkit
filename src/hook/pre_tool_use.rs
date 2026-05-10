@@ -141,13 +141,13 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
         return Some(deny("HARD CONSTRAINT: invoke gm before any other tool. Either Skill(skill=\"gm:gm\") OR Agent(subagent_type=\"gm:gm\") satisfies the gate. Subagent form is preferred — it isolates the orchestration loop in its own context. Must be the first action after every user message."));
     }
 
-    let is_no_memo_write = matches!(tool_name, "Write" | "write_file") && {
+    let is_no_memo_write = matches!(tool_name, "Write" | "Edit" | "NotebookEdit" | "write_file") && {
         let fp = tool_input["file_path"].as_str().unwrap_or("").replace('\\', "/");
         fp.ends_with(".gm/no-memorize-this-turn")
     };
     let is_mutables_or_prd_write = matches!(tool_name, "Write" | "Edit" | "NotebookEdit" | "write_file") && {
         let fp = tool_input["file_path"].as_str().unwrap_or("").replace('\\', "/");
-        fp.ends_with(".gm/mutables.yml") || fp.ends_with(".gm/prd.yml")
+        fp.ends_with(".gm/mutables.yml") || fp.ends_with(".gm/prd.yml") || fp.ends_with(".gm/no-memorize-this-turn")
     };
     let no_memo = gm_dir.join("no-memorize-this-turn");
     if !no_memo.exists() && !is_no_memo_write && !is_mutables_or_prd_write {
