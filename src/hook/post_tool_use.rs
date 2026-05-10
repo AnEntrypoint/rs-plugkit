@@ -47,52 +47,87 @@ fn handle_write(tool_input: &Value) -> Option<(String, bool)> {
     };
 
     let task_id: u64 = stem.parse().ok()?;
-    let out_path = spool_dir.join("out").join(format!("{}.json", task_id));
-
-    let log_path = spool_dir.join("log").join(format!("{}.log", task_id));
+    let meta_path = spool_dir.join("out").join(format!("{}.json", task_id));
+    let out_stream = spool_dir.join("out").join(format!("{}.out", task_id));
+    let err_stream = spool_dir.join("out").join(format!("{}.err", task_id));
 
     rs_exec::obs::event("hook", "post-tool-use.spool-write", serde_json::json!({
         "task_id": task_id,
-        "out_path": out_path.display().to_string(),
-        "log_path": log_path.display().to_string(),
+        "meta_path": meta_path.display().to_string(),
+        "out_stream": out_stream.display().to_string(),
+        "err_stream": err_stream.display().to_string(),
     }));
 
     let deadline = std::time::Instant::now() + Duration::from_millis(SPOOL_STREAM_WINDOW_MS);
 
     loop {
-        if out_path.exists() {
-            let raw = std::fs::read_to_string(&out_path).ok()?;
+        if meta_path.exists() {
+            let raw = std::fs::read_to_string(&meta_path).ok()?;
             let result: Value = serde_json::from_str(&raw).ok()?;
             let ok = result["ok"].as_bool().unwrap_or(false);
             let lang = result["lang"].as_str().unwrap_or("unknown");
             let exit_code = result["exitCode"].as_i64().unwrap_or(-1);
-            let output = result["output"].as_str()
-                .or_else(|| result["error"].as_str())
-                .unwrap_or("");
-            let msg = if ok {
-                format!("[exec task={} lang={} exitCode={}]\n{}", task_id, lang, exit_code, output)
+            let duration_ms = result["durationMs"].as_u64().unwrap_or(0);
+            let timed_out = result["timedOut"].as_bool().unwrap_or(false);
+            let err_field = result["error"].as_str().unwrap_or("");
+            let out_text = std::fs::read_to_string(&out_stream).unwrap_or_default();
+            let err_text = std::fs::read_to_string(&err_stream).unwrap_or_default();
+            let header = if timed_out {
+                format!("[exec task={} lang={} TIMED OUT after {}ms]", task_id, lang, duration_ms)
+            } else if ok {
+                format!("[exec task={} lang={} exitCode={} durationMs={}]", task_id, lang, exit_code, duration_ms)
             } else {
-                format!("[exec task={} lang={} exitCode={}] ERROR\n{}", task_id, lang, exit_code, output)
+                format!("[exec task={} lang={} exitCode={} durationMs={}] ERROR", task_id, lang, exit_code, duration_ms)
             };
-            return Some((msg, ok && output.len() > MIN_OUTPUT_LEN));
+            let mut body = String::new();
+            if !out_text.is_empty() {
+                body.push_str("\n--- stdout ---\n");
+                body.push_str(&out_text);
+            }
+            if !err_text.is_empty() {
+                if !body.ends_with('\n') { body.push('\n'); }
+                body.push_str("--- stderr ---\n");
+                body.push_str(&err_text);
+            }
+            if !err_field.is_empty() {
+                if !body.ends_with('\n') { body.push('\n'); }
+                body.push_str("--- error ---\n");
+                body.push_str(err_field);
+            }
+            let total_len = out_text.len() + err_text.len();
+            let msg = format!("{}{}", header, body);
+            return Some((msg, ok && total_len > MIN_OUTPUT_LEN));
         }
 
         if std::time::Instant::now() >= deadline {
-            let partial = std::fs::read_to_string(&log_path).unwrap_or_default();
-            let log_disp = log_path.display();
-            let out_disp = out_path.display();
-            let msg = if partial.is_empty() {
+            let out_text = std::fs::read_to_string(&out_stream).unwrap_or_default();
+            let err_text = std::fs::read_to_string(&err_stream).unwrap_or_default();
+            let out_disp = out_stream.display();
+            let err_disp = err_stream.display();
+            let meta_disp = meta_path.display();
+            let total_len = out_text.len() + err_text.len();
+            let msg = if total_len == 0 {
                 format!(
-                    "[exec task={tid}] still running after 30s window (no output yet). Continue with: `exec:wait\\n<seconds>` to block on a timer, `exec:sleep\\n{tid}` to block until this task emits more output, `exec:status\\n{tid}` to poll, or `exec:close\\n{tid}` to terminate. Streaming log: {log}. Final result will land at: {out}. If the watcher is not running, no output will ever arrive — start it via `exec:runner\\nstart`.",
-                    tid = task_id, log = log_disp, out = out_disp
+                    "[exec task={tid}] still running after 30s window (no output yet). Continue with: `exec:wait\\n<seconds>` (pure timer), `exec:sleep\\n{tid}` (block until next output), `exec:status\\n{tid}` (poll), `exec:close\\n{tid}` (terminate). Streams append at: {out}, {err}. Metadata lands at: {meta} once complete. If the watcher is not running, start it via `exec:runner\\nstart`.",
+                    tid = task_id, out = out_disp, err = err_disp, meta = meta_disp
                 )
             } else {
+                let mut body = String::new();
+                if !out_text.is_empty() {
+                    body.push_str("\n--- stdout ---\n");
+                    body.push_str(&out_text);
+                }
+                if !err_text.is_empty() {
+                    if !body.ends_with('\n') { body.push('\n'); }
+                    body.push_str("--- stderr ---\n");
+                    body.push_str(&err_text);
+                }
                 format!(
-                    "[exec task={tid} partial output after 30s — still running]\n{partial}\n--- end partial ---\nTask is NOT finished. Continue with: `exec:sleep\\n{tid}` (block until next output chunk), `exec:wait\\n<seconds>` (pure timer), `exec:status\\n{tid}` (poll), or `exec:close\\n{tid}` (terminate). Streaming log keeps growing at: {log}. Final result will land at: {out} — read that file once it exists for the complete output.",
-                    tid = task_id, partial = partial, log = log_disp, out = out_disp
+                    "[exec task={tid} partial output after 30s — still running]{body}\n--- end partial ---\nTask is NOT finished. Continue with: `exec:sleep\\n{tid}` (block until next output chunk), `exec:wait\\n<seconds>` (pure timer), `exec:status\\n{tid}` (poll), or `exec:close\\n{tid}` (terminate). Streams keep growing at: {out}, {err}. Metadata will land at: {meta} once complete.",
+                    tid = task_id, body = body, out = out_disp, err = err_disp, meta = meta_disp
                 )
             };
-            return Some((msg, !partial.is_empty() && partial.len() > MIN_OUTPUT_LEN));
+            return Some((msg, total_len > MIN_OUTPUT_LEN));
         }
 
         std::thread::sleep(Duration::from_millis(SPOOL_POLL_INTERVAL_MS));

@@ -40,6 +40,10 @@ pub fn run() {
         let gm = std::path::Path::new(&dir).join(".gm");
         let _ = std::fs::write(gm.join("turn-state.json"), "{}");
         let _ = std::fs::remove_file(gm.join("no-memorize-this-turn"));
+        let spool_dir = gm.join("exec-spool");
+        let _ = std::fs::remove_dir_all(spool_dir.join("in"));
+        let _ = std::fs::remove_dir_all(spool_dir.join("out"));
+        let _ = std::fs::remove_dir_all(spool_dir.join("log"));
     }
 
     let bin = super::plugkit_bin();

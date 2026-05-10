@@ -66,12 +66,17 @@ fn start_exec_spool() {
     let _ = fs::create_dir_all(&gm);
     let spool_dir = gm.join("exec-spool");
     let _ = fs::create_dir_all(&spool_dir);
-    let _ = fs::create_dir_all(spool_dir.join("in"));
-    let _ = fs::create_dir_all(spool_dir.join("out"));
-    let _ = fs::create_dir_all(spool_dir.join("log"));
 
     let pid_file = spool_dir.join(".watcher.pid");
     let hb_file = spool_dir.join(".watcher.heartbeat");
+
+    if !watcher_alive(&pid_file, &hb_file) {
+        let _ = fs::remove_dir_all(spool_dir.join("in"));
+        let _ = fs::remove_dir_all(spool_dir.join("out"));
+        let _ = fs::remove_dir_all(spool_dir.join("log"));
+    }
+    let _ = fs::create_dir_all(spool_dir.join("in"));
+    let _ = fs::create_dir_all(spool_dir.join("out"));
 
     if watcher_alive(&pid_file, &hb_file) { return; }
 
