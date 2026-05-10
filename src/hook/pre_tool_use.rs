@@ -251,14 +251,18 @@ fn dispatch(tool_name: &str, tool_input: &Value, session_id: &str) -> Value {
         let base = std::path::Path::new(fp).file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
         let ext = std::path::Path::new(fp).extension().and_then(|e| e.to_str()).unwrap_or("");
         let in_skills = fp.contains("/skills/") || fp.contains("\\skills\\");
+        let fp_norm = fp.replace('\\', "/");
+        let in_spool_or_log = fp_norm.contains("/.gm/exec-spool/in/")
+            || fp_norm.contains("/.gm/exec-spool/out/")
+            || fp_norm.contains("/.gm/log/");
         let already_exists = !fp.is_empty() && std::path::Path::new(fp).exists();
-        if (ext == "txt" || base.starts_with("features_list")) && !in_skills && !already_exists {
+        if (ext == "txt" || base.starts_with("features_list")) && !in_skills && !in_spool_or_log && !already_exists {
             return deny("Cannot create new plain-text documentation files. For task-specific notes use .prd. For permanent reference add to CLAUDE.md or AGENTS.md.");
         }
-        if !in_skills && is_test_file(&base, fp) {
+        if !in_skills && !in_spool_or_log && is_test_file(&base, fp) {
             return deny("Test files forbidden on disk. Use Bash tool with real services for all testing.");
         }
-        if !in_skills && is_smoke_page(&base, fp) {
+        if !in_skills && !in_spool_or_log && is_smoke_page(&base, fp) {
             return deny("Smoke/test/demo pages forbidden. Per paper II §5.4 the in-page observability surface is `window.__debug` — modules register on mount, deregister on unmount. Creating dedicated smoke.js, smoke-*.js, test.html, demo.html, *-playground.html, sandbox.html is a parallel test runner that fights the discipline. Register the surface in `window.__debug.<moduleName>` and assert via the project-root `test.js` integration test.");
         }
     }
