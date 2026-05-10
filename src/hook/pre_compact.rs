@@ -44,6 +44,11 @@ fn run_search(project_dir: &str, query: &str) -> String {
 }
 
 pub fn run() {
+    rs_exec::obs::event("hook", "pre-compact.fired", serde_json::json!({
+        "hook_name": "pre_compact",
+        "pid": std::process::id(),
+        "action": "fired",
+    }));
     let mut stdin_buf = String::new();
     let _ = std::io::stdin().read_to_string(&mut stdin_buf);
     let stdin_data: serde_json::Value = serde_json::from_str(&stdin_buf).unwrap_or_default();

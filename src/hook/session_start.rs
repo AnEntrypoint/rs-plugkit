@@ -3,6 +3,11 @@ use serde_json::json;
 use std::fs;
 
 pub fn run() {
+    rs_exec::obs::event("hook", "session-start.fired", serde_json::json!({
+        "hook_name": "session_start",
+        "pid": std::process::id(),
+        "action": "fired",
+    }));
     let project = project_dir();
     ensure_gitignore(project.as_deref());
     ensure_claude_md_pointer(project.as_deref());
@@ -87,9 +92,49 @@ fn start_exec_spool() {
     let mut cmd = super::no_window_cmd(plugkit);
     cmd.arg("spool");
     cmd.env("RS_EXEC_SPOOL_DIR", &spool_dir);
-    if let Ok(child) = cmd.spawn() {
+    let spawn_result = cmd.spawn();
+    let (spawn_ok, spawn_error, watcher_pid) = match &spawn_result {
+        Ok(child) => (true, String::new(), Some(child.id())),
+        Err(e) => (false, e.to_string(), None),
+    };
+    if let Ok(child) = spawn_result {
         let _ = fs::write(&pid_file, child.id().to_string());
     }
+    let now_iso = iso_now();
+    let record = serde_json::json!({
+        "ts": now_iso,
+        "plugkit_version": env!("CARGO_PKG_VERSION"),
+        "watcher_pid_attempted": watcher_pid,
+        "spawn_ok": spawn_ok,
+        "spawn_error": spawn_error,
+    });
+    let _ = fs::write(spool_dir.join(".last-session-start.json"), serde_json::to_string_pretty(&record).unwrap_or_default());
+}
+
+fn iso_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let day = secs / 86_400;
+    let rem = secs % 86_400;
+    let (y, mo, d) = {
+        let z = day as i64 + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = (z - era * 146_097) as u64;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d_ = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+        let y = if m <= 2 { y + 1 } else { y };
+        (y as i32, m, d_)
+    };
+    let h = (rem / 3600) as u32;
+    let mi = ((rem % 3600) / 60) as u32;
+    let se = (rem % 60) as u32;
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, mi, se)
 }
 
 fn watcher_alive(pid_file: &std::path::Path, hb_file: &std::path::Path) -> bool {

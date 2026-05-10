@@ -28,6 +28,11 @@ fn stop_block(reason: String) -> serde_json::Value {
 }
 
 pub fn run_stop() {
+    rs_exec::obs::event("hook", "stop.fired", serde_json::json!({
+        "hook_name": "stop",
+        "pid": std::process::id(),
+        "action": "fired",
+    }));
     let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
     let open = if !session_id.is_empty() {
         super::agent_browser::get_open_session_ids(&session_id)

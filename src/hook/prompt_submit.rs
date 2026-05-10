@@ -15,6 +15,13 @@ pub fn run() {
         })
         .unwrap_or_default();
 
+    rs_exec::obs::event("hook", "prompt-submit.fired", serde_json::json!({
+        "hook_name": "prompt_submit",
+        "tool": serde_json::Value::Null,
+        "pid": std::process::id(),
+        "action": "fired",
+        "prompt_len": prompt.len(),
+    }));
     let project = project_dir();
     let mut autonomous = false;
     if let Some(ref dir) = project {

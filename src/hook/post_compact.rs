@@ -2,6 +2,11 @@ use serde_json::json;
 use std::path::Path;
 
 pub fn run() {
+    rs_exec::obs::event("hook", "post-compact.fired", serde_json::json!({
+        "hook_name": "post_compact",
+        "pid": std::process::id(),
+        "action": "fired",
+    }));
     let project = match std::env::var("CLAUDE_PROJECT_DIR") {
         Ok(p) if !p.is_empty() => p,
         _ => match std::env::current_dir() {

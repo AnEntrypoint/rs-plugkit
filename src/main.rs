@@ -87,6 +87,8 @@ enum Cmd {
     #[command(name = "kill-port")] KillPort { port: u16 },
     Deps,
     Doctor,
+    /// Print rich plugkit/watcher/runner/rs-learn/cache JSON for observability.
+    Health,
     /// Recall episodes from rs-learn (HTTP-preferred, bun fallback). Prints formatted text.
     Recall {
         query: Vec<String>,
@@ -446,6 +448,170 @@ fn today_ymd() -> String {
     let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
     let y = if m <= 2 { y + 1 } else { y };
     format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+fn cmd_health() {
+    let project_dir = env::var("CLAUDE_PROJECT_DIR")
+        .unwrap_or_else(|_| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
+    let gm_dir = PathBuf::from(&project_dir).join(".gm");
+    let spool_dir = gm_dir.join("exec-spool");
+
+    let plugkit_version = env!("CARGO_PKG_VERSION");
+    let binary_path = self_exe();
+    let pinned_version = {
+        let plugin_root = env::var("CLAUDE_PLUGIN_ROOT").unwrap_or_default();
+        let p = PathBuf::from(&plugin_root).join("bin").join("plugkit.version");
+        fs::read_to_string(&p).ok().map(|s| s.trim().to_string()).unwrap_or_default()
+    };
+    let pin_match = !pinned_version.is_empty() && pinned_version == plugkit_version;
+
+    let watcher_pid = fs::read_to_string(spool_dir.join(".watcher.pid")).ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    let watcher_alive = watcher_pid.map(|p| {
+        use sysinfo::{System, Pid, ProcessesToUpdate};
+        let mut sys = System::new();
+        sys.refresh_processes(ProcessesToUpdate::All, true);
+        sys.process(Pid::from(p as usize)).is_some()
+    }).unwrap_or(false);
+    let hb_age_ms = fs::metadata(spool_dir.join(".watcher.heartbeat")).ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|d| d.as_millis() as u64);
+    let status_json: serde_json::Value = fs::read_to_string(spool_dir.join(".status.json")).ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+
+    let runner_port = fs::read_to_string(port_file()).ok()
+        .and_then(|s| s.trim().parse::<u16>().ok());
+    let runner_alive = runner_port.is_some();
+
+    let recent_hook_fires = read_recent_log_lines("hook", 5);
+    let recent_errors = read_recent_log_lines_filter(5, "\"severity\":\"error\"");
+
+    let cache_dirs = serde_json::json!({
+        "spool_root": spool_dir.display().to_string(),
+        "gm_log_root": rs_exec::obs::root_dir().display().to_string(),
+    });
+    let spool_inbox = serde_json::json!({
+        "pending": count_pending(&spool_dir.join("in")),
+        "subdirs": list_subdirs(&spool_dir.join("in")),
+    });
+    let spool_outbox = serde_json::json!({
+        "recent": recent_outbox(&spool_dir.join("out"), 5),
+    });
+
+    let last_session_start: serde_json::Value = fs::read_to_string(spool_dir.join(".last-session-start.json")).ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let bootstrap_error: serde_json::Value = fs::read_to_string(spool_dir.join(".bootstrap-error.json")).ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+
+    let out = serde_json::json!({
+        "plugkit": {
+            "version": plugkit_version,
+            "binary_path": binary_path,
+            "pinned_version": pinned_version,
+            "pin_match": pin_match,
+        },
+        "watcher": {
+            "pid": watcher_pid,
+            "alive": watcher_alive,
+            "heartbeat_age_ms": hb_age_ms,
+            "status_json": status_json,
+            "tasks_dispatched_session": status_json.get("tasks_dispatched_this_session").cloned().unwrap_or(serde_json::Value::Null),
+        },
+        "runner": {
+            "pid": runner_port.map(|_| true),
+            "alive": runner_alive,
+            "port": runner_port,
+        },
+        "rs_learn": {
+            "db_path": gm_dir.join("rs-learn.db").display().to_string(),
+            "http_status": "unknown",
+            "acp_status": "unknown",
+        },
+        "cache_dirs": cache_dirs,
+        "spool_inbox": spool_inbox,
+        "spool_outbox": spool_outbox,
+        "last_session_start": last_session_start,
+        "bootstrap_error": bootstrap_error,
+        "recent_hook_fires": recent_hook_fires,
+        "recent_errors": recent_errors,
+    });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+}
+
+fn count_pending(in_dir: &std::path::Path) -> u64 {
+    let mut n: u64 = 0;
+    if let Ok(rd) = fs::read_dir(in_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() { n += 1; }
+            else if p.is_dir() {
+                if let Ok(sub) = fs::read_dir(&p) {
+                    n += sub.flatten().filter(|s| s.path().is_file()).count() as u64;
+                }
+            }
+        }
+    }
+    n
+}
+
+fn list_subdirs(in_dir: &std::path::Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Ok(rd) = fs::read_dir(in_dir) {
+        for e in rd.flatten() {
+            if e.path().is_dir() {
+                if let Some(n) = e.file_name().to_str() { out.push(n.to_string()); }
+            }
+        }
+    }
+    out
+}
+
+fn recent_outbox(out_dir: &std::path::Path, n: usize) -> Vec<String> {
+    let mut entries: Vec<(std::time::SystemTime, String)> = Vec::new();
+    if let Ok(rd) = fs::read_dir(out_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+            let mt = p.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            entries.push((mt, p.file_name().unwrap_or_default().to_string_lossy().to_string()));
+        }
+    }
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.into_iter().take(n).map(|(_, s)| s).collect()
+}
+
+fn read_recent_log_lines(subsystem: &str, n: usize) -> Vec<String> {
+    let root = rs_exec::obs::root_dir();
+    let today = today_ymd();
+    let path = root.join(&today).join(format!("{}.jsonl", subsystem));
+    let content = match fs::read_to_string(&path) { Ok(c) => c, Err(_) => return Vec::new() };
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].iter().map(|s| s.to_string()).collect()
+}
+
+fn read_recent_log_lines_filter(n: usize, needle: &str) -> Vec<String> {
+    let root = rs_exec::obs::root_dir();
+    let today = today_ymd();
+    let day_dir = root.join(&today);
+    let mut out: Vec<String> = Vec::new();
+    if let Ok(rd) = fs::read_dir(&day_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("jsonl") { continue; }
+            if let Ok(content) = fs::read_to_string(&p) {
+                for line in content.lines() {
+                    if line.contains(needle) { out.push(line.to_string()); }
+                }
+            }
+        }
+    }
+    out.reverse();
+    out.into_iter().take(n).collect()
 }
 
 fn cmd_deps() -> anyhow::Result<()> {
@@ -959,6 +1125,7 @@ async fn main() {
             }
             Some(Cmd::Deps) => { cmd_deps()?; }
             Some(Cmd::Doctor) => { cmd_doctor()?; }
+            Some(Cmd::Health) => { cmd_health(); }
             Some(Cmd::Recall { query, limit, cwd, discipline }) => {
                 let mut q_parts = query;
                 let disc = extract_discipline_sigil(&mut q_parts, discipline);

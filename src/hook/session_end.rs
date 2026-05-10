@@ -7,6 +7,13 @@ pub fn run() {
     let data: serde_json::Value = serde_json::from_str(&stdin).unwrap_or_default();
     let session_id = data["session_id"].as_str().unwrap_or("");
     let reason = data["reason"].as_str().unwrap_or("");
+    rs_exec::obs::event("hook", "session-end.fired", serde_json::json!({
+        "hook_name": "session_end",
+        "pid": std::process::id(),
+        "action": "fired",
+        "reason": reason,
+        "session_id": session_id,
+    }));
 
     if session_id.is_empty() {
         return;
