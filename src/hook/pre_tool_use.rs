@@ -251,7 +251,7 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
             if UTILITIES.contains(&verb.as_str()) {
                 return handle_exec(&verb, args, cwd, session_id);
             }
-            return deny(&format!("exec:{} requires args on the next line, not same-line. Use:\n\n  exec:{}\n  {}\n\nAll utility verbs (runner, type, kill-port, codesearch, recall, memorize, forget, wait, pause, sleep, status, close) take their argument on line 2.", verb, verb, args));
+            return deny(&format!("exec:{} is not a valid Bash exec verb. For code execution, write JSON to .gm/exec-spool/in/<taskId>.json using the Write tool:\n  {{\"taskId\":1,\"lang\":\"{}\",\"code\":\"...\",\"cwd\":\"/path\",\"timeoutMs\":30000,\"sessionId\":\"your-session-id\"}}\nSupported langs: nodejs, python, bash, cmd, typescript, go, rust, c, cpp, java, deno\nUtility verbs that work inline: runner, type, kill-port, codesearch, recall, memorize, forget, wait, pause, sleep, status, close", verb, verb));
         }
         if let Some(nl) = rest.find('\n') {
             let lang_part = &rest[..nl];
@@ -287,8 +287,7 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
                 }
             }
 
-            let normalized = if raw_lang == "bash" || raw_lang == "sh" { normalize_windows_paths(code) } else { code.to_string() };
-            return handle_exec(&raw_lang, &normalized, cwd, session_id);
+            return handle_exec(&raw_lang, code, cwd, session_id);
         }
     }
 
@@ -302,7 +301,7 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
         let target = if first_word == "npx" { second_word } else { third_word };
         const BLOCKED_TARGETS: &[&str] = &["gm-exec", "plugkit", "codebasesearch"];
         if invokes_bun && BLOCKED_TARGETS.iter().any(|t| target == *t) {
-            return deny(&format!("Do not call {} directly. Use exec:<lang> syntax instead.\n\nexec:nodejs\nconsole.log(\"hello\")\n\nexec:codesearch\nfind all database queries", target));
+            return deny(&format!("Do not call {} directly. For code execution, write JSON to .gm/exec-spool/in/<taskId>.json using the Write tool. For codebase search use exec:codesearch.", target));
         }
     }
 
@@ -399,7 +398,6 @@ fn bash_body_starts_with_exec_verb(code: &str) -> Option<String> {
         "browser","runner","type","kill-port",
         "wait","pause","sleep","status","close",
         "learn-status","learn:status","learn-debug","learn:debug","learn-build","learn:build",
-        "nodejs","python","typescript","go","rust","c","cpp","java","cmd","powershell","deno","bash","sh",
     ];
     for line in code.lines() {
         let t = line.trim();
@@ -413,40 +411,6 @@ fn bash_body_starts_with_exec_verb(code: &str) -> Option<String> {
         return None;
     }
     None
-}
-
-fn normalize_windows_paths(code: &str) -> String {
-    if !cfg!(windows) { return code.to_string(); }
-    let mut out = String::with_capacity(code.len());
-    let bytes = code.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if (b.is_ascii_uppercase() || b.is_ascii_lowercase())
-            && i + 2 < bytes.len()
-            && bytes[i+1] == b':'
-            && (bytes[i+2] == b'\\' || bytes[i+2] == b'/')
-        {
-            let prev = if i > 0 { bytes[i-1] } else { b' ' };
-            let path_boundary = matches!(prev, b' ' | b'"' | b'\'' | b'(' | b'`' | b'\n' | b'=' | b':');
-            if path_boundary || i == 0 {
-                out.push('/');
-                out.push((b as char).to_ascii_lowercase());
-                out.push('/');
-                i += 3;
-                while i < bytes.len() {
-                    let c = bytes[i];
-                    if c == b'\\' { out.push('/'); i += 1; }
-                    else if c == b' ' || c == b'"' || c == b'\'' || c == b'\n' || c == b'\r' || c == b')' || c == b'`' { break; }
-                    else { out.push(c as char); i += 1; }
-                }
-                continue;
-            }
-        }
-        out.push(b as char);
-        i += 1;
-    }
-    out
 }
 
 fn is_git_or_gh(cmd: &str) -> bool {
@@ -515,48 +479,6 @@ mod bash_banned_tests {
     }
 }
 
-#[cfg(test)]
-mod simple_shell_command_tests {
-    use super::is_simple_shell_command;
-
-    #[test]
-    fn allows_heredocs() {
-        assert!(is_simple_shell_command("cat <<EOF\nline 3\nline 1\nline 2\nEOF | sort"));
-        assert!(is_simple_shell_command("cat <<'EOF' | grep foo"));
-    }
-
-    #[test]
-    fn allows_pipes() {
-        assert!(is_simple_shell_command("ls -la | head -5"));
-        assert!(is_simple_shell_command("cat file.txt | sort | uniq"));
-    }
-
-    #[test]
-    fn allows_redirections() {
-        assert!(is_simple_shell_command("echo hello > output.txt"));
-        assert!(is_simple_shell_command("cat < input.txt"));
-        assert!(is_simple_shell_command("ls 2>&1"));
-    }
-
-    #[test]
-    fn allows_shell_utils() {
-        assert!(is_simple_shell_command("cat file.txt"));
-        assert!(is_simple_shell_command("sort -n"));
-        assert!(is_simple_shell_command("echo hello"));
-        assert!(is_simple_shell_command("ls -la"));
-    }
-
-    #[test]
-    fn allows_cmd_utils() {
-        assert!(is_simple_shell_command("dir"));
-        assert!(is_simple_shell_command("echo hello"));
-    }
-
-    #[test]
-    fn blocks_exec_prefix() {
-        assert!(!is_simple_shell_command("exec:nodejs\nconsole.log('hi')"));
-    }
-}
 
 #[cfg(test)]
 mod nested_exec_verb_tests {
@@ -603,28 +525,20 @@ fn shell_quote(s: &str) -> String {
 }
 
 fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) -> Value {
-    const BUILTINS: &[&str] = &["js","javascript","ts","typescript","node","nodejs","py","python","sh","bash","shell","zsh","powershell","ps1","go","rust","c","cpp","java","deno","cmd","browser","codesearch","search","runner","type","kill-port","recall","memorize","forget","feedback","learn-status","learn:status","learn-debug","learn:debug","learn-build","learn:build","wait","pause","sleep","status","close"];
-
-    let effective_cwd = cwd.map(|c| c.to_string()).or_else(|| project_dir()).unwrap_or_default();
     let resolved_session = if !session_id.is_empty() {
         session_id.to_string()
     } else {
         std::env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| format!("pid-{}", std::process::id()))
     };
+    let effective_cwd = cwd.map(|c| c.to_string()).or_else(|| project_dir()).unwrap_or_default();
     let compound_key = if !resolved_session.is_empty() && !effective_cwd.is_empty() {
         format!("{}|{}", resolved_session, effective_cwd)
     } else {
         resolved_session.clone()
     };
 
-    if !raw_lang.is_empty() && !BUILTINS.contains(&raw_lang) {
-        if let Some(result) = try_lang_plugin(raw_lang, code, cwd) {
-            return result;
-        }
-    }
-
-    let lang = normalize_lang(raw_lang, code);
-    let safe_code = decode_b64(code);
+    let lang = raw_lang.to_string();
+    let safe_code = code.to_string();
 
     let bin = plugkit_bin();
     let bin_unix = to_unix_path(&bin.to_string_lossy());
@@ -754,18 +668,15 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
             let cmd = format!("{} close", bin_unix);
             return delegate_to_bash(&cmd);
         }
-        _ => {}
+        _ => {
+            return deny(&format!(
+                "exec:{} is not a valid exec verb. For code execution, use the Write tool to write JSON to .gm/exec-spool/in/<taskId>.json:\n  {{\"taskId\":1,\"lang\":\"{}\",\"code\":\"...\",\"cwd\":\"/path/to/project\",\"timeoutMs\":30000,\"sessionId\":\"your-session-id\"}}\nSupported langs: nodejs, python, bash, cmd, typescript, go, rust, c, cpp, java, deno\nLang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface\nOutput arrives as systemMessage after the Write completes.",
+                lang, lang
+            ));
+        }
     }
 
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-    let ext = lang_ext(&lang);
-    let tmp = std::env::temp_dir().join(format!("plugkit-exec-{}.{}", ts, ext));
-    let _ = std::fs::write(&tmp, &safe_code);
-    let tmp_unix = to_unix_path(&tmp.to_string_lossy());
-    let mut cmd = format!("{} exec --lang={} --file={}", bin_unix, lang, tmp_unix);
-    if let Some(c) = cwd { cmd.push_str(&format!(" --cwd={}", shell_quote(&to_unix_path(c)))); }
-    if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
-    delegate_with_drain(&cmd, &compound_key)
+    unreachable!()
 }
 
 fn session_log_drain(session_id: &str) -> String {
@@ -849,108 +760,6 @@ fn delegate_to_bash(cmd: &str) -> Value {
 }
 
 
-fn find_lang_plugin(lang: &str) -> Option<std::path::PathBuf> {
-    let filename = format!("{}.js", lang);
-    if let Some(project) = project_dir() {
-        let candidate = std::path::Path::new(&project).join("lang").join(&filename);
-        if candidate.exists() { return Some(candidate); }
-    }
-    if let Ok(plugin_root) = std::env::var("CLAUDE_PLUGIN_ROOT") {
-        let candidate = std::path::Path::new(&plugin_root).join("lang").join(&filename);
-        if candidate.exists() { return Some(candidate); }
-    }
-    None
-}
-
-fn try_lang_plugin(lang: &str, code: &str, cwd: Option<&str>) -> Option<Value> {
-    let plugin_file = find_lang_plugin(lang)?;
-    let project = project_dir().unwrap_or_default();
-    let project = if project.is_empty() { ".".to_string() } else { project };
-    let plugin_path = serde_json::to_string(&plugin_file.to_string_lossy().to_string()).unwrap_or_default();
-    let code_json = serde_json::to_string(code).unwrap_or_default();
-    let cwd_json = serde_json::to_string(cwd.unwrap_or(&project)).unwrap_or_default();
-    let runner = format!(
-        "const plugin = require({});\nPromise.resolve(plugin.exec.run({}, {})).then(out => process.stdout.write(String(out||''))).catch(e=>{{process.stderr.write(e.message||String(e));process.exit(1)}});",
-        plugin_path, code_json, cwd_json
-    );
-    let escaped = runner.replace('\'', "'\\''");
-    Some(delegate_to_bash(&format!("bun -e '{}'", escaped)))
-}
-
-fn normalize_lang(raw: &str, code: &str) -> String {
-    match raw {
-        "js" | "javascript" | "node" | "nodejs" | "" => {
-            if raw.is_empty() { detect_lang(code).to_string() } else { "nodejs".to_string() }
-        }
-        "ts" | "typescript" => "typescript".to_string(),
-        "py" | "python" => "python".to_string(),
-        "sh" | "shell" | "bash" | "zsh" => "bash".to_string(),
-        "powershell" | "ps1" => "powershell".to_string(),
-        "browser" => "browser".to_string(),
-        "codesearch" | "search" => "codesearch".to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn detect_lang(src: &str) -> &'static str {
-    if src.contains("import ") || src.contains("console.") || src.contains("process.") { return "nodejs"; }
-    if src.contains("def ") || src.contains("print(") || src.contains("import ") { return "python"; }
-    "nodejs"
-}
-
-fn decode_b64(s: &str) -> String {
-    let t = s.trim();
-    if t.len() < 16 || t.len() % 4 != 0 { return s.to_string(); }
-    if t.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '\r' || c == '\n') {
-        if let Ok(decoded) = data_encoding_decode(t) {
-            if !decoded.chars().any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t') {
-                return decoded;
-            }
-        }
-    }
-    s.to_string()
-}
-
-fn data_encoding_decode(s: &str) -> Result<String, ()> {
-    let cleaned: String = s.chars().filter(|&c| c != '\r' && c != '\n').collect();
-    let bytes = base64_decode(&cleaned).ok_or(())?;
-    String::from_utf8(bytes).map_err(|_| ())
-}
-
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
-    let table: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let lookup: Vec<Option<u8>> = (0u8..=255).map(|b| table.iter().position(|&t| t == b).map(|i| i as u8)).collect();
-    let chars: Vec<u8> = s.bytes().filter(|&b| b != b'=').collect();
-    let mut out = vec![];
-    for chunk in chars.chunks(4) {
-        let v: Option<Vec<u8>> = chunk.iter().map(|&b| lookup[b as usize]).collect();
-        let v = v?;
-        match v.len() {
-            4 => { out.push(v[0]<<2|v[1]>>4); out.push(v[1]<<4|v[2]>>2); out.push(v[2]<<6|v[3]); }
-            3 => { out.push(v[0]<<2|v[1]>>4); out.push(v[1]<<4|v[2]>>2); }
-            2 => { out.push(v[0]<<2|v[1]>>4); }
-            _ => {}
-        }
-    }
-    Some(out)
-}
-
-fn lang_ext(lang: &str) -> &str {
-    match lang {
-        "nodejs" | "typescript" => "mjs",
-        "python" => "py",
-        "bash" => "sh",
-        "powershell" => "ps1",
-        "cmd" => "bat",
-        "go" => "go",
-        "rust" => "rs",
-        "c" => "c",
-        "cpp" => "cpp",
-        "java" => "java",
-        _ => lang,
-    }
-}
-
 fn is_test_file(base: &str, fp: &str) -> bool {
     (base.ends_with(".test.js") || base.ends_with(".spec.js") || base.ends_with(".test.ts") || base.ends_with(".spec.ts"))
         || fp.contains("/__tests__/") || fp.contains("/test/") || fp.contains("/tests/")
@@ -993,8 +802,4 @@ mod smoke_page_tests {
 }
 
 
-#[cfg(windows)]
-const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — first line is exec:<lang>, rest is the code:\n   exec:nodejs\n   console.log('hello')\n\n   exec:python\n   print('hello')\n\n   exec:cmd        (PREFERRED on Windows — runs via cmd.exe)\n   echo hello\n\n   exec:bash       (only if you have a real bash; flaky on Windows)\n   echo hello\n\n   Languages: nodejs, python, cmd, powershell, bash, typescript, go, rust, c, cpp, java\n\n2. Browser automation — first line is exec:browser, rest is JS against `page`:\n   exec:browser\n   await page.goto('https://example.com')\n   console.log(await page.title())\n\n3. Utility commands — exec:<cmd> with args on next line:\n   exec:codesearch        (natural language codebase search)\n   exec:runner            (start/stop/status the runner daemon)\n   exec:type              (send stdin: task_id on line 1, input on line 2)\n   exec:kill-port         (kill process listening on port: port number on next line)\n   exec:wait              (raw timer: <seconds> on next line, max 3600)\n   exec:sleep             (wait for task output: <task_id> on next line)\n   exec:pause             (rename .gm/prd.yml↔prd.paused.yml; <question> on next line)\n   exec:status / exec:close\n   exec:recall / exec:memorize / exec:forget\n\n4. Git commands — git <args> directly (no exec: prefix needed):\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.\n\nNotes on Windows shell environment:\n- Default to `exec:cmd` on Windows. cmd.exe is always present and avoids the msys/git-bash quirks that `exec:bash` inherits (path translation, missing builtins, heredoc parsing). Only use `exec:bash` when you genuinely need POSIX shell features.\n- Raw `sleep N` is blocked — use exec:wait <seconds> instead.\n- Inside `exec:cmd`: use `cd /d C:\\path` for drive-aware cd, `set VAR=value` for env, `&&` for chaining. No backtick escapes — `^` is the cmd escape.\n- If you do use `exec:bash`: builtins `time`, `pushd`, `popd`, `source` are NOT available. For timing use `START=$(date +%s%3N); ...; END=$(date +%s%3N); echo \"$((END-START))ms\"`. Prefer /c/Users/foo over C:\\\\Users\\\\foo inside heredocs.";
-
-#[cfg(not(windows))]
-const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — first line is exec:<lang>, rest is the code:\n   exec:nodejs\n   console.log('hello')\n\n   exec:python\n   print('hello')\n\n   exec:bash\n   echo hello\n\n   Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java\n\n2. Browser automation — first line is exec:browser, rest is JS against `page`:\n   exec:browser\n   await page.goto('https://example.com')\n   console.log(await page.title())\n\n3. Utility commands — exec:<cmd> with args on next line:\n   exec:codesearch        (natural language codebase search)\n   exec:runner            (start/stop/status the runner daemon)\n   exec:type              (send stdin: task_id on line 1, input on line 2)\n   exec:kill-port         (kill process listening on port: port number on next line)\n   exec:wait              (raw timer: <seconds> on next line, max 3600)\n   exec:sleep             (wait for task output: <task_id> on next line)\n   exec:pause             (rename .gm/prd.yml↔prd.paused.yml; <question> on next line)\n   exec:status / exec:close\n   exec:recall / exec:memorize / exec:forget\n\n4. Git commands — git <args> directly (no exec: prefix needed):\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.\n\nNotes on exec:bash environment:\n- Bash builtins `time`, `pushd`, `popd`, `source` are NOT available. For timing use `START=$(date +%s%3N); ...; END=$(date +%s%3N); echo \"$((END-START))ms\"`.\n- Raw `sleep N` is blocked — use exec:wait <seconds> instead.";
+const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — write JSON to .gm/exec-spool/in/<taskId>.json using Write tool:\n   {\n     \"taskId\": 1,\n     \"lang\": \"nodejs\",\n     \"code\": \"console.log('hello')\",\n     \"cwd\": \"/path/to/project\",\n     \"timeoutMs\": 30000,\n     \"sessionId\": \"your-session-id\"\n   }\n   Languages: nodejs, python, bash, cmd, typescript, go, rust, c, cpp, java, deno\n   Lang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface\n   Output arrives as systemMessage after Write completes.\n\n2. Browser automation — still via exec:browser:\n   exec:browser\n   await page.goto('https://example.com')\n\n3. Utility commands — exec:<cmd> with args on next line:\n   exec:codesearch / exec:recall / exec:memorize / exec:forget\n   exec:runner / exec:type / exec:kill-port\n   exec:wait / exec:sleep / exec:pause / exec:status / exec:close\n   exec:feedback / exec:learn-status / exec:learn-debug / exec:learn-build\n\n4. Git commands — git <args> directly:\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.";
