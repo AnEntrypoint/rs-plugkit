@@ -7,7 +7,7 @@ const EXEC_TOOL: &str = "Bash";
 const MIN_OUTPUT_LEN: usize = 20;
 const HARD_BLOCK_AT: u64 = 3;
 const SPOOL_POLL_INTERVAL_MS: u64 = 100;
-const SPOOL_POLL_MAX: u64 = 300;
+const SPOOL_STREAM_WINDOW_MS: u64 = 30_000;
 
 const UTILITY_VERBS: &[&str] = &[
     "recall", "memorize", "codesearch", "wait", "sleep", "status",
@@ -52,43 +52,46 @@ fn handle_write(tool_input: &Value) -> Option<(String, bool)> {
     let task_id: u64 = stem.parse().ok()?;
     let out_path = spool_dir.join("out").join(format!("{}.json", task_id));
 
+    let log_path = spool_dir.join("log").join(format!("{}.log", task_id));
+
     rs_exec::obs::event("hook", "post-tool-use.spool-write", serde_json::json!({
         "task_id": task_id,
-        "out_path": out_path.display().to_string()
+        "out_path": out_path.display().to_string(),
+        "log_path": log_path.display().to_string(),
     }));
 
-    for _ in 0..SPOOL_POLL_MAX {
+    let deadline = std::time::Instant::now() + Duration::from_millis(SPOOL_STREAM_WINDOW_MS);
+
+    loop {
         if out_path.exists() {
-            break;
+            let raw = std::fs::read_to_string(&out_path).ok()?;
+            let result: Value = serde_json::from_str(&raw).ok()?;
+            let ok = result["ok"].as_bool().unwrap_or(false);
+            let lang = result["lang"].as_str().unwrap_or("unknown");
+            let exit_code = result["exitCode"].as_i64().unwrap_or(-1);
+            let output = result["output"].as_str()
+                .or_else(|| result["error"].as_str())
+                .unwrap_or("");
+            let msg = if ok {
+                format!("[exec task={} lang={} exitCode={}]\n{}", task_id, lang, exit_code, output)
+            } else {
+                format!("[exec task={} lang={} exitCode={}] ERROR\n{}", task_id, lang, exit_code, output)
+            };
+            return Some((msg, ok && output.len() > MIN_OUTPUT_LEN));
         }
+
+        if std::time::Instant::now() >= deadline {
+            let partial = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let msg = if partial.is_empty() {
+                format!("[exec task={}] still running (30s window elapsed, no output yet). Is the spool watcher running?", task_id)
+            } else {
+                format!("[exec task={} partial output — still running]\n{}", task_id, partial)
+            };
+            return Some((msg, !partial.is_empty() && partial.len() > MIN_OUTPUT_LEN));
+        }
+
         std::thread::sleep(Duration::from_millis(SPOOL_POLL_INTERVAL_MS));
     }
-
-    if !out_path.exists() {
-        let msg = format!(
-            "[exec task={}] ERROR: timed out after 30s waiting for spool output. Is the spool watcher running?",
-            task_id
-        );
-        return Some((msg, false));
-    }
-
-    let raw = std::fs::read_to_string(&out_path).ok()?;
-    let result: Value = serde_json::from_str(&raw).ok()?;
-
-    let ok = result["ok"].as_bool().unwrap_or(false);
-    let lang = result["lang"].as_str().unwrap_or("unknown");
-    let exit_code = result["exitCode"].as_i64().unwrap_or(-1);
-    let output = result["output"].as_str()
-        .or_else(|| result["error"].as_str())
-        .unwrap_or("");
-
-    let msg = if ok {
-        format!("[exec task={} lang={} exitCode={}]\n{}", task_id, lang, exit_code, output)
-    } else {
-        format!("[exec task={} lang={} exitCode={}] ERROR\n{}", task_id, lang, exit_code, output)
-    };
-
-    Some((msg, ok && output.len() > MIN_OUTPUT_LEN))
 }
 
 pub fn run() {
