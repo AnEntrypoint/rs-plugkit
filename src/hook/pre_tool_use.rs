@@ -761,9 +761,17 @@ fn delegate_to_bash(cmd: &str) -> Value {
 
 
 fn is_test_file(base: &str, fp: &str) -> bool {
-    (base.ends_with(".test.js") || base.ends_with(".spec.js") || base.ends_with(".test.ts") || base.ends_with(".spec.ts"))
-        || fp.contains("/__tests__/") || fp.contains("/test/") || fp.contains("/tests/")
-        || fp.contains("/fixtures/") || fp.contains("/__mocks__/")
+    let fp_norm = fp.replace('\\', "/").to_lowercase();
+    let base_lc = base.to_lowercase();
+    let test_ext = base_lc.ends_with(".test.js") || base_lc.ends_with(".spec.js")
+        || base_lc.ends_with(".test.ts") || base_lc.ends_with(".spec.ts")
+        || base_lc.ends_with(".test.mjs") || base_lc.ends_with(".spec.mjs")
+        || base_lc.ends_with(".test.cjs") || base_lc.ends_with(".spec.cjs");
+    let test_name = (base_lc.contains("test") || base_lc.contains("spec") || base_lc.contains("browser-test"))
+        && (base_lc.ends_with(".mjs") || base_lc.ends_with(".cjs"));
+    let test_dir = fp_norm.contains("/__tests__/") || fp_norm.contains("/test/") || fp_norm.contains("/tests/")
+        || fp_norm.contains("/fixtures/") || fp_norm.contains("/__mocks__/");
+    test_ext || test_name || test_dir
 }
 
 fn is_smoke_page(base: &str, fp: &str) -> bool {
@@ -774,6 +782,38 @@ fn is_smoke_page(base: &str, fp: &str) -> bool {
     if base.ends_with("-playground.html") || base.starts_with("playground.") { return true; }
     if fp_norm.contains("/docs/smoke") || fp_norm.contains("/docs/demo.") || fp_norm.contains("/docs/test.html") || fp_norm.contains("/docs/sandbox.") || fp_norm.contains("/docs/playground.") { return true; }
     false
+}
+
+#[cfg(test)]
+mod test_file_tests {
+    use super::is_test_file;
+    #[test]
+    fn blocks_classic_test_extensions() {
+        assert!(is_test_file("foo.test.js", "C:/p/foo.test.js"));
+        assert!(is_test_file("foo.spec.ts", "C:/p/foo.spec.ts"));
+        assert!(is_test_file("bar.test.mjs", "C:/p/bar.test.mjs"));
+        assert!(is_test_file("bar.spec.mjs", "C:/p/bar.spec.mjs"));
+        assert!(is_test_file("baz.test.cjs", "C:/p/baz.test.cjs"));
+    }
+    #[test]
+    fn blocks_browser_test_mjs() {
+        assert!(is_test_file("browser-test.mjs", "C:/p/scripts/browser-test.mjs"));
+        assert!(is_test_file("my-test.mjs", "C:/p/scripts/my-test.mjs"));
+        assert!(is_test_file("spec-helper.mjs", "C:/p/spec-helper.mjs"));
+    }
+    #[test]
+    fn blocks_test_directories() {
+        assert!(is_test_file("foo.js", "C:/p/__tests__/foo.js"));
+        assert!(is_test_file("bar.js", "C:/p/test/bar.js"));
+        assert!(is_test_file("baz.js", "C:/p/tests/baz.js"));
+        assert!(is_test_file("mock.js", "C:/p/__mocks__/mock.js"));
+    }
+    #[test]
+    fn allows_non_test_mjs() {
+        assert!(!is_test_file("server.mjs", "C:/p/server.mjs"));
+        assert!(!is_test_file("index.mjs", "C:/p/src/index.mjs"));
+        assert!(!is_test_file("util.cjs", "C:/p/util.cjs"));
+    }
 }
 
 #[cfg(test)]
