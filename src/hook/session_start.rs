@@ -43,7 +43,7 @@ pub fn run() {
         let session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_default();
         let running_tasks = super::running_tasks_summary(&session_id);
         let system_message = format!(
-            "Session start for workspace: {}\n\n{}\n\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}\nWrite raw exec code into .gm/exec-spool/in/<task>.json when you need JIT execution. The spool watcher executes that file, writes output to .gm/exec-spool/out/<task>.json and the task log, then deletes the request file. Do not wrap code in shell transcripts.{}\n",
+            "Session start for workspace: {}\n\n{}\n\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}\nExecute code by writing JSON to .gm/exec-spool/in/<taskId>.json using the Write tool. Schema: {{\"taskId\": number, \"lang\": string, \"code\": string, \"cwd\": string, \"timeoutMs\": number, \"sessionId\": string}}. Supported langs: nodejs, python, bash, cmd, typescript, go, rust, c, cpp, java, deno. Lang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface. Output arrives as systemMessage after the Write completes — no polling needed.{}\n",
             dir,
             if workspace_context.is_empty() { "No prior context loaded.".to_string() } else { workspace_context },
             prd_path.display(),
