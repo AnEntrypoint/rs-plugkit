@@ -1,6 +1,6 @@
 mod session_start;
 mod session_end;
-mod pre_tool_use;
+pub mod pre_tool_use;
 mod post_tool_use;
 mod prompt_submit;
 mod pre_compact;

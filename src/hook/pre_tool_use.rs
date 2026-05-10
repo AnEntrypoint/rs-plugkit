@@ -157,6 +157,28 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
 
     let last_skill = std::fs::read_to_string(&lastskill).map(|s| s.trim().to_string()).unwrap_or_default();
     let is_file_edit = matches!(tool_name, "Write" | "Edit" | "NotebookEdit");
+
+    let is_git_mutating_bash = tool_name == "Bash" && {
+        let cmd = tool_input["command"].as_str().unwrap_or("");
+        cmd.contains("git commit") || cmd.contains("git push") || cmd.contains("git.exe commit") || cmd.contains("git.exe push")
+    };
+    if is_file_edit || is_git_mutating_bash {
+        let mutables_path = gm_dir.join("mutables.yml");
+        if mutables_path.exists() {
+            if let Ok(raw) = std::fs::read_to_string(&mutables_path) {
+                let unresolved_ids = scan_unresolved_mutable_ids(&raw);
+                if !unresolved_ids.is_empty() {
+                    let id_list = unresolved_ids.join(", ");
+                    let target = if is_git_mutating_bash { "git commit/push" } else { tool_name };
+                    return Some(deny(&format!(
+                        "HARD CONSTRAINT: .gm/mutables.yml has unresolved mutables: [{}]. Cannot {} until every mutable reaches status: witnessed with filled witness_evidence. Regress to gm-execute and resolve each unknown by witness — exec:codesearch, exec:nodejs import, exec:recall, file Read. Each resolution sets status: witnessed and fills witness_evidence with file:line, codesearch hit, or dispatched test output. Empty mutables.yml or status: witnessed for all entries unblocks this gate. Saying \"I will resolve\" is NOT resolution — only an updated mutables.yml counts.",
+                        id_list, target
+                    )));
+                }
+            }
+        }
+    }
+
     let write_blocked = matches!(last_skill.as_str(), "gm-complete" | "update-docs" | "gm:gm-complete" | "gm:update-docs");
     if is_file_edit && write_blocked {
         return Some(deny(&format!(
@@ -166,6 +188,39 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
     }
 
     None
+}
+
+pub fn scan_unresolved_mutable_ids(raw: &str) -> Vec<String> {
+    let mut unresolved: Vec<String> = Vec::new();
+    let mut current_id: Option<String> = None;
+    for line in raw.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("- id:") {
+            current_id = Some(rest.trim().trim_matches(|c: char| c == '"' || c == '\'').to_string());
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("id:") {
+            if current_id.is_none() {
+                current_id = Some(rest.trim().trim_matches(|c: char| c == '"' || c == '\'').to_string());
+            }
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("status:") {
+            let v = rest.trim().trim_matches(|c: char| c == '"' || c == '\'').to_lowercase();
+            if v == "unknown" {
+                if let Some(ref id) = current_id {
+                    if !id.is_empty() {
+                        unresolved.push(id.clone());
+                    } else {
+                        unresolved.push("<unnamed>".to_string());
+                    }
+                } else {
+                    unresolved.push("<unnamed>".to_string());
+                }
+            }
+        }
+    }
+    unresolved
 }
 
 fn read_counter(path: &std::path::Path) -> Option<u64> {
@@ -251,7 +306,7 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
             if UTILITIES.contains(&verb.as_str()) {
                 return handle_exec(&verb, args, cwd, session_id);
             }
-            return deny(&format!("Code execution does not run via the Bash tool. Write the code to the file-spool:\n\n  .gm/exec-spool/in/<lang>/<N>.<ext>     <- preferred (e.g. in/nodejs/42.js, in/python/43.py, in/bash/44.sh)\n  .gm/exec-spool/in/<N>.json             <- back-compat with explicit fields\n\nThe spool watcher executes it and writes out/<N>.json; result returns as systemMessage.\nLanguages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno.\n\nUtility verbs DO run via Bash — first line is the verb, query/arg on line 2:\n\n  exec:codesearch     exec:recall         exec:memorize       exec:wait\n  exec:browser        exec:runner         exec:type           exec:kill-port\n  exec:forget         exec:feedback       exec:learn-status   exec:learn-debug\n  exec:learn-build    exec:discipline     exec:pause          exec:sleep\n  exec:status         exec:close\n\nRejected: exec:{} is not a recognized utility verb.", verb));
+            return deny(&format!("Code execution does not run via the Bash tool. Write the code to the file-spool:\n\n  .gm/exec-spool/in/<lang>/<N>.<ext>     (e.g. in/nodejs/42.js, in/python/43.py, in/bash/44.sh)\n\nThe spool watcher executes it and writes out/<N>.json; result returns as systemMessage.\nLanguages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno.\n\nUtility verbs DO run via Bash — first line is the verb, query/arg on line 2:\n\n  exec:codesearch     exec:recall         exec:memorize       exec:wait\n  exec:browser        exec:runner         exec:type           exec:kill-port\n  exec:forget         exec:feedback       exec:learn-status   exec:learn-debug\n  exec:learn-build    exec:discipline     exec:pause          exec:sleep\n  exec:status         exec:close\n\nRejected: exec:{} is not a recognized utility verb.", verb));
         }
         if let Some(nl) = rest.find('\n') {
             let lang_part = &rest[..nl];
@@ -301,7 +356,7 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
         let target = if first_word == "npx" { second_word } else { third_word };
         const BLOCKED_TARGETS: &[&str] = &["gm-exec", "plugkit", "codebasesearch"];
         if invokes_bun && BLOCKED_TARGETS.iter().any(|t| target == *t) {
-            return deny(&format!("Do not call {} directly. For code execution write a file to .gm/exec-spool/in/<lang>/<N>.<ext> (e.g. in/nodejs/42.js, in/python/43.py, in/bash/44.sh); the spool watcher executes it and writes out/<N>.json. JSON form .gm/exec-spool/in/<N>.json still supported as back-compat. For codebase search use exec:codesearch.", target));
+            return deny(&format!("Do not call {} directly. For code execution write a file to .gm/exec-spool/in/<lang>/<N>.<ext> (e.g. in/nodejs/42.js, in/python/43.py, in/bash/44.sh); the spool watcher executes it and writes out/<N>.json. For codebase search use exec:codesearch.", target));
         }
     }
 
@@ -670,7 +725,7 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
         }
         _ => {
             return deny(&format!(
-                "Code execution does not run via the Bash tool. Write the code to the file-spool:\n\n  .gm/exec-spool/in/<lang>/<N>.<ext>     <- preferred (e.g. in/nodejs/42.js, in/python/43.py, in/bash/44.sh)\n  .gm/exec-spool/in/<N>.json             <- back-compat with explicit fields\n\nThe spool watcher executes it and writes out/<N>.json; result returns as systemMessage.\nLanguages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno.\nLang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface.\n\nUtility verbs DO run via Bash — first line is the verb, query/arg on line 2:\n\n  exec:codesearch     exec:recall         exec:memorize       exec:wait\n  exec:browser        exec:runner         exec:type           exec:kill-port\n  exec:forget         exec:feedback       exec:learn-status   exec:learn-debug\n  exec:learn-build    exec:discipline     exec:pause          exec:sleep\n  exec:status         exec:close\n\nRejected: exec:{} is not a recognized utility verb.",
+                "Code execution does not run via the Bash tool. Write the code to the file-spool:\n\n  .gm/exec-spool/in/<lang>/<N>.<ext>     (e.g. in/nodejs/42.js, in/python/43.py, in/bash/44.sh)\n\nThe spool watcher executes it and writes out/<N>.json; result returns as systemMessage.\nLanguages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno.\nLang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface.\n\nUtility verbs DO run via Bash — first line is the verb, query/arg on line 2:\n\n  exec:codesearch     exec:recall         exec:memorize       exec:wait\n  exec:browser        exec:runner         exec:type           exec:kill-port\n  exec:forget         exec:feedback       exec:learn-status   exec:learn-debug\n  exec:learn-build    exec:discipline     exec:pause          exec:sleep\n  exec:status         exec:close\n\nRejected: exec:{} is not a recognized utility verb.",
                 lang
             ));
         }
@@ -716,7 +771,7 @@ fn delegate_with_drain(cmd: &str, session_id: &str) -> Value {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
-                "additionalContext": "Codex does not accept rewritten tool input here. Write raw code to .gm/exec-spool/in/<lang>/<N>.<ext> (e.g. in/nodejs/42.js); the spool watcher executes it and writes out/<N>.json. JSON form .gm/exec-spool/in/<N>.json still supported as back-compat."
+                "additionalContext": "Codex does not accept rewritten tool input here. Write raw code to .gm/exec-spool/in/<lang>/<N>.<ext> (e.g. in/nodejs/42.js); the spool watcher executes it and writes out/<N>.json."
             }
         });
     }
@@ -746,7 +801,7 @@ fn delegate_to_bash(cmd: &str) -> Value {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
-                "additionalContext": "Codex does not accept rewritten tool input here. Write raw code to .gm/exec-spool/in/<lang>/<N>.<ext> (e.g. in/nodejs/42.js); the spool watcher executes it and writes out/<N>.json. JSON form .gm/exec-spool/in/<N>.json still supported as back-compat."
+                "additionalContext": "Codex does not accept rewritten tool input here. Write raw code to .gm/exec-spool/in/<lang>/<N>.<ext> (e.g. in/nodejs/42.js); the spool watcher executes it and writes out/<N>.json."
             }
         });
     }
@@ -817,6 +872,48 @@ mod test_file_tests {
 }
 
 #[cfg(test)]
+mod mutables_scanner_tests {
+    use super::scan_unresolved_mutable_ids;
+
+    #[test]
+    fn empty_input_returns_empty() {
+        assert!(scan_unresolved_mutable_ids("").is_empty());
+        assert!(scan_unresolved_mutable_ids("\n\n").is_empty());
+    }
+
+    #[test]
+    fn all_witnessed_returns_empty() {
+        let y = "- id: foo\n  status: witnessed\n- id: bar\n  status: witnessed\n";
+        assert!(scan_unresolved_mutable_ids(y).is_empty());
+    }
+
+    #[test]
+    fn collects_unknown_ids() {
+        let y = "- id: alpha\n  status: unknown\n- id: beta\n  status: witnessed\n- id: gamma\n  status: unknown\n";
+        let r = scan_unresolved_mutable_ids(y);
+        assert_eq!(r, vec!["alpha".to_string(), "gamma".to_string()]);
+    }
+
+    #[test]
+    fn handles_quoted_ids() {
+        let y = "- id: \"quoted-id\"\n  status: unknown\n";
+        assert_eq!(scan_unresolved_mutable_ids(y), vec!["quoted-id".to_string()]);
+    }
+
+    #[test]
+    fn case_insensitive_status() {
+        let y = "- id: alpha\n  status: UNKNOWN\n";
+        assert_eq!(scan_unresolved_mutable_ids(y), vec!["alpha".to_string()]);
+    }
+
+    #[test]
+    fn ignores_other_status_values() {
+        let y = "- id: alpha\n  status: pending\n- id: beta\n  status: in_progress\n";
+        assert!(scan_unresolved_mutable_ids(y).is_empty());
+    }
+}
+
+#[cfg(test)]
 mod smoke_page_tests {
     use super::is_smoke_page;
     #[test]
@@ -842,4 +939,4 @@ mod smoke_page_tests {
 }
 
 
-const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — write a file to the spool, NOT via Bash:\n     .gm/exec-spool/in/<lang>/<N>.<ext>     <- preferred (e.g. in/nodejs/42.js, in/python/43.py, in/bash/44.sh)\n     .gm/exec-spool/in/<N>.json             <- back-compat with explicit fields\n   Spool watcher executes and writes out/<N>.json; result returns as systemMessage.\n   Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno, cmd.\n   Lang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface.\n\n2. Browser automation — exec:browser:\n   exec:browser\n   await page.goto('https://example.com')\n\n3. Utility commands — exec:<cmd> with arg on next line:\n   exec:codesearch / exec:recall / exec:memorize / exec:forget\n   exec:runner / exec:type / exec:kill-port\n   exec:wait / exec:sleep / exec:pause / exec:status / exec:close\n   exec:feedback / exec:learn-status / exec:learn-debug / exec:learn-build\n   exec:discipline / exec:browser\n\n4. Git commands — git <args> directly:\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.";
+const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — write a file to the spool, NOT via Bash:\n     .gm/exec-spool/in/<lang>/<N>.<ext>     (e.g. in/nodejs/42.js, in/python/43.py, in/bash/44.sh)\n   Spool watcher executes and writes out/<N>.json; result returns as systemMessage.\n   Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno, cmd.\n   Lang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface.\n\n2. Browser automation — exec:browser:\n   exec:browser\n   await page.goto('https://example.com')\n\n3. Utility commands — exec:<cmd> with arg on next line:\n   exec:codesearch / exec:recall / exec:memorize / exec:forget\n   exec:runner / exec:type / exec:kill-port\n   exec:wait / exec:sleep / exec:pause / exec:status / exec:close\n   exec:feedback / exec:learn-status / exec:learn-debug / exec:learn-build\n   exec:discipline / exec:browser\n\n4. Git commands — git <args> directly:\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.";

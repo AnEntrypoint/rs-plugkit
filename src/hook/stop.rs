@@ -59,6 +59,24 @@ pub fn run_stop() {
     }
 
     let gm_dir = std::path::Path::new(&project_dir).join(".gm");
+
+    let mutables_path = gm_dir.join("mutables.yml");
+    if mutables_path.exists() {
+        if let Ok(raw) = fs::read_to_string(&mutables_path) {
+            let unresolved = super::pre_tool_use::scan_unresolved_mutable_ids(&raw);
+            if !unresolved.is_empty() {
+                let id_list = unresolved.join(", ");
+                write_needs_gm(&project_dir);
+                let out = stop_block(format!(
+                    "Cannot stop while .gm/mutables.yml has unresolved mutables: [{}]. Every mutable must reach status: witnessed with filled witness_evidence before turn-stop. Regress to Skill(gm:gm-execute), resolve each unknown by witness (exec:codesearch, exec:nodejs import, exec:recall, file Read), update mutables.yml entries to status: witnessed.\n\nNEXT ACTION: invoke Skill(gm) first.",
+                    id_list
+                ));
+                println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+                std::process::exit(2);
+            }
+        }
+    }
+
     let residual_marker = gm_dir.join("residual-check-fired");
     if !residual_marker.exists() {
         let _ = fs::create_dir_all(&gm_dir);
