@@ -170,7 +170,7 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
         let cmd = tool_input["command"].as_str().unwrap_or("");
         cmd.contains("git commit") || cmd.contains("git push") || cmd.contains("git.exe commit") || cmd.contains("git.exe push")
     };
-    if is_file_edit || is_git_mutating_bash {
+    if (is_file_edit && !is_mutables_or_prd_write) || is_git_mutating_bash {
         let mutables_path = gm_dir.join("mutables.yml");
         if mutables_path.exists() {
             if let Ok(raw) = std::fs::read_to_string(&mutables_path) {
