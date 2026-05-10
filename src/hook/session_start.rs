@@ -108,9 +108,9 @@ fn watcher_alive(pid_file: &std::path::Path, hb_file: &std::path::Path) -> bool 
 }
 
 fn pid_running(pid: u32) -> bool {
-    use sysinfo::{System, Pid};
+    use sysinfo::{System, Pid, ProcessesToUpdate};
     let mut sys = System::new();
-    sys.refresh_processes();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
     sys.process(Pid::from(pid as usize)).is_some()
 }
 
