@@ -6,6 +6,7 @@ on:
       - 'v*'
     branches:
       - main
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
   workflow_dispatch:
 
 concurrency:

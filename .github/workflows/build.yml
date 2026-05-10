@@ -3,8 +3,14 @@ name: Build
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
   pull_request:
     branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -48,8 +54,16 @@ jobs:
           ls -la target/${{ matrix.target }}/release/plugkit
           du -h target/${{ matrix.target }}/release/plugkit
 
-      - name: Install cargo-bloat
+      - name: Cache cargo-bloat binary
         if: matrix.os == 'ubuntu-latest'
+        id: cache-bloat
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-bloat
+          key: cargo-bloat-${{ runner.os }}-v1
+
+      - name: Install cargo-bloat
+        if: matrix.os == 'ubuntu-latest' && steps.cache-bloat.outputs.cache-hit != 'true'
         run: cargo install cargo-bloat --locked
 
       - name: Run cargo bloat
