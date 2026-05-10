@@ -43,7 +43,7 @@ pub fn run() {
         let session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_default();
         let running_tasks = super::running_tasks_summary(&session_id);
         let system_message = format!(
-            "Session start for workspace: {}\n\n{}\n\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}\nExecute code by writing JSON to .gm/exec-spool/in/<taskId>.json using the Write tool. Schema: {{\"taskId\": number, \"lang\": string, \"code\": string, \"cwd\": string, \"timeoutMs\": number, \"sessionId\": string}}. Supported langs: nodejs, python, bash, cmd, typescript, go, rust, c, cpp, java, deno. Lang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface. Output arrives as systemMessage after the Write completes — no polling needed.{}\n",
+            "Session start for workspace: {}\n\n{}\n\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}\nCode execution: use exec: prefix in Bash (first line `exec:nodejs`/`exec:bash`/`exec:python` etc., body on line 2+). Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno, cmd. Raw JIT code can also bypass Bash by writing to .gm/exec-spool/in/<lang>/<N>.<ext> (preferred, e.g. in/nodejs/42.js); the spool watcher executes it and writes out/<N>.json. JSON form .gm/exec-spool/in/<N>.json remains as back-compat. Lang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface.{}\n",
             dir,
             if workspace_context.is_empty() { "No prior context loaded.".to_string() } else { workspace_context },
             prd_path.display(),
@@ -63,17 +63,55 @@ fn start_exec_spool() {
         _ => return,
     };
     let gm = std::path::Path::new(&project).join(".gm");
-    let started = gm.join("exec-spool.started");
-    if started.exists() { return; }
     let _ = fs::create_dir_all(&gm);
     let spool_dir = gm.join("exec-spool");
+    let _ = fs::create_dir_all(&spool_dir);
+    let _ = fs::create_dir_all(spool_dir.join("in"));
+    let _ = fs::create_dir_all(spool_dir.join("out"));
+    let _ = fs::create_dir_all(spool_dir.join("log"));
+
+    let pid_file = spool_dir.join(".watcher.pid");
+    let hb_file = spool_dir.join(".watcher.heartbeat");
+
+    if watcher_alive(&pid_file, &hb_file) { return; }
+
+    let _ = fs::remove_file(gm.join("exec-spool.started"));
+    let _ = fs::remove_file(&pid_file);
+
     let rs_exec = super::rs_exec_bin();
     let mut cmd = super::no_window_cmd(rs_exec);
     cmd.arg("spool");
     cmd.env("RS_EXEC_SPOOL_DIR", &spool_dir);
     if let Ok(child) = cmd.spawn() {
-        let _ = fs::write(started, child.id().to_string());
+        let _ = fs::write(&pid_file, child.id().to_string());
     }
+}
+
+fn watcher_alive(pid_file: &std::path::Path, hb_file: &std::path::Path) -> bool {
+    let pid_str = match fs::read_to_string(pid_file) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let pid: u32 = match pid_str.trim().parse() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    if !pid_running(pid) { return false; }
+    if let Ok(meta) = fs::metadata(hb_file) {
+        if let Ok(mt) = meta.modified() {
+            if let Ok(age) = std::time::SystemTime::now().duration_since(mt) {
+                return age.as_secs() <= 10;
+            }
+        }
+    }
+    false
+}
+
+fn pid_running(pid: u32) -> bool {
+    use sysinfo::{System, Pid};
+    let mut sys = System::new();
+    sys.refresh_processes();
+    sys.process(Pid::from(pid as usize)).is_some()
 }
 
 fn write_needs_gm_if_gm_project(project_dir: Option<&str>) {

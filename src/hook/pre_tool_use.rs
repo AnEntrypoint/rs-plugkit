@@ -251,7 +251,7 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
             if UTILITIES.contains(&verb.as_str()) {
                 return handle_exec(&verb, args, cwd, session_id);
             }
-            return deny(&format!("exec:{} is not a valid Bash exec verb. For code execution, write JSON to .gm/exec-spool/in/<taskId>.json using the Write tool:\n  {{\"taskId\":1,\"lang\":\"{}\",\"code\":\"...\",\"cwd\":\"/path\",\"timeoutMs\":30000,\"sessionId\":\"your-session-id\"}}\nSupported langs: nodejs, python, bash, cmd, typescript, go, rust, c, cpp, java, deno\nUtility verbs that work inline: runner, type, kill-port, codesearch, recall, memorize, forget, wait, pause, sleep, status, close", verb, verb));
+            return deny(&format!("Bash code execution uses exec: prefix. First line is the verb, rest is the body:\n\n  exec:nodejs        exec:bash         exec:python\n  console.log('hi')  ls -la            print('hi')\n\nUtility verbs (codesearch, recall, memorize, wait, browser, etc.) take a query/arg on line 2.\n\nRaw JIT code can also be dispatched WITHOUT Bash by writing a file:\n  .gm/exec-spool/in/<lang>/<N>.<ext>     <- preferred, no JSON wrapper (e.g. in/nodejs/42.js)\n  .gm/exec-spool/in/<N>.json             <- back-compat with explicit fields\n\nLanguages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno\nResult returns as systemMessage after the next tool use.\n\nRejected: exec:{} is not a recognized inline verb. Inline verbs: runner, type, kill-port, codesearch, recall, memorize, forget, wait, pause, sleep, status, close.", verb));
         }
         if let Some(nl) = rest.find('\n') {
             let lang_part = &rest[..nl];
@@ -301,7 +301,7 @@ fn handle_bash(tool_input: &Value, session_id: &str) -> Value {
         let target = if first_word == "npx" { second_word } else { third_word };
         const BLOCKED_TARGETS: &[&str] = &["gm-exec", "plugkit", "codebasesearch"];
         if invokes_bun && BLOCKED_TARGETS.iter().any(|t| target == *t) {
-            return deny(&format!("Do not call {} directly. For code execution, write JSON to .gm/exec-spool/in/<taskId>.json using the Write tool. For codebase search use exec:codesearch.", target));
+            return deny(&format!("Do not call {} directly. For code execution use the exec: prefix in Bash:\n\n  exec:nodejs\n  console.log('hi')\n\nOr write raw code to .gm/exec-spool/in/<lang>/<N>.<ext> (e.g. in/nodejs/42.js); the spool watcher executes it and writes out/<N>.json. For codebase search use exec:codesearch.", target));
         }
     }
 
@@ -670,8 +670,8 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
         }
         _ => {
             return deny(&format!(
-                "exec:{} is not a valid exec verb. For code execution, use the Write tool to write JSON to .gm/exec-spool/in/<taskId>.json:\n  {{\"taskId\":1,\"lang\":\"{}\",\"code\":\"...\",\"cwd\":\"/path/to/project\",\"timeoutMs\":30000,\"sessionId\":\"your-session-id\"}}\nSupported langs: nodejs, python, bash, cmd, typescript, go, rust, c, cpp, java, deno\nLang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface\nOutput arrives as systemMessage after the Write completes.",
-                lang, lang
+                "Bash code execution uses exec: prefix. First line is the verb, rest is the body:\n\n  exec:nodejs        exec:bash         exec:python\n  console.log('hi')  ls -la            print('hi')\n\nUtility verbs (codesearch, recall, memorize, wait, browser, etc.) take a query/arg on line 2.\n\nRaw JIT code can also be dispatched WITHOUT Bash by writing a file:\n  .gm/exec-spool/in/<lang>/<N>.<ext>     <- preferred, no JSON wrapper (e.g. in/nodejs/42.js)\n  .gm/exec-spool/in/<N>.json             <- back-compat with explicit fields\n\nLanguages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno\nLang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface.\nResult returns as systemMessage after the next tool use.\n\nRejected: exec:{} is not a recognized verb.",
+                lang
             ));
         }
     }
@@ -716,7 +716,7 @@ fn delegate_with_drain(cmd: &str, session_id: &str) -> Value {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
-                "additionalContext": "Codex does not accept rewritten tool input here. Write raw code to .gm/exec-spool/in/<task>.json and let the spool watcher execute it."
+                "additionalContext": "Codex does not accept rewritten tool input here. Write raw code to .gm/exec-spool/in/<lang>/<N>.<ext> (e.g. in/nodejs/42.js); the spool watcher executes it and writes out/<N>.json. JSON form .gm/exec-spool/in/<N>.json still supported as back-compat."
             }
         });
     }
@@ -746,7 +746,7 @@ fn delegate_to_bash(cmd: &str) -> Value {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
-                "additionalContext": "Codex does not accept rewritten tool input here. Write raw code to .gm/exec-spool/in/<task>.json and let the spool watcher execute it."
+                "additionalContext": "Codex does not accept rewritten tool input here. Write raw code to .gm/exec-spool/in/<lang>/<N>.<ext> (e.g. in/nodejs/42.js); the spool watcher executes it and writes out/<N>.json. JSON form .gm/exec-spool/in/<N>.json still supported as back-compat."
             }
         });
     }
@@ -842,4 +842,4 @@ mod smoke_page_tests {
 }
 
 
-const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — write JSON to .gm/exec-spool/in/<taskId>.json using Write tool:\n   {\n     \"taskId\": 1,\n     \"lang\": \"nodejs\",\n     \"code\": \"console.log('hello')\",\n     \"cwd\": \"/path/to/project\",\n     \"timeoutMs\": 30000,\n     \"sessionId\": \"your-session-id\"\n   }\n   Languages: nodejs, python, bash, cmd, typescript, go, rust, c, cpp, java, deno\n   Lang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface\n   Output arrives as systemMessage after Write completes.\n\n2. Browser automation — still via exec:browser:\n   exec:browser\n   await page.goto('https://example.com')\n\n3. Utility commands — exec:<cmd> with args on next line:\n   exec:codesearch / exec:recall / exec:memorize / exec:forget\n   exec:runner / exec:type / exec:kill-port\n   exec:wait / exec:sleep / exec:pause / exec:status / exec:close\n   exec:feedback / exec:learn-status / exec:learn-debug / exec:learn-build\n\n4. Git commands — git <args> directly:\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.";
+const BASH_DENY_MSG: &str = "Bash tool only accepts these exact formats:\n\n1. Code execution — exec: prefix, verb on line 1, body on line 2+:\n   exec:nodejs\n   console.log('hello')\n\n   exec:bash\n   ls -la\n\n   exec:python\n   print('hi')\n\n   Languages: nodejs (default), bash, python, typescript, go, rust, c, cpp, java, deno, cmd.\n   Lang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface.\n\n   Raw JIT code can also be dispatched WITHOUT Bash by writing a file:\n     .gm/exec-spool/in/<lang>/<N>.<ext>     <- preferred, no JSON wrapper (e.g. in/nodejs/42.js)\n     .gm/exec-spool/in/<N>.json             <- back-compat with explicit fields\n   Spool watcher executes and writes out/<N>.json; result returns as systemMessage.\n\n2. Browser automation — exec:browser:\n   exec:browser\n   await page.goto('https://example.com')\n\n3. Utility commands — exec:<cmd> with arg on next line:\n   exec:codesearch / exec:recall / exec:memorize / exec:forget\n   exec:runner / exec:type / exec:kill-port\n   exec:wait / exec:sleep / exec:pause / exec:status / exec:close\n   exec:feedback / exec:learn-status / exec:learn-debug / exec:learn-build\n\n4. Git commands — git <args> directly:\n   git status\n   git commit -m \"msg\"\n\nAnything else is blocked.";
