@@ -43,7 +43,7 @@ pub fn run() {
         let session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_default();
         let running_tasks = super::running_tasks_summary(&session_id);
         let system_message = format!(
-            "Session start for workspace: {}\n\n{}\n\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}\nCode execution: use exec: prefix in Bash (first line `exec:nodejs`/`exec:bash`/`exec:python` etc., body on line 2+). Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno, cmd. Raw JIT code can also bypass Bash by writing to .gm/exec-spool/in/<lang>/<N>.<ext> (preferred, e.g. in/nodejs/42.js); the spool watcher executes it and writes out/<N>.json. JSON form .gm/exec-spool/in/<N>.json remains as back-compat. Lang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface.{}\n",
+            "Session start for workspace: {}\n\n{}\n\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}\nCode execution: use exec: prefix in Bash (first line `exec:nodejs`/`exec:bash`/`exec:python` etc., body on line 2+). Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno, cmd. Raw JIT code can also bypass Bash by writing to .gm/exec-spool/in/<lang>/<N>.<ext> (e.g. in/nodejs/42.js); the spool watcher executes it and writes out/<N>.json. Lang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface.{}\n",
             dir,
             if workspace_context.is_empty() { "No prior context loaded.".to_string() } else { workspace_context },
             prd_path.display(),

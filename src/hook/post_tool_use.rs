@@ -32,18 +32,11 @@ fn handle_write(tool_input: &Value) -> Option<(String, bool)> {
         }
     })?;
 
-    // Path after "in":
-    //   flat:    in/<N>.json            → 1 component after in_comp_idx
-    //   subdir:  in/<lang>/<N>.<ext>    → 2 components after in_comp_idx
     let stem = path.file_stem()?.to_string_lossy().to_string();
     stem.parse::<u64>().ok()?;
 
     let depth_after_in = components.len() - 1 - in_comp_idx;
-    let spool_dir = if depth_after_in == 1 {
-        // in/<N>.json — parent of file is "in", parent of that is spool root
-        path.parent()?.parent()?.to_path_buf()
-    } else if depth_after_in == 2 {
-        // in/<lang>/<N>.ext — parent of file is lang dir, parent of that is "in", parent of that is spool root
+    let spool_dir = if depth_after_in == 2 {
         path.parent()?.parent()?.parent()?.to_path_buf()
     } else {
         return None;
