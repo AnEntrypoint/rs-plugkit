@@ -19,21 +19,37 @@ fn handle_write(tool_input: &Value) -> Option<(String, bool)> {
     let file_path = tool_input["file_path"].as_str()?;
     let path = Path::new(file_path);
 
+    // Locate "exec-spool/in" window anywhere in path components.
+    // Returns index of the "in" component.
     let components: Vec<_> = path.components().collect();
-    let has_exec_spool = components.windows(2).any(|w| {
+    let in_comp_idx = components.windows(2).enumerate().find_map(|(i, w)| {
         let a = w[0].as_os_str().to_string_lossy();
         let b = w[1].as_os_str().to_string_lossy();
-        (a == "exec-spool" && b == "in") || (a.contains("exec-spool") && b == "in")
-    });
-    if !has_exec_spool {
+        if (a == "exec-spool" || a.contains("exec-spool")) && b == "in" {
+            Some(i + 1)
+        } else {
+            None
+        }
+    })?;
+
+    // Path after "in":
+    //   flat:    in/<N>.json            → 1 component after in_comp_idx
+    //   subdir:  in/<lang>/<N>.<ext>    → 2 components after in_comp_idx
+    let stem = path.file_stem()?.to_string_lossy().to_string();
+    stem.parse::<u64>().ok()?;
+
+    let depth_after_in = components.len() - 1 - in_comp_idx;
+    let spool_dir = if depth_after_in == 1 {
+        // in/<N>.json — parent of file is "in", parent of that is spool root
+        path.parent()?.parent()?.to_path_buf()
+    } else if depth_after_in == 2 {
+        // in/<lang>/<N>.ext — parent of file is lang dir, parent of that is "in", parent of that is spool root
+        path.parent()?.parent()?.parent()?.to_path_buf()
+    } else {
         return None;
-    }
+    };
 
-    let stem = path.file_stem()?.to_string_lossy();
     let task_id: u64 = stem.parse().ok()?;
-
-    let in_dir = path.parent()?;
-    let spool_dir = in_dir.parent()?;
     let out_path = spool_dir.join("out").join(format!("{}.json", task_id));
 
     rs_exec::obs::event("hook", "post-tool-use.spool-write", serde_json::json!({
