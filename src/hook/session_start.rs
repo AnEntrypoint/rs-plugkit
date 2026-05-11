@@ -11,7 +11,7 @@ pub fn run() {
     let project = project_dir();
     ensure_gitignore(project.as_deref());
     ensure_claude_md_pointer(project.as_deref());
-    ensure_tools_current();
+    std::thread::spawn(|| { ensure_tools_current(); });
     start_exec_spool();
     write_needs_gm_if_gm_project(project.as_deref());
 
