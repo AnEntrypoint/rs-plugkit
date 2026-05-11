@@ -154,6 +154,7 @@ fn handle_write(tool_input: &Value) -> Option<(String, bool)> {
 }
 
 pub fn run() {
+    let _ = std::panic::catch_unwind(|| super::session_start::start_exec_spool());
     let mut stdin = String::new();
     let _ = std::io::stdin().read_to_string(&mut stdin);
     let data: Value = serde_json::from_str(&stdin).unwrap_or_default();

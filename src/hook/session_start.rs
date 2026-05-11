@@ -123,7 +123,7 @@ fn recall_with_short_timeout(query: &str, dir: &str) -> String {
     rx.recv_timeout(std::time::Duration::from_millis(1500)).unwrap_or_default()
 }
 
-fn start_exec_spool() {
+pub fn start_exec_spool() {
     let project = match project_dir() {
         Some(p) if !p.is_empty() => p,
         _ => return,

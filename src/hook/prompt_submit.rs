@@ -3,6 +3,7 @@ use serde_json::json;
 use std::{env, io::Read};
 
 pub fn run() {
+    let _ = std::panic::catch_unwind(|| super::session_start::start_exec_spool());
     let mut stdin = String::new();
     let _ = std::io::stdin().read_to_string(&mut stdin);
     let prompt = serde_json::from_str::<serde_json::Value>(&stdin)
