@@ -89,6 +89,9 @@ enum Cmd {
     Doctor,
     /// Print rich plugkit/watcher/runner/rs-learn/cache JSON for observability.
     Health,
+    /// Sync ~/.claude/gm-tools/ binaries from cache. Used by session-start as a detached
+    /// child so the main hook process can exit without waiting on 138MB file copies.
+    #[command(name = "ensure-tools")] EnsureTools,
     /// Recall episodes from rs-learn (HTTP-preferred, bun fallback). Prints formatted text.
     Recall {
         query: Vec<String>,
@@ -1127,6 +1130,7 @@ async fn main() {
             Some(Cmd::Deps) => { cmd_deps()?; }
             Some(Cmd::Doctor) => { cmd_doctor()?; }
             Some(Cmd::Health) => { cmd_health(); }
+            Some(Cmd::EnsureTools) => { hook::session_start::ensure_tools_current(); }
             Some(Cmd::Recall { query, limit, cwd, discipline }) => {
                 let mut q_parts = query;
                 let disc = extract_discipline_sigil(&mut q_parts, discipline);

@@ -1,4 +1,4 @@
-mod session_start;
+pub mod session_start;
 mod session_end;
 pub mod pre_tool_use;
 mod post_tool_use;

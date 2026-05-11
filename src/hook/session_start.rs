@@ -11,7 +11,7 @@ pub fn run() {
     let project = project_dir();
     ensure_gitignore(project.as_deref());
     ensure_claude_md_pointer(project.as_deref());
-    std::thread::spawn(|| { ensure_tools_current(); });
+    spawn_ensure_tools_detached();
     start_exec_spool();
     write_needs_gm_if_gm_project(project.as_deref());
 
@@ -71,6 +71,24 @@ fn run_self_with_timeout(args: &[&str], timeout: std::time::Duration) -> String 
         Ok(s) => s,
         Err(_) => String::new(),
     }
+}
+
+fn spawn_ensure_tools_detached() {
+    let plugkit = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => super::plugkit_bin(),
+    };
+    let mut cmd = super::no_window_cmd(plugkit);
+    cmd.arg("ensure-tools");
+    cmd.stdin(std::process::Stdio::null())
+       .stdout(std::process::Stdio::null())
+       .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000 | 0x00000008 | 0x00000200);
+    }
+    let _ = cmd.spawn();
 }
 
 fn spawn_codeinsight_rebuild(dir: String) {
@@ -266,7 +284,7 @@ fn bootstrap_cache_dir() -> Option<std::path::PathBuf> {
     if ver_dir.join(".ok").exists() { Some(ver_dir) } else { None }
 }
 
-fn ensure_tools_current() {
+pub fn ensure_tools_current() {
     let src_dir = match bootstrap_cache_dir() {
         Some(d) => d,
         None => return,
