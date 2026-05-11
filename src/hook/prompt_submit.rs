@@ -3,8 +3,16 @@ use serde_json::json;
 use std::{env, io::Read};
 
 pub fn run() {
-    let mut stdin = String::new();
-    let _ = std::io::stdin().read_to_string(&mut stdin);
+    use std::sync::mpsc;
+    // Bound stdin read: CC normally closes stdin promptly, but a stuck pipe would
+    // block forever with zero CPU/IO usage. Cap at 3s.
+    let (stdin_tx, stdin_rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_to_string(&mut buf);
+        let _ = stdin_tx.send(buf);
+    });
+    let stdin = stdin_rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap_or_default();
     let prompt = serde_json::from_str::<serde_json::Value>(&stdin)
         .ok()
         .and_then(|v| {
@@ -74,7 +82,6 @@ pub fn run() {
         let dir_for_prd = dir.clone();
         let prompt_for_subagent = prompt.clone();
 
-        use std::sync::mpsc;
         let search_rx = if !prompt.is_empty() {
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {

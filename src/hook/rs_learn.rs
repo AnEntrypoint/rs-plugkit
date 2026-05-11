@@ -112,7 +112,14 @@ where
 {
     let gate = gate();
     let work = async move {
-        let _permit = gate.acquire().await.ok()?;
+        // Wall-clock budget includes gate-acquire. If a prior call is holding the
+        // semaphore (e.g. a hung detached fire-and-forget), don't block forever —
+        // skip this recall instead of stalling the hook indefinitely.
+        let permit_fut = gate.acquire();
+        let _permit = match tokio::time::timeout(timeout, permit_fut).await {
+            Ok(Ok(p)) => p,
+            _ => return None,
+        };
         match tokio::time::timeout(timeout, fut).await {
             Ok(Ok(v)) => Some(v),
             _ => None,
