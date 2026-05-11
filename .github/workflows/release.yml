@@ -57,6 +57,7 @@ jobs:
           echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
 
       - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
         with:
           key: release-${{ runner.os }}-${{ matrix.target }}
           cache-on-failure: true
