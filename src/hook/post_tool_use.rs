@@ -6,7 +6,7 @@ use std::time::Duration;
 const EXEC_TOOL: &str = "Bash";
 const MIN_OUTPUT_LEN: usize = 20;
 const HARD_BLOCK_AT: u64 = 10;
-const SPOOL_POLL_INTERVAL_MS: u64 = 100;
+const SPOOL_POLL_INTERVAL_MS: u64 = 50;
 const SPOOL_STREAM_WINDOW_MS: u64 = 30_000;
 
 const UTILITY_VERBS: &[&str] = &[
@@ -58,9 +58,51 @@ fn handle_write(tool_input: &Value) -> Option<(String, bool)> {
         "err_stream": err_stream.display().to_string(),
     }));
 
-    let deadline = std::time::Instant::now() + Duration::from_millis(SPOOL_STREAM_WINDOW_MS);
+    let started = std::time::Instant::now();
+    let deadline = started + Duration::from_millis(SPOOL_STREAM_WINDOW_MS);
+    let max_iters: u64 = (SPOOL_STREAM_WINDOW_MS / SPOOL_POLL_INTERVAL_MS) + 50;
+    let mut iter: u64 = 0;
 
     loop {
+        iter += 1;
+        let now = std::time::Instant::now();
+        if now >= deadline || iter > max_iters {
+            let out_text = std::fs::read_to_string(&out_stream).unwrap_or_default();
+            let err_text = std::fs::read_to_string(&err_stream).unwrap_or_default();
+            let out_disp = out_stream.display();
+            let err_disp = err_stream.display();
+            let meta_disp = meta_path.display();
+            let total_len = out_text.len() + err_text.len();
+            rs_exec::obs::event("hook", "post-tool-use.spool-deadline", serde_json::json!({
+                "task_id": task_id,
+                "iter": iter,
+                "elapsed_ms": now.duration_since(started).as_millis() as u64,
+                "partial_bytes": total_len,
+            }));
+            let msg = if total_len == 0 {
+                format!(
+                    "[exec task={tid}] still running after 30s window (no output yet). Continue with: `exec:wait\\n<seconds>` (pure timer), `exec:sleep\\n{tid}` (block until next output), `exec:status\\n{tid}` (poll), `exec:close\\n{tid}` (terminate). Streams append at: {out}, {err}. Metadata lands at: {meta} once complete. If the watcher is not running, start it via `exec:runner\\nstart`.",
+                    tid = task_id, out = out_disp, err = err_disp, meta = meta_disp
+                )
+            } else {
+                let mut body = String::new();
+                if !out_text.is_empty() {
+                    body.push_str("\n--- stdout ---\n");
+                    body.push_str(&out_text);
+                }
+                if !err_text.is_empty() {
+                    if !body.ends_with('\n') { body.push('\n'); }
+                    body.push_str("--- stderr ---\n");
+                    body.push_str(&err_text);
+                }
+                format!(
+                    "[exec task={tid} partial output after 30s — still running]{body}\n--- end partial ---\nTask is NOT finished. Continue with: `exec:sleep\\n{tid}` (block until next output chunk), `exec:wait\\n<seconds>` (pure timer), `exec:status\\n{tid}` (poll), or `exec:close\\n{tid}` (terminate). Streams keep growing at: {out}, {err}. Metadata will land at: {meta} once complete.",
+                    tid = task_id, body = body, out = out_disp, err = err_disp, meta = meta_disp
+                )
+            };
+            return Some((msg, total_len > MIN_OUTPUT_LEN));
+        }
+
         if meta_path.exists() {
             let raw = std::fs::read_to_string(&meta_path).ok()?;
             let result: Value = serde_json::from_str(&raw).ok()?;
@@ -99,35 +141,12 @@ fn handle_write(tool_input: &Value) -> Option<(String, bool)> {
             return Some((msg, ok && total_len > MIN_OUTPUT_LEN));
         }
 
-        if std::time::Instant::now() >= deadline {
-            let out_text = std::fs::read_to_string(&out_stream).unwrap_or_default();
-            let err_text = std::fs::read_to_string(&err_stream).unwrap_or_default();
-            let out_disp = out_stream.display();
-            let err_disp = err_stream.display();
-            let meta_disp = meta_path.display();
-            let total_len = out_text.len() + err_text.len();
-            let msg = if total_len == 0 {
-                format!(
-                    "[exec task={tid}] still running after 30s window (no output yet). Continue with: `exec:wait\\n<seconds>` (pure timer), `exec:sleep\\n{tid}` (block until next output), `exec:status\\n{tid}` (poll), `exec:close\\n{tid}` (terminate). Streams append at: {out}, {err}. Metadata lands at: {meta} once complete. If the watcher is not running, start it via `exec:runner\\nstart`.",
-                    tid = task_id, out = out_disp, err = err_disp, meta = meta_disp
-                )
-            } else {
-                let mut body = String::new();
-                if !out_text.is_empty() {
-                    body.push_str("\n--- stdout ---\n");
-                    body.push_str(&out_text);
-                }
-                if !err_text.is_empty() {
-                    if !body.ends_with('\n') { body.push('\n'); }
-                    body.push_str("--- stderr ---\n");
-                    body.push_str(&err_text);
-                }
-                format!(
-                    "[exec task={tid} partial output after 30s — still running]{body}\n--- end partial ---\nTask is NOT finished. Continue with: `exec:sleep\\n{tid}` (block until next output chunk), `exec:wait\\n<seconds>` (pure timer), `exec:status\\n{tid}` (poll), or `exec:close\\n{tid}` (terminate). Streams keep growing at: {out}, {err}. Metadata will land at: {meta} once complete.",
-                    tid = task_id, body = body, out = out_disp, err = err_disp, meta = meta_disp
-                )
-            };
-            return Some((msg, total_len > MIN_OUTPUT_LEN));
+        if iter % 30 == 0 {
+            rs_exec::obs::event("hook", "post-tool-use.spool-poll", serde_json::json!({
+                "task_id": task_id,
+                "iter": iter,
+                "elapsed_ms": now.duration_since(started).as_millis() as u64,
+            }));
         }
 
         std::thread::sleep(Duration::from_millis(SPOOL_POLL_INTERVAL_MS));
@@ -152,7 +171,16 @@ pub fn run() {
     rs_exec::obs::event("hook", "post-tool-use.tool", serde_json::json!({ "tool_name": tool_name, "out_len": tool_output.len() }));
 
     if tool_name == "Write" {
-        if let Some((msg, should_count)) = handle_write(tool_input) {
+        let ti = tool_input.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || handle_write(&ti)));
+        let handled = match result {
+            Ok(opt) => opt,
+            Err(_) => {
+                rs_exec::obs::event("hook", "post-tool-use.handle-write-panic", serde_json::json!({}));
+                Some((format!("[exec — internal error during post-tool-use poll; task may still be running]"), false))
+            }
+        };
+        if let Some((msg, should_count)) = handled {
             println!("{}", serde_json::json!({ "systemMessage": msg }));
             if should_count {
                 let project = super::project_dir().unwrap_or_default();

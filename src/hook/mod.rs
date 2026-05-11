@@ -315,7 +315,7 @@ fn run_self_inner(args: &[&str]) -> String {
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
-                    let _ = child.wait();
+                    drop(child);
                     return format!("Error: exec timed out after {}s", timeout.as_secs());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));

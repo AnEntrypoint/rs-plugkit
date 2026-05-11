@@ -1,4 +1,4 @@
-use super::{project_dir, run_self};
+use super::project_dir;
 use serde_json::json;
 use std::fs;
 
@@ -16,14 +16,10 @@ pub fn run() {
     write_needs_gm_if_gm_project(project.as_deref());
 
     if let Some(ref dir) = project {
-        let insight = {
-            let cached = run_self(&["codeinsight", dir, "--read-cache"]);
-            if cached.is_empty() || cached.starts_with("No cache") || cached.starts_with("Error") {
-                run_self(&["codeinsight", dir, "--cache"])
-            } else {
-                cached
-            }
-        };
+        let insight = run_self_with_timeout(&["codeinsight", dir, "--read-cache"], std::time::Duration::from_millis(1500));
+        if insight.is_empty() || insight.starts_with("No cache") || insight.starts_with("Error") {
+            spawn_codeinsight_rebuild(dir.clone());
+        }
 
         let mut context_parts: Vec<String> = Vec::new();
 
@@ -35,7 +31,7 @@ pub fn run() {
         }
 
         let recall_q = super::rs_learn::project_query(dir);
-        let recall = super::rs_learn::recall(&recall_q, dir, 3);
+        let recall = recall_with_short_timeout(&recall_q, dir);
         if !recall.is_empty() {
             context_parts.push(format!(
                 "=== rs-learn recall (project memory — past decisions, feedback, and lessons) ===\n{}",
@@ -60,6 +56,53 @@ pub fn run() {
     } else {
         println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": "" })).unwrap_or_default());
     }
+}
+
+fn run_self_with_timeout(args: &[&str], timeout: std::time::Duration) -> String {
+    use std::sync::mpsc;
+    let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let borrowed: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+        let out = super::run_self(&borrowed);
+        let _ = tx.send(out);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(s) => s,
+        Err(_) => String::new(),
+    }
+}
+
+fn spawn_codeinsight_rebuild(dir: String) {
+    std::thread::spawn(move || {
+        let plugkit = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => super::plugkit_bin(),
+        };
+        let mut cmd = super::no_window_cmd(plugkit);
+        cmd.arg("codeinsight").arg(&dir).arg("--cache");
+        cmd.stdin(std::process::Stdio::null())
+           .stdout(std::process::Stdio::null())
+           .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000 | 0x00000008 | 0x00000200);
+        }
+        let _ = cmd.spawn();
+    });
+}
+
+fn recall_with_short_timeout(query: &str, dir: &str) -> String {
+    use std::sync::mpsc;
+    let q = query.to_string();
+    let d = dir.to_string();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let out = super::rs_learn::recall(&q, &d, 3);
+        let _ = tx.send(out);
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(1500)).unwrap_or_default()
 }
 
 fn start_exec_spool() {
