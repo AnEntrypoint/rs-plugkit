@@ -3,7 +3,6 @@ use serde_json::json;
 use std::{env, io::Read};
 
 pub fn run() {
-    let _ = std::panic::catch_unwind(|| super::session_start::start_exec_spool());
     let mut stdin = String::new();
     let _ = std::io::stdin().read_to_string(&mut stdin);
     let prompt = serde_json::from_str::<serde_json::Value>(&stdin)
@@ -75,13 +74,17 @@ pub fn run() {
         let dir_for_prd = dir.clone();
         let prompt_for_subagent = prompt.clone();
 
-        let search_handle = if !prompt.is_empty() {
-            Some(std::thread::spawn(move || {
-                run_self(&["search", "--path", &dir_for_search, &prompt_for_search])
-            }))
+        use std::sync::mpsc;
+        let search_rx = if !prompt.is_empty() {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(run_self(&["search", "--path", &dir_for_search, &prompt_for_search]));
+            });
+            Some(rx)
         } else { None };
-        let insight_handle = std::thread::spawn(move || {
-            run_self(&["codeinsight", &dir_for_insight])
+        let (insight_tx, insight_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = insight_tx.send(run_self(&["codeinsight", &dir_for_insight, "--read-cache"]));
         });
 
         let mut context_parts: Vec<String> = Vec::new();
@@ -89,12 +92,25 @@ pub fn run() {
         if !prompt.is_empty() {
             let recall_q = super::rs_learn::short_recall_query(&prompt, dir);
             let proj_q = super::rs_learn::project_query(dir);
-            let recall = super::rs_learn::recall_enabled(&recall_q, dir, 5);
-            let proj_recall = if proj_q != recall_q {
-                super::rs_learn::recall_enabled(&proj_q, dir, 3)
-            } else {
-                String::new()
-            };
+            let recall_q_clone = recall_q.clone();
+            let proj_q_clone = proj_q.clone();
+            let dir_for_recall = dir.clone();
+            let dir_for_proj_recall = dir.clone();
+            let (r1_tx, r1_rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = r1_tx.send(super::rs_learn::recall_enabled(&recall_q_clone, &dir_for_recall, 5));
+            });
+            let (r2_tx, r2_rx) = mpsc::channel();
+            let do_proj = proj_q != recall_q;
+            std::thread::spawn(move || {
+                let _ = r2_tx.send(if do_proj {
+                    super::rs_learn::recall_enabled(&proj_q_clone, &dir_for_proj_recall, 3)
+                } else {
+                    String::new()
+                });
+            });
+            let recall = r1_rx.recv_timeout(std::time::Duration::from_millis(1500)).unwrap_or_default();
+            let proj_recall = r2_rx.recv_timeout(std::time::Duration::from_millis(1500)).unwrap_or_default();
             let combined = match (recall.is_empty(), proj_recall.is_empty()) {
                 (false, false) => format!("{}\n\n---\n{}", recall, proj_recall),
                 (false, true) => recall,
@@ -102,8 +118,8 @@ pub fn run() {
                 (true, true) => String::new(),
             };
 
-            if let Some(h) = search_handle {
-                let search_out = h.join().unwrap_or_default();
+            if let Some(rx) = search_rx {
+                let search_out = rx.recv_timeout(std::time::Duration::from_millis(2000)).unwrap_or_default();
                 if !search_out.is_empty() {
                     context_parts.push(format!("=== search ===\n{}", search_out));
                 }
@@ -113,12 +129,20 @@ pub fn run() {
             }
         }
 
-        let insight = insight_handle.join().unwrap_or_default();
-        if !insight.is_empty() {
+        let insight = insight_rx.recv_timeout(std::time::Duration::from_millis(2000)).unwrap_or_default();
+        if !insight.is_empty() && !insight.starts_with("Error") && !insight.starts_with("No cache") {
             context_parts.push(format!("=== codeinsight ===\n{}", insight));
         }
 
-        super::rs_learn::tick_and_maybe_run_deep_cycles(dir);
+        // Bound deep-cycles work to 500ms; it usually returns near-instantly.
+        // If it overruns, the thread continues in background; hook just doesn't wait.
+        let dir_for_tick = dir.clone();
+        let (tick_tx, tick_rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            super::rs_learn::tick_and_maybe_run_deep_cycles(&dir_for_tick);
+            let _ = tick_tx.send(());
+        });
+        let _ = tick_rx.recv_timeout(std::time::Duration::from_millis(500));
 
         let prd_path = std::path::Path::new(&dir_for_prd).join(".gm").join("prd.yml");
         let workspace_context = context_parts.join("\n\n");
