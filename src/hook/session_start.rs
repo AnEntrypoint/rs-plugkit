@@ -151,22 +151,31 @@ pub fn start_exec_spool() {
 
     let plugkit = super::plugkit_bin();
     // On Windows, Rust's Command::spawn (even with DETACHED_PROCESS) keeps the
-    // child's stdio handles inheritable from the parent's console — CC's hook
-    // runner waits for those handles to close before considering the hook
-    // finished. The watcher is long-lived so CC hangs forever. Workaround:
-    // use `cmd /c start /B` which uses CreateProcess with NO_INHERIT_HANDLES
-    // and reparents the child outside the parent's console group.
+    // child's stdio handles inheritable from CC's hook-runner console — CC waits
+    // for the watcher daemon's stdio to close before considering the hook done.
+    // `cmd /c start /B` allocates a visible terminal in console-less parents.
+    // Canonical Windows detach: PowerShell `Start-Process -WindowStyle Hidden`
+    // which calls CreateProcess with NO_INHERIT_HANDLES and `SW_HIDE`.
     #[cfg(windows)]
     let spawn_result = {
-        let mut cmd = super::no_window_cmd("cmd.exe");
-        cmd.arg("/c").arg("start").arg("/B").arg("").arg(&plugkit).arg("spool");
-        cmd.env("RS_EXEC_SPOOL_DIR", &spool_dir);
-        cmd.env("PLUGKIT_VERSION", env!("CARGO_PKG_VERSION"));
+        let plugkit_str = plugkit.to_string_lossy().to_string();
+        let spool_dir_str = spool_dir.to_string_lossy().to_string();
+        let version_str = env!("CARGO_PKG_VERSION");
+        let ps_script = format!(
+            "$env:RS_EXEC_SPOOL_DIR='{}'; $env:PLUGKIT_VERSION='{}'; \
+             Start-Process -FilePath '{}' -ArgumentList 'spool' \
+                -WindowStyle Hidden",
+            spool_dir_str.replace('\'', "''"),
+            version_str,
+            plugkit_str.replace('\'', "''"),
+        );
+        let mut cmd = super::no_window_cmd("powershell.exe");
+        cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps_script]);
         cmd.stdin(std::process::Stdio::null())
            .stdout(std::process::Stdio::null())
            .stderr(std::process::Stdio::null());
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000 | 0x00000008 | 0x00000200);
+        cmd.creation_flags(0x08000000);
         cmd.spawn()
     };
     #[cfg(not(windows))]

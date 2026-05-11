@@ -125,13 +125,20 @@ pub fn check_and_dispatch() {
         Ok(p) => p,
         Err(_) => return,
     };
-    // Detach via cmd /c start /B on Windows (same reason as session_start watcher
-    // spawn: Rust Command::spawn keeps child in parent's console group).
+    // Detach via PowerShell Start-Process -WindowStyle Hidden on Windows
+    // (cmd /c start /B opened a visible terminal when parent has no console).
     #[cfg(windows)]
     {
-        let mut cmd = Command::new("cmd.exe");
-        cmd.arg("/c").arg("start").arg("/B").arg("")
-            .arg(&exe).arg("--self-update").arg(&pinned);
+        let exe_str = exe.to_string_lossy().to_string();
+        let pinned_clone = pinned.clone();
+        let ps_script = format!(
+            "Start-Process -FilePath '{}' -ArgumentList '--self-update','{}' \
+                -WindowStyle Hidden",
+            exe_str.replace('\'', "''"),
+            pinned_clone.replace('\'', "''"),
+        );
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps_script]);
         cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         no_window(&mut cmd);
         let _ = cmd.spawn();
