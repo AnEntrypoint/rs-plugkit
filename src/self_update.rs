@@ -107,8 +107,16 @@ pub fn check_and_dispatch() {
         Err(_) => return,
     };
     if pinned.is_empty() { return; }
-    let current = env!("CARGO_PKG_VERSION").to_string();
-    if pinned == current { return; }
+
+    // Compare BY SHA, not by --version string. Release tags advance faster than
+    // Cargo.toml's CARGO_PKG_VERSION (the publisher auto-bumps the tag without
+    // a matching source bump), so a tag-vs-self mismatch is the norm — but if
+    // the binary's own sha already matches the manifest entry for the pinned
+    // platform, we're already running the pinned binary. Skip update.
+    if running_binary_matches_manifest() { return; }
+
+    // Skip if local already cached identical .new matching pinned sha.
+    if pending_new_valid(&pinned) { return; }
 
     // Single-instance: only spawn updater if no live updater is in flight.
     if updater_in_flight() { return; }
@@ -117,11 +125,60 @@ pub fn check_and_dispatch() {
         Ok(p) => p,
         Err(_) => return,
     };
-    let mut cmd = Command::new(&exe);
-    cmd.arg("--self-update").arg(&pinned);
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    no_window(&mut cmd);
-    let _ = cmd.spawn();
+    // Detach via cmd /c start /B on Windows (same reason as session_start watcher
+    // spawn: Rust Command::spawn keeps child in parent's console group).
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("cmd.exe");
+        cmd.arg("/c").arg("start").arg("/B").arg("")
+            .arg(&exe).arg("--self-update").arg(&pinned);
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        no_window(&mut cmd);
+        let _ = cmd.spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = Command::new(&exe);
+        cmd.arg("--self-update").arg(&pinned);
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        no_window(&mut cmd);
+        let _ = cmd.spawn();
+    }
+}
+
+fn running_binary_matches_manifest() -> bool {
+    let exe = match std::env::current_exe() { Ok(p) => p, Err(_) => return false };
+    let manifest = match std::fs::read_to_string(tools_dir().join("plugkit.sha256")) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let asset = platform_asset();
+    let expected = match parse_sha_manifest(&manifest, asset) {
+        Some(h) => h,
+        None => return false,
+    };
+    match sha256_of(&exe) {
+        Some(h) => h == expected,
+        None => false,
+    }
+}
+
+fn pending_new_valid(pinned: &str) -> bool {
+    let new_path = tools_dir().join(format!("plugkit.{}.new", pinned));
+    if !new_path.exists() { return false; }
+    let manifest = match std::fs::read_to_string(tools_dir().join("plugkit.sha256")) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let asset = platform_asset();
+    let expected = match parse_sha_manifest(&manifest, asset) {
+        Some(h) => h,
+        None => return false,
+    };
+    match sha256_of(&new_path) {
+        Some(h) => h == expected,
+        None => false,
+    }
 }
 
 fn updater_lock_path() -> PathBuf {
