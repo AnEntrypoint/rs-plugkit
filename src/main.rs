@@ -1084,6 +1084,7 @@ async fn main() {
                 }
             }
             Some(Cmd::Spool { once }) => {
+                std::env::set_var("PLUGKIT_VERSION", env!("CARGO_PKG_VERSION"));
                 if once { rs_exec::spool::watch_once(); } else { rs_exec::spool::run_daemon(); }
             }
             Some(Cmd::Hook { event }) => {

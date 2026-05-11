@@ -92,6 +92,15 @@ fn start_exec_spool() {
     let mut cmd = super::no_window_cmd(plugkit);
     cmd.arg("spool");
     cmd.env("RS_EXEC_SPOOL_DIR", &spool_dir);
+    cmd.env("PLUGKIT_VERSION", env!("CARGO_PKG_VERSION"));
+    cmd.stdin(std::process::Stdio::null())
+       .stdout(std::process::Stdio::null())
+       .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000 | 0x00000008 | 0x00000200);
+    }
     let spawn_result = cmd.spawn();
     let (spawn_ok, spawn_error, watcher_pid) = match &spawn_result {
         Ok(child) => (true, String::new(), Some(child.id())),
