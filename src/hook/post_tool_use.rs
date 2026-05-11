@@ -184,7 +184,15 @@ pub fn run() {
             }
         };
         if let Some((msg, should_count)) = handled {
-            println!("{}", serde_json::json!({ "systemMessage": msg }));
+            // Every spool dispatch: remind agent of other running tasks in this session.
+            let session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_default();
+            let running = super::running_tasks_summary(&session_id);
+            let final_msg = if running.is_empty() {
+                msg
+            } else {
+                format!("{}\n\n{}", msg, running)
+            };
+            println!("{}", serde_json::json!({ "systemMessage": final_msg }));
             if should_count {
                 let project = super::project_dir().unwrap_or_default();
                 if !project.is_empty() {
