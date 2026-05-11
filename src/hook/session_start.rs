@@ -150,19 +150,36 @@ pub fn start_exec_spool() {
     let _ = fs::remove_file(&pid_file);
 
     let plugkit = super::plugkit_bin();
-    let mut cmd = super::no_window_cmd(plugkit);
-    cmd.arg("spool");
-    cmd.env("RS_EXEC_SPOOL_DIR", &spool_dir);
-    cmd.env("PLUGKIT_VERSION", env!("CARGO_PKG_VERSION"));
-    cmd.stdin(std::process::Stdio::null())
-       .stdout(std::process::Stdio::null())
-       .stderr(std::process::Stdio::null());
+    // On Windows, Rust's Command::spawn (even with DETACHED_PROCESS) keeps the
+    // child's stdio handles inheritable from the parent's console — CC's hook
+    // runner waits for those handles to close before considering the hook
+    // finished. The watcher is long-lived so CC hangs forever. Workaround:
+    // use `cmd /c start /B` which uses CreateProcess with NO_INHERIT_HANDLES
+    // and reparents the child outside the parent's console group.
     #[cfg(windows)]
-    {
+    let spawn_result = {
+        let mut cmd = super::no_window_cmd("cmd.exe");
+        cmd.arg("/c").arg("start").arg("/B").arg("").arg(&plugkit).arg("spool");
+        cmd.env("RS_EXEC_SPOOL_DIR", &spool_dir);
+        cmd.env("PLUGKIT_VERSION", env!("CARGO_PKG_VERSION"));
+        cmd.stdin(std::process::Stdio::null())
+           .stdout(std::process::Stdio::null())
+           .stderr(std::process::Stdio::null());
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000 | 0x00000008 | 0x00000200);
-    }
-    let spawn_result = cmd.spawn();
+        cmd.spawn()
+    };
+    #[cfg(not(windows))]
+    let spawn_result = {
+        let mut cmd = super::no_window_cmd(&plugkit);
+        cmd.arg("spool");
+        cmd.env("RS_EXEC_SPOOL_DIR", &spool_dir);
+        cmd.env("PLUGKIT_VERSION", env!("CARGO_PKG_VERSION"));
+        cmd.stdin(std::process::Stdio::null())
+           .stdout(std::process::Stdio::null())
+           .stderr(std::process::Stdio::null());
+        cmd.spawn()
+    };
     let (spawn_ok, spawn_error, watcher_pid) = match &spawn_result {
         Ok(child) => (true, String::new(), Some(child.id())),
         Err(e) => (false, e.to_string(), None),
