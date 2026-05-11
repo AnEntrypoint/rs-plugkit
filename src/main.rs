@@ -1,4 +1,5 @@
 mod hook;
+mod self_update;
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -884,6 +885,17 @@ async fn main() {
         return;
     }
     rs_exec::install_broken_pipe_handler();
+
+    // Self-update entry point: detached child invoked by check_and_dispatch.
+    let args_vec: Vec<String> = env::args().collect();
+    if let Some(idx) = args_vec.iter().position(|a| a == "--self-update") {
+        if let Some(pinned) = args_vec.get(idx + 1) {
+            self_update::run_self_update(pinned);
+        }
+        return;
+    }
+    // Background check (non-blocking) — spawns detached updater if pin is newer.
+    self_update::check_and_dispatch();
 
     if env::args().any(|a| a == "--runner-mode") {
         rs_exec::runner::run_server().await.expect("Runner failed");
