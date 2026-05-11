@@ -406,7 +406,9 @@ let block = format!(
         base + &block
     };
 
-    let _ = fs::write(&gitignore, new_content);
+    if new_content != content {
+        let _ = fs::write(&gitignore, new_content);
+    }
 }
 
 fn ensure_trailing_newline(s: &str) -> String {
