@@ -135,6 +135,11 @@ pub fn start_exec_spool() {
 
     let pid_file = spool_dir.join(".watcher.pid");
     let hb_file = spool_dir.join(".watcher.heartbeat");
+    let session_file = spool_dir.join(".last-session-start.json");
+
+    if watcher_alive(&pid_file, &hb_file) && !watcher_version_matches(&session_file) {
+        kill_watcher(&pid_file);
+    }
 
     if !watcher_alive(&pid_file, &hb_file) {
         let _ = fs::remove_dir_all(spool_dir.join("in"));
@@ -251,6 +256,23 @@ fn watcher_alive(pid_file: &std::path::Path, hb_file: &std::path::Path) -> bool 
         }
     }
     false
+}
+
+fn watcher_version_matches(session_file: &std::path::Path) -> bool {
+    let current = env!("CARGO_PKG_VERSION");
+    let Ok(text) = fs::read_to_string(session_file) else { return true; };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return true; };
+    match v.get("plugkit_version").and_then(|x| x.as_str()) {
+        Some(recorded) => recorded == current,
+        None => true,
+    }
+}
+
+fn kill_watcher(pid_file: &std::path::Path) {
+    let Ok(pid_str) = fs::read_to_string(pid_file) else { return };
+    let Ok(pid) = pid_str.trim().parse::<u32>() else { return };
+    rs_exec::kill::kill_tree(pid);
+    let _ = fs::remove_file(pid_file);
 }
 
 fn pid_running(pid: u32) -> bool {
