@@ -6,7 +6,7 @@ use serde_json::json;
 use std::{env, fs, path::PathBuf, time::Duration};
 
 use rs_exec::{daemon, rpc_client};
-use rs_codeinsight::{analyze, AnalyzeOptions};
+use rs_codeinsight::{analyze, analyze_with_files, collect_files, compute_freshness_digest_from_files, config as codeinsight_config, AnalyzeOptions};
 use rs_search::{bm25, context, mcp as search_mcp, scanner};
 
 const RUNNER_NAME: &str = "plugkit-runner";
@@ -1058,7 +1058,9 @@ async fn main() {
                 let digest_path = root_path.join(".codeinsight.digest");
                 if read_cache {
                     let cached_digest = fs::read_to_string(&digest_path).unwrap_or_default();
-                    let live_digest = rs_codeinsight::compute_freshness_digest(root_path);
+                    let cfg = codeinsight_config::load_config(root_path);
+                    let files = collect_files(root_path, &cfg);
+                    let live_digest = compute_freshness_digest_from_files(root_path, &files);
                     if !cached_digest.trim().is_empty() && cached_digest.trim() == live_digest {
                         if let Ok(c) = fs::read_to_string(&cache_path) {
                             print!("{}", c);
@@ -1069,13 +1071,17 @@ async fn main() {
                             return Ok(());
                         }
                     }
-                    eprintln!("No cache found");
+                    let reason = if cached_digest.trim().is_empty() { "no_digest" } else { "digest_mismatch" };
+                    eprintln!("[codeinsight cache {}; running fresh analyze]", reason);
+                    let output = analyze_with_files(root_path, AnalyzeOptions { json_mode: json }, files);
+                    let _ = fs::write(&cache_path, &output.text);
+                    let _ = fs::write(&digest_path, &live_digest);
+                    print!("{}", output.text);
                     rs_exec::obs::event("rs_codeinsight", "analyze.end", serde_json::json!({
                         "root": root, "dur_ms": started.elapsed().as_millis() as u64,
-                        "out_len": 0, "source": "cache_miss", "ok": false,
-                        "reason": if cached_digest.trim().is_empty() { "no_digest" } else { "digest_mismatch" }
+                        "out_len": output.text.len(), "source": "fresh_after_miss", "reason": reason
                     }));
-                    exit_code = 1; return Ok(());
+                    return Ok(());
                 }
                 let output = analyze(root_path, AnalyzeOptions { json_mode: json });
                 println!("{}", output.text);
