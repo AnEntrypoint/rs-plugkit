@@ -7,6 +7,16 @@ on:
   pull_request:
     branches: [main]
     paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
+  workflow_dispatch:
+    inputs:
+      upstream_repo:
+        description: 'Upstream repo that triggered cascade (informational)'
+        required: false
+        default: ''
+      upstream_sha:
+        description: 'Upstream commit SHA (informational)'
+        required: false
+        default: ''
 
 concurrency:
   group: build-${{ github.ref }}

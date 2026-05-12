@@ -1,3 +1,7 @@
+## 2026-05-12 - ci(build): workflow_dispatch entrypoint for cascade smoke
+
+`.github/workflows/build.yml` now also fires on `workflow_dispatch` with optional `upstream_repo` and `upstream_sha` inputs so upstream repos (rs-exec) can dispatch a downstream build smoke on PR without invoking `release.yml` (which auto-bumps and publishes). Push-to-main behaviour unchanged.
+
 ## 2026-05-12 - rebuild trigger to ship rs-exec spool plugkit-discovery fix
 
 Force a non-`[skip ci]` build so the cascade rebuilds plugkit with the rs-exec change in commit 6fe3294 ("spool: fix plugkit discovery + code-file race"). Previous head was `chore: auto-bump version to 0.1.347 [skip ci]`, leaving deployed plugkit at 0.1.345/0.1.346 — versions whose `which_plugkit` resolves only `CLAUDE_PLUGIN_ROOT/bin/plugkit` and PATH, both empty under the gm-cc versioned-cache layout (`/root/.claude/gm-tools/plugkit` runs the watcher but is not on PATH). Symptom: every utility verb (codesearch, recall, memorize, status, health, ...) dispatched via `.gm/exec-spool/in/<verb>/N` resolved with `{"error":"plugkit not found in PATH","exitCode":-1}`. The patched `which_plugkit` adds `PLUGKIT_BIN` env, a `current_exe`-with-"plugkit"-substring match, and a last-resort `current_exe` return so the watcher's own ELF is the dispatch target whenever it embeds rs-exec.
