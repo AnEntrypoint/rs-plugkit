@@ -33,22 +33,8 @@ pub fn run_stop() {
         "pid": std::process::id(),
         "action": "fired",
     }));
-    let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
-    let open = if !session_id.is_empty() {
-        super::agent_browser::get_open_session_ids(&session_id)
-    } else {
-        vec![]
-    };
     let project_dir = env::var("CLAUDE_PROJECT_DIR")
         .unwrap_or_else(|_| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
-
-    if !open.is_empty() {
-        let ids = open.join(", ");
-        write_needs_gm(&project_dir);
-        let out = stop_block(format!("Open browser session(s): [{}]. Close them before stopping:\n  exec:browser\n  await page.close()\n\nOr use `exec:close` to clean up background tasks.\n\nHousekeeping policy: always close browser sessions and background tasks before ending a conversation.\n\nNEXT ACTION: invoke Skill(gm) first.", ids));
-        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
-        std::process::exit(2);
-    }
 
     let prd = std::path::Path::new(&project_dir).join(".gm").join("prd.yml");
 
