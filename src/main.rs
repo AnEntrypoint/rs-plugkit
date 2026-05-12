@@ -1054,9 +1054,13 @@ async fn main() {
                 rs_exec::obs::event("rs_codeinsight", "analyze.start", serde_json::json!({
                     "root": root, "json": json, "cache": cache, "read_cache": read_cache
                 }));
+                let cache_path = root_path.join(".codeinsight");
+                let digest_path = root_path.join(".codeinsight.digest");
                 if read_cache {
-                    match fs::read_to_string(root_path.join(".codeinsight")) {
-                        Ok(c) => {
+                    let cached_digest = fs::read_to_string(&digest_path).unwrap_or_default();
+                    let live_digest = rs_codeinsight::compute_freshness_digest(root_path);
+                    if !cached_digest.trim().is_empty() && cached_digest.trim() == live_digest {
+                        if let Ok(c) = fs::read_to_string(&cache_path) {
                             print!("{}", c);
                             rs_exec::obs::event("rs_codeinsight", "analyze.end", serde_json::json!({
                                 "root": root, "dur_ms": started.elapsed().as_millis() as u64,
@@ -1064,20 +1068,21 @@ async fn main() {
                             }));
                             return Ok(());
                         }
-                        Err(_) => {
-                            eprintln!("No cache found");
-                            rs_exec::obs::event("rs_codeinsight", "analyze.end", serde_json::json!({
-                                "root": root, "dur_ms": started.elapsed().as_millis() as u64,
-                                "out_len": 0, "source": "cache_miss", "ok": false
-                            }));
-                            exit_code = 1; return Ok(());
-                        }
                     }
+                    eprintln!("No cache found");
+                    rs_exec::obs::event("rs_codeinsight", "analyze.end", serde_json::json!({
+                        "root": root, "dur_ms": started.elapsed().as_millis() as u64,
+                        "out_len": 0, "source": "cache_miss", "ok": false,
+                        "reason": if cached_digest.trim().is_empty() { "no_digest" } else { "digest_mismatch" }
+                    }));
+                    exit_code = 1; return Ok(());
                 }
                 let output = analyze(root_path, AnalyzeOptions { json_mode: json });
                 println!("{}", output.text);
                 if cache {
-                    let _ = fs::write(root_path.join(".codeinsight"), &output.text);
+                    let live_digest = rs_codeinsight::compute_freshness_digest(root_path);
+                    let _ = fs::write(&cache_path, &output.text);
+                    let _ = fs::write(&digest_path, &live_digest);
                 }
                 rs_exec::obs::event("rs_codeinsight", "analyze.end", serde_json::json!({
                     "root": root, "dur_ms": started.elapsed().as_millis() as u64,
