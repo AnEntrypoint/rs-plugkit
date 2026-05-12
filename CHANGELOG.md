@@ -1,3 +1,15 @@
+## 2026-05-12 - session_start: kill+respawn watcher when plugkit version changed
+
+`hook/session_start.rs::start_exec_spool` now compares the running watcher's
+recorded `plugkit_version` (from `.gm/exec-spool/.last-session-start.json`)
+against `CARGO_PKG_VERSION` of the spawning binary. On mismatch the watcher
+PID is killed via `rs_exec::kill::kill_tree` and a fresh watcher is spawned
+under the new binary. Without this, a long-lived session keeps an old watcher
+process executing old `spool.rs` code (notably the pending-vs-work-dir code-file
+race fixed in rs-exec 6fe3294) even after the on-disk binary is upgraded by
+`try_promote_pending`. New-session watcher version now always matches the
+binary running the hook.
+
 ## 2026-05-12 - ci(build): workflow_dispatch entrypoint for cascade smoke
 
 `.github/workflows/build.yml` now also fires on `workflow_dispatch` with optional `upstream_repo` and `upstream_sha` inputs so upstream repos (rs-exec) can dispatch a downstream build smoke on PR without invoking `release.yml` (which auto-bumps and publishes). Push-to-main behaviour unchanged.
