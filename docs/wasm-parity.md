@@ -183,3 +183,25 @@ Implication: thebird's settings UI is the primary key authority for the github.i
 | Total | ~34 engineer-days |
 
 Total fits 6-8 calendar weeks for a single engineer assuming CI cycles allowing one merged PR per leaf per day.
+
+## Reachable in this session vs deferred
+
+Status as of 2026-05-13 (rs-plugkit v0.1.364 / plugkit.wasm 296010B):
+
+Reachable and landed:
+
+- `wasm_hooks` (`src/lib.rs`) routes every marker / `.gm/*.yml` read+write through `wasm_dispatch::host_{read,write,exists}`, replacing the prior `std::fs::*` calls that silently no-op under the freddie-host WASI stub. PRD gate, mutables gate, needs-gm marker, residual-scan, lastskill — all real in browser.
+- `wasm_dispatch.rs` extern block carries all 16 host imports (`host_fs_{read,write,readdir,stat}`, `host_fetch`, `host_env_get`, `host_kv_{get,put,query}`, `host_vec_search`, `host_browser_{spawn,eval,close}`, `host_log`, `host_now_ms`, `host_exec_js`). `dispatch_verb` table maps 20+ verbs onto them.
+- `recall` / `memorize` / `codesearch` route entirely through host imports — no `rs_learn::Learn::new()` or `rs_search::Searcher` pull-in needed on the wasm path.
+- `freddie-host.js::makeGmEnvImports` is a real impl backed by `instance.fs` (per-instance IndexedDB-snapshot fs), a `plugkit-wasm` IndexedDB `kv` store seeded into an in-memory map at boot for sync access, `window.fetch` via the queued-tasktoken+outbox pattern, a hidden iframe pool for `host_browser_*`, and `Function()` eval for `host_exec_js`. `host_env_get` reads `localStorage.agent_keys` then falls back to `fs.getConfig().env`.
+- `window.__debug.gm` exposes `dispatch(verb, body)` plus shortcuts `recall`, `memorize`, `codesearch`, `fs_{read,write,stat,readdir}`, `env_get`, `browser_{spawn,eval,close}`, `kv.{map,db}`, `lastHook`, `trajectory`, `logs`. The `gm` freddie tool accepts `{verb, body}` for LLM-driven dispatch alongside the original `{hook, payload}` path.
+- Browser e2e witnessed live at `https://anentrypoint.github.io/thebird/app/`: real recall hits scored by host_vec_search, real codesearch arrays, hook_stop returning `{decision:"block",...}` with real residual-scan reason text (proving wasm_hooks marker reads land), hook_user_prompt_submit returning hookSpecificOutput.additionalContext, hook_pre_tool_use returning permissionDecision based on needs-gm marker.
+
+Deferred to follow-on PRs (genuinely out of single-session reach):
+
+- Full libsql-in-wasm port for `rs-learn`. Current wasm path uses linear-scan `host_kv_query` and dot-product `host_vec_search` over a JS-side bucket. Adequate for hundreds-of-facts scale; libsql-vector at thousands-of-facts is the production target.
+- Candle-in-wasm vector embeddings. Today embeddings are supplied externally (transformers.js or a remote endpoint); `host_vec_search` accepts a precomputed `embedding` field. Wiring transformers.js into the freddie boot path is its own 2-day item.
+- Asyncify rewrite of `plugsdk/src/browser.js::syncify`. The plugsdk browser loader still throws on async host imports. thebird sidesteps this by wiring the wasm directly in `freddie-host.js::loadGmThebirdPlugin`; the plugsdk surface itself remains the documented future refactor.
+- COOP/COEP headers for SharedArrayBuffer on github.io. github.io does not let users set response headers, so the wasm parity ships on non-shared atomics only. A custom-domain Cloudflare Worker is the planned escape hatch.
+- Browser-side python/bash verbs. The dispatch table rejects them with "verb unavailable in browser; use exec:nodejs or host-side dispatch". Pyodide for python is a candidate (~10MB cost); bash sandboxing in-browser is unsolved upstream.
+- rs-exec spool watcher in wasm. Today the verbs that target the spool watcher (status, wait, sleep, close, kill-port, forget, feedback, learn-*, discipline, pause, runner, type, browser) all reject in browser. A wasm-side spool would re-implement the inbox/outbox loop over `host_kv_query("inbox")` — order of 4 engineer-days per the table above.
