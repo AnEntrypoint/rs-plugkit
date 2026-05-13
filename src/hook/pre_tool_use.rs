@@ -149,8 +149,12 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
         let fp = tool_input["file_path"].as_str().unwrap_or("").replace('\\', "/");
         fp.ends_with(".gm/mutables.yml") || fp.ends_with(".gm/prd.yml") || fp.ends_with(".gm/no-memorize-this-turn")
     };
+    let is_spool_write = matches!(tool_name, "Write" | "Edit" | "NotebookEdit" | "write_file") && {
+        let fp = tool_input["file_path"].as_str().unwrap_or("").replace('\\', "/");
+        fp.contains(".gm/exec-spool/in/") || fp.contains(".gm/exec-spool/.")
+    };
     let no_memo = gm_dir.join("no-memorize-this-turn");
-    if !no_memo.exists() && !is_no_memo_write && !is_mutables_or_prd_write {
+    if !no_memo.exists() && !is_no_memo_write && !is_mutables_or_prd_write && !is_spool_write {
         let ts_path = gm_dir.join("turn-state.json");
         if let Some(counter) = read_counter(&ts_path) {
             if counter >= 10 {
@@ -170,7 +174,7 @@ fn needs_gm_and_skill_tracking(tool_name: &str, tool_input: &Value) -> Option<Va
         let cmd = tool_input["command"].as_str().unwrap_or("");
         cmd.contains("git commit") || cmd.contains("git push") || cmd.contains("git.exe commit") || cmd.contains("git.exe push")
     };
-    if (is_file_edit && !is_mutables_or_prd_write) || is_git_mutating_bash {
+    if (is_file_edit && !is_mutables_or_prd_write && !is_spool_write) || is_git_mutating_bash {
         let mutables_path = gm_dir.join("mutables.yml");
         if mutables_path.exists() {
             if let Ok(raw) = std::fs::read_to_string(&mutables_path) {
