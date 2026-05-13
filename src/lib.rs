@@ -11,7 +11,9 @@ pub use rs_exec::runtime;
 
 pub use rs_codeinsight::{analyze, collect_files, matches_ignore_pattern, AnalyzeOptions, AnalysisOutput};
 
-pub use rs_search::{bm25, context, run_search, scanner};
+pub use rs_search::{bm25, context, scanner};
+#[cfg(not(target_arch = "wasm32"))]
+pub use rs_search::run_search;
 #[cfg(not(target_arch = "wasm32"))]
 pub use rs_search::mcp as search_mcp;
 
