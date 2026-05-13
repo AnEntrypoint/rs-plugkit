@@ -1129,30 +1129,22 @@ async fn main() {
                     exit_code = 1;
                     return Ok(());
                 }
-                let pw = hook::find_playwriter();
-                let resolved_session = match session {
-                    Some(s) => s,
-                    None => {
-                        let out = std::process::Command::new(&pw)
-                            .args(["session", "new", "--direct"])
-                            .output();
-                        match out {
-                            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-                            Ok(o) => { eprintln!("[browser] session new failed: {}", String::from_utf8_lossy(&o.stderr)); std::process::exit(1); }
-                            Err(e) => { eprintln!("[browser] session new spawn failed: {} (binary: {})", e, pw); std::process::exit(1); }
+                let cwd_str = cwd.unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| ".".into()));
+                let session_id = session.unwrap_or_else(|| std::env::var("CLAUDE_SESSION_ID").or_else(|_| std::env::var("GM_SESSION_ID")).unwrap_or_else(|_| "default".into()));
+                match rs_exec::runtime::spawn_process("browser", &body, &cwd_str, &session_id) {
+                    Ok(mut spawn) => {
+                        if let Some(mut stdout) = spawn.child.stdout.take() {
+                            std::thread::spawn(move || { let _ = std::io::copy(&mut stdout, &mut std::io::stdout()); });
+                        }
+                        if let Some(mut stderr) = spawn.child.stderr.take() {
+                            std::thread::spawn(move || { let _ = std::io::copy(&mut stderr, &mut std::io::stderr()); });
+                        }
+                        match spawn.child.wait() {
+                            Ok(s) => { exit_code = s.code().unwrap_or(0); }
+                            Err(e) => { eprintln!("[browser] wait failed: {}", e); exit_code = 1; }
                         }
                     }
-                };
-                let mut command = std::process::Command::new(&pw);
-                command.arg("-s").arg(&resolved_session)
-                       .arg("--timeout").arg("14000")
-                       .arg("-e").arg(&body);
-                if let Some(c) = cwd.as_ref() { command.current_dir(c); }
-                command.stdout(std::process::Stdio::inherit());
-                command.stderr(std::process::Stdio::inherit());
-                match command.status() {
-                    Ok(s) => { exit_code = s.code().unwrap_or(0); }
-                    Err(e) => { eprintln!("playwriter exec failed: {} (binary: {})", e, pw); exit_code = 1; }
+                    Err(e) => { eprintln!("[browser] spawn failed: {}", e); exit_code = 1; }
                 }
             }
             Some(Cmd::Hook { event }) => {
