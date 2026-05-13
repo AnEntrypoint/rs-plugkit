@@ -16,6 +16,9 @@ pub use rs_search::{bm25, context, run_search, scanner};
 pub use rs_search::mcp as search_mcp;
 
 #[cfg(target_arch = "wasm32")]
+pub mod wasm_dispatch;
+
+#[cfg(target_arch = "wasm32")]
 #[no_mangle]
 pub extern "C" fn plugkit_version() -> *const u8 {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr()
