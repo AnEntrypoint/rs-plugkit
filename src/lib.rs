@@ -61,41 +61,28 @@ fn read_input(ptr: *const u8, len: usize) -> serde_json::Value {
 #[cfg(target_arch = "wasm32")]
 mod wasm_hooks {
     use serde_json::{json, Value};
-    use std::path::PathBuf;
+    use crate::wasm_dispatch::{host_read, host_write, host_exists};
 
-    pub fn project_dir() -> Option<PathBuf> {
-        std::env::var("CLAUDE_PROJECT_DIR").ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::current_dir().ok())
-    }
-
-    pub fn gm_dir() -> Option<PathBuf> {
-        project_dir().map(|p| p.join(".gm"))
-    }
-
-    pub fn ensure_gm_dir() -> Option<PathBuf> {
-        let d = gm_dir()?;
-        let _ = std::fs::create_dir_all(&d);
-        Some(d)
+    fn path_for(name: &str) -> String {
+        format!(".gm/{}", name)
     }
 
     pub fn read_marker(name: &str) -> bool {
-        gm_dir().map(|d| d.join(name).exists()).unwrap_or(false)
+        let _ = host_exists;
+        let s = host_read(&path_for(name)).unwrap_or_default();
+        !s.is_empty()
     }
 
     pub fn write_marker(name: &str) {
-        if let Some(d) = ensure_gm_dir() { let _ = std::fs::write(d.join(name), "1"); }
+        let _ = host_write(&path_for(name), "1");
     }
 
     pub fn clear_marker(name: &str) {
-        if let Some(d) = gm_dir() { let _ = std::fs::remove_file(d.join(name)); }
+        let _ = host_write(&path_for(name), "");
     }
 
     pub fn read_file(name: &str) -> String {
-        gm_dir()
-            .and_then(|d| std::fs::read_to_string(d.join(name)).ok())
-            .unwrap_or_default()
+        host_read(&path_for(name)).unwrap_or_default()
     }
 
     pub fn pre_tool_use(input: &Value) -> Value {
@@ -136,7 +123,7 @@ mod wasm_hooks {
         if tool_name == "Skill" {
             let skill = input.get("tool_input").and_then(|v| v.get("skill")).and_then(|v| v.as_str()).unwrap_or("");
             if !skill.is_empty() {
-                if let Some(d) = ensure_gm_dir() { let _ = std::fs::write(d.join("lastskill"), skill); }
+                let _ = host_write(&path_for("lastskill"), skill);
             }
         }
         json!({ "continue": true })
@@ -159,7 +146,7 @@ mod wasm_hooks {
         clear_marker("gm-fired-this-turn");
         clear_marker("residual-check-fired");
         clear_marker("needs-gm");
-        if let Some(d) = gm_dir() { let _ = std::fs::write(d.join("turn-state.json"), "{}"); }
+        let _ = host_write(&path_for("turn-state.json"), "{}");
         json!({ "continue": true })
     }
 
