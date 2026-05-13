@@ -696,6 +696,28 @@ fn handle_exec(raw_lang: &str, code: &str, cwd: Option<&str>, session_id: &str) 
             if !compound_key.is_empty() { cmd.push_str(&format!(" --session={}", shell_quote(&compound_key))); }
             return delegate_with_drain(&cmd, &compound_key);
         }
+        "browser" => {
+            // exec:browser <js> — body is JS run inside a persistent playwriter
+            // session bound to this claude session. Globals: page, snapshot,
+            // screenshotWithAccessibilityLabels, state.
+            let body = safe_code.trim();
+            if body.is_empty() {
+                return deny("exec:browser requires JavaScript to run.\n\n  exec:browser\n  await page.goto('https://example.com')\n\nGlobals: page, snapshot, screenshotWithAccessibilityLabels, state. The playwriter session persists across exec:browser calls in the same claude session.");
+            }
+            // Persist code to a temp file so multi-line bodies survive bash quoting.
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+            let tmp = std::env::temp_dir().join(format!("plugkit-browser-{}.js", ts));
+            let _ = std::fs::write(&tmp, body);
+            let tmp_unix = to_unix_path(&tmp.to_string_lossy());
+            let pw = super::find_playwriter();
+            let session_arg = if !compound_key.is_empty() {
+                format!(" --session={}", shell_quote(&compound_key))
+            } else {
+                String::new()
+            };
+            let cmd = format!("{} exec{} --file {}", shell_quote(&pw), session_arg, shell_quote(&tmp_unix));
+            return delegate_with_drain(&cmd, &compound_key);
+        }
         "wait" => {
             let body = safe_code.trim();
             let secs: u64 = body.parse().unwrap_or(0);

@@ -69,6 +69,15 @@ enum Cmd {
     Spool {
         #[arg(long)] once: bool,
     },
+    /// Browser automation via playwriter. Forwards JS body to playwriter exec.
+    /// Used by the spool's in/browser/<N>.js path. Globals available to the
+    /// body: page, snapshot, screenshotWithAccessibilityLabels, state.
+    Browser {
+        /// JS body to run (single positional arg; spool passes the file content here).
+        code: Vec<String>,
+        #[arg(long)] session: Option<String>,
+        #[arg(long)] cwd: Option<String>,
+    },
     /// Wait for a background task to produce new output (or finish). Polls listTasks.
     Sleep {
         task_id: String,
@@ -1112,6 +1121,36 @@ async fn main() {
             Some(Cmd::Spool { once }) => {
                 std::env::set_var("PLUGKIT_VERSION", env!("CARGO_PKG_VERSION"));
                 if once { rs_exec::spool::watch_once(); } else { rs_exec::spool::run_daemon(); }
+            }
+            Some(Cmd::Browser { code, session, cwd }) => {
+                // Forward JS body to playwriter. The body arrives as a single arg
+                // (the spool reads the file and passes its full content here).
+                let body = code.join(" ");
+                if body.trim().is_empty() {
+                    eprintln!("usage: plugkit browser <js>  (body required; use in/browser/<N>.js)");
+                    exit_code = 1;
+                    return Ok(());
+                }
+                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+                let tmp = std::env::temp_dir().join(format!("plugkit-browser-{}.js", ts));
+                if let Err(e) = std::fs::write(&tmp, &body) {
+                    eprintln!("failed to write temp js: {}", e);
+                    exit_code = 1;
+                    return Ok(());
+                }
+                let pw = hook::find_playwriter();
+                let mut command = std::process::Command::new(&pw);
+                command.arg("exec");
+                if let Some(s) = session.as_ref() { command.arg(format!("--session={}", s)); }
+                command.arg("--file").arg(&tmp);
+                if let Some(c) = cwd.as_ref() { command.current_dir(c); }
+                command.stdout(std::process::Stdio::inherit());
+                command.stderr(std::process::Stdio::inherit());
+                match command.status() {
+                    Ok(s) => { exit_code = s.code().unwrap_or(0); }
+                    Err(e) => { eprintln!("playwriter exec failed: {} (binary: {})", e, pw); exit_code = 1; }
+                }
+                let _ = std::fs::remove_file(&tmp);
             }
             Some(Cmd::Hook { event }) => {
                 let ev = event.as_str();
