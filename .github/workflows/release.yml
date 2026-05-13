@@ -193,6 +193,9 @@ jobs:
           export AR_wasm32_wasip1=$HOME/wasi-sdk/bin/llvm-ar
           export CFLAGS_wasm32_wasip1=--sysroot=$HOME/wasi-sdk/share/wasi-sysroot
           cd rs-plugkit-src
+          rm -rf ~/.cargo/git/db ~/.cargo/git/checkouts || true
+          rm -f Cargo.lock
+          cargo generate-lockfile
           cargo build --release --target wasm32-wasip1 --no-default-features --features wasm --lib
           mkdir -p ../bins/plugkit-wasm
           cp target/wasm32-wasip1/release/rs_plugkit.wasm ../bins/plugkit-wasm/plugkit.wasm
