@@ -151,6 +151,11 @@ enum Cmd {
         /// Retention window in days (prune: delete older; stats: aggregate range).
         #[arg(long, default_value_t = 14)] days: u32,
     },
+    /// Combined snapshot of git, tasks, and session output.
+    Snapshot {
+        #[arg(long)] session: Option<String>,
+        #[arg(long)] cwd: Option<String>,
+    },
 }
 
 fn extract_discipline_sigil(args: &mut Vec<String>, flag: Option<String>) -> Option<String> {
@@ -1321,6 +1326,13 @@ async fn main() {
             }
             Some(Cmd::Log { action, rest, limit, date, days }) => {
                 exit_code = cmd_log(&action, &rest, limit, date.as_deref(), days);
+            }
+            Some(Cmd::Snapshot { session, cwd }) => {
+                ensure_runner().await?;
+                let sid = session.unwrap_or_else(|| std::env::var("CLAUDE_SESSION_ID").or_else(|_| std::env::var("GM_SESSION_ID")).unwrap_or_else(|_| "default".into()));
+                let cwd_val = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default().to_string_lossy().to_string());
+                let res = rpc_client::rpc_call("snapshot", json!({ "sessionId": sid, "workingDirectory": cwd_val }), 10000).await?;
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
             }
             Some(Cmd::Search { path, query, discipline }) => {
                 let mut q_parts = query;
