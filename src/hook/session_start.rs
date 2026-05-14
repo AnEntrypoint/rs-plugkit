@@ -18,62 +18,7 @@ pub fn run() {
     spawn_acptoapi_if_needed();
     write_needs_gm_if_gm_project(project.as_deref());
 
-    if let Some(ref dir) = project {
-        let insight = run_self_with_timeout(&["codeinsight", dir, "--read-cache"], std::time::Duration::from_millis(1500));
-        if insight.is_empty() || insight.starts_with("No cache") || insight.starts_with("Error") {
-            spawn_codeinsight_rebuild(dir.clone());
-        }
-
-        let mut context_parts: Vec<String> = Vec::new();
-
-        if !insight.is_empty() && !insight.starts_with("Error") && !insight.starts_with("No cache") {
-            context_parts.push(format!(
-                "=== This is your initial insight of the repository, look at every possible aspect of this for initial opinionation and to offset the need for code exploration ===\n{}",
-                insight
-            ));
-        }
-
-        let recall_q = super::rs_learn::project_query(dir);
-        let recall = recall_with_short_timeout(&recall_q, dir);
-        if !recall.is_empty() {
-            context_parts.push(format!(
-                "=== rs-learn recall (project memory — past decisions, feedback, and lessons) ===\n{}",
-                recall
-            ));
-        }
-
-        let prd_path = std::path::Path::new(dir).join(".gm").join("prd.yml");
-        let workspace_context = context_parts.join("\n\n");
-        let session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_default();
-        let running_tasks = super::running_tasks_summary(&session_id);
-        let system_message = format!(
-            "Session start for workspace: {}\n\n{}\n\nPRD path: {}\n\nInvoke Skill(gm:gm) first. {}\nCode execution: use exec: prefix in Bash (first line `exec:nodejs`/`exec:bash`/`exec:python` etc., body on line 2+). Languages: nodejs, python, bash, typescript, go, rust, c, cpp, java, deno, cmd. Raw JIT code can also bypass Bash by writing to .gm/exec-spool/in/<lang>/<N>.<ext> (e.g. in/nodejs/42.js); the spool watcher executes it and writes out/<N>.json. Lang plugins: lang/<name>.js in project dir with exec.run(code,cwd) interface.{}\n",
-            dir,
-            if workspace_context.is_empty() { "No prior context loaded.".to_string() } else { workspace_context },
-            prd_path.display(),
-            super::runtime_instruction(),
-            if running_tasks.is_empty() { String::new() } else { format!("\n{}\n", running_tasks) },
-        );
-
-        println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": system_message })).unwrap_or_default());
-    } else {
-        println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": "" })).unwrap_or_default());
-    }
-}
-
-fn run_self_with_timeout(args: &[&str], timeout: std::time::Duration) -> String {
-    use std::sync::mpsc;
-    let args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let borrowed: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
-        let out = super::run_self(&borrowed);
-        let _ = tx.send(out);
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(s) => s,
-        Err(_) => String::new(),
-    }
+    println!("{}", serde_json::to_string_pretty(&json!({ "systemMessage": "" })).unwrap_or_default());
 }
 
 fn spawn_ensure_tools_detached() {
@@ -92,38 +37,6 @@ fn spawn_ensure_tools_detached() {
         cmd.creation_flags(0x08000000 | 0x00000008 | 0x00000200);
     }
     let _ = cmd.spawn();
-}
-
-fn spawn_codeinsight_rebuild(dir: String) {
-    std::thread::spawn(move || {
-        let plugkit = match std::env::current_exe() {
-            Ok(p) => p,
-            Err(_) => super::plugkit_bin(),
-        };
-        let mut cmd = super::no_window_cmd(plugkit);
-        cmd.arg("codeinsight").arg(&dir).arg("--cache");
-        cmd.stdin(std::process::Stdio::null())
-           .stdout(std::process::Stdio::null())
-           .stderr(std::process::Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000 | 0x00000008 | 0x00000200);
-        }
-        let _ = cmd.spawn();
-    });
-}
-
-fn recall_with_short_timeout(query: &str, dir: &str) -> String {
-    use std::sync::mpsc;
-    let q = query.to_string();
-    let d = dir.to_string();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let out = super::rs_learn::recall(&q, &d, 3);
-        let _ = tx.send(out);
-    });
-    rx.recv_timeout(std::time::Duration::from_millis(1500)).unwrap_or_default()
 }
 
 pub fn start_exec_spool() {
