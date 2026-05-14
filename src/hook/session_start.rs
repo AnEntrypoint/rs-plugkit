@@ -1,6 +1,8 @@
 use super::project_dir;
 use serde_json::json;
 use std::fs;
+use std::net::TcpStream;
+use std::time::Duration;
 
 pub fn run() {
     rs_exec::obs::event("hook", "session-start.fired", serde_json::json!({
@@ -13,6 +15,7 @@ pub fn run() {
     ensure_claude_md_pointer(project.as_deref());
     spawn_ensure_tools_detached();
     start_exec_spool();
+    spawn_acptoapi_if_needed();
     write_needs_gm_if_gm_project(project.as_deref());
 
     if let Some(ref dir) = project {
@@ -280,6 +283,87 @@ fn pid_running(pid: u32) -> bool {
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::All, true);
     sys.process(Pid::from(pid as usize)).is_some()
+}
+
+fn spawn_acptoapi_if_needed() {
+    if !is_port_reachable("127.0.0.1", 4800) {
+        std::thread::spawn(|| {
+            let _ = spawn_acptoapi_daemon();
+            std::thread::sleep(Duration::from_millis(500));
+            let _ = spawn_acp_agents();
+        });
+    }
+}
+
+fn is_port_reachable(host: &str, port: u16) -> bool {
+    let addr = format!("{}:{}", host, port);
+    TcpStream::connect_timeout(&addr.parse().unwrap_or_else(|_| "127.0.0.1:4800".parse().unwrap()), Duration::from_millis(500)).is_ok()
+}
+
+fn spawn_acptoapi_daemon() -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut cmd = super::no_window_cmd("bun");
+        cmd.args(["x", "acptoapi@latest"]);
+        cmd.stdin(std::process::Stdio::null())
+           .stdout(std::process::Stdio::null())
+           .stderr(std::process::Stdio::null());
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+        let _ = cmd.spawn()?;
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = super::no_window_cmd("bun");
+        cmd.args(["x", "acptoapi@latest"]);
+        cmd.stdin(std::process::Stdio::null())
+           .stdout(std::process::Stdio::null())
+           .stderr(std::process::Stdio::null());
+        let _ = cmd.spawn()?;
+    }
+    Ok(())
+}
+
+fn spawn_acp_agents() {
+    let agents = vec!["opencode", "kilo-code", "codex", "gemini-cli", "qwen-code"];
+    for agent in agents {
+        if let Ok(bin_path) = find_agent_binary(agent) {
+            spawn_acp_agent(&bin_path);
+        }
+    }
+}
+
+fn find_agent_binary(agent: &str) -> std::io::Result<String> {
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        let output = Command::new("where").arg(agent).output()?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use std::process::Command;
+        let output = Command::new("which").arg(agent).output()?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::NotFound, "agent not found"))
+}
+
+fn spawn_acp_agent(bin_path: &str) {
+    let mut cmd = super::no_window_cmd(bin_path);
+    cmd.stdin(std::process::Stdio::piped())
+       .stdout(std::process::Stdio::piped())
+       .stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let _ = cmd.spawn();
 }
 
 fn write_needs_gm_if_gm_project(project_dir: Option<&str>) {
