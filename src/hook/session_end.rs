@@ -43,6 +43,8 @@ pub fn run() {
     };
     if killed > 0 { eprintln!("[session-end] killed {} background tasks", killed); }
 
+    kill_acptoapi_if_running();
+
     if let Some(dir) = project_dir() {
         let gm = std::path::Path::new(&dir).join(".gm");
         let _ = std::fs::write(gm.join("turn-state.json"), "{}");
@@ -65,4 +67,22 @@ fn rs_exec_port() -> Option<u16> {
     let pf = std::env::var("RS_EXEC_PORT_FILE").map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir().join("glootie-runner.port"));
     std::fs::read_to_string(pf).ok()?.trim().parse().ok()
+}
+
+fn kill_acptoapi_if_running() {
+    let pid_file = super::tools_dir().join(".acptoapi-pid");
+    let pid_str = match std::fs::read_to_string(&pid_file) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let pid: u32 = match pid_str.trim().parse() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    rs_exec::obs::event("hook", "acptoapi.cleanup", serde_json::json!({
+        "action": "cleanup",
+        "pid": pid,
+    }));
+    rs_exec::kill::kill_tree(pid);
+    let _ = std::fs::remove_file(&pid_file);
 }
