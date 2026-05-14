@@ -238,7 +238,7 @@ fn spawn_acptoapi_daemon() -> std::io::Result<()> {
 }
 
 fn spawn_acp_agents() {
-    let agents = vec!["opencode", "kilo-code", "codex", "gemini-cli", "qwen-code"];
+    let agents = vec!["opencode", "kilo-code", "codex", "gemini-cli", "qwen-code", "hermes", "cline", "acpx"];
     for agent in agents {
         if let Ok(bin_path) = find_agent_binary(agent) {
             spawn_acp_agent(&bin_path);
