@@ -1,5 +1,6 @@
 mod hook;
 mod self_update;
+mod spool;
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -886,6 +887,68 @@ async fn run_code(code: &str, runtime: &str, cwd: &str, session_id: Option<&str>
     Ok(exit_code)
 }
 
+fn check_acptoapi_port() -> bool {
+    use std::net::TcpStream;
+    use std::time::Duration;
+    match TcpStream::connect_timeout(&"127.0.0.1:4800".parse().unwrap(), Duration::from_millis(500)) {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+fn spawn_acptoapi_async() {
+    let pid_file = {
+        let home = env::var("HOME")
+            .or_else(|_| env::var("USERPROFILE"))
+            .unwrap_or_default();
+        PathBuf::from(home).join(".claude").join("gm-tools").join(".acptoapi-pid")
+    };
+
+    let cmd = if cfg!(windows) {
+        "bun.exe"
+    } else {
+        "bun"
+    };
+
+    let spawn_result = if cfg!(windows) {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new(cmd)
+            .args(&["x", "acptoapi@latest"])
+            .creation_flags(0x08000200)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    } else {
+        std::process::Command::new(cmd)
+            .args(&["x", "acptoapi@latest"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    };
+
+    match spawn_result {
+        Ok(child) => {
+            let pid = child.id();
+            rs_exec::obs::event("plugkit", "acptoapi.spawn", json!({
+                "action": "spawn_acptoapi",
+                "pid": pid,
+                "command": "bun x acptoapi@latest",
+                "result": "success",
+            }));
+            let _ = fs::create_dir_all(pid_file.parent().unwrap_or(&PathBuf::from(".")));
+            let _ = fs::write(&pid_file, pid.to_string());
+        }
+        Err(e) => {
+            rs_exec::obs::event("plugkit", "acptoapi.spawn", json!({
+                "action": "spawn_acptoapi",
+                "pid": 0,
+                "command": "bun x acptoapi@latest",
+                "result": "error",
+                "error": e.to_string(),
+            }));
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -905,6 +968,10 @@ async fn main() {
     }
     // Background check (non-blocking) — spawns detached updater if pin is newer.
     self_update::check_and_dispatch();
+
+    if !check_acptoapi_port() {
+        spawn_acptoapi_async();
+    }
 
     if env::args().any(|a| a == "--runner-mode") {
         rs_exec::runner::run_server().await.expect("Runner failed");
@@ -1120,7 +1187,7 @@ async fn main() {
             }
             Some(Cmd::Spool { once }) => {
                 std::env::set_var("PLUGKIT_VERSION", env!("CARGO_PKG_VERSION"));
-                if once { rs_exec::spool::watch_once(); } else { rs_exec::spool::run_daemon(); }
+                if *once { spool::run_spool_once()?; } else { spool::run_spool_daemon()?; }
             }
             Some(Cmd::Browser { code, session, cwd }) => {
                 let body = code.join(" ");
