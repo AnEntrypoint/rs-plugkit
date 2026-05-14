@@ -64,6 +64,7 @@ jobs:
 
       - name: Wipe cargo git cache and lockfile (force fresh dep resolution)
         shell: bash
+        continue-on-error: true
         run: |
           rm -rf ~/.cargo/git/db ~/.cargo/git/checkouts || true
           rm -f Cargo.lock
