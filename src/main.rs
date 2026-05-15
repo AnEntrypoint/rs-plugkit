@@ -95,6 +95,14 @@ enum Cmd {
     Hook {
         event: String,
     },
+    SkillLifecycle {
+        #[arg(long, default_value_t = true)] session_start: bool,
+        #[arg(long, default_value_t = true)] prompt_submit: bool,
+        #[arg(long, default_value_t = true)] pre_tool_use: bool,
+        #[arg(long, default_value_t = true)] post_tool_use: bool,
+        #[arg(long, default_value_t = false)] stop: bool,
+        #[arg(long, default_value_t = false)] stop_git: bool,
+    },
     #[command(name = "kill-port")] KillPort { port: u16 },
     Deps,
     Doctor,
@@ -1244,6 +1252,26 @@ async fn main() {
                         _ => {}
                     }
                 });
+                return Ok(());
+            }
+            Some(Cmd::SkillLifecycle { session_start, prompt_submit, pre_tool_use, post_tool_use, stop, stop_git }) => {
+                rs_exec::obs::span("hook", "skill-lifecycle", serde_json::json!({}), || {
+                    if session_start { hook::session_start(); }
+                    if prompt_submit { hook::prompt_submit(); }
+                    if pre_tool_use { hook::pre_tool_use(); }
+                    if post_tool_use { hook::post_tool_use(); }
+                    if stop { hook::run_stop(); }
+                    if stop_git { hook::run_stop_git(); }
+                });
+                println!("{}", serde_json::to_string(&json!({
+                    "ok": true,
+                    "sessionStart": session_start,
+                    "promptSubmit": prompt_submit,
+                    "preToolUse": pre_tool_use,
+                    "postToolUse": post_tool_use,
+                    "stop": stop,
+                    "stopGit": stop_git
+                })).unwrap_or_else(|_| "{\"ok\":true}".to_string()));
                 return Ok(());
             }
             Some(Cmd::KillPort { port }) => {
