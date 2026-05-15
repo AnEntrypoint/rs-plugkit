@@ -9,9 +9,17 @@ use notify::{RecursiveMode, Watcher, RecommendedWatcher, Result as NotifyResult}
 use std::sync::mpsc;
 
 pub fn run_spool_daemon() -> Result<(), Box<dyn std::error::Error>> {
-    let exec_spool = PathBuf::from(home_dir()?)
-        .join(".gm")
-        .join("exec-spool");
+    let exec_spool = if let Ok(custom) = env::var("SPOOL_DIR") {
+        PathBuf::from(custom)
+    } else if let Ok(custom) = env::var("RS_EXEC_SPOOL_DIR") {
+        PathBuf::from(custom)
+    } else if let Ok(project) = env::var("CLAUDE_PROJECT_DIR") {
+        PathBuf::from(project).join(".gm").join("exec-spool")
+    } else {
+        PathBuf::from(home_dir()?)
+            .join(".gm")
+            .join("exec-spool")
+    };
 
     let pending_root = exec_spool.join("in");
     if !pending_root.exists() {
@@ -178,8 +186,7 @@ fn execute_dispatch(lang_or_verb: &str, file_id: &str, content: &str) -> (String
     if is_lang {
         dispatch_to_exec_rpc(lang_or_verb, file_id, content)
     } else if is_verb {
-        dispatch_to_spool_verb(lang_or_verb, file_id, content);
-        (String::new(), String::new(), 0)
+        dispatch_to_spool_verb(lang_or_verb, file_id, content)
     } else {
         (
             format!("Unknown lang/verb: {}", lang_or_verb),
@@ -189,62 +196,123 @@ fn execute_dispatch(lang_or_verb: &str, file_id: &str, content: &str) -> (String
     }
 }
 
-fn dispatch_to_exec_rpc(lang: &str, file_id: &str, content: &str) -> (String, String, i32) {
-    let home = match home_dir() {
-        Ok(h) => h,
-        Err(_) => {
-            return (String::new(), "Cannot resolve HOME".to_string(), 1);
-        }
-    };
-    let home_path = PathBuf::from(home);
-    let spool_in = home_path.join(".gm").join("exec-spool").join("in");
+fn find_plugkit() -> Option<PathBuf> {
+    let exe_name = if cfg!(windows) { "plugkit.exe" } else { "plugkit" };
+    
+    which::which(exe_name).ok()
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .map(|p| p.parent().map(|d| d.join(exe_name)).unwrap_or_else(|| PathBuf::from(exe_name)))
+        })
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from).map(|h| h.join(".claude").join("gm-tools").join(exe_name)))
+        .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from).map(|h| h.join(".claude").join("gm-tools").join(exe_name)))
+}
 
+fn dispatch_to_exec_rpc(lang: &str, file_id: &str, content: &str) -> (String, String, i32) {
+    use std::process::{Command, Stdio};
+    
     let runtime = match lang {
         "typescript" => "nodejs",
+        "rust" => "nodejs",
+        "go" => "nodejs",
+        "c" => "nodejs",
+        "cpp" => "nodejs",
+        "java" => "nodejs",
+        "deno" => "nodejs",
         other => other,
     };
 
-    let lang_dir = spool_in.join(runtime);
-    let _ = fs::create_dir_all(&lang_dir);
+    let plugkit_path = find_plugkit()
+        .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "plugkit.exe" } else { "plugkit" }));
+    
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    
+    let session_id = std::env::var("SESSION_ID").unwrap_or_else(|_| "spool".to_string());
+    
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join(format!("spool-{}.{}", file_id, if runtime == "nodejs" { "js" } else { "txt" }));
+    let _ = std::fs::write(&temp_file, content);
+    
+    let output = Command::new(&plugkit_path)
+        .args(["exec", "--lang", runtime, "--session", &session_id, "--timeout-ms", "300000", "--file", temp_file.to_str().unwrap_or("")])
+        .current_dir(&cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
 
-    let ext = match lang {
-        "nodejs" | "typescript" => "js",
-        "python" => "py",
-        "bash" => "sh",
-        "rust" => "rs",
-        "go" => "go",
-        "c" => "c",
-        "cpp" => "cpp",
-        "java" => "java",
-        "deno" => "ts",
-        _ => "txt",
-    };
+    let _ = std::fs::remove_file(&temp_file);
 
-    let task_file = lang_dir.join(format!("{}.{}", file_id, ext));
-    if let Err(e) = fs::write(&task_file, content) {
-        let stderr = format!("Failed to write dispatch file: {}", e);
-        return (String::new(), stderr, 1);
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let exit_code = out.status.code().unwrap_or(1);
+            
+            eprintln!("[spool] executed {} task {}: exit={}", runtime, file_id, exit_code);
+            (stdout, stderr, exit_code)
+        }
+        Err(e) => {
+            let stderr = format!("Failed to execute: {}", e);
+            eprintln!("[spool] {}", stderr);
+            (String::new(), stderr, 1)
+        }
     }
-
-    eprintln!("[spool] dispatched {} task {} to {}", runtime, file_id, task_file.display());
-    (format!("Dispatched {} task {} to runner", runtime, file_id), String::new(), 0)
 }
 
-fn dispatch_to_spool_verb(verb: &str, file_id: &str, content: &str) {
-    let home = home_dir().ok();
-    if home.is_none() {
-        eprintln!("[spool] cannot resolve HOME for verb dispatch");
-        return;
+fn dispatch_to_spool_verb(verb: &str, file_id: &str, content: &str) -> (String, String, i32) {
+    use std::process::{Command, Stdio};
+    
+    let plugkit_path = find_plugkit()
+        .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "plugkit.exe" } else { "plugkit" }));
+    
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    
+    let output = match verb {
+        "codesearch" => {
+            Command::new(&plugkit_path)
+                .args(["search", &content])
+                .current_dir(&cwd)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        }
+        "recall" => {
+            Command::new(&plugkit_path)
+                .args(["recall", &content])
+                .current_dir(&cwd)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        }
+        "memorize" => {
+            Command::new(&plugkit_path)
+                .args(["memorize", &content])
+                .current_dir(&cwd)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        }
+        _ => {
+            return (format!("Unknown verb: {}", verb), String::new(), 1);
+        }
+    };
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let exit_code = out.status.code().unwrap_or(0);
+            
+            eprintln!("[spool] executed verb {} task {}: exit={}", verb, file_id, exit_code);
+            (stdout, stderr, exit_code)
+        }
+        Err(e) => {
+            let stderr = format!("Failed to execute {}: {}", verb, e);
+            eprintln!("[spool] {}", stderr);
+            (String::new(), stderr, 1)
+        }
     }
-    let home_path = PathBuf::from(home.unwrap());
-    let spool_in = home_path.join(".gm").join("exec-spool").join("in");
-
-    let verb_dir = spool_in.join(verb);
-    let _ = fs::create_dir_all(&verb_dir);
-
-    let task_file = verb_dir.join(format!("{}.txt", file_id));
-    let _ = fs::write(task_file, content);
-    eprintln!("[spool] dispatched {} task {}", verb, file_id);
 }
 
 fn home_dir() -> Result<String, Box<dyn std::error::Error>> {
