@@ -27,6 +27,12 @@ fn stop_block(reason: String) -> serde_json::Value {
     json!({ "decision": "block", "reason": reason })
 }
 
+fn block_and_exit(reason: String) -> ! {
+    eprintln!("Stop blocked: {}\\n\\nContinue by invoking Skill(gm) first.", reason);
+    println!("{}", serde_json::to_string_pretty(&stop_block(reason)).unwrap_or_default());
+    std::process::exit(2);
+}
+
 pub fn run_stop() {
     rs_exec::obs::event("hook", "stop.fired", serde_json::json!({
         "hook_name": "stop",
@@ -35,6 +41,17 @@ pub fn run_stop() {
     }));
     let project_dir = env::var("CLAUDE_PROJECT_DIR")
         .unwrap_or_else(|_| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
+    let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
+    let open = if !session_id.is_empty() {
+        super::agent_browser::get_open_session_ids(&session_id)
+    } else {
+        vec![]
+    };
+    if !open.is_empty() {
+        let ids = open.join(", ");
+        write_needs_gm(&project_dir);
+        block_and_exit(format!("Open browser session(s): [{}]. Close them before stopping:\n  exec:browser\n  await page.close()\n\nOr use `exec:close` to clean up background tasks.\n\nHousekeeping policy: always close browser sessions and background tasks before ending a conversation.\n\nNEXT ACTION: invoke Skill(gm) first.", ids));
+    }
 
     let prd = std::path::Path::new(&project_dir).join(".gm").join("prd.yml");
 
@@ -43,9 +60,7 @@ pub fn run_stop() {
         let trimmed = content.trim();
         if !trimmed.is_empty() {
             write_needs_gm(&project_dir);
-            let out = stop_block(format!("Work items remain in {}. Remove completed items as they finish. Delete the file when all items are done.\n\n{}\n\nNEXT ACTION: invoke Skill(gm) first.", prd.display(), trimmed));
-            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
-            std::process::exit(2);
+            block_and_exit(format!("Work items remain in {}. Remove completed items as they finish. Delete the file when all items are done.\n\n{}\n\nNEXT ACTION: invoke Skill(gm) first.", prd.display(), trimmed));
         }
     }
 
@@ -58,12 +73,10 @@ pub fn run_stop() {
             if !unresolved.is_empty() {
                 let id_list = unresolved.join(", ");
                 write_needs_gm(&project_dir);
-                let out = stop_block(format!(
+                block_and_exit(format!(
                     "Cannot stop while .gm/mutables.yml has unresolved mutables: [{}]. Every mutable must reach status: witnessed with filled witness_evidence before turn-stop. Regress to Skill(gm:gm-execute), resolve each unknown by witness (exec:codesearch, exec:nodejs import, exec:recall, file Read), update mutables.yml entries to status: witnessed.\n\nNEXT ACTION: invoke Skill(gm) first.",
                     id_list
                 ));
-                println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
-                std::process::exit(2);
             }
         }
     }
@@ -73,11 +86,9 @@ pub fn run_stop() {
         let _ = fs::create_dir_all(&gm_dir);
         let _ = fs::write(&residual_marker, "1");
         write_needs_gm(&project_dir);
-        let out = stop_block(
+        block_and_exit(
             "Residual scan before stop. PRD is empty, but the user's ask may still have reachable in-spirit residuals not yet captured. Enumerate every residual that is (a) within the spirit of the original ask AND (b) reachable from this session: pre-existing build breaks surfaced this turn, neighboring lint/test/lockfile failures, obvious refactor wins, observability gaps, doc drift, hand-rolled code an existing library covers, follow-on work the user clearly implied.\n\nIf any reachable in-spirit residual exists: re-enter Skill(gm:planning), append PRD items, execute through to COMPLETE. Do not ask the user. Do not name-and-stop. The user's original authorization covers every reachable in-spirit residual.\n\nIf zero reachable in-spirit residuals exist: state that explicitly in one line (e.g. \"residual scan: none reachable in-spirit\") and stop again. The next stop will be allowed.\n\nNEXT ACTION: invoke Skill(gm) first.".to_string()
         );
-        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
-        std::process::exit(2);
     }
 
     println!("{}", serde_json::to_string(&stop_allow(None)).unwrap_or_default());
@@ -205,8 +216,7 @@ pub fn run_stop_git() {
             CiOutcome::Failures(report) => {
                 super::rs_learn::record_quality(&session_id, &project_dir, 0.2, "ci-fail");
                 write_needs_gm(&project_dir);
-                println!("{}", serde_json::to_string_pretty(&stop_block(format!("CI failure(s) on this push:\n{}\n\nInvestigate, fix, push again. Use `gh run view <id> --log-failed` for details.\n\nNEXT ACTION: invoke Skill(gm) first.", report))).unwrap_or_default());
-                std::process::exit(2);
+                block_and_exit(format!("CI failure(s) on this push:\n{}\n\nInvestigate, fix, push again. Use `gh run view <id> --log-failed` for details.\n\nNEXT ACTION: invoke Skill(gm) first.", report));
             }
         }
         return;
@@ -229,8 +239,7 @@ pub fn run_stop_git() {
         let session_id = env::var("CLAUDE_SESSION_ID").unwrap_or_default();
         super::rs_learn::record_quality(&session_id, &project_dir, 0.4, "stop-blocked-git");
         write_needs_gm(&project_dir);
-        println!("{}", serde_json::to_string_pretty(&stop_block(format!("Git: {}{}\n\nNEXT ACTION: invoke Skill(gm) first.", reason, auth_hint))).unwrap_or_default());
-        std::process::exit(2);
+        block_and_exit(format!("Git: {}{}\n\nNEXT ACTION: invoke Skill(gm) first.", reason, auth_hint));
     } else {
         println!("{}", serde_json::to_string(&stop_allow(Some(format!("⚠️ Git warning (attempt #{}): {}{} - Please commit and push your changes.", counter.count, reason, auth_hint)))).unwrap_or_default());
     }
