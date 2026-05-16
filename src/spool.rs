@@ -6,6 +6,12 @@ use std::env;
 use notify::{RecursiveMode, Watcher, RecommendedWatcher};
 use std::sync::mpsc;
 
+fn home_dir() -> String {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string())
+}
+
 pub fn run_spool_daemon() -> Result<(), anyhow::Error> {
     let exec_spool = if let Ok(custom) = env::var("SPOOL_DIR") {
         PathBuf::from(custom)
@@ -14,9 +20,7 @@ pub fn run_spool_daemon() -> Result<(), anyhow::Error> {
     } else if let Ok(project) = env::var("CLAUDE_PROJECT_DIR") {
         PathBuf::from(project).join(".gm").join("exec-spool")
     } else {
-        PathBuf::from(home_dir()?)
-            .join(".gm")
-            .join("exec-spool")
+        PathBuf::from(home_dir()).join(".gm").join("exec-spool")
     };
 
     let pending_root = exec_spool.join("in");
@@ -313,16 +317,8 @@ fn dispatch_to_spool_verb(verb: &str, file_id: &str, content: &str) -> (String, 
     }
 }
 
-fn home_dir() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-}
-
-pub fn run_spool_once() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let exec_spool = PathBuf::from(home_dir()?)
-        .join(".gm")
-        .join("exec-spool");
+pub fn run_spool_once() -> Result<(), anyhow::Error> {
+    let exec_spool = PathBuf::from(home_dir()).join(".gm").join("exec-spool");
 
     let pending_root = exec_spool.join("in");
     let output_root = exec_spool.join("out");
@@ -331,11 +327,11 @@ pub fn run_spool_once() -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         return Ok(());
     }
 
-for entry in walkdir::WalkDir::new(&pending_root)
-                     .into_iter()
-                     .filter_map(|e| e.ok())
-                     .filter(|e| e.file_type().is_file())
-                 {
+    for entry in walkdir::WalkDir::new(&pending_root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
         dispatch_file(entry.path(), &output_root);
     }
 
