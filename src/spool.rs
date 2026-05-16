@@ -5,11 +5,62 @@ use std::time::{Duration, SystemTime};
 use std::env;
 use notify::{RecursiveMode, Watcher, RecommendedWatcher};
 use std::sync::mpsc;
+use serde_yaml;
 
 fn home_dir() -> String {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string())
+}
+
+fn get_gm_dir() -> PathBuf {
+    env::var("CLAUDE_PROJECT_DIR")
+        .ok()
+        .map(|p| PathBuf::from(p).join(".gm"))
+        .unwrap_or_else(|_| PathBuf::from(home_dir()).join(".gm"))
+}
+
+fn check_prd_exists() -> bool {
+    let prd_path = get_gm_dir().join("prd.yml");
+    prd_path.exists()
+}
+
+fn check_unresolved_mutables() -> bool {
+    let mutables_path = get_gm_dir().join("mutables.yml");
+    if !mutables_path.exists() {
+        return false;
+    }
+
+    match fs::read_to_string(&mutables_path) {
+        Ok(content) => {
+            if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                if let Some(items) = yaml.as_sequence() {
+                    for item in items {
+                        if let Some(status) = item.get("status") {
+                            if let Some(status_str) = status.as_str() {
+                                if status_str == "unknown" {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(_) => {}
+    }
+
+    false
+}
+
+fn check_gm_fired(file_id: &str) -> bool {
+    let gm_fired_path = get_gm_dir().join(format!("gm-fired-{}", file_id));
+    gm_fired_path.exists()
+}
+
+fn check_needs_gm() -> bool {
+    let needs_gm_path = get_gm_dir().join("needs-gm");
+    needs_gm_path.exists()
 }
 
 pub fn run_spool_daemon() -> Result<(), anyhow::Error> {
@@ -143,6 +194,8 @@ fn dispatch_file(input_path: &Path, output_root: &Path) {
 
     let file_id = file_name.split('.').next().unwrap_or(&file_name).to_string();
 
+    let (gate_blocked, gate_error) = check_dispatch_gates(&lang_or_verb, &file_id);
+
     match fs::read_to_string(input_path) {
         Ok(content) => {
             eprintln!("[spool] dispatch {} {}", lang_or_verb, file_id);
@@ -151,7 +204,12 @@ fn dispatch_file(input_path: &Path, output_root: &Path) {
             let stderr_path = output_root.join(format!("{}.err", file_id));
             let json_path = output_root.join(format!("{}.json", file_id));
 
-            let (stdout, stderr, exit_code) = execute_dispatch(&lang_or_verb, &file_id, &content);
+            let (stdout, stderr, exit_code) = if gate_blocked {
+                eprintln!("[spool] gate blocked {}: {}", file_id, gate_error);
+                (String::new(), gate_error, 1)
+            } else {
+                execute_dispatch(&lang_or_verb, &file_id, &content)
+            };
 
             let _ = fs::write(stdout_path, stdout);
             let _ = fs::write(stderr_path, stderr);
@@ -175,6 +233,24 @@ fn dispatch_file(input_path: &Path, output_root: &Path) {
             eprintln!("[spool] error reading {}: {}", input_path.display(), e);
         }
     }
+}
+
+fn check_dispatch_gates(lang_or_verb: &str, file_id: &str) -> (bool, String) {
+    let is_admin_verb = matches!(lang_or_verb, "health" | "status" | "close" | "kill-port" | "wait" | "sleep");
+
+    if is_admin_verb {
+        return (false, String::new());
+    }
+
+    if check_unresolved_mutables() {
+        return (true, "[gate] unresolved mutables in .gm/mutables.yml — cannot execute until all mutables resolved".to_string());
+    }
+
+    if check_needs_gm() && !check_gm_fired(file_id) && lang_or_verb != "gm" {
+        return (true, "[gate] PRD exists (.gm/prd.yml) — gm skill must run before other work; waiting for .gm/gm-fired marker".to_string());
+    }
+
+    (false, String::new())
 }
 
 fn execute_dispatch(lang_or_verb: &str, file_id: &str, content: &str) -> (String, String, i32) {
