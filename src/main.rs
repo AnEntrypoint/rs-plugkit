@@ -1201,7 +1201,8 @@ async fn main() {
             }
             Some(Cmd::Spool { once }) => {
                 std::env::set_var("PLUGKIT_VERSION", env!("CARGO_PKG_VERSION"));
-                if once { spool::run_spool_once()?; } else { spool::run_spool_daemon()?; }
+                let result = if once { spool::run_spool_once() } else { spool::run_spool_daemon() };
+                result.map_err(|e| anyhow::anyhow!("{}", e))?;
             }
             Some(Cmd::Browser { code, session, cwd }) => {
                 let body = code.join(" ");
