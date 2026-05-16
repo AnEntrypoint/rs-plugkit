@@ -1024,7 +1024,8 @@ async fn main() {
                 if cmd.trim().is_empty() { eprintln!("No commands provided"); exit_code = 1; return Ok(()); }
                 let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
                 let runtime = if cfg!(windows) { "powershell" } else { "bash" };
-                exit_code = run_code(&cmd, runtime, &cwd, None, timeout_ms).await?;
+                let session_id = env::var("SESSION_ID").ok();
+                exit_code = run_code(&cmd, runtime, &cwd, session_id.as_deref(), timeout_ms).await?;
             }
             Some(Cmd::Type { task_id, input, session }) => {
                 ensure_runner().await?;
@@ -1200,7 +1201,7 @@ async fn main() {
             }
             Some(Cmd::Spool { once }) => {
                 std::env::set_var("PLUGKIT_VERSION", env!("CARGO_PKG_VERSION"));
-                if *once { spool::run_spool_once()?; } else { spool::run_spool_daemon()?; }
+                if once { spool::run_spool_once()?; } else { spool::run_spool_daemon()?; }
             }
             Some(Cmd::Browser { code, session, cwd }) => {
                 let body = code.join(" ");
