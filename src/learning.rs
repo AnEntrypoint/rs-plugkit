@@ -27,7 +27,7 @@ pub fn ingest_fast_disc(content: &str, source: &str, project_dir: &str, discipli
 }
 
 /// Forget/unlearn episodes from rs-learn.
-pub fn forget_disc(kind: &str, target: &str, project_dir: &str, discipline: Option<&str>) -> anyhow::Result<u32> {
+pub fn forget_disc(kind: &str, target: &str, project_dir: &str, discipline: Option<&str>) -> Result<usize, String> {
     let project_path = Path::new(project_dir);
 
     // Try HTTP call
@@ -35,7 +35,7 @@ pub fn forget_disc(kind: &str, target: &str, project_dir: &str, discipline: Opti
         return Ok(count);
     }
 
-    Err(anyhow::anyhow!("forget failed: rs-learn unavailable"))
+    Err("forget failed: rs-learn unavailable".into())
 }
 
 /// Pass-through to rs-learn for status/debug/feedback/build-communities.
@@ -64,7 +64,7 @@ fn try_ingest_http(content: &str, source: &str, _discipline: Option<&str>, _proj
 }
 
 /// Attempt forget via HTTP RPC to rs-learn daemon.
-fn try_forget_http(kind: &str, target: &str, _discipline: Option<&str>, _project_path: &Path) -> Option<u32> {
+fn try_forget_http(kind: &str, target: &str, _discipline: Option<&str>, _project_path: &Path) -> Option<usize> {
     // TODO: Implement HTTP client call to rs-learn daemon
     None
 }
@@ -77,7 +77,56 @@ fn try_learn_passthrough_http(action: &str, rest: &[String], _discipline: Option
 
 /// Fallback: read AGENTS.md and search for matching entries.
 fn fallback_recall_from_agents_md(query: &str) -> String {
-    // TODO: Implement AGENTS.md fallback recall
-    // For now return empty to signal failure
-    String::new()
+    let agents_path = find_agents_md().unwrap_or_else(|| {
+        std::path::PathBuf::from(std::env::current_dir().unwrap_or_default()).join("AGENTS.md")
+    });
+
+    match std::fs::read_to_string(&agents_path) {
+        Ok(content) => search_agents_md(&content, query),
+        Err(_) => String::new(),
+    }
+}
+
+fn find_agents_md() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let mut current = cwd.as_path();
+
+    loop {
+        let candidate = current.join("AGENTS.md");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+
+        match current.parent() {
+            Some(parent) if parent != current => current = parent,
+            _ => break,
+        }
+    }
+
+    None
+}
+
+fn search_agents_md(content: &str, query: &str) -> String {
+    let query_lower = query.to_lowercase();
+    let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+
+    let mut results = Vec::new();
+
+    for line in content.lines() {
+        let line_lower = line.to_lowercase();
+        let matches = query_words.iter().filter(|word| line_lower.contains(word)).count();
+
+        if matches > 0 {
+            results.push((matches, line.to_string()));
+        }
+    }
+
+    results.sort_by(|a, b| b.0.cmp(&a.0));
+
+    results
+        .iter()
+        .take(10)
+        .map(|(_, line)| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
