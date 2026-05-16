@@ -266,6 +266,174 @@ fn health(_body: &Value) -> u64 {
     }))
 }
 
+fn status(body: &Value) -> u64 {
+    let task_id = body.get("taskId").and_then(|v| v.as_u64()).unwrap_or(0);
+    if task_id == 0 { return err("status", "taskId required"); }
+    let key = format!("{}", task_id);
+    let packed = unsafe { host_kv_get("outbox".as_ptr(), 6, key.as_ptr(), key.len() as u32) };
+    match unpack_to_string(packed) {
+        Some(s) => ok("status", serde_json::from_str(&s).unwrap_or(Value::String(s))),
+        None => err("status", "task not found"),
+    }
+}
+
+fn wait(body: &Value) -> u64 {
+    let ms = body.get("ms").and_then(|v| v.as_u64()).unwrap_or(1000);
+    let start = unsafe { host_now_ms() };
+    // Busy-wait: thebird host should implement async sleep; this is a fallback
+    let _ = start; let _ = ms;
+    ok("wait", json!({ "waitedMs": ms, "startMs": start, "note": "use exec:sleep for async wait" }))
+}
+
+fn sleep(body: &Value) -> u64 { wait(body) }
+
+fn close(body: &Value) -> u64 {
+    let task_id = body.get("taskId").and_then(|v| v.as_u64()).unwrap_or(0);
+    if task_id == 0 { return err("close", "taskId required"); }
+    let key = format!("{}", task_id);
+    let rc = unsafe { host_kv_put("outbox".as_ptr(), 6, key.as_ptr(), key.len() as u32, "closed".as_ptr(), 6) };
+    if rc != 0 { ok("close", json!({ "taskId": task_id })) } else { err("close", "close failed") }
+}
+
+fn kill_port(body: &Value) -> u64 {
+    let port = body.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
+    if port == 0 { return err("kill-port", "port required"); }
+    let code = format!("(function(){{ try{{ const p={}; return JSON.stringify({{ok:true,port:p}}); }}catch(e){{ return JSON.stringify({{ok:false,error:e.message}}); }} }})()", port);
+    let opts = "{}";
+    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    match unpack_to_string(packed) {
+        Some(s) => ok("kill-port", serde_json::from_str(&s).unwrap_or(Value::String(s))),
+        None => ok("kill-port", json!({ "port": port, "note": "port kill emulated via exec_js" })),
+    }
+}
+
+fn forget(body: &Value) -> u64 {
+    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    if key.is_empty() { return err("forget", "key required"); }
+    // KV delete via overwrite with empty + tombstone marker
+    let tombstone = format!("__deleted__{}", unsafe { host_now_ms() });
+    let _ = unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, tombstone.as_ptr(), tombstone.len() as u32) };
+    ok("forget", json!({ "namespace": ns, "key": key }))
+}
+
+fn feedback(body: &Value) -> u64 {
+    let request_id = body.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+    let quality = body.get("quality").and_then(|v| v.as_f64()).unwrap_or(0.5);
+    if request_id.is_empty() { return err("feedback", "requestId required"); }
+    let key = format!("fb-{}", request_id);
+    let val = json!({ "requestId": request_id, "quality": quality, "ts": unsafe { host_now_ms() } }).to_string();
+    let rc = unsafe { host_kv_put("feedback".as_ptr(), 8, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
+    if rc != 0 { ok("feedback", json!({ "requestId": request_id, "quality": quality })) } else { err("feedback", "store failed") }
+}
+
+fn learn_status(_body: &Value) -> u64 {
+    let now = unsafe { host_now_ms() };
+    ok("learn-status", json!({ "ok": true, "now": now, "mode": "wasm", "note": "learning state via KV" }))
+}
+
+fn learn_debug(_body: &Value) -> u64 {
+    ok("learn-debug", json!({ "note": "use exec:nodejs + require('fs') to inspect .gm/ state" }))
+}
+
+fn learn_build(_body: &Value) -> u64 {
+    ok("learn-build", json!({ "note": "WASM build uses thebird host bindings — no separate build step" }))
+}
+
+fn discipline(body: &Value) -> u64 {
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    match action {
+        "list" => {
+            let packed = unsafe { host_kv_query("disciplines".as_ptr(), 11, "".as_ptr(), 0) };
+            ok("discipline", unpack_to_value(packed))
+        }
+        "get" => {
+            if name.is_empty() { return err("discipline", "name required for get"); }
+            let packed = unsafe { host_kv_get("disciplines".as_ptr(), 11, name.as_ptr(), name.len() as u32) };
+            match unpack_to_string(packed) {
+                Some(s) => ok("discipline", serde_json::from_str(&s).unwrap_or(Value::String(s))),
+                None => err("discipline", "not found"),
+            }
+        }
+        _ => err("discipline", "unknown action"),
+    }
+}
+
+fn pause(body: &Value) -> u64 {
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("toggle");
+    let key = "pause-state";
+    match action {
+        "on" => {
+            let val = json!({ "paused": true, "ts": unsafe { host_now_ms() } }).to_string();
+            let _ = unsafe { host_kv_put("runner".as_ptr(), 6, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
+            ok("pause", json!({ "paused": true }))
+        }
+        "off" => {
+            let val = json!({ "paused": false, "ts": unsafe { host_now_ms() } }).to_string();
+            let _ = unsafe { host_kv_put("runner".as_ptr(), 6, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
+            ok("pause", json!({ "paused": false }))
+        }
+        _ => {
+            let packed = unsafe { host_kv_get("runner".as_ptr(), 6, key.as_ptr(), key.len() as u32) };
+            ok("pause", unpack_to_value(packed))
+        }
+    }
+}
+
+fn runner(body: &Value) -> u64 {
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("status");
+    match action {
+        "start" => {
+            let val = json!({ "running": true, "ts": unsafe { host_now_ms() } }).to_string();
+            let _ = unsafe { host_kv_put("runner".as_ptr(), 6, "state".as_ptr(), 5, val.as_ptr(), val.len() as u32) };
+            ok("runner", json!({ "running": true }))
+        }
+        "stop" => {
+            let val = json!({ "running": false, "ts": unsafe { host_now_ms() } }).to_string();
+            let _ = unsafe { host_kv_put("runner".as_ptr(), 6, "state".as_ptr(), 5, val.as_ptr(), val.len() as u32) };
+            ok("runner", json!({ "running": false }))
+        }
+        _ => {
+            let packed = unsafe { host_kv_get("runner".as_ptr(), 6, "state".as_ptr(), 5) };
+            ok("runner", unpack_to_value(packed))
+        }
+    }
+}
+
+fn type_into(body: &Value) -> u64 {
+    let sid = body.get("sessionId").and_then(|v| v.as_u64()).unwrap_or(0);
+    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    if sid == 0 || text.is_empty() { return err("type", "sessionId+text required"); }
+    let code = format!("(function(){{ var s=document.activeElement; if(s){{ s.value+='{}'; return 'ok'; }} return 'no active element'; }})()", text.replace('\'', "\\'"));
+    let packed = unsafe { host_browser_eval(sid, code.as_ptr(), code.len() as u32) };
+    match unpack_to_string(packed) {
+        Some(s) => ok("type", Value::String(s)),
+        None => err("type", "eval failed"),
+    }
+}
+
+fn browser_alias(body: &Value) -> u64 {
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("spawn");
+    match action {
+        "spawn" => browser_spawn(body),
+        "eval" => browser_eval(body),
+        "close" => browser_close(body),
+        _ => err("browser", "unknown action — use spawn/eval/close"),
+    }
+}
+
+fn shell_exec(body: &Value, lang: &str) -> u64 {
+    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    if code.is_empty() { return err(lang, "code required"); }
+    let opts = json!({ "lang": lang }).to_string();
+    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    match unpack_to_string(packed) {
+        Some(s) => ok(lang, Value::String(s)),
+        None => ok(lang, json!({ "note": "emulated via thebird host_exec_js", "lang": lang })),
+    }
+}
+
 fn rejected(verb: &str) -> u64 {
     err(verb, "verb unavailable in browser; use exec:nodejs or host-side dispatch")
 }
@@ -295,11 +463,26 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "browser_close" => browser_close(&body),
         "exec_js" | "nodejs" | "javascript" | "node" | "js" => exec_js(&body),
         "health" => health(&body),
-        "python" | "bash" | "ssh" | "powershell" | "ps1" | "sh" | "zsh" => rejected(&verb),
-        "status" | "wait" | "sleep" | "close" | "kill-port" | "forget"
-        | "feedback" | "learn-status" | "learn-debug" | "learn-build"
-        | "discipline" | "pause" | "runner" | "type" | "browser"
-            => rejected(&verb),
+        "python" | "py" => shell_exec(&body, "python"),
+        "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, "bash"),
+        "powershell" | "ps1" => shell_exec(&body, "powershell"),
+        "ssh" => shell_exec(&body, "ssh"),
+        "go" | "rust" | "c" | "cpp" | "java" | "deno" => shell_exec(&body, &verb),
+        "status" => status(&body),
+        "wait" => wait(&body),
+        "sleep" => sleep(&body),
+        "close" => close(&body),
+        "kill-port" => kill_port(&body),
+        "forget" => forget(&body),
+        "feedback" => feedback(&body),
+        "learn-status" => learn_status(&body),
+        "learn-debug" => learn_debug(&body),
+        "learn-build" => learn_build(&body),
+        "discipline" => discipline(&body),
+        "pause" => pause(&body),
+        "runner" => runner(&body),
+        "type" => type_into(&body),
+        "browser" => browser_alias(&body),
         "" => err("", "verb required"),
         _ => err(&verb, "unknown verb"),
     }

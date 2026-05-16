@@ -1,14 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, SystemTime};
 use std::env;
-use notify::{RecursiveMode, Watcher, RecommendedWatcher, Result as NotifyResult};
+use notify::{RecursiveMode, Watcher, RecommendedWatcher};
 use std::sync::mpsc;
 
-pub fn run_spool_daemon() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_spool_daemon() -> Result<(), anyhow::Error> {
     let exec_spool = if let Ok(custom) = env::var("SPOOL_DIR") {
         PathBuf::from(custom)
     } else if let Ok(custom) = env::var("RS_EXEC_SPOOL_DIR") {
@@ -50,7 +48,7 @@ pub fn run_spool_daemon() -> Result<(), Box<dyn std::error::Error>> {
                 for entry in walkdir::WalkDir::new(&pending_root)
                     .into_iter()
                     .filter_map(|e| e.ok())
-                    .filter(|e| e.is_file())
+                    .filter(|e| e.file_type().is_file())
                 {
                     let path = entry.path();
                     if !path.exists() {
@@ -83,7 +81,7 @@ pub fn run_spool_daemon() -> Result<(), Box<dyn std::error::Error>> {
                 for entry in walkdir::WalkDir::new(&pending_root)
                     .into_iter()
                     .filter_map(|e| e.ok())
-                    .filter(|e| e.is_file())
+                    .filter(|e| e.file_type().is_file())
                 {
                     let path = entry.path();
                     if !path.exists() {
@@ -315,13 +313,13 @@ fn dispatch_to_spool_verb(verb: &str, file_id: &str, content: &str) -> (String, 
     }
 }
 
-fn home_dir() -> Result<String, Box<dyn std::error::Error>> {
+fn home_dir() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
 }
 
-pub fn run_spool_once() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_spool_once() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let exec_spool = PathBuf::from(home_dir()?)
         .join(".gm")
         .join("exec-spool");
@@ -333,11 +331,11 @@ pub fn run_spool_once() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    for entry in walkdir::WalkDir::new(&pending_root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.is_file())
-    {
+for entry in walkdir::WalkDir::new(&pending_root)
+                     .into_iter()
+                     .filter_map(|e| e.ok())
+                     .filter(|e| e.file_type().is_file())
+                 {
         dispatch_file(entry.path(), &output_root);
     }
 
