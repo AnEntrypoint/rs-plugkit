@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 /// Recall episodes from rs-learn. Returns formatted text or empty string on failure.
 pub fn recall_disc(query: &str, project_dir: &str, limit: u32, discipline: Option<&str>) -> String {
@@ -51,28 +52,85 @@ pub fn learn_passthrough_disc(action: &str, rest: &[String], project_dir: &str, 
 }
 
 /// Attempt recall via HTTP RPC to rs-learn daemon (127.0.0.1:4800).
-fn try_recall_http(query: &str, limit: u32, _discipline: Option<&str>, _project_path: &Path) -> Option<String> {
-    // TODO: Implement HTTP client call to rs-learn daemon
-    // For now: None to trigger fallback
-    None
+fn try_recall_http(query: &str, limit: u32, discipline: Option<&str>, _project_path: &Path) -> Option<String> {
+    let client = reqwest::blocking::Client::new();
+    let url = "http://127.0.0.1:4800/recall";
+
+    let payload = serde_json::json!({
+        "query": query,
+        "limit": limit,
+        "discipline": discipline,
+    });
+
+    match client.post(url).json(&payload).timeout(Duration::from_secs(5)).send() {
+        Ok(resp) => {
+            match resp.text() {
+                Ok(text) if !text.trim().is_empty() && text != "null" => Some(text),
+                _ => None,
+            }
+        }
+        Err(_) => None,
+    }
 }
 
 /// Attempt ingest via HTTP RPC to rs-learn daemon.
-fn try_ingest_http(content: &str, source: &str, _discipline: Option<&str>, _project_path: &Path) -> Result<(), String> {
-    // TODO: Implement HTTP client call to rs-learn daemon
-    Err("rs-learn unavailable".into())
+fn try_ingest_http(content: &str, source: &str, discipline: Option<&str>, _project_path: &Path) -> Result<(), String> {
+    let client = reqwest::blocking::Client::new();
+    let url = "http://127.0.0.1:4800/ingest";
+
+    let payload = serde_json::json!({
+        "content": content,
+        "source": source,
+        "discipline": discipline,
+    });
+
+    match client.post(url).json(&payload).timeout(Duration::from_secs(5)).send() {
+        Ok(resp) if resp.status().is_success() => Ok(()),
+        _ => Err("rs-learn HTTP call failed".into()),
+    }
 }
 
 /// Attempt forget via HTTP RPC to rs-learn daemon.
-fn try_forget_http(kind: &str, target: &str, _discipline: Option<&str>, _project_path: &Path) -> Option<usize> {
-    // TODO: Implement HTTP client call to rs-learn daemon
-    None
+fn try_forget_http(kind: &str, target: &str, discipline: Option<&str>, _project_path: &Path) -> Option<usize> {
+    let client = reqwest::blocking::Client::new();
+    let url = "http://127.0.0.1:4800/forget";
+
+    let payload = serde_json::json!({
+        "kind": kind,
+        "target": target,
+        "discipline": discipline,
+    });
+
+    match client.post(url).json(&payload).timeout(Duration::from_secs(5)).send() {
+        Ok(resp) => {
+            resp.json::<serde_json::Value>()
+                .ok()
+                .and_then(|v| v.get("count").and_then(|c| c.as_u64()))
+                .map(|n| n as usize)
+        }
+        Err(_) => None,
+    }
 }
 
 /// Attempt passthrough via HTTP RPC to rs-learn daemon.
-fn try_learn_passthrough_http(action: &str, rest: &[String], _discipline: Option<&str>, _project_path: &Path) -> Option<String> {
-    // TODO: Implement HTTP client call to rs-learn daemon
-    None
+fn try_learn_passthrough_http(action: &str, rest: &[String], discipline: Option<&str>, _project_path: &Path) -> Option<String> {
+    let client = reqwest::blocking::Client::new();
+    let url = format!("http://127.0.0.1:4800/{}", action);
+
+    let payload = serde_json::json!({
+        "args": rest,
+        "discipline": discipline,
+    });
+
+    match client.post(&url).json(&payload).timeout(Duration::from_secs(10)).send() {
+        Ok(resp) => {
+            match resp.text() {
+                Ok(text) if !text.trim().is_empty() && text != "null" => Some(text),
+                _ => None,
+            }
+        }
+        Err(_) => None,
+    }
 }
 
 /// Fallback: read AGENTS.md and search for matching entries.
