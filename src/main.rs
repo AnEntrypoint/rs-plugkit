@@ -1,6 +1,6 @@
-mod hook;
 mod self_update;
 mod spool;
+mod learning;
 
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -91,17 +91,6 @@ enum Cmd {
     /// Terminate a background task by id (best-effort via listTasks + kill).
     Close {
         task_id: String,
-    },
-    Hook {
-        event: String,
-    },
-    SkillLifecycle {
-        #[arg(long, default_value_t = true)] session_start: bool,
-        #[arg(long, default_value_t = true)] prompt_submit: bool,
-        #[arg(long, default_value_t = true)] pre_tool_use: bool,
-        #[arg(long, default_value_t = true)] post_tool_use: bool,
-        #[arg(long, default_value_t = false)] stop: bool,
-        #[arg(long, default_value_t = false)] stop_git: bool,
     },
     #[command(name = "kill-port")] KillPort { port: u16 },
     Deps,
@@ -1229,53 +1218,6 @@ async fn main() {
                     Err(e) => { eprintln!("[browser] spawn failed: {}", e); exit_code = 1; }
                 }
             }
-            Some(Cmd::Hook { event }) => {
-                let ev = event.as_str();
-                let known = matches!(ev,
-                    "session-start" | "pre-tool-use" | "post-tool-use" | "prompt-submit" |
-                    "pre-compact" | "post-compact" | "session-end" | "stop" | "stop-git"
-                );
-                if !known {
-                    eprintln!("Unknown hook event: {}", ev);
-                    exit_code = 1;
-                    return Ok(());
-                }
-                rs_exec::obs::span("hook", ev, serde_json::json!({}), || {
-                    match ev {
-                        "session-start" => hook::session_start(),
-                        "pre-tool-use" => hook::pre_tool_use(),
-                        "post-tool-use" => hook::post_tool_use(),
-                        "prompt-submit" => hook::prompt_submit(),
-                        "pre-compact" => hook::pre_compact(),
-                        "post-compact" => hook::post_compact(),
-                        "session-end" => hook::session_end(),
-                        "stop" => hook::run_stop(),
-                        "stop-git" => hook::run_stop_git(),
-                        _ => {}
-                    }
-                });
-                return Ok(());
-            }
-            Some(Cmd::SkillLifecycle { session_start, prompt_submit, pre_tool_use, post_tool_use, stop, stop_git }) => {
-                rs_exec::obs::span("hook", "skill-lifecycle", serde_json::json!({}), || {
-                    if session_start { hook::session_start(); }
-                    if prompt_submit { hook::prompt_submit(); }
-                    if pre_tool_use { hook::pre_tool_use(); }
-                    if post_tool_use { hook::post_tool_use(); }
-                    if stop { hook::run_stop(); }
-                    if stop_git { hook::run_stop_git(); }
-                });
-                println!("{}", serde_json::to_string(&json!({
-                    "ok": true,
-                    "sessionStart": session_start,
-                    "promptSubmit": prompt_submit,
-                    "preToolUse": pre_tool_use,
-                    "postToolUse": post_tool_use,
-                    "stop": stop,
-                    "stopGit": stop_git
-                })).unwrap_or_else(|_| "{\"ok\":true}".to_string()));
-                return Ok(());
-            }
             Some(Cmd::KillPort { port }) => {
                 ensure_runner().await?;
                 let res = rpc_client::rpc_call("killPort", json!({ "port": port }), 10000).await?;
@@ -1289,14 +1231,17 @@ async fn main() {
             Some(Cmd::Deps) => { cmd_deps()?; }
             Some(Cmd::Doctor) => { cmd_doctor()?; }
             Some(Cmd::Health) => { cmd_health(); }
-            Some(Cmd::EnsureTools) => { hook::session_start::ensure_tools_current(); }
+            Some(Cmd::EnsureTools) => {
+                eprintln!("[ensure-tools] spool-based dispatch not yet implemented; skipping");
+                exit_code = 0;
+            }
             Some(Cmd::Recall { query, limit, cwd, discipline }) => {
                 let mut q_parts = query;
                 let disc = extract_discipline_sigil(&mut q_parts, discipline);
                 let q = q_parts.join(" ");
                 if q.trim().is_empty() { eprintln!("No query provided"); exit_code = 1; return Ok(()); }
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
-                let out = hook::rs_learn::recall_disc(&q, &dir, limit, disc.as_deref());
+                let out = learning::recall_disc(&q, &dir, limit, disc.as_deref());
                 if out.is_empty() { println!("No recall results."); return Ok(()); }
                 println!("{}", out);
             }
@@ -1311,7 +1256,7 @@ async fn main() {
                 if body.trim().is_empty() { eprintln!("No content provided"); exit_code = 1; return Ok(()); }
                 let src = source.unwrap_or_else(|| "memorize".into());
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
-                hook::rs_learn::ingest_fast_disc(&body, &src, &dir, disc.as_deref());
+                learning::ingest_fast_disc(&body, &src, &dir, disc.as_deref());
                 let project_name = std::path::Path::new(&dir).file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
                 rs_exec::obs::event("rs_learn", "memorize", serde_json::json!({
                     "bytes": body.len(),
@@ -1333,7 +1278,7 @@ async fn main() {
                     exit_code = 1; return Ok(());
                 }
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
-                match hook::rs_learn::forget_disc(kind, target, &dir, disc.as_deref()) {
+                match learning::forget_disc(kind, target, &dir, disc.as_deref()) {
                     Ok(n) => println!("forgot {} episode(s)", n),
                     Err(e) => { eprintln!("forget failed: {}", e); exit_code = 1; }
                 }
@@ -1342,7 +1287,7 @@ async fn main() {
                 let mut rest_parts = rest;
                 let disc = extract_discipline_sigil(&mut rest_parts, discipline);
                 let dir = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_default().to_string_lossy().to_string());
-                let out = hook::rs_learn::learn_passthrough_disc(&action, &rest_parts, &dir, disc.as_deref());
+                let out = learning::learn_passthrough_disc(&action, &rest_parts, &dir, disc.as_deref());
                 if out.is_empty() {
                     eprintln!("learn {} returned no output (rs-learn may not be available)", action);
                     exit_code = 1;
