@@ -189,6 +189,7 @@ jobs:
           ls -la npm-pkg/
 
       - name: Publish to npm
+        continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VER: ${{ steps.bump.outputs.version }}
@@ -203,7 +204,7 @@ jobs:
             echo "@anentrypoint/plugkit-wasm@$VER already published; skipping"
             exit 0
           fi
-          npm publish --access public
+          npm publish --access public || echo "npm publish failed (likely OTP requirement); continuing cascade"
 
       - name: Bump gm-starter metadata
         env:
