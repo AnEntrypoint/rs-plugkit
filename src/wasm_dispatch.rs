@@ -198,6 +198,7 @@ fn kv_query(body: &Value) -> u64 {
 fn recall(body: &Value) -> u64 {
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(8) as u32;
+    let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if query.is_empty() { return err("recall", "query required"); }
     let emb_packed = unsafe { host_vec_embed(query.as_ptr(), query.len() as u32) };
     let embedding = if emb_packed != 0 { unpack_to_value(emb_packed) } else { Value::Null };
@@ -207,8 +208,7 @@ fn recall(body: &Value) -> u64 {
     if !vec_hits.is_null() && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
         return ok("recall", vec_hits);
     }
-    let ns = "rs-learn";
-    let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, query.as_ptr(), query.len() as u32) };
+    let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, query.as_ptr(), query.len() as u32) };
     let kv_hits = unpack_to_value(packed);
     ok("recall", kv_hits)
 }
