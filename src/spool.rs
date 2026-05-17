@@ -156,10 +156,11 @@ pub fn run_spool_daemon() -> Result<(), anyhow::Error> {
 
                     let last = last_debounce.get(path).copied().unwrap_or(SystemTime::UNIX_EPOCH);
                     let elapsed = mtime.elapsed().unwrap_or(Duration::from_secs(10));
+                    let already_handled = mtime <= last;
 
                     if elapsed < Duration::from_millis(250) {
                         pending_paths.insert(path.to_path_buf());
-                    } else if pending_paths.contains(path) {
+                    } else if !already_handled {
                         pending_paths.remove(path);
                         last_debounce.insert(path.to_path_buf(), mtime);
                         dispatch_file(path, &output_root);
@@ -188,8 +189,11 @@ pub fn run_spool_daemon() -> Result<(), anyhow::Error> {
                         .unwrap_or_else(SystemTime::now);
 
                     let elapsed = now.duration_since(mtime).unwrap_or(Duration::from_secs(10));
+                    let already_handled = last_debounce.get(path)
+                        .map(|t| mtime <= *t)
+                        .unwrap_or(false);
 
-                    if elapsed >= Duration::from_millis(250) && pending_paths.contains(path) {
+                    if elapsed >= Duration::from_millis(250) && !already_handled {
                         to_dispatch.push(path.to_path_buf());
                     }
                 }
