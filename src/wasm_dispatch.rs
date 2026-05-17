@@ -490,6 +490,33 @@ fn sql_smoke() -> u64 {
     pack(crate::libsql_wasm::smoke().to_string())
 }
 
+fn codeinsight_index(body: &Value) -> u64 {
+    let root = body.get("root").and_then(|v| v.as_str()).unwrap_or("/");
+    let max_files = body.get("max_files").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+    pack(crate::code_index::index(root, max_files).to_string())
+}
+
+fn codesearch_libsql(body: &Value) -> u64 {
+    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    pack(crate::code_index::search(query, k).to_string())
+}
+
+fn memorize_libsql(body: &Value) -> u64 {
+    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    if text.is_empty() { return err("memorize", "missing text"); }
+    pack(crate::code_index::memorize(text, ns).to_string())
+}
+
+fn recall_libsql(body: &Value) -> u64 {
+    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
+    let ns = body.get("namespace").and_then(|v| v.as_str());
+    if query.is_empty() { return err("recall", "missing query"); }
+    pack(crate::code_index::recall(query, limit, ns).to_string())
+}
+
 #[no_mangle]
 pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
     let verb = read_str(verb_ptr as *const u8, verb_len);
@@ -509,9 +536,6 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         return pack(response.to_string());
     }
     match verb.as_str() {
-        "recall" => recall(&body),
-        "memorize" => memorize_with_raw(&body, &body_s),
-        "codesearch" => codesearch(&body),
         "fs_read" => fs_read(&body),
         "fs_write" => fs_write(&body),
         "fs_readdir" => fs_readdir(&body),
@@ -529,6 +553,13 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "sql_exec" => sql_exec(&body),
         "sql_query" => sql_query(&body),
         "sql_smoke" => sql_smoke(),
+        "codeinsight_index" => codeinsight_index(&body),
+        "codesearch" => codesearch_libsql(&body),
+        "memorize" => memorize_libsql(&body),
+        "recall" => recall_libsql(&body),
+        "recall_kv" => recall(&body),
+        "memorize_kv" => memorize_with_raw(&body, &body_s),
+        "codesearch_kv" => codesearch(&body),
         "python" | "py" => shell_exec(&body, &body_s, "python"),
         "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, &body_s, "bash"),
         "powershell" | "ps1" => shell_exec(&body, &body_s, "powershell"),
