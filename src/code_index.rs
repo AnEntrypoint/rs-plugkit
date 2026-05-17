@@ -217,9 +217,10 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
         }
     };
     let qlit = vec_to_json_literal(&qvec);
+    let pool = k.saturating_mul(5).max(20);
     let sql = format!(
-        "SELECT c.path, c.kind, c.name, c.line_start, c.line_end, substr(c.body,1,400) AS snippet, vector_distance_cos(c.embedding, vector('{}')) AS distance FROM vector_top_k('code_chunks_vec', vector('{}'), {}) AS v JOIN code_chunks AS c ON c.rowid = v.id",
-        qlit, qlit, k
+        "SELECT c.path, c.kind, c.name, c.line_start, c.line_end, substr(c.body,1,400) AS snippet, vector_distance_cos(c.embedding, vector('{}')) AS distance FROM vector_top_k('code_chunks_vec', vector('{}'), {}) AS v JOIN code_chunks AS c ON c.rowid = v.id ORDER BY distance ASC LIMIT {}",
+        qlit, qlit, pool, k
     );
     match libsql_wasm::query(&sql) {
         Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows }),
@@ -266,10 +267,13 @@ pub fn recall(query: &str, limit: usize, namespace: Option<&str>, inline_embeddi
         }
     };
     let qlit = vec_to_json_literal(&qvec);
+    // Over-fetch from the vector index so namespace filtering still surfaces hits when
+    // the global top-k pool is dominated by other namespaces.
+    let pool = limit.saturating_mul(20).max(50);
     let ns_filter = match namespace { Some(n) => format!(" WHERE m.namespace='{}'", sql_quote(n)), None => String::new() };
     let sql = format!(
-        "SELECT m.id, m.namespace, m.text, m.ts, vector_distance_cos(m.embedding, vector('{}')) AS distance FROM vector_top_k('memories_vec', vector('{}'), {}) AS v JOIN memories AS m ON m.rowid = v.id{}",
-        qlit, qlit, limit, ns_filter
+        "SELECT m.id, m.namespace, m.text, m.ts, vector_distance_cos(m.embedding, vector('{}')) AS distance FROM vector_top_k('memories_vec', vector('{}'), {}) AS v JOIN memories AS m ON m.rowid = v.id{} ORDER BY distance ASC LIMIT {}",
+        qlit, qlit, pool, ns_filter, limit
     );
     match libsql_wasm::query(&sql) {
         Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows }),
