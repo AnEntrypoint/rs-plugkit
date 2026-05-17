@@ -30,6 +30,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
 
     let mut resolved_id: Option<String> = None;
     let mut resolved_evidence: Option<String> = None;
+    let mut found_id = false;
 
     if let Some(seq) = doc.as_sequence_mut() {
         for item in seq.iter_mut() {
@@ -40,21 +41,31 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                     .map(|s| s == trimmed)
                     .unwrap_or(false);
                 if id_match {
+                    found_id = true;
+                    let evidence = map
+                        .get(&Value::String("evidence".to_string()))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    if evidence.trim().is_empty() {
+                        let msg = format!(
+                            "Refused: mutable {} cannot be witnessed without evidence. Add evidence: \"<concrete proof: file:line, codesearch hit, exec output>\" to .gm/mutables.yml row first.",
+                            trimmed
+                        );
+                        return (String::new(), msg, 1);
+                    }
                     map.insert(
                         Value::String("status".to_string()),
                         Value::String("witnessed".to_string()),
                     );
                     resolved_id = Some(trimmed.to_string());
-                    resolved_evidence = map
-                        .get(&Value::String("evidence".to_string()))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
+                    resolved_evidence = Some(evidence);
                 }
             }
         }
     }
 
-    if resolved_id.is_none() {
+    if !found_id {
         return (String::new(), format!("mutable id not found: {}", trimmed), 1);
     }
 
