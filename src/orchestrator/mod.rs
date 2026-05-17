@@ -5,6 +5,8 @@ pub mod memorize;
 pub mod residual;
 pub mod recall;
 pub mod instructions;
+pub mod yaml_util;
+pub mod prd;
 
 use std::path::PathBuf;
 use std::env;
@@ -22,7 +24,9 @@ pub fn gm_dir() -> PathBuf {
 pub fn is_orchestrator_verb(verb: &str) -> bool {
     matches!(
         verb,
-        "transition" | "mutable-resolve" | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall" | "instruction"
+        "transition" | "mutable-resolve" | "mutable-add" | "mutable-list"
+            | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall"
+            | "instruction" | "prd-add" | "prd-resolve" | "prd-list"
     )
 }
 
@@ -30,11 +34,16 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
     match verb {
         "transition" => transitions::handle(content),
         "mutable-resolve" => mutables::handle_resolve(content),
+        "mutable-add" => mutables::handle_add(content),
+        "mutable-list" => mutables::handle_list(content),
         "memorize-fire" => memorize::handle_fire(content),
         "phase-status" => state::handle_status(),
         "residual-scan" => residual::handle_scan(content),
         "auto-recall" => recall::handle_auto_recall(content),
         "instruction" => instructions::handle_instruction(content),
+        "prd-add" => prd::handle_add(content),
+        "prd-resolve" => prd::handle_resolve(content),
+        "prd-list" => prd::handle_list(content),
         _ => (format!("Unknown orchestrator verb: {}", verb), String::new(), 1),
     }
 }

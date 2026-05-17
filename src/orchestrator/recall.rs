@@ -23,6 +23,44 @@ fn derive_query(prompt: &str) -> String {
     words.join(" ")
 }
 
+pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
+    let query = if query_text.trim().is_empty() {
+        return serde_json::Value::Array(Vec::new());
+    } else {
+        derive_query(query_text)
+    };
+    let namespace = "default";
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::wasm_dispatch::{host_vec_embed, host_vec_search, host_kv_query};
+        let emb_packed = unsafe { host_vec_embed(query.as_ptr(), query.len() as u32) };
+        let embedding = if emb_packed != 0 {
+            crate::wasm_dispatch::unpack_to_value_pub(emb_packed)
+        } else { serde_json::Value::Null };
+        let q_json = serde_json::json!({
+            "query": query, "embedding": embedding, "namespace": namespace
+        }).to_string();
+        let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, limit) };
+        let vec_hits = crate::wasm_dispatch::unpack_to_value_pub(packed);
+        if !vec_hits.is_null()
+            && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false)
+        {
+            return vec_hits;
+        }
+        let packed = unsafe {
+            host_kv_query(namespace.as_ptr(), namespace.len() as u32,
+                          query.as_ptr(), query.len() as u32)
+        };
+        let kv_hits = crate::wasm_dispatch::unpack_to_value_pub(packed);
+        if kv_hits.is_null() { serde_json::Value::Array(Vec::new()) } else { kv_hits }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (query, namespace, limit);
+        serde_json::Value::Array(Vec::new())
+    }
+}
+
 pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
     let prompt = content.trim();
     if prompt.is_empty() {

@@ -6,10 +6,10 @@ pub mod verify;
 pub mod update_docs;
 
 use serde_json::json;
-use super::gm_dir;
 use super::state::read_state;
-use super::mutables::mutables_path;
-use crate::pkfs;
+use super::mutables;
+use super::prd;
+use super::recall;
 
 pub fn get_instruction(phase: &str) -> &'static str {
     match phase.trim().to_ascii_uppercase().as_str() {
@@ -35,76 +35,34 @@ fn next_phase_hint(phase: &str) -> Option<&'static str> {
     }
 }
 
-fn pending_mutables() -> Vec<String> {
-    let path = mutables_path();
-    let path_s = path.to_string_lossy().to_string();
-    let mut ids = Vec::new();
-    if !pkfs::exists(&path_s) {
-        return ids;
-    }
-    let raw = match pkfs::read_to_string(&path_s) {
-        Some(s) => s,
-        None => return ids,
-    };
-    let doc: serde_yaml::Value = match serde_yaml::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return ids,
-    };
-    if let Some(seq) = doc.as_sequence() {
-        for item in seq {
-            let status = item
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            if status != "witnessed" && status != "resolved" {
-                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                    ids.push(id.to_string());
-                }
-            }
-        }
-    }
-    ids
+fn prd_items_json() -> Vec<serde_json::Value> {
+    let (body, _err, code) = prd::handle_list("");
+    if code != 0 { return Vec::new(); }
+    serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("items").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
 }
 
-fn pending_prd_count() -> usize {
-    let path = gm_dir().join("prd.yml");
-    let path_s = path.to_string_lossy().to_string();
-    if !pkfs::exists(&path_s) {
-        return 0;
-    }
-    let raw = match pkfs::read_to_string(&path_s) {
-        Some(s) => s,
-        None => return 0,
-    };
-    let doc: serde_yaml::Value = match serde_yaml::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return 0,
-    };
-    let seq_opt = doc.as_sequence().cloned().or_else(|| {
-        doc.get("items").and_then(|v| v.as_sequence()).cloned()
-    });
-    let mut n = 0usize;
-    if let Some(items) = seq_opt {
-        for item in items {
-            let status = item
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("pending");
-            if status != "done" && status != "complete" && status != "completed" {
-                n += 1;
-            }
-        }
-    }
-    n
+fn prd_pending_count(items: &[serde_json::Value]) -> usize {
+    items.iter().filter(|it| {
+        let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+        status != "done" && status != "complete" && status != "completed"
+    }).count()
 }
 
 pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
+    let mut session_id_opt: Option<String> = None;
     let phase = if trimmed.is_empty() {
         read_state().phase
     } else if let Some(stripped) = trimmed.strip_prefix("phase=") {
         stripped.trim().to_string()
     } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
+            session_id_opt = Some(sid.to_string());
+        }
         if let Some(s) = v.as_str() {
             s.to_string()
         } else if let Some(s) = v.get("phase").and_then(|p| p.as_str()) {
@@ -116,17 +74,39 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         trimmed.to_string()
     };
 
+    if let Some(sid) = session_id_opt {
+        let mut st = read_state();
+        st.session_id = Some(sid);
+        let _ = super::state::write_state(&st);
+    }
+
     let instruction = get_instruction(&phase);
-    let mutables_pending = pending_mutables();
-    let prd_pending_count = pending_prd_count();
+    let mutables_pending = mutables::pending_detailed();
+    let prd_items = prd_items_json();
+    let prd_pending = prd_pending_count(&prd_items);
     let next = next_phase_hint(&phase);
+
+    let query = prd_items.iter()
+        .find(|it| {
+            let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+            status != "done" && status != "complete" && status != "completed"
+        })
+        .and_then(|it| it.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .unwrap_or_default();
+    let recall_hits = if query.is_empty() {
+        serde_json::Value::Array(Vec::new())
+    } else {
+        recall::recall_hits(&query, 3)
+    };
 
     let payload = json!({
         "phase": phase,
         "instruction": instruction,
         "mutables_pending": mutables_pending,
-        "prd_pending_count": prd_pending_count,
+        "prd_items": prd_items,
+        "prd_pending_count": prd_pending,
         "next_phase_hint": next,
+        "recall_hits": recall_hits,
     });
     (payload.to_string(), String::new(), 0)
 }
