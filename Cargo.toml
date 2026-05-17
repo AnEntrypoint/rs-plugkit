@@ -19,6 +19,20 @@ serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 libsql-ffi = { version = "0.9", default-features = false, features = ["wasm32-wasi-vfs"] }
+tree-sitter = "0.24"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-rust = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-json = "0.23"
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.25"
+tree-sitter-bash = "0.25"
+tree-sitter-md = "0.5"
 
 [profile.release]
 strip = true
