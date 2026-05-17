@@ -153,6 +153,11 @@ enum Cmd {
         #[arg(long)] session: Option<String>,
         #[arg(long)] cwd: Option<String>,
     },
+    /// Manage .gm/ orchestration marker files. Directives: write-needs-gm | write-gm-fired | delete-all
+    Marker {
+        directive: String,
+        args: Vec<String>,
+    },
 }
 
 fn extract_discipline_sigil(args: &mut Vec<String>, flag: Option<String>) -> Option<String> {
@@ -1365,6 +1370,45 @@ async fn main() {
                     "dur_ms": started.elapsed().as_millis() as u64
                 }));
                 if !printed_any { println!("No results found."); return Ok(()); }
+            }
+            Some(Cmd::Marker { directive, args }) => {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let gm_dir = cwd.join(".gm");
+                std::fs::create_dir_all(&gm_dir).ok();
+
+                match directive.as_str() {
+                    "write-needs-gm" => {
+                        let path = gm_dir.join("needs-gm");
+                        std::fs::write(&path, "").ok();
+                        println!("Created .gm/needs-gm");
+                    }
+                    "write-gm-fired" => {
+                        let session_id = args.first()
+                            .cloned()
+                            .unwrap_or_else(|| std::env::var("SESSION_ID").unwrap_or_else(|_| "default".to_string()));
+                        let path = gm_dir.join(format!("gm-fired-{}", session_id));
+                        std::fs::write(&path, "").ok();
+                        println!("Created .gm/gm-fired-{}", session_id);
+                    }
+                    "delete-all" => {
+                        let session_id = args.first()
+                            .cloned()
+                            .unwrap_or_else(|| std::env::var("SESSION_ID").unwrap_or_else(|_| "default".to_string()));
+                        for file in &[
+                            gm_dir.join("prd.yml"),
+                            gm_dir.join("mutables.yml"),
+                            gm_dir.join("needs-gm"),
+                            gm_dir.join(format!("gm-fired-{}", session_id)),
+                        ] {
+                            let _ = std::fs::remove_file(file);
+                        }
+                        println!("Deleted all gm marker files");
+                    }
+                    _ => {
+                        eprintln!("Unknown marker directive: {}. Valid: write-needs-gm | write-gm-fired | delete-all", directive);
+                        exit_code = 1;
+                    }
+                }
             }
         }
         Ok(())
