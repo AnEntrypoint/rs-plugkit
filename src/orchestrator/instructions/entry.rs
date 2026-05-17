@@ -12,7 +12,7 @@ Skills are installed via `bun x skills add AnEntrypoint/gm-skill`. Each skill la
 
 ## Self-Bootstrap
 
-First spool dispatch in any project checks for `~/.claude/gm-tools/plugkit.wasm` (or `plugkit.exe` on Windows). Absent → write `.gm/exec-spool/in/bootstrap/0.txt` (empty body) and the orchestrator fetches the binary from `AnEntrypoint/plugkit-bin` releases, sha256-verifies against the pinned manifest, and writes `.gm/exec-spool/.bootstrap-status.json` before any other verb runs. Pin mismatch or fetch failure writes `.bootstrap-error.json` and the chain pauses until resolved. Plugkit launches its own spool watcher on first invocation — no external launcher script.
+First spool dispatch in any project checks for `~/.claude/gm-tools/plugkit.wasm`. Absent → write `.gm/exec-spool/in/bootstrap/0.txt` (empty body) and the orchestrator fetches the binary from `AnEntrypoint/plugkit-bin` releases, sha256-verifies against the pinned manifest, and writes `.gm/exec-spool/.bootstrap-status.json` before any other verb runs. Pin mismatch or fetch failure writes `.bootstrap-error.json` and the chain pauses until resolved. Plugkit launches its own spool watcher on first invocation — no external launcher script.
 
 ## Session State
 
@@ -40,9 +40,9 @@ Resumption grammar: `tail` drains additional output without blocking. `watch` bl
 
 A hook blocking a tool call throws an error with an imperative instruction string. It does not rewrite the call's arguments into a self-failing form. Throw form is for "use a different tool" (the model adapts policy); mutate form reinforces the wrong mental model.
 
-## Meaning Through Haiku
+## Code vs Meaning
 
-Any task whose correctness depends on understanding — summarize, classify, extract intent, rewrite, translate, semantic dedup, score, label, decide-if-two-texts-mean-the-same — routes through `Agent(subagent_type='gm:textprocessing', model='haiku', ...)`. One subagent per item, N items in N parallel calls in one message. A keyword-list or regex-on-meaning-phrases loop deciding semantic questions ships a green check that lies.
+Code does mechanics; semantic operations route through `exec_js` calling the agent's tool surface. A keyword-list or regex-on-meaning-phrases loop deciding semantic questions ships a green check that lies.
 
 ## Orient Before Naming
 

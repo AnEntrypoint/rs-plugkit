@@ -13,9 +13,6 @@ extern "C" {
     pub fn host_kv_query(ns_ptr: *const u8, ns_len: u32, q_ptr: *const u8, q_len: u32) -> u64;
     pub fn host_vec_search(q_ptr: *const u8, q_len: u32, k: u32) -> u64;
     pub fn host_vec_embed(text_ptr: *const u8, text_len: u32) -> u64;
-    pub fn host_browser_spawn(url_ptr: *const u8, url_len: u32) -> u64;
-    pub fn host_browser_eval(session_id: u64, code_ptr: *const u8, code_len: u32) -> u64;
-    pub fn host_browser_close(session_id: u64) -> u32;
     pub fn host_exec_js(code_ptr: *const u8, code_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
     pub fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
     pub fn host_now_ms() -> u64;
@@ -165,30 +162,6 @@ fn env_get(body: &Value) -> u64 {
     }
 }
 
-fn browser_spawn(body: &Value) -> u64 {
-    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("about:blank");
-    let sid = unsafe { host_browser_spawn(url.as_ptr(), url.len() as u32) };
-    ok("browser_spawn", json!({ "sessionId": sid }))
-}
-
-fn browser_eval(body: &Value) -> u64 {
-    let sid = body.get("sessionId").and_then(|v| v.as_u64()).unwrap_or(0);
-    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
-    if sid == 0 || code.is_empty() { return err("browser_eval", "sessionId+code required"); }
-    let packed = unsafe { host_browser_eval(sid, code.as_ptr(), code.len() as u32) };
-    match unpack_to_string(packed) {
-        Some(s) => ok("browser_eval", Value::String(s)),
-        None => ok("browser_eval", Value::Null),
-    }
-}
-
-fn browser_close(body: &Value) -> u64 {
-    let sid = body.get("sessionId").and_then(|v| v.as_u64()).unwrap_or(0);
-    if sid == 0 { return err("browser_close", "sessionId required"); }
-    let rc = unsafe { host_browser_close(sid) };
-    if rc != 0 { ok("browser_close", Value::Null) } else { err("browser_close", "close failed") }
-}
-
 fn exec_js(body: &Value) -> u64 {
     let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
     if code.is_empty() { return err("exec_js", "code required"); }
@@ -297,7 +270,6 @@ fn health(_body: &Value) -> u64 {
             "host_fs_read","host_fs_write","host_fs_readdir","host_fs_stat",
             "host_fetch","host_kv_get","host_kv_put","host_kv_query",
             "host_vec_search","host_vec_embed",
-            "host_browser_spawn","host_browser_eval","host_browser_close",
             "host_exec_js","host_log","host_now_ms","host_env_get"
         ]
     }))
@@ -438,28 +410,6 @@ fn runner(body: &Value) -> u64 {
     }
 }
 
-fn type_into(body: &Value) -> u64 {
-    let sid = body.get("sessionId").and_then(|v| v.as_u64()).unwrap_or(0);
-    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
-    if sid == 0 || text.is_empty() { return err("type", "sessionId+text required"); }
-    let code = format!("(function(){{ var s=document.activeElement; if(s){{ s.value+='{}'; return 'ok'; }} return 'no active element'; }})()", text.replace('\'', "\\'"));
-    let packed = unsafe { host_browser_eval(sid, code.as_ptr(), code.len() as u32) };
-    match unpack_to_string(packed) {
-        Some(s) => ok("type", Value::String(s)),
-        None => err("type", "eval failed"),
-    }
-}
-
-fn browser_alias(body: &Value) -> u64 {
-    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("spawn");
-    match action {
-        "spawn" => browser_spawn(body),
-        "eval" => browser_eval(body),
-        "close" => browser_close(body),
-        _ => err("browser", "unknown action — use spawn/eval/close"),
-    }
-}
-
 fn shell_exec(body: &Value, lang: &str) -> u64 {
     let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
     if code.is_empty() { return err(lang, "code required"); }
@@ -507,9 +457,6 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "kv_get" => kv_get(&body),
         "kv_put" => kv_put(&body),
         "kv_query" => kv_query(&body),
-        "browser_spawn" => browser_spawn(&body),
-        "browser_eval" => browser_eval(&body),
-        "browser_close" => browser_close(&body),
         "exec_js" | "nodejs" | "javascript" | "node" | "js" => exec_js(&body),
         "health" => health(&body),
         "python" | "py" => shell_exec(&body, "python"),
@@ -530,8 +477,6 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "discipline" => discipline(&body),
         "pause" => pause(&body),
         "runner" => runner(&body),
-        "type" => type_into(&body),
-        "browser" => browser_alias(&body),
         "instruction" | "transition" | "mutable-resolve" | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall" => {
             let body_str = match &body {
                 Value::Null => String::new(),
