@@ -44,7 +44,9 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         return (String::new(), "empty memorize text".to_string(), 1);
     }
     let now = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let key = format!("mem-{}-{}", now, text.len());
+    static HANDLE_FIRE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = HANDLE_FIRE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let key = format!("mem-{}-{}-{}", now, counter, text.len());
     let rc = unsafe {
         crate::wasm_dispatch::host_kv_put(
             namespace.as_ptr(), namespace.len() as u32,
