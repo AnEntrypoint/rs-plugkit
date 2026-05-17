@@ -442,7 +442,7 @@ fn dispatch_to_spool_verb(verb: &str, file_id: &str, content: &str) -> (String, 
         }
         "marker" => {
             Command::new(&plugkit_path)
-                .args(["marker"].iter().chain(content.split_whitespace()))
+                .args(std::iter::once("marker").chain(content.split_whitespace()))
                 .current_dir(&cwd)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
