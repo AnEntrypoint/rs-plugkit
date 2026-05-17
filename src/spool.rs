@@ -26,31 +26,70 @@ fn check_prd_exists() -> bool {
 }
 
 fn check_unresolved_mutables() -> bool {
-    let mutables_path = get_gm_dir().join("mutables.yml");
-    if !mutables_path.exists() {
-        return false;
-    }
+    !unresolved_mutable_ids().is_empty()
+}
 
-    match fs::read_to_string(&mutables_path) {
-        Ok(content) => {
-            if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                if let Some(items) = yaml.as_sequence() {
-                    for item in items {
-                        if let Some(status) = item.get("status") {
-                            if let Some(status_str) = status.as_str() {
-                                if status_str == "unknown" {
-                                    return true;
-                                }
-                            }
-                        }
+fn unresolved_mutable_ids() -> Vec<String> {
+    let mutables_path = get_gm_dir().join("mutables.yml");
+    let mut ids = Vec::new();
+    if !mutables_path.exists() {
+        return ids;
+    }
+    if let Ok(content) = fs::read_to_string(&mutables_path) {
+        if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+            if let Some(items) = yaml.as_sequence() {
+                for item in items {
+                    let status_unknown = item
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s == "unknown")
+                        .unwrap_or(false);
+                    if status_unknown {
+                        let id = item
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("<unnamed>")
+                            .to_string();
+                        ids.push(id);
                     }
                 }
             }
         }
-        Err(_) => {}
     }
+    ids
+}
 
-    false
+fn pending_prd_ids() -> Vec<String> {
+    let prd_path = get_gm_dir().join("prd.yml");
+    let mut ids = Vec::new();
+    if !prd_path.exists() {
+        return ids;
+    }
+    if let Ok(content) = fs::read_to_string(&prd_path) {
+        if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+            let items_seq = yaml.as_sequence().cloned().or_else(|| {
+                yaml.get("items").and_then(|v| v.as_sequence()).cloned()
+            });
+            if let Some(items) = items_seq {
+                for item in items {
+                    let status = item
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("pending");
+                    if status != "done" && status != "complete" && status != "completed" {
+                        let id = item
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .or_else(|| item.get("title").and_then(|i| i.as_str()))
+                            .unwrap_or("<unnamed>")
+                            .to_string();
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+    }
+    ids
 }
 
 fn check_gm_fired(file_id: &str) -> bool {
@@ -236,21 +275,44 @@ fn dispatch_file(input_path: &Path, output_root: &Path) {
 }
 
 fn check_dispatch_gates(lang_or_verb: &str, file_id: &str) -> (bool, String) {
-    let is_admin_verb = matches!(lang_or_verb, "health" | "status" | "close" | "kill-port" | "wait" | "sleep" | "transition" | "mutable-resolve" | "memorize-fire" | "phase-status");
+    let is_admin_verb = matches!(lang_or_verb, "health" | "status" | "close" | "kill-port" | "wait" | "sleep" | "transition" | "mutable-resolve" | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall");
 
     if is_admin_verb {
         return (false, String::new());
     }
 
-    if check_unresolved_mutables() {
-        return (true, "[gate] unresolved mutables in .gm/mutables.yml — cannot execute until all mutables resolved".to_string());
+    let unresolved = unresolved_mutable_ids();
+    if !unresolved.is_empty() {
+        return (
+            true,
+            format!(
+                "[gate] Write blocked: mutables unresolved: [{}]. Resolve via: write witness_evidence into the matching row of .gm/mutables.yml, then dispatch in/mutable-resolve/<N>.txt with the id as body.",
+                unresolved.join(", ")
+            ),
+        );
     }
 
     if check_needs_gm() && !check_gm_fired(file_id) && lang_or_verb != "gm" {
-        return (true, "[gate] PRD exists (.gm/prd.yml) — gm skill must run before other work; waiting for .gm/gm-fired marker".to_string());
+        return (
+            true,
+            "[gate] Write blocked: gm orchestration not yet fired for this session. Invoke Skill(skill='gm:gm') or Agent(subagent_type='gm:gm') first to clear the gate; this writes .gm/gm-fired-<sessionId>.".to_string(),
+        );
     }
 
     (false, String::new())
+}
+
+pub fn stop_gate_message() -> Option<String> {
+    let pending = pending_prd_ids();
+    if pending.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "[gate] Stop blocked: {} PRD item(s) still pending: [{}]. Complete them, or remove from .gm/prd.yml before stopping.",
+            pending.len(),
+            pending.join(", ")
+        ))
+    }
 }
 
 fn execute_dispatch(lang_or_verb: &str, file_id: &str, content: &str) -> (String, String, i32) {
