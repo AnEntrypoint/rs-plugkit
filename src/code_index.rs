@@ -267,14 +267,19 @@ pub fn recall(query: &str, limit: usize, namespace: Option<&str>, inline_embeddi
         }
     };
     let qlit = vec_to_json_literal(&qvec);
-    // Over-fetch from the vector index so namespace filtering still surfaces hits when
-    // the global top-k pool is dominated by other namespaces.
-    let pool = limit.saturating_mul(20).max(50);
-    let ns_filter = match namespace { Some(n) => format!(" WHERE m.namespace='{}'", sql_quote(n)), None => String::new() };
-    let sql = format!(
-        "SELECT m.id, m.namespace, m.text, m.ts, vector_distance_cos(m.embedding, vector('{}')) AS distance FROM vector_top_k('memories_vec', vector('{}'), {}) AS v JOIN memories AS m ON m.rowid = v.id{} ORDER BY distance ASC LIMIT {}",
-        qlit, qlit, pool, ns_filter, limit
-    );
+    // For namespace-scoped queries: brute-force distance over rows in the namespace
+    // (libsql's vector_top_k uses ANN/DiskANN which silently caps results regardless of k).
+    // For unfiltered queries: use the index for speed.
+    let sql = match namespace {
+        Some(n) => format!(
+            "SELECT id, namespace, text, ts, vector_distance_cos(embedding, vector('{}')) AS distance FROM memories WHERE namespace='{}' AND embedding IS NOT NULL ORDER BY distance ASC LIMIT {}",
+            qlit, sql_quote(n), limit
+        ),
+        None => format!(
+            "SELECT m.id, m.namespace, m.text, m.ts, vector_distance_cos(m.embedding, vector('{}')) AS distance FROM vector_top_k('memories_vec', vector('{}'), {}) AS v JOIN memories AS m ON m.rowid = v.id ORDER BY distance ASC LIMIT {}",
+            qlit, qlit, limit.saturating_mul(5).max(20), limit
+        ),
+    };
     match libsql_wasm::query(&sql) {
         Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows }),
         Err(e) => json!({ "ok": false, "error": e }),
