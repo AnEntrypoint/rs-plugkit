@@ -54,7 +54,7 @@ impl Default for TurnState {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn now_ms() -> u128 {
+pub fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -62,7 +62,7 @@ fn now_ms() -> u128 {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn now_ms() -> u128 {
+pub fn now_ms() -> u128 {
     unsafe { crate::wasm_dispatch::host_now_ms() as u128 }
 }
 
@@ -103,10 +103,17 @@ pub fn write_state(state: &TurnState) -> Result<(), std::io::Error> {
 }
 
 pub fn set_phase(phase: Phase, last_skill: Option<String>) -> Result<TurnState, std::io::Error> {
+    set_phase_with_session(phase, last_skill, None)
+}
+
+pub fn set_phase_with_session(phase: Phase, last_skill: Option<String>, session_id: Option<String>) -> Result<TurnState, std::io::Error> {
     let mut s = read_state();
     s.phase = phase.as_str().to_string();
     if last_skill.is_some() {
         s.last_skill = last_skill;
+    }
+    if session_id.is_some() {
+        s.session_id = session_id;
     }
     s.updated_at_ms = now_ms();
     write_state(&s)?;
