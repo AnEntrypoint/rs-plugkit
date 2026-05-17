@@ -236,7 +236,7 @@ fn dispatch_file(input_path: &Path, output_root: &Path) {
 }
 
 fn check_dispatch_gates(lang_or_verb: &str, file_id: &str) -> (bool, String) {
-    let is_admin_verb = matches!(lang_or_verb, "health" | "status" | "close" | "kill-port" | "wait" | "sleep");
+    let is_admin_verb = matches!(lang_or_verb, "health" | "status" | "close" | "kill-port" | "wait" | "sleep" | "transition" | "mutable-resolve" | "memorize-fire" | "phase-status");
 
     if is_admin_verb {
         return (false, String::new());
@@ -260,9 +260,12 @@ fn execute_dispatch(lang_or_verb: &str, file_id: &str, content: &str) -> (String
     let is_verb = matches!(lang_or_verb,
         "codesearch" | "recall" | "memorize" | "marker"
     );
+    let is_orch = crate::orchestrator::is_orchestrator_verb(lang_or_verb);
 
     if is_lang {
         dispatch_to_exec_rpc(lang_or_verb, file_id, content)
+    } else if is_orch {
+        crate::orchestrator::dispatch(lang_or_verb, file_id, content)
     } else if is_verb {
         dispatch_to_spool_verb(lang_or_verb, file_id, content)
     } else {
