@@ -91,13 +91,7 @@ jobs:
           NEW_PATCH=$((PATCH + 1))
           NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
           sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$NEW_VERSION\"/}" Cargo.toml
-          node -e "
-            const fs = require('fs');
-            let lock = fs.readFileSync('Cargo.lock', 'utf8');
-            lock = lock.replace('name = \"rs-plugkit\"\nversion = \"$CURRENT\"', 'name = \"rs-plugkit\"\nversion = \"$NEW_VERSION\"');
-            fs.writeFileSync('Cargo.lock', lock);
-          "
-          git add Cargo.toml Cargo.lock
+          git add Cargo.toml
           if git diff --cached --quiet; then
             echo "No version change needed"
             echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
