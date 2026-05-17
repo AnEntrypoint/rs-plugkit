@@ -122,6 +122,37 @@ fn fetch(body: &Value) -> u64 {
     ok("fetch", v)
 }
 
+fn inference(body: &Value) -> u64 {
+    let messages = body.get("messages").cloned().unwrap_or(Value::Null);
+    if messages.is_null() {
+        let prompt = body.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+        if prompt.is_empty() { return err("inference", "messages or prompt required"); }
+    }
+    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("http://127.0.0.1:4800/v1/chat/completions");
+    let model = body.get("model").and_then(|v| v.as_str()).map(String::from);
+    let messages_value = if !messages.is_null() {
+        messages
+    } else {
+        let prompt = body.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+        json!([{ "role": "user", "content": prompt }])
+    };
+    let mut req_body = json!({ "messages": messages_value });
+    if let Some(m) = model { req_body["model"] = Value::String(m); }
+    let body_str = req_body.to_string();
+    let opts = json!({ "method": "POST", "headers": {"content-type": "application/json"}, "body": body_str }).to_string();
+    let packed = unsafe { host_fetch(url.as_ptr(), url.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    let v = unpack_to_value(packed);
+    if v.is_null() { return err("inference", "host_fetch empty - is acptoapi running on 4800?"); }
+    let status = v.get("status").and_then(|s| s.as_u64()).unwrap_or(0);
+    if status < 200 || status >= 300 {
+        let detail = v.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string();
+        return err("inference", &format!("acptoapi returned {}: {}", status, detail));
+    }
+    let body_text = v.get("body").and_then(|b| b.as_str()).unwrap_or("");
+    let parsed: Value = serde_json::from_str(body_text).unwrap_or(Value::String(body_text.to_string()));
+    ok("inference", parsed)
+}
+
 fn env_get(body: &Value) -> u64 {
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
     if key.is_empty() { return err("env_get", "key required"); }
@@ -202,7 +233,7 @@ fn recall(body: &Value) -> u64 {
     if query.is_empty() { return err("recall", "query required"); }
     let emb_packed = unsafe { host_vec_embed(query.as_ptr(), query.len() as u32) };
     let embedding = if emb_packed != 0 { unpack_to_value(emb_packed) } else { Value::Null };
-    let q_json = json!({ "query": query, "embedding": embedding }).to_string();
+    let q_json = json!({ "query": query, "embedding": embedding, "namespace": namespace }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, limit) };
     let vec_hits = unpack_to_value(packed);
     if !vec_hits.is_null() && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
@@ -469,6 +500,7 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "fs_readdir" => fs_readdir(&body),
         "fs_stat" => fs_stat(&body),
         "fetch" => fetch(&body),
+        "inference" | "chat" | "complete" => inference(&body),
         "env_get" => env_get(&body),
         "kv_get" => kv_get(&body),
         "kv_put" => kv_put(&body),
