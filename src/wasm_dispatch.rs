@@ -213,10 +213,14 @@ fn recall(body: &Value) -> u64 {
     ok("recall", kv_hits)
 }
 
-fn memorize(body: &Value) -> u64 {
-    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
+    let text = body.get("text").and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| body.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| raw.trim().to_string());
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if text.is_empty() { return err("memorize", "text required"); }
+    let text = text.as_str();
     let now = unsafe { host_now_ms() };
     let key = format!("mem-{}-{}", now, text.len());
     let rc = unsafe { host_kv_put(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32, text.as_ptr(), text.len() as u32) };
@@ -458,7 +462,7 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
     }
     match verb.as_str() {
         "recall" => recall(&body),
-        "memorize" => memorize(&body),
+        "memorize" => memorize_with_raw(&body, &body_s),
         "codesearch" => codesearch(&body),
         "fs_read" => fs_read(&body),
         "fs_write" => fs_write(&body),
