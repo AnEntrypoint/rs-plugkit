@@ -1,6 +1,9 @@
 #![cfg(target_arch = "wasm32")]
 
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static MEMORIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 extern "C" {
     pub fn host_fs_read(path_ptr: *const u8, path_len: u32) -> u64;
@@ -162,9 +165,11 @@ fn env_get(body: &Value) -> u64 {
     }
 }
 
-fn exec_js(body: &Value) -> u64 {
-    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
-    if code.is_empty() { return err("exec_js", "code required"); }
+fn exec_js(body: &Value, body_s: &str) -> u64 {
+    let code = body.get("code").and_then(|v| v.as_str()).map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| body_s.to_string());
+    if code.is_empty() { return err("exec_js", "code required (provide raw code as body or JSON {code: ...})"); }
     let opts = body.get("opts").map(|v| v.to_string()).unwrap_or_else(|| "{}".to_string());
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
@@ -228,7 +233,8 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
     if text.is_empty() { return err("memorize", "text required"); }
     let text = text.as_str();
     let now = unsafe { host_now_ms() };
-    let key = format!("mem-{}-{}", now, text.len());
+    let counter = MEMORIZE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let key = format!("mem-{}-{}-{}", now, counter, text.len());
     let rc = unsafe { host_kv_put(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32, text.as_ptr(), text.len() as u32) };
     if rc == 0 { return err("memorize", "kv_put failed"); }
     let emb_packed = unsafe { host_vec_embed(text.as_ptr(), text.len() as u32) };
@@ -278,8 +284,9 @@ fn health(_body: &Value) -> u64 {
 fn status(body: &Value) -> u64 {
     let task_id = body.get("taskId").and_then(|v| v.as_u64()).unwrap_or(0);
     if task_id == 0 { return err("status", "taskId required"); }
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("outbox");
     let key = format!("{}", task_id);
-    let packed = unsafe { host_kv_get("outbox".as_ptr(), 6, key.as_ptr(), key.len() as u32) };
+    let packed = unsafe { host_kv_get(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok("status", serde_json::from_str(&s).unwrap_or(Value::String(s))),
         None => err("status", "task not found"),
@@ -410,9 +417,11 @@ fn runner(body: &Value) -> u64 {
     }
 }
 
-fn shell_exec(body: &Value, lang: &str) -> u64 {
-    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
-    if code.is_empty() { return err(lang, "code required"); }
+fn shell_exec(body: &Value, body_s: &str, lang: &str) -> u64 {
+    let code = body.get("code").and_then(|v| v.as_str()).map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| body_s.to_string());
+    if code.is_empty() { return err(lang, "code required (provide raw code as body or JSON {code: ...})"); }
     let opts = json!({ "lang": lang }).to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
@@ -457,13 +466,13 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "kv_get" => kv_get(&body),
         "kv_put" => kv_put(&body),
         "kv_query" => kv_query(&body),
-        "exec_js" | "nodejs" | "javascript" | "node" | "js" => exec_js(&body),
+        "exec_js" | "nodejs" | "javascript" | "node" | "js" => exec_js(&body, &body_s),
         "health" => health(&body),
-        "python" | "py" => shell_exec(&body, "python"),
-        "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, "bash"),
-        "powershell" | "ps1" => shell_exec(&body, "powershell"),
-        "ssh" => shell_exec(&body, "ssh"),
-        "go" | "rust" | "c" | "cpp" | "java" | "deno" => shell_exec(&body, &verb),
+        "python" | "py" => shell_exec(&body, &body_s, "python"),
+        "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, &body_s, "bash"),
+        "powershell" | "ps1" => shell_exec(&body, &body_s, "powershell"),
+        "ssh" => shell_exec(&body, &body_s, "ssh"),
+        "go" | "rust" | "c" | "cpp" | "java" | "deno" => shell_exec(&body, &body_s, &verb),
         "status" => status(&body),
         "wait" => wait(&body),
         "sleep" => sleep(&body),
