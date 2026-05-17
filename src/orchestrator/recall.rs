@@ -1,8 +1,3 @@
-#[cfg(not(target_arch = "wasm32"))]
-use std::env;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::learning;
-
 fn derive_query(prompt: &str) -> String {
     let stop: &[&str] = &[
         "the", "a", "an", "to", "of", "in", "on", "for", "and", "or",
@@ -28,26 +23,6 @@ fn derive_query(prompt: &str) -> String {
     words.join(" ")
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
-    let prompt = content.trim();
-    if prompt.is_empty() {
-        return (String::new(), "auto-recall requires user prompt as body".to_string(), 1);
-    }
-    let query = derive_query(prompt);
-    let cwd = env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| ".".to_string());
-    let raw = learning::recall_disc(&query, &cwd, 3, None);
-    let payload = serde_json::json!({
-        "query": query,
-        "limit": 3,
-        "results": raw,
-    });
-    (payload.to_string(), String::new(), 0)
-}
-
-#[cfg(target_arch = "wasm32")]
 pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
     let prompt = content.trim();
     if prompt.is_empty() {
@@ -58,7 +33,7 @@ pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
         "query": query,
         "limit": 3,
         "results": "",
-        "note": "auto-recall on wasm: host should perform recall lookup",
+        "note": "auto-recall: host should perform recall lookup",
     });
     (payload.to_string(), String::new(), 0)
 }
