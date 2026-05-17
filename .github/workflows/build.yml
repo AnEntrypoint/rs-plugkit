@@ -53,5 +53,5 @@ jobs:
         run: |
           ls -la target/wasm32-unknown-unknown/release/rs_plugkit.wasm
           [ -s target/wasm32-unknown-unknown/release/rs_plugkit.wasm ] || exit 1
-          wasm-file-size=$(stat -c%s target/wasm32-unknown-unknown/release/rs_plugkit.wasm || stat -f%z target/wasm32-unknown-unknown/release/rs_plugkit.wasm)
-          echo "WASM artifact size: $wasm-file-size bytes"
+          wasm_file_size=$(stat -c%s target/wasm32-unknown-unknown/release/rs_plugkit.wasm || stat -f%z target/wasm32-unknown-unknown/release/rs_plugkit.wasm)
+          echo "WASM artifact size: $wasm_file_size bytes"
