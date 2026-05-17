@@ -124,6 +124,36 @@ pub fn query(sql: &str) -> Result<Value, String> {
     })
 }
 
+pub fn serialize() -> Result<Vec<u8>, String> {
+    with_db(|db| {
+        let schema = CString::new("main").unwrap();
+        let mut size: i64 = 0;
+        let p = unsafe { ffi::sqlite3_serialize(db, schema.as_ptr(), &mut size, 0) };
+        if p.is_null() || size <= 0 { return Err(format!("serialize null (size={})", size)); }
+        let bytes = unsafe { std::slice::from_raw_parts(p, size as usize).to_vec() };
+        unsafe { ffi::sqlite3_free(p as *mut _); }
+        Ok(bytes)
+    })
+}
+
+pub fn deserialize(bytes: &[u8]) -> Result<(), String> {
+    with_db(|db| {
+        let schema = CString::new("main").unwrap();
+        let size = bytes.len() as i64;
+        let buf = unsafe { ffi::sqlite3_malloc64(size as u64) } as *mut u8;
+        if buf.is_null() { return Err("malloc failed".to_string()); }
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len()); }
+        let rc = unsafe {
+            ffi::sqlite3_deserialize(db, schema.as_ptr(), buf, size, size,
+                ffi::SQLITE_DESERIALIZE_FREEONCLOSE | ffi::SQLITE_DESERIALIZE_RESIZEABLE)
+        };
+        if rc != ffi::SQLITE_OK {
+            return Err(format!("deserialize rc={}", rc));
+        }
+        Ok(())
+    })
+}
+
 pub fn smoke() -> Value {
     let mut log: Vec<Value> = Vec::new();
     log.push(json!({ "step": "open", "result": open(":memory:").err() }));

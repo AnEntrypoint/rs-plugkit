@@ -490,6 +490,76 @@ fn sql_smoke() -> u64 {
     pack(crate::libsql_wasm::smoke().to_string())
 }
 
+fn b64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let b = ((bytes[i] as u32) << 16) | ((bytes[i+1] as u32) << 8) | (bytes[i+2] as u32);
+        out.push(TABLE[((b >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((b >> 12) & 0x3F) as usize] as char);
+        out.push(TABLE[((b >> 6) & 0x3F) as usize] as char);
+        out.push(TABLE[(b & 0x3F) as usize] as char);
+        i += 3;
+    }
+    let rem = bytes.len() - i;
+    if rem == 1 {
+        let b = (bytes[i] as u32) << 16;
+        out.push(TABLE[((b >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((b >> 12) & 0x3F) as usize] as char);
+        out.push('='); out.push('=');
+    } else if rem == 2 {
+        let b = ((bytes[i] as u32) << 16) | ((bytes[i+1] as u32) << 8);
+        out.push(TABLE[((b >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((b >> 12) & 0x3F) as usize] as char);
+        out.push(TABLE[((b >> 6) & 0x3F) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim();
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for c in s.bytes() {
+        let v: u32 = match c {
+            b'A'..=b'Z' => (c - b'A') as u32,
+            b'a'..=b'z' => (c - b'a' + 26) as u32,
+            b'0'..=b'9' => (c - b'0' + 52) as u32,
+            b'+' => 62, b'/' => 63,
+            b'=' => break,
+            b' ' | b'\n' | b'\r' | b'\t' => continue,
+            _ => return None,
+        };
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 { bits -= 8; out.push((buf >> bits) as u8); buf &= (1 << bits) - 1; }
+    }
+    Some(out)
+}
+
+fn sql_serialize() -> u64 {
+    match crate::libsql_wasm::serialize() {
+        Ok(bytes) => ok("sql_serialize", json!({ "bytes_b64": b64_encode(&bytes), "size": bytes.len() })),
+        Err(e) => err("sql_serialize", &e),
+    }
+}
+
+fn sql_deserialize(body: &Value) -> u64 {
+    let s = match body.get("bytes_b64").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return err("sql_deserialize", "missing bytes_b64"),
+    };
+    let bytes = match b64_decode(s) { Some(b) => b, None => return err("sql_deserialize", "invalid base64") };
+    let size = bytes.len();
+    match crate::libsql_wasm::deserialize(&bytes) {
+        Ok(()) => ok("sql_deserialize", json!({ "restored": size })),
+        Err(e) => err("sql_deserialize", &e),
+    }
+}
+
 fn codeinsight_index(body: &Value) -> u64 {
     let root = body.get("root").and_then(|v| v.as_str()).unwrap_or("/");
     let max_files = body.get("max_files").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
@@ -556,6 +626,8 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "sql_exec" => sql_exec(&body),
         "sql_query" => sql_query(&body),
         "sql_smoke" => sql_smoke(),
+        "sql_serialize" => sql_serialize(),
+        "sql_deserialize" => sql_deserialize(&body),
         "codeinsight_index" => codeinsight_index(&body),
         "codesearch" => codesearch_libsql(&body),
         "memorize" => memorize_libsql(&body),
