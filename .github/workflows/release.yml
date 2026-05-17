@@ -34,7 +34,7 @@ jobs:
           echo "WASI_SDK_PATH=$HOME/wasi-sdk" >> $GITHUB_ENV
           echo "CC_wasm32_wasip1=$HOME/wasi-sdk/bin/clang" >> $GITHUB_ENV
           echo "AR_wasm32_wasip1=$HOME/wasi-sdk/bin/llvm-ar" >> $GITHUB_ENV
-          echo "CFLAGS_wasm32_wasip1=--sysroot=$HOME/wasi-sdk/share/wasi-sysroot" >> $GITHUB_ENV
+          echo "CFLAGS_wasm32_wasip1=--sysroot=$HOME/wasi-sdk/share/wasi-sysroot -DSQLITE_OS_OTHER -DLONGDOUBLE_TYPE=double -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_MAX_MMAP_SIZE=0 -DSQLITE_THREADSAFE=0 -DSQLITE_TEMP_STORE=3" >> $GITHUB_ENV
 
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
