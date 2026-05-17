@@ -77,7 +77,16 @@ pub fn read_state() -> TurnState {
         return TurnState::default();
     }
     match pkfs::read_to_string(&ps) {
-        Some(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Some(s) => match serde_json::from_str(&s) {
+            Ok(v) => v,
+            Err(e) => {
+                let now = now_ms();
+                let backup_path = format!("{}.corrupted-{}", ps, now);
+                let _ = pkfs::write(&backup_path, &s);
+                eprintln!("turn-state.json parse failed ({}): backed up to {}", e, backup_path);
+                TurnState::default()
+            }
+        },
         None => TurnState::default(),
     }
 }
