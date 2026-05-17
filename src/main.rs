@@ -639,7 +639,6 @@ fn cmd_deps() -> anyhow::Result<()> {
 }
 
 fn cmd_doctor() -> anyhow::Result<()> {
-    use hook::no_window_cmd;
     let mut fail = 0u32;
     println!("=== plugkit doctor ===");
     println!("plugkit {}", env!("CARGO_PKG_VERSION"));
@@ -665,11 +664,11 @@ fn cmd_doctor() -> anyhow::Result<()> {
 
     let chrome_name = if cfg!(windows) { "chrome.exe" } else { "chrome" };
     let chrome_count = if cfg!(windows) {
-        no_window_cmd("tasklist").args(["/FI", &format!("IMAGENAME eq {}", chrome_name)]).output()
+        std::process::Command::new("tasklist").args(["/FI", &format!("IMAGENAME eq {}", chrome_name)]).output()
             .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.contains(chrome_name)).count())
             .unwrap_or(0)
     } else {
-        no_window_cmd("pgrep").args(["-fc", chrome_name]).output()
+        std::process::Command::new("pgrep").args(["-fc", chrome_name]).output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<usize>().unwrap_or(0))
             .unwrap_or(0)
     };
@@ -1182,10 +1181,8 @@ async fn main() {
                         if count > 0 { eprintln!("Cleaned up {} task(s) for session {}", count, session); }
                     }
                 }
-                if session.is_empty() {
-                    hook::agent_browser::close_all_sessions();
-                } else {
-                    hook::agent_browser::close_sessions_for(&session);
+                if !session.is_empty() {
+                    let _ = rpc_client::rpc_call("killSessionBrowser", json!({ "sessionId": session }), 5000).await;
                 }
             }
             Some(Cmd::Spool { once }) => {

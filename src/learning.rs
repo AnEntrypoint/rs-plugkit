@@ -172,7 +172,7 @@ fn search_agents_md(content: &str, query: &str) -> String {
 
     for line in content.lines() {
         let line_lower = line.to_lowercase();
-        let matches = query_words.iter().filter(|word| line_lower.contains(word)).count();
+        let matches = query_words.iter().filter(|word| line_lower.contains(*word)).count();
 
         if matches > 0 {
             results.push((matches, line.to_string()));
