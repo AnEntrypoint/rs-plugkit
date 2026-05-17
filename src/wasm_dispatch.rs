@@ -457,6 +457,40 @@ fn rejected(verb: &str) -> u64 {
 }
 
 #[no_mangle]
+fn sql_open(body: &Value) -> u64 {
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(":memory:");
+    match crate::libsql_wasm::open(path) {
+        Ok(()) => ok("sql_open", json!({ "path": path })),
+        Err(e) => err("sql_open", &e),
+    }
+}
+
+fn sql_exec(body: &Value) -> u64 {
+    let sql = match body.get("sql").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return err("sql_exec", "missing sql"),
+    };
+    match crate::libsql_wasm::exec(sql) {
+        Ok(()) => ok("sql_exec", json!({})),
+        Err(e) => err("sql_exec", &e),
+    }
+}
+
+fn sql_query(body: &Value) -> u64 {
+    let sql = match body.get("sql").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return err("sql_query", "missing sql"),
+    };
+    match crate::libsql_wasm::query(sql) {
+        Ok(rows) => ok("sql_query", json!({ "rows": rows })),
+        Err(e) => err("sql_query", &e),
+    }
+}
+
+fn sql_smoke() -> u64 {
+    pack(crate::libsql_wasm::smoke().to_string())
+}
+
 pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
     let verb = read_str(verb_ptr as *const u8, verb_len);
     let body_s = read_str(body_ptr as *const u8, body_len);
@@ -491,6 +525,10 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "exec_js" | "nodejs" | "javascript" | "node" | "js" => exec_js(&body, &body_s),
         "browser" => browser(&body, &body_s),
         "health" => health(&body),
+        "sql_open" => sql_open(&body),
+        "sql_exec" => sql_exec(&body),
+        "sql_query" => sql_query(&body),
+        "sql_smoke" => sql_smoke(),
         "python" | "py" => shell_exec(&body, &body_s, "python"),
         "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, &body_s, "bash"),
         "powershell" | "ps1" => shell_exec(&body, &body_s, "powershell"),

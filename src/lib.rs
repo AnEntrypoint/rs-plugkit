@@ -1,6 +1,9 @@
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_dispatch;
 
+#[cfg(target_arch = "wasm32")]
+pub mod libsql_wasm;
+
 pub mod pkfs;
 pub mod orchestrator;
 
