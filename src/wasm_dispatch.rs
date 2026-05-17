@@ -52,6 +52,8 @@ fn unpack_to_value(packed: u64) -> Value {
     }
 }
 
+pub fn unpack_to_value_pub(packed: u64) -> Value { unpack_to_value(packed) }
+
 pub fn host_read(path: &str) -> Option<String> {
     let packed = unsafe { host_fs_read(path.as_ptr(), path.len() as u32) };
     unpack_to_string(packed)

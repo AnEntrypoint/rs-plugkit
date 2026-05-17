@@ -29,11 +29,38 @@ pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
         return (String::new(), "auto-recall requires user prompt as body".to_string(), 1);
     }
     let query = derive_query(prompt);
+    let limit: u32 = 3;
+    let namespace = "default";
+    #[cfg(target_arch = "wasm32")]
+    let results = {
+        use crate::wasm_dispatch::{host_vec_embed, host_vec_search, host_kv_query};
+        let emb_packed = unsafe { host_vec_embed(query.as_ptr(), query.len() as u32) };
+        let embedding = if emb_packed != 0 {
+            crate::wasm_dispatch::unpack_to_value_pub(emb_packed)
+        } else { serde_json::Value::Null };
+        let q_json = serde_json::json!({
+            "query": query, "embedding": embedding, "namespace": namespace
+        }).to_string();
+        let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, limit) };
+        let vec_hits = crate::wasm_dispatch::unpack_to_value_pub(packed);
+        if !vec_hits.is_null()
+            && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false)
+        {
+            vec_hits
+        } else {
+            let packed = unsafe {
+                host_kv_query(namespace.as_ptr(), namespace.len() as u32,
+                              query.as_ptr(), query.len() as u32)
+            };
+            crate::wasm_dispatch::unpack_to_value_pub(packed)
+        }
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let results = serde_json::Value::Array(Vec::new());
     let payload = serde_json::json!({
         "query": query,
-        "limit": 3,
-        "results": "",
-        "note": "auto-recall: host should perform recall lookup",
+        "limit": limit,
+        "results": results,
     });
     (payload.to_string(), String::new(), 0)
 }
