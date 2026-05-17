@@ -31,3 +31,4 @@ dist/
 .gm/
 .codeinsight/
 rs-learn.db
+Cargo.lock
