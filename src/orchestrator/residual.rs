@@ -1,13 +1,14 @@
-use std::fs;
 use super::gm_dir;
+use crate::pkfs;
 
 fn prd_empty_or_missing() -> bool {
     let prd = gm_dir().join("prd.yml");
-    if !prd.exists() {
+    let ps = prd.to_string_lossy().to_string();
+    if !pkfs::exists(&ps) {
         return true;
     }
-    match fs::read_to_string(&prd) {
-        Ok(content) => {
+    match pkfs::read_to_string(&ps) {
+        Some(content) => {
             let trimmed = content.trim();
             if trimmed.is_empty() {
                 return true;
@@ -22,29 +23,31 @@ fn prd_empty_or_missing() -> bool {
             }
             true
         }
-        Err(_) => true,
+        None => true,
     }
 }
 
 fn browser_sessions_open() -> bool {
     let marker = gm_dir().join("browser-sessions.json");
-    if !marker.exists() {
+    let ps = marker.to_string_lossy().to_string();
+    if !pkfs::exists(&ps) {
         return false;
     }
-    match fs::read_to_string(&marker) {
-        Ok(s) => !s.trim().is_empty() && s.trim() != "{}" && s.trim() != "[]",
-        Err(_) => false,
+    match pkfs::read_to_string(&ps) {
+        Some(s) => !s.trim().is_empty() && s.trim() != "{}" && s.trim() != "[]",
+        None => false,
     }
 }
 
 fn running_tasks_exist() -> bool {
     let status = gm_dir().join("exec-spool").join(".status.json");
-    if !status.exists() {
+    let ps = status.to_string_lossy().to_string();
+    if !pkfs::exists(&ps) {
         return false;
     }
-    match fs::read_to_string(&status) {
-        Ok(s) => s.contains("\"running\"") || s.contains("\"runningTasks\":["),
-        Err(_) => false,
+    match pkfs::read_to_string(&ps) {
+        Some(s) => s.contains("\"running\"") || s.contains("\"runningTasks\":["),
+        None => false,
     }
 }
 
@@ -75,8 +78,8 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
         return (payload.to_string(), String::new(), 0);
     }
 
-    let _ = fs::create_dir_all(gm_dir());
-    let _ = fs::write(&marker, "fired");
+    let marker_s = marker.to_string_lossy().to_string();
+    let _ = pkfs::write(&marker_s, "fired");
 
     let message = "Residual scan: name reachable in-spirit work and add to PRD, OR explicitly state 'residual scan: none reachable in-spirit'.";
     let payload = serde_json::json!({

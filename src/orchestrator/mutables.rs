@@ -1,7 +1,7 @@
-use std::fs;
 use serde_yaml::Value;
 use super::gm_dir;
 use super::memorize;
+use crate::pkfs;
 
 pub fn mutables_path() -> std::path::PathBuf {
     gm_dir().join("mutables.yml")
@@ -14,13 +14,14 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     }
 
     let path = mutables_path();
-    if !path.exists() {
+    let path_s = path.to_string_lossy().to_string();
+    if !pkfs::exists(&path_s) {
         return (String::new(), format!("{} does not exist", path.display()), 1);
     }
 
-    let raw = match fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => return (String::new(), format!("read failed: {}", e), 1),
+    let raw = match pkfs::read_to_string(&path_s) {
+        Some(s) => s,
+        None => return (String::new(), "read failed".to_string(), 1),
     };
 
     let mut doc: Value = match serde_yaml::from_str(&raw) {
@@ -73,8 +74,8 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         Ok(s) => s,
         Err(e) => return (String::new(), format!("serialize failed: {}", e), 1),
     };
-    if let Err(e) = fs::write(&path, new_raw) {
-        return (String::new(), format!("write failed: {}", e), 1);
+    if !pkfs::write(&path_s, &new_raw) {
+        return (String::new(), "write failed".to_string(), 1);
     }
 
     let evidence_body = resolved_evidence.unwrap_or_else(|| format!("mutable {} resolved", trimmed));

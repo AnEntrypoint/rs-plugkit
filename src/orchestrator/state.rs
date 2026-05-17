@@ -1,6 +1,6 @@
-use std::fs;
 use serde::{Deserialize, Serialize};
 use super::gm_dir;
+use crate::pkfs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
@@ -66,22 +66,25 @@ pub fn state_path() -> std::path::PathBuf {
 
 pub fn read_state() -> TurnState {
     let p = state_path();
-    if !p.exists() {
+    let ps = p.to_string_lossy().to_string();
+    if !pkfs::exists(&ps) {
         return TurnState::default();
     }
-    match fs::read_to_string(&p) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-        Err(_) => TurnState::default(),
+    match pkfs::read_to_string(&ps) {
+        Some(s) => serde_json::from_str(&s).unwrap_or_default(),
+        None => TurnState::default(),
     }
 }
 
 pub fn write_state(state: &TurnState) -> Result<(), std::io::Error> {
     let p = state_path();
-    if let Some(parent) = p.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let ps = p.to_string_lossy().to_string();
     let json = serde_json::to_string_pretty(state).unwrap_or_else(|_| "{}".to_string());
-    fs::write(&p, json)
+    if pkfs::write(&ps, &json) {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "pkfs write failed"))
+    }
 }
 
 pub fn set_phase(phase: Phase, last_skill: Option<String>) -> Result<TurnState, std::io::Error> {
