@@ -326,12 +326,12 @@ fn execute_dispatch(lang_or_verb: &str, file_id: &str, content: &str) -> (String
     let is_verb = matches!(lang_or_verb,
         "codesearch" | "recall" | "memorize" | "marker"
     );
-    let is_orch = crate::orchestrator::is_orchestrator_verb(lang_or_verb);
+    let is_orch = rs_plugkit::orchestrator::is_orchestrator_verb(lang_or_verb);
 
     if is_lang {
         dispatch_to_exec_rpc(lang_or_verb, file_id, content)
     } else if is_orch {
-        crate::orchestrator::dispatch(lang_or_verb, file_id, content)
+        rs_plugkit::orchestrator::dispatch(lang_or_verb, file_id, content)
     } else if is_verb {
         dispatch_to_spool_verb(lang_or_verb, file_id, content)
     } else {

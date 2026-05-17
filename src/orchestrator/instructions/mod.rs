@@ -5,11 +5,11 @@ pub mod emit;
 pub mod verify;
 pub mod update_docs;
 
-use std::fs;
 use serde_json::json;
 use super::gm_dir;
 use super::state::read_state;
 use super::mutables::mutables_path;
+use crate::pkfs;
 
 pub fn get_instruction(phase: &str) -> &'static str {
     match phase.trim().to_ascii_uppercase().as_str() {
@@ -37,13 +37,14 @@ fn next_phase_hint(phase: &str) -> Option<&'static str> {
 
 fn pending_mutables() -> Vec<String> {
     let path = mutables_path();
+    let path_s = path.to_string_lossy().to_string();
     let mut ids = Vec::new();
-    if !path.exists() {
+    if !pkfs::exists(&path_s) {
         return ids;
     }
-    let raw = match fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return ids,
+    let raw = match pkfs::read_to_string(&path_s) {
+        Some(s) => s,
+        None => return ids,
     };
     let doc: serde_yaml::Value = match serde_yaml::from_str(&raw) {
         Ok(v) => v,
@@ -67,12 +68,13 @@ fn pending_mutables() -> Vec<String> {
 
 fn pending_prd_count() -> usize {
     let path = gm_dir().join("prd.yml");
-    if !path.exists() {
+    let path_s = path.to_string_lossy().to_string();
+    if !pkfs::exists(&path_s) {
         return 0;
     }
-    let raw = match fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return 0,
+    let raw = match pkfs::read_to_string(&path_s) {
+        Some(s) => s,
+        None => return 0,
     };
     let doc: serde_yaml::Value = match serde_yaml::from_str(&raw) {
         Ok(v) => v,

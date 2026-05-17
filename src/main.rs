@@ -1,7 +1,8 @@
 mod self_update;
 mod spool;
-mod learning;
-mod orchestrator;
+
+use rs_plugkit::learning;
+use rs_plugkit::orchestrator;
 
 use clap::{Parser, Subcommand};
 use serde_json::json;

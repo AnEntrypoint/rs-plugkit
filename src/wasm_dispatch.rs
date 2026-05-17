@@ -445,6 +445,17 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
     let body: Value = if body_s.is_empty() { Value::Null } else {
         serde_json::from_str(&body_s).unwrap_or(Value::Null)
     };
+    if crate::orchestrator::is_orchestrator_verb(&verb) {
+        let (out, err_msg, code) = crate::orchestrator::dispatch(&verb, "", &body_s);
+        let ok_flag = code == 0;
+        let response = if ok_flag {
+            let data: Value = serde_json::from_str(&out).unwrap_or(Value::String(out));
+            json!({ "ok": true, "verb": verb, "data": data })
+        } else {
+            json!({ "ok": false, "verb": verb, "error": err_msg, "stdout": out, "exitCode": code })
+        };
+        return pack(response.to_string());
+    }
     match verb.as_str() {
         "recall" => recall(&body),
         "memorize" => memorize(&body),
@@ -483,6 +494,21 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "runner" => runner(&body),
         "type" => type_into(&body),
         "browser" => browser_alias(&body),
+        "instruction" | "transition" | "mutable-resolve" | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall" => {
+            let body_str = match &body {
+                Value::Null => String::new(),
+                Value::String(s) => s.clone(),
+                v => v.to_string(),
+            };
+            let (stdout, stderr, exit_code) = crate::orchestrator::dispatch(&verb, "wasm", &body_str);
+            pack(json!({
+                "ok": exit_code == 0,
+                "verb": verb,
+                "stdout": stdout,
+                "stderr": stderr,
+                "exitCode": exit_code,
+            }).to_string())
+        }
         "" => err("", "verb required"),
         _ => err(&verb, "unknown verb"),
     }

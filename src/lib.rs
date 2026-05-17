@@ -21,6 +21,12 @@ pub use rs_search::mcp as search_mcp;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_dispatch;
 
+pub mod pkfs;
+pub mod orchestrator;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod learning;
+
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
 pub extern "C" fn plugkit_version() -> *const u8 {
