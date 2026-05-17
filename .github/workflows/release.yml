@@ -51,7 +51,7 @@ jobs:
           cargo generate-lockfile
 
       - name: Build WASM
-        run: cargo build --release --target wasm32-wasip1 --features wasm
+        run: cargo build --release --target wasm32-wasip1 --no-default-features --features wasm --lib
 
       - name: Rename WASM binary
         shell: bash

@@ -46,7 +46,7 @@ jobs:
           cargo generate-lockfile
 
       - name: Build WASM
-        run: cargo build --release --target wasm32-unknown-unknown --features wasm
+        run: cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm --lib
 
       - name: Verify WASM artifact
         shell: bash
