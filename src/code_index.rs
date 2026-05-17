@@ -64,7 +64,27 @@ fn list_dir(path: &str) -> Vec<String> {
     }
 }
 
-fn walk(root: &str, max_files: usize, files: &mut Vec<String>) {
+// thebird (busybase) host returns full flat paths from fs_readdir, not posix-style
+// single-level entries. Use the flat list directly; if any entry contains a slash, treat
+// the host's output as already-recursive. Otherwise walk one level at a time.
+fn collect_files(root: &str, max_files: usize) -> Vec<String> {
+    let entries = list_dir(root);
+    if entries.is_empty() { return Vec::new(); }
+    let has_slashes = entries.iter().any(|e| e.contains('/'));
+    if has_slashes {
+        // Flat list mode: paths are already complete. Apply skip-dir filter inline.
+        return entries.into_iter()
+            .filter(|p| !SKIP_DIRS.iter().any(|d| p.split('/').any(|seg| seg == *d)))
+            .take(max_files)
+            .collect();
+    }
+    // POSIX mode: walk recursively.
+    let mut files = Vec::new();
+    walk_posix(root, max_files, &mut files);
+    files
+}
+
+fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>) {
     if files.len() >= max_files { return; }
     if SKIP_DIRS.iter().any(|d| root.ends_with(d) || root.contains(&format!("/{}/", d))) { return; }
     for entry in list_dir(root) {
@@ -73,7 +93,7 @@ fn walk(root: &str, max_files: usize, files: &mut Vec<String>) {
         if entry.contains('.') {
             files.push(next);
         } else {
-            walk(&next, max_files, files);
+            walk_posix(&next, max_files, files);
         }
     }
 }
@@ -142,9 +162,9 @@ fn sql_quote(s: &str) -> String {
 
 pub fn index(root: &str, max_files: usize) -> Value {
     if let Err(e) = ensure_schema() { return json!({ "ok": false, "error": e }); }
-    let mut files = Vec::new();
     let r = if root.is_empty() { "/" } else { root };
-    walk(r, max_files.max(50).min(2000), &mut files);
+    let limit = max_files.max(50).min(2000);
+    let files = collect_files(r, limit);
     let mut indexed = 0;
     let mut chunked = 0;
     let mut embedded = 0;
@@ -153,7 +173,8 @@ pub fn index(root: &str, max_files: usize) -> Value {
         let dot = fp.rfind('.');
         let ext = match dot { Some(i) => &fp[i..], None => "" };
         let (lang_name, lang) = match lang_for_ext(ext) { Some(x) => x, None => continue };
-        let content = match host_read(fp) { Some(c) => c, None => continue };
+        let read_path = if fp.starts_with('/') { fp.clone() } else { format!("/{}", fp) };
+        let content = match host_read(&read_path) { Some(c) => c, None => continue };
         if content.len() > 256 * 1024 { continue; }
         indexed += 1;
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
