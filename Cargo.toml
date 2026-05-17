@@ -6,7 +6,7 @@ edition = "2021"
 [lib]
 name = "rs_plugkit"
 path = "src/lib.rs"
-crate-type = ["rlib", "cdylib"]
+crate-type = ["cdylib"]
 
 [features]
 default = []
