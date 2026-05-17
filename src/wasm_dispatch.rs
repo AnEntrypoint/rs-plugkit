@@ -20,6 +20,7 @@ extern "C" {
     pub fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
     pub fn host_now_ms() -> u64;
     pub fn host_env_get(key_ptr: *const u8, key_len: u32) -> u64;
+    pub fn host_browser_exec(body_ptr: *const u8, body_len: u32, cwd_ptr: *const u8, cwd_len: u32, session_id_ptr: *const u8, session_id_len: u32) -> u64;
 }
 
 fn pack(s: String) -> u64 {
@@ -276,7 +277,7 @@ fn health(_body: &Value) -> u64 {
             "host_fs_read","host_fs_write","host_fs_readdir","host_fs_stat",
             "host_fetch","host_kv_get","host_kv_put","host_kv_query",
             "host_vec_search","host_vec_embed",
-            "host_exec_js","host_log","host_now_ms","host_env_get"
+            "host_exec_js","host_log","host_now_ms","host_env_get","host_browser_exec"
         ]
     }))
 }
@@ -430,6 +431,27 @@ fn shell_exec(body: &Value, body_s: &str, lang: &str) -> u64 {
     }
 }
 
+fn browser(body: &Value, body_s: &str) -> u64 {
+    let code = body.get("code").and_then(|v| v.as_str()).map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| body_s.to_string());
+    if code.is_empty() { return err("browser", "code required (provide JS body or {code, cwd?, sessionId?} JSON)"); }
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+    let session_id = body.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    let packed = unsafe { host_browser_exec(
+        code.as_ptr(), code.len() as u32,
+        cwd.as_ptr(), cwd.len() as u32,
+        session_id.as_ptr(), session_id.len() as u32,
+    ) };
+    match unpack_to_string(packed) {
+        Some(s) => {
+            let v: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
+            ok("browser", v)
+        }
+        None => err("browser", "host_browser_exec returned empty"),
+    }
+}
+
 fn rejected(verb: &str) -> u64 {
     err(verb, "verb unavailable in browser; use exec:nodejs or host-side dispatch")
 }
@@ -467,6 +489,7 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "kv_put" => kv_put(&body),
         "kv_query" => kv_query(&body),
         "exec_js" | "nodejs" | "javascript" | "node" | "js" => exec_js(&body, &body_s),
+        "browser" => browser(&body, &body_s),
         "health" => health(&body),
         "python" | "py" => shell_exec(&body, &body_s, "python"),
         "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, &body_s, "bash"),
