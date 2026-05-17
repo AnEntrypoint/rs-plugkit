@@ -143,9 +143,9 @@ pub fn deserialize(bytes: &[u8]) -> Result<(), String> {
         let buf = unsafe { ffi::sqlite3_malloc64(size as u64) } as *mut u8;
         if buf.is_null() { return Err("malloc failed".to_string()); }
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len()); }
+        let flags = (ffi::SQLITE_DESERIALIZE_FREEONCLOSE | ffi::SQLITE_DESERIALIZE_RESIZEABLE) as u32;
         let rc = unsafe {
-            ffi::sqlite3_deserialize(db, schema.as_ptr(), buf, size, size,
-                ffi::SQLITE_DESERIALIZE_FREEONCLOSE | ffi::SQLITE_DESERIALIZE_RESIZEABLE)
+            ffi::sqlite3_deserialize(db, schema.as_ptr(), buf, size, size, flags)
         };
         if rc != ffi::SQLITE_OK {
             return Err(format!("deserialize rc={}", rc));
