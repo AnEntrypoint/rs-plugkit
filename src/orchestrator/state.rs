@@ -53,11 +53,17 @@ impl Default for TurnState {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_ms() -> u128 {
+    unsafe { crate::wasm_dispatch::host_now_ms() as u128 }
 }
 
 pub fn state_path() -> std::path::PathBuf {
