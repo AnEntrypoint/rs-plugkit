@@ -4,13 +4,7 @@ Docs reflect the current state of the system, not its history. Every rule in AGE
 
 ## AGENTS.md and CLAUDE.md
 
-Edits to AGENTS.md and CLAUDE.md route through the memorize subagent only — never inline-edit. Invocation:
-
-```
-Agent(subagent_type='gm:memorize', model='haiku', run_in_background=true, prompt='## CONTEXT TO MEMORIZE\n<fact>')
-```
-
-The classifier rejects changelog-shaped facts from AGENTS.md ingestion (rs-learn still accepts them). Multiple facts → multiple parallel Agent calls in one message.
+Edits to AGENTS.md and CLAUDE.md route through the `memorize-fire` verb only — never inline-edit. Dispatch by writing the fact body to `.gm/exec-spool/in/memorize-fire/<N>.txt` (raw text, or JSON `{text, namespace?}`). The classifier rejects changelog-shaped facts from AGENTS.md ingestion (rs-learn still accepts them). Multiple facts → multiple parallel spool writes in one message.
 
 ## README.md
 
