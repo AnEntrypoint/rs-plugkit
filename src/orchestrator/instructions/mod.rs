@@ -105,10 +105,13 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     } else if let Some(stripped) = trimmed.strip_prefix("phase=") {
         stripped.trim().to_string()
     } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        v.get("phase")
-            .and_then(|s| s.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| read_state().phase)
+        if let Some(s) = v.as_str() {
+            s.to_string()
+        } else if let Some(s) = v.get("phase").and_then(|p| p.as_str()) {
+            s.to_string()
+        } else {
+            read_state().phase
+        }
     } else {
         trimmed.to_string()
     };

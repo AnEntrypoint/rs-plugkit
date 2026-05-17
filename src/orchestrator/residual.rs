@@ -40,15 +40,7 @@ fn browser_sessions_open() -> bool {
 }
 
 fn running_tasks_exist() -> bool {
-    let status = gm_dir().join("exec-spool").join(".status.json");
-    let ps = status.to_string_lossy().to_string();
-    if !pkfs::exists(&ps) {
-        return false;
-    }
-    match pkfs::read_to_string(&ps) {
-        Some(s) => s.contains("\"running\"") || s.contains("\"runningTasks\":["),
-        None => false,
-    }
+    false
 }
 
 pub fn handle_scan(_content: &str) -> (String, String, i32) {
