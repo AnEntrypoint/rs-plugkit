@@ -18,7 +18,7 @@ pub fn get_instruction(phase: &str) -> &'static str {
         "EXECUTE" => execute::TEXT,
         "EMIT" => emit::TEXT,
         "VERIFY" => verify::TEXT,
-        "UPDATE-DOCS" | "UPDATE_DOCS" | "UPDATEDOCS" | "COMPLETE" => update_docs::TEXT,
+        "COMPLETE" => update_docs::TEXT,
         _ => entry::TEXT,
     }
 }
@@ -29,8 +29,8 @@ fn next_phase_hint(phase: &str) -> Option<&'static str> {
         "PLAN" => Some("EXECUTE"),
         "EXECUTE" => Some("EMIT"),
         "EMIT" => Some("VERIFY"),
-        "VERIFY" => Some("UPDATE-DOCS"),
-        "UPDATE-DOCS" | "UPDATE_DOCS" => Some("COMPLETE"),
+        "VERIFY" => Some("COMPLETE"),
+        "COMPLETE" => None,
         _ => None,
     }
 }
