@@ -7,6 +7,7 @@ use serde_json::json;
 use std::{env, fs, path::PathBuf, time::Duration};
 
 use rs_exec::{daemon, rpc_client};
+#[cfg(not(target_arch = "wasm32"))]
 use rs_codeinsight::{analyze, analyze_with_files, collect_files, compute_freshness_digest_from_files, config as codeinsight_config, AnalyzeOptions};
 use rs_search::{bm25, context, mcp as search_mcp, scanner};
 
@@ -52,6 +53,7 @@ enum Cmd {
     #[command(name = "type")] Type { task_id: String, input: Vec<String>, #[arg(long)] session: Option<String> },
     Runner { sub: String },
     Pm2list,
+    #[cfg(not(target_arch = "wasm32"))]
     Codeinsight {
         path: Option<String>,
         #[arg(long)] json: bool,

@@ -22,12 +22,24 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-wasip1
+
+      - name: Install wasi-sdk (clang + sysroot for tree-sitter C grammars)
+        run: |
+          WASI_VERSION=24
+          WASI_VERSION_FULL=${WASI_VERSION}.0
+          curl -sL -o wasi-sdk.tar.gz "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_VERSION}/wasi-sdk-${WASI_VERSION_FULL}-x86_64-linux.tar.gz"
+          mkdir -p $HOME/wasi-sdk
+          tar -xzf wasi-sdk.tar.gz -C $HOME/wasi-sdk --strip-components=1
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk" >> $GITHUB_ENV
+          echo "CC_wasm32_wasip1=$HOME/wasi-sdk/bin/clang" >> $GITHUB_ENV
+          echo "AR_wasm32_wasip1=$HOME/wasi-sdk/bin/llvm-ar" >> $GITHUB_ENV
+          echo "CFLAGS_wasm32_wasip1=--sysroot=$HOME/wasi-sdk/share/wasi-sysroot" >> $GITHUB_ENV
 
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
         with:
-          key: release-wasm32-unknown-unknown
+          key: release-wasm32-wasip1
           cache-on-failure: true
 
       - name: Wipe cargo git cache and lockfile (force fresh dep resolution)
@@ -39,12 +51,12 @@ jobs:
           cargo generate-lockfile
 
       - name: Build WASM
-        run: cargo build --release --target wasm32-unknown-unknown --features wasm
+        run: cargo build --release --target wasm32-wasip1 --features wasm
 
       - name: Rename WASM binary
         shell: bash
         run: |
-          cp "target/wasm32-unknown-unknown/release/rs_plugkit.wasm" "plugkit.wasm"
+          cp "target/wasm32-wasip1/release/rs_plugkit.wasm" "plugkit.wasm"
 
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
