@@ -17,7 +17,7 @@ fn get_gm_dir() -> PathBuf {
     env::var("CLAUDE_PROJECT_DIR")
         .ok()
         .map(|p| PathBuf::from(p).join(".gm"))
-        .unwrap_or_else(|_| PathBuf::from(home_dir()).join(".gm"))
+        .unwrap_or_else(|| PathBuf::from(home_dir()).join(".gm"))
 }
 
 fn check_prd_exists() -> bool {
