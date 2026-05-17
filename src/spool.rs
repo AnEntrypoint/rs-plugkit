@@ -258,7 +258,7 @@ fn execute_dispatch(lang_or_verb: &str, file_id: &str, content: &str) -> (String
         "nodejs" | "python" | "bash" | "rust" | "typescript" | "go" | "c" | "cpp" | "java" | "deno"
     );
     let is_verb = matches!(lang_or_verb,
-        "codesearch" | "recall" | "memorize"
+        "codesearch" | "recall" | "memorize" | "marker"
     );
 
     if is_lang {
@@ -366,6 +366,14 @@ fn dispatch_to_spool_verb(verb: &str, file_id: &str, content: &str) -> (String, 
         "memorize" => {
             Command::new(&plugkit_path)
                 .args(["memorize", &content])
+                .current_dir(&cwd)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        }
+        "marker" => {
+            Command::new(&plugkit_path)
+                .args(["marker"].iter().chain(content.split_whitespace()))
                 .current_dir(&cwd)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
