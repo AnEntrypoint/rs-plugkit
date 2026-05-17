@@ -23,7 +23,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check-wasm32-wasip1
+          cache-on-failure: true
+
+      - name: Cargo check (fast)
+        run: cargo check --target wasm32-wasip1 --no-default-features --features wasm --lib
+
   build:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
 
     steps:
@@ -31,11 +50,23 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-wasip1
+
+      - name: Install wasi-sdk (clang + sysroot for tree-sitter C grammars via rs-codeinsight)
+        run: |
+          WASI_VERSION=24
+          WASI_VERSION_FULL=${WASI_VERSION}.0
+          curl -sL -o wasi-sdk.tar.gz "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_VERSION}/wasi-sdk-${WASI_VERSION_FULL}-x86_64-linux.tar.gz"
+          mkdir -p $HOME/wasi-sdk
+          tar -xzf wasi-sdk.tar.gz -C $HOME/wasi-sdk --strip-components=1
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk" >> $GITHUB_ENV
+          echo "CC_wasm32_wasip1=$HOME/wasi-sdk/bin/clang" >> $GITHUB_ENV
+          echo "AR_wasm32_wasip1=$HOME/wasi-sdk/bin/llvm-ar" >> $GITHUB_ENV
+          echo "CFLAGS_wasm32_wasip1=--sysroot=$HOME/wasi-sdk/share/wasi-sysroot" >> $GITHUB_ENV
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: build-wasm32-unknown-unknown
+          key: build-wasm32-wasip1
           cache-on-failure: true
 
       - name: Wipe cargo git cache and lockfile (force fresh dep resolution)
@@ -46,12 +77,19 @@ jobs:
           cargo generate-lockfile
 
       - name: Build WASM
-        run: cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm --lib
+        run: cargo build --release --target wasm32-wasip1 --no-default-features --features wasm --lib
 
       - name: Verify WASM artifact
         shell: bash
         run: |
-          ls -la target/wasm32-unknown-unknown/release/rs_plugkit.wasm
-          [ -s target/wasm32-unknown-unknown/release/rs_plugkit.wasm ] || exit 1
-          wasm_file_size=$(stat -c%s target/wasm32-unknown-unknown/release/rs_plugkit.wasm || stat -f%z target/wasm32-unknown-unknown/release/rs_plugkit.wasm)
+          ls -la target/wasm32-wasip1/release/rs_plugkit.wasm
+          [ -s target/wasm32-wasip1/release/rs_plugkit.wasm ] || exit 1
+          wasm_file_size=$(stat -c%s target/wasm32-wasip1/release/rs_plugkit.wasm || stat -f%z target/wasm32-wasip1/release/rs_plugkit.wasm)
           echo "WASM artifact size: $wasm_file_size bytes"
+
+      - name: Upload plugkit.wasm
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugkit-wasm32-wasip1
+          path: target/wasm32-wasip1/release/rs_plugkit.wasm
+          if-no-files-found: error
