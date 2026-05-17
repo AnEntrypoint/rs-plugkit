@@ -456,7 +456,6 @@ fn rejected(verb: &str) -> u64 {
     err(verb, "verb unavailable in browser; use exec:nodejs or host-side dispatch")
 }
 
-#[no_mangle]
 fn sql_open(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(":memory:");
     match crate::libsql_wasm::open(path) {
@@ -491,6 +490,7 @@ fn sql_smoke() -> u64 {
     pack(crate::libsql_wasm::smoke().to_string())
 }
 
+#[no_mangle]
 pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
     let verb = read_str(verb_ptr as *const u8, verb_len);
     let body_s = read_str(body_ptr as *const u8, body_len);
