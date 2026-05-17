@@ -499,14 +499,16 @@ fn codeinsight_index(body: &Value) -> u64 {
 fn codesearch_libsql(body: &Value) -> u64 {
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-    pack(crate::code_index::search(query, k).to_string())
+    let inline = body.get("embedding");
+    pack(crate::code_index::search(query, k, inline).to_string())
 }
 
 fn memorize_libsql(body: &Value) -> u64 {
     let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if text.is_empty() { return err("memorize", "missing text"); }
-    pack(crate::code_index::memorize(text, ns).to_string())
+    let inline = body.get("embedding");
+    pack(crate::code_index::memorize(text, ns, inline).to_string())
 }
 
 fn recall_libsql(body: &Value) -> u64 {
@@ -514,7 +516,8 @@ fn recall_libsql(body: &Value) -> u64 {
     let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
     let ns = body.get("namespace").and_then(|v| v.as_str());
     if query.is_empty() { return err("recall", "missing query"); }
-    pack(crate::code_index::recall(query, limit, ns).to_string())
+    let inline = body.get("embedding");
+    pack(crate::code_index::recall(query, limit, ns, inline).to_string())
 }
 
 #[no_mangle]

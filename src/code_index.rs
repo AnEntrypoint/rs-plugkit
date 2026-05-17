@@ -114,6 +114,10 @@ fn extract_chunks(path: &str, source: &str, lang: Language) -> Vec<(String, Stri
 fn embed_text(text: &str) -> Option<Vec<f32>> {
     let packed = unsafe { host_vec_embed(text.as_ptr(), text.len() as u32) };
     let v = unpack_to_value_pub(packed);
+    json_to_f32_vec(&v)
+}
+
+fn json_to_f32_vec(v: &Value) -> Option<Vec<f32>> {
     if let Value::Array(arr) = v {
         let mut out = Vec::with_capacity(arr.len());
         for x in arr { if let Some(f) = x.as_f64() { out.push(f as f32); } }
@@ -178,9 +182,9 @@ pub fn index(root: &str, max_files: usize) -> Value {
     })
 }
 
-pub fn search(query: &str, k: usize) -> Value {
+pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value {
     if let Err(e) = ensure_schema() { return json!({ "ok": false, "error": e }); }
-    let qvec = match embed_text(query) {
+    let qvec = match inline_embedding.and_then(json_to_f32_vec).or_else(|| embed_text(query)) {
         Some(v) => v,
         None => {
             let like = format!("%{}%", sql_quote(query));
@@ -209,9 +213,9 @@ pub fn search(query: &str, k: usize) -> Value {
     }
 }
 
-pub fn memorize(text: &str, namespace: &str) -> Value {
+pub fn memorize(text: &str, namespace: &str, inline_embedding: Option<&Value>) -> Value {
     if let Err(e) = ensure_schema() { return json!({ "ok": false, "error": e }); }
-    let emb = embed_text(text);
+    let emb = inline_embedding.and_then(json_to_f32_vec).or_else(|| embed_text(text));
     let embedding_sql = match &emb {
         Some(v) => format!("vector('{}')", vec_to_json_literal(v)),
         None => "NULL".to_string(),
@@ -221,14 +225,14 @@ pub fn memorize(text: &str, namespace: &str) -> Value {
         sql_quote(namespace), sql_quote(text), unsafe { crate::wasm_dispatch::host_now_ms() }, embedding_sql
     );
     match libsql_wasm::exec(&sql) {
-        Ok(()) => json!({ "ok": true, "embedded": emb.is_some() }),
+        Ok(()) => json!({ "ok": true, "embedded": emb.is_some(), "inline": inline_embedding.is_some() }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
-pub fn recall(query: &str, limit: usize, namespace: Option<&str>) -> Value {
+pub fn recall(query: &str, limit: usize, namespace: Option<&str>, inline_embedding: Option<&Value>) -> Value {
     if let Err(e) = ensure_schema() { return json!({ "ok": false, "error": e }); }
-    let qvec = match embed_text(query) {
+    let qvec = match inline_embedding.and_then(json_to_f32_vec).or_else(|| embed_text(query)) {
         Some(v) => v,
         None => {
             let like = format!("%{}%", sql_quote(query));
