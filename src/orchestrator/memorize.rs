@@ -8,7 +8,11 @@ pub fn memorize_inbox() -> PathBuf {
 
 pub fn fire(body: &str) -> Result<String, std::io::Error> {
     let dir = memorize_inbox();
-    let n = std::time::SystemTime::now()
+    #[cfg(target_arch = "wasm32")]
+    let n: u128 = (unsafe { crate::wasm_dispatch::host_now_ms() } as u128) * 1_000_000
+        + (body.len() as u128);
+    #[cfg(not(target_arch = "wasm32"))]
+    let n: u128 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
