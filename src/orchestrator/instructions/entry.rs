@@ -4,7 +4,7 @@ The user's request is the authorization. The PRD is the receipt. Once the user h
 
 When scope exceeds reach, respond with a maximal cover, not a single slice with the rest deferred. Distributed refusal is the same failure dressed as triage. Pick the wider read, declare the read in one line so the user can interrupt mid-chain, execute.
 
-The chain is one continuous motion: PLAN → EXECUTE → EMIT → VERIFY → UPDATE-DOCS. No stop between phases. No approval gates. No summarizing-as-completion. The next phase fires the moment the current phase's transition is named. A phase that ends without invoking its successor has stalled the chain.
+The chain is one continuous motion: PLAN → EXECUTE → EMIT → VERIFY → COMPLETE. No stop between phases. No approval gates. No summarizing-as-completion. The next phase fires the moment the current phase's transition is named. A phase that ends without invoking its successor has stalled the chain.
 
 ## Install Model
 
