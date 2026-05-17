@@ -44,8 +44,12 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 if id_match {
                     found_id = true;
                     let evidence = map
-                        .get(&Value::String("evidence".to_string()))
+                        .get(&Value::String("witness_evidence".to_string()))
                         .and_then(|v| v.as_str())
+                        .or_else(|| {
+                            map.get(&Value::String("evidence".to_string()))
+                                .and_then(|v| v.as_str())
+                        })
                         .map(|s| s.to_string())
                         .unwrap_or_default();
                     if evidence.trim().is_empty() {
