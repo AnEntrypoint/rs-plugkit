@@ -4,6 +4,7 @@ pub mod mutables;
 pub mod memorize;
 pub mod residual;
 pub mod recall;
+pub mod instructions;
 
 use std::path::PathBuf;
 use std::env;
@@ -21,7 +22,7 @@ pub fn gm_dir() -> PathBuf {
 pub fn is_orchestrator_verb(verb: &str) -> bool {
     matches!(
         verb,
-        "transition" | "mutable-resolve" | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall"
+        "transition" | "mutable-resolve" | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall" | "instruction"
     )
 }
 
@@ -33,6 +34,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "phase-status" => state::handle_status(),
         "residual-scan" => residual::handle_scan(content),
         "auto-recall" => recall::handle_auto_recall(content),
+        "instruction" => instructions::handle_instruction(content),
         _ => (format!("Unknown orchestrator verb: {}", verb), String::new(), 1),
     }
 }

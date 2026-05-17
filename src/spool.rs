@@ -275,7 +275,7 @@ fn dispatch_file(input_path: &Path, output_root: &Path) {
 }
 
 fn check_dispatch_gates(lang_or_verb: &str, file_id: &str) -> (bool, String) {
-    let is_admin_verb = matches!(lang_or_verb, "health" | "status" | "close" | "kill-port" | "wait" | "sleep" | "transition" | "mutable-resolve" | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall");
+    let is_admin_verb = matches!(lang_or_verb, "health" | "status" | "close" | "kill-port" | "wait" | "sleep" | "transition" | "mutable-resolve" | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall" | "instruction");
 
     if is_admin_verb {
         return (false, String::new());
