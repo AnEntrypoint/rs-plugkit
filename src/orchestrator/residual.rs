@@ -1,6 +1,13 @@
 use super::gm_dir;
 use crate::pkfs;
 
+fn status_is_open(s: Option<&str>) -> bool {
+    match s {
+        Some(v) => matches!(v, "pending" | "in_progress" | "unknown" | "blocked"),
+        None => true,
+    }
+}
+
 fn prd_empty_or_missing() -> bool {
     let prd = gm_dir().join("prd.yml");
     let ps = prd.to_string_lossy().to_string();
@@ -14,11 +21,21 @@ fn prd_empty_or_missing() -> bool {
                 return true;
             }
             if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(trimmed) {
-                if let Some(seq) = yaml.as_sequence() {
-                    return seq.is_empty();
-                }
-                if let Some(items) = yaml.get("items").and_then(|v| v.as_sequence()) {
-                    return items.is_empty();
+                let items_opt = yaml.as_sequence()
+                    .or_else(|| yaml.get("items").and_then(|v| v.as_sequence()));
+                if let Some(items) = items_opt {
+                    if items.is_empty() {
+                        return true;
+                    }
+                    let any_open = items.iter().any(|item| {
+                        let status = item.get("status").and_then(|v| v.as_str());
+                        let blocked_external = item.get("blockedBy")
+                            .and_then(|v| v.as_sequence())
+                            .map(|seq| seq.iter().any(|x| x.as_str() == Some("external")))
+                            .unwrap_or(false);
+                        status_is_open(status) && !blocked_external
+                    });
+                    return !any_open;
                 }
             }
             true
