@@ -156,7 +156,7 @@ jobs:
           mkdir -p npm-pkg
           cat > npm-pkg/package.json <<'EOF'
           {
-            "name": "@anentrypoint/plugkit-wasm",
+            "name": "plugkit-wasm",
             "version": "VERSION_PLACEHOLDER",
             "description": "WASM distribution of plugkit - CLI entry point and spool dispatcher for gm",
             "main": "plugkit.wasm",
@@ -194,8 +194,8 @@ jobs:
             exit 0
           fi
           cd npm-pkg
-          if npm view "@anentrypoint/plugkit-wasm@$VER" version >/dev/null 2>&1; then
-            echo "@anentrypoint/plugkit-wasm@$VER already published; skipping"
+          if npm view "plugkit-wasm@$VER" version >/dev/null 2>&1; then
+            echo "plugkit-wasm@$VER already published; skipping"
             exit 0
           fi
           npm publish --access public || echo "npm publish failed (likely OTP requirement); continuing cascade"
