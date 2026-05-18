@@ -456,12 +456,30 @@ fn rejected(verb: &str) -> u64 {
     err(verb, "verb unavailable in browser; use exec:nodejs or host-side dispatch")
 }
 
+fn db_name_from(body: &Value) -> String {
+    body.get("db_name").or_else(|| body.get("db")).and_then(|v| v.as_str()).unwrap_or("main").to_string()
+}
+
 fn sql_open(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(":memory:");
-    match crate::libsql_wasm::open(path) {
-        Ok(()) => ok("sql_open", json!({ "path": path })),
+    let name = db_name_from(body);
+    match crate::libsql_wasm::open(&name, path) {
+        Ok(()) => ok("sql_open", json!({ "path": path, "db_name": name })),
         Err(e) => err("sql_open", &e),
     }
+}
+
+fn sql_close(body: &Value) -> u64 {
+    let name = db_name_from(body);
+    match crate::libsql_wasm::close(&name) {
+        Ok(()) => ok("sql_close", json!({ "db_name": name })),
+        Err(e) => err("sql_close", &e),
+    }
+}
+
+fn sql_list_dbs(_body: &Value) -> u64 {
+    let names = crate::libsql_wasm::list_dbs();
+    ok("sql_list_dbs", json!({ "dbs": names }))
 }
 
 fn sql_exec(body: &Value) -> u64 {
@@ -469,7 +487,8 @@ fn sql_exec(body: &Value) -> u64 {
         Some(s) => s,
         None => return err("sql_exec", "missing sql"),
     };
-    match crate::libsql_wasm::exec(sql) {
+    let name = db_name_from(body);
+    match crate::libsql_wasm::exec(&name, sql) {
         Ok(()) => ok("sql_exec", json!({})),
         Err(e) => err("sql_exec", &e),
     }
@@ -480,7 +499,8 @@ fn sql_query(body: &Value) -> u64 {
         Some(s) => s,
         None => return err("sql_query", "missing sql"),
     };
-    match crate::libsql_wasm::query(sql) {
+    let name = db_name_from(body);
+    match crate::libsql_wasm::query(&name, sql) {
         Ok(rows) => ok("sql_query", json!({ "rows": rows })),
         Err(e) => err("sql_query", &e),
     }
@@ -540,9 +560,10 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn sql_serialize() -> u64 {
-    match crate::libsql_wasm::serialize() {
-        Ok(bytes) => ok("sql_serialize", json!({ "bytes_b64": b64_encode(&bytes), "size": bytes.len() })),
+fn sql_serialize(body: &Value) -> u64 {
+    let name = db_name_from(body);
+    match crate::libsql_wasm::serialize(&name) {
+        Ok(bytes) => ok("sql_serialize", json!({ "bytes_b64": b64_encode(&bytes), "size": bytes.len(), "db_name": name })),
         Err(e) => err("sql_serialize", &e),
     }
 }
@@ -554,8 +575,9 @@ fn sql_deserialize(body: &Value) -> u64 {
     };
     let bytes = match b64_decode(s) { Some(b) => b, None => return err("sql_deserialize", "invalid base64") };
     let size = bytes.len();
-    match crate::libsql_wasm::deserialize(&bytes) {
-        Ok(()) => ok("sql_deserialize", json!({ "restored": size })),
+    let name = db_name_from(body);
+    match crate::libsql_wasm::deserialize(&name, &bytes) {
+        Ok(()) => ok("sql_deserialize", json!({ "restored": size, "db_name": name })),
         Err(e) => err("sql_deserialize", &e),
     }
 }
@@ -623,10 +645,12 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "browser" => browser(&body, &body_s),
         "health" => health(&body),
         "sql_open" => sql_open(&body),
+        "sql_close" => sql_close(&body),
+        "sql_list_dbs" => sql_list_dbs(&body),
         "sql_exec" => sql_exec(&body),
         "sql_query" => sql_query(&body),
         "sql_smoke" => sql_smoke(),
-        "sql_serialize" => sql_serialize(),
+        "sql_serialize" => sql_serialize(&body),
         "sql_deserialize" => sql_deserialize(&body),
         "codeinsight_index" => codeinsight_index(&body),
         "codesearch" => codesearch_libsql(&body),

@@ -2,20 +2,29 @@
 
 use libsql_ffi as ffi;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::ptr;
 use std::sync::Mutex;
 
-static DB_LOCK: Mutex<Option<DbHandle>> = Mutex::new(None);
+// Each named DB is its own libsql connection (its own :memory: instance).
+// Default name is "main" for backwards compatibility with single-DB callers.
+static DBS: Mutex<Option<HashMap<String, DbHandle>>> = Mutex::new(None);
 
 struct DbHandle(*mut ffi::sqlite3);
 unsafe impl Send for DbHandle {}
 
-pub fn open(path: &str) -> Result<(), String> {
-    let mut guard = DB_LOCK.lock().map_err(|e| e.to_string())?;
-    if guard.is_some() {
-        return Ok(());
+fn dbs_init(guard: &mut std::sync::MutexGuard<'_, Option<HashMap<String, DbHandle>>>) {
+    if guard.is_none() {
+        **guard = Some(HashMap::new());
     }
+}
+
+pub fn open(name: &str, path: &str) -> Result<(), String> {
+    let mut guard = DBS.lock().map_err(|e| e.to_string())?;
+    dbs_init(&mut guard);
+    let map = guard.as_mut().unwrap();
+    if map.contains_key(name) { return Ok(()); }
     let cpath = CString::new(path).map_err(|e| e.to_string())?;
     let mut db: *mut ffi::sqlite3 = ptr::null_mut();
     let rc = unsafe {
@@ -27,25 +36,43 @@ pub fn open(path: &str) -> Result<(), String> {
         )
     };
     if rc != ffi::SQLITE_OK {
-        let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
-        unsafe { ffi::sqlite3_close(db); }
-        return Err(format!("sqlite3_open_v2 rc={} msg={}", rc, msg));
+        let msg = if db.is_null() { format!("rc={}", rc) } else {
+            let m = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
+            unsafe { ffi::sqlite3_close(db); }
+            format!("rc={} msg={}", rc, m)
+        };
+        return Err(format!("sqlite3_open_v2 {}", msg));
     }
-    *guard = Some(DbHandle(db));
+    map.insert(name.to_string(), DbHandle(db));
     Ok(())
 }
 
-fn with_db<F, R>(f: F) -> Result<R, String>
+pub fn close(name: &str) -> Result<(), String> {
+    let mut guard = DBS.lock().map_err(|e| e.to_string())?;
+    let map = match guard.as_mut() { Some(m) => m, None => return Ok(()) };
+    if let Some(h) = map.remove(name) {
+        unsafe { ffi::sqlite3_close(h.0); }
+    }
+    Ok(())
+}
+
+pub fn list_dbs() -> Vec<String> {
+    let guard = DBS.lock().ok();
+    guard.as_ref().and_then(|g| g.as_ref()).map(|m| m.keys().cloned().collect()).unwrap_or_default()
+}
+
+fn with_db<F, R>(name: &str, f: F) -> Result<R, String>
 where
     F: FnOnce(*mut ffi::sqlite3) -> Result<R, String>,
 {
-    let guard = DB_LOCK.lock().map_err(|e| e.to_string())?;
-    let h = guard.as_ref().ok_or_else(|| "db not open".to_string())?;
+    let guard = DBS.lock().map_err(|e| e.to_string())?;
+    let map = guard.as_ref().ok_or_else(|| "no dbs open".to_string())?;
+    let h = map.get(name).ok_or_else(|| format!("db '{}' not open", name))?;
     f(h.0)
 }
 
-pub fn exec(sql: &str) -> Result<(), String> {
-    with_db(|db| {
+pub fn exec(name: &str, sql: &str) -> Result<(), String> {
+    with_db(name, |db| {
         let csql = CString::new(sql).map_err(|e| e.to_string())?;
         let mut err_ptr: *mut i8 = ptr::null_mut();
         let rc = unsafe { ffi::sqlite3_exec(db, csql.as_ptr(), None, ptr::null_mut(), &mut err_ptr) };
@@ -63,8 +90,8 @@ pub fn exec(sql: &str) -> Result<(), String> {
     })
 }
 
-pub fn query(sql: &str) -> Result<Value, String> {
-    with_db(|db| {
+pub fn query(name: &str, sql: &str) -> Result<Value, String> {
+    with_db(name, |db| {
         let csql = CString::new(sql).map_err(|e| e.to_string())?;
         let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
         let rc = unsafe { ffi::sqlite3_prepare_v2(db, csql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
@@ -75,15 +102,13 @@ pub fn query(sql: &str) -> Result<Value, String> {
         let ncols = unsafe { ffi::sqlite3_column_count(stmt) };
         let mut col_names = Vec::with_capacity(ncols as usize);
         for i in 0..ncols {
-            let name = unsafe { CStr::from_ptr(ffi::sqlite3_column_name(stmt, i)).to_string_lossy().into_owned() };
-            col_names.push(name);
+            let nm = unsafe { CStr::from_ptr(ffi::sqlite3_column_name(stmt, i)).to_string_lossy().into_owned() };
+            col_names.push(nm);
         }
         let mut rows: Vec<Value> = Vec::new();
         loop {
             let step = unsafe { ffi::sqlite3_step(stmt) };
-            if step == ffi::SQLITE_DONE {
-                break;
-            }
+            if step == ffi::SQLITE_DONE { break; }
             if step != ffi::SQLITE_ROW {
                 let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
                 unsafe { ffi::sqlite3_finalize(stmt); }
@@ -124,8 +149,8 @@ pub fn query(sql: &str) -> Result<Value, String> {
     })
 }
 
-pub fn serialize() -> Result<Vec<u8>, String> {
-    with_db(|db| {
+pub fn serialize(name: &str) -> Result<Vec<u8>, String> {
+    with_db(name, |db| {
         let schema = CString::new("main").unwrap();
         let mut size: i64 = 0;
         let p = unsafe { ffi::sqlite3_serialize(db, schema.as_ptr(), &mut size, 0) };
@@ -136,8 +161,8 @@ pub fn serialize() -> Result<Vec<u8>, String> {
     })
 }
 
-pub fn deserialize(bytes: &[u8]) -> Result<(), String> {
-    with_db(|db| {
+pub fn deserialize(name: &str, bytes: &[u8]) -> Result<(), String> {
+    with_db(name, |db| {
         let schema = CString::new("main").unwrap();
         let size = bytes.len() as i64;
         let buf = unsafe { ffi::sqlite3_malloc64(size as u64) } as *mut u8;
@@ -156,11 +181,13 @@ pub fn deserialize(bytes: &[u8]) -> Result<(), String> {
 
 pub fn smoke() -> Value {
     let mut log: Vec<Value> = Vec::new();
-    log.push(json!({ "step": "open", "result": open(":memory:").err() }));
-    log.push(json!({ "step": "create_table", "result": exec("CREATE TABLE memos (id INTEGER PRIMARY KEY, text TEXT, emb F32_BLOB(4))").err() }));
-    log.push(json!({ "step": "insert", "result": exec("INSERT INTO memos(text, emb) VALUES ('hello', vector('[0.1,0.2,0.3,0.4]'))").err() }));
-    log.push(json!({ "step": "create_index", "result": exec("CREATE INDEX memos_idx ON memos(libsql_vector_idx(emb, 'metric=cosine'))").err() }));
-    log.push(json!({ "step": "vector_top_k", "rows": query("SELECT id, text, vector_distance_cos(emb, vector('[0.1,0.2,0.3,0.4]')) AS d FROM vector_top_k('memos_idx', vector('[0.1,0.2,0.3,0.4]'), 5) JOIN memos ON memos.rowid = id").ok() }));
+    let n = "smoke";
+    log.push(json!({ "step": "open", "result": open(n, ":memory:").err() }));
+    log.push(json!({ "step": "create_table", "result": exec(n, "CREATE TABLE memos (id INTEGER PRIMARY KEY, text TEXT, emb F32_BLOB(4))").err() }));
+    log.push(json!({ "step": "insert", "result": exec(n, "INSERT INTO memos(text, emb) VALUES ('hello', vector('[0.1,0.2,0.3,0.4]'))").err() }));
+    log.push(json!({ "step": "create_index", "result": exec(n, "CREATE INDEX memos_idx ON memos(libsql_vector_idx(emb, 'metric=cosine'))").err() }));
+    log.push(json!({ "step": "vector_top_k", "rows": query(n, "SELECT id, text, vector_distance_cos(emb, vector('[0.1,0.2,0.3,0.4]')) AS d FROM vector_top_k('memos_idx', vector('[0.1,0.2,0.3,0.4]'), 5) JOIN memos ON memos.rowid = id").ok() }));
+    let _ = close(n);
     json!({ "ok": true, "smoke": log, "libsql_version": libsql_version() })
 }
 
