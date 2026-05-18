@@ -14,6 +14,8 @@ rs-codeinsight and rs-search outputs feeding EMIT must come from a freshly-compl
 
 One Edit or Write per artifact. No multi-file batches that conceal which file failed if one fails. Spool larger payloads through `in/nodejs/` when shape demands it.
 
+The artifacts emitted are the ones the PRD names. A `.md` or `.txt` not in the PRD does not get written. Closing narrative — what was done, why, what's witnessed — goes into the commit message and the next `memorize-fire`, never into a fresh doc file the user did not request.
+
 ## Post-Emit Verify
 
 After each write, re-read the file from disk and assert the change is present. The Read tool is the post-emit witness. Discrepancy → Fix on Sight: fix at root, re-emit, re-verify. A green Write call is not the witness — the verified disk state is.

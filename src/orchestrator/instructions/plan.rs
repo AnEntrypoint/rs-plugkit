@@ -31,6 +31,10 @@ Scope-exceeds-reach is a planning condition, not a stopping condition. The cover
 
 Writing `.gm/prd.yml` is non-negotiable for every task whose scope exceeds a literal single-file single-line edit. Skipping the PRD costs the same as writing it (the work is enumerated mentally either way) and loses durable trace, resumability, and the cover-maximality check.
 
+## No Unsolicited Docs
+
+A PRD item to "write a summary doc", "add an IMPLEMENTATION.md", "ship a START-HERE.md", or "drop a *-STATUS.md" is rejected as a planning artifact unless the user explicitly asked for that file. Closure narrative belongs in the PRD entry's own description, in `memorize-fire` evidence, and in the commit message — not in a new file at project root or under `docs/`. Planning to write a doc the user did not request is the same failure as planning to mock the test.
+
 ## Dispatch
 
 `phase-status` to read FSM state. `transition` to advance. `mutable-resolve` to mark witnessed (auto-fires memorize). Plus the usual `recall`, `codesearch`, `memorize`, `health`, language stems.
