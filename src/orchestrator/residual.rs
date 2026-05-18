@@ -73,11 +73,12 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     let marker_s = marker.to_string_lossy().to_string();
     let _ = pkfs::write(&marker_s, "fired");
 
-    let message = "Residual scan: name reachable in-spirit work and add to PRD, OR explicitly state 'residual scan: none reachable in-spirit'.";
+    let message = "Residual scan: (1) check worktree state — if `git status --porcelain` is non-empty OR `git log @{u}..HEAD` has commits, commit and push before declaring done; (2) name any reachable in-spirit work and add to PRD; (3) if nothing reachable remains, explicitly state 'residual scan: none reachable in-spirit'. A turn that ends with uncommitted changes, unpushed commits, an open PRD slice, or unresolved mutables has not stopped — it has stalled the chain.";
     let payload = serde_json::json!({
         "scan": "fired",
         "marker": marker.display().to_string(),
         "imperative": message,
+        "checks": ["worktree-clean", "remote-pushed", "prd-empty", "mutables-witnessed"],
     });
     (payload.to_string(), String::new(), 0)
 }
