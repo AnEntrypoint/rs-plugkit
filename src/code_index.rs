@@ -46,12 +46,14 @@ const SKIP_DIRS: &[&str] = &[
     ".next", ".nuxt", ".turbo", "coverage", "vendor", ".plugkit-browser-profile",
 ];
 
+const GM_DB: &str = "gm";
+
 pub fn ensure_schema() -> Result<(), String> {
-    libsql_wasm::open(":memory:")?;
-    libsql_wasm::exec("CREATE TABLE IF NOT EXISTS code_chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, body TEXT, embedding F32_BLOB(384))")?;
-    libsql_wasm::exec("CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, namespace TEXT, text TEXT, ts INTEGER, embedding F32_BLOB(384))")?;
-    let _ = libsql_wasm::exec("CREATE INDEX IF NOT EXISTS code_chunks_vec ON code_chunks(libsql_vector_idx(embedding, 'metric=cosine'))");
-    let _ = libsql_wasm::exec("CREATE INDEX IF NOT EXISTS memories_vec ON memories(libsql_vector_idx(embedding, 'metric=cosine'))");
+    libsql_wasm::open(GM_DB, ":memory:")?;
+    libsql_wasm::exec(GM_DB, "CREATE TABLE IF NOT EXISTS code_chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, body TEXT, embedding F32_BLOB(384))")?;
+    libsql_wasm::exec(GM_DB, "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, namespace TEXT, text TEXT, ts INTEGER, embedding F32_BLOB(384))")?;
+    let _ = libsql_wasm::exec(GM_DB, "CREATE INDEX IF NOT EXISTS code_chunks_vec ON code_chunks(libsql_vector_idx(embedding, 'metric=cosine'))");
+    let _ = libsql_wasm::exec(GM_DB, "CREATE INDEX IF NOT EXISTS memories_vec ON memories(libsql_vector_idx(embedding, 'metric=cosine'))");
     Ok(())
 }
 
@@ -190,7 +192,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
                 "INSERT INTO code_chunks(path, kind, name, line_start, line_end, body, embedding) VALUES('{}','{}','{}',{},{},'{}',{})",
                 sql_quote(fp), sql_quote(&kind), sql_quote(&name), ls, le, sql_quote(&body[..body.len().min(8192)]), embedding_sql
             );
-            let _ = libsql_wasm::exec(&sql);
+            let _ = libsql_wasm::exec(GM_DB, &sql);
         }
     }
     json!({
@@ -210,7 +212,7 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
         None => {
             let like = format!("%{}%", sql_quote(query));
             let sql = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM code_chunks WHERE body LIKE '{}' OR name LIKE '{}' LIMIT {}", like, like, k);
-            return match libsql_wasm::query(&sql) {
+            return match libsql_wasm::query(GM_DB, &sql) {
                 Ok(rows) => json!({ "ok": true, "mode": "fallback_like", "rows": rows }),
                 Err(e) => json!({ "ok": false, "mode": "fallback_like", "error": e }),
             };
@@ -222,12 +224,12 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
         "SELECT c.path, c.kind, c.name, c.line_start, c.line_end, substr(c.body,1,400) AS snippet, vector_distance_cos(c.embedding, vector('{}')) AS distance FROM vector_top_k('code_chunks_vec', vector('{}'), {}) AS v JOIN code_chunks AS c ON c.rowid = v.id ORDER BY distance ASC LIMIT {}",
         qlit, qlit, pool, k
     );
-    match libsql_wasm::query(&sql) {
+    match libsql_wasm::query(GM_DB, &sql) {
         Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows }),
         Err(e) => {
             let like = format!("%{}%", sql_quote(query));
             let sql2 = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM code_chunks WHERE body LIKE '{}' OR name LIKE '{}' LIMIT {}", like, like, k);
-            match libsql_wasm::query(&sql2) {
+            match libsql_wasm::query(GM_DB, &sql2) {
                 Ok(rows) => json!({ "ok": true, "mode": "fallback_like_after_vec_err", "vec_err": e, "rows": rows }),
                 Err(e2) => json!({ "ok": false, "vec_err": e, "fallback_err": e2 }),
             }
@@ -246,7 +248,7 @@ pub fn memorize(text: &str, namespace: &str, inline_embedding: Option<&Value>) -
         "INSERT INTO memories(namespace, text, ts, embedding) VALUES('{}','{}',{},{})",
         sql_quote(namespace), sql_quote(text), unsafe { crate::wasm_dispatch::host_now_ms() }, embedding_sql
     );
-    match libsql_wasm::exec(&sql) {
+    match libsql_wasm::exec(GM_DB, &sql) {
         Ok(()) => json!({ "ok": true, "embedded": emb.is_some(), "inline": inline_embedding.is_some() }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
@@ -260,7 +262,7 @@ pub fn recall(query: &str, limit: usize, namespace: Option<&str>, inline_embeddi
             let like = format!("%{}%", sql_quote(query));
             let ns_filter = match namespace { Some(n) => format!(" AND namespace='{}'", sql_quote(n)), None => String::new() };
             let sql = format!("SELECT id, namespace, text, ts FROM memories WHERE text LIKE '{}'{} ORDER BY ts DESC LIMIT {}", like, ns_filter, limit);
-            return match libsql_wasm::query(&sql) {
+            return match libsql_wasm::query(GM_DB, &sql) {
                 Ok(rows) => json!({ "ok": true, "mode": "fallback_like", "rows": rows }),
                 Err(e) => json!({ "ok": false, "error": e }),
             };
@@ -280,7 +282,7 @@ pub fn recall(query: &str, limit: usize, namespace: Option<&str>, inline_embeddi
             qlit, qlit, limit.saturating_mul(5).max(20), limit
         ),
     };
-    match libsql_wasm::query(&sql) {
+    match libsql_wasm::query(GM_DB, &sql) {
         Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
