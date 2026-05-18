@@ -14,6 +14,10 @@ Every unexpected output is a new mutable. Absorbing surprise into the existing m
 
 What ships runs against real services, real data, real binaries. Stubs, mocks, placeholder returns, fixture-only paths, "TODO: implement", hardcoded sample responses, and demo-mode fallbacks are forbidden. They produce green checks that survive into production and lie about what works. Behavioral detection: code paths that always succeed, always return the same value regardless of input, or short-circuit a real call to satisfy a type signature are stubs. Before writing a shim, check whether an upstream library already provides that surface — maintaining a local reimplementation drifts and ages.
 
+## No Unsolicited Docs
+
+Closing a PRD item by writing a `.md` or `.txt` the user did not request is the documentation analog of "code that always succeeds": a green check the agent gave itself. PRD entry text, `memorize-fire` witness, and commit message are the sanctioned destinations for what-was-done narrative; a new SUMMARY.md / COMPLETED.md / IMPLEMENTATION_NOTES.md / *-STATUS.md / START-HERE.md / build-output.txt belongs to none of them and is rejected on sight.
+
 ## Browser Witness
 
 Editing code that runs in a browser requires a live `exec:browser` witness in the same turn as the edit. Boot the real surface (server up, page reachable, HTTP 200 witnessed), navigate, poll for the global the change affects, `page.evaluate` asserting the specific invariant, capture witnessed values. Variance → fix at root → re-witness. Pure-prose edits to static documents with no JS/canvas/DOM behavior change are exempt with the exemption tagged. Silent skip on actual behavior change is forced closure.

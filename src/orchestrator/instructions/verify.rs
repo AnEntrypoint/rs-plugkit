@@ -16,6 +16,10 @@ One `test.js` at project root. 200-line hard cap. No fixtures, no mocks, no scat
 
 Before allowing transition to COMPLETE, fire the `residual-scan` verb. Empty PRD is necessary but not sufficient — the gate asks what the agent should have decided to do but did not. Either re-enter PLAN with appended items and execute, or explicitly state "residual scan: none reachable in-spirit." The `.gm/residual-check-fired` marker makes this one-shot per stopping window. Common residuals: pre-existing build break surfaced this turn, neighboring lint failure, obvious refactor win, observability gap, doc drift, follow-on work the user clearly implied.
 
+## Unsolicited-Doc Residual
+
+Untracked `*.md` or `*.txt` files landed during the turn — at project root, under `docs/`, or anywhere outside `node_modules/` / `target/` / `.gm/` — are residuals. The disposition is delete-or-fold: if the content belongs in the commit message, the PRD entry, or a `memorize-fire`, move it there and delete the file; if it does not, just delete. SUMMARY.md, COMPLETED.md, IMPLEMENTATION_NOTES.md, START-HERE.md, *-STATUS.md, build-output.txt, log.txt are the canonical examples — they do not survive into the commit. A new doc the user explicitly requested is the only exception, and the user's ask is the proof.
+
 ## Git Gate
 
 `git status` clean. `git log` shows the commit pushed. `gh run list` shows the most recent run for the branch concluded green. All three witnessed before transition.
