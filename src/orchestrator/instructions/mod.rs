@@ -10,6 +10,19 @@ use super::state::read_state;
 use super::mutables;
 use super::prd;
 use super::recall;
+use crate::pkfs;
+
+fn read_update_available() -> serde_json::Value {
+    let path = super::gm_dir().join("exec-spool").join(".update-available.json");
+    let ps = path.to_string_lossy().to_string();
+    if !pkfs::exists(&ps) {
+        return serde_json::Value::Null;
+    }
+    match pkfs::read_to_string(&ps) {
+        Some(content) => serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::Value::Null),
+        None => serde_json::Value::Null,
+    }
+}
 
 pub fn get_instruction(phase: &str) -> &'static str {
     match phase.trim().to_ascii_uppercase().as_str() {
@@ -99,6 +112,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         recall::recall_hits(&query, 3)
     };
 
+    let update_available = read_update_available();
+
     let payload = json!({
         "phase": phase,
         "instruction": instruction,
@@ -107,6 +122,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "prd_pending_count": prd_pending,
         "next_phase_hint": next,
         "recall_hits": recall_hits,
+        "update_available": update_available,
     });
     (payload.to_string(), String::new(), 0)
 }
