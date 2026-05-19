@@ -21,6 +21,13 @@ extern "C" {
     pub fn host_now_ms() -> u64;
     pub fn host_env_get(key_ptr: *const u8, key_len: u32) -> u64;
     pub fn host_browser_exec(body_ptr: *const u8, body_len: u32, cwd_ptr: *const u8, cwd_len: u32, session_id_ptr: *const u8, session_id_len: u32) -> u64;
+    pub fn host_task_proc(action_ptr: *const u8, action_len: u32, params_ptr: *const u8, params_len: u32) -> u64;
+}
+
+pub fn host_task(action: &str, params: &Value) -> Value {
+    let params_s = params.to_string();
+    let packed = unsafe { host_task_proc(action.as_ptr(), action.len() as u32, params_s.as_ptr(), params_s.len() as u32) };
+    unpack_to_value(packed)
 }
 
 fn pack(s: String) -> u64 {
@@ -277,7 +284,7 @@ fn health(_body: &Value) -> u64 {
             "host_fs_read","host_fs_write","host_fs_readdir","host_fs_stat",
             "host_fetch","host_kv_get","host_kv_put","host_kv_query",
             "host_vec_search","host_vec_embed",
-            "host_exec_js","host_log","host_now_ms","host_env_get","host_browser_exec"
+            "host_exec_js","host_log","host_now_ms","host_env_get","host_browser_exec","host_task_proc"
         ]
     }))
 }

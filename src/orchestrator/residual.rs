@@ -45,19 +45,23 @@ fn prd_empty_or_missing() -> bool {
 }
 
 fn browser_sessions_open() -> bool {
-    let marker = gm_dir().join("browser-sessions.json");
-    let ps = marker.to_string_lossy().to_string();
-    if !pkfs::exists(&ps) {
-        return false;
+    let candidates = [
+        gm_dir().join("exec-spool").join("browser-sessions.json"),
+        gm_dir().join("browser-sessions.json"),
+    ];
+    for marker in &candidates {
+        let ps = marker.to_string_lossy().to_string();
+        if !pkfs::exists(&ps) { continue; }
+        if let Some(s) = pkfs::read_to_string(&ps) {
+            let t = s.trim();
+            if !t.is_empty() && t != "{}" && t != "[]" { return true; }
+        }
     }
-    match pkfs::read_to_string(&ps) {
-        Some(s) => !s.trim().is_empty() && s.trim() != "{}" && s.trim() != "[]",
-        None => false,
-    }
+    false
 }
 
 fn running_tasks_exist() -> bool {
-    false
+    super::task::any_running()
 }
 
 pub fn handle_scan(_content: &str) -> (String, String, i32) {

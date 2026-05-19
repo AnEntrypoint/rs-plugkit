@@ -113,6 +113,9 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
 
     let update_available = read_update_available();
+    let running_tasks = super::task::live_running_tasks();
+    let open_browser_sessions = super::task::open_browser_sessions();
+    let stuck_spool = super::task::stuck_spool();
 
     let payload = json!({
         "phase": phase,
@@ -123,6 +126,9 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "next_phase_hint": next,
         "recall_hits": recall_hits,
         "update_available": update_available,
+        "running_tasks": running_tasks,
+        "open_browser_sessions": open_browser_sessions,
+        "stuck_spool": stuck_spool,
     });
     (payload.to_string(), String::new(), 0)
 }
