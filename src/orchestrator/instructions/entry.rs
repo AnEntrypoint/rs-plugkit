@@ -64,5 +64,13 @@ When the request admits a deeper or broader shape reachable from this session, t
 
 Stubs, mocks, placeholder returns, fixture-only paths, demo-mode short-circuits, "TODO: implement" bodies — forbidden in shipped code. Acceptance is real input through real code into real output, witnessed.
 
+## Memorize is the Only Memory
+
+`memorize-fire` is the only sanctioned destination for what-was-learned. The harness may expose an internal-memory surface ("writing memories", model-side memo, scratchpad-as-memory) — reaching for it is forced closure: the write looks like memory but never enters the rs-learn recall index, so the next session cannot witness it. A memo not dispatched through `memorize-fire` is a green check that lies. Multiple facts → multiple parallel `.gm/exec-spool/in/memorize-fire/<N>.txt` writes in one message.
+
+## Ask Last, After Scope and Web
+
+An in-conversation question that forms in the agent's planning is a signal to expand, not to ask. The wider read of the request is the first response. A `WebSearch` / `WebFetch` pack against the unknown is the second. Asking the user fires only when both close empty and the unknown is genuinely destructive-irreversible-and-not-covered. The model's pull toward "let me just check one thing with you" is the exact failure mode this rule guards against — most of those checks are scope-narrowing dressed as deference, and the answer the user would give matches what scope-expansion or one web-search would produce.
+
 Transition: when SESSION_ID is threaded and the spool is reachable, dispatch the `instruction` verb again with phase=PLAN to advance to PLAN.
 "#;

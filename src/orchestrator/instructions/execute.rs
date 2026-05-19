@@ -24,9 +24,13 @@ Editing code that runs in a browser requires a live `exec:browser` witness in th
 
 The `browser` verb is the only sanctioned surface — no other library, tool, or skill. Dispatch `.gm/exec-spool/in/browser/<N>.txt` with raw JavaScript as the body. The host runs Chrome under a project-scoped profile at `<cwd>/.gm/browser-profile/` (cookies and login persist per project) and exposes four globals to the body: `page` (the live page handle for `await page.goto(...)`, `await page.evaluate(...)`, etc.), `snapshot` (accessibility-tree snapshot helper), `screenshotWithAccessibilityLabels` (annotated screenshot helper), and `state` (a per-session object that persists across dispatches within the same session). Body starting with `session ` manages session lifecycle: `session new`, `session list`, `session close <id>`. A `node test.js passes` does not substitute for a live `page.evaluate` asserting the invariant the edit was supposed to change.
 
-## Web-Search-Before-Pause
+## Web-Search-Before-Pause-Or-Ask
 
-Before pausing the chain on an unknown that the open web could resolve (API surface, error string, library version, upstream behavior), dispatch a `WebSearch` or `WebFetch` pack. Pausing without first asking the web is the same failure as resolving by narrative.
+Before pausing the chain on an unknown OR before any question to the user forms in-response, dispatch a `WebSearch` or `WebFetch` pack against the unknown. Pausing without first asking the web is the same failure as resolving by narrative. Asking the user without first asking the web is worse — it hands the work back to the human for a fact the open net carries.
+
+## Memorize via Spool
+
+Every memo routes through `memorize-fire` only. The harness may surface a native "save to memory" affordance — that surface is invisible to rs-learn and to next session's recall, and using it produces a memory that does not exist for the discipline. Write the fact body to `.gm/exec-spool/in/memorize-fire/<N>.txt`. Multiple facts dispatch in parallel, one body per file.
 
 ## Mutables Resolve
 
