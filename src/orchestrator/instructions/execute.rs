@@ -24,6 +24,10 @@ Editing code that runs in a browser requires a live `exec:browser` witness in th
 
 The `browser` verb is the only sanctioned surface — no other library, tool, or skill. Dispatch `.gm/exec-spool/in/browser/<N>.txt` with raw JavaScript as the body. The host runs Chrome under a project-scoped profile at `<cwd>/.gm/browser-profile/` (cookies and login persist per project) and exposes four globals to the body: `page` (the live page handle for `await page.goto(...)`, `await page.evaluate(...)`, etc.), `snapshot` (accessibility-tree snapshot helper), `screenshotWithAccessibilityLabels` (annotated screenshot helper), and `state` (a per-session object that persists across dispatches within the same session). Body starting with `session ` manages session lifecycle: `session new`, `session list`, `session close <id>`. A `node test.js passes` does not substitute for a live `page.evaluate` asserting the invariant the edit was supposed to change.
 
+## No Greenlight Gate
+
+EXECUTE does not have a confirmation step in front of it. A PLAN that resolves to "the next turn will start EXECUTE pending your sign-off" has stalled the chain. The user authorized the work in the first message; PLAN locks the shape; EXECUTE cuts. If a destructive-irreversible-uncovered decision appears mid-EXECUTE, name it as a single-shot pause and continue everything around it — never block the whole chain on one resolvable detail. "Burned a lot of context" and "this is a good stopping point" are not stop conditions; they are the agent's question, not the user's. The PRD says when to stop, and only when the reachable in-spirit family is closed.
+
 ## Web-Search-Before-Pause-Or-Ask
 
 Before pausing the chain on an unknown OR before any question to the user forms in-response, dispatch a `WebSearch` or `WebFetch` pack against the unknown. Pausing without first asking the web is the same failure as resolving by narrative. Asking the user without first asking the web is worse — it hands the work back to the human for a fact the open net carries.
