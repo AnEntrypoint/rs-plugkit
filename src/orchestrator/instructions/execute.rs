@@ -22,6 +22,8 @@ Closing a PRD item by writing a `.md` or `.txt` the user did not request is the 
 
 Editing code that runs in a browser requires a live `exec:browser` witness in the same turn as the edit. Boot the real surface (server up, page reachable, HTTP 200 witnessed), navigate, poll for the global the change affects, `page.evaluate` asserting the specific invariant, capture witnessed values. Variance → fix at root → re-witness. Pure-prose edits to static documents with no JS/canvas/DOM behavior change are exempt with the exemption tagged. Silent skip on actual behavior change is forced closure.
 
+The `browser` verb is the only sanctioned surface — no other library, tool, or skill. Dispatch `.gm/exec-spool/in/browser/<N>.txt` with raw JavaScript as the body. The host runs Chrome under a project-scoped profile at `<cwd>/.gm/browser-profile/` (cookies and login persist per project) and exposes four globals to the body: `page` (the live page handle for `await page.goto(...)`, `await page.evaluate(...)`, etc.), `snapshot` (accessibility-tree snapshot helper), `screenshotWithAccessibilityLabels` (annotated screenshot helper), and `state` (a per-session object that persists across dispatches within the same session). Body starting with `session ` manages session lifecycle: `session new`, `session list`, `session close <id>`. A `node test.js passes` does not substitute for a live `page.evaluate` asserting the invariant the edit was supposed to change.
+
 ## Web-Search-Before-Pause
 
 Before pausing the chain on an unknown that the open web could resolve (API surface, error string, library version, upstream behavior), dispatch a `WebSearch` or `WebFetch` pack. Pausing without first asking the web is the same failure as resolving by narrative.
