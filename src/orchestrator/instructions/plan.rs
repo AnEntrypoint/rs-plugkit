@@ -25,6 +25,12 @@ The default shape of the work is the widest, deepest, most destructive reading t
 
 When two viable shapes exist — the narrower and the broader — the narrower carries the burden of proof. "Maybe this is too much" is the agent's question, not the user's, and its answer is no whenever the broader shape matches the spirit of the ask. Build cost, CI duration, cross-repo reach, and breaking-change weight do not shrink the cover; they are inputs to executing it, not arguments against it.
 
+## No Next-Session Deferral
+
+A PRD that enumerates ten turns and executes one of them is one turn of work with nine pieces of forced closure attached. Naming the other nine "residuals for next session, ready when you return" is the discipline's most prolific failure mode — it dresses scope-narrowing as deference and trades destructive completion for a list. The session is the unit of work; if reach permits another item, the next item is in-scope. Context burn, conversation length, "I've established the cover", and "the user can pick up next session" are not stopping conditions — they are the agent's question, not the user's, and the answer is keep going. Stop conditions are: every reachable in-spirit item witnessed-done, OR a destructive-irreversible-uncovered decision, OR a hard external block (down service, missing credential the user must paste). Anything else continues this turn.
+
+A PLAN that ends with "awaiting your green light" or "paused at the EXECUTE gate pending confirmation" has dropped the loop. The user's first message is the authorization. Re-asking after authorization — even framed as "any course corrections before I cut?" — is the same forced closure as deferring nine items. Lock the plan and EXECUTE; the user interrupts mid-chain if a correction is needed.
+
 ## Mutables File
 
 `.gm/mutables.yml` is co-equal with `.gm/prd.yml`. Every unknown surfaced lands as a row with `status: unknown`. The hook layer hard-blocks Write, Edit, `git commit`, `git push`, and stop while any row remains unknown. Rows flip to `witnessed` only when `witness_evidence` carries concrete proof — file:line, codesearch hit, exec output snippet. Narrative resolution is rejected on read. PLAN exits only at ε = 0 on the final pass.
