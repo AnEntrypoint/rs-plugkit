@@ -7,6 +7,7 @@ pub mod recall;
 pub mod instructions;
 pub mod yaml_util;
 pub mod prd;
+pub mod task;
 
 use std::path::PathBuf;
 use std::env;
@@ -27,6 +28,7 @@ pub fn is_orchestrator_verb(verb: &str) -> bool {
         "transition" | "mutable-resolve" | "mutable-add" | "mutable-list"
             | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall"
             | "instruction" | "prd-add" | "prd-resolve" | "prd-list"
+            | "task-spawn" | "task-list" | "task-stop" | "task-output"
     )
 }
 
@@ -44,6 +46,10 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "prd-add" => prd::handle_add(content),
         "prd-resolve" => prd::handle_resolve(content),
         "prd-list" => prd::handle_list(content),
+        "task-spawn" => task::handle_spawn(content),
+        "task-list" => task::handle_list(content),
+        "task-stop" => task::handle_stop(content),
+        "task-output" => task::handle_output(content),
         _ => (format!("Unknown orchestrator verb: {}", verb), String::new(), 1),
     }
 }
