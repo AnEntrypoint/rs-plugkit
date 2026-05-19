@@ -1,6 +1,6 @@
 pub const TEXT: &str = r#"# EMIT
 
-EMIT is where intent becomes artifact. The phase exists as a distinct gate because writing without verification produces silent drift between what the agent believes was emitted and what landed on disk.
+EMIT is where intent becomes artifact. The phase exists as a distinct gate because writing without verification produces silent drift between what the agent believes was emitted and what landed on disk. What lands is the whole covering family, not a representative subset.
 
 ## Pre-Emit
 

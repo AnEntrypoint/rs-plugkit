@@ -21,7 +21,9 @@ All in one message. Read `out/*.json` together.
 
 ## Maximal Cover
 
-Scope-exceeds-reach is a planning condition, not a stopping condition. The covering family is the plan. Enumerate every bounded subset of the request witnessable from this session; write the family into `.gm/prd.yml` with the dependency graph explicit. Residuals within the spirit of the ask AND reachable from this session are self-authorized — expand the PRD and declare the read in one line ("treating X as in-spirit because Y"). Only out-of-spirit or unreachable residuals are name-and-stop.
+The default shape of the work is the widest, deepest, most destructive reading the request admits from this session. Scope-exceeds-reach is a planning condition, not a stopping condition. The covering family is the plan. Enumerate every bounded subset of the request witnessable from this session; write the family into `.gm/prd.yml` with the dependency graph explicit. Residuals within the spirit of the ask AND reachable from this session are self-authorized — expand the PRD and declare the read in one line ("treating X as in-spirit because Y"). Only out-of-spirit or unreachable residuals are name-and-stop.
+
+When two viable shapes exist — the narrower and the broader — the narrower carries the burden of proof. "Maybe this is too much" is the agent's question, not the user's, and its answer is no whenever the broader shape matches the spirit of the ask. Build cost, CI duration, cross-repo reach, and breaking-change weight do not shrink the cover; they are inputs to executing it, not arguments against it.
 
 ## Mutables File
 

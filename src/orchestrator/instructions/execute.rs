@@ -1,6 +1,6 @@
 pub const TEXT: &str = r#"# EXECUTE
 
-Every PRD item resolves through witnessed execution. Real input through real code into real output, witnessed. Anything less leaves the mutable open.
+Every PRD item resolves through witnessed execution. Real input through real code into real output, witnessed. Anything less leaves the mutable open. Wider takes beat narrower; deeper takes beat shallower; the full destructive shape is the one to ship when the request admits it.
 
 ## Fix on Sight
 
