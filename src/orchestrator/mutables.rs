@@ -8,6 +8,26 @@ pub fn mutables_path() -> std::path::PathBuf {
     gm_dir().join("mutables.yml")
 }
 
+fn levenshtein(a: &str, b: &str) -> usize {
+    let av: Vec<char> = a.chars().collect();
+    let bv: Vec<char> = b.chars().collect();
+    let m = av.len();
+    let n = bv.len();
+    if m == 0 { return n; }
+    if n == 0 { return m; }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut cur: Vec<usize> = vec![0; n + 1];
+    for i in 1..=m {
+        cur[0] = i;
+        for j in 1..=n {
+            let cost = if av[i - 1] == bv[j - 1] { 0 } else { 1 };
+            cur[j] = (cur[j - 1] + 1).min(prev[j] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[n]
+}
+
 pub fn handle_add(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -179,7 +199,27 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     }
 
     if !found_id {
-        return (String::new(), format!("mutable id not found: {}", trimmed), 1);
+        let mut candidates: Vec<(String, usize)> = Vec::new();
+        if let Some(seq) = doc.as_sequence() {
+            for item in seq.iter() {
+                if let Some(id) = item
+                    .as_mapping()
+                    .and_then(|m| m.get(&Value::String("id".to_string())))
+                    .and_then(|v| v.as_str())
+                {
+                    let d = levenshtein(trimmed, id);
+                    candidates.push((id.to_string(), d));
+                }
+            }
+        }
+        candidates.sort_by_key(|c| c.1);
+        let hint = if candidates.is_empty() {
+            String::from(" (no mutables in file)")
+        } else {
+            let near: Vec<String> = candidates.iter().take(3).map(|c| c.0.clone()).collect();
+            format!(" — did you mean one of: {}", near.join(", "))
+        };
+        return (String::new(), format!("mutable id not found: {}{}", trimmed, hint), 1);
     }
 
     let new_raw = match serde_yaml::to_string(&doc) {
