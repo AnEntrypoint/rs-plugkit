@@ -1,36 +1,20 @@
 pub const TEXT: &str = r#"# VERIFY
 
-COMPLETE is earned, not declared. Three preconditions: git clean, pushed to remote, CI green. Any one missing means the phase has not concluded.
+COMPLETE is earned. Three preconditions: git clean, pushed, CI green.
 
 ## CI Is The Build
 
-For Rust crates (rs-exec, rs-codeinsight, rs-search, rs-learn, rs-plugkit) and the gm publish chain, `git push` triggers the build matrix across six target platforms. `cargo build` and `cargo test` are not run locally — a local build covers exactly one platform and proves nothing about the other five. Push, watch CI, fix on red. Toolchain mismatches and rustc skew never block a push.
+Push triggers the matrix. Local cargo proves one platform; CI proves all of them. Watch the run with `gh run list --branch <branch> --limit 3 --json status,conclusion,name`; on red, root-cause and re-push. Toolchain skew is not a stop condition.
 
-Watch protocol: after push, poll `gh run list --branch <branch> --limit 3 --json status,conclusion,name` until the run completes, up to `GM_CI_WATCH_SECS` (default 180). On red, triage the failure shape (import error → check manifests; type error → snake to PLAN; test failure → root cause; lint → fix in-band; build timeout → re-trigger once, else PRD `blockedBy: external`). Fix at root, push, re-watch. Green CI is the precondition for VERIFY → COMPLETE.
+## One Integration Test
 
-## Single Integration Test
+`test.js` at project root, 200-line cap, real services only. VERIFY runs it. Failure regresses to EXECUTE.
 
-One `test.js` at project root. 200-line hard cap. No fixtures, no mocks, no scattered test files. The VERIFY phase runs it. Failure = regression to EXECUTE. Prefer compaction over expansion when editing: merge groups, drop redundancy.
+## Residual Scan
 
-## Residual-Scan Gate
-
-Before allowing transition to COMPLETE, fire the `residual-scan` verb. Empty PRD is necessary but not sufficient — the gate asks what the agent should have decided to do but did not. Either re-enter PLAN with appended items and execute, or explicitly state "residual scan: none reachable in-spirit." The `.gm/residual-check-fired` marker makes this one-shot per stopping window. Common residuals: pre-existing build break surfaced this turn, neighboring lint failure, obvious refactor win, observability gap, doc drift, follow-on work the user clearly implied.
-
-## No Deferral Phrasing
-
-PRD descriptions, commit messages, and conversation text must not contain "next pass", "next session", "next turn", "future work", "defer to later", "address it next", "below criticality", "skip for now", "do later", "fix later". Per §22 Fix on Sight and §17 Maximal Cover, in-spirit reachable work is executed this turn, not deferred. If the work is genuinely unreachable from this session, the PRD item carries `blockedBy: [external]` or `blockedBy: [out-of-reach]` — those are auditable refusals, not defers. The orchestrator's `prd-add` verb rejects defer-marker text in description/subject/notes unless blockedBy names external/out-of-reach. A commit message containing the same markers is the same forced closure; rewrite it before the push.
-
-## Unsolicited-Doc Residual
-
-Untracked `*.md` or `*.txt` files landed during the turn — at project root, under `docs/`, or anywhere outside `node_modules/` / `target/` / `.gm/` — are residuals. The disposition is delete-or-fold: if the content belongs in the commit message, the PRD entry, or a `memorize-fire`, move it there and delete the file; if it does not, just delete. SUMMARY.md, COMPLETED.md, IMPLEMENTATION_NOTES.md, START-HERE.md, *-STATUS.md, build-output.txt, log.txt are the canonical examples — they do not survive into the commit. A new doc the user explicitly requested is the only exception, and the user's ask is the proof.
-
-## Git Gate
-
-`git status` clean. `git log` shows the commit pushed. `gh run list` shows the most recent run for the branch concluded green. All three witnessed before transition.
+Before transitioning to COMPLETE, dispatch `residual-scan`. Reachable in-spirit work expands the PRD and runs. The `.gm/residual-check-fired` marker makes this one-shot per stopping window.
 
 ## Dispatch
 
-`phase-status`, `transition`, `residual-scan`. Spool the CI watch through `in/bash/` so timeouts respect the spool budget.
-
-Transition: residual-scan clear AND git clean AND CI green → dispatch `transition` to advance to COMPLETE. Anything else → dispatch `transition` back to PLAN or EXECUTE per the gap.
+`transition` to COMPLETE only when residual-scan clear AND git clean AND CI green. The orchestrator hard-rejects the transition if any mutable or PRD item is open.
 "#;

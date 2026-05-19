@@ -1,32 +1,22 @@
 pub const TEXT: &str = r#"# EMIT
 
-EMIT is where intent becomes artifact. The phase exists as a distinct gate because writing without verification produces silent drift between what the agent believes was emitted and what landed on disk. What lands is the whole covering family, not a representative subset.
+Intent becomes artifact. The whole covering family lands, not a representative subset.
 
-## Pre-Emit
+## Read Before Write
 
-Before writing, debug the planned state. Read the target paths that will be touched — confirm current contents match the assumption the diff is built on. A diff applied to a file the agent has not freshly read is a diff against a stale model. Spool the reads if scope is wide; serial Read calls are acceptable for a small set. Surface mismatches → snake to PLAN.
+Read the target path first. A diff against an unread file is a diff against a stale model. Mismatch → snake to PLAN.
 
-## Sync-Before-Emit
+## Fresh Index
 
-rs-codeinsight and rs-search outputs feeding EMIT must come from a freshly-completed index. No cache serves a result without a digest match against the live filesystem. Default invocation always runs fresh. `--read-cache` is permitted only when `.codeinsight.digest` matches exactly; on mismatch, the cache auto-refreshes before the result emits. Emitting from an unverified or partial index is forced closure equivalent to bluffing strength — the agent reads stale output as ground truth and acts on a state that no longer exists.
+Codeinsight and search outputs feed EMIT only from a freshly-completed index. Digest match against the live filesystem or no result.
 
-## Write
+## Write Then Verify
 
-One Edit or Write per artifact. No multi-file batches that conceal which file failed if one fails. Spool larger payloads through `in/nodejs/` when shape demands it.
+One Edit or Write per artifact. After the write, Read the file from disk and assert the change is present. The verified disk state is the witness, not the green tool call. Discrepancy → fix at root, re-emit, re-verify.
 
-The artifacts emitted are the ones the PRD names. A `.md` or `.txt` not in the PRD does not get written. Closing narrative — what was done, why, what's witnessed — goes into the commit message and the next `memorize-fire`, never into a fresh doc file the user did not request.
-
-## Post-Emit Verify
-
-After each write, re-read the file from disk and assert the change is present. The Read tool is the post-emit witness. Discrepancy → Fix on Sight: fix at root, re-emit, re-verify. A green Write call is not the witness — the verified disk state is.
-
-## Fix on Sight
-
-Issues surfaced during EMIT (a write that revealed a previously-hidden import error, a generated file that no longer matches its source) are fixed this turn at root cause. Add the residual to PRD before transitioning if the fix expands scope beyond the current slice.
+Artifacts the PRD names. Closing narrative goes in the commit message and the next `memorize-fire`.
 
 ## Dispatch
 
-`phase-status` to check FSM state before transition. Spool any meaningful reads/writes for auditability.
-
-Transition: when every planned artifact is written AND verified-from-disk, dispatch `transition` to advance to VERIFY. New unknown → dispatch `transition` back to PLAN.
+`transition` when every planned artifact is written and disk-verified. New unknown → `transition` back to PLAN.
 "#;
