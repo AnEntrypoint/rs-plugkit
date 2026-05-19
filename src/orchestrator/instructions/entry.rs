@@ -22,9 +22,17 @@ Lives entirely in `cwd/.gm/`. `prd.yml` (current task plan), `mutables.yml` (unr
 
 Every dispatch goes through the spool. Tool args are ephemeral; the spool inverts that — request lives on disk before the watcher reads it, watcher is detached from the agent process, output triplet (`.out`, `.err`, `.json`) is auditable after the fact.
 
-Write to `.gm/exec-spool/in/<lang>/<N>.<ext>` (nodejs, python, bash, typescript, go, rust, c, cpp, java, deno) or `in/<verb>/<N>.txt` (codesearch, recall, memorize, wait, sleep, status, close, browser, runner, type, kill-port, forget, feedback, learn-status, learn-debug, learn-build, discipline, pause, health, bootstrap, instruction). Watcher streams `out/<N>.out` and `out/<N>.err` line-by-line, then writes `out/<N>.json` (exitCode, durationMs, timedOut, startedAt, endedAt) at completion.
+Write to `.gm/exec-spool/in/<lang>/<N>.<ext>` (nodejs, python, bash, typescript, go, rust, c, cpp, java, deno) or `in/<verb>/<N>.txt` (codesearch, recall, memorize, wait, sleep, status, close, browser, runner, type, kill-port, forget, feedback, learn-status, learn-debug, learn-build, discipline, pause, health, bootstrap, instruction, transition, phase-status, prd-add, prd-resolve, prd-list, mutable-add, mutable-resolve, mutable-list, memorize-fire, residual-scan, auto-recall, task-spawn, task-list, task-stop, task-output). Watcher streams `out/<N>.out` and `out/<N>.err` line-by-line, then writes `out/<N>.json` (exitCode, durationMs, timedOut, startedAt, endedAt) at completion.
 
 Only `git` and `gh` run directly via the Bash tool. Inline `node script.js`, `Bash(exec:<anything>)`, JSON-form dispatch — denied at the hook layer.
+
+## Batch Dispatch
+
+The watcher processes verbs sequentially internally, but the agent's bottleneck is round-trip latency, not the watcher. Write N inputs in one message via parallel Write tool calls, then read N outputs in one message via parallel Read calls. A 5-verb batch is one agent turn, not five. Serial round-trips for independent verbs are forced closure dressed as caution. Dependent verbs (transition after instruction, prd-resolve after the work it resolves) serialize at the dependency boundary only, not across independent dispatches.
+
+## Observability — .watcher.log
+
+The watcher writes its own stdout/stderr (plus the wasm cdylib's `println!`/`eprintln!`) to `.gm/exec-spool/.watcher.log`. Read it directly when a dispatch returned an error you don't understand, when a verb seems slow (the log shows `[dispatch] ← verb=X ms=N`), when sweep activity needs explaining, or when boot issues surface (`--- watcher boot ... ---` markers). Use Read with `offset` to tail. Rotated at 10MB to `.watcher.log.1`.
 
 ## Session-ID Threading
 
