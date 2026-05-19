@@ -94,7 +94,7 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     let marker_s = marker.to_string_lossy().to_string();
     let _ = pkfs::write(&marker_s, "fired");
 
-    let message = "Residual scan: (1) check worktree state — if `git status --porcelain` is non-empty OR `git log @{u}..HEAD` has commits, commit and push before declaring done; (2) name any reachable in-spirit work and add to PRD; (3) if nothing reachable remains, explicitly state 'residual scan: none reachable in-spirit'. A turn that ends with uncommitted changes, unpushed commits, an open PRD slice, or unresolved mutables has not stopped — it has stalled the chain.";
+    let message = "Residual scan: (1) check worktree state — if `git status --porcelain` is non-empty OR `git log @{u}..HEAD` has commits, commit and push before declaring done; (2) name any reachable in-spirit work and add to PRD; (3) if nothing reachable remains, explicitly state 'residual scan: none reachable in-spirit'. A turn that ends with uncommitted changes, unpushed commits, an open PRD slice, or unresolved mutables has not stopped — it has stalled the chain. 'Out-of-reach' is not a synonym for 'belongs to another project on this machine' or 'in another open browser session' — same machine, same plugkit daemon, same shell access = reachable. Out-of-reach means: requires credentials the user must paste, depends on a down external service, demands a product decision only the user can make. Inventing unreachability to license stop is forced closure dressed as humility.";
     let payload = serde_json::json!({
         "scan": "fired",
         "marker": marker.display().to_string(),
