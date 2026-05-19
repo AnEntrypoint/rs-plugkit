@@ -38,6 +38,23 @@ pub fn handle_list(_content: &str) -> (String, String, i32) {
     (serde_json::json!({ "items": items, "count": count }).to_string(), String::new(), 0)
 }
 
+fn defer_marker_in_text(text: &str) -> Option<&'static str> {
+    let lower = text.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "next pass", "next session", "next turn",
+        "defer to later", "deferred to later", "deferred for later",
+        "future pass", "future session", "future turn", "future work",
+        "address it next", "address this next", "leave for next",
+        "documented for next", "documented for future",
+        "below criticality", "skip for now", "punt for now",
+        "do later", "fix later", "later pass",
+    ];
+    for m in MARKERS {
+        if lower.contains(m) { return Some(m); }
+    }
+    None
+}
+
 pub fn handle_add(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -56,6 +73,26 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         Some(m) => m.clone(),
         None => return (String::new(), "item must be a mapping with id/subject/status".to_string(), 1),
     };
+    let has_external_block = item_map.get(&Value::String("blockedBy".to_string()))
+        .and_then(|v| v.as_sequence())
+        .map(|seq| seq.iter().any(|x| matches!(x.as_str(), Some("external") | Some("out-of-reach"))))
+        .unwrap_or(false);
+    if !has_external_block {
+        let mut scan_buf = String::new();
+        for field in &["description", "subject", "notes"] {
+            if let Some(s) = item_map.get(&Value::String(field.to_string())).and_then(|v| v.as_str()) {
+                scan_buf.push_str(s);
+                scan_buf.push('\n');
+            }
+        }
+        if let Some(marker) = defer_marker_in_text(&scan_buf) {
+            let err = format!(
+                "PRD item rejected: deferral language detected ('{}'). Per §22 Fix on Sight and §17 Maximal Cover, in-spirit reachable work must be executed this turn, not deferred. Either: (a) drop the deferral phrasing and commit to executing this turn, or (b) add `blockedBy: [external]` (or `[out-of-reach]`) to declare the item genuinely unreachable from this session.",
+                marker
+            );
+            return (String::new(), err, 1);
+        }
+    }
     let id = item_map.get(&Value::String("id".to_string()))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())

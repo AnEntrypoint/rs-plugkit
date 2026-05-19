@@ -24,6 +24,29 @@ fn read_update_available() -> serde_json::Value {
     }
 }
 
+fn read_unsupervised_watcher() -> serde_json::Value {
+    let path = super::gm_dir().join("exec-spool").join(".pre-supervised-watcher.json");
+    let ps = path.to_string_lossy().to_string();
+    if !pkfs::exists(&ps) {
+        return serde_json::Value::Null;
+    }
+    match pkfs::read_to_string(&ps) {
+        Some(content) => serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::Value::Null),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn residual_check_fired_recently() -> bool {
+    let marker = super::gm_dir().join("residual-check-fired");
+    let ms = marker.to_string_lossy().to_string();
+    pkfs::exists(&ms)
+}
+
+fn should_residual_scan(prd_pending: usize, running_tasks_count: usize) -> bool {
+    if residual_check_fired_recently() { return false; }
+    prd_pending > 0 || running_tasks_count == 0
+}
+
 pub fn get_instruction(phase: &str) -> &'static str {
     match phase.trim().to_ascii_uppercase().as_str() {
         "ENTRY" | "ORCHESTRATOR" | "" => entry::TEXT,
@@ -116,6 +139,12 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let running_tasks = super::task::live_running_tasks();
     let open_browser_sessions = super::task::open_browser_sessions();
     let stuck_spool = super::task::stuck_spool();
+    let unsupervised_watcher = read_unsupervised_watcher();
+    let running_tasks_count = match &running_tasks {
+        serde_json::Value::Array(a) => a.len(),
+        _ => 0,
+    };
+    let should_scan = should_residual_scan(prd_pending, running_tasks_count);
 
     let payload = json!({
         "phase": phase,
@@ -129,6 +158,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "running_tasks": running_tasks,
         "open_browser_sessions": open_browser_sessions,
         "stuck_spool": stuck_spool,
+        "unsupervised_watcher": unsupervised_watcher,
+        "should_residual_scan": should_scan,
     });
     (payload.to_string(), String::new(), 0)
 }

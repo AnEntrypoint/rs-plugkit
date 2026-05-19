@@ -16,6 +16,10 @@ One `test.js` at project root. 200-line hard cap. No fixtures, no mocks, no scat
 
 Before allowing transition to COMPLETE, fire the `residual-scan` verb. Empty PRD is necessary but not sufficient — the gate asks what the agent should have decided to do but did not. Either re-enter PLAN with appended items and execute, or explicitly state "residual scan: none reachable in-spirit." The `.gm/residual-check-fired` marker makes this one-shot per stopping window. Common residuals: pre-existing build break surfaced this turn, neighboring lint failure, obvious refactor win, observability gap, doc drift, follow-on work the user clearly implied.
 
+## No Deferral Phrasing
+
+PRD descriptions, commit messages, and conversation text must not contain "next pass", "next session", "next turn", "future work", "defer to later", "address it next", "below criticality", "skip for now", "do later", "fix later". Per §22 Fix on Sight and §17 Maximal Cover, in-spirit reachable work is executed this turn, not deferred. If the work is genuinely unreachable from this session, the PRD item carries `blockedBy: [external]` or `blockedBy: [out-of-reach]` — those are auditable refusals, not defers. The orchestrator's `prd-add` verb rejects defer-marker text in description/subject/notes unless blockedBy names external/out-of-reach. A commit message containing the same markers is the same forced closure; rewrite it before the push.
+
 ## Unsolicited-Doc Residual
 
 Untracked `*.md` or `*.txt` files landed during the turn — at project root, under `docs/`, or anywhere outside `node_modules/` / `target/` / `.gm/` — are residuals. The disposition is delete-or-fold: if the content belongs in the commit message, the PRD entry, or a `memorize-fire`, move it there and delete the file; if it does not, just delete. SUMMARY.md, COMPLETED.md, IMPLEMENTATION_NOTES.md, START-HERE.md, *-STATUS.md, build-output.txt, log.txt are the canonical examples — they do not survive into the commit. A new doc the user explicitly requested is the only exception, and the user's ask is the proof.
