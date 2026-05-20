@@ -296,11 +296,18 @@ pub fn memorize(text: &str, namespace: &str, inline_embedding: Option<&Value>) -
 }
 
 pub fn memorize_at(text: &str, namespace: &str, inline_embedding: Option<&Value>, project_path: Option<&str>) -> Value {
+    if inline_embedding.is_none() && crate::pipeline::needs_summarize(text) {
+        return crate::pipeline::build_pending_step(text, namespace, project_path);
+    }
+    memorize_at_finalize(text, text, namespace, inline_embedding, project_path)
+}
+
+pub fn memorize_at_finalize(embed_source: &str, stored_text: &str, namespace: &str, inline_embedding: Option<&Value>, project_path: Option<&str>) -> Value {
     let db_name = match ensure_schema_for(project_path) {
         Ok(n) => n,
         Err(e) => return json!({ "ok": false, "error": e }),
     };
-    let emb = inline_embedding.and_then(json_to_f32_vec).or_else(|| embed_text(text));
+    let emb = inline_embedding.and_then(json_to_f32_vec).or_else(|| embed_text(embed_source));
     let v = match emb {
         Some(v) => v,
         None => {
@@ -312,10 +319,10 @@ pub fn memorize_at(text: &str, namespace: &str, inline_embedding: Option<&Value>
     let embedding_sql = format!("vector('{}')", vec_to_json_literal(&v));
     let sql = format!(
         "INSERT INTO memories(namespace, text, ts, embedding) VALUES('{}','{}',{},{})",
-        sql_quote(namespace), sql_quote(text), unsafe { crate::wasm_dispatch::host_now_ms() }, embedding_sql
+        sql_quote(namespace), sql_quote(stored_text), unsafe { crate::wasm_dispatch::host_now_ms() }, embedding_sql
     );
     match libsql_wasm::exec(&db_name, &sql) {
-        Ok(()) => json!({ "ok": true, "embedded": true, "inline": inline_embedding.is_some(), "project_path": project_path }),
+        Ok(()) => json!({ "ok": true, "memorized": true, "embedded": true, "inline": inline_embedding.is_some(), "project_path": project_path }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
