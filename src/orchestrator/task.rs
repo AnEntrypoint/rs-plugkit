@@ -168,7 +168,7 @@ pub fn open_browser_sessions() -> Value {
         let port_info = ports.get(sid).cloned().unwrap_or(Value::Null);
         out.push(json!({
             "session_id": sid,
-            "playwriter_sessions": sessions,
+            "browser_sessions": sessions,
             "port": port_info.get("port"),
             "chrome_pid": port_info.get("pid"),
         }));

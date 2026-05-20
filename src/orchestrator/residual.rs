@@ -70,7 +70,8 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     if !prd_empty_or_missing() {
         let payload = serde_json::json!({
             "scan": "skipped",
-            "reason": "PRD still has items; complete or remove them before residual scan."
+            "reason": "PRD still has items; complete or remove them before residual scan.",
+            "deviation_kind": "residual-premature"
         });
         return (payload.to_string(), String::new(), 0);
     }
