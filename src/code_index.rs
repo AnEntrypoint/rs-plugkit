@@ -48,13 +48,52 @@ const SKIP_DIRS: &[&str] = &[
 
 const GM_DB: &str = "gm";
 
-pub fn ensure_schema() -> Result<(), String> {
-    libsql_wasm::open(GM_DB, ":memory:")?;
-    libsql_wasm::exec(GM_DB, "CREATE TABLE IF NOT EXISTS code_chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, body TEXT, embedding F32_BLOB(384))")?;
-    libsql_wasm::exec(GM_DB, "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, namespace TEXT, text TEXT, ts INTEGER, embedding F32_BLOB(384))")?;
-    let _ = libsql_wasm::exec(GM_DB, "CREATE INDEX IF NOT EXISTS code_chunks_vec ON code_chunks(libsql_vector_idx(embedding, 'metric=cosine'))");
-    let _ = libsql_wasm::exec(GM_DB, "CREATE INDEX IF NOT EXISTS memories_vec ON memories(libsql_vector_idx(embedding, 'metric=cosine'))");
+pub fn ensure_schema_at(db_name: &str, path: &str) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    libsql_wasm::open(db_name, path)?;
+    libsql_wasm::exec(db_name, "CREATE TABLE IF NOT EXISTS code_chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, body TEXT, embedding F32_BLOB(384))")?;
+    libsql_wasm::exec(db_name, "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, namespace TEXT, text TEXT, ts INTEGER, embedding F32_BLOB(384))")?;
+    let _ = libsql_wasm::exec(db_name, "CREATE INDEX IF NOT EXISTS code_chunks_vec ON code_chunks(libsql_vector_idx(embedding, 'metric=cosine'))");
+    let _ = libsql_wasm::exec(db_name, "CREATE INDEX IF NOT EXISTS memories_vec ON memories(libsql_vector_idx(embedding, 'metric=cosine'))");
     Ok(())
+}
+
+fn project_db_path(project_path: Option<&str>) -> String {
+    match project_path {
+        Some(p) if !p.is_empty() => format!("{}/.gm/rs-learn.db", p.trim_end_matches('/').trim_end_matches('\\')),
+        _ => ".gm/rs-learn.db".to_string(),
+    }
+}
+
+fn project_db_name(project_path: Option<&str>) -> String {
+    match project_path {
+        Some(p) if !p.is_empty() => format!("gm_ext_{:x}", crc32(p)),
+        _ => GM_DB.to_string(),
+    }
+}
+
+fn crc32(s: &str) -> u32 {
+    let mut h: u32 = 0xffffffff;
+    for b in s.bytes() {
+        h ^= b as u32;
+        for _ in 0..8 {
+            h = if h & 1 != 0 { (h >> 1) ^ 0xedb88320 } else { h >> 1 };
+        }
+    }
+    !h
+}
+
+pub fn ensure_schema() -> Result<(), String> {
+    ensure_schema_at(GM_DB, &project_db_path(None))
+}
+
+fn ensure_schema_for(project_path: Option<&str>) -> Result<String, String> {
+    let name = project_db_name(project_path);
+    let path = project_db_path(project_path);
+    ensure_schema_at(&name, &path)?;
+    Ok(name)
 }
 
 fn list_dir(path: &str) -> Vec<String> {
@@ -238,7 +277,14 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
 }
 
 pub fn memorize(text: &str, namespace: &str, inline_embedding: Option<&Value>) -> Value {
-    if let Err(e) = ensure_schema() { return json!({ "ok": false, "error": e }); }
+    memorize_at(text, namespace, inline_embedding, None)
+}
+
+pub fn memorize_at(text: &str, namespace: &str, inline_embedding: Option<&Value>, project_path: Option<&str>) -> Value {
+    let db_name = match ensure_schema_for(project_path) {
+        Ok(n) => n,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
     let emb = inline_embedding.and_then(json_to_f32_vec).or_else(|| embed_text(text));
     let embedding_sql = match &emb {
         Some(v) => format!("vector('{}')", vec_to_json_literal(v)),
@@ -248,30 +294,34 @@ pub fn memorize(text: &str, namespace: &str, inline_embedding: Option<&Value>) -
         "INSERT INTO memories(namespace, text, ts, embedding) VALUES('{}','{}',{},{})",
         sql_quote(namespace), sql_quote(text), unsafe { crate::wasm_dispatch::host_now_ms() }, embedding_sql
     );
-    match libsql_wasm::exec(GM_DB, &sql) {
-        Ok(()) => json!({ "ok": true, "embedded": emb.is_some(), "inline": inline_embedding.is_some() }),
+    match libsql_wasm::exec(&db_name, &sql) {
+        Ok(()) => json!({ "ok": true, "embedded": emb.is_some(), "inline": inline_embedding.is_some(), "project_path": project_path }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
 pub fn recall(query: &str, limit: usize, namespace: Option<&str>, inline_embedding: Option<&Value>) -> Value {
-    if let Err(e) = ensure_schema() { return json!({ "ok": false, "error": e }); }
+    recall_at(query, limit, namespace, inline_embedding, None)
+}
+
+pub fn recall_at(query: &str, limit: usize, namespace: Option<&str>, inline_embedding: Option<&Value>, project_path: Option<&str>) -> Value {
+    let db_name = match ensure_schema_for(project_path) {
+        Ok(n) => n,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
     let qvec = match inline_embedding.and_then(json_to_f32_vec).or_else(|| embed_text(query)) {
         Some(v) => v,
         None => {
             let like = format!("%{}%", sql_quote(query));
             let ns_filter = match namespace { Some(n) => format!(" AND namespace='{}'", sql_quote(n)), None => String::new() };
             let sql = format!("SELECT id, namespace, text, ts FROM memories WHERE text LIKE '{}'{} ORDER BY ts DESC LIMIT {}", like, ns_filter, limit);
-            return match libsql_wasm::query(GM_DB, &sql) {
-                Ok(rows) => json!({ "ok": true, "mode": "fallback_like", "rows": rows }),
+            return match libsql_wasm::query(&db_name, &sql) {
+                Ok(rows) => json!({ "ok": true, "mode": "fallback_like", "rows": rows, "project_path": project_path }),
                 Err(e) => json!({ "ok": false, "error": e }),
             };
         }
     };
     let qlit = vec_to_json_literal(&qvec);
-    // For namespace-scoped queries: brute-force distance over rows in the namespace
-    // (libsql's vector_top_k uses ANN/DiskANN which silently caps results regardless of k).
-    // For unfiltered queries: use the index for speed.
     let sql = match namespace {
         Some(n) => format!(
             "SELECT id, namespace, text, ts, vector_distance_cos(embedding, vector('{}')) AS distance FROM memories WHERE namespace='{}' AND embedding IS NOT NULL ORDER BY distance ASC LIMIT {}",
@@ -282,8 +332,8 @@ pub fn recall(query: &str, limit: usize, namespace: Option<&str>, inline_embeddi
             qlit, qlit, limit.saturating_mul(5).max(20), limit
         ),
     };
-    match libsql_wasm::query(GM_DB, &sql) {
-        Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows }),
+    match libsql_wasm::query(&db_name, &sql) {
+        Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows, "project_path": project_path }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
