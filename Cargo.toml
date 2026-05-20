@@ -18,7 +18,7 @@ serde_yaml = "0.9"
 serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-libsql-ffi = { version = "0.9", default-features = false, features = ["wasm32-wasi-vfs"] }
+libsql-ffi = { version = "=0.9.0", default-features = false, features = ["wasm32-wasi-vfs"] }
 tree-sitter = "0.24"
 tree-sitter-javascript = "0.23"
 tree-sitter-typescript = "0.23"
