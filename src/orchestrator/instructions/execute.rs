@@ -1,36 +1,40 @@
-pub const TEXT: &str = r#"# EXECUTE — Layer 3 (direction: distance + audit)
+pub const TEXT: &str = r#"# EXECUTE — L3 distance + audit
 
-Real input through real code into real output, witnessed. Wider beats narrower; deeper beats shallower; the destructive shape ships when the request admits it.
+Real input → real code → real output, witnessed. Wider beats narrower; deeper beats shallower; the destructive shape ships when the request admits it.
 
-## Central store, in-place, audited
+## Single-writer mutation surface
 
-Every mutation routes through one auditable structure — PRD rows (`prd-resolve`), mutables (`mutable-resolve`), KV memos (`memorize-fire`). No parallel state, no inline checklists, no "I'll track this in the response." Each mutation carries a key (id), a hash/checksum (the file:line or output snippet that witnessed it), and a timestamp (the dispatch). That triple IS the audit trail L3 requires.
+Every mutation routes through one auditable structure: PRD rows (`prd-resolve`), mutables (`mutable-resolve`), KV memos (`memorize-fire`). No parallel state, no inline response checklists, no "I'll track this in chat." Audit tuple per accepted write: `(id, hash, ts)` where `hash` is the file:line or output snippet that witnessed it.
 
-`mutable-resolve` requires `witness_evidence` = file:line, codesearch hit, or exec output snippet. Anything else is rejected. The auto-fired memorize on resolve persists the witness.
+`mutable-resolve` requires `witness_evidence` ∈ {file:line, codesearch hit, exec snippet}. Else rejected. Resolve auto-fires memorize; the witness persists into the recall index.
 
-## Witness — the distance check
+## Witness as Lyapunov check
 
-Every PRD item resolves through a witnessed call. The witness IS the distance measurement: does the artifact produced match the goal described? Stubs, mocks, fixture-only paths, "always succeeds" returns, and architecture skeletons that "frame Phase 1" without rendering all sit too far from the goal — they are L3 rejects (busy work that does not advance the solution).
+Each PRD item resolves through a witnessed call. The witness IS the distance measurement: does the produced artifact reduce `d(state, goal)`? Stubs, mocks, fixture-only paths, "always succeeds" returns, and "skeleton frameworks for Phase N" all sit at high distance — L3 rejects, *not* in-progress work.
 
-Code that runs in a browser requires a live `browser` dispatch in the same turn — boot the surface, navigate, `page.evaluate` the invariant, capture the value. A passing `node` test does not substitute for a live page assertion.
+Browser-running code requires a live `browser` dispatch in the same turn: boot the surface, navigate, `page.evaluate` the invariant, capture the return. A passing `node` test is not a witness for browser code.
 
-The `browser` verb is the only sanctioned surface: dispatch `.gm/exec-spool/in/browser/<N>.txt` with raw JS; globals are `page`, `snapshot`, `screenshotWithAccessibilityLabels`, `state`. `session new` / `session list` / `session close <id>` manage lifecycle.
+`browser` verb is the sole sanctioned surface. `in/browser/<N>.txt` carries raw JS; globals `page`, `snapshot`, `screenshotWithAccessibilityLabels`, `state`. `session new` / `session list` / `session close <id>` manage lifecycle.
 
-## Surface — surprise becomes mutable
+## Surface — surprise → mutable
 
-Issues that surface during work become PRD items the same turn and resolve before the gate. Pre-existing breaks, lockfile drift, suppressed errors, stale generated files — surface, name, fix at root, re-witness. The user does not have to ask. Unexpected output is a new mutable, never noise — snake back to PLAN, name it, witness it, resume.
+Issues surfaced during work become PRD items the same turn and resolve before the gate. Pre-existing breaks, lockfile drift, suppressed errors, stale generated files — surface, name, fix at root, re-witness. Unexpected output is a new mutable, never noise. Snake back to PLAN, name, witness, resume.
 
-Genuinely external blocks (credentials, down service, irreversible product decision) land as PRD entries with `blockedBy: external`. Not as questions.
+Genuine external blocks → PRD `blockedBy: external`. Not questions.
 
-## Closure Rules
+## Maturity-first invariant
 
-See entry. At EXECUTE the L3 violations cluster around: spec-instead-of-impl when the work feels large, "Skeleton + Framework for Phase 1" when the witness is hard, watcher-broken-excuse when dispatch fails. Each one is narrative-as-mutation — looks productive, does not advance the solution. Surface the error, fix at root, re-dispatch.
+Ship the closure of the transform, not the prefix. "I'll do Phase 1 now, Phase 2 next session" externalizes completion cost — non-monotonic, L3-rejected. If the closure exceeds session reach, that's a Maximal Cover decomposition (PRD-DAG enumeration), not a scaffold + IOU. The first artifact emitted IS the mature artifact.
+
+## Closure Anti-Shapes
+
+See entry. At EXECUTE: spec-instead-of-impl when work feels large; "Architecture Skeleton" when witness is hard; watcher-broken-excuse when dispatch fails. Each substitutes narrative for the audited mutation. Surface, fix at root, re-dispatch.
 
 ## Memorize
 
-Every memo routes through `memorize-fire`. The harness's native "save to memory" affordance is invisible to recall and produces a memo that does not exist for the discipline.
+Every memo through `memorize-fire`. Native memory surfaces are invisible to recall.
 
 ## Dispatch
 
-Spool every exec. `mutable-resolve` to flip rows. `transition` when the PRD slice is closed and every mutable in it is witnessed. New unknown → `transition` back to PLAN.
+Spool every exec. `mutable-resolve` flips rows. `transition` when the PRD slice is closed and every mutable in it is witnessed. New unknown → `transition` back to PLAN.
 "#;
