@@ -32,3 +32,5 @@ dist/
 .codeinsight/
 rs-learn.db
 Cargo.lock
+
+weights/*.gguf

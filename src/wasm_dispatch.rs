@@ -161,7 +161,7 @@ fn inference(body: &Value) -> u64 {
     let opts = json!({ "method": "POST", "headers": {"content-type": "application/json"}, "body": body_str }).to_string();
     let packed = unsafe { host_fetch(url.as_ptr(), url.len() as u32, opts.as_ptr(), opts.len() as u32) };
     let v = unpack_to_value(packed);
-    if v.is_null() { return err("inference", "host_fetch empty - inference must be served via the callback protocol (rs-learn-embed sidecar / agent callback)"); }
+    if v.is_null() { return err("inference", "host_fetch empty - inference must be served via the callback protocol (agent callback)"); }
     let status = v.get("status").and_then(|s| s.as_u64()).unwrap_or(0);
     if status < 200 || status >= 300 {
         let detail = v.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string();
