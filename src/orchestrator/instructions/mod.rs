@@ -145,6 +145,26 @@ fn read_last_prompt() -> String {
     pkfs::read_to_string(&ps).unwrap_or_default()
 }
 
+fn pending_step_block(st: &super::state::TurnState) -> Option<serde_json::Value> {
+    let step_id = st.pending_step_id.as_ref()?;
+    let deadline = st.pending_step_deadline_ms?;
+    let now = super::state::now_ms();
+    if now > deadline {
+        return None;
+    }
+    Some(json!({
+        "pending_step_id": step_id,
+        "pending_step_deadline_ms": deadline,
+        "required_next_verb": "memorize-continue",
+        "required_next_body_shape": {
+            "token": "<the token from the prior pending_step response>",
+            "step_id": step_id,
+            "result": "<an object obeying the prior pending_step.result_schema>"
+        },
+        "imperative": "Pipeline suspended at step_id. Compute the suspended step inline using its prompt_template against payload.input. Do NOT call any external tool or other verb. Dispatch memorize-continue with the result. No other verb is valid until this completes."
+    }))
+}
+
 pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     let mut session_id_opt: Option<String> = None;
@@ -225,8 +245,13 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let wave = ready_wave(&prd_items);
     let mutables_pending_count = mutables_pending.len();
 
+    let turn_state = super::state::read_state();
+    let await_result = pending_step_block(&turn_state);
+
     let payload = json!({
         "phase": phase,
+        "sub_phase": if await_result.is_some() { "AWAIT-RESULT" } else { "" },
+        "await_result": await_result,
         "instruction": instruction,
         "mutables_pending": mutables_pending,
         "mutables_pending_count": mutables_pending_count,
