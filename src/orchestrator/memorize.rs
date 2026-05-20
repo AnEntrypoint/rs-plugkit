@@ -26,6 +26,26 @@ pub fn fire(body: &str) -> Result<String, std::io::Error> {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn is_derivable_state(text: &str) -> Option<&'static str> {
+    let t = text.trim();
+    if t.len() > 40 && t.chars().filter(|c| c.is_ascii_hexdigit()).count() == t.len() {
+        return Some("memo is a hex hash; git log is the source of truth");
+    }
+    let lower = t.to_lowercase();
+    let bad: &[(&str, &str)] = &[
+        ("we used to ", "historical framing belongs in git log + CHANGELOG, not the recall index"),
+        ("(fixed)", "past-tense fix markers belong in commit messages"),
+        ("changelog:", "changelog entries live in CHANGELOG.md"),
+        ("commit hash", "commit hashes are derivable from git log"),
+        ("recent commit", "recent commits are derivable from git log"),
+        ("git blame says", "git blame is derivable from the repo"),
+    ];
+    for (pat, msg) in bad {
+        if lower.contains(pat) { return Some(msg); }
+    }
+    None
+}
+
 pub fn handle_fire(content: &str) -> (String, String, i32) {
     if content.trim().is_empty() {
         return (String::new(), "empty memorize body".to_string(), 1);
@@ -42,6 +62,9 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     };
     if text.is_empty() {
         return (String::new(), "empty memorize text".to_string(), 1);
+    }
+    if let Some(reason) = is_derivable_state(&text) {
+        return (String::new(), format!("rejected: {} — memo not stored", reason), 1);
     }
     let now = unsafe { crate::wasm_dispatch::host_now_ms() };
     static HANDLE_FIRE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
