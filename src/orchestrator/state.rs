@@ -40,6 +40,10 @@ pub struct TurnState {
     pub session_id: Option<String>,
     pub last_skill: Option<String>,
     pub updated_at_ms: u128,
+    #[serde(default)]
+    pub pending_step_id: Option<String>,
+    #[serde(default)]
+    pub pending_step_deadline_ms: Option<u128>,
 }
 
 impl Default for TurnState {
@@ -49,6 +53,8 @@ impl Default for TurnState {
             session_id: None,
             last_skill: None,
             updated_at_ms: now_ms(),
+            pending_step_id: None,
+            pending_step_deadline_ms: None,
         }
     }
 }

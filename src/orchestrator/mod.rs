@@ -29,7 +29,21 @@ pub fn is_orchestrator_verb(verb: &str) -> bool {
             | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall"
             | "instruction" | "prd-add" | "prd-resolve" | "prd-list"
             | "task-spawn" | "task-list" | "task-stop" | "task-output"
+            | "memorize-continue"
     )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn handle_memorize_continue(content: &str) -> (String, String, i32) {
+    let body: serde_json::Value = serde_json::from_str(content).unwrap_or(serde_json::Value::Null);
+    let result = crate::pipeline::handle_continue(&body);
+    let ok = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    (result.to_string(), String::new(), if ok { 0 } else { 1 })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn handle_memorize_continue(_content: &str) -> (String, String, i32) {
+    ("{\"ok\":false,\"error\":\"memorize-continue requires wasm32\"}".to_string(), String::new(), 1)
 }
 
 pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i32) {
@@ -50,6 +64,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "task-list" => task::handle_list(content),
         "task-stop" => task::handle_stop(content),
         "task-output" => task::handle_output(content),
+        "memorize-continue" => handle_memorize_continue(content),
         _ => (format!("Unknown orchestrator verb: {}", verb), String::new(), 1),
     }
 }
