@@ -78,5 +78,5 @@ Read/Glob/Grep for state inspection. Bash for shell-only (`git`, `gh`, `npm`, `b
 
 `memorize-fire` is the recall index. Surfaces outside it produce memos the index does not see.
 
-Transition: SESSION_ID threaded ∧ spool reachable → dispatch `instruction` with phase=PLAN.
+Transition: SESSION_ID threaded ∧ spool reachable → dispatch `instruction` with `{"prompt":"<user request>"}` body so orient_nouns and recall_hits derive from the request. Subsequent same-chain dispatches may use empty body.
 "#;
