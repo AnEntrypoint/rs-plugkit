@@ -34,6 +34,25 @@ fetch() {
   fi
 }
 
-fetch "$MODEL_URL" "$MODEL_PATH" "$MODEL_SHA"
+F32_PATH="$WEIGHTS_DIR/minilm-l6-v2.f32.safetensors"
+F32_SHA="$MODEL_SHA"
+F16_PATH="$MODEL_PATH"
+
+fetch "$MODEL_URL" "$F32_PATH" "$F32_SHA"
 fetch "$TOK_URL" "$TOK_PATH" "$TOK_SHA"
-echo "weights ready in $WEIGHTS_DIR"
+
+if [ ! -s "$F16_PATH" ] || [ "$F32_PATH" -nt "$F16_PATH" ]; then
+  echo "converting $F32_PATH (F32) -> $F16_PATH (F16)"
+  pip install --quiet safetensors torch --index-url https://download.pytorch.org/whl/cpu || pip install --quiet safetensors torch
+  python3 - "$F32_PATH" "$F16_PATH" <<'PY'
+import sys
+from safetensors.torch import load_file, save_file
+src, dst = sys.argv[1], sys.argv[2]
+tensors = load_file(src)
+converted = {k: v.to('cpu').half() for k, v in tensors.items()}
+save_file(converted, dst)
+print(f"wrote {dst}")
+PY
+fi
+
+echo "weights ready in $WEIGHTS_DIR (F16: $(stat -c%s "$F16_PATH" 2>/dev/null || stat -f%z "$F16_PATH") bytes)"
