@@ -4,13 +4,13 @@ set -euo pipefail
 WEIGHTS_DIR="$(cd "$(dirname "$0")/.." && pwd)/weights"
 mkdir -p "$WEIGHTS_DIR"
 
-GGUF_URL="https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf"
-GGUF_PATH="$WEIGHTS_DIR/nomic-q4.gguf"
-GGUF_SHA="d4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac"
+MODEL_URL="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors"
+MODEL_PATH="$WEIGHTS_DIR/minilm-l6-v2.safetensors"
+MODEL_SHA="53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db"
 
-TOK_URL="https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json"
+TOK_URL="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
 TOK_PATH="$WEIGHTS_DIR/tokenizer.json"
-TOK_SHA="d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+TOK_SHA="be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037"
 
 check_sha() {
   local path="$1" expected="$2"
@@ -34,6 +34,6 @@ fetch() {
   fi
 }
 
-fetch "$GGUF_URL" "$GGUF_PATH" "$GGUF_SHA"
+fetch "$MODEL_URL" "$MODEL_PATH" "$MODEL_SHA"
 fetch "$TOK_URL" "$TOK_PATH" "$TOK_SHA"
 echo "weights ready in $WEIGHTS_DIR"

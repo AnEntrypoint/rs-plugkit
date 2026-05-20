@@ -2,15 +2,15 @@
 
 use std::sync::OnceLock;
 
-use candle_core::{quantized::gguf_file, Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::nomic_bert::{NomicBertModel, Config as NomicConfig};
+use candle_transformers::models::bert::{BertModel, Config, HiddenAct, PositionEmbeddingType};
 use tokenizers::Tokenizer;
 
-static MODEL_GGUF: &[u8] = include_bytes!("../weights/nomic-q4.gguf");
+static MODEL_SAFETENSORS: &[u8] = include_bytes!("../weights/minilm-l6-v2.safetensors");
 static TOKENIZER_JSON: &[u8] = include_bytes!("../weights/tokenizer.json");
 
-const EMBED_DIM: usize = 768;
+const EMBED_DIM: usize = 384;
 const MAX_TOKENS: usize = 512;
 
 fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
@@ -28,11 +28,32 @@ getrandom::register_custom_getrandom!(custom_getrandom);
 
 struct EmbedCtx {
     tokenizer: Tokenizer,
-    model: NomicBertModel,
+    model: BertModel,
     device: Device,
 }
 
 static CTX: OnceLock<Result<EmbedCtx, String>> = OnceLock::new();
+
+fn minilm_config() -> Config {
+    Config {
+        vocab_size: 30522,
+        hidden_size: 384,
+        num_hidden_layers: 6,
+        num_attention_heads: 12,
+        intermediate_size: 1536,
+        hidden_act: HiddenAct::Gelu,
+        hidden_dropout_prob: 0.1,
+        max_position_embeddings: 512,
+        type_vocab_size: 2,
+        initializer_range: 0.02,
+        layer_norm_eps: 1e-12,
+        pad_token_id: 0,
+        position_embedding_type: PositionEmbeddingType::Absolute,
+        use_cache: true,
+        classifier_dropout: None,
+        model_type: Some("bert".to_string()),
+    }
+}
 
 fn init_ctx() -> Result<EmbedCtx, String> {
     let tokenizer = Tokenizer::from_bytes(TOKENIZER_JSON)
@@ -40,18 +61,12 @@ fn init_ctx() -> Result<EmbedCtx, String> {
 
     let device = Device::Cpu;
 
-    let mut cursor = std::io::Cursor::new(MODEL_GGUF);
-    let content = gguf_file::Content::read(&mut cursor)
-        .map_err(|e| format!("gguf parse: {}", e))?;
+    let vb = VarBuilder::from_slice_safetensors(MODEL_SAFETENSORS, DType::F32, &device)
+        .map_err(|e| format!("varbuilder safetensors: {}", e))?;
 
-    let config = NomicConfig::v1_5();
-
-    let vb = VarBuilder::from_gguf_buffer(MODEL_GGUF, &device)
-        .map_err(|e| format!("varbuilder gguf: {}", e))?;
-    let _ = content;
-
-    let model = NomicBertModel::new(vb, &config)
-        .map_err(|e| format!("nomic_bert init: {}", e))?;
+    let config = minilm_config();
+    let model = BertModel::load(vb, &config)
+        .map_err(|e| format!("bert init: {}", e))?;
 
     Ok(EmbedCtx { tokenizer, model, device })
 }
@@ -88,11 +103,11 @@ pub fn embed_text(text: &str) -> Option<Vec<f32>> {
 
     let ids_t = Tensor::from_vec(ids.clone(), (1, seq_len), &c.device).ok()?;
     let mask_t = Tensor::from_vec(mask.clone(), (1, seq_len), &c.device).ok()?;
-    let token_type_ids = Tensor::zeros((1, seq_len), candle_core::DType::U32, &c.device).ok()?;
+    let token_type_ids = Tensor::zeros((1, seq_len), DType::U32, &c.device).ok()?;
 
     let hidden = c.model.forward(&ids_t, &token_type_ids, Some(&mask_t)).ok()?;
 
-    let mask_f = mask_t.to_dtype(candle_core::DType::F32).ok()?;
+    let mask_f = mask_t.to_dtype(DType::F32).ok()?;
     let mask_e = mask_f.unsqueeze(2).ok()?;
     let masked = hidden.broadcast_mul(&mask_e).ok()?;
     let sum = masked.sum(1).ok()?;
