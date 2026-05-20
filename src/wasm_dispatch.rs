@@ -468,7 +468,7 @@ fn db_name_from(body: &Value) -> String {
 }
 
 fn sql_open(body: &Value) -> u64 {
-    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(":memory:");
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(".gm/rs-learn.db");
     let name = db_name_from(body);
     match crate::libsql_wasm::open(&name, path) {
         Ok(()) => ok("sql_open", json!({ "path": path, "db_name": name })),
@@ -613,7 +613,8 @@ fn memorize_libsql(body: &Value, raw: &str) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if text.is_empty() { return err("memorize", "missing text"); }
     let inline = body.get("embedding");
-    pack(crate::code_index::memorize(&text, ns, inline).to_string())
+    let project_path = body.get("projectPath").and_then(|v| v.as_str());
+    pack(crate::code_index::memorize_at(&text, ns, inline, project_path).to_string())
 }
 
 fn recall_libsql(body: &Value, raw: &str) -> u64 {
@@ -625,7 +626,8 @@ fn recall_libsql(body: &Value, raw: &str) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str());
     if query.is_empty() { return err("recall", "missing query"); }
     let inline = body.get("embedding");
-    pack(crate::code_index::recall(&query, limit, ns, inline).to_string())
+    let project_path = body.get("projectPath").and_then(|v| v.as_str());
+    pack(crate::code_index::recall_at(&query, limit, ns, inline, project_path).to_string())
 }
 
 fn filter(body: &Value, raw: &str) -> u64 {
