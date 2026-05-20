@@ -154,7 +154,12 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         }
     }
     if !found {
-        return (String::new(), format!("prd id not found: {}", id_target), 1);
+        let body = serde_json::json!({
+            "error": format!("prd id not found: {}", id_target),
+            "deviation_kind": "prd-resolve-unknown-id",
+            "prd_id": id_target,
+        }).to_string();
+        return (body, format!("prd id not found: {}", id_target), 1);
     }
     let new_raw = serde_yaml::to_string(&doc).unwrap_or_default();
     if !pkfs::write(&path_s, &new_raw) {
