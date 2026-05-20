@@ -1,38 +1,38 @@
-pub const TEXT: &str = r#"# VERIFY — Layer 3 trajectory (convergent ⇒ emit)
+pub const TEXT: &str = r#"# VERIFY — L3 trajectory; emit transition iff convergent
 
-COMPLETE is earned. The trajectory classifier reads the chain's four-observation window and emits transition only if the system is convergent:
+COMPLETE is earned. Trajectory classifier reads the chain's 4-observation window:
 
 ```
 [worktree-clean] [remote-pushed] [prd-empty] [mutables-witnessed]
 ```
 
-All four true → state Open → emit transition to COMPLETE. Any false → defer or hold or regress.
+All-four-true is the convergence criterion — state Open → emit transition to COMPLETE. Any false → defer, hold, or regress.
 
-## CI Is The Build
+## CI is the build
 
-Push triggers the matrix. Local cargo proves one platform; CI proves all of them. Watch with `gh run list --branch <branch> --limit 3 --json status,conclusion,name`; on red, root-cause and re-push. Toolchain skew is not a stop condition — it's a divergent observation that holds the trajectory until resolved.
+Push triggers the matrix. Local cargo proves one platform; CI proves all. Watch with `gh run list --branch <branch> --limit 3 --json status,conclusion,name`; on red, root-cause and re-push. Toolchain skew is a divergent observation that holds trajectory, not a stop condition.
 
-## One Integration Test
+## One integration test
 
-`test.js` at project root, 200-line cap, real services only. VERIFY runs it. Failure regresses to EXECUTE — the trajectory reads `recursive`, snake the chain back, do not declare done in spite of the signal.
+`test.js` at root, 200-line cap, real services only. VERIFY runs it. Failure regresses to EXECUTE — classifier reads `recursive`, chain snakes back. Declaring done past `recursive` violates L3.
 
-## Residual Scan — the trajectory window
+## Residual scan — trajectory window
 
-Before transitioning to COMPLETE, dispatch `residual-scan`. The scan reads the last window of the chain (PRD pending count, open browser sessions, dirty tree, untracked docs) and either fires the four-check pass or returns a residual list. Reachable in-spirit residuals expand the PRD and run — the trajectory was reading `recursive` because the cover was incomplete. The `.gm/residual-check-fired` marker makes the scan one-shot per stopping window.
+Before transitioning to COMPLETE, dispatch `residual-scan`. Reads PRD pending count, open browser sessions, dirty tree, untracked docs; either fires the four-check pass or returns a residual list. Reachable in-spirit residuals expand the PRD and run — `recursive` reading meant cover was incomplete. `.gm/residual-check-fired` marker enforces one-shot per stop window.
 
-## Mutable Witness, Not Checkmarks
+## Mutable witness — not checkmarks
 
-`mutable-resolve` requires `witness_evidence` = file:line, codesearch hit, or exec output snippet. A line of prose ending in `✓` is rejected on add. "Verified all mutables: quadtree streaming ✓, shaders compile ✓" without dispatched resolves is a self-declared completion, not a witness. Each ✓ in a final-message summary is an unfired `mutable-resolve` — go fire it before claiming done.
+`mutable-resolve` requires `witness_evidence` ∈ {file:line, codesearch hit, exec snippet}. Prose ending in `✓` is rejected on add. "Verified all mutables ✓ ✓ ✓" without dispatched resolves is self-declared completion, never a witness. Each ✓ in a final-message summary IS an unfired `mutable-resolve` — fire it before claiming done.
 
-## Self-Declared Complete Is The Failure
+## Self-declared complete is the failure
 
-"Session Complete", "Work Accomplished", "Status: deployable" written into the response without `transition` to COMPLETE actually running is the exact close-by-narrative the orchestrator hard-rejects. If the watcher is broken and `transition` will not dispatch, that is the work to fix — surface the bootstrap error, reboot, dispatch. Not a license to declare done in prose.
+"Session Complete", "Work Accomplished", "Status: deployable" written into the response without `transition` to COMPLETE having dispatched IS the close-by-narrative the orchestrator hard-rejects. Broken watcher → fix the watcher; not a license to narrate done.
 
-## Closure Rules
+## Closure Anti-Shapes
 
-See entry. At VERIFY: committed work + named out-of-spirit residuals must equal the witnessable closure. Gap means cover is not yet maximal — re-enter PLAN. That is the trajectory classifier doing its job.
+See entry. At VERIFY: committed work + named out-of-spirit residuals must equal the witnessable closure. Gap = cover not maximal → re-enter PLAN.
 
 ## Dispatch
 
-`transition` to COMPLETE only when all four observations are true. The orchestrator hard-rejects the transition if any mutable or PRD item is open.
+`transition` to COMPLETE only when all four observations are true. Orchestrator hard-rejects transition if any mutable or PRD item is open.
 "#;
