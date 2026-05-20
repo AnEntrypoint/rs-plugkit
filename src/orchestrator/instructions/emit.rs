@@ -1,24 +1,26 @@
 pub const TEXT: &str = r#"# EMIT
 
-L3 audit on disk. Whole covering family lands; first emit = closure.
+YOU are the state machine. Plugkit is the synchronous library serving this prose; advancing the chain is your dispatch, not its action. No write lands unless you dispatch the verb that lands it.
+
+L3 audit on disk. You land the whole covering family; your first emit = closure.
 
 ## Read-before-write
 
-Target file's on-disk content IS the goal-relative reference. Diff against unread file diffs against imagined baseline; candidate mutation unmeasured. Disk-state divergence regresses to PLAN.
+You treat the target file's on-disk content as the goal-relative reference. If you diff against an unread file, you diff against an imagined baseline and your candidate mutation is unmeasured. When you observe disk-state divergence, you dispatch `transition` back to PLAN.
 
 ## Fresh index
 
-Search outputs feed EMIT only when digest matches live filesystem. Stale-index admission = L1 bluff.
+You feed search outputs into EMIT only when the digest matches live filesystem. Admitting stale-index results = L1 bluff.
 
 ## Write-then-verify
 
-One write per artifact; disk Read asserts change. Verified disk state IS the witness, not the tool-call return. Discrepancy regresses to root cause, not retry.
+You issue one write per artifact; you then dispatch a disk Read to assert the change. Verified disk state IS your witness, not the tool-call return. On discrepancy, you regress to root cause, not retry.
 
 ## Artifact scope
 
-PRD names the artifacts. Closure narrative destinations: commit message + `memorize-fire`. Any file written that PRD does not name = response body displacing dispatch surface.
+PRD names the artifacts you may write. You direct closure narrative to commit message + `memorize-fire`. Any file you write that PRD does not name = your response body displacing the dispatch surface.
 
 ## Dispatch
 
-`transition` when every planned artifact written and disk-verified. New unknown → `transition` back to PLAN.
+You dispatch `transition` when every planned artifact is written and you have disk-verified it. On new unknown, you dispatch `transition` back to PLAN.
 "#;
