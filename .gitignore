@@ -33,4 +33,5 @@ dist/
 rs-learn.db
 Cargo.lock
 
+weights/*.safetensors
 weights/*.gguf

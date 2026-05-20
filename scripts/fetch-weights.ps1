@@ -5,14 +5,14 @@ New-Item -ItemType Directory -Force -Path $WeightsDir | Out-Null
 
 $Items = @(
   @{
-    Url  = "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf"
-    Path = Join-Path $WeightsDir "nomic-q4.gguf"
-    Sha  = "d4e388894e09cf3816e8b0896d81d265b55e7a9fff9ab03fe8bf4ef5e11295ac"
+    Url  = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/model.safetensors"
+    Path = Join-Path $WeightsDir "minilm-l6-v2.safetensors"
+    Sha  = "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db"
   },
   @{
-    Url  = "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json"
+    Url  = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
     Path = Join-Path $WeightsDir "tokenizer.json"
-    Sha  = "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+    Sha  = "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037"
   }
 )
 
