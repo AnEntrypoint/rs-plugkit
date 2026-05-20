@@ -468,7 +468,7 @@ fn db_name_from(body: &Value) -> String {
 }
 
 fn sql_open(body: &Value) -> u64 {
-    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(".gm/rs-learn.db");
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(":memory:");
     let name = db_name_from(body);
     match crate::libsql_wasm::open(&name, path) {
         Ok(()) => ok("sql_open", json!({ "path": path, "db_name": name })),

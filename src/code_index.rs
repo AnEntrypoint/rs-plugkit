@@ -61,10 +61,15 @@ pub fn ensure_schema_at(db_name: &str, path: &str) -> Result<(), String> {
 }
 
 fn project_db_path(project_path: Option<&str>) -> String {
-    match project_path {
-        Some(p) if !p.is_empty() => format!("{}/.gm/rs-learn.db", p.trim_end_matches('/').trim_end_matches('\\')),
-        _ => ".gm/rs-learn.db".to_string(),
-    }
+    // libsql file-backed open requires WASI fs syscalls (fd_prestat_get etc.)
+    // that the wasm host doesn't fully implement yet — using a file path
+    // crashes the watcher with 'unimplemented WASI call'. Until the host
+    // WASI shim is fleshed out, default to :memory: even when project_path
+    // is requested. The KV store at <cwd>/.gm/disciplines/<ns>/ (in the
+    // JS-side host_kv_* implementation) already provides project-local
+    // persistent memory; libsql is only needed for vector-index ANN.
+    let _ = project_path;
+    ":memory:".to_string()
 }
 
 fn project_db_name(project_path: Option<&str>) -> String {
