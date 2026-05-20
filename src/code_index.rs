@@ -48,11 +48,38 @@ const SKIP_DIRS: &[&str] = &[
 
 const GM_DB: &str = "gm";
 
+const EXPECTED_EMBED_DIM: usize = 384;
+
+fn embedding_col_dim(db_name: &str, table: &str) -> Option<usize> {
+    let sql = format!("SELECT type FROM pragma_table_info('{}') WHERE name = 'embedding'", table);
+    let rows = libsql_wasm::query(db_name, &sql).ok()?;
+    let arr = rows.as_array()?;
+    let row = arr.first()?;
+    let ty = row.get("type")?.as_str()?;
+    let start = ty.find('(')? + 1;
+    let end = ty.find(')')?;
+    ty[start..end].parse::<usize>().ok()
+}
+
+fn drop_if_dim_mismatch(db_name: &str, table: &str) -> Result<bool, String> {
+    match embedding_col_dim(db_name, table) {
+        Some(dim) if dim == EXPECTED_EMBED_DIM => Ok(false),
+        Some(_) => {
+            let _ = libsql_wasm::exec(db_name, &format!("DROP INDEX IF EXISTS {}_vec", table));
+            libsql_wasm::exec(db_name, &format!("DROP TABLE IF EXISTS {}", table))?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 pub fn ensure_schema_at(db_name: &str, path: &str) -> Result<(), String> {
     if let Some(parent) = std::path::Path::new(path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     libsql_wasm::open(db_name, path)?;
+    let _ = drop_if_dim_mismatch(db_name, "code_chunks");
+    let _ = drop_if_dim_mismatch(db_name, "memories");
     libsql_wasm::exec(db_name, "CREATE TABLE IF NOT EXISTS code_chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, body TEXT, embedding F32_BLOB(384))")?;
     libsql_wasm::exec(db_name, "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, namespace TEXT, text TEXT, ts INTEGER, embedding F32_BLOB(384))")?;
     let _ = libsql_wasm::exec(db_name, "CREATE INDEX IF NOT EXISTS code_chunks_vec ON code_chunks(libsql_vector_idx(embedding, 'metric=cosine'))");
