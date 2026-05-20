@@ -80,16 +80,8 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     if rc == 0 {
         return (String::new(), "kv_put failed".to_string(), 1);
     }
-    let emb_packed = unsafe {
-        crate::wasm_dispatch::host_vec_embed(text.as_ptr(), text.len() as u32)
-    };
-    let emb_str_opt: Option<String> = if emb_packed != 0 {
-        let v = crate::wasm_dispatch::unpack_to_value_pub(emb_packed);
-        let s = v.as_str().map(String::from).unwrap_or_else(|| v.to_string());
-        if !s.is_empty() && s != "null" { Some(s) } else { None }
-    } else { None };
-    let emb_str = match emb_str_opt {
-        Some(s) => s,
+    let emb_str = match crate::embed::embed_text_json(text) {
+        Some(v) => v.to_string(),
         None => {
             let tombstone = format!("__deleted__{}", now);
             let _ = unsafe {
@@ -99,7 +91,7 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
                     tombstone.as_ptr(), tombstone.len() as u32,
                 )
             };
-            let msg = format!("memorize: host_vec_embed failed for key={}; rolled back text row; refusing silent-NULL-embedding insert", key);
+            let msg = format!("memorize: embed_text failed for key={}; rolled back text row; refusing silent-NULL-embedding insert", key);
             let _ = unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
             return (String::new(), msg, 1);
         }

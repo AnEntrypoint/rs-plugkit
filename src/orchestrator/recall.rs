@@ -32,11 +32,8 @@ pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
     let namespace = "default";
     #[cfg(target_arch = "wasm32")]
     {
-        use crate::wasm_dispatch::{host_vec_embed, host_vec_search, host_kv_query};
-        let emb_packed = unsafe { host_vec_embed(query.as_ptr(), query.len() as u32) };
-        let embedding = if emb_packed != 0 {
-            crate::wasm_dispatch::unpack_to_value_pub(emb_packed)
-        } else { serde_json::Value::Null };
+        use crate::wasm_dispatch::{host_vec_search, host_kv_query};
+        let embedding = crate::embed::embed_text_json(&query).unwrap_or(serde_json::Value::Null);
         let q_json = serde_json::json!({
             "query": query, "embedding": embedding, "namespace": namespace
         }).to_string();
@@ -71,11 +68,8 @@ pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
     let namespace = "default";
     #[cfg(target_arch = "wasm32")]
     let results = {
-        use crate::wasm_dispatch::{host_vec_embed, host_vec_search, host_kv_query};
-        let emb_packed = unsafe { host_vec_embed(query.as_ptr(), query.len() as u32) };
-        let embedding = if emb_packed != 0 {
-            crate::wasm_dispatch::unpack_to_value_pub(emb_packed)
-        } else { serde_json::Value::Null };
+        use crate::wasm_dispatch::{host_vec_search, host_kv_query};
+        let embedding = crate::embed::embed_text_json(&query).unwrap_or(serde_json::Value::Null);
         let q_json = serde_json::json!({
             "query": query, "embedding": embedding, "namespace": namespace
         }).to_string();

@@ -15,7 +15,6 @@ extern "C" {
     pub fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
     pub fn host_kv_query(ns_ptr: *const u8, ns_len: u32, q_ptr: *const u8, q_len: u32) -> u64;
     pub fn host_vec_search(q_ptr: *const u8, q_len: u32, k: u32) -> u64;
-    pub fn host_vec_embed(text_ptr: *const u8, text_len: u32) -> u64;
     pub fn host_exec_js(code_ptr: *const u8, code_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
     pub fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
     pub fn host_now_ms() -> u64;
@@ -239,8 +238,7 @@ fn recall(body: &Value) -> u64 {
     let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(8) as u32;
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if query.is_empty() { return err("recall", "query required"); }
-    let emb_packed = unsafe { host_vec_embed(query.as_ptr(), query.len() as u32) };
-    let embedding = if emb_packed != 0 { unpack_to_value(emb_packed) } else { Value::Null };
+    let embedding = crate::embed::embed_text_json(query).unwrap_or(Value::Null);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": namespace }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, limit) };
     let vec_hits = unpack_to_value(packed);
@@ -265,23 +263,21 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
     let key = format!("mem-{}-{}-{}", now, counter, text.len());
     let rc = unsafe { host_kv_put(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32, text.as_ptr(), text.len() as u32) };
     if rc == 0 { return err("memorize", "kv_put failed"); }
-    let emb_packed = unsafe { host_vec_embed(text.as_ptr(), text.len() as u32) };
-    if emb_packed != 0 {
+    let emb_json = crate::embed::embed_text_json(text);
+    let embedded = emb_json.is_some();
+    if let Some(emb) = emb_json {
         let vec_ns = format!("{}-vec", namespace);
-        let emb_str = unpack_to_string(emb_packed).unwrap_or_default();
-        if !emb_str.is_empty() {
-            let _ = unsafe { host_kv_put(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32, emb_str.as_ptr(), emb_str.len() as u32) };
-        }
+        let emb_str = emb.to_string();
+        let _ = unsafe { host_kv_put(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32, emb_str.as_ptr(), emb_str.len() as u32) };
     }
-    ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": emb_packed != 0}))
+    ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": embedded}))
 }
 
 fn codesearch(body: &Value) -> u64 {
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
     if query.is_empty() { return err("codesearch", "query required"); }
-    let emb_packed = unsafe { host_vec_embed(query.as_ptr(), query.len() as u32) };
-    let embedding = if emb_packed != 0 { unpack_to_value(emb_packed) } else { Value::Null };
+    let embedding = crate::embed::embed_text_json(query).unwrap_or(Value::Null);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": "codeinsight" }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, k) };
     let vec_hits = unpack_to_value(packed);
@@ -303,7 +299,7 @@ fn health(_body: &Value) -> u64 {
         "imports": [
             "host_fs_read","host_fs_write","host_fs_readdir","host_fs_stat",
             "host_fetch","host_kv_get","host_kv_put","host_kv_query",
-            "host_vec_search","host_vec_embed",
+            "host_vec_search",
             "host_exec_js","host_log","host_now_ms","host_env_get","host_browser_exec","host_task_proc"
         ]
     }))

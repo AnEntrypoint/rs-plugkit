@@ -33,6 +33,11 @@ tree-sitter-html = "0.23"
 tree-sitter-css = "0.25"
 tree-sitter-bash = "0.25"
 tree-sitter-md = "0.5"
+candle-core = { version = "0.8", default-features = false }
+candle-nn = { version = "0.8", default-features = false }
+candle-transformers = { version = "0.8", default-features = false }
+tokenizers = { version = "0.20", default-features = false, features = ["unstable_wasm"] }
+getrandom = { version = "0.2", features = ["custom"] }
 
 [profile.release]
 strip = true
