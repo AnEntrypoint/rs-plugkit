@@ -297,6 +297,9 @@ pub fn memorize(text: &str, namespace: &str, inline_embedding: Option<&Value>) -
 
 pub fn memorize_at(text: &str, namespace: &str, inline_embedding: Option<&Value>, project_path: Option<&str>) -> Value {
     if inline_embedding.is_none() && crate::pipeline::needs_summarize(text) {
+        if let Err(e) = ensure_schema_for(project_path) {
+            return json!({ "ok": false, "error": e });
+        }
         return crate::pipeline::build_pending_step(text, namespace, project_path);
     }
     memorize_at_finalize(text, text, namespace, inline_embedding, project_path)
