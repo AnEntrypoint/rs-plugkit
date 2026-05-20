@@ -15,6 +15,7 @@ extern "C" {
 }
 
 pub fn ensure_pipeline_schema() -> Result<(), String> {
+    libsql_wasm::open(GM_DB, ":memory:")?;
     libsql_wasm::exec(
         GM_DB,
         "CREATE TABLE IF NOT EXISTS pipeline_state (step_id TEXT PRIMARY KEY, state TEXT NOT NULL, deadline_ms INTEGER NOT NULL, created_ms INTEGER NOT NULL)",
