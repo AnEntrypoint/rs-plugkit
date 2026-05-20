@@ -16,6 +16,12 @@ pub mod pipeline;
 #[cfg(target_arch = "wasm32")]
 pub mod gitignore;
 
+#[cfg(target_arch = "wasm32")]
+pub mod gates;
+
+#[cfg(target_arch = "wasm32")]
+pub mod browser_witness;
+
 pub mod pkfs;
 pub mod orchestrator;
 pub mod filter;
