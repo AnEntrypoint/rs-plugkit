@@ -1,39 +1,31 @@
-pub const TEXT: &str = r#"# PLAN
+pub const TEXT: &str = r#"# PLAN — Gate 1 (cost) + Gate 2 (bound)
 
-Prior memory loads on entry. Search before naming an unknown absent. Check before designing what already exists.
+Search before naming an unknown absent. Check before designing what already exists. Prior memory loads on entry.
 
-## ORIENT
+## ORIENT — Gate 1: measure against baseline
 
-The opening move is a parallel pack — 3–5 `recall` and 3–5 `codesearch` dispatches in one message against the request's nouns. Hits become weak_prior; misses confirm fresh ground. All in one message, read together.
+The opening move is a parallel pack — 3–5 `recall` + 3–5 `codesearch` dispatches in one message against the request's nouns. Hits are the baseline (prior best-observed knowledge); misses confirm fresh ground. All in one message, read together. This is the cost-measurement gate: you are asking "what is already known?" before allocating new work. Skip orient → operate blind → pay the cost of duplicated discovery + disagree-with-prior-witness risk.
 
 ```
-.gm/exec-spool/in/recall/1.txt        "<noun 1>"
-.gm/exec-spool/in/recall/2.txt        "<noun 2>"
-.gm/exec-spool/in/recall/3.txt        "<noun 3>"
-.gm/exec-spool/in/codesearch/1.txt    "<phrase 1>"
-.gm/exec-spool/in/codesearch/2.txt    "<phrase 2>"
-.gm/exec-spool/in/codesearch/3.txt    "<phrase 3>"
+in/recall/{1..N}.txt        "<noun K>"
+in/codesearch/{1..N}.txt    "<phrase K>"
 ```
 
-## Shape
+## Shape — Gate 2: bound the family
 
-The shape of the work is the widest, deepest, most destructive reading the request admits from this session. The covering family is the plan. Enumerate every subset reachable from here into `.gm/prd.yml` with the dependency graph explicit. Residuals in-spirit and reachable expand the PRD silently; the read declares itself in one line and the chain continues.
+The shape of the work is the widest, deepest, most destructive reading the request admits from this session. Enumerate every reachable subset into `.gm/prd.yml` with the dependency graph explicit — that is the bounded covering family. The session is the unit; reach permits the next item, the next item is in-scope. Residuals in-spirit and reachable expand the PRD silently; the read declares itself in one line and the chain continues.
 
-The session is the unit. Reach permits the next item, the next item is in-scope.
-
-## No Permission Asks
-
-"Want me to proceed?" after the user already said do-it is forced closure. "This is a significant rework — should I continue?" is the same closure dressed as deference. "Do you have specifics about how X should appear?" when the request admits an obvious read is the same again. Effort, breadth, file-count, and "equivalent to redoing turns N..M" are never grounds to re-ask. When two viable approaches exist, pick the read matching the obvious meaning, declare the choice in one line so the user can interrupt mid-chain, and execute. Multi-file refactors, SDK-wide deletions, and design-shape questions are all in-scope under the original ask the moment they sit within its spirit and reach. If reach genuinely runs out — credentials, down service, irreversible product decision — that lands as `blockedBy: external`, not as a question.
+`.gm/prd.yml` is the central store (G3 surface). `|F| = 1`: every plan item lands here, no parallel TODO lists, no inline checklist in the response. PRD items that propose writing a `.md` or `.txt` the user did not ask for are rejected on add.
 
 ## Mutables
 
-`.gm/mutables.yml` is co-equal with `.gm/prd.yml`. Unknowns land as `status: unknown`. Rows flip to `witnessed` on concrete proof — file:line, codesearch hit, exec output. The orchestrator hard-rejects narrative resolution and hard-rejects transition to COMPLETE while any row is unwitnessed or any PRD item is unresolved.
+`.gm/mutables.yml` is co-equal with the PRD. Unknowns land as `status: unknown`. Rows flip to `witnessed` only on concrete proof — file:line, codesearch hit, exec output. The orchestrator hard-rejects narrative resolution and hard-rejects transition to COMPLETE while any row is unwitnessed or any PRD item is unresolved.
 
-## PRD
+## Closure Rules
 
-Writing `.gm/prd.yml` is the receipt. Anything beyond a single-file single-line edit lands as PRD entries with explicit subjects. PRD items that propose writing a `.md` or `.txt` the user did not ask for are rejected on add.
+See entry: no permission asks, no self-declared complete, no spec-instead-of-impl, no unsolicited docs, no watcher-broken-excuse. The forced-closure anti-shapes apply at PLAN's exit boundary in particular — the request to "scope it first" is the same shape as "want me to proceed?".
 
 ## Dispatch
 
-`recall`, `codesearch`, `prd-add`, `mutable-add`, `mutable-resolve`, `transition`. The pack opens, the PRD writes, the mutables file, the transition fires.
+`recall`, `codesearch`, `prd-add`, `mutable-add`, `mutable-resolve`, `transition`. Pack opens, PRD writes, mutables file, transition fires.
 "#;
