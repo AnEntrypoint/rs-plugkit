@@ -246,14 +246,15 @@ fn write_offset(offset: u64, last_scan_ms: u64, date: &str) {
     let _ = host_write(OFFSET_PATH, &body);
 }
 
-fn extract_command(line: &str) -> Option<(String, &str)> {
+fn extract_command(line: &str) -> Option<(String, String)> {
     let v: Value = serde_json::from_str(line).ok()?;
-    let tool = v.get("tool").and_then(|t| t.as_str()).unwrap_or("");
+    let tool = v.get("tool").and_then(|t| t.as_str()).unwrap_or("").to_string();
     if tool != "Bash" { return None; }
     let cmd = v.get("command")
         .or_else(|| v.get("tool_input").and_then(|ti| ti.get("command")))
-        .and_then(|c| c.as_str())?;
-    Some((cmd.to_string(), tool))
+        .and_then(|c| c.as_str())?
+        .to_string();
+    Some((cmd, tool))
 }
 
 fn line_ts(line: &str) -> Option<u64> {
