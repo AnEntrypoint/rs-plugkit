@@ -8,6 +8,9 @@ pub mod libsql_wasm;
 pub mod code_index;
 
 #[cfg(target_arch = "wasm32")]
+pub mod embed;
+
+#[cfg(target_arch = "wasm32")]
 pub mod pipeline;
 
 pub mod pkfs;

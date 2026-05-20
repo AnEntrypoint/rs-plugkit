@@ -8,7 +8,6 @@ use crate::wasm_dispatch::{host_read, unpack_to_value_pub};
 
 extern "C" {
     fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
-    fn host_vec_embed(text_ptr: *const u8, text_len: u32) -> u64;
     fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
 }
 
@@ -179,9 +178,7 @@ fn extract_chunks(path: &str, source: &str, lang: Language) -> Vec<(String, Stri
 }
 
 fn embed_text(text: &str) -> Option<Vec<f32>> {
-    let packed = unsafe { host_vec_embed(text.as_ptr(), text.len() as u32) };
-    let v = unpack_to_value_pub(packed);
-    json_to_f32_vec(&v)
+    crate::embed::embed_text(text)
 }
 
 fn json_to_f32_vec(v: &Value) -> Option<Vec<f32>> {
