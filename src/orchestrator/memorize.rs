@@ -80,7 +80,7 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     if rc == 0 {
         return (String::new(), "kv_put failed".to_string(), 1);
     }
-    let emb_str = match crate::embed::embed_text_json(text) {
+    let emb_str = match crate::embed::embed_text_json(&text) {
         Some(v) => v.to_string(),
         None => {
             let tombstone = format!("__deleted__{}", now);
