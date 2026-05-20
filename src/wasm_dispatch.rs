@@ -665,6 +665,12 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
     let body: Value = if body_s.is_empty() { Value::Null } else {
         serde_json::from_str(&body_s).unwrap_or(Value::Null)
     };
+    let gate = crate::gates::check_dispatch(&verb, &body);
+    if !gate.allowed {
+        return pack(gate.to_denial_json(&verb).to_string());
+    }
+    let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+    crate::browser_witness::record_from_body(cwd_for_witness, &body);
     if crate::orchestrator::is_orchestrator_verb(&verb) {
         let (out, err_msg, code) = crate::orchestrator::dispatch(&verb, "", &body_s);
         let ok_flag = code == 0;
