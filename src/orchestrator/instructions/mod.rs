@@ -148,6 +148,7 @@ fn read_last_prompt() -> String {
 pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     let mut session_id_opt: Option<String> = None;
+    let mut prompt_opt: Option<String> = None;
     let phase = if trimmed.is_empty() {
         read_state().phase
     } else if let Some(stripped) = trimmed.strip_prefix("phase=") {
@@ -155,6 +156,9 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
             session_id_opt = Some(sid.to_string());
+        }
+        if let Some(p) = v.get("prompt").and_then(|s| s.as_str()) {
+            prompt_opt = Some(p.to_string());
         }
         if let Some(s) = v.as_str() {
             s.to_string()
@@ -166,6 +170,14 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     } else {
         trimmed.to_string()
     };
+
+    if let Some(p) = &prompt_opt {
+        if !p.trim().is_empty() {
+            let path = super::gm_dir().join("last-prompt.txt");
+            let ps = path.to_string_lossy().to_string();
+            let _ = pkfs::write(&ps, p);
+        }
+    }
 
     if let Some(sid) = session_id_opt {
         let mut st = read_state();
