@@ -188,16 +188,9 @@ fn exec_js(body: &Value, body_s: &str) -> u64 {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| body_s.to_string());
     if code.is_empty() { return err("exec_js", "code required (provide raw code as body or JSON {code: ...})"); }
-    let timeout_ms = body.get("timeoutMs")
-        .or_else(|| body.get("opts").and_then(|o| o.get("timeoutMs")))
-        .and_then(|v| v.as_u64());
-    let timeout_ms = match timeout_ms {
-        Some(n) if n > 0 => n,
-        _ => return err_json("exec_js", json!({
-            "error": "missing timeoutMs",
-            "required": "positive integer milliseconds",
-            "paper_ref": "§20"
-        })),
+    let timeout_ms = match crate::validation::validate_timeout_ms(body, true) {
+        Ok(n) => n,
+        Err(detail) => return err_json("exec_js", detail),
     };
     let mut opts_obj = body.get("opts").cloned().unwrap_or_else(|| json!({}));
     if let Some(map) = opts_obj.as_object_mut() {
@@ -457,14 +450,9 @@ fn shell_exec(body: &Value, body_s: &str, lang: &str) -> u64 {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| body_s.to_string());
     if code.is_empty() { return err(lang, "code required (provide raw code as body or JSON {code: ...})"); }
-    let timeout_ms = body.get("timeoutMs").and_then(|v| v.as_u64());
-    let timeout_ms = match timeout_ms {
-        Some(n) if n > 0 => n,
-        _ => return err_json(lang, json!({
-            "error": "missing timeoutMs",
-            "required": "positive integer milliseconds",
-            "paper_ref": "§20"
-        })),
+    let timeout_ms = match crate::validation::validate_timeout_ms(body, false) {
+        Ok(n) => n,
+        Err(detail) => return err_json(lang, detail),
     };
     let opts = json!({ "lang": lang, "timeoutMs": timeout_ms }).to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };

@@ -10,6 +10,7 @@ pub mod code_index;
 pub mod pkfs;
 pub mod orchestrator;
 pub mod filter;
+pub mod validation;
 
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]

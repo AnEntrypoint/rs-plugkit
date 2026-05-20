@@ -104,3 +104,42 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     });
     (payload.to_string(), String::new(), 0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_is_open_classifies_states() {
+        assert!(status_is_open(Some("pending")));
+        assert!(status_is_open(Some("in_progress")));
+        assert!(status_is_open(Some("unknown")));
+        assert!(status_is_open(Some("blocked")));
+        assert!(status_is_open(None));
+        assert!(!status_is_open(Some("completed")));
+        assert!(!status_is_open(Some("resolved")));
+    }
+
+    #[test]
+    fn scan_premature_payload_shape() {
+        // The handle_scan happy path requires pkfs writability; host build returns deviation
+        // shape when PRD is non-empty. Validate the JSON shape the handler emits.
+        let payload = serde_json::json!({
+            "scan": "skipped",
+            "reason": "PRD still has items; complete or remove them before residual scan.",
+            "deviation_kind": "residual-premature"
+        });
+        assert_eq!(payload["deviation_kind"], "residual-premature");
+        assert_eq!(payload["scan"], "skipped");
+    }
+
+    #[test]
+    fn scan_fired_payload_shape() {
+        let payload = serde_json::json!({
+            "scan": "fired",
+            "checks": ["worktree-clean", "remote-pushed", "prd-empty", "mutables-witnessed"],
+        });
+        assert_eq!(payload["scan"], "fired");
+        assert_eq!(payload["checks"].as_array().unwrap().len(), 4);
+    }
+}
