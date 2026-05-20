@@ -136,10 +136,31 @@ pub fn pending_detailed() -> Vec<serde_json::Value> {
 }
 
 pub fn handle_resolve(content: &str) -> (String, String, i32) {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
+    let raw_trimmed = content.trim();
+    if raw_trimmed.is_empty() {
         return (String::new(), "missing mutable id in body".to_string(), 1);
     }
+
+    // Body shape: either raw id string OR JSON object {mutable_id|id, witness_evidence?, witness_method?}.
+    // Inline witness_evidence is applied to the row if the row's evidence field is empty.
+    let (id_str, inline_evidence): (String, Option<String>) = match serde_json::from_str::<serde_json::Value>(raw_trimmed) {
+        Ok(serde_json::Value::Object(map)) => {
+            let id = map.get("mutable_id")
+                .or_else(|| map.get("id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| raw_trimmed.to_string());
+            let evidence = map.get("witness_evidence")
+                .or_else(|| map.get("evidence"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
+            (id, evidence)
+        }
+        Ok(serde_json::Value::String(s)) => (s, None),
+        _ => (raw_trimmed.to_string(), None),
+    };
+    let trimmed = id_str.as_str();
 
     let path = mutables_path();
     let path_s = path.to_string_lossy().to_string();
@@ -171,7 +192,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                     .unwrap_or(false);
                 if id_match {
                     found_id = true;
-                    let evidence = map
+                    let row_evidence: Option<String> = map
                         .get(&Value::String("witness_evidence".to_string()))
                         .and_then(|v| v.as_str())
                         .or_else(|| {
@@ -179,13 +200,21 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                                 .and_then(|v| v.as_str())
                         })
                         .map(|s| s.to_string())
-                        .unwrap_or_default();
+                        .filter(|s| !s.trim().is_empty());
+                    let row_had_evidence = row_evidence.is_some();
+                    let evidence = row_evidence.or_else(|| inline_evidence.clone()).unwrap_or_default();
                     if evidence.trim().is_empty() {
                         let msg = format!(
-                            "Refused: mutable {} cannot be witnessed without evidence. Add evidence: \"<concrete proof: file:line, codesearch hit, exec output>\" to .gm/mutables.yml row first.",
-                            trimmed
+                            "Refused: mutable {} cannot be witnessed without evidence. Pass {{\"mutable_id\":\"{}\",\"witness_evidence\":\"<concrete proof>\"}} in the body, or add evidence to the .gm/mutables.yml row first.",
+                            trimmed, trimmed
                         );
                         return (String::new(), msg, 1);
+                    }
+                    if !row_had_evidence {
+                        map.insert(
+                            Value::String("witness_evidence".to_string()),
+                            Value::String(evidence.clone()),
+                        );
                     }
                     map.insert(
                         Value::String("status".to_string()),
