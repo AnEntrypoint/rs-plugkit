@@ -29,4 +29,8 @@ Pausing the chain on an unknown, or forming a question to the user in-response, 
 ## Dispatch
 
 Spool every exec. `mutable-resolve` to flip rows. `transition` when the PRD slice is closed. New unknown → `transition` back to PLAN.
+
+## Inspect with the right tool
+
+State inspection routes through `Read`/`Glob`/`Grep` — never `Bash` for `cat`/`ls`/`grep`/`head`/`tail`/`sed`/`awk`/`echo`. Spool output files, `.gm/*` state, source, git output: dedicated tools first. Polling for a spool response: dispatch the next verb instead of chaining `sleep`+`cat` — the watcher writes the response synchronously; the harness blocks chained sleeps anyway. `Bash` is for `git`, `gh`, `npm`, `bun x <tool>`, `curl`, and shell-only operations; not for reading files.
 "#;
