@@ -13,6 +13,9 @@ pub mod embed;
 #[cfg(target_arch = "wasm32")]
 pub mod pipeline;
 
+#[cfg(target_arch = "wasm32")]
+pub mod gitignore;
+
 pub mod pkfs;
 pub mod orchestrator;
 pub mod filter;
@@ -132,6 +135,7 @@ mod wasm_hooks {
         clear_marker("gm-fired-this-turn");
         clear_marker("residual-check-fired");
         write_marker("needs-gm");
+        let _ = crate::gitignore::ensure_managed_gitignore("");
         json!({
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
