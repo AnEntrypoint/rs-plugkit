@@ -44,7 +44,7 @@ fn residual_check_fired_recently() -> bool {
 
 fn should_residual_scan(prd_pending: usize, running_tasks_count: usize) -> bool {
     if residual_check_fired_recently() { return false; }
-    prd_pending > 0 || running_tasks_count == 0
+    prd_pending == 0 && running_tasks_count == 0
 }
 
 pub fn get_instruction(phase: &str) -> &'static str {
@@ -88,6 +88,63 @@ fn prd_pending_count(items: &[serde_json::Value]) -> usize {
     }).count()
 }
 
+fn item_is_open(it: &serde_json::Value) -> bool {
+    let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+    status != "done" && status != "complete" && status != "completed"
+}
+
+fn ready_wave(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let completed_ids: std::collections::HashSet<String> = items.iter()
+        .filter(|it| !item_is_open(it))
+        .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+    items.iter()
+        .filter(|it| item_is_open(it))
+        .filter(|it| {
+            it.get("blockedBy")
+                .or_else(|| it.get("dependencies"))
+                .and_then(|v| v.as_array())
+                .map(|deps| deps.iter().all(|d| {
+                    d.as_str()
+                        .map(|s| s == "external" || completed_ids.contains(s))
+                        .unwrap_or(false)
+                }))
+                .unwrap_or(true)
+        })
+        .take(3)
+        .cloned()
+        .collect()
+}
+
+fn orient_nouns(prompt: &str) -> Vec<String> {
+    let stop: &[&str] = &[
+        "the","a","an","to","of","in","on","for","and","or","is","are","was","were",
+        "be","been","being","do","does","did","have","has","had","i","you","we","they",
+        "it","this","that","these","those","with","from","as","at","by","but","if",
+        "then","so","can","could","would","should","will","shall","may","might",
+        "please","me","my","our","your","their","his","her",
+    ];
+    let mut words: Vec<String> = prompt
+        .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+        .filter(|w| w.len() > 2)
+        .filter(|w| {
+            let lower = w.to_lowercase();
+            !stop.contains(&lower.as_str())
+        })
+        .map(|s| s.to_string())
+        .collect();
+    words.sort();
+    words.dedup();
+    words.truncate(5);
+    words
+}
+
+fn read_last_prompt() -> String {
+    let p = super::gm_dir().join("last-prompt.txt");
+    let ps = p.to_string_lossy().to_string();
+    pkfs::read_to_string(&ps).unwrap_or_default()
+}
+
 pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     let mut session_id_opt: Option<String> = None;
@@ -122,17 +179,22 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let prd_pending = prd_pending_count(&prd_items);
     let next = next_phase_hint(&phase);
 
-    let query = prd_items.iter()
+    let prompt_query = {
+        let p = read_last_prompt();
+        if p.is_empty() { String::new() } else { p.chars().take(400).collect() }
+    };
+    let prd_subject_query = prd_items.iter()
         .find(|it| {
             let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
             status != "done" && status != "complete" && status != "completed"
         })
         .and_then(|it| it.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .unwrap_or_default();
+    let query = if !prompt_query.is_empty() { prompt_query } else { prd_subject_query };
     let recall_hits = if query.is_empty() {
         serde_json::Value::Array(Vec::new())
     } else {
-        recall::recall_hits(&query, 3)
+        recall::recall_hits(&query, 5)
     };
 
     let update_available = read_update_available();
@@ -146,14 +208,26 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
     let should_scan = should_residual_scan(prd_pending, running_tasks_count);
 
+    let prompt = read_last_prompt();
+    let nouns = orient_nouns(&prompt);
+    let wave = ready_wave(&prd_items);
+    let mutables_pending_count = match &mutables_pending {
+        serde_json::Value::Array(a) => a.len(),
+        _ => 0,
+    };
+
     let payload = json!({
         "phase": phase,
         "instruction": instruction,
         "mutables_pending": mutables_pending,
+        "mutables_pending_count": mutables_pending_count,
+        "epistemic_gap": mutables_pending_count,
         "prd_items": prd_items,
         "prd_pending_count": prd_pending,
         "next_phase_hint": next,
         "recall_hits": recall_hits,
+        "orient_nouns": nouns,
+        "ready_wave": wave,
         "update_available": update_available,
         "running_tasks": running_tasks,
         "open_browser_sessions": open_browser_sessions,

@@ -146,6 +146,9 @@ mod wasm_hooks {
         clear_marker("residual-check-fired");
         write_marker("needs-gm");
         let prompt = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+        if !prompt.is_empty() {
+            let _ = host_write(&path_for("last-prompt.txt"), prompt);
+        }
         let mut ctx = String::from("Invoke Skill(gm:gm) first. The gate enforces this.\n");
         if !prompt.is_empty() {
             ctx.push_str(&format!("\nUser prompt: {}\n", prompt.chars().take(280).collect::<String>()));
