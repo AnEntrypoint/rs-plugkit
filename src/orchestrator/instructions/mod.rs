@@ -205,6 +205,11 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         let _ = super::state::write_state(&st);
     }
 
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::poll_detect::scan_turn_entry("");
+    }
+
     let instruction = get_instruction(&phase);
     let mutables_pending = mutables::pending_detailed();
     let prd_items = prd_items_json();

@@ -22,6 +22,9 @@ pub mod gates;
 #[cfg(target_arch = "wasm32")]
 pub mod browser_witness;
 
+#[cfg(target_arch = "wasm32")]
+pub mod poll_detect;
+
 pub mod pkfs;
 pub mod orchestrator;
 pub mod filter;
