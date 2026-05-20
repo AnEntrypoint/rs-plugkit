@@ -1,38 +1,34 @@
 pub const TEXT: &str = r#"# VERIFY — L3 trajectory; emit transition iff convergent
 
-COMPLETE is earned. Trajectory classifier reads the chain's 4-observation window:
+COMPLETE is earned. The four-observation window:
 
 ```
 [worktree-clean] [remote-pushed] [prd-empty] [mutables-witnessed]
 ```
 
-All-four-true is the convergence criterion — state Open → emit transition to COMPLETE. Any false → defer, hold, or regress.
+All-four-true is the convergence criterion; state Open → emit transition. Any false defers, holds, or regresses.
 
 ## CI is the build
 
-Push triggers the matrix. Local cargo proves one platform; CI proves all. Watch with `gh run list --branch <branch> --limit 3 --json status,conclusion,name`; on red, root-cause and re-push. Toolchain skew is a divergent observation that holds trajectory, not a stop condition.
+Local proof covers one platform; the build matrix covers all. The push IS the validation dispatch. A red run is a divergent observation that holds the trajectory at VERIFY until the cause is named and the next push lands green. Toolchain skew is an observation to converge, not a stop condition.
 
-## One integration test
+## Integration witness
 
-`test.js` at root, 200-line cap, real services only. VERIFY runs it. Failure regresses to EXECUTE — classifier reads `recursive`, chain snakes back. Declaring done past `recursive` violates L3.
+`test.js` at project root, 200-line ceiling, real services only. Its passage is the integration witness; its failure regresses to EXECUTE. The classifier reading `recursive` means the cover was incomplete; the chain snakes back, it does not narrate done past the signal.
 
-## Residual scan — trajectory window
+## Residual-scan as the gate
 
-Before transitioning to COMPLETE, dispatch `residual-scan`. Reads PRD pending count, open browser sessions, dirty tree, untracked docs; either fires the four-check pass or returns a residual list. Reachable in-spirit residuals expand the PRD and run — `recursive` reading meant cover was incomplete. `.gm/residual-check-fired` marker enforces one-shot per stop window.
+Before COMPLETE, `residual-scan` examines the chain's open surface (PRD pending count, browser sessions, dirty tree, untracked artifacts). A non-empty result is the trajectory window reading non-convergent — the agent's recourse is to expand the PRD with the reachable in-spirit residual and re-execute, not to declare done. The marker is one-shot per stop window; the scan is the gate, not a formality.
 
-## Mutable witness — not checkmarks
+## Witness over claim
 
-`mutable-resolve` requires `witness_evidence` ∈ {file:line, codesearch hit, exec snippet}. Prose ending in `✓` is rejected on add. "Verified all mutables ✓ ✓ ✓" without dispatched resolves is self-declared completion, never a witness. Each ✓ in a final-message summary IS an unfired `mutable-resolve` — fire it before claiming done.
+Every mutable in the closing PRD slice must carry `witness_evidence` of the concrete form the verb admits (`file:line`, codesearch hit, exec snippet). The orchestrator hard-rejects narrative resolution at the dispatch boundary; a row that reads as resolved in the response but is not resolved in the store is the unfired dispatch the agent must complete.
 
-## Self-declared complete is the failure
+## Completion is a verb output, not a response composition
 
-"Session Complete", "Work Accomplished", "Status: deployable" written into the response without `transition` to COMPLETE having dispatched IS the close-by-narrative the orchestrator hard-rejects. Broken watcher → fix the watcher; not a license to narrate done.
-
-## Closure Anti-Shapes
-
-See entry. At VERIFY: committed work + named out-of-spirit residuals must equal the witnessable closure. Gap = cover not maximal → re-enter PLAN.
+The chain enters COMPLETE when `transition` returns the COMPLETE phase. The state of the chain is what the orchestrator says it is. A response that asserts completion without the verb's emission has only described an outcome — the closure trajectory is in the dispatched state, not the prose.
 
 ## Dispatch
 
-`transition` to COMPLETE only when all four observations are true. Orchestrator hard-rejects transition if any mutable or PRD item is open.
+`transition` to COMPLETE only when the four-observation window is fully true. The orchestrator hard-rejects the transition while any mutable or PRD item is open.
 "#;
