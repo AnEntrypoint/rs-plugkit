@@ -1,24 +1,26 @@
-pub const TEXT: &str = r#"# EMIT
+pub const TEXT: &str = r#"# EMIT — Gate 3 audit on disk
 
 Intent becomes artifact. The whole covering family lands, not a representative subset.
 
-## Read Before Write
+## Read Before Write — distance check
 
-Read the target path first. A diff against an unread file is a diff against a stale model. Mismatch → snake to PLAN.
+Read the target path first. A diff against an unread file is a diff against a stale model — the candidate mutation is being measured against an imagined baseline, not the real one. Mismatch → snake to PLAN. This is the disk-side distance check: the file as it is now is the goal-relative reference; your write is the mutation; the post-write Read is the audit.
 
 ## Fresh Index
 
-Codeinsight and search outputs feed EMIT only from a freshly-completed index. Digest match against the live filesystem or no result.
+Codeinsight and search outputs feed EMIT only from a freshly-completed index. Digest match against the live filesystem or no result. Emitting from an unverified index is bluffing the cost-gate — the agent reads stale output as ground truth and acts on a state that no longer exists.
 
-## Write Then Verify
+## Write Then Verify — central store + checksum
 
 One Edit or Write per artifact. After the write, Read the file from disk and assert the change is present. The verified disk state is the witness, not the green tool call. Discrepancy → fix at root, re-emit, re-verify.
 
-Artifacts the PRD names. Closing narrative goes in the commit message and the next `memorize-fire`.
+Artifacts the PRD names. Closing narrative goes in the commit message and the next `memorize-fire`. Nowhere else.
 
-## No Status Summaries, No Spec-Instead-of-Implementation
+## Closure Rules
 
-"Session Complete: <title>" followed by a checkmark list ("✅ Work Accomplished", "📋 Key Findings", "📁 Deliverables") is the forced-closure anti-shape. Effort estimates ("Phase 1: 4-6 hours, Phase 2: 8-12 hours") as grounds to stop are the same shape. The user asked for a thing built; emitting a spec or a roadmap instead of the thing is shipping a smaller-than-necessary slice. Architecture skeletons that "frame Phase 1" without rendering are stubs by the Nothing Fake rule. Files named `*-SPEC.md`, `*-SUMMARY.md`, `*-ROADMAP.md`, `*-PLAN.md`, `TERRAIN-EXTRACTION-SPEC.md`, `SESSION-SUMMARY.md`, `IMPLEMENTATION-NOTES.md` are unsolicited docs at project root; do not create them. The closure narrative belongs in the commit message and `memorize-fire` only. If the watcher is broken, surface the bootstrap error and reboot — do not "document what was accomplished directly" as a substitute for finishing the chain.
+See entry. The shape that fires hardest at EMIT: unsolicited docs. The literal regex of forbidden filenames at project root, `docs/`, or anywhere: `(?i)(SESSION|IMPLEMENTATION|TERRAIN|<COMPONENT>)-(SPEC|SUMMARY|PLAN|ROADMAP|STATUS|NOTES|COMPLETE)\.(md|txt)$` and variants like `START-HERE.md`, `COMPLETED.md`, `SUMMARY.txt`. The commit message + `memorize-fire` are the only sanctioned destinations for closure narrative.
+
+"✅ Work Accomplished / 📋 Key Findings / 📁 Deliverables / Session Complete" prose composed in lieu of writing the artifact is forced closure. Effort estimates as stop-grounds ("Phase 1: 4-6h, Phase 2: 8-12h") are the same shape — the chain is COMPLETE when plugkit says it is, never when the agent narrates it.
 
 ## Dispatch
 
