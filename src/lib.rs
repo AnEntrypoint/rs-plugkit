@@ -7,6 +7,9 @@ pub mod libsql_wasm;
 #[cfg(target_arch = "wasm32")]
 pub mod code_index;
 
+#[cfg(target_arch = "wasm32")]
+pub mod pipeline;
+
 pub mod pkfs;
 pub mod orchestrator;
 pub mod filter;
