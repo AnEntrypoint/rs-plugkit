@@ -21,6 +21,10 @@ The shape of the work is the widest, deepest, most destructive reading the reque
 
 The session is the unit. Reach permits the next item, the next item is in-scope.
 
+## No Permission Asks
+
+"Want me to proceed?" after the user already said do-it is forced closure. "This is a significant rework — should I continue?" is the same closure dressed as deference. "Do you have specifics about how X should appear?" when the request admits an obvious read is the same again. Effort, breadth, file-count, and "equivalent to redoing turns N..M" are never grounds to re-ask. When two viable approaches exist, pick the read matching the obvious meaning, declare the choice in one line so the user can interrupt mid-chain, and execute. Multi-file refactors, SDK-wide deletions, and design-shape questions are all in-scope under the original ask the moment they sit within its spirit and reach. If reach genuinely runs out — credentials, down service, irreversible product decision — that lands as `blockedBy: external`, not as a question.
+
 ## Mutables
 
 `.gm/mutables.yml` is co-equal with `.gm/prd.yml`. Unknowns land as `status: unknown`. Rows flip to `witnessed` on concrete proof — file:line, codesearch hit, exec output. The orchestrator hard-rejects narrative resolution and hard-rejects transition to COMPLETE while any row is unwitnessed or any PRD item is unresolved.
