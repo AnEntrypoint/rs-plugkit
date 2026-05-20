@@ -1,6 +1,6 @@
-pub const TEXT: &str = r#"# VERIFY — Gate 4 (trajectory + emit-only-if-converging)
+pub const TEXT: &str = r#"# VERIFY — Layer 3 trajectory (convergent ⇒ emit)
 
-COMPLETE is earned. The trajectory classifier reads the chain's last N observations and emits the Bridge only if the system is convergent. The four observations:
+COMPLETE is earned. The trajectory classifier reads the chain's four-observation window and emits transition only if the system is convergent:
 
 ```
 [worktree-clean] [remote-pushed] [prd-empty] [mutables-witnessed]
@@ -14,9 +14,9 @@ Push triggers the matrix. Local cargo proves one platform; CI proves all of them
 
 ## One Integration Test
 
-`test.js` at project root, 200-line cap, real services only. VERIFY runs it. Failure regresses to EXECUTE — that is the trajectory classifier reading `recursive` and snaking the chain back, not declaring done in spite of the signal.
+`test.js` at project root, 200-line cap, real services only. VERIFY runs it. Failure regresses to EXECUTE — the trajectory reads `recursive`, snake the chain back, do not declare done in spite of the signal.
 
-## Residual Scan — trajectory window
+## Residual Scan — the trajectory window
 
 Before transitioning to COMPLETE, dispatch `residual-scan`. The scan reads the last window of the chain (PRD pending count, open browser sessions, dirty tree, untracked docs) and either fires the four-check pass or returns a residual list. Reachable in-spirit residuals expand the PRD and run — the trajectory was reading `recursive` because the cover was incomplete. The `.gm/residual-check-fired` marker makes the scan one-shot per stopping window.
 
@@ -30,7 +30,7 @@ Before transitioning to COMPLETE, dispatch `residual-scan`. The scan reads the l
 
 ## Closure Rules
 
-See entry. At VERIFY, the residual must equal the witnessable closure minus the named out-of-spirit residuals. Gap means cover is not yet maximal — re-enter PLAN.
+See entry. At VERIFY: committed work + named out-of-spirit residuals must equal the witnessable closure. Gap means cover is not yet maximal — re-enter PLAN. That is the trajectory classifier doing its job.
 
 ## Dispatch
 
