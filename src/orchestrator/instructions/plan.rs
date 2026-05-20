@@ -1,33 +1,26 @@
 pub const TEXT: &str = r#"# PLAN — L1 baseline probe + L2 covering family
 
-Prior memory loads on entry. Search before naming an unknown absent. Check before designing what already exists.
+Prior memory loads on entry.
 
 ## ORIENT — L1 baseline
 
-Parallel fan-out: 3–5 `recall` + 3–5 `codesearch` in a single message against the request's nouns. Hits = empirical baseline (prior best-observed knowledge); misses = fresh ground. Skip → operate blind → pay duplicated-discovery cost + disagree-with-prior-witness risk.
+The first dispatch of any non-trivial turn is a parallel fan-out of `recall` and `codesearch` against the request's nouns. Hits constitute the empirical baseline; misses delimit fresh ground. Operations whose marginal cost is unmeasured against existing context are unevaluated; an agent that proceeds without orient commits to an envelope it has not observed.
 
-```
-in/recall/{1..N}.txt        "<noun K>"
-in/codesearch/{1..N}.txt    "<phrase K>"
-```
+`in/recall/{N}.txt` and `in/codesearch/{N}.txt` are the surfaces. Fan-out is parallel writes in a single message; reads in the next.
 
 ## Cover — L2 maximal closure
 
-Shape := closure of the destructive transform the request admits over this session. Enumerate the **covering family** (every reachable subset) into `.gm/prd.yml` with explicit dependency DAG for parallel execution. Session is the unit; reach permits the next node, the next node is in-scope. Residuals in-spirit and reachable expand the PRD silently — declare the read in one line; the chain continues.
+The PRD is the central store for plan-items (`|F|=1`). Its content is the closure of the destructive transform the request admits over this session, enumerated as a dependency DAG. Session is the unit; reach permits the next node; the next node is in-scope.
 
-`.gm/prd.yml` is the central store. `|F|=1`: every plan-item lands here, no parallel TODO lists in the response body, no inline checklists. PRD items proposing unrequested `.md`/`.txt` rejected on add.
+A plan-item that names a smaller-than-necessary slice while a larger reachable shape exists is non-monotonic — it ships a prefix and externalizes the remainder. Partition only along genuine dependency edges; partition along schedule ("Phase N") is L3 deferral, not planning. In-spirit reachable residuals expand the PRD silently; the read declares itself in one line.
 
-**Maturity-first invariant**: a PRD row that ships a smaller-than-necessary slice while a larger reachable shape exists is distributed refusal — re-emit as the closure, not the scaffold. "Phase 1 of N" partitioning of single-session work is L3 deferral, not planning.
+The response body is not a planning surface. Inline TODO lists violate `|F|=1` and produce state the orchestrator cannot reconcile.
 
 ## Mutables
 
-`.gm/mutables.yml` co-equal with PRD. Unknowns enter at `status: unknown`. Transition to `witnessed` only on concrete witness: `file:line`, codesearch hit, exec output snippet. Orchestrator hard-rejects narrative resolution and hard-rejects COMPLETE while any row is unwitnessed or any PRD item is unresolved.
-
-## Closure Anti-Shapes
-
-See entry. At PLAN exit boundary, the tempting failure is "scope-it-first instead of build-it" — same shape as `<COMPONENT>-SPEC.md` instead of the implementation.
+Unknowns enter `.gm/mutables.yml` at `status: unknown`. Transition to `witnessed` requires concrete witness (`file:line`, codesearch hit, exec output). Narrative resolution is rejected at the verb. Unwitnessed rows block the transition gate.
 
 ## Dispatch
 
-`recall`, `codesearch`, `prd-add`, `mutable-add`, `mutable-resolve`, `transition`. Pack opens → PRD writes → mutables file → transition fires.
+`recall`, `codesearch`, `prd-add`, `mutable-add`, `mutable-resolve`, `transition`.
 "#;

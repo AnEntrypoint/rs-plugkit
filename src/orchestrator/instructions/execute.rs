@@ -1,38 +1,28 @@
 pub const TEXT: &str = r#"# EXECUTE — L3 distance + audit
 
-Real input → real code → real output, witnessed. Wider beats narrower; deeper beats shallower; the destructive shape ships when the request admits it.
+Real input → real code → real output, witnessed. The destructive shape ships when the request admits it.
 
 ## Single-writer mutation surface
 
-Every mutation routes through one auditable structure: PRD rows (`prd-resolve`), mutables (`mutable-resolve`), KV memos (`memorize-fire`). No parallel state, no inline response checklists, no "I'll track this in chat." Audit tuple per accepted write: `(id, hash, ts)` where `hash` is the file:line or output snippet that witnessed it.
-
-`mutable-resolve` requires `witness_evidence` ∈ {file:line, codesearch hit, exec snippet}. Else rejected. Resolve auto-fires memorize; the witness persists into the recall index.
+Mutation routes through PRD rows, mutables, and KV memos. Audit tuple `(id, hash, ts)` per accepted write where `hash` is the witness — a `file:line`, codesearch hit, or exec snippet that observed the change. Resolution without witness is rejected at the verb; the recall index does not see narrative claims.
 
 ## Witness as Lyapunov check
 
-Each PRD item resolves through a witnessed call. The witness IS the distance measurement: does the produced artifact reduce `d(state, goal)`? Stubs, mocks, fixture-only paths, "always succeeds" returns, and "skeleton frameworks for Phase N" all sit at high distance — L3 rejects, *not* in-progress work.
+The witness IS the distance measurement: the artifact's existence in observable state reduces `d(state, goal)`. An artifact that exists only in the agent's response prose, or that returns success without doing the work it represents, sits at high distance regardless of how it is described — it is rejected by L3 even when it passes type-check or returns truthy.
 
-Browser-running code requires a live `browser` dispatch in the same turn: boot the surface, navigate, `page.evaluate` the invariant, capture the return. A passing `node` test is not a witness for browser code.
-
-`browser` verb is the sole sanctioned surface. `in/browser/<N>.txt` carries raw JS; globals `page`, `snapshot`, `screenshotWithAccessibilityLabels`, `state`. `session new` / `session list` / `session close <id>` manage lifecycle.
+Code that runs in a non-default execution surface must be witnessed on that surface in the same turn. A passing test on surface A is not a witness for code that runs on surface B. The harness's single sanctioned interactive surface for browser code is the `browser` verb (`in/browser/<N>.txt`, raw JS body, globals `page`/`snapshot`/`screenshotWithAccessibilityLabels`/`state`; `session new|list|close <id>` manage lifecycle).
 
 ## Surface — surprise → mutable
 
-Issues surfaced during work become PRD items the same turn and resolve before the gate. Pre-existing breaks, lockfile drift, suppressed errors, stale generated files — surface, name, fix at root, re-witness. Unexpected output is a new mutable, never noise. Snake back to PLAN, name, witness, resume.
-
-Genuine external blocks → PRD `blockedBy: external`. Not questions.
+State observed during work that diverges from the PRD's assumed shape enters the system as a new mutable, not as background noise. The orchestrator does not distinguish "noticed in passing" from "named target" — both are unknowns the chain must witness. The agent's recourse is the same: name, witness, resume; never absorb. External blocks lacking a reachable witness land as `blockedBy: external` on the PRD row.
 
 ## Maturity-first invariant
 
-Ship the closure of the transform, not the prefix. "I'll do Phase 1 now, Phase 2 next session" externalizes completion cost — non-monotonic, L3-rejected. If the closure exceeds session reach, that's a Maximal Cover decomposition (PRD-DAG enumeration), not a scaffold + IOU. The first artifact emitted IS the mature artifact.
-
-## Closure Anti-Shapes
-
-See entry. At EXECUTE: spec-instead-of-impl when work feels large; "Architecture Skeleton" when witness is hard; watcher-broken-excuse when dispatch fails. Each substitutes narrative for the audited mutation. Surface, fix at root, re-dispatch.
+The first emit is the closure of the transform. A scaffold + IOU for future-session work shifts completion into implicit state; the next session reconstructs it from prose, which is unaudited and unreliable. When closure exceeds session reach, decompose along dependency edges (Maximal Cover DAG), never along schedule. Each DAG node is a closed transform at its own scale; the carry-over is the dependency relation, not the maturity gradient.
 
 ## Memorize
 
-Every memo through `memorize-fire`. Native memory surfaces are invisible to recall.
+`memorize-fire` is the only surface that enters the recall index. The harness's native memory affordances do not.
 
 ## Dispatch
 
