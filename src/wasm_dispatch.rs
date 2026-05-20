@@ -628,6 +628,14 @@ fn recall_libsql(body: &Value, raw: &str) -> u64 {
     pack(crate::code_index::recall(&query, limit, ns, inline).to_string())
 }
 
+fn filter(body: &Value, raw: &str) -> u64 {
+    let (data, err_msg) = crate::filter::dispatch(body, raw);
+    match err_msg {
+        Some(e) => err("filter", &e),
+        None => ok("filter", data),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
     let verb = read_str(verb_ptr as *const u8, verb_len);
@@ -685,6 +693,7 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "sleep" => sleep(&body),
         "close" => close(&body),
         "kill-port" => kill_port(&body),
+        "filter" => filter(&body, &body_s),
         "forget" => forget(&body),
         "feedback" => feedback(&body),
         "learn-status" => learn_status(&body),
