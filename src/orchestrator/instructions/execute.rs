@@ -22,6 +22,10 @@ Every memo dispatches through `memorize-fire`. The harness's native "save to mem
 
 Pausing the chain on an unknown, or forming a question to the user in-response, fires a `WebSearch` or `WebFetch` pack first. The web carries the fact more often than not.
 
+## No Mid-Chain Questions
+
+A question to the user formed in-response — "want me to proceed?", "this is a significant rework, continue?", "any specifics on how X should appear?" — is the failure mode this phase prevents. The first request was the authorization. Re-asking after the user said do-it is forced closure dressed as deference; effort, breadth, file count, and "equivalent to redoing prior turns" are never grounds. When two viable approaches exist: pick the obvious read, declare the choice in one line so the user can interrupt mid-chain, execute. When reach genuinely runs out: `blockedBy: external` on the PRD row, not a question. The `pause` verb is the only sanctioned escalation, and it fires for destructive-irreversible-uncovered decisions only — not for scope expansion within the spirit of the ask.
+
 ## Mutables
 
 `mutable-resolve` auto-fires memorize on success. `witness_evidence` is file:line, codesearch hit, or exec output snippet. Anything else is rejected.
