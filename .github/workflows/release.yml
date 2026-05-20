@@ -198,7 +198,14 @@ jobs:
             echo "plugkit-wasm@$VER already published; skipping"
             exit 0
           fi
-          npm publish --access public || echo "npm publish failed (likely OTP requirement); continuing cascade"
+          if npm publish --access public 2>npm-publish-err.log; then
+            echo "plugkit-wasm@$VER published to npm"
+          else
+            ERR=$(cat npm-publish-err.log | tr '\n' ' ' | head -c 400)
+            echo "::warning title=npm publish failed for plugkit-wasm@$VER::$ERR"
+            echo "npm publish failed; gh-releases path remains canonical, cascade continues"
+            cat npm-publish-err.log
+          fi
 
       - name: Bump gm-starter metadata
         env:
