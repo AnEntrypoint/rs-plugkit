@@ -1,34 +1,36 @@
 pub const TEXT: &str = r#"# VERIFY
 
-L3 trajectory; emit transition iff convergent.
+YOU are the state machine. Plugkit is the synchronous library serving this prose; advancing the chain is your dispatch, not its action. Plugkit does not validate in the background — you read the four observations and you decide whether to dispatch `transition`.
+
+L3 trajectory; you dispatch `transition` iff convergent.
 
 ```
 [worktree-clean] [remote-pushed] [prd-empty] [mutables-witnessed]
 ```
 
-All-four-true = convergence criterion → emit transition. Any false defers, holds, or regresses.
+When you observe all four true, you have convergence criterion → you dispatch `transition`. Any false defers, holds, or you regress.
 
 ## CI
 
-Push IS the validation dispatch. Local proof covers one platform; matrix covers all. Red = divergent observation holding trajectory until cause named and next push green. Toolchain skew = observation to converge, not stop.
+The push you make IS the validation dispatch. Your local proof covers one platform; matrix covers all. Red = divergent observation that holds your trajectory until you name the cause and dispatch the next push green. Toolchain skew = observation for you to converge, not stop.
 
 ## Integration witness
 
-`test.js` at root, 200-line ceiling, real services only. Pass = integration witness; fail → EXECUTE. Classifier reading `recursive` = cover incomplete; chain snakes back, does not narrate past signal.
+You write `test.js` at root, 200-line ceiling, real services only. Pass = your integration witness; on fail you dispatch `transition` back to EXECUTE. If the classifier reads `recursive`, your cover is incomplete; you snake the chain back, you do not narrate past signal.
 
 ## Residual-scan
 
-Before COMPLETE. Examines open surface: PRD pending, browser sessions, dirty tree, untracked artifacts. Non-empty = trajectory non-convergent → expand PRD with reachable in-spirit residual, re-execute. One-shot per stop window via marker.
+You run residual-scan before COMPLETE by dispatching `residual-scan`. The verb examines your open surface: PRD pending, browser sessions, dirty tree, untracked artifacts. Non-empty = your trajectory non-convergent → you expand PRD with reachable in-spirit residual via `prd-add`, you re-execute. One-shot per stop window via marker — plugkit refuses to re-run inside the same window.
 
 ## Witness over claim
 
-Every mutable in closing slice carries `witness_evidence` of the form the verb admits. Resolved-in-response without resolved-in-store = unfired dispatch.
+You attach `witness_evidence` of the form the verb admits to every mutable in your closing slice. Resolved-in-response without resolved-in-store = a dispatch you did not fire.
 
 ## Completion
 
-Chain enters COMPLETE when `transition` returns COMPLETE phase. State of the chain is what the orchestrator says it is. Response asserting completion without the verb's emission has only described outcome.
+The chain enters COMPLETE when your dispatched `transition` returns COMPLETE phase. The state of the chain is what plugkit's on-disk state file says it is, and that file moves only when you write a `transition` request. Asserting completion in your response without firing the verb is description only.
 
 ## Dispatch
 
-`transition` to COMPLETE only when four-observation window fully true. Orchestrator hard-rejects transition while any mutable or PRD item open.
+You dispatch `transition` to COMPLETE only when the four-observation window is fully true. Plugkit's transition handler hard-rejects your dispatch while any mutable or PRD item is open.
 "#;
