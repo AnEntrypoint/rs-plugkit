@@ -211,10 +211,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let prompt = read_last_prompt();
     let nouns = orient_nouns(&prompt);
     let wave = ready_wave(&prd_items);
-    let mutables_pending_count = match &mutables_pending {
-        serde_json::Value::Array(a) => a.len(),
-        _ => 0,
-    };
+    let mutables_pending_count = mutables_pending.len();
 
     let payload = json!({
         "phase": phase,
