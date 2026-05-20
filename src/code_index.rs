@@ -9,6 +9,7 @@ use crate::wasm_dispatch::{host_read, unpack_to_value_pub};
 extern "C" {
     fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
     fn host_vec_embed(text_ptr: *const u8, text_len: u32) -> u64;
+    fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
 }
 
 fn lang_for_ext(ext: &str) -> Option<(&'static str, Language)> {
@@ -214,6 +215,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
     let mut indexed = 0;
     let mut chunked = 0;
     let mut embedded = 0;
+    let mut skipped_no_embed = 0u32;
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     for fp in &files {
         let dot = fp.rfind('.');
@@ -226,12 +228,19 @@ pub fn index(root: &str, max_files: usize) -> Value {
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
         let chunks = extract_chunks(fp, &content, lang);
         for (kind, name, ls, le, body) in chunks {
-            chunked += 1;
             let emb_blob = embed_text(&format!("{} {}", name, &body[..body.len().min(512)]));
-            let embedding_sql = match &emb_blob {
-                Some(v) => { embedded += 1; format!("vector('{}')", vec_to_json_literal(v)) },
-                None => "NULL".to_string(),
+            let v = match emb_blob {
+                Some(v) => v,
+                None => {
+                    skipped_no_embed += 1;
+                    let msg = format!("code_index: embed failed for {}:{} ({}); skipping chunk to avoid NULL-embedding row", fp, ls, name);
+                    let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+                    continue;
+                }
             };
+            chunked += 1;
+            embedded += 1;
+            let embedding_sql = format!("vector('{}')", vec_to_json_literal(&v));
             let sql = format!(
                 "INSERT INTO code_chunks(path, kind, name, line_start, line_end, body, embedding) VALUES('{}','{}','{}',{},{},'{}',{})",
                 sql_quote(fp), sql_quote(&kind), sql_quote(&name), ls, le, sql_quote(&body[..body.len().min(8192)]), embedding_sql
@@ -245,6 +254,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
         "files_indexed": indexed,
         "chunks": chunked,
         "embedded": embedded,
+        "skipped_no_embed": skipped_no_embed,
         "by_language": langs,
     })
 }
@@ -291,16 +301,21 @@ pub fn memorize_at(text: &str, namespace: &str, inline_embedding: Option<&Value>
         Err(e) => return json!({ "ok": false, "error": e }),
     };
     let emb = inline_embedding.and_then(json_to_f32_vec).or_else(|| embed_text(text));
-    let embedding_sql = match &emb {
-        Some(v) => format!("vector('{}')", vec_to_json_literal(v)),
-        None => "NULL".to_string(),
+    let v = match emb {
+        Some(v) => v,
+        None => {
+            let msg = format!("memorize_at: embed_text failed for namespace={}; refusing to insert row with NULL embedding", namespace);
+            let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+            return json!({ "ok": false, "error": msg });
+        }
     };
+    let embedding_sql = format!("vector('{}')", vec_to_json_literal(&v));
     let sql = format!(
         "INSERT INTO memories(namespace, text, ts, embedding) VALUES('{}','{}',{},{})",
         sql_quote(namespace), sql_quote(text), unsafe { crate::wasm_dispatch::host_now_ms() }, embedding_sql
     );
     match libsql_wasm::exec(&db_name, &sql) {
-        Ok(()) => json!({ "ok": true, "embedded": emb.is_some(), "inline": inline_embedding.is_some(), "project_path": project_path }),
+        Ok(()) => json!({ "ok": true, "embedded": true, "inline": inline_embedding.is_some(), "project_path": project_path }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }

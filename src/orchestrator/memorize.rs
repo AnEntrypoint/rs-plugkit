@@ -83,28 +83,53 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     let emb_packed = unsafe {
         crate::wasm_dispatch::host_vec_embed(text.as_ptr(), text.len() as u32)
     };
-    let embedded = if emb_packed != 0 {
-        let vec_ns = format!("{}-vec", namespace);
-        if let Some(emb_str) = crate::wasm_dispatch::unpack_to_value_pub(emb_packed).as_str().map(String::from)
-            .or_else(|| Some(crate::wasm_dispatch::unpack_to_value_pub(emb_packed).to_string()))
-        {
-            if !emb_str.is_empty() && emb_str != "null" {
-                let _ = unsafe {
-                    crate::wasm_dispatch::host_kv_put(
-                        vec_ns.as_ptr(), vec_ns.len() as u32,
-                        key.as_ptr(), key.len() as u32,
-                        emb_str.as_ptr(), emb_str.len() as u32,
-                    )
-                };
-                true
-            } else { false }
-        } else { false }
-    } else { false };
+    let emb_str_opt: Option<String> = if emb_packed != 0 {
+        let v = crate::wasm_dispatch::unpack_to_value_pub(emb_packed);
+        let s = v.as_str().map(String::from).unwrap_or_else(|| v.to_string());
+        if !s.is_empty() && s != "null" { Some(s) } else { None }
+    } else { None };
+    let emb_str = match emb_str_opt {
+        Some(s) => s,
+        None => {
+            let tombstone = format!("__deleted__{}", now);
+            let _ = unsafe {
+                crate::wasm_dispatch::host_kv_put(
+                    namespace.as_ptr(), namespace.len() as u32,
+                    key.as_ptr(), key.len() as u32,
+                    tombstone.as_ptr(), tombstone.len() as u32,
+                )
+            };
+            let msg = format!("memorize: host_vec_embed failed for key={}; rolled back text row; refusing silent-NULL-embedding insert", key);
+            let _ = unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
+            return (String::new(), msg, 1);
+        }
+    };
+    let vec_ns = format!("{}-vec", namespace);
+    let vrc = unsafe {
+        crate::wasm_dispatch::host_kv_put(
+            vec_ns.as_ptr(), vec_ns.len() as u32,
+            key.as_ptr(), key.len() as u32,
+            emb_str.as_ptr(), emb_str.len() as u32,
+        )
+    };
+    if vrc == 0 {
+        let tombstone = format!("__deleted__{}", now);
+        let _ = unsafe {
+            crate::wasm_dispatch::host_kv_put(
+                namespace.as_ptr(), namespace.len() as u32,
+                key.as_ptr(), key.len() as u32,
+                tombstone.as_ptr(), tombstone.len() as u32,
+            )
+        };
+        let msg = format!("memorize: vector kv_put failed for key={}; rolled back text row", key);
+        let _ = unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
+        return (String::new(), msg, 1);
+    }
     let payload = serde_json::json!({
         "ok": true,
         "key": key,
         "namespace": namespace,
-        "embedded": embedded,
+        "embedded": true,
         "bytes": text.len(),
     });
     (payload.to_string(), String::new(), 0)
