@@ -43,7 +43,7 @@ fetch "$TOK_URL" "$TOK_PATH" "$TOK_SHA"
 
 if [ ! -s "$F16_PATH" ] || [ "$F32_PATH" -nt "$F16_PATH" ]; then
   echo "converting $F32_PATH (F32) -> $F16_PATH (F16)"
-  pip install --quiet safetensors torch --index-url https://download.pytorch.org/whl/cpu || pip install --quiet safetensors torch
+  pip install --quiet safetensors numpy torch --extra-index-url https://download.pytorch.org/whl/cpu
   python3 - "$F32_PATH" "$F16_PATH" <<'PY'
 import sys
 from safetensors.torch import load_file, save_file
