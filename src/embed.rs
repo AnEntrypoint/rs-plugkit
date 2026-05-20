@@ -61,7 +61,7 @@ fn init_ctx() -> Result<EmbedCtx, String> {
 
     let device = Device::Cpu;
 
-    let vb = VarBuilder::from_slice_safetensors(MODEL_SAFETENSORS, DType::F32, &device)
+    let vb = VarBuilder::from_slice_safetensors(MODEL_SAFETENSORS, DType::F16, &device)
         .map_err(|e| format!("varbuilder safetensors: {}", e))?;
 
     let config = minilm_config();
@@ -105,7 +105,8 @@ pub fn embed_text(text: &str) -> Option<Vec<f32>> {
     let mask_t = Tensor::from_vec(mask.clone(), (1, seq_len), &c.device).ok()?;
     let token_type_ids = Tensor::zeros((1, seq_len), DType::U32, &c.device).ok()?;
 
-    let hidden = c.model.forward(&ids_t, &token_type_ids, Some(&mask_t)).ok()?;
+    let hidden_raw = c.model.forward(&ids_t, &token_type_ids, Some(&mask_t)).ok()?;
+    let hidden = hidden_raw.to_dtype(DType::F32).ok()?;
 
     let mask_f = mask_t.to_dtype(DType::F32).ok()?;
     let mask_e = mask_f.unsqueeze(2).ok()?;
