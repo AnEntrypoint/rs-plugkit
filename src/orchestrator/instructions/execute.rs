@@ -1,30 +1,30 @@
-pub const TEXT: &str = r#"# EXECUTE — L3 distance + audit
+pub const TEXT: &str = r#"# EXECUTE
 
-Real input → real code → real output, witnessed. The destructive shape ships when the request admits it.
+L3 distance + audit. Real input → real code → real output, witnessed.
 
-## Single-writer mutation surface
+## Surfaces
 
-Mutation routes through PRD rows, mutables, and KV memos. Audit tuple `(id, hash, ts)` per accepted write where `hash` is the witness — a `file:line`, codesearch hit, or exec snippet that observed the change. Resolution without witness is rejected at the verb; the recall index does not see narrative claims.
+Mutation routes through PRD rows, mutables, KV memos. Audit tuple `(id, hash, ts)` per accepted write; `hash` = witness (`file:line`, codesearch hit, exec snippet). Resolution without witness rejected at verb. Single-dispatch resolve: `{mutable_id, witness_evidence}` body — inline evidence applied to row before status flip.
 
-## Witness as Lyapunov check
+## Witness
 
-The witness IS the distance measurement: the artifact's existence in observable state reduces `d(state, goal)`. An artifact that exists only in the agent's response prose, or that returns success without doing the work it represents, sits at high distance regardless of how it is described — it is rejected by L3 even when it passes type-check or returns truthy.
+The witness IS the distance measurement: artifact exists in observable state, `d(state, goal)` decreases. Artifact existing only in response prose, or returning success without doing the work, sits at high distance regardless of structure — rejected by L3.
 
-Code that runs in a non-default execution surface must be witnessed on that surface in the same turn. A passing test on surface A is not a witness for code that runs on surface B. The harness's single sanctioned interactive surface for browser code is the `browser` verb (`in/browser/<N>.txt`, raw JS body, globals `page`/`snapshot`/`screenshotWithAccessibilityLabels`/`state`; `session new|list|close <id>` manage lifecycle).
+Code running on non-default surface witnessed on that surface in the same turn. Passing test on surface A is not witness for code on surface B. Browser surface: `browser` verb (`in/browser/<N>.txt`, raw JS, globals `page`/`snapshot`/`screenshotWithAccessibilityLabels`/`state`; `session new|list|close <id>`).
 
-## Surface — surprise → mutable
+## Surface → mutable
 
-State observed during work that diverges from the PRD's assumed shape enters the system as a new mutable, not as background noise. The orchestrator does not distinguish "noticed in passing" from "named target" — both are unknowns the chain must witness. The agent's recourse is the same: name, witness, resume; never absorb. External blocks lacking a reachable witness land as `blockedBy: external` on the PRD row.
+State observed diverging from PRD's assumed shape enters as new mutable, not background noise. Recourse identical to named target: name, witness, resume. External-block without reachable witness → `blockedBy: external` on PRD row.
 
-## Maturity-first invariant
+## Maturity-first
 
-The first emit is the closure of the transform. A scaffold + IOU for future-session work shifts completion into implicit state; the next session reconstructs it from prose, which is unaudited and unreliable. When closure exceeds session reach, decompose along dependency edges (Maximal Cover DAG), never along schedule. Each DAG node is a closed transform at its own scale; the carry-over is the dependency relation, not the maturity gradient.
+First emit = closure of transform. Scaffold + IOU shifts completion to implicit state. Closure beyond session reach → Maximal Cover DAG (each node a closed transform), never along schedule.
 
 ## Memorize
 
-`memorize-fire` is the only surface that enters the recall index. The harness's native memory affordances do not.
+`memorize-fire` only enters the recall index.
 
 ## Dispatch
 
-Spool every exec. `mutable-resolve` flips rows. `transition` when the PRD slice is closed and every mutable in it is witnessed. New unknown → `transition` back to PLAN.
+Spool every exec. `mutable-resolve` flips rows. `transition` when PRD slice closed and every mutable witnessed. New unknown → `transition` back to PLAN.
 "#;
