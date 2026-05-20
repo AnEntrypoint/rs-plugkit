@@ -85,6 +85,16 @@ fn err(verb: &str, reason: &str) -> u64 {
     pack(json!({ "ok": false, "verb": verb, "error": reason }).to_string())
 }
 
+fn err_json(verb: &str, detail: Value) -> u64 {
+    let mut obj = json!({ "ok": false, "verb": verb });
+    if let Some(map) = detail.as_object() {
+        for (k, v) in map {
+            obj[k] = v.clone();
+        }
+    }
+    pack(obj.to_string())
+}
+
 fn ok(verb: &str, data: Value) -> u64 {
     pack(json!({ "ok": true, "verb": verb, "data": data }).to_string())
 }
@@ -178,7 +188,24 @@ fn exec_js(body: &Value, body_s: &str) -> u64 {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| body_s.to_string());
     if code.is_empty() { return err("exec_js", "code required (provide raw code as body or JSON {code: ...})"); }
-    let opts = body.get("opts").map(|v| v.to_string()).unwrap_or_else(|| "{}".to_string());
+    let timeout_ms = body.get("timeoutMs")
+        .or_else(|| body.get("opts").and_then(|o| o.get("timeoutMs")))
+        .and_then(|v| v.as_u64());
+    let timeout_ms = match timeout_ms {
+        Some(n) if n > 0 => n,
+        _ => return err_json("exec_js", json!({
+            "error": "missing timeoutMs",
+            "required": "positive integer milliseconds",
+            "paper_ref": "§20"
+        })),
+    };
+    let mut opts_obj = body.get("opts").cloned().unwrap_or_else(|| json!({}));
+    if let Some(map) = opts_obj.as_object_mut() {
+        map.insert("timeoutMs".to_string(), json!(timeout_ms));
+    } else {
+        opts_obj = json!({"timeoutMs": timeout_ms});
+    }
+    let opts = opts_obj.to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok("exec_js", Value::String(s)),
@@ -430,7 +457,16 @@ fn shell_exec(body: &Value, body_s: &str, lang: &str) -> u64 {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| body_s.to_string());
     if code.is_empty() { return err(lang, "code required (provide raw code as body or JSON {code: ...})"); }
-    let opts = json!({ "lang": lang }).to_string();
+    let timeout_ms = body.get("timeoutMs").and_then(|v| v.as_u64());
+    let timeout_ms = match timeout_ms {
+        Some(n) if n > 0 => n,
+        _ => return err_json(lang, json!({
+            "error": "missing timeoutMs",
+            "required": "positive integer milliseconds",
+            "paper_ref": "§20"
+        })),
+    };
+    let opts = json!({ "lang": lang, "timeoutMs": timeout_ms }).to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok(lang, Value::String(s)),
