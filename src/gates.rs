@@ -105,6 +105,10 @@ fn mutables_unresolved() -> bool {
     content.contains("status: unknown")
 }
 
+fn worktree_dirty() -> bool {
+    !crate::wasm_dispatch::git_porcelain().trim().is_empty()
+}
+
 fn defer_marker_in(text: &str) -> Option<&'static str> {
     let lower = text.to_lowercase();
     for m in DEFER_MARKERS {
@@ -147,6 +151,14 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
         if host_exists(".gm/mutables.yml") && mutables_unresolved() {
             residuals.push("unresolved mutables present — resolve with witness_evidence before declaring done".into());
+        }
+        if worktree_dirty() {
+            residuals.push("worktree dirty — commit or revert before declaring done; an unpushed delta is an unwitnessed slice".into());
+            log_deviation("push-dirty", "COMPLETE attempted with dirty worktree");
+        }
+        if !host_exists(".gm/residual-check-fired") {
+            residuals.push("residual-scan not fired in this stop window — dispatch residual-scan before COMPLETE".into());
+            log_deviation("complete-without-residual-scan", "");
         }
         if !residuals.is_empty() {
             log_deviation("gate-deny", &format!("stop-gate residuals={}", residuals.len()));

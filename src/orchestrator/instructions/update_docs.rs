@@ -22,7 +22,7 @@ You write one entry per commit you landed this session. The commit message line 
 
 ## Commit and Push
 
-You stage doc updates only — you never bundle them with code changes from earlier phases (you committed those at their own time). One commit, present-tense imperative subject. You push to main. Your push triggers the docs pipeline if the repo has one.
+You stage doc updates only — you never bundle them with code changes from earlier phases (you committed those at their own time). One commit, present-tense imperative subject. Before you push, `git status --porcelain` reads empty; non-empty = uncommitted residual that the push would orphan, and you commit or revert it first. Then you push to main. Your push triggers the docs pipeline if the repo has one. A doc commit stages only paths matching AGENTS.md, CLAUDE.md, README.md, SKILLS.md, CHANGELOG.md, LICENSE*, docs/**, or site/** — any non-doc path in a doc commit is a sign you bundled phases and you split it back out before staging.
 
 ## COMPLETE
 
