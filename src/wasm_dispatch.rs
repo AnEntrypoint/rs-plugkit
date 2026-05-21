@@ -15,6 +15,7 @@ extern "C" {
     pub fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
     pub fn host_kv_query(ns_ptr: *const u8, ns_len: u32, q_ptr: *const u8, q_len: u32) -> u64;
     pub fn host_vec_search(q_ptr: *const u8, q_len: u32, k: u32) -> u64;
+    pub fn host_vec_embed(text_ptr: *const u8, text_len: u32, out_ptr: *mut f32, out_len: u32) -> i32;
     pub fn host_exec_js(code_ptr: *const u8, code_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
     pub fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
     pub fn host_now_ms() -> u64;
@@ -837,11 +838,29 @@ fn git_push(body: &Value) -> u64 {
             "reason": format!("worktree dirty — commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice", branch),
         }).to_string());
     }
-    let push_out = exec_git(&format!("push origin {}", branch));
+    let push_out = exec_git_push(&branch);
     ok("git_push", json!({
         "branch": branch,
         "output": push_out,
     }))
+}
+
+fn exec_git_push(branch: &str) -> String {
+    let code = format!(
+        r#"const {{execSync}} = require('child_process');
+let out = '';
+try {{ out = execSync('git push origin {}', {{ encoding: 'utf8', timeout: 30000 }}); }} catch (e) {{ out = String((e && e.stdout) || '') + String((e && e.stderr) || ''); }}
+process.stdout.write(out);
+"#,
+        branch
+    );
+    let opts = r#"{"timeoutMs":35000}"#;
+    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    let raw = unpack_to_string(packed).unwrap_or_default();
+    if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+        if let Some(s) = v.get("stdout").and_then(|x| x.as_str()) { return s.to_string(); }
+    }
+    raw
 }
 
 fn filter(body: &Value, raw: &str) -> u64 {
