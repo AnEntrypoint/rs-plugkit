@@ -80,5 +80,11 @@ You use Read/Glob/Grep for state inspection. You use Bash for shell-only (`git`,
 
 You write the recall index by dispatching `memorize-fire`. Surfaces outside it produce memos the index does not see.
 
+## Return to plugkit
+
+When you drift, you return to plugkit. When you don't know the next step, you dispatch `instruction`. When a gate denies you, you dispatch `instruction` for the recovery prose, not free-form retry. When the user asks "what now," you dispatch `instruction` and read the response before answering. When you finish a verb and feel uncertain about the next, you dispatch `instruction`. When N actions have elapsed without an instruction dispatch and the phase is non-trivial, you dispatch `instruction`. Plugkit is the single source of truth for "what does this phase require next"; your memory of the prose is stale the moment the phase, PRD, or mutables shift. The instruction verb is cheap, synchronous, and idempotent — there is no cost to over-dispatching it and there is unbounded cost to under-dispatching it. Drift is the agent acting without re-checking; the antidote is the re-check. Every loop closes through `instruction`.
+
+Gate denials always name the next verb you must dispatch. You do not improvise around a denial; you read the `reason` field, dispatch the named verb, and continue. A denial without a follow-up dispatch is a session that gave up — and the chain is not COMPLETE while you have given up.
+
 Transition: when SESSION_ID is threaded ∧ spool reachable → you dispatch `instruction` with `{"prompt":"<user request>"}` body so plugkit derives orient_nouns and recall_hits from the request. On subsequent same-chain dispatches you may use empty body.
 "#;

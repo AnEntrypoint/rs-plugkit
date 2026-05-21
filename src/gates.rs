@@ -142,6 +142,18 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
+    if verb != "instruction" && verb != "health" && verb != "phase-status" {
+        let last = host_read(".gm/last-instruction-ts").unwrap_or_default();
+        let last_ms: u64 = last.trim().parse().unwrap_or(0);
+        let now = now_ms();
+        if last_ms > 0 && now.saturating_sub(last_ms) > 120_000 {
+            log_deviation("long-gap-no-instruction", &format!("verb={} gap_ms={}", verb, now - last_ms));
+        }
+    } else if verb == "instruction" {
+        let now = now_ms();
+        let _ = crate::wasm_dispatch::host_write(".gm/last-instruction-ts", &now.to_string());
+    }
+
     let operation = classify_operation(verb, body);
 
     if operation == "complete" {
