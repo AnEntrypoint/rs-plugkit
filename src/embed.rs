@@ -7,6 +7,14 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, HiddenAct, PositionEmbeddingType};
 use tokenizers::Tokenizer;
 
+extern "C" {
+    fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
+}
+
+fn elog(msg: &str) {
+    let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+}
+
 static MODEL_SAFETENSORS: &[u8] = include_bytes!("../weights/minilm-l6-v2.safetensors");
 static TOKENIZER_JSON: &[u8] = include_bytes!("../weights/tokenizer.json");
 
@@ -72,10 +80,25 @@ fn init_ctx() -> Result<EmbedCtx, String> {
 }
 
 fn ctx() -> Result<&'static EmbedCtx, &'static str> {
-    let r = CTX.get_or_init(init_ctx);
+    let r = CTX.get_or_init(|| {
+        let res = init_ctx();
+        if let Err(ref e) = res {
+            elog(&format!("embed::init_ctx FAILED: {}", e));
+        } else {
+            elog(&format!(
+                "embed::init_ctx OK (safetensors={}B tokenizer={}B)",
+                MODEL_SAFETENSORS.len(),
+                TOKENIZER_JSON.len()
+            ));
+        }
+        res
+    });
     match r {
         Ok(c) => Ok(c),
-        Err(_) => Err("embed init failed"),
+        Err(e) => {
+            elog(&format!("embed::ctx returning cached init failure: {}", e));
+            Err("embed init failed")
+        }
     }
 }
 
@@ -88,10 +111,28 @@ fn l2_normalize(v: &mut [f32]) {
     }
 }
 
-pub fn embed_text(text: &str) -> Option<Vec<f32>> {
-    let c = ctx().ok()?;
+macro_rules! step {
+    ($label:expr, $expr:expr) => {
+        match $expr {
+            Ok(v) => v,
+            Err(e) => {
+                elog(&format!("embed::embed_text step '{}' failed: {}", $label, e));
+                return None;
+            }
+        }
+    };
+}
 
-    let enc = c.tokenizer.encode(text, true).ok()?;
+pub fn embed_text(text: &str) -> Option<Vec<f32>> {
+    let c = match ctx() {
+        Ok(c) => c,
+        Err(e) => {
+            elog(&format!("embed::embed_text ctx() failed: {} (text_len={})", e, text.len()));
+            return None;
+        }
+    };
+
+    let enc = step!("tokenizer.encode", c.tokenizer.encode(text, true));
     let mut ids: Vec<u32> = enc.get_ids().to_vec();
     let mut mask: Vec<u32> = enc.get_attention_mask().to_vec();
     if ids.len() > MAX_TOKENS {
@@ -99,24 +140,32 @@ pub fn embed_text(text: &str) -> Option<Vec<f32>> {
         mask.truncate(MAX_TOKENS);
     }
     let seq_len = ids.len();
-    if seq_len == 0 { return None; }
+    if seq_len == 0 {
+        elog(&format!("embed::embed_text empty tokenization (text_len={})", text.len()));
+        return None;
+    }
 
-    let ids_t = Tensor::from_vec(ids.clone(), (1, seq_len), &c.device).ok()?;
-    let mask_t = Tensor::from_vec(mask.clone(), (1, seq_len), &c.device).ok()?;
-    let token_type_ids = Tensor::zeros((1, seq_len), DType::U32, &c.device).ok()?;
+    let ids_t = step!("Tensor::from_vec(ids)", Tensor::from_vec(ids.clone(), (1, seq_len), &c.device));
+    let mask_t = step!("Tensor::from_vec(mask)", Tensor::from_vec(mask.clone(), (1, seq_len), &c.device));
+    let token_type_ids = step!("Tensor::zeros(token_type_ids)", Tensor::zeros((1, seq_len), DType::U32, &c.device));
 
-    let hidden_raw = c.model.forward(&ids_t, &token_type_ids, Some(&mask_t)).ok()?;
-    let hidden = hidden_raw.to_dtype(DType::F32).ok()?;
+    let hidden_raw = step!("model.forward", c.model.forward(&ids_t, &token_type_ids, Some(&mask_t)));
+    let hidden = step!("hidden.to_dtype(F32)", hidden_raw.to_dtype(DType::F32));
 
-    let mask_f = mask_t.to_dtype(DType::F32).ok()?;
-    let mask_e = mask_f.unsqueeze(2).ok()?;
-    let masked = hidden.broadcast_mul(&mask_e).ok()?;
-    let sum = masked.sum(1).ok()?;
-    let denom = mask_f.sum(1).ok()?.unsqueeze(1).ok()?;
-    let pooled = sum.broadcast_div(&denom).ok()?;
+    let mask_f = step!("mask.to_dtype(F32)", mask_t.to_dtype(DType::F32));
+    let mask_e = step!("mask.unsqueeze(2)", mask_f.unsqueeze(2));
+    let masked = step!("hidden.broadcast_mul(mask)", hidden.broadcast_mul(&mask_e));
+    let sum = step!("masked.sum(1)", masked.sum(1));
+    let denom_s = step!("mask.sum(1)", mask_f.sum(1));
+    let denom = step!("denom.unsqueeze(1)", denom_s.unsqueeze(1));
+    let pooled = step!("sum.broadcast_div(denom)", sum.broadcast_div(&denom));
 
-    let flat: Vec<f32> = pooled.flatten_all().ok()?.to_vec1().ok()?;
-    if flat.len() != EMBED_DIM { return None; }
+    let flat_t = step!("pooled.flatten_all", pooled.flatten_all());
+    let flat: Vec<f32> = step!("flat.to_vec1", flat_t.to_vec1());
+    if flat.len() != EMBED_DIM {
+        elog(&format!("embed::embed_text dim mismatch: got={} expected={}", flat.len(), EMBED_DIM));
+        return None;
+    }
     let mut out = flat;
     l2_normalize(&mut out);
     Some(out)
