@@ -7,7 +7,7 @@ pub fn next_skill(current: Phase) -> &'static str {
     match current {
         Phase::Plan => "gm-execute",
         Phase::Execute => "gm-emit",
-        Phase::Emit => "gm-complete",
+        Phase::Emit => "gm-verify",
         Phase::Verify => "gm-complete",
         Phase::Complete => "update-docs",
     }
@@ -56,6 +56,57 @@ pub fn handle(content: &str) -> (String, String, i32) {
     };
 
     if matches!(target, Phase::Complete) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let porcelain = crate::wasm_dispatch::git_porcelain();
+            let worktree_clean = porcelain.trim().is_empty();
+            let (ahead, behind, branch) = {
+                let exec_git = |args: &str| -> String {
+                    let code = format!(
+                        r#"const {{execSync}} = require('child_process'); try {{ process.stdout.write(execSync('git {}', {{encoding: 'utf8', timeout: 5000}})); }} catch (e) {{ process.stdout.write(''); }}"#,
+                        args
+                    );
+                    let opts = r#"{"timeoutMs":5000}"#;
+                    let packed = unsafe { crate::wasm_dispatch::host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+                    let raw = crate::wasm_dispatch::unpack_to_value_pub(packed);
+                    raw.get("stdout").and_then(|v| v.as_str()).unwrap_or("").to_string()
+                };
+                let branch = exec_git("rev-parse --abbrev-ref HEAD").trim().to_string();
+                let remote_cfg = exec_git(&format!("config --get branch.{}.remote", branch)).trim().to_string();
+                let remote = if remote_cfg.is_empty() { "origin".to_string() } else { remote_cfg };
+                let counts = exec_git(&format!("rev-list --left-right --count {}/{}...HEAD", remote, branch));
+                let parts: Vec<&str> = counts.split_whitespace().collect();
+                let (b, a) = if parts.len() == 2 {
+                    (parts[0].parse::<u64>().unwrap_or(0), parts[1].parse::<u64>().unwrap_or(0))
+                } else { (0u64, 0u64) };
+                (a, b, branch)
+            };
+            let remote_pushed = ahead == 0;
+            let prd_empty = {
+                let (b, _e, c) = prd::handle_list("");
+                if c != 0 { false } else {
+                    serde_json::from_str::<serde_json::Value>(&b).ok()
+                        .and_then(|v| v.get("items").cloned())
+                        .and_then(|v| v.as_array().cloned())
+                        .map(|arr| arr.iter().all(|it| {
+                            let s = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+                            s == "done" || s == "complete" || s == "completed"
+                        }))
+                        .unwrap_or(true)
+                }
+            };
+            let mutables_witnessed = mutables::pending_detailed().is_empty();
+            if !(worktree_clean && remote_pushed && prd_empty && mutables_witnessed) {
+                return (
+                    String::new(),
+                    format!(
+                        "transition to COMPLETE rejected: four-observation gate not satisfied — worktree-clean={} remote-pushed={} (branch={} ahead={} behind={}) prd-empty={} mutables-witnessed={}. All four must hold simultaneously per VERIFY convergence.",
+                        worktree_clean, remote_pushed, branch, ahead, behind, prd_empty, mutables_witnessed
+                    ),
+                    1,
+                );
+            }
+        }
         let pending_muts = mutables::pending_detailed();
         if !pending_muts.is_empty() {
             let ids: Vec<String> = pending_muts.iter()
