@@ -59,29 +59,15 @@ pub fn handle(content: &str) -> (String, String, i32) {
         #[cfg(target_arch = "wasm32")]
         {
             let porcelain = crate::wasm_dispatch::git_porcelain();
-            if porcelain == crate::wasm_dispatch::HOST_NO_GIT_SENTINEL {
-                return (
-                    String::new(),
-                    "transition to COMPLETE deferred: host has no git (browser/sandboxed host). The outer Node/CLI host that owns the worktree must witness convergence and dispatch COMPLETE.".to_string(),
-                    1,
-                );
-            }
             let worktree_clean = porcelain.trim().is_empty();
             let (ahead, behind, branch) = {
-                let exec_git = |args: &str| -> String {
-                    let code = format!(
-                        r#"const {{execSync}} = require('child_process'); try {{ process.stdout.write(execSync('git {}', {{encoding: 'utf8', timeout: 5000}})); }} catch (e) {{ process.stdout.write(''); }}"#,
-                        args
-                    );
-                    let opts = r#"{"timeoutMs":5000}"#;
-                    let packed = unsafe { crate::wasm_dispatch::host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
-                    let raw = crate::wasm_dispatch::unpack_to_value_pub(packed);
-                    raw.get("stdout").and_then(|v| v.as_str()).unwrap_or("").to_string()
-                };
-                let branch = exec_git("rev-parse --abbrev-ref HEAD").trim().to_string();
-                let remote_cfg = exec_git(&format!("config --get branch.{}.remote", branch)).trim().to_string();
+                let branch = crate::wasm_dispatch::git_call("rev-parse --abbrev-ref HEAD", None)
+                    .get("stdout").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                let remote_cfg = crate::wasm_dispatch::git_call(&format!("config --get branch.{}.remote", branch), None)
+                    .get("stdout").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
                 let remote = if remote_cfg.is_empty() { "origin".to_string() } else { remote_cfg };
-                let counts = exec_git(&format!("rev-list --left-right --count {}/{}...HEAD", remote, branch));
+                let counts = crate::wasm_dispatch::git_call(&format!("rev-list --left-right --count {}/{}...HEAD", remote, branch), None)
+                    .get("stdout").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let parts: Vec<&str> = counts.split_whitespace().collect();
                 let (b, a) = if parts.len() == 2 {
                     (parts[0].parse::<u64>().unwrap_or(0), parts[1].parse::<u64>().unwrap_or(0))
