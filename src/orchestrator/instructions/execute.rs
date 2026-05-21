@@ -26,6 +26,8 @@ Your first emit = closure of transform. Scaffold + IOU shifts completion to impl
 
 You write to the recall index only by dispatching `memorize-fire`. Other surfaces produce memos the index does not see.
 
+Between each mutable resolution, between failed exec retries, between unfamiliar errors — you re-dispatch `instruction`. EXECUTE has the highest drift surface; the recovery primitive is unchanged.
+
 ## Dispatch
 
 You spool every exec. You flip rows by dispatching `mutable-resolve`. You dispatch `transition` when the PRD slice is closed and every mutable is witnessed. On new unknown, you dispatch `transition` back to PLAN.
