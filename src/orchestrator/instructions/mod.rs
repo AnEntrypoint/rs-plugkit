@@ -165,7 +165,16 @@ fn pending_step_block(st: &super::state::TurnState) -> Option<serde_json::Value>
     }))
 }
 
+#[cfg(target_arch = "wasm32")]
+fn ilog(msg: &str) {
+    extern "C" { fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32; }
+    let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn ilog(_msg: &str) {}
+
 pub fn handle_instruction(content: &str) -> (String, String, i32) {
+    ilog(&format!("instruction::handle start body_len={}", content.len()));
     let trimmed = content.trim();
     let mut session_id_opt: Option<String> = None;
     let mut prompt_opt: Option<String> = None;
@@ -228,11 +237,13 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         .and_then(|it| it.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .unwrap_or_default();
     let query = if !prompt_query.is_empty() { prompt_query } else { prd_subject_query };
+    ilog(&format!("instruction::handle pre-recall query_len={} prd_pending={}", query.len(), prd_pending));
     let recall_hits = if query.is_empty() {
         serde_json::Value::Array(Vec::new())
     } else {
         recall::recall_hits(&query, 5)
     };
+    ilog("instruction::handle post-recall");
 
     let update_available = read_update_available();
     let running_tasks = super::task::live_running_tasks();
@@ -274,5 +285,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "unsupervised_watcher": unsupervised_watcher,
         "should_residual_scan": should_scan,
     });
-    (payload.to_string(), String::new(), 0)
+    let s = payload.to_string();
+    ilog(&format!("instruction::handle done out_len={}", s.len()));
+    (s, String::new(), 0)
 }
