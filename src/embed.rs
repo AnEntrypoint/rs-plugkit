@@ -69,7 +69,7 @@ fn init_ctx() -> Result<EmbedCtx, String> {
 
     let device = Device::Cpu;
 
-    let vb = VarBuilder::from_slice_safetensors(MODEL_SAFETENSORS, DType::F16, &device)
+    let vb = VarBuilder::from_slice_safetensors(MODEL_SAFETENSORS, DType::F32, &device)
         .map_err(|e| format!("varbuilder safetensors: {}", e))?;
 
     let config = minilm_config();

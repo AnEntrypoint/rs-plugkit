@@ -852,8 +852,30 @@ fn filter(body: &Value, raw: &str) -> u64 {
     }
 }
 
+static PANIC_HOOK_INIT: std::sync::Once = std::sync::Once::new();
+
+fn install_panic_hook() {
+    PANIC_HOOK_INIT.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "(non-string panic payload)".to_string());
+            let loc = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "(no location)".to_string());
+            let s = format!("WASM PANIC at {}: {}", loc, msg);
+            let bytes = s.as_bytes();
+            unsafe { host_log(3, bytes.as_ptr(), bytes.len() as u32); }
+            emit_event("wasm_panic", serde_json::json!({
+                "location": loc,
+                "message": msg,
+            }));
+        }));
+    });
+}
+
 #[no_mangle]
 pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
+    install_panic_hook();
     let verb = read_str(verb_ptr as *const u8, verb_len);
     let body_s = read_str(body_ptr as *const u8, body_len);
     let body: Value = if body_s.is_empty() { Value::Null } else {
