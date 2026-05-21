@@ -63,7 +63,30 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     if text.is_empty() {
         return (String::new(), "empty memorize text".to_string(), 1);
     }
+    if namespace == "default" {
+        for tok in text.split_whitespace() {
+            if let Some(rest) = tok.strip_prefix('@') {
+                let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+                if !name.is_empty() {
+                    static FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !FIRED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        crate::wasm_dispatch::emit_event("discipline_sigil_ignored", serde_json::json!({
+                            "sigil": format!("@{}", name),
+                            "fallback_namespace": "default",
+                        }));
+                    }
+                    break;
+                }
+            }
+        }
+    }
     if let Some(reason) = is_derivable_state(&text) {
+        let prefix: String = text.chars().take(60).collect();
+        crate::wasm_dispatch::emit_event("memorize_reject", serde_json::json!({
+            "reason": reason,
+            "text_prefix": prefix,
+            "namespace": namespace,
+        }));
         return (String::new(), format!("rejected: {} — memo not stored", reason), 1);
     }
     let now = unsafe { crate::wasm_dispatch::host_now_ms() };
@@ -93,6 +116,11 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             };
             let msg = format!("memorize: embed_text failed for key={}; rolled back text row; refusing silent-NULL-embedding insert", key);
             let _ = unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
+            crate::wasm_dispatch::emit_event("memorize_embed_rollback", serde_json::json!({
+                "key": key,
+                "namespace": namespace,
+                "error": "embed_text returned None",
+            }));
             return (String::new(), msg, 1);
         }
     };
@@ -115,6 +143,11 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         };
         let msg = format!("memorize: vector kv_put failed for key={}; rolled back text row", key);
         let _ = unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
+        crate::wasm_dispatch::emit_event("memorize_embed_rollback", serde_json::json!({
+            "key": key,
+            "namespace": namespace,
+            "error": "vector kv_put failed",
+        }));
         return (String::new(), msg, 1);
     }
     let payload = serde_json::json!({
