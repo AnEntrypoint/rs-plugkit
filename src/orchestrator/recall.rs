@@ -30,17 +30,17 @@ fn rlog(msg: &str) {
 }
 
 pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
-    let query = if query_text.trim().is_empty() {
+    if query_text.trim().is_empty() {
         return serde_json::Value::Array(Vec::new());
-    } else {
-        derive_query(query_text)
-    };
+    }
+    let query = derive_query(query_text);
+    let embed_input = if query_text.len() <= 512 { query_text } else { &query };
     let namespace = "default";
     #[cfg(target_arch = "wasm32")]
     {
         use crate::wasm_dispatch::{host_vec_search, host_kv_query};
-        rlog(&format!("recall::recall_hits start query_len={} limit={}", query.len(), limit));
-        let embedding = crate::embed::embed_text_json(&query).unwrap_or(serde_json::Value::Null);
+        rlog(&format!("recall::recall_hits start query_len={} embed_len={} limit={}", query.len(), embed_input.len(), limit));
+        let embedding = crate::embed::embed_text_json(embed_input).unwrap_or(serde_json::Value::Null);
         rlog(&format!("recall::recall_hits embed_done embedded={}", !embedding.is_null()));
         let q_json = serde_json::json!({
             "query": query, "embedding": embedding, "namespace": namespace
@@ -75,12 +75,13 @@ pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
         return (String::new(), "auto-recall requires user prompt as body".to_string(), 1);
     }
     let query = derive_query(prompt);
+    let embed_input = if prompt.len() <= 512 { prompt } else { query.as_str() };
     let limit: u32 = 3;
     let namespace = "default";
     #[cfg(target_arch = "wasm32")]
     let results = {
         use crate::wasm_dispatch::{host_vec_search, host_kv_query};
-        let embedding = crate::embed::embed_text_json(&query).unwrap_or(serde_json::Value::Null);
+        let embedding = crate::embed::embed_text_json(embed_input).unwrap_or(serde_json::Value::Null);
         let q_json = serde_json::json!({
             "query": query, "embedding": embedding, "namespace": namespace
         }).to_string();
