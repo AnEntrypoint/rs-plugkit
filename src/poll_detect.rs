@@ -281,13 +281,23 @@ pub fn scan_turn_entry(_cwd: &str) {
         }
     };
 
-    let start_offset = if prev_date == date {
+    let raw_start = if prev_date == date {
         prev_offset.min(content.len() as u64) as usize
     } else {
         0
     };
+    let mut start_offset = raw_start.min(content.len());
+    while start_offset < content.len() && !content.is_char_boundary(start_offset) {
+        start_offset += 1;
+    }
 
-    let new_content = &content[start_offset..];
+    let new_content = match content.get(start_offset..) {
+        Some(s) => s,
+        None => {
+            write_offset(content.len() as u64, now, &date);
+            return;
+        }
+    };
     let mut deviation_count = 0u32;
 
     for line in new_content.split('\n') {
