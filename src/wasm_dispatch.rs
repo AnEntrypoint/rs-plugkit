@@ -823,36 +823,65 @@ fn branch_status(_body: &Value) -> u64 {
 }
 
 fn git_push(body: &Value) -> u64 {
+    let repo = body.get("repo").and_then(|v| v.as_str()).map(String::from);
     let branch = body.get("branch").and_then(|v| v.as_str()).map(String::from)
-        .unwrap_or_else(|| exec_git("rev-parse --abbrev-ref HEAD").trim().to_string());
+        .unwrap_or_else(|| exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD").trim().to_string());
     if branch.is_empty() {
         return err("git_push", "unable to determine branch");
     }
-    let porcelain = git_porcelain();
+    let porcelain = git_porcelain_in(repo.as_deref());
     if !porcelain.trim().is_empty() {
         log_deviation_push("push-dirty", &branch);
         return pack(json!({
             "ok": false,
             "verb": "git_push",
             "gate_denied": true,
-            "reason": format!("worktree dirty — commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice", branch),
+            "repo": repo,
+            "reason": format!("worktree dirty in {} — commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice", repo.as_deref().unwrap_or("cwd"), branch),
         }).to_string());
     }
-    let push_out = exec_git_push(&branch);
+    let push_out = exec_git_push_in(repo.as_deref(), &branch);
     ok("git_push", json!({
         "branch": branch,
+        "repo": repo,
         "output": push_out,
     }))
 }
 
-fn exec_git_push(branch: &str) -> String {
+fn exec_git_in(repo: Option<&str>, args: &str) -> String {
+    let cwd_opt = match repo {
+        Some(p) => format!(", cwd: {}", serde_json::to_string(p).unwrap_or_default()),
+        None => String::new(),
+    };
+    let code = format!(
+        r#"const {{execSync}} = require('child_process'); try {{ process.stdout.write(execSync('git {}', {{encoding: 'utf8', timeout: 5000{}}})); }} catch (e) {{ process.stdout.write(''); }}"#,
+        args, cwd_opt
+    );
+    let opts = r#"{"timeoutMs":5000}"#;
+    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    let raw = unpack_to_string(packed).unwrap_or_default();
+    if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+        if let Some(s) = v.get("stdout").and_then(|x| x.as_str()) { return s.to_string(); }
+    }
+    raw
+}
+
+fn git_porcelain_in(repo: Option<&str>) -> String {
+    exec_git_in(repo, "status --porcelain")
+}
+
+fn exec_git_push_in(repo: Option<&str>, branch: &str) -> String {
+    let cwd_opt = match repo {
+        Some(p) => format!(", cwd: {}", serde_json::to_string(p).unwrap_or_default()),
+        None => String::new(),
+    };
     let code = format!(
         r#"const {{execSync}} = require('child_process');
 let out = '';
-try {{ out = execSync('git push origin {}', {{ encoding: 'utf8', timeout: 30000 }}); }} catch (e) {{ out = String((e && e.stdout) || '') + String((e && e.stderr) || ''); }}
+try {{ out = execSync('git push origin {}', {{ encoding: 'utf8', timeout: 30000{} }}); }} catch (e) {{ out = String((e && e.stdout) || '') + String((e && e.stderr) || ''); }}
 process.stdout.write(out);
 "#,
-        branch
+        branch, cwd_opt
     );
     let opts = r#"{"timeoutMs":35000}"#;
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };

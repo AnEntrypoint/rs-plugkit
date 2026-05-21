@@ -7,16 +7,6 @@ pub const TOPLEVEL_DOC_ALLOWLIST: &[&str] = &[
     "AGENTS.md", "CLAUDE.md", "README.md", "SKILLS.md", "CHANGELOG.md", "LICENSE", "LICENSE.md",
 ];
 
-pub const DEFER_MARKERS: &[&str] = &[
-    "next pass", "next session", "next turn",
-    "defer to later", "deferred to later", "deferred for later",
-    "future pass", "future session", "future turn",
-    "address it next", "address this next", "leave for next",
-    "documented for next", "documented for future",
-    "below criticality", "skip for now", "punt for now",
-    "do later", "fix later", "later pass",
-];
-
 const AWAIT_ALLOWED_VERBS: &[&str] = &["memorize-continue", "instruction", "phase-status", "health"];
 
 pub struct GateVerdict {
@@ -114,14 +104,6 @@ fn worktree_dirty() -> bool {
     !crate::wasm_dispatch::git_porcelain().trim().is_empty()
 }
 
-fn defer_marker_in(text: &str) -> Option<&'static str> {
-    let lower = text.to_lowercase();
-    for m in DEFER_MARKERS {
-        if lower.contains(m) { return Some(*m); }
-    }
-    None
-}
-
 fn is_unsolicited_toplevel_doc(rel: &str) -> bool {
     let norm = rel.replace('\\', "/");
     if norm.contains('/') { return false; }
@@ -152,7 +134,12 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let now = now_ms();
         if last_ms > 0 && now.saturating_sub(last_ms) > 120_000 {
-            log_deviation("long-gap-no-instruction", &format!("verb={} gap_ms={}", verb, now - last_ms));
+            let gap_ms = now - last_ms;
+            log_deviation("long-gap-no-instruction", &format!("verb={} gap_ms={}", verb, gap_ms));
+            return GateVerdict::deny(format!(
+                "long-gap-no-instruction: {}ms since last `instruction` dispatch (threshold 120000ms). Idle mid-chain is a deviation. Dispatch `instruction` for recovery prose before any other verb.",
+                gap_ms
+            ));
         }
     } else if verb == "instruction" {
         let now = now_ms();
@@ -193,19 +180,21 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    let prd_content = host_read(".gm/prd.yml").unwrap_or_default();
-    if !prd_content.is_empty() {
-        for line in prd_content.lines() {
-            if let Some(rest) = line.trim_start().strip_prefix("subject:") {
-                if let Some(marker) = defer_marker_in(rest) {
-                    log_deviation("prd-defer-marker", marker);
-                    break;
-                }
-            }
-            if let Some(rest) = line.trim_start().strip_prefix("description:") {
-                if let Some(marker) = defer_marker_in(rest) {
-                    log_deviation("prd-defer-marker", marker);
-                    break;
+    if matches!(classify_operation(verb, body), "complete") || verb == "transition" {
+        let (body_s, _err, code) = crate::orchestrator::prd::handle_list("");
+        if code == 0 {
+            if let Ok(v) = serde_json::from_str::<Value>(&body_s) {
+                if let Some(items) = v.get("items").and_then(|v| v.as_array()) {
+                    for it in items {
+                        let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+                        let is_open = status == "pending" || status == "in_progress";
+                        if !is_open { continue; }
+                        let witness = it.get("witness_evidence").and_then(|v| v.as_str()).unwrap_or("");
+                        if witness.trim().is_empty() {
+                            let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                            log_deviation("prd-anti-shape", &format!("id={} status={} no witness_evidence on closing transition", id, status));
+                        }
+                    }
                 }
             }
         }

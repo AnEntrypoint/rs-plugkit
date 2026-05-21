@@ -4,6 +4,7 @@ pub mod execute;
 pub mod emit;
 pub mod verify;
 pub mod update_docs;
+pub mod browser;
 
 use serde_json::json;
 use super::state::read_state;
@@ -55,6 +56,7 @@ pub fn get_instruction(phase: &str) -> &'static str {
         "EMIT" => emit::TEXT,
         "VERIFY" => verify::TEXT,
         "COMPLETE" => update_docs::TEXT,
+        "BROWSER" => browser::TEXT,
         _ => entry::TEXT,
     }
 }

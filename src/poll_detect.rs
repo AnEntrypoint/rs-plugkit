@@ -272,8 +272,9 @@ pub fn scan_turn_entry(_cwd: &str) {
     }
 
     let date = today_str(now);
-    let log_path = format!("{}/.claude/gm-log/{}/hook.jsonl", home_dir(), date);
-    let content = match host_read(&log_path) {
+    let primary = format!("{}/.gm-log/{}/hook.jsonl", home_dir(), date);
+    let fallback = format!("{}/.claude/gm-log/{}/hook.jsonl", home_dir(), date);
+    let content = match host_read(&primary).or_else(|| host_read(&fallback)) {
         Some(s) => s,
         None => {
             write_offset(prev_offset, now, &date);

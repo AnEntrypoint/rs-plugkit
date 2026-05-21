@@ -46,7 +46,11 @@ English describing your intent = liability when code can encode it. Comments = l
 
 ## Bootstrap
 
-On your first dispatch you check `~/.claude/gm-tools/plugkit.wasm`. Absent → you write `.gm/exec-spool/in/bootstrap/0.txt`; plugkit fetches, sha-verifies, writes `.bootstrap-status.json`. On pin mismatch plugkit writes `.bootstrap-error.json`; you pause the chain.
+On your first dispatch you check `~/.gm-tools/plugkit.wasm` (or `~/.claude/gm-tools/plugkit.wasm` on legacy installs). Absent → you write `.gm/exec-spool/in/bootstrap/0.txt`; plugkit fetches, sha-verifies, writes `.bootstrap-status.json`. On pin mismatch plugkit writes `.bootstrap-error.json`; you pause the chain.
+
+## Supervisor drift and version updates
+
+The wasm watcher runs under a supervisor process (`.gm/exec-spool/.supervisor.pid`). The supervisor heartbeats every 5s and kills the watcher when `.status.json` is stale > 60s. When the on-disk wrapper or plugkit version differs from the running instance, the watcher emits `wrapper.drift` or `version.drift`, exits cleanly, and the supervisor respawns under fresh code. Your next dispatch into that window may return `wasm_aborted: true` (wasm proc_exit intercepted, response file written, supervisor respawning); you retry the same dispatch. `update.available` events in the instruction response mean newer fixes are on disk — you continue; the supervisor will pick them up on the next drift cycle.
 
 ## State
 
