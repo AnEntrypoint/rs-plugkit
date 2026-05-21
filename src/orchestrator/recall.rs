@@ -23,6 +23,12 @@ fn derive_query(prompt: &str) -> String {
     words.join(" ")
 }
 
+#[cfg(target_arch = "wasm32")]
+fn rlog(msg: &str) {
+    extern "C" { fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32; }
+    let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+}
+
 pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
     let query = if query_text.trim().is_empty() {
         return serde_json::Value::Array(Vec::new());
@@ -33,21 +39,26 @@ pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
     #[cfg(target_arch = "wasm32")]
     {
         use crate::wasm_dispatch::{host_vec_search, host_kv_query};
+        rlog(&format!("recall::recall_hits start query_len={} limit={}", query.len(), limit));
         let embedding = crate::embed::embed_text_json(&query).unwrap_or(serde_json::Value::Null);
+        rlog(&format!("recall::recall_hits embed_done embedded={}", !embedding.is_null()));
         let q_json = serde_json::json!({
             "query": query, "embedding": embedding, "namespace": namespace
         }).to_string();
         let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, limit) };
+        rlog("recall::recall_hits vec_search returned");
         let vec_hits = crate::wasm_dispatch::unpack_to_value_pub(packed);
         if !vec_hits.is_null()
             && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false)
         {
+            rlog("recall::recall_hits done via vec_search");
             return vec_hits;
         }
         let packed = unsafe {
             host_kv_query(namespace.as_ptr(), namespace.len() as u32,
                           query.as_ptr(), query.len() as u32)
         };
+        rlog("recall::recall_hits kv_query returned");
         let kv_hits = crate::wasm_dispatch::unpack_to_value_pub(packed);
         if kv_hits.is_null() { serde_json::Value::Array(Vec::new()) } else { kv_hits }
     }
