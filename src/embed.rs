@@ -84,12 +84,19 @@ fn ctx() -> Result<&'static EmbedCtx, &'static str> {
         let res = init_ctx();
         if let Err(ref e) = res {
             elog(&format!("embed::init_ctx FAILED: {}", e));
+            crate::wasm_dispatch::emit_event("embed_init_fail", serde_json::json!({
+                "error": e,
+            }));
         } else {
             elog(&format!(
                 "embed::init_ctx OK (safetensors={}B tokenizer={}B)",
                 MODEL_SAFETENSORS.len(),
                 TOKENIZER_JSON.len()
             ));
+            crate::wasm_dispatch::emit_event("embed_init_ok", serde_json::json!({
+                "safetensors_bytes": MODEL_SAFETENSORS.len(),
+                "tokenizer_bytes": TOKENIZER_JSON.len(),
+            }));
         }
         res
     });
@@ -97,6 +104,9 @@ fn ctx() -> Result<&'static EmbedCtx, &'static str> {
         Ok(c) => Ok(c),
         Err(e) => {
             elog(&format!("embed::ctx returning cached init failure: {}", e));
+            crate::wasm_dispatch::emit_event("embed_init_cached_fail", serde_json::json!({
+                "error": e,
+            }));
             Err("embed init failed")
         }
     }
@@ -116,7 +126,12 @@ macro_rules! step {
         match $expr {
             Ok(v) => v,
             Err(e) => {
-                elog(&format!("embed::embed_text step '{}' failed: {}", $label, e));
+                let err_s = format!("{}", e);
+                elog(&format!("embed::embed_text step '{}' failed: {}", $label, err_s));
+                crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
+                    "step": $label,
+                    "error": err_s,
+                }));
                 return None;
             }
         }

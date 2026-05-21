@@ -64,9 +64,14 @@ fn embedding_col_dim(db_name: &str, table: &str) -> Option<usize> {
 fn drop_if_dim_mismatch(db_name: &str, table: &str) -> Result<bool, String> {
     match embedding_col_dim(db_name, table) {
         Some(dim) if dim == EXPECTED_EMBED_DIM => Ok(false),
-        Some(_) => {
+        Some(old_dim) => {
             let _ = libsql_wasm::exec(db_name, &format!("DROP INDEX IF EXISTS {}_vec", table));
             libsql_wasm::exec(db_name, &format!("DROP TABLE IF EXISTS {}", table))?;
+            crate::wasm_dispatch::emit_event("table_dropped", serde_json::json!({
+                "table": table,
+                "old_dim": old_dim,
+                "new_dim": EXPECTED_EMBED_DIM,
+            }));
             Ok(true)
         }
         None => Ok(false),

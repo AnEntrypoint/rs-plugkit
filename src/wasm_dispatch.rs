@@ -250,16 +250,86 @@ fn recall(body: &Value) -> u64 {
     let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(8) as u32;
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if query.is_empty() { return err("recall", "query required"); }
+    check_sigil_ignored(query, namespace);
+    let derived_query = query.to_string();
     let embedding = crate::embed::embed_text_json(query).unwrap_or(Value::Null);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": namespace }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, limit) };
     let vec_hits = unpack_to_value(packed);
     if !vec_hits.is_null() && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
-        return ok("recall", vec_hits);
+        let annotated = annotate_hits_with_score(vec_hits);
+        return ok("recall", json!({
+            "mode": "vector_top_k",
+            "namespace": namespace,
+            "derived_query": derived_query,
+            "hits": annotated,
+        }));
     }
     let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, query.as_ptr(), query.len() as u32) };
     let kv_hits = unpack_to_value(packed);
-    ok("recall", kv_hits)
+    let annotated = annotate_hits_with_score(kv_hits);
+    ok("recall", json!({
+        "mode": "fallback_like",
+        "namespace": namespace,
+        "derived_query": derived_query,
+        "hits": annotated,
+    }))
+}
+
+static RECALL_SCORE_UNAVAILABLE_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SIGIL_IGNORED_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn annotate_hits_with_score(v: Value) -> Value {
+    let arr = match v {
+        Value::Array(a) => a,
+        other => return other,
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    let mut any_missing = false;
+    for hit in arr {
+        match hit {
+            Value::Object(mut map) => {
+                if !map.contains_key("score") {
+                    map.insert("score".to_string(), Value::Null);
+                    any_missing = true;
+                }
+                out.push(Value::Object(map));
+            }
+            other => {
+                any_missing = true;
+                out.push(json!({ "value": other, "score": Value::Null }));
+            }
+        }
+    }
+    if any_missing && !RECALL_SCORE_UNAVAILABLE_FIRED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        emit_event("recall_score_unavailable", json!({
+            "reason": "host_vec_search return shape elides per-hit score",
+        }));
+    }
+    Value::Array(out)
+}
+
+fn check_sigil_ignored(text: &str, namespace: &str) {
+    if namespace != "default" { return; }
+    let sigil = extract_sigil(text);
+    if let Some(s) = sigil {
+        if !SIGIL_IGNORED_FIRED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            emit_event("discipline_sigil_ignored", json!({
+                "sigil": s,
+                "fallback_namespace": "default",
+            }));
+        }
+    }
+}
+
+fn extract_sigil(text: &str) -> Option<String> {
+    for tok in text.split_whitespace() {
+        if let Some(rest) = tok.strip_prefix('@') {
+            let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+            if !name.is_empty() { return Some(format!("@{}", name)); }
+        }
+    }
+    None
 }
 
 fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
@@ -270,6 +340,7 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if text.is_empty() { return err("memorize", "text required"); }
     let text = text.as_str();
+    check_sigil_ignored(text, namespace);
     let now = unsafe { host_now_ms() };
     let counter = MEMORIZE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let key = format!("mem-{}-{}-{}", now, counter, text.len());
@@ -679,6 +750,24 @@ fn exec_git(args: &str) -> String {
 fn log_deviation_push(event: &str, detail: &str) {
     let msg = format!("plugkit gate: {} {}", event, detail);
     unsafe { host_log(2, msg.as_ptr(), msg.len() as u32); }
+}
+
+pub(crate) fn emit_event(event: &str, fields: Value) {
+    let mut obj = serde_json::Map::new();
+    obj.insert("event".to_string(), Value::String(event.to_string()));
+    let sess = host_read(".gm/exec-spool/.session-current").unwrap_or_default();
+    let sess_trim = sess.trim();
+    if !sess_trim.is_empty() {
+        obj.insert("sess".to_string(), Value::String(sess_trim.to_string()));
+    }
+    let ts = unsafe { host_now_ms() };
+    obj.insert("ts".to_string(), Value::Number(serde_json::Number::from(ts)));
+    if let Value::Object(map) = fields {
+        for (k, v) in map { obj.insert(k, v); }
+    }
+    let payload = Value::Object(obj).to_string();
+    let msg = format!("evt: {}", payload);
+    unsafe { host_log(1, msg.as_ptr(), msg.len() as u32); }
 }
 
 fn git_status(_body: &Value) -> u64 {
