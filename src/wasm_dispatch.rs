@@ -106,7 +106,8 @@ fn err_json(verb: &str, detail: Value) -> u64 {
 }
 
 fn ok(verb: &str, data: Value) -> u64 {
-    pack(json!({ "ok": true, "verb": verb, "data": data }).to_string())
+    let hint = if verb == "instruction" { Value::Null } else { json!("instruction") };
+    pack(json!({ "ok": true, "verb": verb, "data": data, "next_dispatch_hint": hint }).to_string())
 }
 
 fn fs_read(body: &Value) -> u64 {

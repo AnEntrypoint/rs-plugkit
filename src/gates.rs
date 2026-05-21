@@ -35,11 +35,16 @@ impl GateVerdict {
         Self { allowed: false, reason: Some(reason), await_result: false, pending_step_id: None, residuals: vec![] }
     }
     pub fn to_denial_json(&self, verb: &str) -> Value {
+        let reason_with_hint = format!(
+            "{} — dispatch `instruction` for recovery prose; do not improvise around this denial.",
+            self.reason.clone().unwrap_or_default()
+        );
         let mut obj = json!({
             "ok": false,
             "verb": verb,
             "gate_denied": true,
-            "reason": self.reason.clone().unwrap_or_default(),
+            "reason": reason_with_hint,
+            "next_dispatch": "instruction",
         });
         if self.await_result {
             obj["await_result"] = json!(true);

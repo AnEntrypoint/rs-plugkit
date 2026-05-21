@@ -20,6 +20,8 @@ You issue one write per artifact; you then dispatch a disk Read to assert the ch
 
 PRD names the artifacts you may write. You direct closure narrative to commit message + `memorize-fire`. Any file you write that PRD does not name = your response body displacing the dispatch surface.
 
+Between artifacts, between disk-Read checks, between a write you're uncertain about and the next — you re-dispatch `instruction`. Closure is the EMIT discipline; re-reading the prose between artifacts is how you avoid partial emits.
+
 ## Dispatch
 
 You dispatch `transition` when every planned artifact is written and you have disk-verified it. On new unknown, you dispatch `transition` back to PLAN.

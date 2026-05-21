@@ -18,6 +18,8 @@ Inline TODO in your response body violates `|F|=1` and produces unreconcilable s
 
 You enter unknowns into `.gm/mutables.yml` by dispatching `mutable-add` with `status: unknown`. Your witness = `file:line`, codesearch hit, or exec output. Narrative resolution in your response is rejected. Unwitnessed rows block any `transition` you attempt.
 
+Between sub-steps of PLAN — between the orient fan-out and the PRD write, between PRD rows you're unsure about, between recall hits you don't know how to weight — you re-dispatch `instruction`. Uncertainty is the signal to come back. You do not invent next steps from memory of the prose; you re-read.
+
 ## Dispatch
 
 You dispatch: `recall`, `codesearch`, `prd-add`, `mutable-add`, `mutable-resolve`, `transition`. Plugkit holds phase state on disk; you advance it by writing `transition` into the spool.

@@ -32,6 +32,8 @@ You attach `witness_evidence` of the form the verb admits to every mutable in yo
 
 The chain enters COMPLETE when your dispatched `transition` returns COMPLETE phase. The state of the chain is what plugkit's on-disk state file says it is, and that file moves only when you write a `transition` request. Asserting completion in your response without firing the verb is description only.
 
+Between each of the four observations, between residual-scan and COMPLETE, between push and transition — you re-dispatch `instruction`. VERIFY is where premature COMPLETE happens; the recovery primitive prevents it.
+
 ## Dispatch
 
 You dispatch `transition` to COMPLETE only when the four-observation window is fully true. Plugkit's transition handler hard-rejects your dispatch while any mutable or PRD item is open.
