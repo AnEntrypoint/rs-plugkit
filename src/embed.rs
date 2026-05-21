@@ -9,6 +9,25 @@ use tokenizers::Tokenizer;
 
 extern "C" {
     fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
+    fn host_vec_embed(text_ptr: *const u8, text_len: u32, out_ptr: *mut f32, out_len: u32) -> i32;
+}
+
+fn try_host_embed(text: &str) -> Option<Vec<f32>> {
+    let mut out = vec![0f32; EMBED_DIM];
+    let rc = unsafe {
+        host_vec_embed(
+            text.as_ptr(),
+            text.len() as u32,
+            out.as_mut_ptr(),
+            EMBED_DIM as u32,
+        )
+    };
+    if rc == EMBED_DIM as i32 {
+        l2_normalize(&mut out);
+        Some(out)
+    } else {
+        None
+    }
 }
 
 fn elog(msg: &str) {
@@ -35,12 +54,27 @@ fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
 getrandom::register_custom_getrandom!(custom_getrandom);
 
 struct EmbedCtx {
-    tokenizer: Tokenizer,
-    model: BertModel,
+    tokenizer: Option<Tokenizer>,
+    model: Option<BertModel>,
     device: Device,
+    host_delegated: bool,
 }
 
 static CTX: OnceLock<Result<EmbedCtx, String>> = OnceLock::new();
+
+fn probe_host_embed() -> bool {
+    let probe_text = "init-probe";
+    let mut out = vec![0f32; EMBED_DIM];
+    let rc = unsafe {
+        host_vec_embed(
+            probe_text.as_ptr(),
+            probe_text.len() as u32,
+            out.as_mut_ptr(),
+            EMBED_DIM as u32,
+        )
+    };
+    rc == EMBED_DIM as i32
+}
 
 fn minilm_config() -> Config {
     Config {
@@ -64,6 +98,24 @@ fn minilm_config() -> Config {
 }
 
 fn init_ctx() -> Result<EmbedCtx, String> {
+    if probe_host_embed() {
+        crate::wasm_dispatch::emit_event("embed.host-delegated", serde_json::json!({
+            "embed_dim": EMBED_DIM,
+            "reason": "host_vec_embed probe returned EMBED_DIM; skipping wasm safetensors load",
+        }));
+        elog("embed::init_ctx host-delegated (probe ok); skipping safetensors+tokenizer load");
+        return Ok(EmbedCtx {
+            tokenizer: None,
+            model: None,
+            device: Device::Cpu,
+            host_delegated: true,
+        });
+    }
+
+    crate::wasm_dispatch::emit_event("embed.wasm-loading", serde_json::json!({
+        "reason": "host_vec_embed probe failed; loading wasm-side bert model",
+    }));
+
     let tokenizer = Tokenizer::from_bytes(TOKENIZER_JSON)
         .map_err(|e| format!("tokenizer load: {}", e))?;
 
@@ -76,7 +128,17 @@ fn init_ctx() -> Result<EmbedCtx, String> {
     let model = BertModel::load(vb, &config)
         .map_err(|e| format!("bert init: {}", e))?;
 
-    Ok(EmbedCtx { tokenizer, model, device })
+    crate::wasm_dispatch::emit_event("embed.wasm-loaded", serde_json::json!({
+        "safetensors_bytes": MODEL_SAFETENSORS.len(),
+        "tokenizer_bytes": TOKENIZER_JSON.len(),
+    }));
+
+    Ok(EmbedCtx {
+        tokenizer: Some(tokenizer),
+        model: Some(model),
+        device,
+        host_delegated: false,
+    })
 }
 
 fn ctx() -> Result<&'static EmbedCtx, &'static str> {
@@ -88,14 +150,15 @@ fn ctx() -> Result<&'static EmbedCtx, &'static str> {
                 "error": e,
             }));
         } else {
+            let host_delegated = res.as_ref().map(|c| c.host_delegated).unwrap_or(false);
             elog(&format!(
-                "embed::init_ctx OK (safetensors={}B tokenizer={}B)",
-                MODEL_SAFETENSORS.len(),
-                TOKENIZER_JSON.len()
+                "embed::init_ctx OK (host_delegated={})",
+                host_delegated
             ));
             crate::wasm_dispatch::emit_event("embed_init_ok", serde_json::json!({
-                "safetensors_bytes": MODEL_SAFETENSORS.len(),
-                "tokenizer_bytes": TOKENIZER_JSON.len(),
+                "host_delegated": host_delegated,
+                "safetensors_bytes": if host_delegated { 0 } else { MODEL_SAFETENSORS.len() },
+                "tokenizer_bytes": if host_delegated { 0 } else { TOKENIZER_JSON.len() },
             }));
         }
         res
@@ -139,6 +202,9 @@ macro_rules! step {
 }
 
 pub fn embed_text(text: &str) -> Option<Vec<f32>> {
+    if let Some(v) = try_host_embed(text) {
+        return Some(v);
+    }
     let c = match ctx() {
         Ok(c) => c,
         Err(e) => {
@@ -147,7 +213,31 @@ pub fn embed_text(text: &str) -> Option<Vec<f32>> {
         }
     };
 
-    let enc = step!("tokenizer.encode", c.tokenizer.encode(text, true));
+    if c.host_delegated {
+        elog("embed::embed_text host-delegated but host_vec_embed returned non-EMBED_DIM; no wasm fallback available");
+        crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
+            "step": "host_delegated_no_fallback",
+            "error": "host_vec_embed returned non-EMBED_DIM and wasm model was skipped at init",
+        }));
+        return None;
+    }
+
+    let tokenizer = match c.tokenizer.as_ref() {
+        Some(t) => t,
+        None => {
+            elog("embed::embed_text tokenizer missing in non-host-delegated ctx");
+            return None;
+        }
+    };
+    let model = match c.model.as_ref() {
+        Some(m) => m,
+        None => {
+            elog("embed::embed_text model missing in non-host-delegated ctx");
+            return None;
+        }
+    };
+
+    let enc = step!("tokenizer.encode", tokenizer.encode(text, true));
     let mut ids: Vec<u32> = enc.get_ids().to_vec();
     let mut mask: Vec<u32> = enc.get_attention_mask().to_vec();
     if ids.len() > MAX_TOKENS {
@@ -164,7 +254,7 @@ pub fn embed_text(text: &str) -> Option<Vec<f32>> {
     let mask_t = step!("Tensor::from_vec(mask)", Tensor::from_vec(mask.clone(), (1, seq_len), &c.device));
     let token_type_ids = step!("Tensor::zeros(token_type_ids)", Tensor::zeros((1, seq_len), DType::U32, &c.device));
 
-    let hidden_raw = step!("model.forward", c.model.forward(&ids_t, &token_type_ids, Some(&mask_t)));
+    let hidden_raw = step!("model.forward", model.forward(&ids_t, &token_type_ids, Some(&mask_t)));
     let hidden = step!("hidden.to_dtype(F32)", hidden_raw.to_dtype(DType::F32));
 
     let mask_f = step!("mask.to_dtype(F32)", mask_t.to_dtype(DType::F32));
