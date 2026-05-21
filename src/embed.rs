@@ -34,9 +34,10 @@ fn elog(msg: &str) {
     let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
 }
 
-static MODEL_SAFETENSORS: &[u8] = include_bytes!("../weights/minilm-l6-v2.safetensors");
-static TOKENIZER_JSON: &[u8] = include_bytes!("../weights/tokenizer.json");
+static MODEL_SAFETENSORS: &[u8] = include_bytes!("../weights/bge-small-en-v1.5.safetensors");
+static TOKENIZER_JSON: &[u8] = include_bytes!("../weights/bge-tokenizer.json");
 
+const EMBED_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 const EMBED_DIM: usize = 384;
 const MAX_TOKENS: usize = 512;
 
@@ -76,11 +77,11 @@ fn probe_host_embed() -> bool {
     rc == EMBED_DIM as i32
 }
 
-fn minilm_config() -> Config {
+fn bge_small_config() -> Config {
     Config {
         vocab_size: 30522,
         hidden_size: 384,
-        num_hidden_layers: 6,
+        num_hidden_layers: 12,
         num_attention_heads: 12,
         intermediate_size: 1536,
         hidden_act: HiddenAct::Gelu,
@@ -124,11 +125,14 @@ fn init_ctx() -> Result<EmbedCtx, String> {
     let vb = VarBuilder::from_slice_safetensors(MODEL_SAFETENSORS, DType::F32, &device)
         .map_err(|e| format!("varbuilder safetensors: {}", e))?;
 
-    let config = minilm_config();
+    let config = bge_small_config();
     let model = BertModel::load(vb, &config)
         .map_err(|e| format!("bert init: {}", e))?;
 
-    crate::wasm_dispatch::emit_event("embed.wasm-loaded", serde_json::json!({
+    crate::wasm_dispatch::emit_event("embed.model-loaded", serde_json::json!({
+        "model": EMBED_MODEL_NAME,
+        "embed_dim": EMBED_DIM,
+        "num_hidden_layers": config.num_hidden_layers,
         "safetensors_bytes": MODEL_SAFETENSORS.len(),
         "tokenizer_bytes": TOKENIZER_JSON.len(),
     }));
@@ -255,18 +259,31 @@ pub fn embed_text(text: &str) -> Option<Vec<f32>> {
     let token_type_ids = step!("Tensor::zeros(token_type_ids)", Tensor::zeros((1, seq_len), DType::U32, &c.device));
 
     let hidden_raw = step!("model.forward", model.forward(&ids_t, &token_type_ids, Some(&mask_t)));
+    drop(ids_t);
+    drop(token_type_ids);
     let hidden = step!("hidden.to_dtype(F32)", hidden_raw.to_dtype(DType::F32));
+    drop(hidden_raw);
 
     let mask_f = step!("mask.to_dtype(F32)", mask_t.to_dtype(DType::F32));
+    drop(mask_t);
     let mask_e = step!("mask.unsqueeze(2)", mask_f.unsqueeze(2));
     let masked = step!("hidden.broadcast_mul(mask)", hidden.broadcast_mul(&mask_e));
+    drop(hidden);
+    drop(mask_e);
     let sum = step!("masked.sum(1)", masked.sum(1));
+    drop(masked);
     let denom_s = step!("mask.sum(1)", mask_f.sum(1));
+    drop(mask_f);
     let denom = step!("denom.unsqueeze(1)", denom_s.unsqueeze(1));
+    drop(denom_s);
     let pooled = step!("sum.broadcast_div(denom)", sum.broadcast_div(&denom));
+    drop(sum);
+    drop(denom);
 
     let flat_t = step!("pooled.flatten_all", pooled.flatten_all());
+    drop(pooled);
     let flat: Vec<f32> = step!("flat.to_vec1", flat_t.to_vec1());
+    drop(flat_t);
     if flat.len() != EMBED_DIM {
         elog(&format!("embed::embed_text dim mismatch: got={} expected={}", flat.len(), EMBED_DIM));
         return None;

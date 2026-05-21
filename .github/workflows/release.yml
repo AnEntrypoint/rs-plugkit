@@ -50,7 +50,7 @@ jobs:
           rm -f Cargo.lock
           cargo generate-lockfile
 
-      - name: Fetch embedding weights (MiniLM-L6-v2 safetensors + tokenizer)
+      - name: Fetch embedding weights (BGE-small-en-v1.5 F32 safetensors + tokenizer)
         shell: bash
         run: bash scripts/fetch-weights.sh
 
