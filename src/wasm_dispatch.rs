@@ -30,7 +30,21 @@ pub fn host_task(action: &str, params: &Value) -> Value {
     unpack_to_value(packed)
 }
 
+pub const HOST_NO_GIT_SENTINEL: &str = "__HOST_NO_GIT__";
+
+pub fn host_has_git() -> bool {
+    let code = r#"try { const cp = require('child_process'); cp.execSync('git --version', {encoding: 'utf8', timeout: 2000}); process.stdout.write('YES'); } catch (e) { process.stdout.write('NO'); }"#;
+    let opts = r#"{"timeoutMs":2500}"#;
+    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    let raw = unpack_to_string(packed).unwrap_or_default();
+    if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+        if let Some(s) = v.get("stdout").and_then(|x| x.as_str()) { return s.trim() == "YES"; }
+    }
+    raw.contains("YES")
+}
+
 pub fn git_porcelain() -> String {
+    if !host_has_git() { return HOST_NO_GIT_SENTINEL.to_string(); }
     let code = r#"const {execSync} = require('child_process'); try { process.stdout.write(execSync('git status --porcelain', {encoding: 'utf8', timeout: 5000})); } catch (e) { process.stdout.write(''); }"#;
     let opts = r#"{"timeoutMs":5000}"#;
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
@@ -823,6 +837,14 @@ fn branch_status(_body: &Value) -> u64 {
 }
 
 fn git_push(body: &Value) -> u64 {
+    if !host_has_git() {
+        return pack(json!({
+            "ok": false,
+            "verb": "git_push",
+            "gate_denied": true,
+            "reason": "host has no git (browser host or sandboxed environment). Push must be performed by an outer Node/CLI host that owns the working tree.",
+        }).to_string());
+    }
     let repo = body.get("repo").and_then(|v| v.as_str()).map(String::from);
     let branch = body.get("branch").and_then(|v| v.as_str()).map(String::from)
         .unwrap_or_else(|| exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD").trim().to_string());
@@ -830,6 +852,14 @@ fn git_push(body: &Value) -> u64 {
         return err("git_push", "unable to determine branch");
     }
     let porcelain = git_porcelain_in(repo.as_deref());
+    if porcelain == HOST_NO_GIT_SENTINEL {
+        return pack(json!({
+            "ok": false,
+            "verb": "git_push",
+            "gate_denied": true,
+            "reason": "host has no git; cannot witness worktree state",
+        }).to_string());
+    }
     if !porcelain.trim().is_empty() {
         log_deviation_push("push-dirty", &branch);
         return pack(json!({
@@ -867,6 +897,7 @@ fn exec_git_in(repo: Option<&str>, args: &str) -> String {
 }
 
 fn git_porcelain_in(repo: Option<&str>) -> String {
+    if !host_has_git() { return HOST_NO_GIT_SENTINEL.to_string(); }
     exec_git_in(repo, "status --porcelain")
 }
 
