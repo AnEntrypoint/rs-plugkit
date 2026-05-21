@@ -32,6 +32,10 @@ You attach `witness_evidence` of the form the verb admits to every mutable in yo
 
 The chain enters COMPLETE when your dispatched `transition` returns COMPLETE phase. The state of the chain is what plugkit's on-disk state file says it is, and that file moves only when you write a `transition` request. Asserting completion in your response without firing the verb is description only.
 
+**Done is plugkit's pronouncement, not yours.** You do not decide when the work is done. Plugkit decides — through the COMPLETE gate, the four-observation window, and the on-disk state file. If you "feel done" but the gate denies, you are not done. If the gate allows but you have not yet dispatched `transition`, you are not done. If `transition` returns anything but COMPLETE, you are not done. The agent that announces "I'm finished" before plugkit's gate flips is the agent that has stopped dispatching and started narrating. The cure is to dispatch `phase-status` and read what plugkit actually says.
+
+**Always seek the next state transition.** If the chain is not at COMPLETE, there is a next transition to seek. Idle is a deviation. "Waiting for the user" mid-chain is a deviation (the user authorized the closure at request time; they do not need to re-authorize each phase). When you finish a verb and do not immediately know the next, you dispatch `instruction` and read it. When `phase-status` shows a non-terminal phase, you act on it — you do not stop. The chain's natural state is motion toward COMPLETE; rest is the exception that requires plugkit's pronouncement.
+
 Between each of the four observations, between residual-scan and COMPLETE, between push and transition — you re-dispatch `instruction`. VERIFY is where premature COMPLETE happens; the recovery primitive prevents it.
 
 ## Dispatch
