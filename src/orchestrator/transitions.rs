@@ -59,6 +59,13 @@ pub fn handle(content: &str) -> (String, String, i32) {
         #[cfg(target_arch = "wasm32")]
         {
             let porcelain = crate::wasm_dispatch::git_porcelain();
+            if porcelain == crate::wasm_dispatch::HOST_NO_GIT_SENTINEL {
+                return (
+                    String::new(),
+                    "transition to COMPLETE deferred: host has no git (browser/sandboxed host). The outer Node/CLI host that owns the worktree must witness convergence and dispatch COMPLETE.".to_string(),
+                    1,
+                );
+            }
             let worktree_clean = porcelain.trim().is_empty();
             let (ahead, behind, branch) = {
                 let exec_git = |args: &str| -> String {
