@@ -29,6 +29,17 @@ pub fn host_task(action: &str, params: &Value) -> Value {
     unpack_to_value(packed)
 }
 
+pub fn git_porcelain() -> String {
+    let code = r#"const {execSync} = require('child_process'); try { process.stdout.write(execSync('git status --porcelain', {encoding: 'utf8', timeout: 5000})); } catch (e) { process.stdout.write(''); }"#;
+    let opts = r#"{"timeoutMs":5000}"#;
+    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    let raw = unpack_to_string(packed).unwrap_or_default();
+    if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+        if let Some(s) = v.get("stdout").and_then(|x| x.as_str()) { return s.to_string(); }
+    }
+    raw
+}
+
 fn pack(s: String) -> u64 {
     let bytes = s.into_bytes();
     let len = bytes.len() as u64;
@@ -650,6 +661,99 @@ fn recall_libsql(body: &Value, raw: &str) -> u64 {
     pack(crate::code_index::recall_at(&query, limit, ns, inline, project_path).to_string())
 }
 
+fn exec_git(args: &str) -> String {
+    let code = format!(
+        r#"const {{execSync}} = require('child_process'); try {{ process.stdout.write(execSync('git {}', {{encoding: 'utf8', timeout: 5000}})); }} catch (e) {{ process.stdout.write(''); }}"#,
+        args
+    );
+    let opts = r#"{"timeoutMs":5000}"#;
+    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    let raw = unpack_to_string(packed).unwrap_or_default();
+    if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+        if let Some(s) = v.get("stdout").and_then(|x| x.as_str()) { return s.to_string(); }
+    }
+    raw
+}
+
+fn log_deviation_push(event: &str, detail: &str) {
+    let msg = format!("plugkit gate: {} {}", event, detail);
+    unsafe { host_log(2, msg.as_ptr(), msg.len() as u32); }
+}
+
+fn git_status(_body: &Value) -> u64 {
+    let porcelain = git_porcelain();
+    let mut modified: Vec<String> = vec![];
+    let mut untracked: Vec<String> = vec![];
+    let mut deleted: Vec<String> = vec![];
+    let mut staged: Vec<String> = vec![];
+    for line in porcelain.lines() {
+        if line.len() < 3 { continue; }
+        let xy = &line[..2];
+        let path = line[3..].trim().to_string();
+        let x = xy.chars().nth(0).unwrap_or(' ');
+        let y = xy.chars().nth(1).unwrap_or(' ');
+        if xy == "??" { untracked.push(path); continue; }
+        if x != ' ' && x != '?' { staged.push(path.clone()); }
+        if y == 'M' || x == 'M' { modified.push(path.clone()); }
+        if y == 'D' || x == 'D' { deleted.push(path.clone()); }
+    }
+    let dirty = !porcelain.trim().is_empty();
+    ok("git_status", json!({
+        "dirty": dirty,
+        "modified": modified,
+        "untracked": untracked,
+        "deleted": deleted,
+        "staged": staged,
+    }))
+}
+
+fn branch_status(_body: &Value) -> u64 {
+    let branch = exec_git("rev-parse --abbrev-ref HEAD").trim().to_string();
+    if branch.is_empty() {
+        return err("branch_status", "unable to determine branch");
+    }
+    let remote = exec_git(&format!("config --get branch.{}.remote", branch)).trim().to_string();
+    let remote = if remote.is_empty() { "origin".to_string() } else { remote };
+    let counts = exec_git(&format!("rev-list --left-right --count {}/{}...HEAD", remote, branch));
+    let counts = counts.trim();
+    let mut behind: u64 = 0;
+    let mut ahead: u64 = 0;
+    let parts: Vec<&str> = counts.split_whitespace().collect();
+    if parts.len() == 2 {
+        behind = parts[0].parse().unwrap_or(0);
+        ahead = parts[1].parse().unwrap_or(0);
+    }
+    ok("branch_status", json!({
+        "branch": branch,
+        "ahead": ahead,
+        "behind": behind,
+        "remote": remote,
+    }))
+}
+
+fn git_push(body: &Value) -> u64 {
+    let branch = body.get("branch").and_then(|v| v.as_str()).map(String::from)
+        .unwrap_or_else(|| exec_git("rev-parse --abbrev-ref HEAD").trim().to_string());
+    if branch.is_empty() {
+        return err("git_push", "unable to determine branch");
+    }
+    let porcelain = git_porcelain();
+    if !porcelain.trim().is_empty() {
+        log_deviation_push("push-dirty", &branch);
+        return pack(json!({
+            "ok": false,
+            "verb": "git_push",
+            "gate_denied": true,
+            "reason": format!("worktree dirty — commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice", branch),
+        }).to_string());
+    }
+    let push_out = exec_git(&format!("push origin {}", branch));
+    ok("git_push", json!({
+        "branch": branch,
+        "output": push_out,
+    }))
+}
+
 fn filter(body: &Value, raw: &str) -> u64 {
     let (data, err_msg) = crate::filter::dispatch(body, raw);
     match err_msg {
@@ -722,6 +826,9 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "close" => close(&body),
         "kill-port" => kill_port(&body),
         "filter" => filter(&body, &body_s),
+        "git_status" => git_status(&body),
+        "branch_status" => branch_status(&body),
+        "git_push" => git_push(&body),
         "forget" => forget(&body),
         "feedback" => feedback(&body),
         "learn-status" => learn_status(&body),

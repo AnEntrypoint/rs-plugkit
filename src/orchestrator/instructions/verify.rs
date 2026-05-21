@@ -10,6 +10,8 @@ L3 trajectory; you dispatch `transition` iff convergent.
 
 When you observe all four true, you have convergence criterion → you dispatch `transition`. Any false defers, holds, or you regress.
 
+`git status --porcelain` is the `[worktree-clean]` witness. Non-empty bytes = unstaged residual; you stage-and-commit or revert before any push. A push from a dirty tree advances the chain on an unwitnessed slice — the bytes you didn't ship are the bytes that break the next session.
+
 ## CI
 
 The push you make IS the validation dispatch. Your local proof covers one platform; matrix covers all. Red = divergent observation that holds your trajectory until you name the cause and dispatch the next push green. Toolchain skew = observation for you to converge, not stop.

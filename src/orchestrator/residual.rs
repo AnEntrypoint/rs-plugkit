@@ -1,6 +1,39 @@
 use super::gm_dir;
 use crate::pkfs;
 
+#[cfg(target_arch = "wasm32")]
+fn porcelain_output() -> String {
+    crate::wasm_dispatch::git_porcelain()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn porcelain_output() -> String {
+    std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+fn worktree_dirty() -> bool {
+    !porcelain_output().trim().is_empty()
+}
+
+fn count_modified_untracked(porcelain: &str) -> (usize, usize) {
+    let mut modified = 0usize;
+    let mut untracked = 0usize;
+    for line in porcelain.lines() {
+        if line.len() < 2 { continue; }
+        if line.starts_with("??") {
+            untracked += 1;
+        } else {
+            modified += 1;
+        }
+    }
+    (modified, untracked)
+}
+
 fn status_is_open(s: Option<&str>) -> bool {
     match s {
         Some(v) => matches!(v, "pending" | "in_progress" | "unknown" | "blocked"),
@@ -88,6 +121,23 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
         let payload = serde_json::json!({
             "scan": "skipped",
             "reason": "background tasks still running"
+        });
+        return (payload.to_string(), String::new(), 0);
+    }
+
+    let porcelain = porcelain_output();
+    if !porcelain.trim().is_empty() {
+        let (modified, untracked) = count_modified_untracked(&porcelain);
+        let reason = format!(
+            "worktree dirty — modified={} untracked={} — commit or revert before residual scan; a push from a dirty tree orphans the unstaged delta",
+            modified, untracked
+        );
+        let payload = serde_json::json!({
+            "scan": "skipped",
+            "reason": reason,
+            "deviation_kind": "residual-dirty-tree",
+            "modified": modified,
+            "untracked": untracked
         });
         return (payload.to_string(), String::new(), 0);
     }
