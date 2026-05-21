@@ -12,6 +12,8 @@ When you observe all four true, you have convergence criterion → you dispatch 
 
 `git status --porcelain` is the `[worktree-clean]` witness. Non-empty bytes = unstaged residual; you stage-and-commit or revert before any push. A push from a dirty tree advances the chain on an unwitnessed slice — the bytes you didn't ship are the bytes that break the next session.
 
+The `git_push` verb is the only admissible push surface, for ANY repo, from any cwd. To push a sibling repo you dispatch `git_push` with body `{repo: "<abs path>", branch: "<branch>"}`. The verb runs `git status --porcelain` and `git push origin <branch>` inside the target repo's working tree via the host_git import. `cd <other-repo> && git push` via Bash bypasses the porcelain probe even when the current-cwd worktree is clean — the sibling's residuals slip past the gate. ccsniff `--git-discipline` flags every raw push regardless of cwd.
+
 ## CI
 
 The push you make IS the validation dispatch. Your local proof covers one platform; matrix covers all. Red = divergent observation that holds your trajectory until you name the cause and dispatch the next push green. Toolchain skew = observation for you to converge, not stop.
