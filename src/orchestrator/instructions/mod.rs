@@ -264,6 +264,15 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let turn_state = super::state::read_state();
     let await_result = pending_step_block(&turn_state);
 
+    let instruction_md_body = format!(
+        "# Next step\n\nPhase: {}\nUpdated: {}\n\n---\n\n{}",
+        phase,
+        super::state::now_ms(),
+        instruction
+    );
+    let next_step_path = super::gm_dir().join("next-step.md");
+    let _ = pkfs::write(&next_step_path.to_string_lossy().to_string(), &instruction_md_body);
+
     let payload = json!({
         "phase": phase,
         "sub_phase": if await_result.is_some() { "AWAIT-RESULT" } else { "" },

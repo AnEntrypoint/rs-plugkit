@@ -173,6 +173,19 @@ mod wasm_hooks {
         if !prompt.is_empty() {
             ctx.push_str(&format!("\nUser prompt: {}\n", prompt.chars().take(280).collect::<String>()));
         }
+        let next_step = host_read(&path_for("next-step.md")).unwrap_or_default();
+        let next_step_trim = next_step.trim();
+        if !next_step_trim.is_empty() {
+            ctx.push_str(&format!("\n=== CURRENT NEXT STEP (from .gm/next-step.md) ===\n\n{}\n", next_step_trim));
+        }
+        let prd = host_read(&path_for("prd.yml")).unwrap_or_default();
+        let open_count = prd.lines().filter(|l| {
+            let t = l.trim_start();
+            t == "status: pending" || t == "status: open" || t == "status: in_progress"
+        }).count();
+        if open_count > 0 {
+            ctx.push_str(&format!("\n{} open PRD item(s) — finish what's already planned before adding new scope.\n", open_count));
+        }
         json!({
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
