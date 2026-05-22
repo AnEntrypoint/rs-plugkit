@@ -1,6 +1,6 @@
 pub const TEXT: &str = r#"# PLAN
 
-YOU are the state machine. Plugkit is the synchronous library serving this prose; advancing the chain is your dispatch, not its action. Nothing happens while you wait — every state change is a verb you write into the spool.
+YOU are the state machine. Plugkit is the synchronous library serving this prose; advancing the chain is your dispatch, not its action. Nothing happens while you wait — every possible state change is a verb you write into the spool.
 
 L1 baseline + L2 covering family. You loaded prior memory on entry by dispatching `instruction`.
 
@@ -10,13 +10,13 @@ Your first non-trivial dispatch = parallel fan-out of `recall` + `codesearch` ag
 
 ## Cover
 
-You write the PRD as the central plan-item store (`|F|=1`). You enumerate content as the closure of the destructive transform admissible over the session, as a dependency DAG. Reach permits the next node; the next node is in-scope. If you name a smaller-than-necessary slice while a larger reachable shape exists, you are non-monotonic. You partition along dependency edges, not schedule. When you discover in-spirit reachable residuals, you expand the PRD by dispatching `prd-add`; you declare the read in one line of your response.
+You write the PRD as the central plan-item store (`|F|=1`). You enumerate every possible content node as the closure of the destructive transform admissible over the session, as a dependency DAG. Reach permits the next node; the next node is in-scope. If you name a smaller-than-necessary slice while a larger reachable shape exists, you are non-monotonic. You partition along dependency edges, not schedule. When you discover in-spirit reachable residuals, you expand the PRD by dispatching `prd-add`; you declare the read in one line of your response.
 
 Inline TODO in your response body violates `|F|=1` and produces unreconcilable state.
 
 ## Mutables
 
-You enter unknowns into `.gm/mutables.yml` by dispatching `mutable-add` with `status: unknown`. Your witness = `file:line`, codesearch hit, or exec output. Narrative resolution in your response is rejected. Unwitnessed rows block any `transition` you attempt.
+You enter unknowns into `.gm/mutables.yml` by dispatching `mutable-add` with `status: unknown`. Your witness = `file:line`, codesearch hit, or exec output. Narrative resolution in your response is rejected. Unwitnessed rows block every possible `transition` you attempt.
 
 Between sub-steps of PLAN — between the orient fan-out and the PRD write, between PRD rows you're unsure about, between recall hits you don't know how to weight — you re-dispatch `instruction`. Uncertainty is the signal to come back. You do not invent next steps from memory of the prose; you re-read.
 
