@@ -211,7 +211,7 @@ jobs:
             cat npm-publish-err.log
           fi
 
-      - name: Bump gm-starter metadata
+      - name: Bump gm metadata
         env:
           GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
           VER: ${{ steps.bump.outputs.version }}
@@ -221,12 +221,12 @@ jobs:
           git config --global user.email "noreply@github.com"
           git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/AnEntrypoint/gm.git" gm-src
           cd gm-src
-          jq --arg v "$VER" '.plugkitVersion = $v' gm-starter/gm.json > /tmp/gm.json
-          mv /tmp/gm.json gm-starter/gm.json
-          echo "$VER" > gm-starter/bin/plugkit.version
-          cp ../release-assets/plugkit.wasm.sha256 gm-starter/bin/plugkit.wasm.sha256 2>/dev/null || \
-            curl -sL "https://github.com/AnEntrypoint/plugkit-bin/releases/download/v${VER}/plugkit.wasm.sha256" -o gm-starter/bin/plugkit.wasm.sha256
-          git add gm-starter/gm.json gm-starter/bin/plugkit.version gm-starter/bin/plugkit.wasm.sha256
+          jq --arg v "$VER" '.plugkitVersion = $v' gm.json > /tmp/gm.json
+          mv /tmp/gm.json gm.json
+          echo "$VER" > bin/plugkit.version
+          cp ../release-assets/plugkit.wasm.sha256 bin/plugkit.wasm.sha256 2>/dev/null || \
+            curl -sL "https://github.com/AnEntrypoint/plugkit-bin/releases/download/v${VER}/plugkit.wasm.sha256" -o bin/plugkit.wasm.sha256
+          git add gm.json bin/plugkit.version bin/plugkit.wasm.sha256
           if git diff --cached --quiet; then
             echo "No metadata changes"
             exit 0
