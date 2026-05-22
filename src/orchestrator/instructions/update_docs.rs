@@ -22,7 +22,7 @@ You write one entry per every possible commit you landed this session. The commi
 
 ## Commit and Push
 
-You stage doc updates only — you never bundle them with code changes from earlier phases (you committed those at their own time). One commit, present-tense imperative subject. Before you push, `git status --porcelain` reads empty; non-empty = uncommitted residual that the push would orphan, and you commit or revert it first. Then you push to main. Your push triggers the docs pipeline if the repo has one. A doc commit stages only paths matching AGENTS.md, CLAUDE.md, README.md, SKILLS.md, CHANGELOG.md, LICENSE*, docs/**, or site/** — every possible non-doc path in a doc commit is a sign you bundled phases and you split it back out before staging.
+You stage doc updates only — you never bundle them with code changes from earlier phases (you committed those at their own time). One commit, present-tense imperative subject. Before every possible push, you dispatch `git status --porcelain` as its own Bash call and read its output empty; non-empty = uncommitted residual that the push would orphan, and you commit or revert it first. The probe is separate from the push for a reason — ccsniff `--git-discipline` scans the last 20 Bash events for an explicit porcelain probe and flags `push-no-porcelain-witness` when chained `commit && push` skips it. The witness must be visible in the transcript. Then you push to main. Your push triggers the docs pipeline if the repo has one. A doc commit stages only paths matching AGENTS.md, CLAUDE.md, README.md, SKILLS.md, CHANGELOG.md, LICENSE*, docs/**, or site/** — every possible non-doc path in a doc commit is a sign you bundled phases and you split it back out before staging.
 
 ## COMPLETE
 
