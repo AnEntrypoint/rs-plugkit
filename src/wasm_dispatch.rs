@@ -254,7 +254,7 @@ fn recall(body: &Value) -> u64 {
     if query.is_empty() { return err("recall", "query required"); }
     check_sigil_ignored(query, namespace);
     let derived_query = query.to_string();
-    let embedding = crate::embed::embed_text_json(query).unwrap_or(Value::Null);
+    let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": namespace }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, limit) };
     let vec_hits = unpack_to_value(packed);
@@ -362,7 +362,7 @@ fn codesearch(body: &Value) -> u64 {
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
     if query.is_empty() { return err("codesearch", "query required"); }
-    let embedding = crate::embed::embed_text_json(query).unwrap_or(Value::Null);
+    let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": "codeinsight" }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, k) };
     let vec_hits = unpack_to_value(packed);
