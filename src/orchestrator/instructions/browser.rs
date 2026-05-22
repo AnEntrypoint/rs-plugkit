@@ -2,9 +2,9 @@ pub const TEXT: &str = r#"# BROWSER
 
 ## Hard Rule: Browser Witness Mandate (paper §23)
 
-**Every edit to code that runs in a browser requires a live `browser` dispatch in the same turn as the edit.** Client-side surfaces — `.html`, `.js`, `.jsx`, `.ts`, `.tsx`, `.vue`, `.svelte`, `.mjs`, `.css`, web components, service workers, anything loaded by a `<script>` tag, anything reached by `import` from a browser-side entry — must be witnessed by a live `page.evaluate` of the specific invariant the edit establishes. A passing node test, a passing build, a `curl` of the served HTML, a static-analysis pass, none of these substitute: they witness server delivery, not browser behavior. The witness IS the proof; the prose is not.
+**Every possible edit to code that runs in a browser requires a live `browser` dispatch in the same turn as the edit.** Client-side surfaces — `.html`, `.js`, `.jsx`, `.ts`, `.tsx`, `.vue`, `.svelte`, `.mjs`, `.css`, web components, service workers, every possible asset loaded by a `<script>` tag, every possible path reached by `import` from a browser-side entry — must be witnessed by a live `page.evaluate` of the specific invariant the edit establishes. A passing node test, a passing build, a `curl` of the served HTML, a static-analysis pass — every possible one of these is non-substitutive: they witness server delivery, not browser behavior. The witness IS the proof; the prose is not.
 
-Protocol (paper §23): (1) boot the real surface — server up, page reachable, HTTP 200 witnessed; (2) `browser` dispatch → navigate → poll for the global the change affects; (3) `page.evaluate` asserting the specific invariant, capturing the witnessed values into `stdout`; (4) variance → fix at root cause, re-witness (Fix on Sight). Never advance on unwitnessed client behavior. Never queue browser validation for "later" — the same turn that edited the client-side file dispatches the browser verb that validates it; emit-without-witness is forced closure.
+Protocol (paper §23): (1) boot the real surface — server up, page reachable, HTTP 200 witnessed; (2) `browser` dispatch → navigate → poll for the global the change affects; (3) `page.evaluate` asserting the specific invariant, capturing the witnessed values into `stdout`; (4) variance → fix at root cause, re-witness (Fix on Sight). Never advance on unwitnessed client behavior. Never queue browser validation for "later" — the same turn that edited every possible client-side file dispatches the browser verb that validates each one; emit-without-witness is forced closure.
 
 The rule fires across phases:
  - **EXECUTE**: edit a client-side file → dispatch `browser` in the same turn against the live page asserting the invariant the edit establishes
@@ -13,7 +13,7 @@ The rule fires across phases:
 
 Pure-prose static-document edits (no JS, no CSS-driven behavior, no DOM mutation) are the ONLY exempt category and the exemption must be named explicitly in the response so the skip is auditable. Silent skip on actual behavior change is forced closure.
 
-YOU drive the browser through the spool. Plugkit holds the Chromium handle, the per-project profile, the session table; you advance the work by writing `.gm/exec-spool/in/browser/<N>.txt` and reading `out/<N>.json`. There is no library import that shortcuts this. There is no puppeteer/playwright/CDP handle you can hold. The verb is the surface; everything else is fabrication.
+YOU drive the browser through the spool. Plugkit holds the Chromium handle, the per-project profile, the session table; you advance the work by writing `.gm/exec-spool/in/browser/<N>.txt` and reading `out/<N>.json`. There is no library import that shortcuts this. There is no puppeteer/playwright/CDP handle you can hold. The verb is the surface; every possible other reach is fabrication.
 
 The body is a string. Five shapes, nothing else:
 
@@ -39,7 +39,7 @@ The window opens on the user's screen. That is the witness — you launched, the
 
 ## Profile
 
-`session new` (or a bare expression with no live session) spawns a locally-profiled Chromium at `<cwd>/.gm/browser-profile/` and the runner attaches via `--direct <wsEndpoint>`. Cookies, storage, extensions persist across your session, across your turns, across runs. A second concurrent launch contends the SingletonLock; the watcher reuses the live CDP rather than re-launching. The runner's own extension-attach mode (the "Waiting for extension to connect" message) is never the default and is never what you want — if you see it in your `stderr`, the host failed to spawn the local Chromium and you dispatch `instruction` for the recovery prose, not retry blind.
+`session new` (or a bare expression with no live session) spawns a locally-profiled Chromium at `<cwd>/.gm/browser-profile/` and the runner attaches via `--direct <wsEndpoint>`. Cookies, storage, extensions persist across every possible session, turn, and run. A second concurrent launch contends the SingletonLock; the watcher reuses the live CDP rather than re-launching. The runner's own extension-attach mode (the "Waiting for extension to connect" message) is never the default and is never what you want — if you see it in your `stderr`, the host failed to spawn the local Chromium and you dispatch `instruction` for the recovery prose, not retry blind.
 
 ## Discipline
 

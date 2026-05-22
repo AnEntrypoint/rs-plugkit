@@ -14,7 +14,7 @@ candidate → [L1 cost] → [L2 bounds] → [L3 direction] → execute
 - **L2.** Single-writer per surface (`|F|=1`). You enforce hard cap per resource; you backpressure to defer queue at watermark. If you write state outside a sanctioned surface, it is unreconcilable, inadmissible.
 - **L3.** Lyapunov: `Δd ≥ 0` rejects your dispatch. You attach audit tuple `(id, hash, ts)` per accepted write. Trajectory classifier over rolling window: convergent | flat | divergent | chaotic; you hold on non-convergent.
 
-The five phases are your scheduling; the filter is the engine you run on every candidate.
+The five phases are your scheduling; the filter is the engine you run on every possible candidate.
 
 ## Invariants
 
@@ -24,15 +24,15 @@ The five phases are your scheduling; the filter is the engine you run on every c
 - **Monotonic closure on first emit.** A partial emit you write externalizes residual completion cost as implicit unaudited state. Your mature artifact = your first artifact.
 - **Witness is the audit primitive.** Your claim without `(id, hash, ts)` is not in the system.
 
-## Code Invariants (every emission)
+## Code Invariants (every possible emission)
 
-- **State space minimized.** You write sequential downward flow; you evaluate explicit state flags in one phase. You flow all external input through a unified queue before mutation. You make state changes explicit assignment, never buried side effect. You never hide init via helpers.
+- **State space minimized.** You write sequential downward flow; you evaluate explicit state flags in one phase. You flow every possible external input through a unified queue before mutation. You make state changes explicit assignment, never buried side effect. You never hide init via helpers.
 - **Hardware reality.** You benchmark before abstracting. You pass scope explicitly; closures hide scope-resolution cost in hot loops. You mutate in place; pools over allocation. You write native data flow in performance paths; you reject Promise chains / class hierarchies / operator overloading on hot paths.
 - **Flat structure.** You write denormalized graphs over nested documents. You write partial-field updates over whole-document writes. Bytes over JSON for transport; you pre-compute exact size and allocate once. You use lexical ordering for deterministic tie-breaking.
 - **200-line vertical slices.** One responsibility per file you write. You complete input→process→output in the module. Your zero-config defaults are correct for 90%. Universal runtime: browser, Node, mobile, Bare.
 - **Async boundary explicit.** You write sequential awaitable primitives. You do not rely on implicit callback ordering. You write a unified error channel; you never swallow rejections. Your tests await real ops; mock-free.
 - **Naming by scale.** <50 lines: single-letter algebraic. 50–200: short descriptors. >200: full names. Iterators/temp short; your public APIs explicit.
-- **Fail fast, loud, deterministic.** You halt on precondition violation with exact state. You assert on emitted semantics (diagnostic logs), not return values. You attach sentinel words + checksum headers on critical structures and verify on every access. You never silently degrade.
+- **Fail fast, loud, deterministic.** You halt on precondition violation with exact state. You assert on emitted semantics (diagnostic logs), not return values. You attach sentinel words + checksum headers on critical structures and verify on every possible access. You never silently degrade.
 - **Binary transport, append-only persistence.** You write varint variable-width fields. You use lexical cursors for sparse reads. Append-only sequence for replay. Chunked by lexical range; you modify only the touched chunk.
 - **Single focused task per session.** No drive-by refactors. You pre-compute and inline; code growth < cognitive overhead. Saturation = internalization.
 
@@ -86,9 +86,9 @@ You write the recall index by dispatching `memorize-fire`. Surfaces outside it p
 
 ## Return to plugkit
 
-When you drift, you return to plugkit. When you don't know the next step, you dispatch `instruction`. When a gate denies you, you dispatch `instruction` for the recovery prose, not free-form retry. When the user asks "what now," you dispatch `instruction` and read the response before answering. When you finish a verb and feel uncertain about the next, you dispatch `instruction`. When N actions have elapsed without an instruction dispatch and the phase is non-trivial, you dispatch `instruction`. Plugkit is the single source of truth for "what does this phase require next"; your memory of the prose is stale the moment the phase, PRD, or mutables shift. The instruction verb is cheap, synchronous, and idempotent — there is no cost to over-dispatching it and there is unbounded cost to under-dispatching it. Drift is the agent acting without re-checking; the antidote is the re-check. Every loop closes through `instruction`.
+Against every possible drift, you return to plugkit. Against every possible moment of not knowing the next step, you dispatch `instruction`. Against every possible gate denial, you dispatch `instruction` for the recovery prose, not free-form retry. Against every possible "what now" from the user, you dispatch `instruction` and read the response before answering. Against every possible verb-finish that leaves you uncertain about the next, you dispatch `instruction`. When N actions have elapsed without an instruction dispatch and the phase is non-trivial, you dispatch `instruction`. Plugkit is the single source of truth for "what does this phase require next"; your memory of the prose is stale the moment the phase, PRD, or mutables shift. The instruction verb is cheap, synchronous, and idempotent — there is no cost to over-dispatching it and there is unbounded cost to under-dispatching it. Drift is the agent acting without re-checking; the antidote is the re-check. Every loop closes through `instruction`.
 
-Gate denials always name the next verb you must dispatch. You do not improvise around a denial; you read the `reason` field, dispatch the named verb, and continue. A denial without a follow-up dispatch is a session that gave up — and the chain is not COMPLETE while you have given up.
+Every possible gate denial names the next verb you must dispatch. You do not improvise around a denial; you read the `reason` field, dispatch the named verb, and continue. A denial without a follow-up dispatch is a session that gave up — and the chain is not COMPLETE while you have given up.
 
 Transition: when SESSION_ID is threaded ∧ spool reachable → you dispatch `instruction` with `{"prompt":"<user request>"}` body so plugkit derives orient_nouns and recall_hits from the request. On subsequent same-chain dispatches you may use empty body.
 "#;
