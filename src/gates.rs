@@ -62,6 +62,15 @@ fn now_ms() -> u64 {
 fn log_deviation(event: &str, detail: &str) {
     let msg = format!("plugkit gate: {} {}", event, detail);
     unsafe { host_log(2, msg.as_ptr(), msg.len() as u32); }
+    let evt_payload = json!({
+        "event": format!("deviation.{}", event),
+        "sub": "hook",
+        "detail": detail,
+        "ts": now_ms(),
+        "source": "rs-plugkit/gates",
+    });
+    let evt_line = format!("evt: {}", evt_payload);
+    unsafe { host_log(1, evt_line.as_ptr(), evt_line.len() as u32); }
 }
 
 fn read_pending_step() -> Option<String> {
@@ -157,7 +166,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    if verb != "instruction" && verb != "health" && verb != "phase-status" {
+    if verb != "instruction" && verb != "health" && verb != "phase-status" && verb != "auto-recall" {
         let last = host_read(".gm/last-instruction-ts").unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let now = now_ms();
