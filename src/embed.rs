@@ -41,6 +41,11 @@ const EMBED_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 const EMBED_DIM: usize = 384;
 const MAX_TOKENS: usize = 512;
 
+const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
+
+const QUERY_CACHE_CAP: usize = 64;
+const QUERY_CACHE_TTL_MS: i64 = 600_000;
+
 fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
     extern "C" {
         fn host_random_fill(ptr: *mut u8, len: u32) -> u32;
@@ -294,12 +299,79 @@ pub fn embed_text(text: &str) -> Option<Vec<f32>> {
 }
 
 pub fn embed_text_json(text: &str) -> Option<serde_json::Value> {
+    embed_text_json_passage(text)
+}
+
+pub fn embed_text_json_passage(text: &str) -> Option<serde_json::Value> {
     let v = embed_text(text)?;
-    Some(serde_json::Value::Array(
+    Some(vec_to_json(v))
+}
+
+pub fn embed_text_json_query(query_text: &str) -> Option<serde_json::Value> {
+    let trimmed = query_text.trim();
+    if trimmed.is_empty() { return None; }
+
+    if let Some(cached) = query_cache_get(trimmed) {
+        crate::wasm_dispatch::emit_event("embed.query_cache_hit", serde_json::json!({
+            "query_len": trimmed.len(),
+        }));
+        return Some(vec_to_json(cached));
+    }
+
+    let prefixed = format!("{}{}", BGE_QUERY_PREFIX, trimmed);
+    let v = embed_text(&prefixed)?;
+    query_cache_put(trimmed, &v);
+    Some(vec_to_json(v))
+}
+
+fn vec_to_json(v: Vec<f32>) -> serde_json::Value {
+    serde_json::Value::Array(
         v.into_iter()
             .map(|f| serde_json::Number::from_f64(f as f64)
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null))
             .collect(),
-    ))
+    )
+}
+
+use std::sync::Mutex;
+
+struct CacheEntry {
+    key: String,
+    embedding: Vec<f32>,
+    ts_ms: i64,
+}
+
+static QUERY_CACHE: Mutex<Vec<CacheEntry>> = Mutex::new(Vec::new());
+
+extern "C" {
+    fn host_now_ms() -> i64;
+}
+
+fn now_ms() -> i64 {
+    unsafe { host_now_ms() }
+}
+
+fn query_cache_get(key: &str) -> Option<Vec<f32>> {
+    let mut guard = QUERY_CACHE.lock().ok()?;
+    let now = now_ms();
+    guard.retain(|e| now - e.ts_ms < QUERY_CACHE_TTL_MS);
+    let idx = guard.iter().position(|e| e.key == key)?;
+    let entry = guard.remove(idx);
+    let emb = entry.embedding.clone();
+    guard.push(entry);
+    Some(emb)
+}
+
+fn query_cache_put(key: &str, embedding: &[f32]) {
+    let mut guard = match QUERY_CACHE.lock() { Ok(g) => g, Err(_) => return };
+    let now = now_ms();
+    guard.retain(|e| now - e.ts_ms < QUERY_CACHE_TTL_MS && e.key != key);
+    while guard.len() >= QUERY_CACHE_CAP { guard.remove(0); }
+    guard.push(CacheEntry { key: key.to_string(), embedding: embedding.to_vec(), ts_ms: now });
+}
+
+#[cfg(test)]
+pub fn query_cache_clear() {
+    if let Ok(mut g) = QUERY_CACHE.lock() { g.clear(); }
 }
