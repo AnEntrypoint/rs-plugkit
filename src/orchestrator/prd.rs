@@ -127,10 +127,20 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     if trimmed.is_empty() {
         return (String::new(), "missing PRD item id".to_string(), 1);
     }
-    let id_target = if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string()).unwrap_or_else(|| trimmed.to_string())
+    let (id_target, witness) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        let id = v.get("id")
+            .or_else(|| v.get("prd_id"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| trimmed.to_string());
+        let wit = v.get("witness_evidence")
+            .or_else(|| v.get("witness"))
+            .or_else(|| v.get("evidence"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        (id, wit)
     } else {
-        trimmed.to_string()
+        (trimmed.to_string(), None)
     };
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
@@ -148,6 +158,9 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             if let Some(map) = item.as_mapping_mut() {
                 if map.get(&Value::String("id".to_string())).and_then(|v| v.as_str()) == Some(&id_target) {
                     map.insert(Value::String("status".to_string()), Value::String("completed".to_string()));
+                    if let Some(w) = witness.as_ref() {
+                        map.insert(Value::String("witness".to_string()), Value::String(w.clone()));
+                    }
                     found = true;
                 }
             }
@@ -158,6 +171,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             "error": format!("prd id not found: {}", id_target),
             "deviation_kind": "prd-resolve-unknown-id",
             "prd_id": id_target,
+            "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; raw text body also accepted as bare id",
         }).to_string();
         return (body, format!("prd id not found: {}", id_target), 1);
     }
