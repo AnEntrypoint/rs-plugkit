@@ -14,32 +14,38 @@ pub struct GateVerdict {
     pub reason: Option<String>,
     pub await_result: bool,
     pub pending_step_id: Option<String>,
+    pub pending_step_full: Option<Value>,
     pub residuals: Vec<String>,
 }
 
 impl GateVerdict {
     fn allow() -> Self {
-        Self { allowed: true, reason: None, await_result: false, pending_step_id: None, residuals: vec![] }
+        Self { allowed: true, reason: None, await_result: false, pending_step_id: None, pending_step_full: None, residuals: vec![] }
     }
     fn deny(reason: String) -> Self {
-        Self { allowed: false, reason: Some(reason), await_result: false, pending_step_id: None, residuals: vec![] }
+        Self { allowed: false, reason: Some(reason), await_result: false, pending_step_id: None, pending_step_full: None, residuals: vec![] }
     }
     pub fn to_denial_json(&self, verb: &str) -> Value {
+        let next = if self.await_result { "memorize-continue" } else { "instruction" };
         let reason_with_hint = format!(
-            "{} — dispatch `instruction` for recovery prose; do not improvise around this denial.",
-            self.reason.clone().unwrap_or_default()
+            "{} — dispatch `{}` for recovery; do not improvise around this denial.",
+            self.reason.clone().unwrap_or_default(),
+            next,
         );
         let mut obj = json!({
             "ok": false,
             "verb": verb,
             "gate_denied": true,
             "reason": reason_with_hint,
-            "next_dispatch": "instruction",
+            "next_dispatch": next,
         });
         if self.await_result {
             obj["await_result"] = json!(true);
             if let Some(s) = &self.pending_step_id {
                 obj["pending_step_id"] = json!(s);
+            }
+            if let Some(full) = &self.pending_step_full {
+                obj["pending_step_full"] = full.clone();
             }
         }
         if !self.residuals.is_empty() {
@@ -67,6 +73,25 @@ fn read_pending_step() -> Option<String> {
     let deadline = v.get("pending_step_deadline_ms").and_then(|n| n.as_u64()).unwrap_or(0);
     if deadline > 0 && now_ms() > deadline { return None; }
     Some(step_id)
+}
+
+fn read_pending_step_full() -> Option<Value> {
+    let content = host_read(".gm/turn-state.json").unwrap_or_default();
+    if content.is_empty() { return None; }
+    let v: Value = serde_json::from_str(&content).ok()?;
+    let step_id = v.get("pending_step_id").and_then(|s| s.as_str())?.to_string();
+    if step_id.is_empty() { return None; }
+    let deadline = v.get("pending_step_deadline_ms").and_then(|n| n.as_u64()).unwrap_or(0);
+    if deadline > 0 && now_ms() > deadline { return None; }
+    let kv_key = format!("rs-learn/pipeline/{}", step_id);
+    let state_raw = crate::wasm_dispatch::host_kv_read("rs-learn/pipeline", &step_id).unwrap_or_default();
+    let state: Value = serde_json::from_str(&state_raw).unwrap_or(Value::Null);
+    Some(json!({
+        "step_id": step_id,
+        "deadline_ms": deadline,
+        "kv_key": kv_key,
+        "state": state,
+    }))
 }
 
 fn body_path_field(body: &Value) -> Option<String> {
@@ -118,13 +143,16 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             log_deviation("await-result-violation", &format!("verb={} step={}", verb, step_id));
             let mut v = GateVerdict::deny(format!(
                 "pipeline suspended at step_id={}; only memorize-continue advances state. \
-                 Read the AWAIT-RESULT instruction (dispatch `instruction`), compute the step inline \
-                 using its prompt_template, then dispatch memorize-continue with the result. \
-                 No other verb is valid until this completes.",
+                 The full pending_step recovery payload is embedded in this response as `pending_step_full` \
+                 (no need to re-dispatch `instruction` first). Compute the step inline using \
+                 `pending_step_full.state.pipeline[cursor].payload` and the prompt_template, then dispatch \
+                 memorize-continue with body {{token, step_id, result}}. No other verb is valid until \
+                 this completes.",
                 step_id
             ));
             v.await_result = true;
-            v.pending_step_id = Some(step_id);
+            v.pending_step_id = Some(step_id.clone());
+            v.pending_step_full = read_pending_step_full();
             return v;
         }
     }
