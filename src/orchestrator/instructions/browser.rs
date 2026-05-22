@@ -15,16 +15,19 @@ Pure-prose static-document edits (no JS, no CSS-driven behavior, no DOM mutation
 
 YOU drive the browser through the spool. Plugkit holds the Chromium handle, the per-project profile, the session table; you advance the work by writing `.gm/exec-spool/in/browser/<N>.txt` and reading `out/<N>.json`. There is no library import that shortcuts this. There is no puppeteer/playwright/CDP handle you can hold. The verb is the surface; everything else is fabrication.
 
-The body is a string. Four shapes, nothing else:
+The body is a string. Five shapes, nothing else:
 
 ```
 session new
 session list
 session kill <id>
 <arbitrary JS expression evaluated in page context>
+timeout=<ms>\n<expression>
 ```
 
 A bare expression with no live session opens one and evaluates against `about:blank`. A bare expression with a live session reuses it. `session new` returns the id you carry on subsequent dispatches; you keep it in your turn and refer to it by writing `session=<id>\n<expr>` when more than one is open.
+
+Default per-evaluation timeout is 14000ms. Operations that legitimately exceed this (long page loads, multi-step navigation, slow remote APIs) prefix `timeout=<ms>\n` with the desired millisecond cap; the wrapper clamps to 50000ms maximum. The response includes `timeout_ms_used` so you witness which budget actually applied. `browser.runner-timeout` event fires when the runner hits the cap — read your `stderr`, narrow the operation, or raise timeout; do not retry blind at the same budget.
 
 ## Envelope
 
