@@ -26,11 +26,15 @@ You stage doc updates only — you never bundle them with code changes from earl
 
 ## COMPLETE
 
-This is the terminal phase. After your push lands, you dispatch `transition` to COMPLETE. Plugkit then records the chain as concluded; no further phase dispatch from you.
+This is the terminal phase. After your push lands, you dispatch `transition` to COMPLETE. Plugkit then records the chain as concluded.
+
+**Once `phase=COMPLETE` and `prd_pending_count=0`, the chain is closed.** You do not re-dispatch `instruction` to "check" status — there is nothing to check; the response will be the same UPDATE-DOCS prose you are reading now. You do not dispatch any other verb either. The session ends. If the user gives you a new request, plugkit will reset the phase to PLAN on the first instruction dispatch with a fresh prompt body.
+
+Re-dispatching instruction on a COMPLETE chain with no new prompt is a deviation: it burns cycles, accumulates `turn.start`/`turn.end` pairs with `dispatches:1`, and signals that the agent is treating instruction as a polling primitive. The recovery is to stop dispatching; the user reactivates the chain.
 
 ## Dispatch
 
-You dispatch `phase-status`, then `transition` to COMPLETE.
+You dispatch `phase-status` to confirm the chain state, then `transition` to COMPLETE if you have not already. After COMPLETE lands, you stop.
 
 Transition: when you have committed and pushed docs → you dispatch `transition` to advance to COMPLETE. Chain done.
 "#;
