@@ -180,10 +180,10 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     let mut session_id_opt: Option<String> = None;
     let mut prompt_opt: Option<String> = None;
-    let phase = if trimmed.is_empty() {
-        read_state().phase
+    let raw_phase_opt = if trimmed.is_empty() {
+        None
     } else if let Some(stripped) = trimmed.strip_prefix("phase=") {
-        stripped.trim().to_string()
+        Some(stripped.trim().to_string())
     } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
             session_id_opt = Some(sid.to_string());
@@ -192,14 +192,32 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
             prompt_opt = Some(p.to_string());
         }
         if let Some(s) = v.as_str() {
-            s.to_string()
+            Some(s.to_string())
         } else if let Some(s) = v.get("phase").and_then(|p| p.as_str()) {
-            s.to_string()
+            Some(s.to_string())
         } else {
-            read_state().phase
+            None
         }
     } else {
-        trimmed.to_string()
+        Some(trimmed.to_string())
+    };
+
+    let valid_phases = ["ENTRY", "ORCHESTRATOR", "PLAN", "EXECUTE", "EMIT", "VERIFY", "COMPLETE", "BROWSER"];
+    let phase = match raw_phase_opt.as_deref() {
+        None => read_state().phase,
+        Some(p) => {
+            let upper = p.trim().to_ascii_uppercase();
+            if upper.is_empty() || valid_phases.contains(&upper.as_str()) {
+                if upper.is_empty() { read_state().phase } else { upper }
+            } else {
+                ilog(&format!(
+                    "instruction::handle invalid phase '{}' (len={}); falling back to disk state. Valid: PLAN|EXECUTE|EMIT|VERIFY|COMPLETE|BROWSER",
+                    &p.chars().take(80).collect::<String>(),
+                    p.len()
+                ));
+                read_state().phase
+            }
+        }
     };
 
     if let Some(p) = &prompt_opt {
