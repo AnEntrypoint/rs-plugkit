@@ -23,7 +23,7 @@ The window opens on the user's screen. That is the witness — you launched, the
 
 ## Profile
 
-Per-project at `<cwd>/.gm/browser-profile/`. Cookies, storage, extensions persist across your session, across your turns, across runs. A second concurrent launch contends the SingletonLock; plugkit falls back to a per-pid profile and the fallback loses persistence — you avoid concurrent launches by reusing the session id you already hold.
+`session new` (or a bare expression with no live session) spawns a locally-profiled Chromium at `<cwd>/.gm/browser-profile/` and the runner attaches via `--direct <wsEndpoint>`. Cookies, storage, extensions persist across your session, across your turns, across runs. A second concurrent launch contends the SingletonLock; the watcher reuses the live CDP rather than re-launching. The runner's own extension-attach mode (the "Waiting for extension to connect" message) is never the default and is never what you want — if you see it in your `stderr`, the host failed to spawn the local Chromium and you dispatch `instruction` for the recovery prose, not retry blind.
 
 ## Discipline
 
