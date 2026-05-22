@@ -130,6 +130,8 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let (id_target, witness) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         let id = v.get("id")
             .or_else(|| v.get("prd_id"))
+            .or_else(|| v.get("mutable_id"))
+            .or_else(|| v.get("item_id"))
             .and_then(|s| s.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| trimmed.to_string());
@@ -140,7 +142,10 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             .map(|s| s.to_string());
         (id, wit)
     } else {
-        (trimmed.to_string(), None)
+        let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+        let id = parts.first().map(|s| s.to_string()).unwrap_or_else(|| trimmed.to_string());
+        let wit = parts.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        (id, wit)
     };
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
@@ -171,7 +176,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             "error": format!("prd id not found: {}", id_target),
             "deviation_kind": "prd-resolve-unknown-id",
             "prd_id": id_target,
-            "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; raw text body also accepted as bare id",
+            "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; aliases accepted: prd_id, mutable_id, item_id (all map to id). Raw text body: first whitespace-delimited token = id, rest = witness_evidence. NOT a valid id: a multi-word free-text description, a JSON object with the id missing from id/prd_id/mutable_id/item_id keys, or a quoted string that includes the id and free text in one blob.",
         }).to_string();
         return (body, format!("prd id not found: {}", id_target), 1);
     }
