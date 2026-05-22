@@ -30,5 +30,11 @@ Between each mutable resolution, between failed exec retries, between unfamiliar
 
 ## Dispatch
 
-You spool every exec. You flip rows by dispatching `mutable-resolve`. You dispatch `transition` when the PRD slice is closed and every mutable is witnessed. On new unknown, you dispatch `transition` back to PLAN.
+You spool every exec.
+
+You flip mutables by dispatching `mutable-resolve` with body `{"mutable_id": "<id>", "witness_evidence": "<file:line | codesearch hit | exec snippet>"}`.
+
+You flip PRD rows by dispatching `prd-resolve` with body `{"id": "<prd-item-id>", "witness_evidence": "<…>"}`. Bare text body (just the id) is also accepted but loses the witness audit trail. Do not pass `{prd_id, witness_evidence}` with the whole envelope nested as a string — the verb accepts `id` or `prd_id` at the top level alongside `witness_evidence`. A response with `deviation_kind: prd-resolve-unknown-id` means your id did not match a PRD row; you read the `hint` field and re-dispatch with the correct id, you do not retry blind.
+
+You dispatch `transition` when the PRD slice is closed and every mutable is witnessed. On new unknown, you dispatch `transition` back to PLAN.
 "#;
