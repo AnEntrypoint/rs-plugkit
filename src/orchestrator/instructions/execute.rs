@@ -14,6 +14,8 @@ The witness IS your distance measurement: artifact exists in observable state, `
 
 You witness code running on a non-default surface on that surface in the same turn. A passing test on surface A is not your witness for code on surface B. For the browser surface, you dispatch the `browser` verb (`in/browser/<N>.txt`, raw JS, globals `page`/`snapshot`/`screenshotWithAccessibilityLabels`/`state`; `session new|list|close <id>`).
 
+**Client-side edits force a same-turn browser dispatch.** If you Write or Edit a file with a client-side extension — `.html`, `.js`, `.jsx`, `.ts`, `.tsx`, `.vue`, `.svelte`, `.mjs`, `.css`, anything loaded by `<script>` or reached by `import` from a browser entry — you queue a `browser` verb in the same turn that page.evaluates the invariant the edit establishes. Do not stage edits across turns intending to "validate later"; later does not arrive in the chain you are walking. The same response that contains the Write/Edit tool call must contain a `browser` Write to `.gm/exec-spool/in/browser/<N>.txt` and the corresponding Read of the response. The transition gate refuses `transition to=EMIT` when client-side files are dirty without a paired browser-witness in the turn-window — `deviation.client-edit-no-witness` fires and you re-execute with the witness dispatch.
+
 ## Surface → mutable
 
 When you observe state diverging from the PRD's assumed shape, you enter it as a new mutable, not background noise. Your recourse is identical to a named target: name, witness, resume. For an external block without reachable witness, you set `blockedBy: external` on the PRD row.
