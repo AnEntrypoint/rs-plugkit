@@ -138,6 +138,39 @@ fn worktree_dirty() -> bool {
     !crate::wasm_dispatch::git_porcelain().trim().is_empty()
 }
 
+fn check_browser_witness_coverage() -> Vec<String> {
+    let edits_raw = host_read(".gm/exec-spool/.turn-browser-edits.json").unwrap_or_default();
+    if edits_raw.trim().is_empty() { return vec![]; }
+    let edits: Vec<Value> = match serde_json::from_str::<Value>(&edits_raw) {
+        Ok(Value::Array(arr)) => arr,
+        _ => return vec![],
+    };
+    if edits.is_empty() { return vec![]; }
+    let witness_raw = host_read(".gm/exec-spool/.turn-browser-witnessed").unwrap_or_default();
+    let witnessed_hashes: serde_json::Map<String, Value> = if witness_raw.trim().is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_str::<Value>(&witness_raw).ok()
+            .and_then(|v| v.get("witnessed_hashes").cloned())
+            .and_then(|v| if let Value::Object(m) = v { Some(m) } else { None })
+            .unwrap_or_default()
+    };
+    let mut unwitnessed: Vec<String> = vec![];
+    for entry in edits.iter() {
+        let file = match entry.get("file").and_then(|v| v.as_str()) {
+            Some(f) if !f.is_empty() => f,
+            _ => continue,
+        };
+        let edit_hash = entry.get("hash").and_then(|v| v.as_str()).unwrap_or("");
+        if edit_hash.is_empty() { continue; }
+        let witness_hash = witnessed_hashes.get(file).and_then(|v| v.as_str()).unwrap_or("");
+        if witness_hash != edit_hash {
+            unwitnessed.push(file.to_string());
+        }
+    }
+    unwitnessed
+}
+
 fn is_unsolicited_toplevel_doc(rel: &str) -> bool {
     let norm = rel.replace('\\', "/");
     if norm.contains('/') { return false; }
@@ -200,6 +233,11 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         if !host_exists(".gm/residual-check-fired") {
             residuals.push("residual-scan not fired in this stop window — dispatch residual-scan before COMPLETE".into());
             log_deviation("complete-without-residual-scan", "");
+        }
+        let bw_check = check_browser_witness_coverage();
+        if !bw_check.is_empty() {
+            residuals.push(format!("client-edit-no-witness: {} client-side file(s) edited without browser-witness in this session — dispatch `browser` verb to page.evaluate the invariant each edit establishes, then re-attempt COMPLETE. Files: {}", bw_check.len(), bw_check.join(", ")));
+            log_deviation("client-edit-no-witness", &format!("files={}", bw_check.join(",")));
         }
         if !residuals.is_empty() {
             log_deviation("gate-deny", &format!("stop-gate residuals={}", residuals.len()));

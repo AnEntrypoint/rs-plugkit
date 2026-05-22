@@ -1,5 +1,18 @@
 pub const TEXT: &str = r#"# BROWSER
 
+## Hard Rule: Browser Witness Mandate (paper §23)
+
+**Every edit to code that runs in a browser requires a live `browser` dispatch in the same turn as the edit.** Client-side surfaces — `.html`, `.js`, `.jsx`, `.ts`, `.tsx`, `.vue`, `.svelte`, `.mjs`, `.css`, web components, service workers, anything loaded by a `<script>` tag, anything reached by `import` from a browser-side entry — must be witnessed by a live `page.evaluate` of the specific invariant the edit establishes. A passing node test, a passing build, a `curl` of the served HTML, a static-analysis pass, none of these substitute: they witness server delivery, not browser behavior. The witness IS the proof; the prose is not.
+
+Protocol (paper §23): (1) boot the real surface — server up, page reachable, HTTP 200 witnessed; (2) `browser` dispatch → navigate → poll for the global the change affects; (3) `page.evaluate` asserting the specific invariant, capturing the witnessed values into `stdout`; (4) variance → fix at root cause, re-witness (Fix on Sight). Never advance on unwitnessed client behavior. Never queue browser validation for "later" — the same turn that edited the client-side file dispatches the browser verb that validates it; emit-without-witness is forced closure.
+
+The rule fires across phases:
+ - **EXECUTE**: edit a client-side file → dispatch `browser` in the same turn against the live page asserting the invariant the edit establishes
+ - **EMIT**: post-emit re-witness — the page still passes the invariant after the full diff lands
+ - **VERIFY**: final gate — `browser-witness-hash-mismatch` deviation fires if any file you witnessed earlier has changed without re-witnessing
+
+Pure-prose static-document edits (no JS, no CSS-driven behavior, no DOM mutation) are the ONLY exempt category and the exemption must be named explicitly in the response so the skip is auditable. Silent skip on actual behavior change is forced closure.
+
 YOU drive the browser through the spool. Plugkit holds the Chromium handle, the per-project profile, the session table; you advance the work by writing `.gm/exec-spool/in/browser/<N>.txt` and reading `out/<N>.json`. There is no library import that shortcuts this. There is no puppeteer/playwright/CDP handle you can hold. The verb is the surface; everything else is fabrication.
 
 The body is a string. Four shapes, nothing else:

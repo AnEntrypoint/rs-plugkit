@@ -24,7 +24,11 @@ You write `test.js` at root, 200-line ceiling, real services only. Pass = your i
 
 ## Residual-scan
 
-You run residual-scan before COMPLETE by dispatching `residual-scan`. The verb examines your open surface: PRD pending, browser sessions, dirty tree, untracked artifacts. Non-empty = your trajectory non-convergent → you expand PRD with reachable in-spirit residual via `prd-add`, you re-execute. One-shot per stop window via marker — plugkit refuses to re-run inside the same window.
+You run residual-scan before COMPLETE by dispatching `residual-scan`. The verb examines your open surface: PRD pending, browser sessions, dirty tree, untracked artifacts, **browser-witness coverage for client-side files modified in the session**. Non-empty = your trajectory non-convergent → you expand PRD with reachable in-spirit residual via `prd-add`, you re-execute. One-shot per stop window via marker — plugkit refuses to re-run inside the same window.
+
+## Browser-witness coverage
+
+Before VERIFY admits the chain to COMPLETE, every client-side file touched this session must have a `browser.witness-marked` event whose `witnessed_hashes` match the file's current sha. The check enumerates files changed since the session's first dispatch; for each matching `.html`, `.js`, `.jsx`, `.ts`, `.tsx`, `.vue`, `.svelte`, `.mjs`, `.css` (or anything that an HTML entry imports), it asserts a corresponding browser-witness record exists with the current hash. Mismatch or absence → `deviation.browser-witness-hash-mismatch` or `deviation.browser-witness-missing` fires, residual-scan refuses, and you regress to EXECUTE to re-witness against the live page. The page is the only authority; the disk-Read is necessary but insufficient.
 
 ## Witness over claim
 
