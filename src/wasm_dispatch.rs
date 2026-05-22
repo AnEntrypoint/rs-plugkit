@@ -219,6 +219,12 @@ fn exec_js(body: &Value, body_s: &str) -> u64 {
     }
 }
 
+pub fn host_kv_read(namespace: &str, key: &str) -> Option<String> {
+    if key.is_empty() { return None; }
+    let packed = unsafe { host_kv_get(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
+    unpack_to_string(packed)
+}
+
 fn kv_get(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
