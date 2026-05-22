@@ -749,6 +749,15 @@ fn exec_git(args: &str) -> String {
 fn log_deviation_push(event: &str, detail: &str) {
     let msg = format!("plugkit gate: {} {}", event, detail);
     unsafe { host_log(2, msg.as_ptr(), msg.len() as u32); }
+    let evt_payload = json!({
+        "event": format!("deviation.{}", event),
+        "sub": "hook",
+        "detail": detail,
+        "ts": unsafe { host_now_ms() },
+        "source": "rs-plugkit/git_push",
+    });
+    let evt_line = format!("evt: {}", evt_payload);
+    unsafe { host_log(1, evt_line.as_ptr(), evt_line.len() as u32); }
 }
 
 pub(crate) fn emit_event(event: &str, fields: Value) {
@@ -830,12 +839,21 @@ fn git_push(body: &Value) -> u64 {
     let porcelain = git_porcelain_in(repo.as_deref());
     if !porcelain.trim().is_empty() {
         log_deviation_push("push-dirty", &branch);
+        let porcelain_preview: String = porcelain.lines().take(8).collect::<Vec<_>>().join("\n");
+        let more = if porcelain.lines().count() > 8 { format!("\n... +{} more", porcelain.lines().count() - 8) } else { String::new() };
         return pack(json!({
             "ok": false,
             "verb": "git_push",
             "gate_denied": true,
             "repo": repo,
-            "reason": format!("worktree dirty in {} — commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice", repo.as_deref().unwrap_or("cwd"), branch),
+            "branch": branch,
+            "porcelain": porcelain_preview.clone() + &more,
+            "reason": format!(
+                "worktree dirty in {} — commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice. Porcelain:\n{}{}",
+                repo.as_deref().unwrap_or("cwd"), branch, porcelain_preview, more
+            ),
+            "next_dispatch": "instruction",
+            "next_action_hint": "Read porcelain field, decide stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. Do NOT retry git_push with the same dirty tree — the gate will deny again.",
         }).to_string());
     }
     let push_out = exec_git_push_in(repo.as_deref(), &branch);
