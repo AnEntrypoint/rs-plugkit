@@ -20,6 +20,10 @@ You witness code running on a non-default surface on that surface in the same tu
 
 When you observe state diverging from the PRD's assumed shape, you enter it as a new mutable, not background noise. Your recourse is identical to a named target: name, witness, resume. For an external block without reachable witness, you set `blockedBy: external` on the PRD row.
 
+## Re-expand on discovery
+
+While executing, you discover every possible additional case the PLAN-phase expansion did not name: a corner case that surfaced under real input, a caveat the tool actually emits, a failure mode the surface exposes, a related artifact that the user clearly meant to include. Each of those is a `prd-add` you dispatch this turn, not a "future work" note. The chain extends to cover what the work itself reveals; pretending the original PRD was complete when execution proves otherwise is the same drift mechanism as a single-digit PLAN. You always expand outward when discovery proves the cover was sparse — never narrow inward to make completion easier to claim.
+
 ## Maturity-first
 
 Your first emit = closure of transform. Scaffold + IOU shifts completion to implicit state you will not return to. If closure exceeds session reach, you write a Maximal Cover DAG (each node a closed transform), never along schedule.
