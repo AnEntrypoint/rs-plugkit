@@ -93,10 +93,17 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             return (String::new(), err, 1);
         }
     }
-    let id = item_map.get(&Value::String("id".to_string()))
+    let provided_id = item_map.get(&Value::String("id".to_string()))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(|s| s.to_string());
+    let id = provided_id.clone()
         .unwrap_or_else(|| format!("item-{}", crate::orchestrator::state::now_ms()));
+    if provided_id.is_none() {
+        crate::wasm_dispatch::emit_event("deviation.prd-add-no-id", serde_json::json!({
+            "fallback_id": id,
+            "hint": "Pass `id` in prd-add body so the PRD row is semantically findable later. Auto-generated 'item-<ms>' ids cannot be referenced by intent in recall or prd-resolve.",
+        }));
+    }
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
     let mut doc: Value = if pkfs::exists(&path_s) {
