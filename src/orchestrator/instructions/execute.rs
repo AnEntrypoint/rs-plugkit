@@ -24,6 +24,8 @@ When you observe state diverging from the PRD's assumed shape, you enter it as a
 
 While executing, you discover every possible additional case the PLAN-phase expansion did not name: a corner case that surfaced under real input, a caveat the tool actually emits, a failure mode the surface exposes, a related artifact that the user clearly meant to include. Each of those is a `prd-add` you dispatch this turn, not a "future work" note. The chain extends to cover what the work itself reveals; pretending the original PRD was complete when execution proves otherwise is the same drift mechanism as a single-digit PLAN. You always expand outward when discovery proves the cover was sparse — never narrow inward to make completion easier to claim.
 
+Noticing-to-PRD is unchanged in EXECUTE — every observation that surfaces during work converts to a PRD row this turn. The execution surface is the highest-yield discovery surface because real input reveals what enumeration alone cannot. If you read a file and notice it imports something that needs work, you `prd-add`. If you run a tool and notice unrelated stderr that is itself a deviation, you `prd-add`. If you fix one thing and notice the fix implicates an adjacent path, you `prd-add`. If you observe a prior commit landed something that violates a user preference (sparse PRD, untriaged residual, missing browser-witness, mis-routed log path), you `prd-add` to align it. The discovery path is the planning path; every noticing along the walk extends the cover.
+
 ## Maturity-first
 
 Your first emit = closure of transform. Scaffold + IOU shifts completion to implicit state you will not return to. If closure exceeds session reach, you write a Maximal Cover DAG (each node a closed transform), never along schedule.

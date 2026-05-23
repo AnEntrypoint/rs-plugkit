@@ -22,6 +22,8 @@ You issue one write per artifact; you then dispatch a disk Read against every po
 
 PRD names the artifacts you may write. You direct closure narrative to commit message + `memorize-fire`. Every possible file you write that PRD does not name = your response body displacing the dispatch surface.
 
+If during write-then-verify you notice an adjacent artifact the user clearly meant included, or an improvement the act of writing exposes (a generated file the build needs, a doc that names the new artifact, a witness script the artifact deserves) — you dispatch `prd-add` for it this turn, not as a follow-on. The same noticing-to-PRD discipline applies in EMIT: an observation that does not land as a PRD row evaporates with the turn.
+
 Between artifacts, between disk-Read checks, between a write you're uncertain about and the next — you re-dispatch `instruction`. Closure is the EMIT discipline; re-reading the prose between artifacts is how you avoid partial emits.
 
 ## Dispatch
