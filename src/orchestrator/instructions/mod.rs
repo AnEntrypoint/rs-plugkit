@@ -37,6 +37,18 @@ fn read_unsupervised_watcher() -> serde_json::Value {
     }
 }
 
+fn read_gm_plugkit_stale() -> serde_json::Value {
+    let path = super::gm_dir().join("exec-spool").join(".gm-plugkit-stale.json");
+    let ps = path.to_string_lossy().to_string();
+    if !pkfs::exists(&ps) {
+        return serde_json::Value::Null;
+    }
+    match pkfs::read_to_string(&ps) {
+        Some(content) => serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::Value::Null),
+        None => serde_json::Value::Null,
+    }
+}
+
 fn residual_check_fired_recently() -> bool {
     let marker = super::gm_dir().join("residual-check-fired");
     let ms = marker.to_string_lossy().to_string();
@@ -280,6 +292,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let open_browser_sessions = super::task::open_browser_sessions();
     let stuck_spool = super::task::stuck_spool();
     let unsupervised_watcher = read_unsupervised_watcher();
+    let gm_plugkit_stale = read_gm_plugkit_stale();
     let running_tasks_count = match &running_tasks {
         serde_json::Value::Array(a) => a.len(),
         _ => 0,
@@ -309,6 +322,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "orient_nouns": nouns,
         "ready_wave": wave,
         "update_available": update_available,
+        "gm_plugkit_stale": gm_plugkit_stale,
         "running_tasks": running_tasks,
         "open_browser_sessions": open_browser_sessions,
         "stuck_spool": stuck_spool,
