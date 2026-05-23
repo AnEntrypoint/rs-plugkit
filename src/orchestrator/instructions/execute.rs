@@ -36,6 +36,8 @@ You write to the recall index only by dispatching `memorize-fire`. Other surface
 
 Between each mutable resolution, between failed exec retries, between unfamiliar errors — you re-dispatch `instruction`. EXECUTE has the highest drift surface; the recovery primitive is unchanged.
 
+When a gate denies your verb, the denial payload carries a `next_dispatch` field naming the recovery verb (typically `instruction`). You dispatch THAT verb next, not the same denied verb again. Retrying the same denied verb without dispatching the recovery first is a deviation the gate detects on the 2nd attempt and escalates to `deviation.long-gap-retry-without-instruction`. The chain cannot recover by re-attempting the denied verb — the gate's refusal IS the chain telling you the next step is the named verb.
+
 ## Dispatch
 
 You spool every possible exec.

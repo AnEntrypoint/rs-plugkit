@@ -59,6 +59,15 @@ fn now_ms() -> u64 {
     unsafe { crate::wasm_dispatch::host_now_ms() }
 }
 
+fn parse_retry_state(s: &str) -> (String, u32) {
+    let s = s.trim();
+    if s.is_empty() { return (String::new(), 0); }
+    let mut parts = s.splitn(2, '|');
+    let verb = parts.next().unwrap_or("").to_string();
+    let count = parts.next().and_then(|c| c.trim().parse::<u32>().ok()).unwrap_or(0);
+    (verb, count)
+}
+
 fn log_deviation(event: &str, detail: &str) {
     let msg = format!("plugkit gate: {} {}", event, detail);
     unsafe { host_log(2, msg.as_ptr(), msg.len() as u32); }
@@ -205,6 +214,17 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         let now = now_ms();
         if last_ms > 0 && now.saturating_sub(last_ms) > 120_000 {
             let gap_ms = now - last_ms;
+            let retry_state = host_read(".gm/long-gap-retry-state").unwrap_or_default();
+            let (last_verb, count) = parse_retry_state(&retry_state);
+            let new_count = if last_verb == verb { count + 1 } else { 1u32 };
+            let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", &format!("{}|{}", verb, new_count));
+            if new_count >= 2 {
+                log_deviation("long-gap-retry-without-instruction", &format!("verb={} consecutive_retries={} gap_ms={}", verb, new_count, gap_ms));
+                return GateVerdict::deny(format!(
+                    "long-gap-retry-without-instruction: verb=`{}` denied {}× in a row by long-gap-no-instruction gate, yet the agent retried instead of dispatching `instruction`. The gate's `next_dispatch` field names the recovery verb — when it says `instruction`, the next verb IS `instruction`, not the same verb again. Dispatch `instruction` now; the chain cannot recover by re-attempting the denied verb.",
+                    verb, new_count
+                ));
+            }
             log_deviation("long-gap-no-instruction", &format!("verb={} gap_ms={}", verb, gap_ms));
             return GateVerdict::deny(format!(
                 "long-gap-no-instruction: {}ms since last `instruction` dispatch (threshold 120000ms). Idle mid-chain is a deviation. Dispatch `instruction` for recovery prose before any other verb.",
@@ -214,6 +234,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     } else if verb == "instruction" {
         let now = now_ms();
         let _ = crate::wasm_dispatch::host_write(".gm/last-instruction-ts", &now.to_string());
+        let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", "");
     }
 
     let operation = classify_operation(verb, body);
