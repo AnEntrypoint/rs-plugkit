@@ -104,7 +104,8 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
         let payload = serde_json::json!({
             "scan": "skipped",
             "reason": "PRD still has items; complete or remove them before residual scan.",
-            "deviation_kind": "residual-premature"
+            "deviation_kind": "residual-premature",
+            "next_dispatch": "prd-list"
         });
         return (payload.to_string(), String::new(), 0);
     }
@@ -112,7 +113,8 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     if browser_sessions_open() {
         let payload = serde_json::json!({
             "scan": "skipped",
-            "reason": "browser sessions still open"
+            "reason": "browser sessions still open — dispatch `browser` with `session list` body to enumerate open ids, then `session close <id>` for each before retrying residual-scan",
+            "next_dispatch": "browser"
         });
         return (payload.to_string(), String::new(), 0);
     }
@@ -120,7 +122,8 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     if running_tasks_exist() {
         let payload = serde_json::json!({
             "scan": "skipped",
-            "reason": "background tasks still running"
+            "reason": "background tasks still running — wait for completion or kill them via the host_exec_js interface before retrying residual-scan",
+            "next_dispatch": "phase-status"
         });
         return (payload.to_string(), String::new(), 0);
     }
