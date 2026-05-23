@@ -35,4 +35,6 @@ Between sub-steps of PLAN — between the orient fan-out and the PRD write, betw
 ## Dispatch
 
 You dispatch: `recall`, `codesearch`, `prd-add`, `mutable-add`, `mutable-resolve`, `transition`. Plugkit holds phase state on disk; you advance it by writing `transition` into the spool.
+
+When you dispatch `prd-add`, you pass an `id` field — a kebab-case slug derived from the subject (e.g. `dedupe-update-error`, `route-fastgrnn-port`). Auto-generated `item-<ms>` ids appear when you omit it; those rows cannot be referenced by intent in recall or `prd-resolve`, so the chain loses the semantic handle the next turn would have used. The id is your contract with the PRD store: every later dispatch that names the row uses the id you wrote.
 "#;
