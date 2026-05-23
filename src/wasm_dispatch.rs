@@ -331,13 +331,12 @@ fn check_sigil_ignored(text: &str, namespace: &str) {
 }
 
 fn extract_sigil(text: &str) -> Option<String> {
-    for tok in text.split_whitespace() {
-        if let Some(rest) = tok.strip_prefix('@') {
-            let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
-            if !name.is_empty() { return Some(format!("@{}", name)); }
-        }
-    }
-    None
+    let trimmed = text.trim_start();
+    let first_tok = trimmed.split_whitespace().next()?;
+    let rest = first_tok.strip_prefix('@')?;
+    let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    if name.is_empty() { return None; }
+    Some(format!("@{}", name))
 }
 
 fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
