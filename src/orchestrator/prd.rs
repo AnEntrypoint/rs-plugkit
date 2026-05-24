@@ -7,6 +7,26 @@ pub fn prd_path() -> std::path::PathBuf {
     gm_dir().join("prd.yml")
 }
 
+fn slug_from_subject(subject: &str) -> Option<String> {
+    let s = subject.trim();
+    if s.is_empty() { return None; }
+    let mut out = String::with_capacity(s.len());
+    let mut prev_dash = false;
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') { out.pop(); }
+    if out.is_empty() { return None; }
+    if out.len() > 64 { out.truncate(64); while out.ends_with('-') { out.pop(); } }
+    Some(out)
+}
+
 pub fn handle_list(_content: &str) -> (String, String, i32) {
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
@@ -96,12 +116,17 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     let provided_id = item_map.get(&Value::String("id".to_string()))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let subject_str = item_map.get(&Value::String("subject".to_string()))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let id = provided_id.clone()
+        .or_else(|| slug_from_subject(subject_str))
         .unwrap_or_else(|| format!("item-{}", crate::orchestrator::state::now_ms()));
     if provided_id.is_none() {
         crate::wasm_dispatch::emit_event("deviation.prd-add-no-id", serde_json::json!({
             "fallback_id": id,
-            "hint": "Pass `id` in prd-add body so the PRD row is semantically findable later. Auto-generated 'item-<ms>' ids cannot be referenced by intent in recall or prd-resolve.",
+            "subject": subject_str,
+            "hint": "Pass `id` in prd-add body so the PRD row is semantically findable later. Without `id`, plugkit derives a slug from `subject` when available, otherwise falls back to 'item-<ms>'.",
         }));
     }
     let path = prd_path();
