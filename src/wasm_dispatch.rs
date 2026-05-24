@@ -196,6 +196,58 @@ fn env_get(body: &Value) -> u64 {
     }
 }
 
+fn lang(body: &Value) -> u64 {
+    let project_dir = body.get("projectDir").and_then(|v| v.as_str()).unwrap_or("");
+    let command = body.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    if project_dir.is_empty() { return err("lang", "projectDir required"); }
+    if command.is_empty() { return err("lang", "command required"); }
+    let timeout_ms = body.get("timeoutMs").and_then(|v| v.as_u64()).unwrap_or(35000);
+    let runner_js = format!(
+        r#"(async () => {{
+  const fs = require('fs');
+  const path = require('path');
+  const projectDir = {project_dir};
+  const command = {command};
+  const code = {code};
+  const langDir = path.join(projectDir, 'lang');
+  if (!fs.existsSync(langDir)) return JSON.stringify({{ok:false, error:'no-lang-dir', langDir}});
+  const files = fs.readdirSync(langDir).filter(f => f.endsWith('.js') && f !== 'loader.js');
+  const plugins = files.reduce((acc, f) => {{
+    try {{
+      const p = require(path.join(langDir, f));
+      if (p && typeof p.id === 'string' && p.exec && p.exec.match instanceof RegExp && typeof p.exec.run === 'function') acc.push(p);
+    }} catch (_) {{}}
+    return acc;
+  }}, []);
+  const plugin = plugins.find(p => p.exec.match.test(command));
+  if (!plugin) return JSON.stringify({{ok:false, error:'no-plugin-matched', command, available: plugins.map(p => p.id)}});
+  const t0 = Date.now();
+  try {{
+    const out = await Promise.race([
+      Promise.resolve(plugin.exec.run(code, projectDir)),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('plugin-timeout')), 30000))
+    ]);
+    return JSON.stringify({{ok:true, plugin_id: plugin.id, output: String(out), ms: Date.now() - t0}});
+  }} catch (e) {{
+    return JSON.stringify({{ok:false, error: String(e && e.message || e), plugin_id: plugin.id, ms: Date.now() - t0}});
+  }}
+}})()"#,
+        project_dir = serde_json::to_string(project_dir).unwrap_or_else(|_| "\"\"".to_string()),
+        command = serde_json::to_string(command).unwrap_or_else(|_| "\"\"".to_string()),
+        code = serde_json::to_string(code).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+    let opts = json!({"timeoutMs": timeout_ms}).to_string();
+    let packed = unsafe { host_exec_js(runner_js.as_ptr(), runner_js.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    match unpack_to_string(packed) {
+        Some(s) => {
+            let parsed: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
+            ok("lang", parsed)
+        }
+        None => err("lang", "host_exec_js returned empty"),
+    }
+}
+
 fn exec_js(body: &Value, body_s: &str) -> u64 {
     let code = body.get("code").and_then(|v| v.as_str()).map(|s| s.to_string())
         .filter(|s| !s.is_empty())
@@ -945,6 +997,7 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "kv_put" => kv_put(&body),
         "kv_query" => kv_query(&body),
         "exec_js" | "nodejs" | "javascript" | "node" | "js" => exec_js(&body, &body_s),
+        "lang" => lang(&body),
         "browser" => browser(&body, &body_s),
         "health" => health(&body),
         "sql_open" => sql_open(&body),
