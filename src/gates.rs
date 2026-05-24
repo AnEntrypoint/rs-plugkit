@@ -212,7 +212,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         let last = host_read(".gm/last-instruction-ts").unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let now = now_ms();
-        if last_ms > 0 && now.saturating_sub(last_ms) > 120_000 {
+        if last_ms > 0 && now.saturating_sub(last_ms) > 300_000 {
             let gap_ms = now - last_ms;
             let retry_state = host_read(".gm/long-gap-retry-state").unwrap_or_default();
             let (last_verb, count) = parse_retry_state(&retry_state);
@@ -227,7 +227,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             }
             log_deviation("long-gap-no-instruction", &format!("verb={} gap_ms={}", verb, gap_ms));
             return GateVerdict::deny(format!(
-                "long-gap-no-instruction: {}ms since last `instruction` dispatch (threshold 120000ms). Idle mid-chain is a deviation. Dispatch `instruction` for recovery prose before any other verb.",
+                "long-gap-no-instruction: {}ms since last `instruction` dispatch (threshold 300000ms). Idle mid-chain is a deviation. Dispatch `instruction` for recovery prose before any other verb.",
                 gap_ms
             ));
         }
