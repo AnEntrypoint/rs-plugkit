@@ -211,7 +211,7 @@ fn lang(body: &Value) -> u64 {
   const command = {command};
   const code = {code};
   const langDir = path.join(projectDir, 'lang');
-  if (!fs.existsSync(langDir)) return JSON.stringify({{ok:false, error:'no-lang-dir', langDir}});
+  if (!fs.existsSync(langDir)) {{ process.stdout.write(JSON.stringify({{ok:false, error:'no-lang-dir', langDir}})); return; }}
   const files = fs.readdirSync(langDir).filter(f => f.endsWith('.js') && f !== 'loader.js');
   const plugins = files.reduce((acc, f) => {{
     try {{
@@ -221,18 +221,18 @@ fn lang(body: &Value) -> u64 {
     return acc;
   }}, []);
   const plugin = plugins.find(p => p.exec.match.test(command));
-  if (!plugin) return JSON.stringify({{ok:false, error:'no-plugin-matched', command, available: plugins.map(p => p.id)}});
+  if (!plugin) {{ process.stdout.write(JSON.stringify({{ok:false, error:'no-plugin-matched', command, available: plugins.map(p => p.id)}})); return; }}
   const t0 = Date.now();
   try {{
     const out = await Promise.race([
       Promise.resolve(plugin.exec.run(code, projectDir)),
       new Promise((_, rej) => setTimeout(() => rej(new Error('plugin-timeout')), 30000))
     ]);
-    return JSON.stringify({{ok:true, plugin_id: plugin.id, output: String(out), ms: Date.now() - t0}});
+    process.stdout.write(JSON.stringify({{ok:true, plugin_id: plugin.id, output: String(out), ms: Date.now() - t0}}));
   }} catch (e) {{
-    return JSON.stringify({{ok:false, error: String(e && e.message || e), plugin_id: plugin.id, ms: Date.now() - t0}});
+    process.stdout.write(JSON.stringify({{ok:false, error: String(e && e.message || e), plugin_id: plugin.id, ms: Date.now() - t0}}));
   }}
-}})()"#,
+}})().catch(e => {{ process.stdout.write(JSON.stringify({{ok:false, error: String(e && e.message || e)}})); }})"#,
         project_dir = serde_json::to_string(project_dir).unwrap_or_else(|_| "\"\"".to_string()),
         command = serde_json::to_string(command).unwrap_or_else(|_| "\"\"".to_string()),
         code = serde_json::to_string(code).unwrap_or_else(|_| "\"\"".to_string()),
@@ -241,8 +241,20 @@ fn lang(body: &Value) -> u64 {
     let packed = unsafe { host_exec_js(runner_js.as_ptr(), runner_js.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => {
-            let parsed: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
-            ok("lang", parsed)
+            let envelope: Value = serde_json::from_str(&s).unwrap_or(Value::Null);
+            if envelope.is_null() {
+                return err("lang", "host_exec_js returned non-JSON");
+            }
+            let stdout = envelope.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+            let exit_code = envelope.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let timed_out = envelope.get("timed_out").and_then(|v| v.as_bool()).unwrap_or(false);
+            if timed_out { return err("lang", "host_exec_js timed out"); }
+            if exit_code != 0 {
+                let stderr = envelope.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+                return err_json("lang", json!({"error":"runner exit non-zero","exit_code":exit_code,"stderr":stderr,"stdout":stdout}));
+            }
+            let inner: Value = serde_json::from_str(stdout).unwrap_or_else(|_| Value::String(stdout.to_string()));
+            ok("lang", inner)
         }
         None => err("lang", "host_exec_js returned empty"),
     }
