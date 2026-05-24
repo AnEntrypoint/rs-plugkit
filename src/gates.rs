@@ -218,7 +218,9 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    if verb == "instruction" || verb == "transition" || verb == "phase-status" {
+    if verb == "instruction" || verb == "transition" || verb == "phase-status"
+        || verb == "prd-add" || verb == "prd-resolve" || verb == "prd-list"
+        || verb == "mutable-add" || verb == "mutable-resolve" || verb == "mutable-list" {
         let now = now_ms();
         let _ = crate::wasm_dispatch::host_write(".gm/last-instruction-ts", &now.to_string());
         let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", "");
