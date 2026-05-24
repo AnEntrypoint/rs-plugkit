@@ -68,6 +68,16 @@ fn parse_retry_state(s: &str) -> (String, u32) {
     (verb, count)
 }
 
+fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
+    let s = s.trim();
+    if s.is_empty() { return (String::new(), 0, 0); }
+    let mut parts = s.splitn(3, '|');
+    let verb = parts.next().unwrap_or("").to_string();
+    let count = parts.next().and_then(|c| c.trim().parse::<u32>().ok()).unwrap_or(0);
+    let ts = parts.next().and_then(|t| t.trim().parse::<u64>().ok()).unwrap_or(0);
+    (verb, count, ts)
+}
+
 fn log_deviation(event: &str, detail: &str) {
     let msg = format!("plugkit gate: {} {}", event, detail);
     unsafe { host_log(2, msg.as_ptr(), msg.len() as u32); }
@@ -208,16 +218,21 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    if verb != "instruction" && verb != "health" && verb != "phase-status" && verb != "auto-recall" {
+    if verb == "instruction" || verb == "transition" || verb == "phase-status" {
+        let now = now_ms();
+        let _ = crate::wasm_dispatch::host_write(".gm/last-instruction-ts", &now.to_string());
+        let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", "");
+    } else if verb != "health" && verb != "auto-recall" {
         let last = host_read(".gm/last-instruction-ts").unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let now = now_ms();
         if last_ms > 0 && now.saturating_sub(last_ms) > 300_000 {
             let gap_ms = now - last_ms;
             let retry_state = host_read(".gm/long-gap-retry-state").unwrap_or_default();
-            let (last_verb, count) = parse_retry_state(&retry_state);
-            let new_count = if last_verb == verb { count + 1 } else { 1u32 };
-            let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", &format!("{}|{}", verb, new_count));
+            let (last_verb, count, last_denial_ts) = parse_retry_state_v2(&retry_state);
+            let since_last_denial = now.saturating_sub(last_denial_ts);
+            let new_count = if last_verb == verb && since_last_denial > 5_000 { count + 1 } else if last_verb == verb { count } else { 1u32 };
+            let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", &format!("{}|{}|{}", verb, new_count, now));
             if new_count >= 2 {
                 log_deviation("long-gap-retry-without-instruction", &format!("verb={} consecutive_retries={} gap_ms={}", verb, new_count, gap_ms));
                 return GateVerdict::deny(format!(
@@ -231,10 +246,6 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 gap_ms
             ));
         }
-    } else if verb == "instruction" || verb == "transition" || verb == "phase-status" {
-        let now = now_ms();
-        let _ = crate::wasm_dispatch::host_write(".gm/last-instruction-ts", &now.to_string());
-        let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", "");
     }
 
     let operation = classify_operation(verb, body);
