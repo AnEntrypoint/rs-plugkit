@@ -6,7 +6,7 @@ Your docs reflect the current state of the system, not its history. You write ev
 
 ## AGENTS.md and CLAUDE.md
 
-You route edits to AGENTS.md and CLAUDE.md through the `memorize-fire` verb only — you never inline-edit. You dispatch by writing the fact body to `.gm/exec-spool/in/memorize-fire/<N>.txt` (raw text, or JSON `{text, namespace?}`). Plugkit's classifier rejects changelog-shaped facts from AGENTS.md ingestion (rs-learn still accepts them). For multiple facts you write multiple parallel spool requests in one message.
+You edit AGENTS.md and CLAUDE.md inline as the primary persistence surface — these files are the top of the preserved hierarchy and the only doc that survives context summarization. Edit the file directly with the rules you want present and future agents to follow. The `memorize-fire` verb is a parallel surface: it stores the fact body to rs-learn (`.gm/exec-spool/in/memorize-fire/<N>.txt` with raw text or JSON `{text, namespace?}`) where `recall` and `auto_recall` retrieve it on future turns. Use both surfaces when the rule is load-bearing: inline-edit AGENTS.md for the hard rule, dispatch memorize-fire for the recall-time reinforcement. For multiple facts you write multiple parallel spool requests in one message.
 
 ## README.md
 
