@@ -231,7 +231,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 gap_ms
             ));
         }
-    } else if verb == "instruction" {
+    } else if verb == "instruction" || verb == "transition" || verb == "phase-status" {
         let now = now_ms();
         let _ = crate::wasm_dispatch::host_write(".gm/last-instruction-ts", &now.to_string());
         let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", "");
