@@ -119,14 +119,15 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     let subject_str = item_map.get(&Value::String("subject".to_string()))
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let slug = if provided_id.is_none() { slug_from_subject(subject_str) } else { None };
     let id = provided_id.clone()
-        .or_else(|| slug_from_subject(subject_str))
+        .or_else(|| slug.clone())
         .unwrap_or_else(|| format!("item-{}", crate::orchestrator::state::now_ms()));
-    if provided_id.is_none() {
+    if provided_id.is_none() && slug.is_none() {
         crate::wasm_dispatch::emit_event("deviation.prd-add-no-id", serde_json::json!({
             "fallback_id": id,
             "subject": subject_str,
-            "hint": "Pass `id` in prd-add body so the PRD row is semantically findable later. Without `id`, plugkit derives a slug from `subject` when available, otherwise falls back to 'item-<ms>'.",
+            "hint": "Pass `id` in prd-add body. Subject was empty or unslugifiable, so plugkit fell back to 'item-<ms>' which cannot be referenced by intent. Either pass `id` directly or provide a meaningful `subject` so slug derivation succeeds.",
         }));
     }
     let path = prd_path();
