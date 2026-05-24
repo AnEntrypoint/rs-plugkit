@@ -179,11 +179,24 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         }
     }
     if !found {
+        let mut known_ids: Vec<String> = Vec::new();
+        if let Some(seq) = doc.as_sequence() {
+            for item in seq {
+                if let Some(m) = item.as_mapping() {
+                    if let Some(id_v) = m.get(&Value::String("id".to_string())) {
+                        if let Some(id_s) = id_v.as_str() {
+                            known_ids.push(id_s.to_string());
+                        }
+                    }
+                }
+            }
+        }
         let body = serde_json::json!({
             "error": format!("prd id not found: {}", id_target),
             "deviation_kind": "prd-resolve-unknown-id",
             "prd_id": id_target,
-            "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; aliases accepted: prd_id, mutable_id, item_id (all map to id). Raw text body: first whitespace-delimited token = id, rest = witness_evidence. NOT a valid id: a multi-word free-text description, a JSON object with the id missing from id/prd_id/mutable_id/item_id keys, or a quoted string that includes the id and free text in one blob.",
+            "known_ids": known_ids,
+            "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; aliases accepted: prd_id, mutable_id, item_id (all map to id). Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If id is not in `known_ids` above, the row was never `prd-add`ed in this chain — your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added. NOT a valid id: a multi-word free-text description, a JSON object with the id missing from id/prd_id/mutable_id/item_id keys, or a quoted string that includes the id and free text in one blob.",
         }).to_string();
         return (body, format!("prd id not found: {}", id_target), 1);
     }
