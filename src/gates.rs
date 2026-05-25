@@ -233,16 +233,26 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             let retry_state = host_read(".gm/long-gap-retry-state").unwrap_or_default();
             let (last_verb, count, last_denial_ts) = parse_retry_state_v2(&retry_state);
             let since_last_denial = now.saturating_sub(last_denial_ts);
+            // A burst of same-verb dispatches within 5s (e.g. a fan-out of N prunes/prd-adds while
+            // the gate is tripped) is ONE logical gate-trip, not N. Count escalation and deviation
+            // emission both dedup on the 5s window: same verb within 5s keeps count and suppresses
+            // the duplicate deviation, so a 12-verb burst logs one long-gap-no-instruction event, not
+            // twelve. The deny still fires for every dispatch (correct); only the audit noise dedups.
+            let same_burst = last_verb == verb && since_last_denial <= 5_000;
             let new_count = if last_verb == verb && since_last_denial > 5_000 { count + 1 } else if last_verb == verb { count } else { 1u32 };
             let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", &format!("{}|{}|{}", verb, new_count, now));
             if new_count >= 2 {
-                log_deviation("long-gap-retry-without-instruction", &format!("verb={} consecutive_retries={} gap_ms={}", verb, new_count, gap_ms));
+                if !same_burst {
+                    log_deviation("long-gap-retry-without-instruction", &format!("verb={} consecutive_retries={} gap_ms={}", verb, new_count, gap_ms));
+                }
                 return GateVerdict::deny(format!(
                     "long-gap-retry-without-instruction: verb=`{}` denied {}× in a row by long-gap-no-instruction gate, yet the agent retried instead of dispatching `instruction`. The gate's `next_dispatch` field names the recovery verb — when it says `instruction`, the next verb IS `instruction`, not the same verb again. Dispatch `instruction` now; the chain cannot recover by re-attempting the denied verb.",
                     verb, new_count
                 ));
             }
-            log_deviation("long-gap-no-instruction", &format!("verb={} gap_ms={}", verb, gap_ms));
+            if !same_burst {
+                log_deviation("long-gap-no-instruction", &format!("verb={} gap_ms={}", verb, gap_ms));
+            }
             return GateVerdict::deny(format!(
                 "long-gap-no-instruction: {}ms since last `instruction` dispatch (threshold 300000ms). Idle mid-chain is a deviation. Dispatch `instruction` for recovery prose before any other verb.",
                 gap_ms
