@@ -320,6 +320,10 @@ pub fn index(root: &str, max_files: usize) -> Value {
             fv_put("codeinsight-vec", &key, &emb_json);
         }
     }
+    {
+        let msg = format!("code_index: done files_indexed={} chunks={} embedded={} skipped_no_embed={}", indexed, chunked, embedded, skipped_no_embed);
+        let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+    }
     json!({
         "ok": true,
         "files_scanned": files.len(),
