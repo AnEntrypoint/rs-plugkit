@@ -416,16 +416,22 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
     let now = unsafe { host_now_ms() };
     let counter = MEMORIZE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let key = format!("mem-{}-{}-{}", now, counter, text.len());
+    // Embed FIRST and write text only on success — atomic by construction. The prior order (text
+    // then embed) left a text-only orphan whenever embed_text_json returned None (cold/failed
+    // model): the memory persisted with no vector, unreachable by vector recall (only kv-LIKE
+    // fallback), polluting the store. A memory without an embedding is not properly recallable, so
+    // refuse it rather than orphan it. Witnessed: 12 text-without-vec orphans in default ns from
+    // early-May embed failures.
+    let emb = match crate::embed::embed_text_json(text) {
+        Some(e) => e,
+        None => return err("memorize", "embed failed; refusing to write a text-only memory with no vector (un-vector-recallable orphan)"),
+    };
     let rc = unsafe { host_kv_put(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32, text.as_ptr(), text.len() as u32) };
     if rc == 0 { return err("memorize", "kv_put failed"); }
-    let emb_json = crate::embed::embed_text_json(text);
-    let embedded = emb_json.is_some();
-    if let Some(emb) = emb_json {
-        let vec_ns = format!("{}-vec", namespace);
-        let emb_str = emb.to_string();
-        let _ = unsafe { host_kv_put(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32, emb_str.as_ptr(), emb_str.len() as u32) };
-    }
-    ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": embedded}))
+    let vec_ns = format!("{}-vec", namespace);
+    let emb_str = emb.to_string();
+    let _ = unsafe { host_kv_put(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32, emb_str.as_ptr(), emb_str.len() as u32) };
+    ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true}))
 }
 
 fn memorize_prune(body: &Value) -> u64 {
