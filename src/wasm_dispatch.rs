@@ -13,6 +13,7 @@ extern "C" {
     pub fn host_fetch(url_ptr: *const u8, url_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
     pub fn host_kv_get(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u64;
     pub fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
+    pub fn host_kv_delete(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u32;
     pub fn host_kv_query(ns_ptr: *const u8, ns_len: u32, q_ptr: *const u8, q_len: u32) -> u64;
     pub fn host_vec_search(q_ptr: *const u8, q_len: u32, k: u32) -> u64;
     pub fn host_vec_embed(text_ptr: *const u8, text_len: u32, out_ptr: *mut f32, out_len: u32) -> i32;
@@ -425,6 +426,50 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
         let _ = unsafe { host_kv_put(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32, emb_str.as_ptr(), emb_str.len() as u32) };
     }
     ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": embedded}))
+}
+
+fn memorize_prune(body: &Value) -> u64 {
+    let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    // Mode 1: explicit key(s) — delete exactly those memories. Use when the agent KNOWS a specific
+    // memory is wrong/superseded (e.g. a recall hit it just judged stale).
+    let mut keys: Vec<String> = Vec::new();
+    if let Some(k) = body.get("key").and_then(|v| v.as_str()) {
+        if !k.is_empty() { keys.push(k.to_string()); }
+    }
+    if let Some(arr) = body.get("keys").and_then(|v| v.as_array()) {
+        for v in arr { if let Some(s) = v.as_str() { keys.push(s.to_string()); } }
+    }
+    if !keys.is_empty() {
+        let mut deleted = Vec::new();
+        for key in &keys {
+            let rc = unsafe { host_kv_delete(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
+            if rc != 0 {
+                deleted.push(key.clone());
+                emit_event("memory.pruned", json!({"key": key, "namespace": namespace, "mode": "explicit-key"}));
+            }
+        }
+        return ok("memorize-prune", json!({"namespace": namespace, "deleted": deleted, "mode": "explicit-key"}));
+    }
+    // Mode 2: query + min_score — surface candidate stale memories for the agent to review. Pruning
+    // bad memory matters more than retention, but a blind similarity-delete is itself a bad-memory
+    // generator; so query mode is REVIEW-ONLY by default (returns candidates with keys), and only
+    // deletes when confirm:true is passed alongside the explicit candidate keys. This keeps the
+    // destructive step under the agent's judgment, never an automatic similarity heuristic.
+    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    if query.is_empty() {
+        return err("memorize-prune", "provide `key`/`keys` to delete, or `query` to list prune candidates");
+    }
+    let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
+    let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
+    let q_json = json!({ "query": query, "embedding": embedding, "namespace": namespace }).to_string();
+    let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, k) };
+    let hits = unpack_to_value(packed);
+    ok("memorize-prune", json!({
+        "namespace": namespace,
+        "mode": "review",
+        "candidates": hits,
+        "note": "Review-only: re-dispatch memorize-prune with {keys:[...]} naming the stale ones to delete. Pruning is agent-judged, never auto-similarity-deleted.",
+    }))
 }
 
 fn codesearch(body: &Value) -> u64 {
@@ -1023,6 +1068,7 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "codeinsight_index" => codeinsight_index(&body),
         "codesearch" => codesearch(&body),
         "memorize" => memorize_with_raw(&body, &body_s),
+        "memorize-prune" | "memorize_prune" => memorize_prune(&body),
         "recall" => recall(&body),
         "recall_kv" => recall(&body),
         "memorize_kv" => memorize_with_raw(&body, &body_s),
