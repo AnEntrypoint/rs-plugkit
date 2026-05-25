@@ -273,8 +273,17 @@ pub fn index(root: &str, max_files: usize) -> Value {
         let dot = fp.rfind('.');
         let ext = match dot { Some(i) => &fp[i..], None => "" };
         let (lang_name, lang) = match lang_for_ext(ext) { Some(x) => x, None => continue };
-        let read_path = if fp.starts_with('/') { fp.clone() } else { format!("/{}", fp) };
-        let content = match host_read(&read_path) { Some(c) => c, None => continue };
+        // host_fs_read does fs.readFileSync(path) relative to the watcher cwd. collect_files
+        // yields cwd-relative paths (e.g. ./src/lib.rs or src/lib.rs). Prepending '/' made them
+        // filesystem-absolute (/./src/lib.rs -> /src/lib.rs) which does not exist, so every read
+        // failed and the loop indexed zero chunks despite files=101. Try the path as-is first
+        // (relative, the common case), then a '/'-prefixed absolute as fallback for hosts that
+        // require it.
+        let rel = fp.trim_start_matches("./").to_string();
+        let content = match host_read(&rel)
+            .or_else(|| host_read(fp))
+            .or_else(|| host_read(&format!("/{}", rel)))
+        { Some(c) => c, None => continue };
         if content.len() > 256 * 1024 { continue; }
         indexed += 1;
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
