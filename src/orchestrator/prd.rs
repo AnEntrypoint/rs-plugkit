@@ -128,7 +128,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .or_else(|| item_map.get(&Value::String("prd_id".to_string())))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let subject_str = subject_from_fields(item_map);
+    let subject_str = subject_from_fields(&item_map);
     let slug = if provided_id.is_none() { slug_from_subject(subject_str) } else { None };
     if provided_id.is_none() && slug.is_none() {
         crate::wasm_dispatch::emit_event("deviation.prd-add-no-id", serde_json::json!({
