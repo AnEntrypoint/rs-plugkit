@@ -158,32 +158,59 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     (serde_json::json!({ "added": id }).to_string(), String::new(), 0)
 }
 
-pub fn handle_resolve(content: &str) -> (String, String, i32) {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return (String::new(), "missing PRD item id".to_string(), 1);
-    }
-    let (id_target, witness) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+fn parse_resolve_target(trimmed: &str) -> (String, Option<String>) {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         let id = v.get("id")
             .or_else(|| v.get("prd_id"))
             .or_else(|| v.get("mutable_id"))
             .or_else(|| v.get("item_id"))
             .or_else(|| v.get("slug"))
+            .or_else(|| v.get("key"))
             .and_then(|s| s.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| trimmed.to_string());
-        let wit = v.get("witness_evidence")
+        let mut wit = v.get("witness_evidence")
             .or_else(|| v.get("witness"))
             .or_else(|| v.get("evidence"))
             .and_then(|s| s.as_str())
             .map(|s| s.to_string());
+        let id = if let Ok(inner) = serde_json::from_str::<serde_json::Value>(&id) {
+            if let Some(im) = inner.as_object() {
+                let recovered = im.get("key")
+                    .or_else(|| im.get("id"))
+                    .or_else(|| im.get("prd_id"))
+                    .or_else(|| im.get("slug"))
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                if wit.is_none() {
+                    wit = im.get("witness_evidence")
+                        .or_else(|| im.get("witness"))
+                        .or_else(|| im.get("evidence"))
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                }
+                recovered.unwrap_or(id)
+            } else {
+                id
+            }
+        } else {
+            id
+        };
         (id, wit)
     } else {
         let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
         let id = parts.first().map(|s| s.to_string()).unwrap_or_else(|| trimmed.to_string());
         let wit = parts.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         (id, wit)
-    };
+    }
+}
+
+pub fn handle_resolve(content: &str) -> (String, String, i32) {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return (String::new(), "missing PRD item id".to_string(), 1);
+    }
+    let (id_target, witness) = parse_resolve_target(trimmed);
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
     if !pkfs::exists(&path_s) {
@@ -226,7 +253,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             "deviation_kind": "prd-resolve-unknown-id",
             "prd_id": id_target,
             "known_ids": known_ids,
-            "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; aliases accepted: prd_id, mutable_id, item_id, slug (all map to id). Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If id is not in `known_ids` above, the row was never `prd-add`ed in this chain — your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added. NOT a valid id: a multi-word free-text description, a JSON object with the id missing from id/prd_id/mutable_id/item_id/slug keys, or a quoted string that includes the id and free text in one blob.",
+            "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; aliases accepted: prd_id, mutable_id, item_id, slug, key (all map to id). A nested envelope (prd_id holding a stringified {\"key\":..,\"witness\":..} object) is unwrapped automatically and the inner key/id/prd_id/slug is recovered. Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If the recovered id is not in `known_ids` above, the row was never `prd-add`ed in this chain — your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added.",
         }).to_string();
         return (body, format!("prd id not found: {}", id_target), 1);
     }
@@ -261,5 +288,63 @@ mod tests {
         });
         assert_eq!(body["deviation_kind"], "prd-resolve-unknown-id");
         assert_eq!(body["prd_id"], "bogus");
+    }
+
+    #[test]
+    fn resolve_unwraps_nested_envelope_in_prd_id() {
+        let body = r#"{"prd_id":"{\"key\":\"foo-bar\",\"witness\":\"src/x.rs:10\"}"}"#;
+        let (id, wit) = parse_resolve_target(body);
+        assert_eq!(id, "foo-bar");
+        assert_eq!(wit.as_deref(), Some("src/x.rs:10"));
+    }
+
+    #[test]
+    fn resolve_accepts_top_level_key_alias() {
+        let (id, _) = parse_resolve_target(r#"{"key":"foo-bar"}"#);
+        assert_eq!(id, "foo-bar");
+    }
+
+    #[test]
+    fn resolve_nested_recovers_id_alias_when_no_key() {
+        let body = r#"{"prd_id":"{\"id\":\"baz\"}"}"#;
+        let (id, wit) = parse_resolve_target(body);
+        assert_eq!(id, "baz");
+        assert!(wit.is_none());
+    }
+
+    #[test]
+    fn resolve_top_level_witness_wins_over_nested() {
+        let body = r#"{"prd_id":"{\"key\":\"foo\",\"witness\":\"nested\"}","witness_evidence":"toplevel"}"#;
+        let (id, wit) = parse_resolve_target(body);
+        assert_eq!(id, "foo");
+        assert_eq!(wit.as_deref(), Some("toplevel"));
+    }
+
+    #[test]
+    fn resolve_nested_array_falls_through_unchanged() {
+        let body = r#"{"prd_id":"[1,2,3]"}"#;
+        let (id, _) = parse_resolve_target(body);
+        assert_eq!(id, "[1,2,3]");
+    }
+
+    #[test]
+    fn resolve_nested_object_without_recoverable_key_keeps_blob() {
+        let body = r#"{"prd_id":"{\"foo\":\"bar\"}"}"#;
+        let (id, _) = parse_resolve_target(body);
+        assert_eq!(id, r#"{"foo":"bar"}"#);
+    }
+
+    #[test]
+    fn resolve_plain_id_unaffected() {
+        let (id, wit) = parse_resolve_target(r#"{"id":"plain-id","witness_evidence":"w"}"#);
+        assert_eq!(id, "plain-id");
+        assert_eq!(wit.as_deref(), Some("w"));
+    }
+
+    #[test]
+    fn resolve_raw_text_body_unaffected() {
+        let (id, wit) = parse_resolve_target("raw-id some witness text");
+        assert_eq!(id, "raw-id");
+        assert_eq!(wit.as_deref(), Some("some witness text"));
     }
 }
