@@ -86,6 +86,8 @@ You use Read/Glob/Grep for state inspection. You use Bash for shell-only (`git`,
 
 You write the recall index by dispatching `memorize-fire`. Surfaces outside it produce memos the index does not see.
 
+You prune bad memory on sight by dispatching `memorize-prune`. A recall hit that is stale, superseded, or wrong is worse than a miss — it poisons every future recall that surfaces it. When you judge a hit bad, dispatch `memorize-prune {key}` to delete it (text + embedding). Pruning bad memory matters more than preserving good memory. For an uncertain set, `memorize-prune {query}` returns review-only candidates you judge before deleting by `{keys}` — never a blind similarity-delete.
+
 ## Return to plugkit
 
 Against every possible drift, you return to plugkit. Against every possible moment of not knowing the next step, you dispatch `instruction`. Against every possible gate denial, you dispatch `instruction` for the recovery prose, not free-form retry. Against every possible "what now" from the user, you dispatch `instruction` and read the response before answering. Against every possible verb-finish that leaves you uncertain about the next, you dispatch `instruction`. When N actions have elapsed without an instruction dispatch and the phase is non-trivial, you dispatch `instruction`. Plugkit is the single source of truth for "what does this phase require next"; your memory of the prose is stale the moment the phase, PRD, or mutables shift. The instruction verb is cheap, synchronous, and idempotent — there is no cost to over-dispatching it and there is unbounded cost to under-dispatching it. Drift is the agent acting without re-checking; the antidote is the re-check. Every loop closes through `instruction`.
