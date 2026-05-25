@@ -233,12 +233,17 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             let retry_state = host_read(".gm/long-gap-retry-state").unwrap_or_default();
             let (last_verb, count, last_denial_ts) = parse_retry_state_v2(&retry_state);
             let since_last_denial = now.saturating_sub(last_denial_ts);
-            // A burst of same-verb dispatches within 5s (e.g. a fan-out of N prunes/prd-adds while
-            // the gate is tripped) is ONE logical gate-trip, not N. Count escalation and deviation
-            // emission both dedup on the 5s window: same verb within 5s keeps count and suppresses
-            // the duplicate deviation, so a 12-verb burst logs one long-gap-no-instruction event, not
-            // twelve. The deny still fires for every dispatch (correct); only the audit noise dedups.
-            let same_burst = last_verb == verb && since_last_denial <= 5_000;
+            // A burst of dispatches within 5s while the gate is tripped is ONE logical gate-trip,
+            // not N — whether they are the same verb (a retry loop) or different verbs (a parallel
+            // orient fan-out of recall+codesearch). Dedup is TIME-based, not verb-based: any prior
+            // long-gap denial recorded within the last 5s makes this dispatch part of the same burst,
+            // so a 4-verb parallel fan-out logs one long-gap-no-instruction event, not four. Verb-keyed
+            // dedup raced under parallel dispatch (non-atomic read-modify-write of the retry-state file
+            // let each verb see no prior verb and log), so the window is keyed only on last_denial_ts.
+            // The escalation count still tracks genuine SAME-verb retries past the window (the
+            // ignored-next_dispatch failure mode). The deny still fires for every dispatch (correct);
+            // only the audit noise dedups.
+            let same_burst = last_denial_ts > 0 && since_last_denial <= 5_000;
             let new_count = if last_verb == verb && since_last_denial > 5_000 { count + 1 } else if last_verb == verb { count } else { 1u32 };
             let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", &format!("{}|{}|{}", verb, new_count, now));
             if new_count >= 2 {
