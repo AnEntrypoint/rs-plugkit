@@ -97,8 +97,25 @@ jobs:
         shell: bash
         run: bash scripts/fetch-weights.sh
 
+      - name: Force fresh compile of the rs-plugkit crate (defeat stale-cache artifact)
+        shell: bash
+        run: |
+          # rust-cache restores target/ under a constant key, which can carry a stale
+          # rs_plugkit.wasm and incremental fingerprints. If cargo judges the crate
+          # unchanged after restore, it skips recompiling and the next step cp's the
+          # cached (stale) wasm — so a pushed source change is absent from the published
+          # artifact despite green CI. Remove the cached output wasm and force the top
+          # crate to rebuild so the artifact always reflects this commit's source.
+          rm -f target/wasm32-wasip1/release/rs_plugkit.wasm || true
+          cargo clean --release --target wasm32-wasip1 -p rs-plugkit || true
+
       - name: Build WASM
         run: cargo build --release --target wasm32-wasip1 --no-default-features --features wasm --lib
+
+      - name: Verify WASM was produced fresh this run
+        shell: bash
+        run: |
+          test -f "target/wasm32-wasip1/release/rs_plugkit.wasm" || { echo "rs_plugkit.wasm not built"; exit 1; }
 
       - name: Rename WASM binary
         shell: bash
