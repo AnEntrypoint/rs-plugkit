@@ -143,7 +143,16 @@ fn list_dir(path: &str) -> Vec<String> {
     let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
     let v = unpack_to_value_pub(packed);
     match v {
-        Value::Array(arr) => arr.into_iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+        // The host returns either bare strings OR rich entry objects {name, is_dir, is_file}
+        // (the current gm-plugkit wrapper emits objects). Accept both: a bare string is the name;
+        // an object's name is under name/path/file. Previously only bare strings were handled, so
+        // an object-returning host yielded an empty list and code_index found files=0, leaving
+        // codesearch's autobuild index empty.
+        Value::Array(arr) => arr.into_iter().filter_map(|x| {
+            if let Some(s) = x.as_str() { return Some(s.to_string()); }
+            x.get("name").or_else(|| x.get("path")).or_else(|| x.get("file"))
+                .and_then(|n| n.as_str()).map(String::from)
+        }).collect(),
         _ => Vec::new(),
     }
 }
