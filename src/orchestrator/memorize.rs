@@ -34,8 +34,15 @@ fn is_derivable_state(text: &str) -> Option<&'static str> {
     let lower = t.to_lowercase();
     let bad: &[(&str, &str)] = &[
         ("we used to ", "historical framing belongs in git log + CHANGELOG, not the recall index"),
+        ("used to do", "historical framing belongs in git log + CHANGELOG, not the recall index"),
+        ("previously did", "historical framing belongs in git log + CHANGELOG, not the recall index"),
         ("(fixed)", "past-tense fix markers belong in commit messages"),
+        ("fixed in commit", "commit-fix references belong in git log, not the recall index"),
+        ("fix in commit", "commit-fix references belong in git log, not the recall index"),
         ("changelog:", "changelog entries live in CHANGELOG.md"),
+        ("changelog entry", "changelog entries live in CHANGELOG.md"),
+        ("dated audit", "dated audit entries belong in git log, not the recall index"),
+        ("(added 20", "dated (added YYYY-..) annotations belong in git log, not the recall index"),
         ("commit hash", "commit hashes are derivable from git log"),
         ("recent commit", "recent commits are derivable from git log"),
         ("git blame says", "git blame is derivable from the repo"),
