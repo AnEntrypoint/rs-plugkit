@@ -136,6 +136,7 @@ jobs:
       - name: Download WASM artifact
         uses: actions/download-artifact@v5
         with:
+          name: plugkit.wasm
           path: bins/
 
       - name: Stage release assets
@@ -146,7 +147,7 @@ jobs:
         run: |
           set -e
           mkdir -p release-assets
-          cp bins/plugkit.wasm/plugkit.wasm release-assets/
+          cp bins/plugkit.wasm release-assets/
           cd release-assets
           sha256sum plugkit.wasm | sed 's/ \*/  /' > plugkit.wasm.sha256
           echo "$VER" > plugkit.wasm.version
