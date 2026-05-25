@@ -486,6 +486,19 @@ fn codesearch(body: &Value) -> u64 {
     let ns = "codeinsight";
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, query.as_ptr(), query.len() as u32) };
     let hits = unpack_to_value(packed);
+    let kv_empty = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
+    // Sync-before-emit (paper §27): an empty codeinsight index means it was never built for this
+    // project. code_index::index now dual-writes the file-vec store this verb reads, so an autobuild
+    // then retry returns real hits. The auto_indexed guard prevents a rebuild loop when the tree
+    // genuinely has no indexable chunks.
+    if kv_empty && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let _ = crate::code_index::index(".", 500);
+        let mut retry = body.clone();
+        if let Some(obj) = retry.as_object_mut() {
+            obj.insert("auto_indexed".to_string(), Value::Bool(true));
+        }
+        return codesearch(&retry);
+    }
     ok("codesearch", hits)
 }
 

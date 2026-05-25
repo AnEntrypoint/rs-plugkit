@@ -9,6 +9,12 @@ use crate::wasm_dispatch::{host_read, unpack_to_value_pub};
 extern "C" {
     fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
     fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
+    fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
+    fn host_now_ms() -> u64;
+}
+
+fn fv_put(ns: &str, key: &str, val: &str) {
+    let _ = unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
 }
 
 fn lang_for_ext(ext: &str) -> Option<(&'static str, Language)> {
@@ -275,6 +281,15 @@ pub fn index(root: &str, max_files: usize) -> Value {
                 sql_quote(fp), sql_quote(&kind), sql_quote(&name), ls, le, sql_quote(&body[..body.len().min(8192)]), embedding_sql
             );
             let _ = libsql_wasm::exec(GM_DB, &sql);
+            // Also write the chunk to the file-vec store the `codesearch` verb actually reads
+            // (host_vec_search over namespace `codeinsight` / `codeinsight-vec`). The libsql insert
+            // above feeds the `_libsql` codesearch variant; this dual-write feeds the primary
+            // file-vec codesearch, mirroring how memorize_with_raw writes text + `-vec` embedding.
+            let key = format!("ci-{}-{}-{}", unsafe { host_now_ms() }, ls, chunked);
+            let text = format!("{}:{}:{} {}\n{}", fp, ls, le, name, &body[..body.len().min(8192)]);
+            fv_put("codeinsight", &key, &text);
+            let emb_json = serde_json::json!({ "embedding": v }).to_string();
+            fv_put("codeinsight-vec", &key, &emb_json);
         }
     }
     json!({
