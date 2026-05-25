@@ -52,6 +52,8 @@ The chain enters COMPLETE when your dispatched `transition` returns COMPLETE pha
 
 Between every possible pair of the four observations, between residual-scan and COMPLETE, between push and transition — you re-dispatch `instruction`. VERIFY is where premature COMPLETE happens; the recovery primitive prevents it.
 
+**You do not summarize here, and you do not end a turn in prose here.** A summary, recap, or any prose-only message with no tool call IS a stop — the harness reads only tool calls and their outputs, and halts the session on a tool-less turn. This is the mechanical cause of "the agent did one part and stopped": the work felt done, the model wrote a wrap-up, emitted no verb, and the harness ended it. VERIFY is exactly where that temptation peaks. Refuse it: until THIS surface returns phase=COMPLETE after your `transition` lands, every turn ends in a verb — `phase-status` to recheck, `residual-scan`, the push verbs, `instruction` to recover, or `transition` to advance. The feeling of doneness authorizes nothing; only plugkit's COMPLETE pronouncement does. If you catch yourself composing a summary, that is the drift signal — dispatch `phase-status` instead and act on what it returns.
+
 ## Dispatch
 
 You dispatch `transition` to COMPLETE only when the four-observation window is fully true. Plugkit's transition handler hard-rejects your dispatch while every possible open mutable or PRD item remains unresolved.

@@ -120,7 +120,7 @@ mod wasm_hooks {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
-                    "permissionDecisionReason": "HARD CONSTRAINT: invoke gm before any other tool. Either Skill(skill=\"gm:gm\") OR Agent(subagent_type=\"gm:gm\") satisfies the gate. Subagent form is preferred — it isolates the orchestration loop in its own context. Must be the first action after every user message."
+                    "permissionDecisionReason": "HARD CONSTRAINT: dispatch the gm-skill instruction verb before any other tool. Write .gm/exec-spool/in/instruction/<N>.txt with {\"prompt\":\"<request>\"} and read the response. This is the portable gate — it works identically on every agent because it depends only on the spool, not on any tool-specific invocation form."
                 }
             });
         }
@@ -140,7 +140,7 @@ mod wasm_hooks {
     }
 
     pub fn session_start(_input: &Value) -> Value {
-        let policy = "=== gm response policy (always active) ===\n\nTerse. Technical substance stays. Fluff dies. Drop articles/filler/pleasantries/hedging. Fragments OK. Pattern: [thing] [action] [reason]. [next step].\n\nInvoke Skill(\"gm:gm\") as the first tool after every user message. The pre-tool-use gate enforces this.";
+        let policy = "=== gm response policy (always active) ===\n\nTerse. Technical substance stays. Fluff dies. Drop articles/filler/pleasantries/hedging. Fragments OK. Pattern: [thing] [action] [reason]. [next step].\n\nDispatch the gm-skill instruction verb (write .gm/exec-spool/in/instruction/<N>.txt, read the response) as the first action after every user message. A turn that ends without a tool call is a stop; never summarize until the instruction surface returns phase=COMPLETE. This gate is spool-only, identical on every agent.";
         clear_marker("gm-fired-this-turn");
         clear_marker("residual-check-fired");
         write_marker("needs-gm");
