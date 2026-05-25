@@ -243,10 +243,18 @@ fn sql_quote(s: &str) -> String {
 }
 
 pub fn index(root: &str, max_files: usize) -> Value {
-    if let Err(e) = ensure_schema() { return json!({ "ok": false, "error": e }); }
+    // libsql schema init is best-effort: the file-vec store (host_kv_put) is the live codesearch
+    // backend and must populate even when libsql/wasi schema init fails. Previously a failed
+    // ensure_schema() returned early before any file-vec write, so codesearch's autobuild produced
+    // an empty index silently. Decouple: record the libsql availability, keep going regardless.
+    let libsql_ok = ensure_schema().is_ok();
     let r = if root.is_empty() { "/" } else { root };
     let limit = max_files.max(50).min(2000);
     let files = collect_files(r, limit);
+    {
+        let msg = format!("code_index: indexing root={} files={} libsql_ok={}", r, files.len(), libsql_ok);
+        let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+    }
     let mut indexed = 0;
     let mut chunked = 0;
     let mut embedded = 0;
@@ -275,12 +283,14 @@ pub fn index(root: &str, max_files: usize) -> Value {
             };
             chunked += 1;
             embedded += 1;
-            let embedding_sql = format!("vector('{}')", vec_to_json_literal(&v));
-            let sql = format!(
-                "INSERT INTO code_chunks(path, kind, name, line_start, line_end, body, embedding) VALUES('{}','{}','{}',{},{},'{}',{})",
-                sql_quote(fp), sql_quote(&kind), sql_quote(&name), ls, le, sql_quote(&body[..body.len().min(8192)]), embedding_sql
-            );
-            let _ = libsql_wasm::exec(GM_DB, &sql);
+            if libsql_ok {
+                let embedding_sql = format!("vector('{}')", vec_to_json_literal(&v));
+                let sql = format!(
+                    "INSERT INTO code_chunks(path, kind, name, line_start, line_end, body, embedding) VALUES('{}','{}','{}',{},{},'{}',{})",
+                    sql_quote(fp), sql_quote(&kind), sql_quote(&name), ls, le, sql_quote(&body[..body.len().min(8192)]), embedding_sql
+                );
+                let _ = libsql_wasm::exec(GM_DB, &sql);
+            }
             // Also write the chunk to the file-vec store the `codesearch` verb actually reads
             // (host_vec_search over namespace `codeinsight` / `codeinsight-vec`). The libsql insert
             // above feeds the `_libsql` codesearch variant; this dual-write feeds the primary
