@@ -7,6 +7,16 @@ pub fn prd_path() -> std::path::PathBuf {
     gm_dir().join("prd.yml")
 }
 
+fn subject_from_fields(item_map: &serde_yaml::Mapping) -> &str {
+    ["subject", "title", "name", "task", "goal", "description", "notes"]
+        .iter()
+        .find_map(|f| item_map.get(&Value::String(f.to_string()))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty()))
+        .unwrap_or("")
+}
+
 fn slug_from_subject(subject: &str) -> Option<String> {
     let s = subject.trim();
     if s.is_empty() { return None; }
@@ -118,16 +128,14 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .or_else(|| item_map.get(&Value::String("prd_id".to_string())))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let subject_str = item_map.get(&Value::String("subject".to_string()))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let subject_str = subject_from_fields(item_map);
     let slug = if provided_id.is_none() { slug_from_subject(subject_str) } else { None };
     if provided_id.is_none() && slug.is_none() {
         crate::wasm_dispatch::emit_event("deviation.prd-add-no-id", serde_json::json!({
             "subject": subject_str,
-            "hint": "Pass `id` in prd-add body. Subject was empty or unslugifiable, so the row was REJECTED — an item-<ms> fallback cannot be referenced by intent in recall or prd-resolve, so it is never admitted. Either pass `id` directly or provide a meaningful `subject` so slug derivation succeeds.",
+            "hint": "Pass `id` in prd-add body. No usable text in any of id/slug/prd_id or subject/title/name/task/goal/description/notes — every one was empty or unslugifiable, so the row was REJECTED. An item-<ms> fallback cannot be referenced by intent in recall or prd-resolve, so it is never admitted. Pass `id` directly, or put the intent in any of subject/title/name/task/goal/description so slug derivation succeeds.",
         }));
-        let err = "PRD item rejected: no usable `id` and `subject` is empty or unslugifiable. A referenceable handle is mandatory — every later prd-resolve / recall names the row by id. Pass `id` directly (kebab-case slug derived from intent) or provide a meaningful `subject`. Auto `item-<ms>` ids are not admitted because they cannot be referenced by intent.";
+        let err = "PRD item rejected: no usable `id` and no slugifiable text in subject/title/name/task/goal/description/notes. A referenceable handle is mandatory — every later prd-resolve / recall names the row by id. Pass `id` directly (kebab-case slug derived from intent) or provide a meaningful subject/title/description. Auto `item-<ms>` ids are not admitted because they cannot be referenced by intent.";
         return (String::new(), err.to_string(), 1);
     }
     let id = provided_id.clone()
@@ -346,5 +354,45 @@ mod tests {
         let (id, wit) = parse_resolve_target("raw-id some witness text");
         assert_eq!(id, "raw-id");
         assert_eq!(wit.as_deref(), Some("some witness text"));
+    }
+
+    fn map_of(pairs: &[(&str, &str)]) -> serde_yaml::Mapping {
+        let mut m = serde_yaml::Mapping::new();
+        for (k, v) in pairs {
+            m.insert(Value::String(k.to_string()), Value::String(v.to_string()));
+        }
+        m
+    }
+
+    #[test]
+    fn subject_prefers_subject_field() {
+        let m = map_of(&[("subject", "the subject"), ("title", "the title")]);
+        assert_eq!(subject_from_fields(&m), "the subject");
+    }
+
+    #[test]
+    fn subject_falls_back_to_title_when_subject_absent() {
+        let m = map_of(&[("title", "Add zero-amount sell guard")]);
+        assert_eq!(subject_from_fields(&m), "Add zero-amount sell guard");
+    }
+
+    #[test]
+    fn subject_falls_back_through_description() {
+        let m = map_of(&[("description", "verify planGrid sell guard")]);
+        assert_eq!(subject_from_fields(&m), "verify planGrid sell guard");
+        assert_eq!(slug_from_subject(subject_from_fields(&m)).as_deref(), Some("verify-plangrid-sell-guard"));
+    }
+
+    #[test]
+    fn subject_skips_empty_and_whitespace_fields() {
+        let m = map_of(&[("subject", "   "), ("title", ""), ("task", "real task here")]);
+        assert_eq!(subject_from_fields(&m), "real task here");
+    }
+
+    #[test]
+    fn subject_empty_when_no_text_fields() {
+        let m = map_of(&[("category", "bug"), ("effort", "low")]);
+        assert_eq!(subject_from_fields(&m), "");
+        assert!(slug_from_subject(subject_from_fields(&m)).is_none());
     }
 }
