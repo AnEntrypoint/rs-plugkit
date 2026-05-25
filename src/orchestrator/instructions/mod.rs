@@ -199,6 +199,22 @@ fn ilog(msg: &str) {
 #[cfg(not(target_arch = "wasm32"))]
 fn ilog(_msg: &str) {}
 
+#[cfg(target_arch = "wasm32")]
+fn idev(event: &str, detail: &str) {
+    extern "C" { fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32; }
+    let evt = json!({
+        "event": format!("deviation.{}", event),
+        "sub": "hook",
+        "detail": detail,
+        "ts": super::state::now_ms(),
+        "source": "rs-plugkit/instruction",
+    });
+    let line = format!("evt: {}", evt);
+    let _ = unsafe { host_log(1, line.as_ptr(), line.len() as u32) };
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn idev(_event: &str, _detail: &str) {}
+
 pub fn handle_instruction(content: &str) -> (String, String, i32) {
     ilog(&format!("instruction::handle start body_len={}", content.len()));
     let trimmed = content.trim();
@@ -244,11 +260,37 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         }
     };
 
+    let prev_prompt = read_last_prompt();
+    let mut phase = phase;
+    let fresh_prompt = prompt_opt
+        .as_deref()
+        .map(|p| !p.trim().is_empty() && p.trim() != prev_prompt.trim())
+        .unwrap_or(false);
+
     if let Some(p) = &prompt_opt {
         if !p.trim().is_empty() {
             let path = super::gm_dir().join("last-prompt.txt");
             let ps = path.to_string_lossy().to_string();
             let _ = pkfs::write(&ps, p);
+        }
+    }
+
+    let raw_phase_override = raw_phase_opt.as_deref().map(|p| {
+        !p.trim().is_empty() && valid_phases.contains(&p.trim().to_ascii_uppercase().as_str())
+    }).unwrap_or(false);
+
+    if phase == "COMPLETE" && !raw_phase_override {
+        if fresh_prompt {
+            phase = "PLAN".to_string();
+            let mut st = read_state();
+            st.phase = "PLAN".to_string();
+            let _ = super::state::write_state(&st);
+            ilog("instruction::handle fresh prompt on COMPLETE chain -> reset phase to PLAN");
+        } else if prd_pending_count(&prd_items_json()) == 0 {
+            idev(
+                "complete-chain-poll",
+                "instruction re-dispatched on terminal chain (phase=COMPLETE, prd_pending=0, no fresh prompt). The chain is closed; stop dispatching. A new request resets to PLAN.",
+            );
         }
     }
 
