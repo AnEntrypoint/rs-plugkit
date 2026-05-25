@@ -28,6 +28,8 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/rs-learn.db-wal",
     ".gm/learning-state.md",
     ".gm/git-block-counter.json",
+    ".gm/disciplines/codeinsight/",
+    ".gm/disciplines/codeinsight-vec/",
     ".plugkit-browser-profile/",
     ".plugkit-browser-profile-*/",
 ];
