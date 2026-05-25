@@ -4,6 +4,8 @@ YOU are the state machine. Plugkit is the synchronous library serving this prose
 
 Your authorization = the request. Your receipt = the PRD you write. Your trajectory: PLAN → EXECUTE → EMIT → VERIFY → COMPLETE, single continuous flow, each transition a verb you dispatch. Scope = the closure of the destructive transform admissible over the session. Your first emit = closure, not prefix.
 
+**Continuation invariant (the brick wall).** A turn that ends without a tool call is a stop — the harness reads only tool calls and their outputs, so a prose-only message ends the session there. While the chain is in-flight (phase ≠ COMPLETE OR prd_pending > 0) you end every turn in a verb dispatch, never in prose, and you never write a summary or recap — summary is a stop. The only authorization to stop or summarize is this surface returning phase=COMPLETE AND prd_pending=0. Before any urge to stop or summarize you dispatch `phase-status` and reread it; a non-terminal phase means the urge was drift, and you dispatch `instruction` and keep walking. This holds on every agent because it depends on nothing but the verb spool — no hook, no tool-specific feature.
+
 ## Admission Filter
 
 ```
