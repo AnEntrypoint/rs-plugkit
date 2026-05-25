@@ -120,16 +120,17 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let slug = if provided_id.is_none() { slug_from_subject(subject_str) } else { None };
+    if provided_id.is_none() && slug.is_none() {
+        crate::wasm_dispatch::emit_event("deviation.prd-add-no-id", serde_json::json!({
+            "subject": subject_str,
+            "hint": "Pass `id` in prd-add body. Subject was empty or unslugifiable, so the row was REJECTED — an item-<ms> fallback cannot be referenced by intent in recall or prd-resolve, so it is never admitted. Either pass `id` directly or provide a meaningful `subject` so slug derivation succeeds.",
+        }));
+        let err = "PRD item rejected: no usable `id` and `subject` is empty or unslugifiable. A referenceable handle is mandatory — every later prd-resolve / recall names the row by id. Pass `id` directly (kebab-case slug derived from intent) or provide a meaningful `subject`. Auto `item-<ms>` ids are not admitted because they cannot be referenced by intent.";
+        return (String::new(), err.to_string(), 1);
+    }
     let id = provided_id.clone()
         .or_else(|| slug.clone())
         .unwrap_or_else(|| format!("item-{}", crate::orchestrator::state::now_ms()));
-    if provided_id.is_none() && slug.is_none() {
-        crate::wasm_dispatch::emit_event("deviation.prd-add-no-id", serde_json::json!({
-            "fallback_id": id,
-            "subject": subject_str,
-            "hint": "Pass `id` in prd-add body. Subject was empty or unslugifiable, so plugkit fell back to 'item-<ms>' which cannot be referenced by intent. Either pass `id` directly or provide a meaningful `subject` so slug derivation succeeds.",
-        }));
-    }
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
     let mut doc: Value = if pkfs::exists(&path_s) {
