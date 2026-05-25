@@ -114,6 +114,8 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         }
     }
     let provided_id = item_map.get(&Value::String("id".to_string()))
+        .or_else(|| item_map.get(&Value::String("slug".to_string())))
+        .or_else(|| item_map.get(&Value::String("prd_id".to_string())))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     let subject_str = item_map.get(&Value::String("subject".to_string()))
@@ -166,6 +168,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             .or_else(|| v.get("prd_id"))
             .or_else(|| v.get("mutable_id"))
             .or_else(|| v.get("item_id"))
+            .or_else(|| v.get("slug"))
             .and_then(|s| s.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| trimmed.to_string());
@@ -223,7 +226,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             "deviation_kind": "prd-resolve-unknown-id",
             "prd_id": id_target,
             "known_ids": known_ids,
-            "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; aliases accepted: prd_id, mutable_id, item_id (all map to id). Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If id is not in `known_ids` above, the row was never `prd-add`ed in this chain — your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added. NOT a valid id: a multi-word free-text description, a JSON object with the id missing from id/prd_id/mutable_id/item_id keys, or a quoted string that includes the id and free text in one blob.",
+            "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; aliases accepted: prd_id, mutable_id, item_id, slug (all map to id). Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If id is not in `known_ids` above, the row was never `prd-add`ed in this chain — your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added. NOT a valid id: a multi-word free-text description, a JSON object with the id missing from id/prd_id/mutable_id/item_id/slug keys, or a quoted string that includes the id and free text in one blob.",
         }).to_string();
         return (body, format!("prd id not found: {}", id_target), 1);
     }
