@@ -29,6 +29,60 @@ fn rlog(msg: &str) {
     let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
 }
 
+#[cfg(target_arch = "wasm32")]
+fn rerank_by_adapter(query_text: &str, hits: serde_json::Value) -> serde_json::Value {
+    let mut arr = match hits.as_array() {
+        Some(a) if a.len() > 1 => a.clone(),
+        _ => return hits,
+    };
+    let namespaces: Vec<String> = {
+        let mut seen = Vec::new();
+        for h in &arr {
+            if let Some(ns) = h.get("namespace").and_then(|v| v.as_str()) {
+                if !ns.is_empty() && !seen.iter().any(|s| s == ns) { seen.push(ns.to_string()); }
+            }
+        }
+        seen
+    };
+    if namespaces.len() < 2 { return hits; }
+    let embedding = match crate::embed::embed_text(query_text) {
+        Some(e) => e,
+        None => return hits,
+    };
+    let targets: Vec<serde_json::Value> = namespaces.iter().map(|n| serde_json::Value::String(n.clone())).collect();
+    let req = serde_json::json!({
+        "verb": "apply_adapter",
+        "body": { "embedding": embedding, "targets": targets }
+    });
+    let mut session = rs_learn::LearnSession::new(crate::wasm_dispatch::PlugkitKv);
+    let resp = rs_learn::dispatch_json(&mut session, req.to_string().as_bytes());
+    let logits: Vec<f64> = serde_json::from_slice::<serde_json::Value>(&resp).ok()
+        .and_then(|v| v.get("data").and_then(|d| d.get("logits")).cloned())
+        .and_then(|l| serde_json::from_value::<Vec<f64>>(l).ok())
+        .unwrap_or_default();
+    if logits.len() != namespaces.len() || logits.iter().all(|x| x.abs() < 1e-9) {
+        return hits;
+    }
+    let ns_score = |ns: &str| -> f64 {
+        match namespaces.iter().position(|n| n == ns) {
+            Some(i) => 1.0 / (1.0 + (-logits[i]).exp()),
+            None => 0.5,
+        }
+    };
+    const LAMBDA: f64 = 0.25;
+    arr.sort_by(|a, b| {
+        let fa = a.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0)
+            * (1.0 + LAMBDA * (ns_score(a.get("namespace").and_then(|v| v.as_str()).unwrap_or("")) - 0.5) * 2.0);
+        let fb = b.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0)
+            * (1.0 + LAMBDA * (ns_score(b.get("namespace").and_then(|v| v.as_str()).unwrap_or("")) - 0.5) * 2.0);
+        fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    serde_json::Value::Array(arr)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn rerank_by_adapter(_query_text: &str, hits: serde_json::Value) -> serde_json::Value { hits }
+
 pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
     if query_text.trim().is_empty() {
         return serde_json::Value::Array(Vec::new());
@@ -52,7 +106,8 @@ pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
             && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false)
         {
             rlog("recall::recall_hits done via vec_search");
-            return vec_hits;
+            let reranked = rerank_by_adapter(embed_input, vec_hits);
+            return reranked;
         }
         let packed = unsafe {
             host_kv_query(namespace.as_ptr(), namespace.len() as u32,
