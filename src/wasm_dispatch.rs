@@ -642,7 +642,7 @@ fn learn_build(_body: &Value) -> u64 {
     ok("learn-build", json!({ "note": "WASM build uses thebird host bindings — no separate build step" }))
 }
 
-struct PlugkitKv;
+pub struct PlugkitKv;
 
 impl rs_learn::KvBackend for PlugkitKv {
     fn get(&self, namespace: &str, key: &str) -> Option<Vec<u8>> {
