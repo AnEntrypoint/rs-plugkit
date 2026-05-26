@@ -451,6 +451,7 @@ fn memorize_prune(body: &Value) -> u64 {
             let rc = unsafe { host_kv_delete(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
             if rc != 0 {
                 deleted.push(key.clone());
+                invalidate_memory_edge(key);
                 emit_event("memory.pruned", json!({"key": key, "namespace": namespace, "mode": "explicit-key"}));
             }
         }
@@ -681,6 +682,15 @@ fn learn_dispatch_value(req: &Value) -> Value {
     String::from_utf8(resp).ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .unwrap_or(Value::Null)
+}
+
+fn invalidate_memory_edge(key: &str) {
+    let now = unsafe { host_now_ms() };
+    let req = serde_json::json!({
+        "verb": "invalidate_edge",
+        "body": { "edge_id": key, "invalid_at": now, "expired_at": now }
+    });
+    let _ = learn_dispatch_value(&req);
 }
 
 pub fn route_hint(prompt: &str, estimated_tokens: u64) -> Value {
