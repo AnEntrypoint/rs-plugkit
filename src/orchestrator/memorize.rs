@@ -157,7 +157,7 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         }));
         return (String::new(), msg, 1);
     }
-    let edge_inserted = insert_memory_edge(&namespace, &key, &text, &emb_str, now);
+    let edge_inserted = insert_memory_edge(&namespace, &key, &text, &emb_str, now as i64);
     let payload = serde_json::json!({
         "ok": true,
         "key": key,
