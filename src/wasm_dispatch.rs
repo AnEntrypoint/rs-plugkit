@@ -642,6 +642,36 @@ fn learn_build(_body: &Value) -> u64 {
     ok("learn-build", json!({ "note": "WASM build uses thebird host bindings — no separate build step" }))
 }
 
+struct PlugkitKv;
+
+impl rs_learn::KvBackend for PlugkitKv {
+    fn get(&self, namespace: &str, key: &str) -> Option<Vec<u8>> {
+        let packed = unsafe { host_kv_get(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
+        unpack_to_string(packed).map(|s| s.into_bytes())
+    }
+    fn put(&mut self, namespace: &str, key: &str, val: &[u8]) {
+        let _ = unsafe { host_kv_put(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
+    }
+    fn list_prefix(&self, namespace: &str, prefix: &str) -> Vec<String> {
+        let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, prefix.as_ptr(), prefix.len() as u32) };
+        match unpack_to_value(packed) {
+            Value::Array(a) => a.into_iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+            Value::Object(o) => o.keys().cloned().collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+fn learn(body: &Value, raw: &str) -> u64 {
+    let _ = body;
+    let mut session = rs_learn::LearnSession::new(PlugkitKv);
+    let resp = rs_learn::dispatch_json(&mut session, raw.as_bytes());
+    match String::from_utf8(resp) {
+        Ok(s) => pack(s),
+        Err(_) => err("learn", "rs_learn dispatch returned non-utf8"),
+    }
+}
+
 fn discipline(body: &Value) -> u64 {
     let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("list");
     let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -1208,6 +1238,7 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "git_push" => git_push(&body),
         "forget" => forget(&body),
         "feedback" => feedback(&body),
+        "learn" => learn(&body, &body_s),
         "learn-status" => learn_status(&body),
         "learn-debug" => learn_debug(&body),
         "learn-build" => learn_build(&body),

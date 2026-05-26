@@ -38,6 +38,7 @@ candle-nn = { version = "0.8", default-features = false }
 candle-transformers = { version = "0.8", default-features = false }
 tokenizers = { version = "0.20", default-features = false, features = ["unstable_wasm"] }
 getrandom = { version = "0.2", features = ["custom"] }
+rs-learn = { git = "https://github.com/AnEntrypoint/rs-learn.git", package = "rs-learn", default-features = false }
 
 [profile.release]
 strip = true
