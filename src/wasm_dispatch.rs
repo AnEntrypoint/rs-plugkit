@@ -1003,12 +1003,65 @@ fn git_push(body: &Value) -> u64 {
             "next_action_hint": "Read porcelain field, decide stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. Do NOT retry git_push with the same dirty tree — the gate will deny again.",
         }).to_string());
     }
-    let push_out = exec_git_push_in(repo.as_deref(), &branch);
+    let mut push_out = exec_git_push_in(repo.as_deref(), &branch);
+    let mut attempts = 0u32;
+    let mut rebased = false;
+    while push_rejected(&push_out) && attempts < 3 {
+        attempts += 1;
+        let rebase_out = exec_git_in(repo.as_deref(), &format!("pull --rebase origin {}", branch));
+        if rebase_failed(&rebase_out) || !git_porcelain_in(repo.as_deref()).trim().is_empty() {
+            let _ = exec_git_in(repo.as_deref(), "rebase --abort");
+            log_deviation_push("push-rebase-conflict", &branch);
+            return pack(json!({
+                "ok": false,
+                "verb": "git_push",
+                "gate_denied": true,
+                "repo": repo,
+                "branch": branch,
+                "reason": format!(
+                    "push rejected (remote moved); pull --rebase origin {} conflicted and was aborted — worktree could not be cleanly replayed onto origin. Resolve manually. Rebase output:\n{}",
+                    branch, rebase_out
+                ),
+                "next_dispatch": "instruction",
+            }).to_string());
+        }
+        rebased = true;
+        push_out = exec_git_push_in(repo.as_deref(), &branch);
+    }
+    if push_rejected(&push_out) {
+        log_deviation_push("push-remote-outpaces", &branch);
+        return pack(json!({
+            "ok": false,
+            "verb": "git_push",
+            "gate_denied": true,
+            "repo": repo,
+            "branch": branch,
+            "reason": format!(
+                "push to {} rejected after {} rebase-retries — remote is moving faster than the push can land. Re-dispatch git_push after the remote settles. Last output:\n{}",
+                branch, attempts, push_out
+            ),
+            "next_dispatch": "instruction",
+        }).to_string());
+    }
     ok("git_push", json!({
         "branch": branch,
         "repo": repo,
         "output": push_out,
+        "rebased": rebased,
+        "rebase_retries": attempts,
     }))
+}
+
+fn push_rejected(out: &str) -> bool {
+    let l = out.to_lowercase();
+    l.contains("rejected") || l.contains("non-fast-forward") || l.contains("fetch first")
+        || l.contains("updates were rejected")
+}
+
+fn rebase_failed(out: &str) -> bool {
+    let l = out.to_lowercase();
+    l.contains("conflict") || l.contains("could not apply") || l.contains("error:")
+        || l.contains("needs merge") || l.contains("automatic merge failed")
 }
 
 fn exec_git_in(repo: Option<&str>, args: &str) -> String {
