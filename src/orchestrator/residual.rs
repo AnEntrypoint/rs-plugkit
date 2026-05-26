@@ -78,6 +78,12 @@ fn prd_empty_or_missing() -> bool {
 }
 
 fn browser_sessions_open() -> bool {
+    // Session-scoped: only the CURRENT session's own browsers gate this scan.
+    // browser-sessions.json is keyed by claudeSessionId ({"<sid>": ["pwId", ...]});
+    // foreign sessions' open browsers (other projects, other concurrent gm sessions)
+    // are theirs to close, not this session's residual. Gating on the global set
+    // wedges a session on browsers it never opened and must not close.
+    let current_sid = super::state::read_state().session_id;
     let candidates = [
         gm_dir().join("exec-spool").join("browser-sessions.json"),
         gm_dir().join("browser-sessions.json"),
@@ -85,9 +91,29 @@ fn browser_sessions_open() -> bool {
     for marker in &candidates {
         let ps = marker.to_string_lossy().to_string();
         if !pkfs::exists(&ps) { continue; }
-        if let Some(s) = pkfs::read_to_string(&ps) {
-            let t = s.trim();
-            if !t.is_empty() && t != "{}" && t != "[]" { return true; }
+        let Some(s) = pkfs::read_to_string(&ps) else { continue; };
+        let t = s.trim();
+        if t.is_empty() || t == "{}" || t == "[]" { continue; }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(t) else {
+            // Unparseable but non-empty: fail safe to the old any-open behavior.
+            return true;
+        };
+        match (&current_sid, val.as_object()) {
+            (Some(sid), Some(map)) => {
+                // Only the current session's entry counts.
+                if let Some(entry) = map.get(sid) {
+                    let open = match entry {
+                        serde_json::Value::Array(a) => !a.is_empty(),
+                        serde_json::Value::Null => false,
+                        _ => true,
+                    };
+                    if open { return true; }
+                }
+                // current session has no open browsers in this file; keep scanning candidates
+            }
+            // No known current session id, or non-object shape: fall back to
+            // the conservative any-non-empty check so we never under-gate.
+            _ => return true,
         }
     }
     false
