@@ -164,7 +164,15 @@ pub fn open_browser_sessions() -> Value {
     let ports: Value = pkfs::read_to_string(&ports_s)
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(Value::Null);
+    // Session-scoped: surface only the CURRENT session's own browsers. Foreign
+    // sessions' browsers (other projects, other concurrent gm sessions) are not
+    // this session's residual to see, gate on, or close. Without a known current
+    // session id, fall back to surfacing all (preserves visibility, never hides).
+    let current_sid = super::state::read_state().session_id;
     for (sid, sessions) in obj {
+        if let Some(cur) = &current_sid {
+            if sid != cur { continue; }
+        }
         let port_info = ports.get(sid).cloned().unwrap_or(Value::Null);
         out.push(json!({
             "session_id": sid,
