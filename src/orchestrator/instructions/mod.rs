@@ -362,6 +362,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let turn_state = super::state::read_state();
     let await_result = pending_step_block(&turn_state);
 
+    let route_hint = crate::wasm_dispatch::route_hint(&prompt, 8000);
+
     let payload = json!({
         "phase": phase,
         "sub_phase": if await_result.is_some() { "AWAIT-RESULT" } else { "" },
@@ -384,6 +386,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "stuck_spool": stuck_spool,
         "unsupervised_watcher": unsupervised_watcher,
         "should_residual_scan": should_scan,
+        "route_hint": route_hint,
     });
     let s = payload.to_string();
     ilog(&format!("instruction::handle done out_len={}", s.len()));
