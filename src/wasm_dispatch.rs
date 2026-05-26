@@ -689,25 +689,30 @@ pub fn route_hint(prompt: &str, estimated_tokens: u64) -> Value {
         Some(e) => e,
         None => return Value::Null,
     };
-    let targets: Vec<Value> = ROUTER_MODELS.iter().map(|m| Value::String((*m).into())).collect();
     let route_req = serde_json::json!({
         "verb": "route",
         "body": { "embedding": embedding, "task_type": "code", "estimated_tokens": estimated_tokens }
     });
-    let mut resp = learn_dispatch_value(&route_req);
+    let resp = learn_dispatch_value(&route_req);
     let routed_ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-    if !routed_ok {
-        let init_req = serde_json::json!({
-            "verb": "init_router",
-            "body": { "in_dim": 384, "targets": targets }
-        });
-        let _ = learn_dispatch_value(&init_req);
-        resp = learn_dispatch_value(&route_req);
+    if routed_ok {
+        if let Some(d) = resp.get("data") { if !d.is_null() { return d.clone(); } }
     }
-    match resp.get("data") {
-        Some(d) if !d.is_null() => d.clone(),
-        _ => Value::Null,
-    }
+    let cfg = rs_learn::RouterConfig::new(384, ROUTER_MODELS.iter().map(|m| (*m).to_string()).collect());
+    let mut router = rs_learn::Router::new(cfg);
+    let mut ctx = rs_learn::RouteCtx::default();
+    ctx.task_type = Some("code".into());
+    ctx.estimated_tokens = estimated_tokens;
+    let r = router.route(&embedding, &ctx);
+    serde_json::json!({
+        "model": r.model,
+        "context_bucket": r.context_bucket,
+        "temperature": r.temperature,
+        "top_p": r.top_p,
+        "confidence": r.confidence,
+        "algo": r.algo,
+        "exploration": r.exploration,
+    })
 }
 
 fn discipline(body: &Value) -> u64 {
