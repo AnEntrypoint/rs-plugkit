@@ -70,17 +70,35 @@ pub fn handle_list(_content: &str) -> (String, String, i32) {
 
 fn defer_marker_in_text(text: &str) -> Option<&'static str> {
     let lower = text.to_lowercase();
-    const MARKERS: &[&str] = &[
-        "next pass", "next session", "next turn",
+    // Unambiguous forward-deferral imperatives: these can only mean "do it later",
+    // never appear as retrospective description, so a bare substring match is safe.
+    const HARD_MARKERS: &[&str] = &[
         "defer to later", "deferred to later", "deferred for later",
-        "future pass", "future session", "future turn", "future work",
         "address it next", "address this next", "leave for next",
         "documented for next", "documented for future",
         "below criticality", "skip for now", "punt for now",
-        "do later", "fix later", "later pass",
+        "do later", "fix later", "later pass", "future work",
     ];
-    for m in MARKERS {
+    for m in HARD_MARKERS {
         if lower.contains(m) { return Some(m); }
+    }
+    // Ambiguous noun-phrases ("next session", "future turn", …) false-positive when
+    // a row is DESCRIBING a past deferral deviation rather than deferring. Only treat
+    // them as deferral when a deferral cue co-occurs AND no retrospective cue is present.
+    const SOFT_MARKERS: &[&str] = &[
+        "next pass", "next session", "next turn",
+        "future pass", "future session", "future turn",
+    ];
+    let has_soft = SOFT_MARKERS.iter().find(|m| lower.contains(**m)).copied();
+    if let Some(m) = has_soft {
+        const DEFER_CUE: &[&str] = &["defer", "punt", "leave", "save it", "save this",
+            "push to", "kick to", "hold for", "wait for", "do it in", "handle in", "finish in"];
+        const RETRO_CUE: &[&str] = &["quoted", "described", "the phrase", "rejected for",
+            "flagged", "caused by", "deviation", "false-positive", "false positive",
+            "was mine", "self-caught", "tripped", "substring"];
+        let retro = RETRO_CUE.iter().any(|c| lower.contains(c));
+        let defer = DEFER_CUE.iter().any(|c| lower.contains(c));
+        if defer && !retro { return Some(m); }
     }
     None
 }
