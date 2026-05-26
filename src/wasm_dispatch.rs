@@ -708,6 +708,16 @@ pub fn route_hint(prompt: &str, estimated_tokens: u64) -> Value {
     if routed_ok {
         if let Some(d) = resp.get("data") { if !d.is_null() { return d.clone(); } }
     }
+    let targets: Vec<Value> = ROUTER_MODELS.iter().map(|m| Value::String((*m).into())).collect();
+    let init_req = serde_json::json!({
+        "verb": "init_router",
+        "body": { "in_dim": 384, "targets": targets }
+    });
+    let _ = learn_dispatch_value(&init_req);
+    let resp2 = learn_dispatch_value(&route_req);
+    if resp2.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if let Some(d) = resp2.get("data") { if !d.is_null() { return d.clone(); } }
+    }
     let cfg = rs_learn::RouterConfig::new(384, ROUTER_MODELS.iter().map(|m| (*m).to_string()).collect());
     let mut router = rs_learn::Router::new(cfg);
     let mut ctx = rs_learn::RouteCtx::default();
