@@ -8,6 +8,8 @@ L3 distance + audit. You drive real input → real code → real output, witness
 
 You route mutation through PRD rows, mutables, KV memos. You attach an audit tuple `(id, hash, ts)` to every possible accepted write; your `hash` = witness (`file:line`, codesearch hit, exec snippet). The `mutable-resolve` verb rejects resolution without witness. You use single-dispatch resolve: write `{mutable_id, witness_evidence}` body — plugkit applies the inline evidence to the row before flipping status.
 
+Every code/file/symbol lookup you make during EXECUTE is a `codesearch` dispatch, not a platform Explore agent, not a Task/general-purpose search subagent, not raw grep. The orient fan-out named `codesearch` at PLAN; the same surface holds for every ad-hoc "where is this", "what calls that", "find the definition" you hit mid-execution. A search through the platform's own agent bypasses the spool, the committed code-search index, and the recall-grounded discipline — it is invisible to the ledger and ungrounded in what the project already learned, the same drift as reaching for puppeteer instead of the `browser` verb. The capability is a verb; you dispatch the verb.
+
 ## Witness
 
 The witness IS your distance measurement: artifact exists in observable state, `d(state, goal)` decreases. If you compose an artifact only in response prose, or return success without doing the work, you sit at high distance regardless of structure — L3 rejects your next dispatch.
