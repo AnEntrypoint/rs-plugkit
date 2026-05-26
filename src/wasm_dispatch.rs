@@ -672,6 +672,44 @@ fn learn(body: &Value, raw: &str) -> u64 {
     }
 }
 
+const ROUTER_MODELS: &[&str] = &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"];
+
+fn learn_dispatch_value(req: &Value) -> Value {
+    let mut session = rs_learn::LearnSession::new(PlugkitKv);
+    let raw = req.to_string();
+    let resp = rs_learn::dispatch_json(&mut session, raw.as_bytes());
+    String::from_utf8(resp).ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or(Value::Null)
+}
+
+pub fn route_hint(prompt: &str, estimated_tokens: u64) -> Value {
+    if prompt.trim().is_empty() { return Value::Null; }
+    let embedding = match crate::embed::embed_text(prompt) {
+        Some(e) => e,
+        None => return Value::Null,
+    };
+    let targets: Vec<Value> = ROUTER_MODELS.iter().map(|m| Value::String((*m).into())).collect();
+    let route_req = serde_json::json!({
+        "verb": "route",
+        "body": { "embedding": embedding, "task_type": "code", "estimated_tokens": estimated_tokens }
+    });
+    let mut resp = learn_dispatch_value(&route_req);
+    let routed_ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !routed_ok {
+        let init_req = serde_json::json!({
+            "verb": "init_router",
+            "body": { "in_dim": 384, "targets": targets }
+        });
+        let _ = learn_dispatch_value(&init_req);
+        resp = learn_dispatch_value(&route_req);
+    }
+    match resp.get("data") {
+        Some(d) if !d.is_null() => d.clone(),
+        _ => Value::Null,
+    }
+}
+
 fn discipline(body: &Value) -> u64 {
     let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("list");
     let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
