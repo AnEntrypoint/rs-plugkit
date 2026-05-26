@@ -585,9 +585,29 @@ fn feedback(body: &Value) -> u64 {
     if rc != 0 { ok("feedback", json!({ "requestId": request_id, "quality": quality })) } else { err("feedback", "store failed") }
 }
 
-fn learn_status(_body: &Value) -> u64 {
+fn learn_status(body: &Value) -> u64 {
     let now = unsafe { host_now_ms() };
-    ok("learn-status", json!({ "ok": true, "now": now, "mode": "wasm", "note": "learning state via KV" }))
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    let vec_ns = format!("{}-vec", ns);
+    let count_ns = |n: &str| -> usize {
+        let packed = unsafe { host_kv_query(n.as_ptr(), n.len() as u32, "".as_ptr(), 0) };
+        match unpack_to_value(packed) {
+            Value::Array(a) => a.len(),
+            Value::Object(o) => o.len(),
+            _ => 0,
+        }
+    };
+    let text_rows = count_ns(ns);
+    let vec_rows = count_ns(&vec_ns);
+    ok("learn-status", json!({
+        "ok": true,
+        "now": now,
+        "mode": "wasm",
+        "namespace": ns,
+        "text_rows": text_rows,
+        "vec_rows": vec_rows,
+        "balanced": text_rows == vec_rows,
+    }))
 }
 
 fn learn_debug(_body: &Value) -> u64 {
