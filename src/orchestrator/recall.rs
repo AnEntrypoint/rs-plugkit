@@ -63,18 +63,34 @@ fn rerank_by_adapter(query_text: &str, hits: serde_json::Value) -> serde_json::V
     if logits.len() != namespaces.len() || logits.iter().all(|x| x.abs() < 1e-9) {
         return hits;
     }
-    let ns_score = |ns: &str| -> f64 {
-        match namespaces.iter().position(|n| n == ns) {
-            Some(i) => 1.0 / (1.0 + (-logits[i]).exp()),
-            None => 0.5,
+    // The head's quality-trained logits are small in absolute terms (~1e-5), so a per-logit
+    // sigmoid collapses to ~0.5 and never reorders. Normalize to a temperature-scaled softmax
+    // over the candidate namespaces so RELATIVE preference is what matters, independent of
+    // absolute magnitude. Center each weight on the uniform 1/n so an untrained (all-equal)
+    // head yields a neutral factor of exactly 1.0 — preserving the no-op guarantee — while a
+    // trained head shifts the favored namespace up and the others down.
+    let n = logits.len() as f64;
+    let max = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let spread = max - logits.iter().cloned().fold(f64::INFINITY, f64::min);
+    // Temperature scales the (tiny) logit spread up to an order where softmax discriminates;
+    // if the spread is effectively zero the weights stay uniform and the blend is a no-op.
+    let tau = if spread > 1e-12 { spread } else { 1.0 };
+    let exps: Vec<f64> = logits.iter().map(|l| ((l - max) / tau).exp()).collect();
+    let sum: f64 = exps.iter().sum();
+    let weights: Vec<f64> = if sum > 0.0 { exps.iter().map(|e| e / sum).collect() } else { vec![1.0 / n; logits.len()] };
+    let uniform = 1.0 / n;
+    let ns_factor = |ns: &str| -> f64 {
+        match namespaces.iter().position(|x| x == ns) {
+            Some(i) => 1.0 + LAMBDA * (weights[i] - uniform),
+            None => 1.0,
         }
     };
-    const LAMBDA: f64 = 0.25;
+    const LAMBDA: f64 = 1.0;
     arr.sort_by(|a, b| {
         let fa = a.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0)
-            * (1.0 + LAMBDA * (ns_score(a.get("namespace").and_then(|v| v.as_str()).unwrap_or("")) - 0.5) * 2.0);
+            * ns_factor(a.get("namespace").and_then(|v| v.as_str()).unwrap_or(""));
         let fb = b.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0)
-            * (1.0 + LAMBDA * (ns_score(b.get("namespace").and_then(|v| v.as_str()).unwrap_or("")) - 0.5) * 2.0);
+            * ns_factor(b.get("namespace").and_then(|v| v.as_str()).unwrap_or(""));
         fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
     });
     serde_json::Value::Array(arr)
