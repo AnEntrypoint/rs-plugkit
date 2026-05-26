@@ -286,7 +286,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
             st.phase = "PLAN".to_string();
             let _ = super::state::write_state(&st);
             ilog("instruction::handle fresh prompt on COMPLETE chain -> reset phase to PLAN");
-        } else if prd_pending_count(&prd_items_json()) == 0 {
+        } else if prd_pending_count(&prd_items_json()) == 0 && session_id_opt.is_some() {
             idev(
                 "complete-chain-poll",
                 "instruction re-dispatched on terminal chain (phase=COMPLETE, prd_pending=0, no fresh prompt). The chain is closed; stop dispatching. A new request resets to PLAN.",
