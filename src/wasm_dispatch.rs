@@ -585,20 +585,21 @@ fn feedback(body: &Value) -> u64 {
     if rc != 0 { ok("feedback", json!({ "requestId": request_id, "quality": quality })) } else { err("feedback", "store failed") }
 }
 
+fn kv_ns_count(n: &str) -> usize {
+    let packed = unsafe { host_kv_query(n.as_ptr(), n.len() as u32, "".as_ptr(), 0) };
+    match unpack_to_value(packed) {
+        Value::Array(a) => a.len(),
+        Value::Object(o) => o.len(),
+        _ => 0,
+    }
+}
+
 fn learn_status(body: &Value) -> u64 {
     let now = unsafe { host_now_ms() };
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     let vec_ns = format!("{}-vec", ns);
-    let count_ns = |n: &str| -> usize {
-        let packed = unsafe { host_kv_query(n.as_ptr(), n.len() as u32, "".as_ptr(), 0) };
-        match unpack_to_value(packed) {
-            Value::Array(a) => a.len(),
-            Value::Object(o) => o.len(),
-            _ => 0,
-        }
-    };
-    let text_rows = count_ns(ns);
-    let vec_rows = count_ns(&vec_ns);
+    let text_rows = kv_ns_count(ns);
+    let vec_rows = kv_ns_count(&vec_ns);
     ok("learn-status", json!({
         "ok": true,
         "now": now,
@@ -611,7 +612,30 @@ fn learn_status(body: &Value) -> u64 {
 }
 
 fn learn_debug(_body: &Value) -> u64 {
-    ok("learn-debug", json!({ "note": "use exec:nodejs + require('fs') to inspect .gm/ state" }))
+    let packed = unsafe { host_kv_query("disciplines".as_ptr(), 11, "".as_ptr(), 0) };
+    let names: Vec<String> = match unpack_to_value(packed) {
+        Value::Array(a) => a.into_iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        Value::Object(o) => o.keys().cloned().collect(),
+        _ => Vec::new(),
+    };
+    let mut disciplines = Vec::new();
+    for ns in std::iter::once("default".to_string()).chain(names.into_iter().filter(|n| n != "default")) {
+        let text_rows = kv_ns_count(&ns);
+        let vec_rows = kv_ns_count(&format!("{}-vec", ns));
+        if text_rows == 0 && vec_rows == 0 { continue; }
+        disciplines.push(json!({
+            "namespace": ns,
+            "text_rows": text_rows,
+            "vec_rows": vec_rows,
+            "balanced": text_rows == vec_rows,
+            "orphans": (text_rows as i64 - vec_rows as i64).abs(),
+        }));
+    }
+    ok("learn-debug", json!({
+        "ok": true,
+        "mode": "wasm",
+        "disciplines": disciplines,
+    }))
 }
 
 fn learn_build(_body: &Value) -> u64 {
