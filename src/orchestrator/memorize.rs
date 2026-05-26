@@ -157,14 +157,41 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         }));
         return (String::new(), msg, 1);
     }
+    let edge_inserted = insert_memory_edge(&namespace, &key, &text, &emb_str, now);
     let payload = serde_json::json!({
         "ok": true,
         "key": key,
         "namespace": namespace,
         "embedded": true,
         "bytes": text.len(),
+        "graph_edge": edge_inserted,
     });
     (payload.to_string(), String::new(), 0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn insert_memory_edge(namespace: &str, key: &str, text: &str, emb_str: &str, now: i64) -> bool {
+    let embedding: serde_json::Value = serde_json::from_str(emb_str).unwrap_or(serde_json::Value::Null);
+    let fact: String = text.chars().take(280).collect();
+    let edge_req = serde_json::json!({
+        "verb": "insert_edge",
+        "body": {
+            "id": key,
+            "src": namespace,
+            "dst": key,
+            "relation": "memorize",
+            "fact": fact,
+            "embedding": embedding,
+            "created_at": now,
+            "valid_at": now,
+        }
+    });
+    let raw = edge_req.to_string();
+    let mut session = rs_learn::LearnSession::new(crate::wasm_dispatch::PlugkitKv);
+    let resp = rs_learn::dispatch_json(&mut session, raw.as_bytes());
+    serde_json::from_slice::<serde_json::Value>(&resp).ok()
+        .and_then(|v| v.get("ok").and_then(|o| o.as_bool()))
+        .unwrap_or(false)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
