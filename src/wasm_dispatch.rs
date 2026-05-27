@@ -43,6 +43,11 @@ pub fn git_porcelain() -> String {
     v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
+pub fn git_call_argv(argv: &[&str], cwd: Option<&str>) -> Value {
+    let json = serde_json::to_string(argv).unwrap_or_default();
+    git_call(&json, cwd)
+}
+
 fn pack(s: String) -> u64 {
     let bytes = s.into_bytes();
     let len = bytes.len() as u64;
@@ -1179,6 +1184,261 @@ fn git_push(body: &Value) -> u64 {
     }))
 }
 
+fn git_add(body: &Value) -> u64 {
+    let repo = body.get("repo").and_then(|v| v.as_str());
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
+    let paths: Vec<String> = body.get("paths").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let mut argv: Vec<&str> = vec!["add"];
+    if paths.is_empty() {
+        argv.push("-A");
+    } else {
+        for p in &paths { argv.push(p.as_str()); }
+    }
+    let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 0 {
+        return err("git_add", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("git add failed"));
+    }
+    ok("git_add", json!({ "staged": if paths.is_empty() { vec!["-A".to_string()] } else { paths } }))
+}
+
+fn git_commit(body: &Value) -> u64 {
+    let repo = body.get("repo").and_then(|v| v.as_str());
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
+    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if message.is_empty() {
+        return err("git_commit", "message required");
+    }
+    let allow_empty = body.get("allow_empty").and_then(|v| v.as_bool()).unwrap_or(false);
+    if git_porcelain_in(cwd).trim().is_empty() && !allow_empty {
+        return ok("git_commit", json!({ "nothing_to_commit": true }));
+    }
+    let _ = git_call_argv(&["add", "-A"], cwd);
+    let mut argv: Vec<&str> = vec!["commit", "-m", message];
+    if allow_empty { argv.push("--allow-empty"); }
+    let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 0 {
+        let serr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+        let sout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+        if sout.contains("nothing to commit") || serr.contains("nothing to commit") {
+            return ok("git_commit", json!({ "nothing_to_commit": true }));
+        }
+        return err("git_commit", if serr.is_empty() { sout } else { serr });
+    }
+    let sha = exec_git_in(cwd, "rev-parse --short HEAD").trim().to_string();
+    let summary = message.lines().next().unwrap_or("").to_string();
+    ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary }))
+}
+
+fn git_finalize(body: &Value) -> u64 {
+    let repo = body.get("repo").and_then(|v| v.as_str()).map(String::from);
+    let cwd = repo.clone();
+    let cwd_ref = cwd.as_deref();
+    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let mut steps: Vec<Value> = vec![];
+    let mut committed = false;
+    let mut sha = String::new();
+    let mut summary = String::new();
+
+    let dirty = !git_porcelain_in(cwd_ref).trim().is_empty();
+    if dirty {
+        if message.is_empty() {
+            return err("git_finalize", "worktree dirty but no commit message provided — pass {message}");
+        }
+        let _ = git_call_argv(&["add", "-A"], cwd_ref);
+        let cr = git_call_argv(&["commit", "-m", message.as_str()], cwd_ref);
+        let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if ccode != 0 {
+            let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+            let sout = cr.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+            if !(sout.contains("nothing to commit") || serr.contains("nothing to commit")) {
+                return err("git_finalize", &format!("commit failed: {}", if serr.is_empty() { sout } else { serr }));
+            }
+        } else {
+            committed = true;
+            sha = exec_git_in(cwd_ref, "rev-parse --short HEAD").trim().to_string();
+            summary = message.lines().next().unwrap_or("").to_string();
+            emit_event("git.commit", json!({ "sha": sha, "summary": summary, "repo": repo }));
+            steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
+        }
+    } else {
+        steps.push(json!({ "step": "commit", "nothing_to_commit": true }));
+    }
+
+    let leftover = git_porcelain_in(cwd_ref);
+    if !leftover.trim().is_empty() {
+        return err("git_finalize", &format!("worktree still dirty after commit (untriaged residual) — refusing push. Porcelain:\n{}", leftover.lines().take(8).collect::<Vec<_>>().join("\n")));
+    }
+
+    let push_resp_packed = git_push(body);
+    let push_resp = unpack_to_value(push_resp_packed);
+    let pushed = push_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !pushed {
+        return pack(json!({
+            "ok": false,
+            "verb": "git_finalize",
+            "committed": committed,
+            "pushed": false,
+            "sha": sha,
+            "steps": steps,
+            "push_result": push_resp,
+            "reason": "commit landed (or nothing to commit) but push was refused — read push_result.reason",
+            "next_dispatch": "instruction",
+        }).to_string());
+    }
+    emit_event("git.push", json!({ "repo": repo, "sha": sha }));
+    let branch = push_resp.get("data").and_then(|d| d.get("branch")).and_then(|b| b.as_str()).unwrap_or("").to_string();
+    steps.push(json!({ "step": "push", "branch": branch }));
+    ok("git_finalize", json!({
+        "committed": committed,
+        "pushed": true,
+        "sha": sha,
+        "summary": summary,
+        "branch": branch,
+        "steps": steps,
+    }))
+}
+
+fn git_log(body: &Value) -> u64 {
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let count = body.get("count").and_then(|v| v.as_u64()).unwrap_or(10);
+    let nflag = format!("-{}", count);
+    let r = git_call_argv(&["log", &nflag, "--oneline", "--no-color"], cwd);
+    let out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let commits: Vec<Value> = out.lines().filter(|l| !l.is_empty()).map(|l| {
+        let mut it = l.splitn(2, ' ');
+        let sha = it.next().unwrap_or("").to_string();
+        let subject = it.next().unwrap_or("").to_string();
+        json!({ "sha": sha, "subject": subject })
+    }).collect();
+    ok("git_log", json!({ "commits": commits }))
+}
+
+fn git_diff(body: &Value) -> u64 {
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let staged = body.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
+    let path = body.get("path").and_then(|v| v.as_str());
+    let mut argv: Vec<&str> = vec!["diff", "--no-color"];
+    if staged { argv.push("--staged"); }
+    if let Some(p) = path { argv.push("--"); argv.push(p); }
+    let r = git_call_argv(&argv, cwd);
+    let mut diff = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let truncated = diff.len() > 60000;
+    if truncated { diff.truncate(60000); }
+    ok("git_diff", json!({ "diff": diff, "truncated": truncated }))
+}
+
+fn git_show(body: &Value) -> u64 {
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
+    let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut argv: Vec<&str> = vec!["show", "--no-color"];
+    if stat { argv.push("--stat"); }
+    argv.push(refspec);
+    let r = git_call_argv(&argv, cwd);
+    let mut out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if out.len() > 60000 { out.truncate(60000); }
+    ok("git_show", json!({ "output": out }))
+}
+
+fn git_fetch(body: &Value) -> u64 {
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let remote = body.get("remote").and_then(|v| v.as_str()).unwrap_or("origin");
+    let r = git_call_argv(&["fetch", remote], cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let out = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 { return err("git_fetch", &out); }
+    ok("git_fetch", json!({ "remote": remote, "output": out }))
+}
+
+fn git_branch(body: &Value) -> u64 {
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let current = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
+    let listing = exec_git_in(cwd, "branch --no-color");
+    let branches: Vec<String> = listing.lines()
+        .map(|l| l.trim_start_matches('*').trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    ok("git_branch", json!({ "current": current, "branches": branches }))
+}
+
+fn git_checkout(body: &Value) -> u64 {
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if refspec.is_empty() { return err("git_checkout", "ref required"); }
+    let create = body.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
+    let argv: Vec<&str> = if create { vec!["checkout", "-b", refspec] } else { vec!["checkout", refspec] };
+    let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 0 {
+        return err("git_checkout", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("checkout failed"));
+    }
+    ok("git_checkout", json!({ "checked_out": refspec, "created": create }))
+}
+
+fn git_rm(body: &Value) -> u64 {
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let paths: Vec<String> = body.get("paths").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if paths.is_empty() { return err("git_rm", "paths required"); }
+    let cached = body.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut argv: Vec<&str> = vec!["rm"];
+    if cached { argv.push("--cached"); }
+    argv.push("-r");
+    for p in &paths { argv.push(p.as_str()); }
+    let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 0 {
+        return err("git_rm", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("git rm failed"));
+    }
+    ok("git_rm", json!({ "removed": paths, "cached": cached }))
+}
+
+fn git_revert(body: &Value) -> u64 {
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    // discard working-tree changes for paths, OR revert a commit by ref
+    if let Some(arr) = body.get("paths").and_then(|v| v.as_array()) {
+        let paths: Vec<String> = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        if paths.is_empty() { return err("git_revert", "paths empty"); }
+        let mut argv: Vec<&str> = vec!["checkout", "--"];
+        for p in &paths { argv.push(p.as_str()); }
+        let r = git_call_argv(&argv, cwd);
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 { return err("git_revert", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("discard failed")); }
+        return ok("git_revert", json!({ "discarded": paths }));
+    }
+    if let Some(refspec) = body.get("ref").and_then(|v| v.as_str()) {
+        let r = git_call_argv(&["revert", "--no-edit", refspec], cwd);
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 { return err("git_revert", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("revert failed")); }
+        return ok("git_revert", json!({ "reverted": refspec }));
+    }
+    err("git_revert", "pass {paths:[...]} to discard working changes or {ref} to revert a commit")
+}
+
+fn git_reset(body: &Value) -> u64 {
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
+    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("mixed");
+    let mode_flag = match mode {
+        "soft" => "--soft",
+        "hard" => "--hard",
+        _ => "--mixed",
+    };
+    let r = git_call_argv(&["reset", mode_flag, refspec], cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 0 {
+        return err("git_reset", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("reset failed"));
+    }
+    ok("git_reset", json!({ "reset_to": refspec, "mode": mode }))
+}
+
 fn push_rejected(out: &str) -> bool {
     let l = out.to_lowercase();
     l.contains("rejected") || l.contains("non-fast-forward") || l.contains("fetch first")
@@ -1309,6 +1569,18 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
         "git_status" => git_status(&body),
         "branch_status" => branch_status(&body),
         "git_push" => git_push(&body),
+        "git_add" => git_add(&body),
+        "git_commit" => git_commit(&body),
+        "git_finalize" => git_finalize(&body),
+        "git_log" => git_log(&body),
+        "git_diff" => git_diff(&body),
+        "git_show" => git_show(&body),
+        "git_fetch" => git_fetch(&body),
+        "git_branch" => git_branch(&body),
+        "git_checkout" => git_checkout(&body),
+        "git_rm" => git_rm(&body),
+        "git_revert" => git_revert(&body),
+        "git_reset" => git_reset(&body),
         "forget" => forget(&body),
         "feedback" => feedback(&body),
         "learn" => learn(&body, &body_s),
