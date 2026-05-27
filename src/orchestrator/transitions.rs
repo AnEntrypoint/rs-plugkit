@@ -66,6 +66,11 @@ pub fn handle(content: &str) -> (String, String, i32) {
                 let remote_cfg = crate::wasm_dispatch::git_call(&format!("config --get branch.{}.remote", branch), None)
                     .get("stdout").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
                 let remote = if remote_cfg.is_empty() { "origin".to_string() } else { remote_cfg };
+                // git_push/git_finalize do not refresh the local remote-tracking ref, so a
+                // rev-list against the stale origin/<branch> reports a false ahead:N right after
+                // a successful push and wedges this gate even though HEAD is on the remote. Fetch
+                // first so remote-pushed reflects the true remote; tolerate offline failure.
+                let _ = crate::wasm_dispatch::git_call(&format!("fetch {} {}", remote, branch), None);
                 let counts = crate::wasm_dispatch::git_call(&format!("rev-list --left-right --count {}/{}...HEAD", remote, branch), None)
                     .get("stdout").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let parts: Vec<&str> = counts.split_whitespace().collect();

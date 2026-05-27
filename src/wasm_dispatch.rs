@@ -1084,13 +1084,21 @@ fn git_status(_body: &Value) -> u64 {
     }))
 }
 
-fn branch_status(_body: &Value) -> u64 {
+fn branch_status(body: &Value) -> u64 {
     let branch = exec_git("rev-parse --abbrev-ref HEAD").trim().to_string();
     if branch.is_empty() {
         return err("branch_status", "unable to determine branch");
     }
     let remote = exec_git(&format!("config --get branch.{}.remote", branch)).trim().to_string();
     let remote = if remote.is_empty() { "origin".to_string() } else { remote };
+    // The local remote-tracking ref (origin/<branch>) is only as fresh as the last fetch;
+    // git_push/git_finalize do not update it, so ahead/behind computed against the stale ref
+    // reports a false ahead:N after a successful push and falsely blocks the COMPLETE gate's
+    // remote-pushed witness. Fetch the branch first so ahead/behind reflect the true remote.
+    // Tolerate failure (offline) — falls back to the stale ref, no worse than before.
+    if !body.get("no_fetch").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let _ = exec_git(&format!("fetch {} {}", remote, branch));
+    }
     let counts = exec_git(&format!("rev-list --left-right --count {}/{}...HEAD", remote, branch));
     let counts = counts.trim();
     let mut behind: u64 = 0;
