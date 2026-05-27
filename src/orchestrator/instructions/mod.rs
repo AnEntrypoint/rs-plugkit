@@ -319,6 +319,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let mutables_pending = mutables::pending_detailed();
     let prd_items = prd_items_json();
     let prd_pending = prd_pending_count(&prd_items);
+    let prd_items_open: Vec<serde_json::Value> = prd_items.iter().filter(|it| item_is_open(it)).cloned().collect();
     let next = next_phase_hint(&phase);
 
     let prompt_query = {
@@ -372,7 +373,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "mutables_pending": mutables_pending,
         "mutables_pending_count": mutables_pending_count,
         "epistemic_gap": mutables_pending_count,
-        "prd_items": prd_items,
+        "prd_items": prd_items_open,
+        "prd_total_count": prd_items.len(),
         "prd_pending_count": prd_pending,
         "next_phase_hint": next,
         "recall_hits": recall_hits,
