@@ -30,7 +30,7 @@ fn rlog(msg: &str) {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn rerank_by_adapter(query_text: &str, hits: serde_json::Value) -> serde_json::Value {
+pub fn rerank_by_adapter(query_text: &str, hits: serde_json::Value) -> serde_json::Value {
     let mut arr = match hits.as_array() {
         Some(a) if a.len() > 1 => a.clone(),
         _ => return hits,
@@ -102,7 +102,7 @@ fn rerank_by_adapter(query_text: &str, hits: serde_json::Value) -> serde_json::V
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn rerank_by_adapter(_query_text: &str, hits: serde_json::Value) -> serde_json::Value { hits }
+pub fn rerank_by_adapter(_query_text: &str, hits: serde_json::Value) -> serde_json::Value { hits }
 
 pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
     if query_text.trim().is_empty() {

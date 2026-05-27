@@ -331,11 +331,12 @@ fn recall(body: &Value) -> u64 {
     let vec_hits = unpack_to_value(packed);
     if !vec_hits.is_null() && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
         let annotated = annotate_hits_with_score(vec_hits);
+        let reranked = crate::orchestrator::recall::rerank_by_adapter(query, annotated);
         return ok("recall", json!({
             "mode": "vector_top_k",
             "namespace": namespace,
             "derived_query": derived_query,
-            "hits": annotated,
+            "hits": reranked,
         }));
     }
     let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, query.as_ptr(), query.len() as u32) };
