@@ -56,31 +56,36 @@ fn rerank_by_adapter(query_text: &str, hits: serde_json::Value) -> serde_json::V
     });
     let mut session = rs_learn::LearnSession::new(crate::wasm_dispatch::PlugkitKv);
     let resp = rs_learn::dispatch_json(&mut session, req.to_string().as_bytes());
-    let logits: Vec<f64> = serde_json::from_slice::<serde_json::Value>(&resp).ok()
-        .and_then(|v| v.get("data").and_then(|d| d.get("logits")).cloned())
+    let resp_val: serde_json::Value = serde_json::from_slice(&resp).unwrap_or(serde_json::Value::Null);
+    let data = resp_val.get("data").cloned().unwrap_or(serde_json::Value::Null);
+    let logits: Vec<f64> = data.get("logits").cloned()
         .and_then(|l| serde_json::from_value::<Vec<f64>>(l).ok())
         .unwrap_or_default();
-    if logits.len() != namespaces.len() || logits.iter().all(|x| x.abs() < 1e-9) {
+    // The adapter's target labels, in the SAME order as logits. The re-rank must map each
+    // logit to its namespace BY LABEL, not by positional index: the logits come back in the
+    // adapter's persisted target order, which is unrelated to the order namespaces were
+    // discovered from the hits. Without the labels, the weight applied to a namespace is the
+    // weight of whatever target happens to share its index — silently wrong.
+    let adapter_targets: Vec<String> = data.get("targets").cloned()
+        .and_then(|t| serde_json::from_value::<Vec<String>>(t).ok())
+        .unwrap_or_default();
+    if logits.len() != adapter_targets.len() || logits.iter().all(|x| x.abs() < 1e-9) {
         return hits;
     }
-    // The head's quality-trained logits are small in absolute terms (~1e-5), so a per-logit
-    // sigmoid collapses to ~0.5 and never reorders. Normalize to a temperature-scaled softmax
-    // over the candidate namespaces so RELATIVE preference is what matters, independent of
-    // absolute magnitude. Center each weight on the uniform 1/n so an untrained (all-equal)
-    // head yields a neutral factor of exactly 1.0 — preserving the no-op guarantee — while a
-    // trained head shifts the favored namespace up and the others down.
+    // Temperature-scaled softmax over the logits so RELATIVE preference drives the blend
+    // independent of the tiny absolute magnitude. Center each weight on uniform 1/n so an
+    // untrained (all-equal) head yields a neutral factor of exactly 1.0 — preserving the
+    // no-op guarantee — while a trained head shifts the favored target up and the rest down.
     let n = logits.len() as f64;
     let max = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let spread = max - logits.iter().cloned().fold(f64::INFINITY, f64::min);
-    // Temperature scales the (tiny) logit spread up to an order where softmax discriminates;
-    // if the spread is effectively zero the weights stay uniform and the blend is a no-op.
     let tau = if spread > 1e-12 { spread } else { 1.0 };
     let exps: Vec<f64> = logits.iter().map(|l| ((l - max) / tau).exp()).collect();
     let sum: f64 = exps.iter().sum();
     let weights: Vec<f64> = if sum > 0.0 { exps.iter().map(|e| e / sum).collect() } else { vec![1.0 / n; logits.len()] };
     let uniform = 1.0 / n;
     let ns_factor = |ns: &str| -> f64 {
-        match namespaces.iter().position(|x| x == ns) {
+        match adapter_targets.iter().position(|x| x == ns) {
             Some(i) => 1.0 + LAMBDA * (weights[i] - uniform),
             None => 1.0,
         }
