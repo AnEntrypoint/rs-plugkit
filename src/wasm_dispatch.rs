@@ -1265,7 +1265,19 @@ fn git_finalize(body: &Value) -> u64 {
             steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
         }
     } else {
-        steps.push(json!({ "step": "commit", "nothing_to_commit": true }));
+        // Not dirty. A prior aborted attempt (watcher death mid-verb) may have already
+        // committed; detect by checking whether HEAD is ahead of upstream. If so, report
+        // the real HEAD sha rather than committed:false/sha:"" which under-reports success.
+        let ahead = exec_git_in(cwd_ref, "rev-list --count @{u}..HEAD").trim().to_string();
+        let ahead_n: u64 = ahead.parse().unwrap_or(0);
+        if ahead_n > 0 {
+            sha = exec_git_in(cwd_ref, "rev-parse --short HEAD").trim().to_string();
+            summary = exec_git_in(cwd_ref, "log -1 --pretty=%s").trim().to_string();
+            committed = true;
+            steps.push(json!({ "step": "commit", "already_committed": true, "sha": sha, "summary": summary, "ahead": ahead_n }));
+        } else {
+            steps.push(json!({ "step": "commit", "nothing_to_commit": true }));
+        }
     }
 
     let leftover = git_porcelain_in(cwd_ref);
