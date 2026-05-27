@@ -448,15 +448,24 @@ fn memorize_prune(body: &Value) -> u64 {
     }
     if !keys.is_empty() {
         let mut deleted = Vec::new();
+        let mut not_found = Vec::new();
         for key in &keys {
             let rc = unsafe { host_kv_delete(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
             if rc != 0 {
                 deleted.push(key.clone());
                 invalidate_memory_edge(key);
                 emit_event("memory.pruned", json!({"key": key, "namespace": namespace, "mode": "explicit-key"}));
+            } else {
+                not_found.push(key.clone());
+                emit_event("memory.prune-miss", json!({"key": key, "namespace": namespace, "mode": "explicit-key"}));
             }
         }
-        return ok("memorize-prune", json!({"namespace": namespace, "deleted": deleted, "mode": "explicit-key"}));
+        let mut resp = json!({"namespace": namespace, "deleted": deleted, "mode": "explicit-key"});
+        if !not_found.is_empty() {
+            resp["not_found"] = json!(not_found);
+            resp["note"] = json!("Keys in not_found did not exist in this namespace — nothing was pruned for them. The key is likely under a different namespace (pass {namespace:<the recall hit's namespace>}) or the key string did not match exactly. Re-run memorize-prune {query} to get live candidates with their exact keys + namespaces.");
+        }
+        return ok("memorize-prune", resp);
     }
     // Mode 2: query + min_score — surface candidate stale memories for the agent to review. Pruning
     // bad memory matters more than retention, but a blind similarity-delete is itself a bad-memory
