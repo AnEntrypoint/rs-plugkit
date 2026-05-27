@@ -104,7 +104,8 @@ mod wasm_hooks {
         let is_agent = tool_name == "Agent" || tool_name == "Task";
         let skill_name = input.get("tool_input").and_then(|v| v.get("skill")).and_then(|v| v.as_str()).unwrap_or("");
         let agent_type = input.get("tool_input").and_then(|v| v.get("subagent_type")).and_then(|v| v.as_str()).unwrap_or("");
-        let invokes_gm = (is_skill && skill_name == "gm:gm") || (is_agent && agent_type == "gm:gm");
+        let is_gm_name = |n: &str| n == "gm-skill" || n == "gm:gm";
+        let invokes_gm = (is_skill && is_gm_name(skill_name)) || (is_agent && is_gm_name(agent_type));
 
         if invokes_gm {
             write_marker("gm-fired-this-turn");
@@ -169,7 +170,7 @@ mod wasm_hooks {
         if !prompt.is_empty() {
             let _ = host_write(&path_for("last-prompt.txt"), prompt);
         }
-        let mut ctx = String::from("Invoke Skill(gm:gm) first. The gate enforces this.\n");
+        let mut ctx = String::from("Invoke the gm-skill first, then dispatch the instruction verb (write .gm/exec-spool/in/instruction/<N>.txt, read the response). The spool-dispatch gate enforces this.\n");
         if !prompt.is_empty() {
             ctx.push_str(&format!("\nUser prompt: {}\n", prompt.chars().take(280).collect::<String>()));
         }
@@ -196,7 +197,7 @@ mod wasm_hooks {
 
     pub fn pre_compact(_input: &Value) -> Value {
         write_marker("needs-gm");
-        let policy = "=== RESPONSE POLICY — ALWAYS ACTIVE (post-compact reinforcement) ===\n\nTerse. Drop filler. Pattern: [thing] [action] [reason]. [next step].\n\n=== POST-COMPACT FIRST RESPONSE — HARD RULE ===\n\nThe very next response after this compaction MUST call Skill(\"gm:gm\") as the FIRST tool invocation.";
+        let policy = "=== RESPONSE POLICY — ALWAYS ACTIVE (post-compact reinforcement) ===\n\nTerse. Drop filler. Pattern: [thing] [action] [reason]. [next step].\n\n=== POST-COMPACT FIRST RESPONSE — HARD RULE ===\n\nThe very next response after this compaction invokes the gm-skill and dispatches the instruction verb as the FIRST action.";
         json!({ "systemMessage": policy })
     }
 
@@ -221,7 +222,7 @@ mod wasm_hooks {
             write_marker("needs-gm");
             return json!({
                 "decision": "block",
-                "reason": format!("Work items remain in .gm/prd.yml. Remove completed items as they finish. Delete the file when all items are done.\n\n{}\n\nNEXT ACTION: invoke Skill(gm) first.", prd_trim)
+                "reason": format!("Work items remain in .gm/prd.yml. Remove completed items as they finish. Delete the file when all items are done.\n\n{}\n\nNEXT ACTION: invoke the gm-skill and dispatch the instruction verb first.", prd_trim)
             });
         }
         let muts = read_file("mutables.yml");
@@ -229,7 +230,7 @@ mod wasm_hooks {
             write_marker("needs-gm");
             return json!({
                 "decision": "block",
-                "reason": "Cannot stop while .gm/mutables.yml has unresolved mutables. Resolve each unknown by witness; update mutables.yml entries to status: witnessed.\n\nNEXT ACTION: invoke Skill(gm) first."
+                "reason": "Cannot stop while .gm/mutables.yml has unresolved mutables. Resolve each unknown by witness; update mutables.yml entries to status: witnessed.\n\nNEXT ACTION: invoke the gm-skill and dispatch the instruction verb first."
             });
         }
         if !read_marker("residual-check-fired") {
@@ -237,7 +238,7 @@ mod wasm_hooks {
             write_marker("needs-gm");
             return json!({
                 "decision": "block",
-                "reason": "Residual scan before stop. PRD is empty, but the user's ask may still have reachable in-spirit residuals not yet captured. Enumerate every residual that is (a) within the spirit of the original ask AND (b) reachable from this session.\n\nIf any reachable residual exists: re-enter Skill(gm:planning), append PRD items, execute through to COMPLETE.\nIf zero reachable in-spirit residuals exist: state that explicitly in one line and stop again.\n\nNEXT ACTION: invoke Skill(gm) first."
+                "reason": "Residual scan before stop. PRD is empty, but the user's ask may still have reachable in-spirit residuals not yet captured. Enumerate every residual that is (a) within the spirit of the original ask AND (b) reachable from this session.\n\nIf any reachable residual exists: dispatch prd-add to append PRD items, transition to PLAN, and execute through to COMPLETE.\nIf zero reachable in-spirit residuals exist: state that explicitly in one line and stop again.\n\nNEXT ACTION: invoke the gm-skill and dispatch the instruction verb first."
             });
         }
         json!({ "decision": "approve" })
