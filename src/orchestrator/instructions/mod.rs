@@ -283,6 +283,16 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         !p.trim().is_empty() && valid_phases.contains(&p.trim().to_ascii_uppercase().as_str())
     }).unwrap_or(false);
 
+    if fresh_prompt && !raw_phase_override && phase != "PLAN" && phase != "COMPLETE"
+        && prd_pending_count(&prd_items_json()) == 0
+    {
+        ilog(&format!("instruction::handle fresh prompt on stuck {} chain (no pending PRD) -> reset phase to PLAN", phase));
+        phase = "PLAN".to_string();
+        let mut st = read_state();
+        st.phase = "PLAN".to_string();
+        let _ = super::state::write_state(&st);
+    }
+
     if phase == "COMPLETE" && !raw_phase_override {
         if fresh_prompt {
             phase = "PLAN".to_string();
