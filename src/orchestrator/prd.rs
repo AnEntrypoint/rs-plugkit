@@ -223,12 +223,48 @@ fn parse_resolve_target(trimmed: &str) -> (String, Option<String>) {
             id
         };
         (id, wit)
+    } else if let Some((id, wit)) = recover_truncated_envelope(trimmed) {
+        // Malformed/truncated JSON envelope (e.g. an LLM cut off mid-body:
+        // {"id":"strip-folder-prefix","witness_evidence":"imapsync-server.js  ). serde rejected it,
+        // but the leading "id"/"prd_id" string value is still recoverable by a brace-free scan.
+        (id, wit)
     } else {
         let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
         let id = parts.first().map(|s| s.to_string()).unwrap_or_else(|| trimmed.to_string());
         let wit = parts.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         (id, wit)
     }
+}
+
+// Recover the id (and witness if present) from a body that LOOKS like a JSON envelope but
+// failed to parse (most commonly a truncation: the witness_evidence string was cut off before
+// its closing quote/brace). Returns None when the body is not envelope-shaped, so the plain
+// first-token fallback still applies to ordinary raw-text bodies.
+fn recover_truncated_envelope(s: &str) -> Option<(String, Option<String>)> {
+    let s = s.trim_start();
+    if !s.starts_with('{') { return None; }
+    let extract = |key: &str| -> Option<String> {
+        let needle = format!("\"{}\"", key);
+        let after_key = s.find(&needle)? + needle.len();
+        let rest = &s[after_key..];
+        let colon = rest.find(':')?;
+        let after_colon = rest[colon + 1..].trim_start();
+        if !after_colon.starts_with('"') { return None; }
+        let val = &after_colon[1..];
+        // value ends at the next unescaped quote, or end-of-string if truncated.
+        let mut out = String::new();
+        let mut chars = val.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' { if let Some(n) = chars.next() { out.push(n); } continue; }
+            if c == '"' { return Some(out); }
+            out.push(c);
+        }
+        if out.is_empty() { None } else { Some(out) } // truncated before closing quote
+    };
+    let id = extract("id").or_else(|| extract("prd_id")).or_else(|| extract("mutable_id"))
+        .or_else(|| extract("item_id")).or_else(|| extract("slug")).or_else(|| extract("key"))?;
+    let wit = extract("witness_evidence").or_else(|| extract("witness")).or_else(|| extract("evidence"));
+    Some((id, wit))
 }
 
 fn levenshtein(a: &str, b: &str) -> usize {
@@ -358,6 +394,23 @@ mod tests {
         let (id, wit) = parse_resolve_target(body);
         assert_eq!(id, "foo-bar");
         assert_eq!(wit.as_deref(), Some("src/x.rs:10"));
+    }
+
+    #[test]
+    fn resolve_recovers_truncated_envelope() {
+        // LLM cut the body off mid-witness (no closing quote/brace) — serde rejects it,
+        // but the leading id value is recoverable so it does not become an unknown-id.
+        let body = r#"{"id":"strip-folder-prefix","witness_evidence":"imapsync-server.js"#;
+        let (id, wit) = parse_resolve_target(body);
+        assert_eq!(id, "strip-folder-prefix");
+        assert_eq!(wit.as_deref(), Some("imapsync-server.js"));
+    }
+
+    #[test]
+    fn resolve_recovers_truncated_envelope_no_witness() {
+        let body = r#"{"id":"only-id"#;
+        let (id, _) = parse_resolve_target(body);
+        assert_eq!(id, "only-id");
     }
 
     #[test]
