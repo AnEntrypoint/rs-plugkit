@@ -838,7 +838,12 @@ fn browser(body: &Value, body_s: &str) -> u64 {
         .unwrap_or_else(|| body_s.to_string());
     if code.is_empty() { return err("browser", "code required (provide JS body or {code, cwd?, sessionId?} JSON)"); }
     let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-    let session_id = body.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    let explicit_sid = body.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let session_id = if explicit_sid.is_empty() {
+        host_read(".gm/exec-spool/.session-current").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_default()
+    } else {
+        explicit_sid
+    };
     let packed = unsafe { host_browser_exec(
         code.as_ptr(), code.len() as u32,
         cwd.as_ptr(), cwd.len() as u32,
