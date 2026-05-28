@@ -78,6 +78,17 @@ fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
     (verb, count, ts)
 }
 
+// The long-gap gate fires only on genuine IDLE-mid-chain: both >threshold since the last
+// instruction AND >threshold since the previous dispatch of any verb. prev_dispatch_ms==0
+// means no prior work dispatch in this window (boot/overnight idle), which counts as idle.
+// Active back-to-back work verbs keep prev_dispatch_ms fresh, so the gate stays quiet.
+fn long_gap_should_fire(last_instruction_ms: u64, prev_dispatch_ms: u64, now: u64, threshold: u64) -> bool {
+    if last_instruction_ms == 0 { return false; }
+    let idle_since_instruction = now.saturating_sub(last_instruction_ms) > threshold;
+    let idle_since_any = prev_dispatch_ms == 0 || now.saturating_sub(prev_dispatch_ms) > threshold;
+    idle_since_instruction && idle_since_any
+}
+
 fn log_deviation(event: &str, detail: &str) {
     let msg = format!("plugkit gate: {} {}", event, detail);
     unsafe { host_log(2, msg.as_ptr(), msg.len() as u32); }
@@ -238,6 +249,16 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
+    // Read the PRIOR last-ANY-dispatch ts BEFORE overwriting it: the long-gap gate guards
+    // against IDLE-mid-chain, not active-work-without-re-reading-prose. A rapid succession of
+    // work verbs (browser/exec_js/codesearch/...) is active work, so the gap since the PREVIOUS
+    // dispatch — not since the last instruction alone — is what distinguishes idle from work.
+    let prev_dispatch_ms: u64 = if verb != "health" && verb != "auto-recall" {
+        let p = host_read(".gm/last-dispatch-ts").unwrap_or_default().trim().parse().unwrap_or(0);
+        let _ = crate::wasm_dispatch::host_write(".gm/last-dispatch-ts", &now_ms().to_string());
+        p
+    } else { 0 };
+
     if verb == "instruction" || verb == "transition" || verb == "phase-status"
         || verb == "prd-add" || verb == "prd-resolve" || verb == "prd-list"
         || verb == "mutable-add" || verb == "mutable-resolve" || verb == "mutable-list" {
@@ -248,7 +269,11 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         let last = host_read(".gm/last-instruction-ts").unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let now = now_ms();
-        if last_ms > 0 && now.saturating_sub(last_ms) > 300_000 {
+        // The clock fires only on genuine IDLE: >300s since the last instruction AND
+        // >300s since the PREVIOUS dispatch of any verb. Active back-to-back work verbs keep
+        // the previous-dispatch ts fresh, so a browser-heavy debugging stretch never trips the
+        // gate; a true overnight/boot idle (no dispatches at all, prev==0) still does.
+        if long_gap_should_fire(last_ms, prev_dispatch_ms, now, 300_000) {
             let gap_ms = now - last_ms;
             let retry_state = host_read(".gm/long-gap-retry-state").unwrap_or_default();
             let (last_verb, count, last_denial_ts) = parse_retry_state_v2(&retry_state);
@@ -347,4 +372,38 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     }
 
     GateVerdict::allow()
+}
+
+#[cfg(test)]
+mod long_gap_tests {
+    use super::long_gap_should_fire;
+    const T: u64 = 300_000;
+
+    #[test]
+    fn fires_on_genuine_idle() {
+        // >threshold since instruction AND >threshold since any dispatch (or none).
+        let now = 1_000_000;
+        assert!(long_gap_should_fire(now - T - 1, now - T - 1, now, T));
+        assert!(long_gap_should_fire(now - T - 1, 0, now, T)); // boot/overnight: no prior dispatch
+    }
+
+    #[test]
+    fn quiet_during_active_work() {
+        // Stale instruction (>threshold) but a recent work dispatch keeps the chain alive.
+        let now = 1_000_000;
+        assert!(!long_gap_should_fire(now - T - 1, now - 1_000, now, T));
+        assert!(!long_gap_should_fire(now - T - 50_000, now - 200_000, now, T));
+    }
+
+    #[test]
+    fn quiet_when_instruction_recent() {
+        let now = 1_000_000;
+        assert!(!long_gap_should_fire(now - 1_000, 0, now, T));
+    }
+
+    #[test]
+    fn quiet_when_no_instruction_yet() {
+        let now = 1_000_000;
+        assert!(!long_gap_should_fire(0, 0, now, T));
+    }
 }
