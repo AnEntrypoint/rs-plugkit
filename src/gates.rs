@@ -424,4 +424,17 @@ mod long_gap_tests {
         let now = 1_000_000;
         assert!(!long_gap_should_fire(0, 0, now, T));
     }
+
+    #[test]
+    fn exempt_set_covers_pause_and_internal_verbs() {
+        use super::is_longgap_exempt;
+        // Internal pulses and deliberate-pause poll verbs never trip long-gap.
+        for v in ["health", "auto-recall", "wait", "sleep"] {
+            assert!(is_longgap_exempt(v), "{} must be long-gap-exempt", v);
+        }
+        // Real work/orchestrator verbs are NOT exempt.
+        for v in ["browser", "exec_js", "codesearch", "instruction", "prd-add", "git_push"] {
+            assert!(!is_longgap_exempt(v), "{} must NOT be exempt", v);
+        }
+    }
 }
