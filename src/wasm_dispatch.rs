@@ -229,19 +229,23 @@ fn lang(body: &Value) -> u64 {
   const plugin = plugins.find(p => p.exec.match.test(command));
   if (!plugin) {{ process.stdout.write(JSON.stringify({{ok:false, error:'no-plugin-matched', command, available: plugins.map(p => p.id)}})); return; }}
   const t0 = Date.now();
+  let timer = null;
   try {{
     const out = await Promise.race([
       Promise.resolve(plugin.exec.run(code, projectDir)),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('plugin-timeout')), 30000))
+      new Promise((_, rej) => {{ timer = setTimeout(() => rej(new Error('plugin-timeout')), {inner_timeout}); }})
     ]);
     process.stdout.write(JSON.stringify({{ok:true, plugin_id: plugin.id, output: String(out), ms: Date.now() - t0}}));
   }} catch (e) {{
     process.stdout.write(JSON.stringify({{ok:false, error: String(e && e.message || e), plugin_id: plugin.id, ms: Date.now() - t0}}));
+  }} finally {{
+    if (timer) clearTimeout(timer);
   }}
 }})().catch(e => {{ process.stdout.write(JSON.stringify({{ok:false, error: String(e && e.message || e)}})); }})"#,
         project_dir = serde_json::to_string(project_dir).unwrap_or_else(|_| "\"\"".to_string()),
         command = serde_json::to_string(command).unwrap_or_else(|_| "\"\"".to_string()),
         code = serde_json::to_string(code).unwrap_or_else(|_| "\"\"".to_string()),
+        inner_timeout = timeout_ms.saturating_sub(2000).max(1000),
     );
     let opts = json!({"timeoutMs": timeout_ms}).to_string();
     let packed = unsafe { host_exec_js(runner_js.as_ptr(), runner_js.len() as u32, opts.as_ptr(), opts.len() as u32) };
