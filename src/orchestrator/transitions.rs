@@ -81,16 +81,26 @@ pub fn handle(content: &str) -> (String, String, i32) {
             };
             let remote_pushed = ahead == 0;
             let prd_empty = {
-                let (b, _e, c) = prd::handle_list("");
-                if c != 0 { false } else {
-                    serde_json::from_str::<serde_json::Value>(&b).ok()
-                        .and_then(|v| v.get("items").cloned())
-                        .and_then(|v| v.as_array().cloned())
-                        .map(|arr| arr.iter().all(|it| {
-                            let s = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                            s == "done" || s == "complete" || s == "completed"
-                        }))
-                        .unwrap_or(true)
+                let prd_path = super::gm_dir().join("prd.yml");
+                let prd_ps = prd_path.to_string_lossy().to_string();
+                let file_empty_or_missing = !crate::pkfs::exists(&prd_ps)
+                    || crate::pkfs::read_to_string(&prd_ps)
+                        .map(|c| c.trim().is_empty())
+                        .unwrap_or(true);
+                if file_empty_or_missing {
+                    true
+                } else {
+                    let (b, _e, c) = prd::handle_list("");
+                    if c != 0 { false } else {
+                        serde_json::from_str::<serde_json::Value>(&b).ok()
+                            .and_then(|v| v.get("items").cloned())
+                            .and_then(|v| v.as_array().cloned())
+                            .map(|arr| arr.iter().all(|it| {
+                                let s = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+                                s == "done" || s == "complete" || s == "completed"
+                            }))
+                            .unwrap_or(true)
+                    }
                 }
             };
             let mutables_witnessed = mutables::pending_detailed().is_empty();
