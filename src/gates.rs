@@ -78,6 +78,14 @@ fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
     (verb, count, ts)
 }
 
+// Verbs exempt from the long-gap gate and its dispatch-clock bookkeeping. health and
+// auto-recall are internal/orientation pulses; wait and sleep are the agent deliberately
+// pausing to poll a long-running task (wasm_dispatch.rs wait/sleep) — firing
+// long-gap-no-instruction on a deliberate wait is contradictory. Checked in BOTH the
+// prev-dispatch-stamp guard and the gap-check branch, so they must come from one source.
+const LONGGAP_EXEMPT: &[&str] = &["health", "auto-recall", "wait", "sleep"];
+fn is_longgap_exempt(verb: &str) -> bool { LONGGAP_EXEMPT.contains(&verb) }
+
 // The long-gap gate fires only on genuine IDLE-mid-chain: both >threshold since the last
 // instruction AND >threshold since the previous dispatch of any verb. prev_dispatch_ms==0
 // means no prior work dispatch in this window (boot/overnight idle), which counts as idle.
@@ -253,7 +261,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     // against IDLE-mid-chain, not active-work-without-re-reading-prose. A rapid succession of
     // work verbs (browser/exec_js/codesearch/...) is active work, so the gap since the PREVIOUS
     // dispatch — not since the last instruction alone — is what distinguishes idle from work.
-    let prev_dispatch_ms: u64 = if verb != "health" && verb != "auto-recall" {
+    let prev_dispatch_ms: u64 = if !is_longgap_exempt(verb) {
         let p = host_read(".gm/last-dispatch-ts").unwrap_or_default().trim().parse().unwrap_or(0);
         let _ = crate::wasm_dispatch::host_write(".gm/last-dispatch-ts", &now_ms().to_string());
         p
@@ -265,7 +273,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         let now = now_ms();
         let _ = crate::wasm_dispatch::host_write(".gm/last-instruction-ts", &now.to_string());
         let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", "");
-    } else if verb != "health" && verb != "auto-recall" {
+    } else if !is_longgap_exempt(verb) {
         let last = host_read(".gm/last-instruction-ts").unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let now = now_ms();
@@ -376,8 +384,18 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
 
 #[cfg(test)]
 mod long_gap_tests {
-    use super::long_gap_should_fire;
+    use super::{long_gap_should_fire, is_longgap_exempt};
     const T: u64 = 300_000;
+
+    #[test]
+    fn exempt_set_covers_internal_and_pause_verbs() {
+        for v in ["health", "auto-recall", "wait", "sleep"] {
+            assert!(is_longgap_exempt(v), "{} must be long-gap-exempt", v);
+        }
+        for v in ["browser", "codesearch", "exec_js", "instruction", "git_push"] {
+            assert!(!is_longgap_exempt(v), "{} must NOT be long-gap-exempt", v);
+        }
+    }
 
     #[test]
     fn fires_on_genuine_idle() {
