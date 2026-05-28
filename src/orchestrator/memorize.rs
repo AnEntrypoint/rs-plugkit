@@ -165,8 +165,29 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         "embedded": true,
         "bytes": text.len(),
         "graph_edge": edge_inserted,
+        "agents_drain": agents_drain_obligation(),
     });
     (payload.to_string(), String::new(), 0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn agents_drain_obligation() -> serde_json::Value {
+    let text = match crate::wasm_dispatch::host_read("AGENTS.md") {
+        Some(t) => t,
+        None => return serde_json::Value::Null,
+    };
+    let bytes = text.len();
+    let lines = text.lines().count();
+    serde_json::json!({
+        "agents_bytes": bytes,
+        "agents_lines": lines,
+        "instruction": "AGENTS.md is a staging ground; every memorize run drains it. THIS turn, pick a few existing AGENTS.md entries that are detail-heavy, single-crate, or single-platform (the material that belongs in rs-learn), memorize-fire their substance to the default namespace, then compress each drained paragraph to a one-line pointer in the SAME commit. Witness: this store gained the fact (recallable next turn) AND the AGENTS.md byte count dropped. A few entries per run, never a wholesale rewrite; top-level cross-cutting rules stay. Skipping the drain is the slow-bloat drift this back-pressure exists to prevent.",
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn agents_drain_obligation() -> serde_json::Value {
+    serde_json::Value::Null
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -231,6 +231,40 @@ fn parse_resolve_target(trimmed: &str) -> (String, Option<String>) {
     }
 }
 
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+fn nearest_known_id(target: &str, known: &[String]) -> Option<String> {
+    if target.is_empty() {
+        return None;
+    }
+    let mut best: Option<(usize, &String)> = None;
+    for id in known {
+        let d = levenshtein(target, id);
+        match best {
+            Some((bd, _)) if d >= bd => {}
+            _ => best = Some((d, id)),
+        }
+    }
+    best.and_then(|(d, id)| {
+        let bound = (target.len().max(id.len()) / 3).max(2);
+        if d <= bound { Some(id.clone()) } else { None }
+    })
+}
+
 pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -274,12 +308,14 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 }
             }
         }
+        let suggested_id = nearest_known_id(&id_target, &known_ids);
         let body = serde_json::json!({
             "error": format!("prd id not found: {}", id_target),
             "deviation_kind": "prd-resolve-unknown-id",
             "prd_id": id_target,
             "known_ids": known_ids,
-            "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; aliases accepted: prd_id, mutable_id, item_id, slug, key (all map to id). A nested envelope (prd_id holding a stringified {\"key\":..,\"witness\":..} object) is unwrapped automatically and the inner key/id/prd_id/slug is recovered. Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If the recovered id is not in `known_ids` above, the row was never `prd-add`ed in this chain — your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added.",
+            "suggested_id": suggested_id,
+            "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; aliases accepted: prd_id, mutable_id, item_id, slug, key (all map to id). A nested envelope (prd_id holding a stringified {\"key\":..,\"witness\":..} object) is unwrapped automatically and the inner key/id/prd_id/slug is recovered. Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If `suggested_id` is non-null it is the closest known id to what you passed — likely a typo; re-dispatch with it. If the recovered id is not in `known_ids` above, the row was never `prd-add`ed in this chain — your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added; never retry the same unknown id unchanged.",
         }).to_string();
         return (body, format!("prd id not found: {}", id_target), 1);
     }
