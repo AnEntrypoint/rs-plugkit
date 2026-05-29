@@ -10,11 +10,73 @@ extern "C" {
     fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
     fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
     fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
+    fn host_kv_query(ns_ptr: *const u8, ns_len: u32, q_ptr: *const u8, q_len: u32) -> u64;
+    fn host_kv_delete(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u32;
     fn host_now_ms() -> u64;
 }
 
 fn fv_put(ns: &str, key: &str, val: &str) {
     let _ = unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
+}
+
+fn fv_query(ns: &str, q: &str) -> Value {
+    let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, q.as_ptr(), q.len() as u32) };
+    unpack_to_value_pub(packed)
+}
+
+fn fv_delete(ns: &str, key: &str) {
+    let _ = unsafe { host_kv_delete(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32) };
+}
+
+fn entry_embed_dim(entry_value: &str) -> Option<usize> {
+    let parsed: Value = serde_json::from_str(entry_value).ok()?;
+    let arr = parsed.get("embedding").and_then(|e| e.as_array())?;
+    Some(arr.len())
+}
+
+fn clear_codeinsight_if_dim_mismatch() -> bool {
+    let vec_rows = fv_query("codeinsight-vec", "");
+    let rows = match vec_rows.as_array() {
+        Some(r) if !r.is_empty() => r,
+        _ => return false,
+    };
+    let mut existing_dim: Option<usize> = None;
+    for row in rows {
+        if let Some(val) = row.get("value").and_then(|v| v.as_str()) {
+            if let Some(d) = entry_embed_dim(val) {
+                existing_dim = Some(d);
+                break;
+            }
+        }
+    }
+    let old_dim = match existing_dim {
+        Some(d) if d != EXPECTED_EMBED_DIM => d,
+        _ => return false,
+    };
+    let data_rows = fv_query("codeinsight", "");
+    let mut cleared = 0u32;
+    if let Some(arr) = data_rows.as_array() {
+        for row in arr {
+            if let Some(key) = row.get("key").and_then(|k| k.as_str()) {
+                fv_delete("codeinsight", key);
+                cleared += 1;
+            }
+        }
+    }
+    for row in rows {
+        if let Some(key) = row.get("key").and_then(|k| k.as_str()) {
+            fv_delete("codeinsight-vec", key);
+        }
+    }
+    crate::wasm_dispatch::emit_event("codeinsight_namespace_cleared", serde_json::json!({
+        "reason": "embed_dim_mismatch",
+        "old_dim": old_dim,
+        "new_dim": EXPECTED_EMBED_DIM,
+        "keys_cleared": cleared,
+    }));
+    let msg = format!("code_index: codeinsight namespace cleared on dim mismatch old={} new={} keys={}", old_dim, EXPECTED_EMBED_DIM, cleared);
+    let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+    true
 }
 
 fn lang_for_ext(ext: &str) -> Option<(&'static str, Language)> {
@@ -257,6 +319,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
     // ensure_schema() returned early before any file-vec write, so codesearch's autobuild produced
     // an empty index silently. Decouple: record the libsql availability, keep going regardless.
     let libsql_ok = ensure_schema().is_ok();
+    let kvvec_cleared = clear_codeinsight_if_dim_mismatch();
     let r = if root.is_empty() { "/" } else { root };
     let limit = max_files.max(50).min(2000);
     let files = collect_files(r, limit);
@@ -331,6 +394,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
         "chunks": chunked,
         "embedded": embedded,
         "skipped_no_embed": skipped_no_embed,
+        "kvvec_cleared_dim_mismatch": kvvec_cleared,
         "by_language": langs,
     })
 }
