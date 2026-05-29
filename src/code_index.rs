@@ -34,6 +34,28 @@ fn entry_embed_dim(entry_value: &str) -> Option<usize> {
     Some(arr.len())
 }
 
+pub fn clear_codeinsight() -> u32 {
+    let mut cleared = 0u32;
+    let data_rows = fv_query("codeinsight", "");
+    if let Some(arr) = data_rows.as_array() {
+        for row in arr {
+            if let Some(key) = row.get("key").and_then(|k| k.as_str()) {
+                fv_delete("codeinsight", key);
+                cleared += 1;
+            }
+        }
+    }
+    let vec_rows = fv_query("codeinsight-vec", "");
+    if let Some(arr) = vec_rows.as_array() {
+        for row in arr {
+            if let Some(key) = row.get("key").and_then(|k| k.as_str()) {
+                fv_delete("codeinsight-vec", key);
+            }
+        }
+    }
+    cleared
+}
+
 fn clear_codeinsight_if_dim_mismatch() -> bool {
     let vec_rows = fv_query("codeinsight-vec", "");
     let rows = match vec_rows.as_array() {
@@ -53,21 +75,7 @@ fn clear_codeinsight_if_dim_mismatch() -> bool {
         Some(d) if d != EXPECTED_EMBED_DIM => d,
         _ => return false,
     };
-    let data_rows = fv_query("codeinsight", "");
-    let mut cleared = 0u32;
-    if let Some(arr) = data_rows.as_array() {
-        for row in arr {
-            if let Some(key) = row.get("key").and_then(|k| k.as_str()) {
-                fv_delete("codeinsight", key);
-                cleared += 1;
-            }
-        }
-    }
-    for row in rows {
-        if let Some(key) = row.get("key").and_then(|k| k.as_str()) {
-            fv_delete("codeinsight-vec", key);
-        }
-    }
+    let cleared = clear_codeinsight();
     crate::wasm_dispatch::emit_event("codeinsight_namespace_cleared", serde_json::json!({
         "reason": "embed_dim_mismatch",
         "old_dim": old_dim,

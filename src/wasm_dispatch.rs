@@ -502,6 +502,18 @@ fn codesearch(body: &Value) -> u64 {
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
     if query.is_empty() { return err("codesearch", "query required"); }
+    if body.get("rebuild").and_then(|v| v.as_bool()).unwrap_or(false)
+        && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let cleared = crate::code_index::clear_codeinsight();
+        emit_event("codeinsight_rebuild", json!({ "reason": "explicit-rebuild", "keys_cleared": cleared }));
+        let _ = crate::code_index::index(".", 500);
+        let mut retry = body.clone();
+        if let Some(obj) = retry.as_object_mut() {
+            obj.insert("auto_indexed".to_string(), Value::Bool(true));
+            obj.insert("rebuild".to_string(), Value::Bool(false));
+        }
+        return codesearch(&retry);
+    }
     let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": "codeinsight" }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, k) };
