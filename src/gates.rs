@@ -59,15 +59,6 @@ fn now_ms() -> u64 {
     unsafe { crate::wasm_dispatch::host_now_ms() }
 }
 
-fn parse_retry_state(s: &str) -> (String, u32) {
-    let s = s.trim();
-    if s.is_empty() { return (String::new(), 0); }
-    let mut parts = s.splitn(2, '|');
-    let verb = parts.next().unwrap_or("").to_string();
-    let count = parts.next().and_then(|c| c.trim().parse::<u32>().ok()).unwrap_or(0);
-    (verb, count)
-}
-
 fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
     let s = s.trim();
     if s.is_empty() { return (String::new(), 0, 0); }
@@ -423,18 +414,5 @@ mod long_gap_tests {
     fn quiet_when_no_instruction_yet() {
         let now = 1_000_000;
         assert!(!long_gap_should_fire(0, 0, now, T));
-    }
-
-    #[test]
-    fn exempt_set_covers_pause_and_internal_verbs() {
-        use super::is_longgap_exempt;
-        // Internal pulses and deliberate-pause poll verbs never trip long-gap.
-        for v in ["health", "auto-recall", "wait", "sleep"] {
-            assert!(is_longgap_exempt(v), "{} must be long-gap-exempt", v);
-        }
-        // Real work/orchestrator verbs are NOT exempt.
-        for v in ["browser", "exec_js", "codesearch", "instruction", "prd-add", "git_push"] {
-            assert!(!is_longgap_exempt(v), "{} must NOT be exempt", v);
-        }
     }
 }

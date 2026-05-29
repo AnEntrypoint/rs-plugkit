@@ -1066,8 +1066,9 @@ pub(crate) fn emit_event(event: &str, fields: Value) {
     unsafe { host_log(1, msg.as_ptr(), msg.len() as u32); }
 }
 
-fn git_status(_body: &Value) -> u64 {
-    let porcelain = git_porcelain();
+fn git_status(body: &Value) -> u64 {
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let porcelain = git_porcelain_in(cwd);
     let mut modified: Vec<String> = vec![];
     let mut untracked: Vec<String> = vec![];
     let mut deleted: Vec<String> = vec![];
@@ -1094,11 +1095,12 @@ fn git_status(_body: &Value) -> u64 {
 }
 
 fn branch_status(body: &Value) -> u64 {
-    let branch = exec_git("rev-parse --abbrev-ref HEAD").trim().to_string();
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let branch = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
     if branch.is_empty() {
         return err("branch_status", "unable to determine branch");
     }
-    let remote = exec_git(&format!("config --get branch.{}.remote", branch)).trim().to_string();
+    let remote = exec_git_in(cwd, &format!("config --get branch.{}.remote", branch)).trim().to_string();
     let remote = if remote.is_empty() { "origin".to_string() } else { remote };
     // The local remote-tracking ref (origin/<branch>) is only as fresh as the last fetch;
     // git_push/git_finalize do not update it, so ahead/behind computed against the stale ref
@@ -1106,9 +1108,9 @@ fn branch_status(body: &Value) -> u64 {
     // remote-pushed witness. Fetch the branch first so ahead/behind reflect the true remote.
     // Tolerate failure (offline) — falls back to the stale ref, no worse than before.
     if !body.get("no_fetch").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let _ = exec_git(&format!("fetch {} {}", remote, branch));
+        let _ = exec_git_in(cwd, &format!("fetch {} {}", remote, branch));
     }
-    let counts = exec_git(&format!("rev-list --left-right --count {}/{}...HEAD", remote, branch));
+    let counts = exec_git_in(cwd, &format!("rev-list --left-right --count {}/{}...HEAD", remote, branch));
     let counts = counts.trim();
     let mut behind: u64 = 0;
     let mut ahead: u64 = 0;
@@ -1126,7 +1128,7 @@ fn branch_status(body: &Value) -> u64 {
 }
 
 fn git_push(body: &Value) -> u64 {
-    let repo = body.get("repo").and_then(|v| v.as_str()).map(String::from);
+    let repo = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str())).map(String::from);
     let branch = body.get("branch").and_then(|v| v.as_str()).map(String::from)
         .unwrap_or_else(|| exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD").trim().to_string());
     if branch.is_empty() {
@@ -1251,7 +1253,7 @@ fn git_commit(body: &Value) -> u64 {
 }
 
 fn git_finalize(body: &Value) -> u64 {
-    let repo = body.get("repo").and_then(|v| v.as_str()).map(String::from);
+    let repo = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str())).map(String::from);
     let cwd = repo.clone();
     let cwd_ref = cwd.as_deref();
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
