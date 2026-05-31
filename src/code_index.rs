@@ -328,6 +328,10 @@ pub fn index(root: &str, max_files: usize) -> Value {
     // an empty index silently. Decouple: record the libsql availability, keep going regardless.
     let libsql_ok = ensure_schema().is_ok();
     let kvvec_cleared = clear_codeinsight_if_dim_mismatch();
+    // Full rebuild replaces, never appends: clear the file-vec store so stale chunks from a prior
+    // tree state (and prior digest) do not accumulate. Without this the store grows unbounded across
+    // re-index runs and serves rows from a tree state that no longer exists.
+    let _ = clear_codeinsight();
     let r = if root.is_empty() { "/" } else { root };
     let limit = max_files.max(50).min(2000);
     let files = collect_files(r, limit);
@@ -391,8 +395,12 @@ pub fn index(root: &str, max_files: usize) -> Value {
             fv_put("codeinsight-vec", &key, &emb_json);
         }
     }
+    // Stamp the tree digest the index was built against so codesearch can detect staleness
+    // (sync-before-emit) and rebuild only on mismatch rather than serving an index from a stale tree.
+    let digest = current_digest();
+    store_digest(&digest);
     {
-        let msg = format!("code_index: done files_indexed={} chunks={} embedded={} skipped_no_embed={}", indexed, chunked, embedded, skipped_no_embed);
+        let msg = format!("code_index: done files_indexed={} chunks={} embedded={} skipped_no_embed={} digest={}", indexed, chunked, embedded, skipped_no_embed, digest);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     }
     json!({
@@ -405,6 +413,22 @@ pub fn index(root: &str, max_files: usize) -> Value {
         "kvvec_cleared_dim_mismatch": kvvec_cleared,
         "by_language": langs,
     })
+}
+
+pub fn current_digest() -> String {
+    let head = crate::wasm_dispatch::git_call("rev-parse HEAD", None)
+        .get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let porcelain = crate::wasm_dispatch::git_porcelain();
+    let dirty = crc32(&porcelain);
+    format!("{}:{}", head, dirty)
+}
+
+pub fn stored_digest() -> Option<String> {
+    crate::wasm_dispatch::host_kv_read("codeinsight", "__digest__")
+}
+
+pub fn store_digest(digest: &str) {
+    fv_put("codeinsight", "__digest__", digest);
 }
 
 pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value {

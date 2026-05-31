@@ -514,6 +514,25 @@ fn codesearch(body: &Value) -> u64 {
         }
         return codesearch(&retry);
     }
+    // Sync-before-emit staleness gate: an index built against a different tree state must not be
+    // served. Compare the stored build digest (git HEAD + dirty marker) against the current tree;
+    // on mismatch, rebuild once then retry. The auto_indexed guard prevents a rebuild loop.
+    let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !already_indexed {
+        let stored = crate::code_index::stored_digest();
+        let current = crate::code_index::current_digest();
+        let stale = match stored { Some(s) => s != current, None => false };
+        if stale {
+            let cleared = crate::code_index::clear_codeinsight();
+            emit_event("codeinsight_rebuild", json!({ "reason": "digest-mismatch", "keys_cleared": cleared, "stored_then_current": current }));
+            let _ = crate::code_index::index(".", 500);
+            let mut retry = body.clone();
+            if let Some(obj) = retry.as_object_mut() {
+                obj.insert("auto_indexed".to_string(), Value::Bool(true));
+            }
+            return codesearch(&retry);
+        }
+    }
     let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": "codeinsight" }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, k) };
