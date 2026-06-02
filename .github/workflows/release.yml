@@ -110,7 +110,16 @@ jobs:
           cargo clean --release --target wasm32-wasip1 -p rs-plugkit || true
 
       - name: Build WASM
-        run: cargo build --release --target wasm32-wasip1 --no-default-features --features wasm --lib
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --release --target wasm32-wasip1 --no-default-features --features wasm --lib 2>&1 | tee /tmp/wasm-build.log || {
+            echo "::group::rustc errors"
+            grep -E '^error|error\[E[0-9]+\]' /tmp/wasm-build.log | grep -vE 'cargo:warning' | head -40
+            echo "::endgroup::"
+            grep -E '^error|error\[E[0-9]+\]' /tmp/wasm-build.log | grep -vE 'cargo:warning' | head -10 | while IFS= read -r line; do echo "::error::$line"; done
+            exit 1
+          }
 
       - name: Verify WASM was produced fresh this run
         shell: bash
