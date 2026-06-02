@@ -7,6 +7,7 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, HiddenAct, PositionEmbeddingType};
 use tokenizers::Tokenizer;
 
+#[link(wasm_import_module = "env")]
 extern "C" {
     fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
     fn host_vec_embed(text_ptr: *const u8, text_len: u32, out_ptr: *mut f32, out_len: u32) -> i32;
@@ -47,6 +48,7 @@ const QUERY_CACHE_CAP: usize = 64;
 const QUERY_CACHE_TTL_MS: i64 = 600_000;
 
 fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
+    #[link(wasm_import_module = "env")]
     extern "C" {
         fn host_random_fill(ptr: *mut u8, len: u32) -> u32;
     }
@@ -344,6 +346,7 @@ struct CacheEntry {
 
 static QUERY_CACHE: Mutex<Vec<CacheEntry>> = Mutex::new(Vec::new());
 
+#[link(wasm_import_module = "env")]
 extern "C" {
     fn host_now_ms() -> i64;
 }

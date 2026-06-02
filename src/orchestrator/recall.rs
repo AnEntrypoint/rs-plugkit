@@ -25,6 +25,7 @@ fn derive_query(prompt: &str) -> String {
 
 #[cfg(target_arch = "wasm32")]
 fn rlog(msg: &str) {
+    #[link(wasm_import_module = "env")]
     extern "C" { fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32; }
     let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
 }

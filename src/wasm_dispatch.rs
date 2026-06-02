@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static MEMORIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[link(wasm_import_module = "env")]
 extern "C" {
     pub fn host_fs_read(path_ptr: *const u8, path_len: u32) -> u64;
     pub fn host_fs_write(path_ptr: *const u8, path_len: u32, data_ptr: *const u8, data_len: u32) -> u32;
