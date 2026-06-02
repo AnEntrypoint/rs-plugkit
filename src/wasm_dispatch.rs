@@ -521,10 +521,11 @@ fn codesearch(body: &Value) -> u64 {
     if !already_indexed {
         let stored = crate::code_index::stored_digest();
         let current = crate::code_index::current_digest();
-        let stale = match stored { Some(s) => s != current, None => false };
+        let stale = match &stored { Some(s) => s != &current, None => true };
         if stale {
+            let reason = if stored.is_none() { "digest-absent" } else { "digest-mismatch" };
             let cleared = crate::code_index::clear_codeinsight();
-            emit_event("codeinsight_rebuild", json!({ "reason": "digest-mismatch", "keys_cleared": cleared, "stored_then_current": current }));
+            emit_event("codeinsight_rebuild", json!({ "reason": reason, "keys_cleared": cleared, "stored_then_current": current }));
             let _ = crate::code_index::index(".", 500);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
