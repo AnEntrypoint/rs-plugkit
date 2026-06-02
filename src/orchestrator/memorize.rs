@@ -53,6 +53,7 @@ fn is_derivable_state(text: &str) -> Option<&'static str> {
     None
 }
 
+#[cfg(target_arch = "wasm32")]
 pub fn handle_fire(content: &str) -> (String, String, i32) {
     if content.trim().is_empty() {
         return (String::new(), "empty memorize body".to_string(), 1);
