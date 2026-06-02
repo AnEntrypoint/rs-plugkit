@@ -193,6 +193,7 @@ fn pending_step_block(st: &super::state::TurnState) -> Option<serde_json::Value>
 
 #[cfg(target_arch = "wasm32")]
 fn ilog(msg: &str) {
+    #[link(wasm_import_module = "env")]
     extern "C" { fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32; }
     let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
 }
@@ -201,6 +202,7 @@ fn ilog(_msg: &str) {}
 
 #[cfg(target_arch = "wasm32")]
 fn idev(event: &str, detail: &str) {
+    #[link(wasm_import_module = "env")]
     extern "C" { fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32; }
     let evt = json!({
         "event": format!("deviation.{}", event),

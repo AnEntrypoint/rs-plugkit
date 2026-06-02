@@ -6,6 +6,7 @@ use tree_sitter::{Language, Parser};
 use crate::libsql_wasm;
 use crate::wasm_dispatch::{host_read, unpack_to_value_pub};
 
+#[link(wasm_import_module = "env")]
 extern "C" {
     fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
     fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
