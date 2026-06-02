@@ -35,8 +35,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: check-wasm32-wasip1
-          cache-on-failure: true
+          key: check-wasm32-wasip1-v2
+          cache-on-failure: false
 
       - name: Cargo check (fast)
         run: cargo check --target wasm32-wasip1 --no-default-features --features wasm --lib
@@ -66,8 +66,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: build-wasm32-wasip1
-          cache-on-failure: true
+          key: build-wasm32-wasip1-v2
+          cache-on-failure: false
 
       - name: Wipe cargo git cache and lockfile (force fresh dep resolution)
         shell: bash

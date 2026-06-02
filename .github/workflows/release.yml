@@ -82,8 +82,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
         with:
-          key: release-wasm32-wasip1
-          cache-on-failure: true
+          key: release-wasm32-wasip1-v2
+          cache-on-failure: false
 
       - name: Wipe cargo git cache and lockfile (force fresh dep resolution)
         shell: bash
