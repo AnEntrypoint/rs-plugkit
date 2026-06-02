@@ -114,10 +114,13 @@ jobs:
         run: |
           set -o pipefail
           cargo build --release --target wasm32-wasip1 --no-default-features --features wasm --lib 2>&1 | tee /tmp/wasm-build.log || {
-            echo "::group::rustc errors"
-            grep -E '^error|error\[E[0-9]+\]' /tmp/wasm-build.log | grep -vE 'cargo:warning' | head -40
+            echo "::group::last 80 lines of build output"
+            tail -80 /tmp/wasm-build.log
             echo "::endgroup::"
-            grep -E '^error|error\[E[0-9]+\]' /tmp/wasm-build.log | grep -vE 'cargo:warning' | head -10 | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::group::all error lines (rustc + C)"
+            grep -iE 'error' /tmp/wasm-build.log | head -60
+            echo "::endgroup::"
+            grep -iE 'error\[E[0-9]+\]|^error:|error: use of undeclared|error: unknown type|undefined symbol|cannot find' /tmp/wasm-build.log | head -12 | while IFS= read -r line; do echo "::error::${line:0:300}"; done
             exit 1
           }
 
