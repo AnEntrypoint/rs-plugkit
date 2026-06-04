@@ -121,6 +121,7 @@ const CHUNK_NODE_TYPES: &[&str] = &[
 const SKIP_DIRS: &[&str] = &[
     "node_modules", ".git", "target", "dist", "build", ".cache",
     ".next", ".nuxt", ".turbo", "coverage", "vendor", ".plugkit-browser-profile",
+    ".gm",
 ];
 
 const GM_DB: &str = "gm";
@@ -424,11 +425,33 @@ pub fn index(root: &str, max_files: usize) -> Value {
     })
 }
 
+fn porcelain_path(line: &str) -> &str {
+    let rest = if line.len() > 3 { &line[3..] } else { line.trim_start() };
+    match rest.rfind(" -> ") {
+        Some(i) => &rest[i + 4..],
+        None => rest,
+    }
+}
+
+fn skipped_path(path: &str) -> bool {
+    let p = path.trim_matches('"');
+    p.split('/').any(|seg| SKIP_DIRS.iter().any(|d| seg == *d))
+}
+
+fn indexable_porcelain(porcelain: &str) -> String {
+    porcelain
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| !skipped_path(porcelain_path(line)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn current_digest() -> String {
     let head = crate::wasm_dispatch::git_call("rev-parse HEAD", None)
         .get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
     let porcelain = crate::wasm_dispatch::git_porcelain();
-    let dirty = crc32(&porcelain);
+    let dirty = crc32(&indexable_porcelain(&porcelain));
     format!("{}:{}", head, dirty)
 }
 
@@ -546,5 +569,62 @@ pub fn recall_at(query: &str, limit: usize, namespace: Option<&str>, inline_embe
     match libsql_wasm::query(&db_name, &sql) {
         Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows, "project_path": project_path }),
         Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn porcelain_path_extracts_path() {
+        assert_eq!(porcelain_path(" M src/lib.rs"), "src/lib.rs");
+        assert_eq!(porcelain_path("?? new.txt"), "new.txt");
+        assert_eq!(porcelain_path("R  old.rs -> new.rs"), "new.rs");
+    }
+
+    #[test]
+    fn skipped_path_matches_gm_and_skip_dirs() {
+        assert!(skipped_path(".gm/disciplines/default/mem-1.json"));
+        assert!(skipped_path(".gm/exec-spool/.status.json"));
+        assert!(skipped_path("node_modules/x/index.js"));
+        assert!(skipped_path("target/debug/foo"));
+    }
+
+    #[test]
+    fn skipped_path_keeps_real_source() {
+        assert!(!skipped_path("src/code_index.rs"));
+        assert!(!skipped_path("lib/skill-bootstrap.js"));
+        assert!(!skipped_path("docs/paper.html"));
+        assert!(!skipped_path("gm.json"));
+    }
+
+    #[test]
+    fn indexable_porcelain_drops_gm_keeps_source() {
+        let raw = " M src/lib.rs\n?? .gm/disciplines/default/mem-1.json\n M .gm/prd.yml\n M lib/x.js";
+        let filtered = indexable_porcelain(raw);
+        assert!(filtered.contains("src/lib.rs"));
+        assert!(filtered.contains("lib/x.js"));
+        assert!(!filtered.contains(".gm/"));
+    }
+
+    #[test]
+    fn indexable_porcelain_source_edit_still_changes_hash() {
+        let before = indexable_porcelain("?? .gm/exec-spool/1.txt");
+        let after = indexable_porcelain("?? .gm/exec-spool/1.txt\n M src/lib.rs");
+        assert_ne!(crc32(&before), crc32(&after));
+    }
+
+    #[test]
+    fn indexable_porcelain_gm_only_churn_is_stable() {
+        let a = indexable_porcelain(" M .gm/prd.yml\n?? .gm/disciplines/default/mem-1.json");
+        let b = indexable_porcelain(" M .gm/prd.yml\n?? .gm/disciplines/default/mem-2.json\n M .gm/exec-spool/.status.json");
+        assert_eq!(crc32(&a), crc32(&b));
+    }
+
+    #[test]
+    fn indexable_porcelain_empty_is_consistent() {
+        assert_eq!(crc32(&indexable_porcelain("")), crc32(&indexable_porcelain("")));
+        assert_eq!(indexable_porcelain(""), "");
     }
 }
