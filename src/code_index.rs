@@ -365,7 +365,15 @@ pub fn index(root: &str, max_files: usize) -> Value {
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
         let chunks = extract_chunks(fp, &content, lang);
         for (kind, name, ls, le, body) in chunks {
-            let emb_blob = embed_text(&format!("{} {}", name, &body[..body.len().min(512)]));
+            // Truncate body to <=512 bytes at a char boundary: a hard byte slice
+            // panics when a multibyte char (e.g. an emoji) straddles byte 512,
+            // which aborts the whole index rebuild and wedges the watcher.
+            let body_head = {
+                let mut e = body.len().min(512);
+                while e > 0 && !body.is_char_boundary(e) { e -= 1; }
+                &body[..e]
+            };
+            let emb_blob = embed_text(&format!("{} {}", name, body_head));
             let v = match emb_blob {
                 Some(v) => v,
                 None => {
