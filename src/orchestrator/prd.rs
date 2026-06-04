@@ -307,6 +307,16 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         return (String::new(), "missing PRD item id".to_string(), 1);
     }
     let (id_target, witness) = parse_resolve_target(trimmed);
+    let has_witness = witness.as_ref().map(|w| !w.trim().is_empty()).unwrap_or(false);
+    if !has_witness {
+        let body = serde_json::json!({
+            "error": format!("prd-resolve refused: no witness_evidence for {}", id_target),
+            "deviation_kind": "prd-resolve-no-witness",
+            "prd_id": id_target,
+            "hint": "resolve requires non-empty witness_evidence (file:line | codesearch hit | exec snippet | browser page.evaluate result). A row cannot be marked completed without evidence the work is real - this gate exists because an agent under closure-pressure marked undone tasks completed with an absent witness. Body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}. Do the work, capture its witness, then resolve.",
+        }).to_string();
+        return (body, format!("prd-resolve refused: no witness_evidence for {}", id_target), 1);
+    }
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
     if !pkfs::exists(&path_s) {
@@ -372,6 +382,35 @@ mod tests {
         assert_eq!(rc, 1);
         assert!(out.is_empty());
         assert!(err.contains("missing PRD item id"));
+    }
+
+    #[test]
+    fn resolve_rejects_missing_witness() {
+        // id present, no witness_evidence: must refuse with deviation_kind before any state mutation.
+        // This runs before the prd_path() existence check, so it is exercised even with pkfs host no-op.
+        let (out, err, rc) = handle_resolve(r#"{"id":"some-row"}"#);
+        assert_eq!(rc, 1);
+        assert!(err.contains("no witness_evidence"));
+        let body: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(body["deviation_kind"], "prd-resolve-no-witness");
+        assert_eq!(body["prd_id"], "some-row");
+    }
+
+    #[test]
+    fn resolve_rejects_blank_witness() {
+        // whitespace-only witness is treated as absent.
+        let (_out, err, rc) = handle_resolve(r#"{"id":"some-row","witness_evidence":"   "}"#);
+        assert_eq!(rc, 1);
+        assert!(err.contains("no witness_evidence"));
+    }
+
+    #[test]
+    fn resolve_with_witness_passes_witness_gate() {
+        // WITH a real witness the no-witness gate does not fire; the handler proceeds past it
+        // (and then hits the pkfs "does not exist" path on host, NOT the no-witness refusal).
+        let (_out, err, rc) = handle_resolve(r#"{"id":"some-row","witness_evidence":"src/x.rs:42"}"#);
+        assert_eq!(rc, 1);
+        assert!(!err.contains("no witness_evidence"));
     }
 
     #[test]
