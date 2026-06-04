@@ -416,11 +416,46 @@ pub fn index(root: &str, max_files: usize) -> Value {
     })
 }
 
+fn porcelain_path(line: &str) -> &str {
+    // git status --porcelain line is "XY <path>" (two status chars, a space, then the path).
+    // Rename lines are "XY <old> -> <new>"; take the post-arrow path as the indexable target.
+    let rest = if line.len() > 3 { &line[3..] } else { line.trim_start() };
+    match rest.rfind(" -> ") {
+        Some(i) => &rest[i + 4..],
+        None => rest,
+    }
+}
+
+fn is_indexable_path(path: &str) -> bool {
+    // Transient runtime state under .gm/ (exec-spool, witness, prd.yml, mem-*.json) is not
+    // indexable source and must not flip the digest, or every concurrent edit forces a full
+    // re-embed of the whole tree. Only paths whose extension has a tree-sitter language count.
+    let p = path.trim().trim_matches('"');
+    if p.split('/').any(|seg| seg == ".gm") {
+        return false;
+    }
+    match p.rfind('.') {
+        Some(i) => lang_for_ext(&p[i..]).is_some(),
+        None => false,
+    }
+}
+
 pub fn current_digest() -> String {
     let head = crate::wasm_dispatch::git_call("rev-parse HEAD", None)
         .get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    // Hash only the indexable-source portion of the working tree, not the full porcelain.
+    // A whole-porcelain hash flips on any uncommitted change -- including transient runtime
+    // emissions (.gm/exec-spool, prd.yml, mem-*.json) that concurrent sessions churn constantly --
+    // which forced a ~280s full re-embed of all chunks on every tick (digest never stabilized).
+    // Filtering to indexable paths means a real source edit still invalidates the index while
+    // runtime churn does not, satisfying sync-before-emit without the rebuild thrash.
     let porcelain = crate::wasm_dispatch::git_porcelain();
-    let dirty = crc32(&porcelain);
+    let mut indexable: Vec<&str> = porcelain
+        .lines()
+        .filter(|l| !l.trim().is_empty() && is_indexable_path(porcelain_path(l)))
+        .collect();
+    indexable.sort_unstable();
+    let dirty = crc32(&indexable.join("\n"));
     format!("{}:{}", head, dirty)
 }
 
