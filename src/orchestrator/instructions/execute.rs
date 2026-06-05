@@ -28,6 +28,12 @@ While executing, you discover every possible additional case the PLAN-phase expa
 
 Noticing-to-PRD is unchanged in EXECUTE — every observation that surfaces during work converts to a PRD row this turn. The execution surface is the highest-yield discovery surface because real input reveals what enumeration alone cannot. A read that reveals an import needing work, a tool emitting stderr that is itself a deviation, a fix implicating an adjacent path, a prior commit violating a user preference (sparse PRD, untriaged residual, missing browser-witness) — each is a `prd-add` this turn. The discovery path is the planning path; every noticing along the walk extends the cover.
 
+## Planning-event re-entry — additive discovery vs reshaping discovery
+
+A discovery is one of two kinds, and they take different moves. **Additive discovery** adds a sibling the original cover missed (a new corner case, an adjacent file, an extra validation): you `prd-add` it this turn and stay in EXECUTE — the slice grew, its shape did not change. **Reshaping discovery** is a planning event: a decision or directive that changes the scope, approach, or dependency shape of an existing row (or the plan as a whole) — "this CPU mirror should be a real-GL renderer", "this row's approach is wrong, it needs X instead". That is not a sibling to append; it rewrites a node the DAG already contains, so the cover itself must be re-cut. The move is `transition to=PLAN` (always gate-legal from EXECUTE — only `to=COMPLETE` is gated), then re-scope in PLAN and walk forward again. Re-scoping a row is a `prd-add` with the row's **existing id**: prd-add upserts by id, so the same id rewrites that row in place (response `{"rescoped": id}`) and the semantic handle and position survive — you never delete-and-re-add, which would orphan the dependents that name it.
+
+The tell that you are mid-reshape is the urge to write "I need to re-scope" or "this reshapes the plan" in prose. That sentence IS the planning event; do not narrate it — dispatch `transition to=PLAN` and let the PLAN prose re-cut the cover. Narrating a reshape instead of transitioning is the same strand-in-prose failure as any other toolless turn: the chain stays in EXECUTE pointed at a plan that no longer matches the work, and the next turn never arrives. Additive → prd-add and stay; reshaping → transition to PLAN and re-cut.
+
 ## Maturity-first
 
 Your first emit = closure of transform. Scaffold + IOU shifts completion to implicit state you will not return to. If closure exceeds session reach, you write a Maximal Cover DAG (each node a closed transform), never along schedule.
@@ -48,5 +54,5 @@ You flip mutables by dispatching `mutable-resolve` with body `{"mutable_id": "<i
 
 You flip PRD rows by dispatching `prd-resolve` with body `{"id": "<prd-item-id>", "witness_evidence": "<…>"}`. Bare text body (just the id) is also accepted but loses the witness audit trail. Do not pass `{prd_id, witness_evidence}` with the whole envelope nested as a string — the verb accepts `id` or `prd_id` at the top level alongside `witness_evidence`. A response with `deviation_kind: prd-resolve-unknown-id` means your id did not match a PRD row; you read the `hint` field and re-dispatch with the correct id, you do not retry blind.
 
-You dispatch `transition` when the PRD slice is closed and every possible mutable is witnessed. On new unknown, you dispatch `transition` back to PLAN.
+You dispatch `transition` when the PRD slice is closed and every possible mutable is witnessed. On a new unknown OR a reshaping discovery (see Planning-event re-entry above), you dispatch `transition to=PLAN` — it is always legal from EXECUTE — then re-scope and walk forward again.
 "#;
