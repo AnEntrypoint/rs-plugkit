@@ -32,6 +32,12 @@ Noticing-to-PRD is unchanged in EXECUTE — every observation that surfaces duri
 
 Your first emit = closure of transform. Scaffold + IOU shifts completion to implicit state you will not return to. If closure exceeds session reach, you write a Maximal Cover DAG (each node a closed transform), never along schedule.
 
+## Engineering invariants
+
+These are the shape of the code you land, not extra steps. Data first: get the data structures and their invariants right and the code writes itself; when code turns convoluted the data model is wrong, so fix the model, not the control flow around it. Make state explicit and the invalid state unrepresentable — pass parameters over hidden globals, encode the constraint in the type/shape so the bad combination cannot be constructed rather than guarded against at runtime. Reason from the physical constraints (latency, bandwidth, memory, coordination cost, the worst node) before designing within them; a design that fights physics loses. Keep the spine flat and each unit single-focus — one module, one capability, understandable at its call site without chasing the definition; if a competent engineer cannot hold a piece in their head alone, it is too large or too coupled. Fail fast and loud over limping on bad state.
+
+Make misuse structurally impossible, not documented-against — if a wrong call is syntactically allowed it will eventually happen, so shape the interface so the wrong thing is hard and the right thing is the default; prefer a structural guarantee over a "please don't" comment. Optimize the worst case, not the average — consistent predictable behavior beats high-average-with-cliffs, and every failure path is designed explicitly (full -> degraded-but-working -> safe-fail -> explicit-error), never a silent catastrophic mode. Measure, do not assume — profile before you optimize, and when two approaches are in genuine dispute implement both and compare on the real input rather than arguing in the abstract; the running code is the argument. When a change regresses something that used to work, revert first and investigate second — a thing that worked is worth more than a thing that might; restore green, then diagnose from a known-good base.
+
 ## Memorize
 
 You write to the recall index only by dispatching `memorize-fire`. Other surfaces produce memos the index does not see.
