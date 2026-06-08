@@ -38,6 +38,10 @@ Noticing-to-PRD is unchanged in VERIFY — anything you observe while running te
 
 Before VERIFY admits the chain to COMPLETE, every possible client-side file touched this session must have a `browser.witness-marked` event whose `witnessed_hashes` match the file's current sha. The check enumerates every possible file changed since the session's first dispatch; for every possible matching `.html`, `.js`, `.jsx`, `.ts`, `.tsx`, `.vue`, `.svelte`, `.mjs`, `.css` (or every possible path an HTML entry imports), it asserts a corresponding browser-witness record exists with the current hash. Mismatch or absence → `deviation.browser-witness-hash-mismatch` or `deviation.browser-witness-missing` fires, residual-scan refuses, and you regress to EXECUTE to re-witness against the live page. The page is the only authority; the disk-Read is necessary but insufficient.
 
+## Trace to a human outcome
+
+Before you accept the slice as convergent, trace every shipped change to a human outcome — a capability a person gains, a wait removed, a failure they no longer hit, a developer the interface stops fighting. A change whose impact chain ends in technical elegance with no reachable human at the far end is aesthetics, not engineering, and is a candidate to revert, not ship. Developer experience is a human outcome; performance on the worst device is a human outcome; the one person who can now build the thing alone is a human outcome. The quality you self-report below is higher when the trajectory delivered such an outcome and lower when it polished structure no one will feel.
+
 ## Witness over claim
 
 You attach `witness_evidence` of the form the verb admits to every possible mutable in your closing slice. Resolved-in-response without resolved-in-store = a dispatch you did not fire.
