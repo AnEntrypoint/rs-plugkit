@@ -167,13 +167,28 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     } else {
         Value::Sequence(vec![])
     };
+    let mut upserted = false;
     if let Some(seq) = doc.as_sequence_mut() {
         let mut new_with_id = item_map.clone();
         new_with_id.insert(Value::String("id".to_string()), Value::String(id.clone()));
         if !new_with_id.contains_key(&Value::String("status".to_string())) {
             new_with_id.insert(Value::String("status".to_string()), Value::String("pending".to_string()));
         }
-        seq.push(Value::Mapping(new_with_id));
+        // Upsert by id: re-adding an existing id reshapes that row in place rather than pushing
+        // a duplicate. This is the re-scope path — a planning event that changes a row's
+        // scope/approach re-dispatches prd-add with the same id and the row is rewritten,
+        // preserving its position and semantic handle. Without this, re-adding an id duplicated
+        // the row (two pending rows sharing one id, one of which can never be resolved by intent).
+        let existing = seq.iter_mut().find(|it| {
+            it.as_mapping()
+                .and_then(|m| m.get(&Value::String("id".to_string())))
+                .and_then(|v| v.as_str())
+                == Some(id.as_str())
+        });
+        match existing {
+            Some(slot) => { *slot = Value::Mapping(new_with_id); upserted = true; }
+            None => seq.push(Value::Mapping(new_with_id)),
+        }
     } else {
         return (String::new(), "prd.yml is not a sequence".to_string(), 1);
     }
@@ -181,7 +196,8 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     if !pkfs::write(&path_s, &new_raw) {
         return (String::new(), "write failed".to_string(), 1);
     }
-    (serde_json::json!({ "added": id }).to_string(), String::new(), 0)
+    let key = if upserted { "rescoped" } else { "added" };
+    (serde_json::json!({ key: id }).to_string(), String::new(), 0)
 }
 
 fn parse_resolve_target(trimmed: &str) -> (String, Option<String>) {

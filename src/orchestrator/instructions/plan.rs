@@ -37,4 +37,6 @@ Between sub-steps of PLAN — between the orient fan-out and the PRD write, betw
 You dispatch: `recall`, `codesearch`, `prd-add`, `mutable-add`, `mutable-resolve`, `transition`. Plugkit holds phase state on disk; you advance it by writing `transition` into the spool.
 
 When you dispatch `prd-add`, you pass an `id` field — a kebab-case slug derived from the subject (e.g. `dedupe-update-error`, `route-fastgrnn-port`). Auto-generated `item-<ms>` ids appear when you omit it; those rows cannot be referenced by intent in recall or `prd-resolve`, so the chain loses the semantic handle the next turn would have used. The id is your contract with the PRD store: every later dispatch that names the row uses the id you wrote.
+
+`prd-add` upserts by id. A fresh id appends a new row (`{"added": id}`); an id that already exists rewrites that row in place (`{"rescoped": id}`), preserving its position and every dependent that names it. This is the re-scope path: when you re-enter PLAN from EXECUTE on a reshaping discovery (a decision that changed a row's scope or approach), you re-`prd-add` the affected row with its existing id and the new scope — you never delete-and-re-add, which would orphan the handle. Re-entry to PLAN is a first-class move, not a failure; the cover is meant to be re-cut whenever the work reveals the old shape was wrong.
 "#;
