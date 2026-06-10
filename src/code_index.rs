@@ -366,7 +366,7 @@ struct FileManifest {
     chunks: Vec<ChunkRecord>,
 }
 
-fn manifest_to_json(hash: u32, chunks: &[ChunkRecord]) -> String {
+fn manifest_to_json(fp: &str, hash: u32, chunks: &[ChunkRecord]) -> String {
     let arr: Vec<Value> = chunks.iter().map(|c| json!({
         "key": c.key,
         "kind": c.kind,
@@ -377,11 +377,20 @@ fn manifest_to_json(hash: u32, chunks: &[ChunkRecord]) -> String {
         "text": c.text,
         "emb": c.emb,
     })).collect();
-    json!({ "hash": hash, "chunks": arr }).to_string()
+    // The real file path is embedded in the value because the host kv store sanitizes
+    // the row key into a filename (every '/' becomes '_'), so the key that fv_query
+    // returns is NOT the path that was written. Loading by row key made prior.get(fp)
+    // miss for every file in a subdirectory -- reused stayed 0 and the full re-embed
+    // freeze fired on every digest mismatch despite the manifest cache existing.
+    json!({ "path": fp, "hash": hash, "chunks": arr }).to_string()
 }
 
-fn parse_manifest(val: &str) -> Option<FileManifest> {
+fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     let parsed: Value = serde_json::from_str(val).ok()?;
+    // Manifests without an embedded path predate the path field and are unloadable by
+    // real path; skip them, the next write for the same file overwrites the same
+    // sanitized filename and the reap pass never sees them as live entries.
+    let fp = parsed.get("path").and_then(|p| p.as_str())?.to_string();
     let hash = parsed.get("hash").and_then(|h| h.as_u64())? as u32;
     let arr = parsed.get("chunks").and_then(|c| c.as_array())?;
     let mut chunks = Vec::with_capacity(arr.len());
@@ -396,21 +405,21 @@ fn parse_manifest(val: &str) -> Option<FileManifest> {
         let emb = json_to_f32_vec(c.get("emb")?)?;
         chunks.push(ChunkRecord { key, kind, name, ls, le, body, text, emb });
     }
-    Some(FileManifest { hash, chunks })
+    Some((fp, FileManifest { hash, chunks }))
 }
 
-// Load every persisted per-file manifest into a path->manifest map. Keyed by the
-// file path so an incremental re-index can look up "did this file's content
-// change?" in O(1) and reuse the stored chunk embeddings when it didn't.
+// Load every persisted per-file manifest into a path->manifest map. The map key is
+// the path EMBEDDED in each manifest value, never the kv row key: the host store
+// returns sanitized filenames as row keys (slashes mangled to underscores), which
+// can never equal a real subdirectory path.
 fn load_manifests() -> std::collections::HashMap<String, FileManifest> {
     let mut out = std::collections::HashMap::new();
     let rows = fv_query(MANIFEST_NS, "");
     if let Some(arr) = rows.as_array() {
         for row in arr {
-            let key = match row.get("key").and_then(|k| k.as_str()) { Some(k) => k, None => continue };
             let val = match row.get("value").and_then(|v| v.as_str()) { Some(v) => v, None => continue };
-            if let Some(m) = parse_manifest(val) {
-                out.insert(key.to_string(), m);
+            if let Some((fp, m)) = parse_manifest(val) {
+                out.insert(fp, m);
             }
         }
     }
@@ -557,7 +566,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
             records.push(rec);
         }
         // Persist the per-file manifest (hash + full chunk records) so the next index can reuse it.
-        fv_put(MANIFEST_NS, fp, &manifest_to_json(file_hash, &records));
+        fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, &records));
     }
 
     // Reap files that disappeared since the last index: remove their served chunks + manifest.
