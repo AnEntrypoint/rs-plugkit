@@ -482,20 +482,23 @@ pub fn index(root: &str, max_files: usize) -> Value {
     // Track which prior-manifest paths we still saw this run; anything left over is a deleted file
     // whose stored chunks + manifest must be removed so the index matches a full rebuild's shape.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for fp in &files {
+    for raw_fp in &files {
+        // collect_files yields two path forms depending on host list_dir mode: flat-list mode
+        // returns complete paths without a leading ./ (e.g. src/lib.rs) while POSIX-walk mode with
+        // root="." builds ./src/lib.rs. The manifest store key, the seen set, and the prior.get
+        // lookup must all use ONE canonical form or an incremental run keyed under one form never
+        // matches a prior run keyed under the other, so prior.get(fp) misses universally, reused
+        // stays 0, every prior manifest counts as removed, and the full re-embed freeze the
+        // manifest cache exists to prevent fires on every digest mismatch. Canonicalize to the
+        // ./-stripped, non-/-prefixed form here so every keyed use below is form-stable.
+        let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();
+        let fp = &canon;
         let dot = fp.rfind('.');
         let ext = match dot { Some(i) => &fp[i..], None => "" };
         let (lang_name, lang) = match lang_for_ext(ext) { Some(x) => x, None => continue };
-        // host_fs_read does fs.readFileSync(path) relative to the watcher cwd. collect_files
-        // yields cwd-relative paths (e.g. ./src/lib.rs or src/lib.rs). Prepending '/' made them
-        // filesystem-absolute (/./src/lib.rs -> /src/lib.rs) which does not exist, so every read
-        // failed and the loop indexed zero chunks despite files=101. Try the path as-is first
-        // (relative, the common case), then a '/'-prefixed absolute as fallback for hosts that
-        // require it.
-        let rel = fp.trim_start_matches("./").to_string();
-        let content = match host_read(&rel)
-            .or_else(|| host_read(fp))
-            .or_else(|| host_read(&format!("/{}", rel)))
+        let content = match host_read(fp)
+            .or_else(|| host_read(raw_fp))
+            .or_else(|| host_read(&format!("/{}", fp)))
         { Some(c) => c, None => continue };
         if content.len() > 256 * 1024 { continue; }
         seen.insert(fp.clone());
