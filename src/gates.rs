@@ -69,18 +69,9 @@ fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
     (verb, count, ts)
 }
 
-// Verbs exempt from the long-gap gate and its dispatch-clock bookkeeping. health and
-// auto-recall are internal/orientation pulses; wait and sleep are the agent deliberately
-// pausing to poll a long-running task (wasm_dispatch.rs wait/sleep) — firing
-// long-gap-no-instruction on a deliberate wait is contradictory. Checked in BOTH the
-// prev-dispatch-stamp guard and the gap-check branch, so they must come from one source.
 const LONGGAP_EXEMPT: &[&str] = &["health", "auto-recall", "wait", "sleep"];
 fn is_longgap_exempt(verb: &str) -> bool { LONGGAP_EXEMPT.contains(&verb) }
 
-// The long-gap gate fires only on genuine IDLE-mid-chain: both >threshold since the last
-// instruction AND >threshold since the previous dispatch of any verb. prev_dispatch_ms==0
-// means no prior work dispatch in this window (boot/overnight idle), which counts as idle.
-// Active back-to-back work verbs keep prev_dispatch_ms fresh, so the gate stays quiet.
 fn long_gap_should_fire(last_instruction_ms: u64, prev_dispatch_ms: u64, now: u64, threshold: u64) -> bool {
     if last_instruction_ms == 0 { return false; }
     let idle_since_instruction = now.saturating_sub(last_instruction_ms) > threshold;
@@ -248,10 +239,6 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    // Read the PRIOR last-ANY-dispatch ts BEFORE overwriting it: the long-gap gate guards
-    // against IDLE-mid-chain, not active-work-without-re-reading-prose. A rapid succession of
-    // work verbs (browser/exec_js/codesearch/...) is active work, so the gap since the PREVIOUS
-    // dispatch — not since the last instruction alone — is what distinguishes idle from work.
     let prev_dispatch_ms: u64 = if !is_longgap_exempt(verb) {
         let p = host_read(".gm/last-dispatch-ts").unwrap_or_default().trim().parse().unwrap_or(0);
         let _ = crate::wasm_dispatch::host_write(".gm/last-dispatch-ts", &now_ms().to_string());
@@ -268,25 +255,11 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         let last = host_read(".gm/last-instruction-ts").unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let now = now_ms();
-        // The clock fires only on genuine IDLE: >300s since the last instruction AND
-        // >300s since the PREVIOUS dispatch of any verb. Active back-to-back work verbs keep
-        // the previous-dispatch ts fresh, so a browser-heavy debugging stretch never trips the
-        // gate; a true overnight/boot idle (no dispatches at all, prev==0) still does.
         if long_gap_should_fire(last_ms, prev_dispatch_ms, now, 300_000) {
             let gap_ms = now - last_ms;
             let retry_state = host_read(".gm/long-gap-retry-state").unwrap_or_default();
             let (last_verb, count, last_denial_ts) = parse_retry_state_v2(&retry_state);
             let since_last_denial = now.saturating_sub(last_denial_ts);
-            // A burst of dispatches within 5s while the gate is tripped is ONE logical gate-trip,
-            // not N — whether they are the same verb (a retry loop) or different verbs (a parallel
-            // orient fan-out of recall+codesearch). Dedup is TIME-based, not verb-based: any prior
-            // long-gap denial recorded within the last 5s makes this dispatch part of the same burst,
-            // so a 4-verb parallel fan-out logs one long-gap-no-instruction event, not four. Verb-keyed
-            // dedup raced under parallel dispatch (non-atomic read-modify-write of the retry-state file
-            // let each verb see no prior verb and log), so the window is keyed only on last_denial_ts.
-            // The escalation count still tracks genuine SAME-verb retries past the window (the
-            // ignored-next_dispatch failure mode). The deny still fires for every dispatch (correct);
-            // only the audit noise dedups.
             let same_burst = last_denial_ts > 0 && since_last_denial <= 5_000;
             let new_count = if last_verb == verb && since_last_denial > 5_000 { count + 1 } else if last_verb == verb { count } else { 1u32 };
             let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", &format!("{}|{}|{}", verb, new_count, now));
@@ -390,15 +363,13 @@ mod long_gap_tests {
 
     #[test]
     fn fires_on_genuine_idle() {
-        // >threshold since instruction AND >threshold since any dispatch (or none).
         let now = 1_000_000;
         assert!(long_gap_should_fire(now - T - 1, now - T - 1, now, T));
-        assert!(long_gap_should_fire(now - T - 1, 0, now, T)); // boot/overnight: no prior dispatch
+        assert!(long_gap_should_fire(now - T - 1, 0, now, T));
     }
 
     #[test]
     fn quiet_during_active_work() {
-        // Stale instruction (>threshold) but a recent work dispatch keeps the chain alive.
         let now = 1_000_000;
         assert!(!long_gap_should_fire(now - T - 1, now - 1_000, now, T));
         assert!(!long_gap_should_fire(now - T - 50_000, now - 200_000, now, T));

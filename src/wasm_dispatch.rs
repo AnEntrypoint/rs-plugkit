@@ -427,12 +427,6 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
     let now = unsafe { host_now_ms() };
     let counter = MEMORIZE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let key = format!("mem-{}-{}-{}", now, counter, text.len());
-    // Embed FIRST and write text only on success — atomic by construction. The prior order (text
-    // then embed) left a text-only orphan whenever embed_text_json returned None (cold/failed
-    // model): the memory persisted with no vector, unreachable by vector recall (only kv-LIKE
-    // fallback), polluting the store. A memory without an embedding is not properly recallable, so
-    // refuse it rather than orphan it. Witnessed: 12 text-without-vec orphans in default ns from
-    // early-May embed failures.
     let emb = match crate::embed::embed_text_json(text) {
         Some(e) => e,
         None => return err("memorize", "embed failed; refusing to write a text-only memory with no vector (un-vector-recallable orphan)"),
@@ -447,8 +441,6 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
 
 fn memorize_prune(body: &Value) -> u64 {
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
-    // Mode 1: explicit key(s) — delete exactly those memories. Use when the agent KNOWS a specific
-    // memory is wrong/superseded (e.g. a recall hit it just judged stale).
     let mut keys: Vec<String> = Vec::new();
     if let Some(k) = body.get("key").and_then(|v| v.as_str()) {
         if !k.is_empty() { keys.push(k.to_string()); }
@@ -477,11 +469,6 @@ fn memorize_prune(body: &Value) -> u64 {
         }
         return ok("memorize-prune", resp);
     }
-    // Mode 2: query + min_score — surface candidate stale memories for the agent to review. Pruning
-    // bad memory matters more than retention, but a blind similarity-delete is itself a bad-memory
-    // generator; so query mode is REVIEW-ONLY by default (returns candidates with keys), and only
-    // deletes when confirm:true is passed alongside the explicit candidate keys. This keeps the
-    // destructive step under the agent's judgment, never an automatic similarity heuristic.
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     if query.is_empty() {
         return err("memorize-prune", "provide `key`/`keys` to delete, or `query` to list prune candidates");
@@ -515,9 +502,6 @@ fn codesearch(body: &Value) -> u64 {
         }
         return codesearch(&retry);
     }
-    // Sync-before-emit staleness gate: an index built against a different tree state must not be
-    // served. Compare the stored build digest (git HEAD + dirty marker) against the current tree;
-    // on mismatch, rebuild once then retry. The auto_indexed guard prevents a rebuild loop.
     let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
     if !already_indexed {
         let stored = crate::code_index::stored_digest();
@@ -525,10 +509,6 @@ fn codesearch(body: &Value) -> u64 {
         let stale = match &stored { Some(s) => s != &current, None => true };
         if stale {
             let reason = if stored.is_none() { "digest-absent" } else { "digest-mismatch" };
-            // Do NOT clear_codeinsight() here: that wiped every persisted embedding and forced a full
-            // re-embed (the 5+ min watcher freeze). code_index::index is now incremental — it reuses
-            // unchanged files' stored embeddings and self-cleans changed/removed files — so the served
-            // namespaces must stay intact for the reuse fast-path to hit.
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "stored_then_current": current }));
             let _ = crate::code_index::index(".", 500);
             let mut retry = body.clone();
@@ -549,10 +529,6 @@ fn codesearch(body: &Value) -> u64 {
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, query.as_ptr(), query.len() as u32) };
     let hits = unpack_to_value(packed);
     let kv_empty = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
-    // Sync-before-emit (paper §27): an empty codeinsight index means it was never built for this
-    // project. code_index::index now dual-writes the file-vec store this verb reads, so an autobuild
-    // then retry returns real hits. The auto_indexed guard prevents a rebuild loop when the tree
-    // genuinely has no indexable chunks.
     if kv_empty && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
         let _ = crate::code_index::index(".", 500);
         let mut retry = body.clone();
@@ -594,7 +570,6 @@ fn status(body: &Value) -> u64 {
 fn wait(body: &Value) -> u64 {
     let ms = body.get("ms").and_then(|v| v.as_u64()).unwrap_or(1000);
     let start = unsafe { host_now_ms() };
-    // Busy-wait: thebird host should implement async sleep; this is a fallback
     let _ = start; let _ = ms;
     ok("wait", json!({ "waitedMs": ms, "startMs": start, "note": "use exec:sleep for async wait" }))
 }
@@ -625,7 +600,6 @@ fn forget(body: &Value) -> u64 {
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if key.is_empty() { return err("forget", "key required"); }
-    // KV delete via overwrite with empty + tombstone marker
     let tombstone = format!("__deleted__{}", unsafe { host_now_ms() });
     let _ = unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, tombstone.as_ptr(), tombstone.len() as u32) };
     ok("forget", json!({ "namespace": ns, "key": key }))
@@ -1138,11 +1112,6 @@ fn branch_status(body: &Value) -> u64 {
     }
     let remote = exec_git_in(cwd, &format!("config --get branch.{}.remote", branch)).trim().to_string();
     let remote = if remote.is_empty() { "origin".to_string() } else { remote };
-    // The local remote-tracking ref (origin/<branch>) is only as fresh as the last fetch;
-    // git_push/git_finalize do not update it, so ahead/behind computed against the stale ref
-    // reports a false ahead:N after a successful push and falsely blocks the COMPLETE gate's
-    // remote-pushed witness. Fetch the branch first so ahead/behind reflect the true remote.
-    // Tolerate failure (offline) — falls back to the stale ref, no worse than before.
     if !body.get("no_fetch").and_then(|v| v.as_bool()).unwrap_or(false) {
         let _ = exec_git_in(cwd, &format!("fetch {} {}", remote, branch));
     }
@@ -1320,9 +1289,6 @@ fn git_finalize(body: &Value) -> u64 {
             steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
         }
     } else {
-        // Not dirty. A prior aborted attempt (watcher death mid-verb) may have already
-        // committed; detect by checking whether HEAD is ahead of upstream. If so, report
-        // the real HEAD sha rather than committed:false/sha:"" which under-reports success.
         let ahead = exec_git_in(cwd_ref, "rev-list --count @{u}..HEAD").trim().to_string();
         let ahead_n: u64 = ahead.parse().unwrap_or(0);
         if ahead_n > 0 {
@@ -1469,7 +1435,6 @@ fn git_rm(body: &Value) -> u64 {
 
 fn git_revert(body: &Value) -> u64 {
     let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
-    // discard working-tree changes for paths, OR revert a commit by ref
     if let Some(arr) = body.get("paths").and_then(|v| v.as_array()) {
         let paths: Vec<String> = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
         if paths.is_empty() { return err("git_revert", "paths empty"); }

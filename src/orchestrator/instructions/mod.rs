@@ -263,11 +263,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
 
     let mut phase = phase;
-    // A present, non-empty `prompt` field is the new-work signal — even when its text is
-    // identical to the previous turn's. Recurring drivers (e.g. /loop) re-send the same prompt
-    // verbatim; a text-inequality test would treat that as "not fresh" and wedge the chain at
-    // COMPLETE. The poll case (a subsequent same-turn `instruction` with no new work) carries an
-    // empty body, so `prompt_opt` is None and never trips this.
     let fresh_prompt = prompt_opt
         .as_deref()
         .map(|p| !p.trim().is_empty())

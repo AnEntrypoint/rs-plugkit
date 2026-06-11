@@ -56,9 +56,6 @@ pub fn clear_codeinsight() -> u32 {
     cleared
 }
 
-// Like clear_codeinsight() but also drops the per-file manifests, forcing the next index() to
-// re-embed everything from scratch (no incremental reuse). Used by the explicit `rebuild:true`
-// codesearch path where the caller wants a guaranteed clean rebuild.
 pub fn clear_codeinsight_full() -> u32 {
     let cleared = clear_codeinsight();
     let rows = fv_query("codeinsight-manifest", "");
@@ -186,13 +183,6 @@ pub fn ensure_schema_at(db_name: &str, path: &str) -> Result<(), String> {
 }
 
 fn project_db_path(project_path: Option<&str>) -> String {
-    // libsql file-backed open requires WASI fs syscalls (fd_prestat_get etc.)
-    // that the wasm host doesn't fully implement yet — using a file path
-    // crashes the watcher with 'unimplemented WASI call'. Until the host
-    // WASI shim is fleshed out, default to :memory: even when project_path
-    // is requested. The KV store at <cwd>/.gm/disciplines/<ns>/ (in the
-    // JS-side host_kv_* implementation) already provides project-local
-    // persistent memory; libsql is only needed for vector-index ANN.
     let _ = project_path;
     ":memory:".to_string()
 }
@@ -230,11 +220,6 @@ fn list_dir(path: &str) -> Vec<String> {
     let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
     let v = unpack_to_value_pub(packed);
     match v {
-        // The host returns either bare strings OR rich entry objects {name, is_dir, is_file}
-        // (the current gm-plugkit wrapper emits objects). Accept both: a bare string is the name;
-        // an object's name is under name/path/file. Previously only bare strings were handled, so
-        // an object-returning host yielded an empty list and code_index found files=0, leaving
-        // codesearch's autobuild index empty.
         Value::Array(arr) => arr.into_iter().filter_map(|x| {
             if let Some(s) = x.as_str() { return Some(s.to_string()); }
             x.get("name").or_else(|| x.get("path")).or_else(|| x.get("file"))
@@ -244,21 +229,16 @@ fn list_dir(path: &str) -> Vec<String> {
     }
 }
 
-// thebird (busybase) host returns full flat paths from fs_readdir, not posix-style
-// single-level entries. Use the flat list directly; if any entry contains a slash, treat
-// the host's output as already-recursive. Otherwise walk one level at a time.
 fn collect_files(root: &str, max_files: usize) -> Vec<String> {
     let entries = list_dir(root);
     if entries.is_empty() { return Vec::new(); }
     let has_slashes = entries.iter().any(|e| e.contains('/'));
     if has_slashes {
-        // Flat list mode: paths are already complete. Apply skip-dir filter inline.
         return entries.into_iter()
             .filter(|p| !SKIP_DIRS.iter().any(|d| p.split('/').any(|seg| seg == *d)))
             .take(max_files)
             .collect();
     }
-    // POSIX mode: walk recursively.
     let mut files = Vec::new();
     walk_posix(root, max_files, &mut files);
     files
@@ -340,15 +320,6 @@ fn sql_quote(s: &str) -> String {
 
 const MANIFEST_NS: &str = "codeinsight-manifest";
 
-// A persisted per-file index manifest: the file's content hash plus the full set
-// of chunk records (text + embedding) that were written for it. Storing the
-// embeddings here lets a re-index reuse them for unchanged files without
-// recomputing the 12-layer BERT forward — eliminating the full-rebuild freeze on
-// a digest mismatch where almost no file content actually changed.
-//
-// `key` is the deterministic file-vec store key (`ci-{filehash}-{chunkidx}`),
-// stable across runs so the codeinsight / codeinsight-vec namespaces end in the
-// same shape they'd have after a full rebuild.
 #[derive(Clone)]
 struct ChunkRecord {
     key: String,
@@ -377,19 +348,11 @@ fn manifest_to_json(fp: &str, hash: u32, chunks: &[ChunkRecord]) -> String {
         "text": c.text,
         "emb": c.emb,
     })).collect();
-    // The real file path is embedded in the value because the host kv store sanitizes
-    // the row key into a filename (every '/' becomes '_'), so the key that fv_query
-    // returns is NOT the path that was written. Loading by row key made prior.get(fp)
-    // miss for every file in a subdirectory -- reused stayed 0 and the full re-embed
-    // freeze fired on every digest mismatch despite the manifest cache existing.
     json!({ "path": fp, "hash": hash, "chunks": arr }).to_string()
 }
 
 fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     let parsed: Value = serde_json::from_str(val).ok()?;
-    // Manifests without an embedded path predate the path field and are unloadable by
-    // real path; skip them, the next write for the same file overwrites the same
-    // sanitized filename and the reap pass never sees them as live entries.
     let fp = parsed.get("path").and_then(|p| p.as_str())?.to_string();
     let hash = parsed.get("hash").and_then(|h| h.as_u64())? as u32;
     let arr = parsed.get("chunks").and_then(|c| c.as_array())?;
@@ -408,10 +371,6 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     Some((fp, FileManifest { hash, chunks }))
 }
 
-// Load every persisted per-file manifest into a path->manifest map. The map key is
-// the path EMBEDDED in each manifest value, never the kv row key: the host store
-// returns sanitized filenames as row keys (slashes mangled to underscores), which
-// can never equal a real subdirectory path.
 fn load_manifests() -> std::collections::HashMap<String, FileManifest> {
     let mut out = std::collections::HashMap::new();
     let rows = fv_query(MANIFEST_NS, "");
@@ -426,10 +385,6 @@ fn load_manifests() -> std::collections::HashMap<String, FileManifest> {
     out
 }
 
-// Write one chunk record into the served file-vec stores (the namespaces
-// `codesearch`/`recall` read), plus the best-effort libsql vector table. Used for
-// both freshly-embedded chunks and reused (unchanged-file) chunks so the live
-// index ends in identical shape regardless of which path produced the record.
 fn write_chunk(libsql_ok: bool, fp: &str, c: &ChunkRecord) {
     if libsql_ok {
         let embedding_sql = format!("vector('{}')", vec_to_json_literal(&c.emb));
@@ -452,14 +407,7 @@ fn delete_chunk_keys(chunks: &[ChunkRecord]) {
 }
 
 pub fn index(root: &str, max_files: usize) -> Value {
-    // libsql schema init is best-effort: the file-vec store (host_kv_put) is the live codesearch
-    // backend and must populate even when libsql/wasi schema init fails. Previously a failed
-    // ensure_schema() returned early before any file-vec write, so codesearch's autobuild produced
-    // an empty index silently. Decouple: record the libsql availability, keep going regardless.
     let libsql_ok = ensure_schema().is_ok();
-    // A dimension mismatch in the persisted vectors means EVERY stored embedding is unusable, so the
-    // incremental reuse path must not run — wipe both the served namespaces and the manifests so the
-    // rebuild below re-embeds from scratch at the correct dim.
     let kvvec_cleared = clear_codeinsight_if_dim_mismatch();
     if kvvec_cleared {
         let rows = fv_query(MANIFEST_NS, "");
@@ -469,10 +417,6 @@ pub fn index(root: &str, max_files: usize) -> Value {
             }
         }
     }
-    // INCREMENTAL re-index (was: a full clear_codeinsight() + re-embed of every chunk on ANY digest
-    // mismatch, which froze the watcher for 5+ minutes recomputing 2500-5000 BERT forwards even when
-    // a single new commit changed almost no file content). Reuse persisted embeddings for files whose
-    // content hash is unchanged; only re-embed new/changed files; drop chunks for files that vanished.
     let prior = load_manifests();
     let r = if root.is_empty() { "/" } else { root };
     let limit = max_files.max(50).min(2000);
@@ -488,18 +432,8 @@ pub fn index(root: &str, max_files: usize) -> Value {
     let mut reused_files = 0;
     let mut skipped_no_embed = 0u32;
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
-    // Track which prior-manifest paths we still saw this run; anything left over is a deleted file
-    // whose stored chunks + manifest must be removed so the index matches a full rebuild's shape.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for raw_fp in &files {
-        // collect_files yields two path forms depending on host list_dir mode: flat-list mode
-        // returns complete paths without a leading ./ (e.g. src/lib.rs) while POSIX-walk mode with
-        // root="." builds ./src/lib.rs. The manifest store key, the seen set, and the prior.get
-        // lookup must all use ONE canonical form or an incremental run keyed under one form never
-        // matches a prior run keyed under the other, so prior.get(fp) misses universally, reused
-        // stays 0, every prior manifest counts as removed, and the full re-embed freeze the
-        // manifest cache exists to prevent fires on every digest mismatch. Canonicalize to the
-        // ./-stripped, non-/-prefixed form here so every keyed use below is form-stable.
         let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();
         let fp = &canon;
         let dot = fp.rfind('.');
@@ -515,9 +449,6 @@ pub fn index(root: &str, max_files: usize) -> Value {
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
         let file_hash = crc32(&content);
 
-        // FAST PATH: file content unchanged since last index -> reuse its persisted chunk embeddings.
-        // No embed_text() call, so no BERT forward, so no freeze. Re-emit the served KV entries and
-        // the (per-process, in-memory) libsql rows so the index ends in full-rebuild shape.
         if let Some(m) = prior.get(fp) {
             if m.hash == file_hash {
                 for c in &m.chunks {
@@ -528,17 +459,12 @@ pub fn index(root: &str, max_files: usize) -> Value {
                 reused_files += 1;
                 continue;
             }
-            // Content changed: drop the stale chunk keys before re-embedding to avoid leftovers.
             delete_chunk_keys(&m.chunks);
         }
 
-        // SLOW PATH: new or changed file -> re-embed its chunks.
         let chunks = extract_chunks(fp, &content, lang);
         let mut records: Vec<ChunkRecord> = Vec::new();
         for (idx, (kind, name, ls, le, body)) in chunks.into_iter().enumerate() {
-            // Truncate body to <=512 bytes at a char boundary: a hard byte slice
-            // panics when a multibyte char (e.g. an emoji) straddles byte 512,
-            // which aborts the whole index rebuild and wedges the watcher.
             let body_head = {
                 let mut e = body.len().min(512);
                 while e > 0 && !body.is_char_boundary(e) { e -= 1; }
@@ -556,20 +482,15 @@ pub fn index(root: &str, max_files: usize) -> Value {
             };
             chunked += 1;
             embedded += 1;
-            // Deterministic per-file key (was `ci-{ms}-{ls}-{n}` with a timestamp, which made keys
-            // non-reusable across runs). `ci-{filehash}-{chunkidx}` is stable so the manifest's
-            // recorded keys still address the same rows on the next incremental pass.
             let key = format!("ci-{:x}-{}", file_hash, idx);
             let text = format!("{}:{}:{} {}\n{}", fp, ls, le, name, &body[..body.len().min(8192)]);
             let rec = ChunkRecord { key, kind, name, ls, le, body, text, emb: v };
             write_chunk(libsql_ok, fp, &rec);
             records.push(rec);
         }
-        // Persist the per-file manifest (hash + full chunk records) so the next index can reuse it.
         fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, &records));
     }
 
-    // Reap files that disappeared since the last index: remove their served chunks + manifest.
     let mut removed_files = 0;
     for (fp, m) in &prior {
         if !seen.contains(fp) {
@@ -578,8 +499,6 @@ pub fn index(root: &str, max_files: usize) -> Value {
             removed_files += 1;
         }
     }
-    // Stamp the tree digest the index was built against so codesearch can detect staleness
-    // (sync-before-emit) and rebuild only on mismatch rather than serving an index from a stale tree.
     let digest = current_digest();
     store_digest(&digest);
     {

@@ -70,8 +70,6 @@ pub fn handle_list(_content: &str) -> (String, String, i32) {
 
 fn defer_marker_in_text(text: &str) -> Option<&'static str> {
     let lower = text.to_lowercase();
-    // Unambiguous forward-deferral imperatives: these can only mean "do it later",
-    // never appear as retrospective description, so a bare substring match is safe.
     const HARD_MARKERS: &[&str] = &[
         "defer to later", "deferred to later", "deferred for later",
         "address it next", "address this next", "leave for next",
@@ -82,9 +80,6 @@ fn defer_marker_in_text(text: &str) -> Option<&'static str> {
     for m in HARD_MARKERS {
         if lower.contains(m) { return Some(m); }
     }
-    // Ambiguous noun-phrases ("next session", "future turn", …) false-positive when
-    // a row is DESCRIBING a past deferral deviation rather than deferring. Only treat
-    // them as deferral when a deferral cue co-occurs AND no retrospective cue is present.
     const SOFT_MARKERS: &[&str] = &[
         "next pass", "next session", "next turn",
         "future pass", "future session", "future turn",
@@ -174,11 +169,6 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         if !new_with_id.contains_key(&Value::String("status".to_string())) {
             new_with_id.insert(Value::String("status".to_string()), Value::String("pending".to_string()));
         }
-        // Upsert by id: re-adding an existing id reshapes that row in place rather than pushing
-        // a duplicate. This is the re-scope path — a planning event that changes a row's
-        // scope/approach re-dispatches prd-add with the same id and the row is rewritten,
-        // preserving its position and semantic handle. Without this, re-adding an id duplicated
-        // the row (two pending rows sharing one id, one of which can never be resolved by intent).
         let existing = seq.iter_mut().find(|it| {
             it.as_mapping()
                 .and_then(|m| m.get(&Value::String("id".to_string())))
@@ -240,9 +230,6 @@ fn parse_resolve_target(trimmed: &str) -> (String, Option<String>) {
         };
         (id, wit)
     } else if let Some((id, wit)) = recover_truncated_envelope(trimmed) {
-        // Malformed/truncated JSON envelope (e.g. an LLM cut off mid-body:
-        // {"id":"strip-folder-prefix","witness_evidence":"imapsync-server.js  ). serde rejected it,
-        // but the leading "id"/"prd_id" string value is still recoverable by a brace-free scan.
         (id, wit)
     } else {
         let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
@@ -252,10 +239,6 @@ fn parse_resolve_target(trimmed: &str) -> (String, Option<String>) {
     }
 }
 
-// Recover the id (and witness if present) from a body that LOOKS like a JSON envelope but
-// failed to parse (most commonly a truncation: the witness_evidence string was cut off before
-// its closing quote/brace). Returns None when the body is not envelope-shaped, so the plain
-// first-token fallback still applies to ordinary raw-text bodies.
 fn recover_truncated_envelope(s: &str) -> Option<(String, Option<String>)> {
     let s = s.trim_start();
     if !s.starts_with('{') { return None; }
@@ -267,7 +250,6 @@ fn recover_truncated_envelope(s: &str) -> Option<(String, Option<String>)> {
         let after_colon = rest[colon + 1..].trim_start();
         if !after_colon.starts_with('"') { return None; }
         let val = &after_colon[1..];
-        // value ends at the next unescaped quote, or end-of-string if truncated.
         let mut out = String::new();
         let mut chars = val.chars();
         while let Some(c) = chars.next() {
@@ -275,7 +257,7 @@ fn recover_truncated_envelope(s: &str) -> Option<(String, Option<String>)> {
             if c == '"' { return Some(out); }
             out.push(c);
         }
-        if out.is_empty() { None } else { Some(out) } // truncated before closing quote
+        if out.is_empty() { None } else { Some(out) }
     };
     let id = extract("id").or_else(|| extract("prd_id")).or_else(|| extract("mutable_id"))
         .or_else(|| extract("item_id")).or_else(|| extract("slug")).or_else(|| extract("key"))?;
@@ -402,8 +384,6 @@ mod tests {
 
     #[test]
     fn resolve_rejects_missing_witness() {
-        // id present, no witness_evidence: must refuse with deviation_kind before any state mutation.
-        // This runs before the prd_path() existence check, so it is exercised even with pkfs host no-op.
         let (out, err, rc) = handle_resolve(r#"{"id":"some-row"}"#);
         assert_eq!(rc, 1);
         assert!(err.contains("no witness_evidence"));
@@ -414,7 +394,6 @@ mod tests {
 
     #[test]
     fn resolve_rejects_blank_witness() {
-        // whitespace-only witness is treated as absent.
         let (_out, err, rc) = handle_resolve(r#"{"id":"some-row","witness_evidence":"   "}"#);
         assert_eq!(rc, 1);
         assert!(err.contains("no witness_evidence"));
@@ -422,8 +401,6 @@ mod tests {
 
     #[test]
     fn resolve_with_witness_passes_witness_gate() {
-        // WITH a real witness the no-witness gate does not fire; the handler proceeds past it
-        // (and then hits the pkfs "does not exist" path on host, NOT the no-witness refusal).
         let (_out, err, rc) = handle_resolve(r#"{"id":"some-row","witness_evidence":"src/x.rs:42"}"#);
         assert_eq!(rc, 1);
         assert!(!err.contains("no witness_evidence"));
@@ -431,9 +408,6 @@ mod tests {
 
     #[test]
     fn resolve_unknown_id_returns_deviation_kind() {
-        // pkfs is no-op on host so prd_path() reports "does not exist" path before unknown-id check.
-        // To exercise unknown-id deviation_kind shape directly, validate the JSON body the handler
-        // would emit. This is a logic-shape test, not a state test.
         let body = serde_json::json!({
             "error": "prd id not found: bogus",
             "deviation_kind": "prd-resolve-unknown-id",
@@ -453,8 +427,6 @@ mod tests {
 
     #[test]
     fn resolve_recovers_truncated_envelope() {
-        // LLM cut the body off mid-witness (no closing quote/brace) — serde rejects it,
-        // but the leading id value is recoverable so it does not become an unknown-id.
         let body = r#"{"id":"strip-folder-prefix","witness_evidence":"imapsync-server.js"#;
         let (id, wit) = parse_resolve_target(body);
         assert_eq!(id, "strip-folder-prefix");

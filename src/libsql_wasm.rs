@@ -7,8 +7,6 @@ use std::ffi::{CStr, CString};
 use std::ptr;
 use std::sync::Mutex;
 
-// Each named DB is its own libsql connection (its own :memory: instance).
-// Default name is "main" for backwards compatibility with single-DB callers.
 static DBS: Mutex<Option<HashMap<String, DbHandle>>> = Mutex::new(None);
 
 struct DbHandle(*mut ffi::sqlite3);

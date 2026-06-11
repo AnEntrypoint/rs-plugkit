@@ -62,21 +62,12 @@ pub fn rerank_by_adapter(query_text: &str, hits: serde_json::Value) -> serde_jso
     let logits: Vec<f64> = data.get("logits").cloned()
         .and_then(|l| serde_json::from_value::<Vec<f64>>(l).ok())
         .unwrap_or_default();
-    // The adapter's target labels, in the SAME order as logits. The re-rank must map each
-    // logit to its namespace BY LABEL, not by positional index: the logits come back in the
-    // adapter's persisted target order, which is unrelated to the order namespaces were
-    // discovered from the hits. Without the labels, the weight applied to a namespace is the
-    // weight of whatever target happens to share its index — silently wrong.
     let adapter_targets: Vec<String> = data.get("targets").cloned()
         .and_then(|t| serde_json::from_value::<Vec<String>>(t).ok())
         .unwrap_or_default();
     if logits.len() != adapter_targets.len() || logits.iter().all(|x| x.abs() < 1e-9) {
         return hits;
     }
-    // Temperature-scaled softmax over the logits so RELATIVE preference drives the blend
-    // independent of the tiny absolute magnitude. Center each weight on uniform 1/n so an
-    // untrained (all-equal) head yields a neutral factor of exactly 1.0 — preserving the
-    // no-op guarantee — while a trained head shifts the favored target up and the rest down.
     let n = logits.len() as f64;
     let max = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let spread = max - logits.iter().cloned().fold(f64::INFINITY, f64::min);
