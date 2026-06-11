@@ -141,8 +141,6 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         return (String::new(), "missing mutable id in body".to_string(), 1);
     }
 
-    // Body shape: either raw id string OR JSON object {mutable_id|id, witness_evidence?, witness_method?}.
-    // Inline witness_evidence is applied to the row if the row's evidence field is empty.
     let (id_str, inline_evidence): (String, Option<String>) = match serde_json::from_str::<serde_json::Value>(raw_trimmed) {
         Ok(serde_json::Value::Object(map)) => {
             let id = map.get("mutable_id")
@@ -288,8 +286,6 @@ mod tests {
 
     #[test]
     fn resolve_parses_witness_evidence_from_json() {
-        // pkfs is host-no-op so we can't run the full state path; validate JSON-parse branch
-        // by confirming a body with witness_evidence parses to a populated inline_evidence.
         let body = serde_json::json!({
             "mutable_id": "m1",
             "witness_evidence": "src/foo.rs:42"
@@ -297,7 +293,6 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["mutable_id"], "m1");
         assert_eq!(v["witness_evidence"], "src/foo.rs:42");
-        // Empty evidence variant must be filtered (matches handler's .filter(!is_empty))
         let body2 = serde_json::json!({"mutable_id": "m1", "witness_evidence": "  "}).to_string();
         let v2: serde_json::Value = serde_json::from_str(&body2).unwrap();
         let trimmed = v2["witness_evidence"].as_str().unwrap().trim();
