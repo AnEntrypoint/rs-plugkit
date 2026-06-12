@@ -72,17 +72,18 @@ fn should_residual_scan(prd_pending: usize, running_tasks_count: usize) -> bool 
     prd_pending == 0 && running_tasks_count == 0
 }
 
-pub fn get_instruction(phase: &str) -> &'static str {
-    match phase.trim().to_ascii_uppercase().as_str() {
-        "ENTRY" | "ORCHESTRATOR" | "" => entry::TEXT,
-        "PLAN" => plan::TEXT,
-        "EXECUTE" => execute::TEXT,
-        "EMIT" => emit::TEXT,
-        "VERIFY" => verify::TEXT,
-        "COMPLETE" => update_docs::TEXT,
-        "BROWSER" => browser::TEXT,
-        _ => entry::TEXT,
-    }
+pub fn get_instruction(phase: &str) -> String {
+    let (key, default) = match phase.trim().to_ascii_uppercase().as_str() {
+        "ENTRY" | "ORCHESTRATOR" | "" => ("entry", entry::TEXT),
+        "PLAN" => ("plan", plan::TEXT),
+        "EXECUTE" => ("execute", execute::TEXT),
+        "EMIT" => ("emit", emit::TEXT),
+        "VERIFY" => ("verify", verify::TEXT),
+        "COMPLETE" => ("update_docs", update_docs::TEXT),
+        "BROWSER" => ("browser", browser::TEXT),
+        _ => ("entry", entry::TEXT),
+    };
+    crate::prose::resolve(key, default)
 }
 
 fn next_phase_hint(phase: &str) -> Option<&'static str> {
