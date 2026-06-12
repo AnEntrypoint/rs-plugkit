@@ -26,6 +26,7 @@ pub mod browser_witness;
 pub mod poll_detect;
 
 pub mod pkfs;
+pub mod prose;
 pub mod orchestrator;
 pub mod filter;
 pub mod validation;

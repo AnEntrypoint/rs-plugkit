@@ -275,10 +275,13 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             if !same_burst {
                 log_deviation("long-gap-no-instruction", &format!("verb={} gap_ms={}", verb, gap_ms));
             }
-            return GateVerdict::deny(format!(
-                "long-gap-no-instruction: {}ms since last `instruction` dispatch (threshold 300000ms). Idle mid-chain is a deviation. Dispatch `instruction` for recovery prose before any other verb.",
-                gap_ms
-            ));
+            return GateVerdict::deny(
+                crate::prose::resolve(
+                    "gates/long-gap-no-instruction",
+                    "long-gap-no-instruction: {gap_ms}ms since last `instruction` dispatch (threshold 300000ms). Idle mid-chain is a deviation. Dispatch `instruction` for recovery prose before any other verb.",
+                )
+                .replace("{gap_ms}", &gap_ms.to_string()),
+            );
         }
     }
 
