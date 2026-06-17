@@ -111,6 +111,7 @@ fn lang_for_ext(ext: &str) -> Option<(&'static str, Language)> {
         ".go" => Some(("go", tree_sitter_go::LANGUAGE.into())),
         ".c" | ".h" => Some(("c", tree_sitter_c::LANGUAGE.into())),
         ".cpp" | ".cc" | ".hpp" | ".hh" | ".cxx" => Some(("cpp", tree_sitter_cpp::LANGUAGE.into())),
+        ".glsl" | ".vert" | ".frag" | ".comp" | ".geom" | ".tesc" | ".tese" | ".vsh" | ".fsh" | ".glslv" | ".glslf" => Some(("glsl", tree_sitter_c::LANGUAGE.into())),
         ".java" => Some(("java", tree_sitter_java::LANGUAGE.into())),
         ".json" => Some(("json", tree_sitter_json::LANGUAGE.into())),
         ".html" | ".htm" => Some(("html", tree_sitter_html::LANGUAGE.into())),
