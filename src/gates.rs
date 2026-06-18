@@ -186,6 +186,13 @@ fn check_browser_witness_coverage() -> Vec<String> {
             Some(f) if !f.is_empty() => f,
             _ => continue,
         };
+        // Self-heal stale entries: re-classify each recorded file against the CURRENT
+        // ruleset. A pre-fix watcher (e.g. before 'src/' was dropped from BROWSER_DIR_PREFIXES)
+        // may have written a now-exempt file (a Node CLI bin like src/cli.js) into the edits
+        // ledger; after the watcher upgrades mid-session, that ledger entry would otherwise keep
+        // blocking COMPLETE with an unsatisfiable client-edit-no-witness (no page to evaluate).
+        // Skipping entries that are no longer browser-running lets the gate self-heal on upgrade.
+        if !crate::browser_witness::is_browser_running_file(file) { continue; }
         let edit_hash = entry.get("hash").and_then(|v| v.as_str()).unwrap_or("");
         if edit_hash.is_empty() { continue; }
         let witness_hash = witnessed_hashes.get(file).and_then(|v| v.as_str()).unwrap_or("");
