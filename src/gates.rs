@@ -16,17 +16,22 @@ pub struct GateVerdict {
     pub pending_step_id: Option<String>,
     pub pending_step_full: Option<Value>,
     pub residuals: Vec<String>,
+    pub next_dispatch: Option<String>,
 }
 
 impl GateVerdict {
     fn allow() -> Self {
-        Self { allowed: true, reason: None, await_result: false, pending_step_id: None, pending_step_full: None, residuals: vec![] }
+        Self { allowed: true, reason: None, await_result: false, pending_step_id: None, pending_step_full: None, residuals: vec![], next_dispatch: None }
     }
     fn deny(reason: String) -> Self {
-        Self { allowed: false, reason: Some(reason), await_result: false, pending_step_id: None, pending_step_full: None, residuals: vec![] }
+        Self { allowed: false, reason: Some(reason), await_result: false, pending_step_id: None, pending_step_full: None, residuals: vec![], next_dispatch: None }
+    }
+    fn with_next(mut self, next: &str) -> Self {
+        self.next_dispatch = Some(next.to_string());
+        self
     }
     pub fn to_denial_json(&self, verb: &str) -> Value {
-        let next = if self.await_result { "memorize-continue" } else { "instruction" };
+        let next: &str = self.next_dispatch.as_deref().unwrap_or(if self.await_result { "memorize-continue" } else { "instruction" });
         let reason_with_hint = format!(
             "{} — dispatch `{}` for recovery; do not improvise around this denial.",
             self.reason.clone().unwrap_or_default(),
@@ -235,7 +240,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                  git_status (porcelain), git_log, git_diff, git_show, git_branch (inspect); git_add, git_commit, git_finalize (stage/commit/push in one), git_push (push w/ rebase-retry); git_checkout, git_fetch, git_rm, git_revert, git_reset (mutate). \
                  git_finalize {{message}} bundles add→commit→porcelain-gate→push in ONE dispatch. The shell git bypasses the porcelain gate, the witness ledger, and is non-portable. Command was: `{}`",
                 verb, cmd.chars().take(120).collect::<String>()
-            ));
+            )).with_next("git_finalize");
         }
     }
 
@@ -289,29 +294,40 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
 
     if operation == "complete" {
         let mut residuals: Vec<String> = vec![];
+        // The recovery verb is the FIRST blocker in dependency order (resolve the work, then commit,
+        // then re-scan): open PRD -> prd-resolve, mutables -> mutable-resolve, dirty -> git_finalize,
+        // missing residual-scan -> residual-scan, client-edit -> browser. A concurrent/weak agent that
+        // keys on next_dispatch then recovers in one mechanical step instead of looping on the gate.
+        let mut next_recovery: Option<&str> = None;
         if host_exists(".gm/prd.yml") && prd_has_open_items() {
-            residuals.push("PRD has open items — resolve or name-and-stop before declaring done".into());
+            residuals.push("PRD has open items — resolve (prd-resolve with witness_evidence) or name-and-stop before declaring done".into());
+            next_recovery.get_or_insert("prd-resolve");
         }
         if host_exists(".gm/mutables.yml") && mutables_unresolved() {
             residuals.push("unresolved mutables present — resolve with witness_evidence before declaring done".into());
+            next_recovery.get_or_insert("mutable-resolve");
         }
         if worktree_dirty() {
             residuals.push("worktree dirty — commit or revert before declaring done; an unpushed delta is an unwitnessed slice".into());
             log_deviation("push-dirty", "COMPLETE attempted with dirty worktree");
+            next_recovery.get_or_insert("git_finalize");
         }
         if !host_exists(".gm/residual-check-fired") {
             residuals.push("residual-scan not fired in this stop window — dispatch residual-scan before COMPLETE".into());
             log_deviation("complete-without-residual-scan", "");
+            next_recovery.get_or_insert("residual-scan");
         }
         let bw_check = check_browser_witness_coverage();
         if !bw_check.is_empty() {
             residuals.push(format!("client-edit-no-witness: {} client-side file(s) edited without browser-witness in this session — dispatch `browser` verb to page.evaluate the invariant each edit establishes, then re-attempt COMPLETE. Files: {}", bw_check.len(), bw_check.join(", ")));
             log_deviation("client-edit-no-witness", &format!("files={}", bw_check.join(",")));
+            next_recovery.get_or_insert("browser");
         }
         if !residuals.is_empty() {
             log_deviation("gate-deny", &format!("stop-gate residuals={}", residuals.len()));
             let mut v = GateVerdict::deny(format!("stop-gate residuals: {}", residuals.join("; ")));
             v.residuals = residuals;
+            if let Some(n) = next_recovery { v.next_dispatch = Some(n.to_string()); }
             return v;
         }
     }
