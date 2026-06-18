@@ -31,6 +31,22 @@ fn rlog(msg: &str) {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn emit_recall(query: &str, hits: &serde_json::Value, mode: &str, namespace: &str) {
+    let arr = hits.as_array();
+    let n_hits = arr.map(|a| a.len()).unwrap_or(0);
+    let top_score = arr.and_then(|a| a.first()).and_then(|r| r.get("score")).and_then(|d| d.as_f64());
+    let mut fields = serde_json::Map::new();
+    fields.insert("sub".to_string(), serde_json::Value::String("rs_learn".to_string()));
+    fields.insert("query".to_string(), serde_json::Value::String(query.chars().take(200).collect::<String>()));
+    fields.insert("hit".to_string(), serde_json::Value::Bool(n_hits > 0));
+    fields.insert("mode".to_string(), serde_json::Value::String(mode.to_string()));
+    fields.insert("n_hits".to_string(), serde_json::Value::Number(serde_json::Number::from(n_hits as u64)));
+    fields.insert("namespace".to_string(), serde_json::Value::String(namespace.to_string()));
+    if let Some(s) = top_score { if let Some(num) = serde_json::Number::from_f64(s) { fields.insert("top_score".to_string(), serde_json::Value::Number(num)); } }
+    crate::wasm_dispatch::emit_event("recall", serde_json::Value::Object(fields));
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn rerank_by_adapter(query_text: &str, hits: serde_json::Value) -> serde_json::Value {
     let mut arr = match hits.as_array() {
         Some(a) if a.len() > 1 => a.clone(),
@@ -120,6 +136,7 @@ pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
         {
             rlog("recall::recall_hits done via vec_search");
             let reranked = rerank_by_adapter(embed_input, vec_hits);
+            emit_recall(&query, &reranked, "vector_top_k", namespace);
             return reranked;
         }
         let packed = unsafe {
@@ -128,7 +145,9 @@ pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
         };
         rlog("recall::recall_hits kv_query returned");
         let kv_hits = crate::wasm_dispatch::unpack_to_value_pub(packed);
-        if kv_hits.is_null() { serde_json::Value::Array(Vec::new()) } else { kv_hits }
+        let result = if kv_hits.is_null() { serde_json::Value::Array(Vec::new()) } else { kv_hits };
+        emit_recall(&query, &result, "kv_query", namespace);
+        result
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -169,6 +188,8 @@ pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
     };
     #[cfg(not(target_arch = "wasm32"))]
     let results = serde_json::Value::Array(Vec::new());
+    #[cfg(target_arch = "wasm32")]
+    emit_recall(&query, &results, "auto_recall", namespace);
     let payload = serde_json::json!({
         "query": query,
         "limit": limit,
