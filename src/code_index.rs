@@ -630,6 +630,24 @@ pub fn memorize_at_finalize(embed_source: &str, stored_text: &str, namespace: &s
     }
 }
 
+fn emit_recall(query: &str, rows: &Value, mode: &str, namespace: Option<&str>) {
+    let arr = rows.as_array();
+    let n_hits = arr.map(|a| a.len()).unwrap_or(0);
+    let top_score = arr.and_then(|a| a.first())
+        .and_then(|r| r.get("distance"))
+        .and_then(|d| d.as_f64())
+        .map(|d| 1.0 - d);
+    let mut fields = serde_json::Map::new();
+    fields.insert("sub".to_string(), Value::String("rs_learn".to_string()));
+    fields.insert("query".to_string(), Value::String(query.chars().take(200).collect::<String>()));
+    fields.insert("hit".to_string(), Value::Bool(n_hits > 0));
+    fields.insert("mode".to_string(), Value::String(mode.to_string()));
+    fields.insert("n_hits".to_string(), Value::Number(serde_json::Number::from(n_hits as u64)));
+    if let Some(n) = namespace { fields.insert("namespace".to_string(), Value::String(n.to_string())); }
+    if let Some(s) = top_score { if let Some(num) = serde_json::Number::from_f64(s) { fields.insert("top_score".to_string(), Value::Number(num)); } }
+    crate::wasm_dispatch::emit_event("recall", Value::Object(fields));
+}
+
 pub fn recall(query: &str, limit: usize, namespace: Option<&str>, inline_embedding: Option<&Value>) -> Value {
     recall_at(query, limit, namespace, inline_embedding, None)
 }
@@ -646,7 +664,7 @@ pub fn recall_at(query: &str, limit: usize, namespace: Option<&str>, inline_embe
             let ns_filter = match namespace { Some(n) => format!(" AND namespace='{}'", sql_quote(n)), None => String::new() };
             let sql = format!("SELECT id, namespace, text, ts FROM memories WHERE text LIKE '{}'{} ORDER BY ts DESC LIMIT {}", like, ns_filter, limit);
             return match libsql_wasm::query(&db_name, &sql) {
-                Ok(rows) => json!({ "ok": true, "mode": "fallback_like", "rows": rows, "project_path": project_path }),
+                Ok(rows) => { emit_recall(query, &rows, "fallback_like", namespace); json!({ "ok": true, "mode": "fallback_like", "rows": rows, "project_path": project_path }) }
                 Err(e) => json!({ "ok": false, "error": e }),
             };
         }
@@ -663,7 +681,7 @@ pub fn recall_at(query: &str, limit: usize, namespace: Option<&str>, inline_embe
         ),
     };
     match libsql_wasm::query(&db_name, &sql) {
-        Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows, "project_path": project_path }),
+        Ok(rows) => { emit_recall(query, &rows, "vector_top_k", namespace); json!({ "ok": true, "mode": "vector_top_k", "rows": rows, "project_path": project_path }) }
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
