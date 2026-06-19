@@ -112,7 +112,7 @@ fn tree(input: &str, body: &Value) -> Value {
     let mut skipped_depth = 0usize;
     let mut skipped_cap = 0usize;
     for line in input.lines() {
-        let depth = line.chars().take_while(|c| matches!(c, ' ' | '│' | '├' | '└' | '─' | '|' | '`' | '-')).count() / 4;
+        let depth = line.chars().take_while(|c| matches!(c, ' ' | '\u{2502}' | '\u{251C}' | '\u{2514}' | '\u{2500}' | '|' | '`' | '-')).count() / 4;
         if depth > max_depth { skipped_depth += 1; continue; }
         if out_lines.len() >= max_lines { skipped_cap += 1; continue; }
         out_lines.push(line.trim_end().to_string());
@@ -260,7 +260,7 @@ fn log_dedup(input: &str, body: &Value) -> Value {
     for key in &order {
         if emitted >= max_lines { break; }
         let c = counts[key];
-        if c > 1 { out.push_str(&format!("[{}×] {}\n", c, key)); }
+        if c > 1 { out.push_str(&format!("[{}x] {}\n", c, key)); }
         else { out.push_str(&format!("{}\n", key)); }
         emitted += 1;
     }
@@ -293,7 +293,7 @@ fn normalize_log_line(line: &str) -> String {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max { s.to_string() }
-    else { format!("{}…", &s[..max.saturating_sub(1)]) }
+    else { format!("{}...", &s[..max.saturating_sub(3)]) }
 }
 
 fn pct_saved(input: usize, output: usize) -> u64 {

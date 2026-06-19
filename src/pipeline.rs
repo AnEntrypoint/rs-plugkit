@@ -194,7 +194,7 @@ fn mark_turn_pending(step_id: &str, deadline_ms: u64) -> Result<(), String> {
     st.pending_step_id = Some(step_id.to_string());
     st.pending_step_deadline_ms = Some(deadline_ms as u128);
     st.updated_at_ms = crate::orchestrator::state::now_ms();
-    crate::orchestrator::state::write_state(&st).map_err(|e| e.to_string())
+    crate::orchestrator::state::write_state(&st).map_err(|e| format!("write_state failed: {}", e))
 }
 
 fn clear_turn_pending() {

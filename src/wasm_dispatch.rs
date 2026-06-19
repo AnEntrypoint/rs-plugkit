@@ -747,7 +747,10 @@ pub fn route_hint(prompt: &str, estimated_tokens: u64) -> Value {
         if let Some(d) = resp2.get("data") { if !d.is_null() { return d.clone(); } }
     }
     let cfg = rs_learn::RouterConfig::new(384, ROUTER_MODELS.iter().map(|m| (*m).to_string()).collect());
-    let mut router = rs_learn::Router::new(cfg);
+    let mut router = match rs_learn::Router::new(cfg) {
+        Ok(r) => r,
+        Err(e) => return serde_json::json!({"ok": false, "error": e}),
+    };
     let mut ctx = rs_learn::RouteCtx::default();
     ctx.task_type = Some("code".into());
     ctx.estimated_tokens = estimated_tokens;
