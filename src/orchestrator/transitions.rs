@@ -28,7 +28,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
     let mut session_id: Option<String> = None;
     let target = if trimmed.is_empty() {
         let cur = read_state();
-        let cur_phase = Phase::parse(&cur.phase).unwrap_or(Phase::Plan);
+        let cur_phase = cur.phase;
         next_phase(cur_phase)
     } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
@@ -44,7 +44,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
             },
             None => {
                 let cur = read_state();
-                let cur_phase = Phase::parse(&cur.phase).unwrap_or(Phase::Plan);
+                let cur_phase = cur.phase;
                 next_phase(cur_phase)
             }
         }
@@ -173,10 +173,10 @@ pub fn handle(content: &str) -> (String, String, i32) {
                         .unwrap_or_default()
                 } else { String::new() }
             };
-            let combined = if query.is_empty() { s.phase.clone() } else { format!("{} {}", s.phase, query) };
+            let combined = if query.is_empty() { s.phase.as_str().to_string() } else { format!("{} {}", s.phase.as_str(), query) };
             let hits = recall::recall_hits(&combined, 3);
             let payload = serde_json::json!({
-                "phase": s.phase,
+                "phase": s.phase.as_str(),
                 "nextSkill": skill,
                 "recall_hits": hits,
             });

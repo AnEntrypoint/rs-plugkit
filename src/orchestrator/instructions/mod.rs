@@ -7,7 +7,7 @@ pub mod update_docs;
 pub mod browser;
 
 use serde_json::json;
-use super::state::read_state;
+use super::state::{read_state, Phase};
 use super::mutables;
 use super::prd;
 use super::recall;
@@ -247,18 +247,18 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
 
     let valid_phases = ["ENTRY", "ORCHESTRATOR", "PLAN", "EXECUTE", "EMIT", "VERIFY", "COMPLETE", "BROWSER"];
     let phase = match raw_phase_opt.as_deref() {
-        None => read_state().phase,
+        None => read_state().phase.as_str().to_string(),
         Some(p) => {
             let upper = p.trim().to_ascii_uppercase();
             if upper.is_empty() || valid_phases.contains(&upper.as_str()) {
-                if upper.is_empty() { read_state().phase } else { upper }
+                if upper.is_empty() { read_state().phase.as_str().to_string() } else { upper }
             } else {
                 ilog(&format!(
                     "instruction::handle invalid phase '{}' (len={}); falling back to disk state. Valid: PLAN|EXECUTE|EMIT|VERIFY|COMPLETE|BROWSER",
                     &p.chars().take(80).collect::<String>(),
                     p.len()
                 ));
-                read_state().phase
+                read_state().phase.as_str().to_string()
             }
         }
     };
@@ -287,7 +287,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         ilog(&format!("instruction::handle fresh prompt on stuck {} chain (no pending PRD) -> reset phase to PLAN", phase));
         phase = "PLAN".to_string();
         let mut st = read_state();
-        st.phase = "PLAN".to_string();
+        st.phase = Phase::Plan;
         let _ = super::state::write_state(&st);
     }
 
@@ -295,7 +295,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         if fresh_prompt {
             phase = "PLAN".to_string();
             let mut st = read_state();
-            st.phase = "PLAN".to_string();
+            st.phase = Phase::Plan;
             let _ = super::state::write_state(&st);
             ilog("instruction::handle fresh prompt on COMPLETE chain -> reset phase to PLAN");
         } else if prd_pending_count(&prd_items_json()) == 0 && session_id_opt.is_some() {

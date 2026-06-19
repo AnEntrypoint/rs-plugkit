@@ -4,10 +4,15 @@ use crate::pkfs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
+    #[serde(rename = "PLAN")]
     Plan,
+    #[serde(rename = "EXECUTE")]
     Execute,
+    #[serde(rename = "EMIT")]
     Emit,
+    #[serde(rename = "VERIFY")]
     Verify,
+    #[serde(rename = "COMPLETE")]
     Complete,
 }
 
@@ -36,7 +41,7 @@ impl Phase {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnState {
-    pub phase: String,
+    pub phase: Phase,
     pub session_id: Option<String>,
     pub last_skill: Option<String>,
     pub updated_at_ms: u128,
@@ -49,7 +54,7 @@ pub struct TurnState {
 impl Default for TurnState {
     fn default() -> Self {
         TurnState {
-            phase: "PLAN".to_string(),
+            phase: Phase::Plan,
             session_id: None,
             last_skill: None,
             updated_at_ms: now_ms(),
@@ -114,7 +119,7 @@ pub fn set_phase(phase: Phase, last_skill: Option<String>) -> Result<TurnState, 
 
 pub fn set_phase_with_session(phase: Phase, last_skill: Option<String>, session_id: Option<String>) -> Result<TurnState, std::io::Error> {
     let mut s = read_state();
-    s.phase = phase.as_str().to_string();
+    s.phase = phase;
     if last_skill.is_some() {
         s.last_skill = last_skill;
     }
