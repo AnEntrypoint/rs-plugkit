@@ -2,6 +2,7 @@
 
 use serde_json::{json, Value};
 use crate::wasm_dispatch::{host_read, host_exists, host_log};
+use serde_yaml;
 
 pub const TOPLEVEL_DOC_ALLOWLIST: &[&str] = &[
     "AGENTS.md", "CLAUDE.md", "README.md", "SKILLS.md", "CHANGELOG.md", "LICENSE", "LICENSE.md",
@@ -151,12 +152,36 @@ fn classify_operation(verb: &str, body: &Value) -> &'static str {
 
 fn prd_has_open_items() -> bool {
     let content = host_read(".gm/prd.yml").unwrap_or_default();
-    content.contains("status: pending") || content.contains("status: in_progress")
+    if content.is_empty() { return false; }
+    match serde_yaml::from_str::<serde_yaml::Value>(&content) {
+        Ok(serde_yaml::Value::Sequence(items)) => {
+            items.iter().any(|item| {
+                item.get("status")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s == "pending" || s == "in_progress")
+                    .unwrap_or(false)
+            })
+        }
+        Ok(_) => false,
+        Err(_) => content.contains("status: pending") || content.contains("status: in_progress"),
+    }
 }
 
 fn mutables_unresolved() -> bool {
     let content = host_read(".gm/mutables.yml").unwrap_or_default();
-    content.contains("status: unknown")
+    if content.is_empty() { return false; }
+    match serde_yaml::from_str::<serde_yaml::Value>(&content) {
+        Ok(serde_yaml::Value::Sequence(items)) => {
+            items.iter().any(|item| {
+                item.get("status")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s == "unknown")
+                    .unwrap_or(false)
+            })
+        }
+        Ok(_) => false,
+        Err(_) => content.contains("status: unknown"),
+    }
 }
 
 fn worktree_dirty() -> bool {

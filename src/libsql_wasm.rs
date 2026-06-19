@@ -140,6 +140,99 @@ pub fn query(name: &str, sql: &str) -> Result<Value, String> {
     })
 }
 
+pub fn exec_params(name: &str, sql: &str, params: &[&str]) -> Result<(), String> {
+    with_db(name, |db| {
+        let csql = CString::new(sql).map_err(|e| e.to_string())?;
+        let cparams: Vec<CString> = params.iter()
+            .map(|p| CString::new(*p).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
+        let rc = unsafe { ffi::sqlite3_prepare_v2(db, csql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
+        if rc != ffi::SQLITE_OK {
+            let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
+            return Err(format!("prepare rc={} msg={}", rc, msg));
+        }
+        for (i, cp) in cparams.iter().enumerate() {
+            let rc = unsafe {
+                ffi::sqlite3_bind_text(stmt, (i + 1) as i32, cp.as_ptr(), -1, None)
+            };
+            if rc != ffi::SQLITE_OK {
+                unsafe { ffi::sqlite3_finalize(stmt); }
+                return Err(format!("bind param {} rc={}", i, rc));
+            }
+        }
+        let step = unsafe { ffi::sqlite3_step(stmt) };
+        unsafe { ffi::sqlite3_finalize(stmt); }
+        if step != ffi::SQLITE_DONE && step != ffi::SQLITE_ROW {
+            let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
+            return Err(format!("step rc={} msg={}", step, msg));
+        }
+        Ok(())
+    })
+}
+
+pub fn query_params(name: &str, sql: &str, params: &[&str]) -> Result<Value, String> {
+    with_db(name, |db| {
+        let csql = CString::new(sql).map_err(|e| e.to_string())?;
+        let cparams: Vec<CString> = params.iter()
+            .map(|p| CString::new(*p).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
+        let rc = unsafe { ffi::sqlite3_prepare_v2(db, csql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
+        if rc != ffi::SQLITE_OK {
+            let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
+            return Err(format!("prepare rc={} msg={}", rc, msg));
+        }
+        for (i, cp) in cparams.iter().enumerate() {
+            let rc = unsafe {
+                ffi::sqlite3_bind_text(stmt, (i + 1) as i32, cp.as_ptr(), -1, None)
+            };
+            if rc != ffi::SQLITE_OK {
+                unsafe { ffi::sqlite3_finalize(stmt); }
+                return Err(format!("bind param {} rc={}", i, rc));
+            }
+        }
+        let ncols = unsafe { ffi::sqlite3_column_count(stmt) };
+        let mut col_names = Vec::with_capacity(ncols as usize);
+        for i in 0..ncols {
+            let nm = unsafe { CStr::from_ptr(ffi::sqlite3_column_name(stmt, i)).to_string_lossy().into_owned() };
+            col_names.push(nm);
+        }
+        let mut rows: Vec<Value> = Vec::new();
+        loop {
+            let step = unsafe { ffi::sqlite3_step(stmt) };
+            if step == ffi::SQLITE_DONE { break; }
+            if step != ffi::SQLITE_ROW {
+                let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
+                unsafe { ffi::sqlite3_finalize(stmt); }
+                return Err(format!("step rc={} msg={}", step, msg));
+            }
+            let mut row = serde_json::Map::new();
+            for i in 0..ncols {
+                let ctype = unsafe { ffi::sqlite3_column_type(stmt, i) };
+                let v = match ctype {
+                    ffi::SQLITE_INTEGER => Value::from(unsafe { ffi::sqlite3_column_int64(stmt, i) }),
+                    ffi::SQLITE_FLOAT => Value::from(unsafe { ffi::sqlite3_column_double(stmt, i) }),
+                    ffi::SQLITE_NULL => Value::Null,
+                    ffi::SQLITE_TEXT => {
+                        let p = unsafe { ffi::sqlite3_column_text(stmt, i) };
+                        if p.is_null() { Value::Null }
+                        else {
+                            let s = unsafe { CStr::from_ptr(p as *const _).to_string_lossy().into_owned() };
+                            Value::String(s)
+                        }
+                    }
+                    _ => Value::Null,
+                };
+                row.insert(col_names[i as usize].clone(), v);
+            }
+            rows.push(Value::Object(row));
+        }
+        unsafe { ffi::sqlite3_finalize(stmt); }
+        Ok(Value::Array(rows))
+    })
+}
+
 pub fn serialize(name: &str) -> Result<Vec<u8>, String> {
     with_db(name, |db| {
         let schema = CString::new("main").unwrap();
