@@ -581,7 +581,7 @@ fn close(body: &Value) -> u64 {
     if task_id == 0 { return err("close", "taskId required"); }
     let key = format!("{}", task_id);
     let rc = unsafe { host_kv_put("outbox".as_ptr(), 6, key.as_ptr(), key.len() as u32, "closed".as_ptr(), 6) };
-    if rc == 0 { ok("close", json!({ "taskId": task_id })) } else { err("close", "close failed") }
+    if rc != 0 { ok("close", json!({ "taskId": task_id })) } else { err("close", "close failed") }
 }
 
 fn kill_port(body: &Value) -> u64 {
