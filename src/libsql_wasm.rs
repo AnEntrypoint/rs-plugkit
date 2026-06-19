@@ -12,16 +12,9 @@ static DBS: Mutex<Option<HashMap<String, DbHandle>>> = Mutex::new(None);
 struct DbHandle(*mut ffi::sqlite3);
 unsafe impl Send for DbHandle {}
 
-fn dbs_init(guard: &mut std::sync::MutexGuard<'_, Option<HashMap<String, DbHandle>>>) {
-    if guard.is_none() {
-        **guard = Some(HashMap::new());
-    }
-}
-
 pub fn open(name: &str, path: &str) -> Result<(), String> {
     let mut guard = DBS.lock().map_err(|e| e.to_string())?;
-    dbs_init(&mut guard);
-    let map = guard.as_mut().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
     if map.contains_key(name) { return Ok(()); }
     let cpath = CString::new(path).map_err(|e| e.to_string())?;
     let mut db: *mut ffi::sqlite3 = ptr::null_mut();
