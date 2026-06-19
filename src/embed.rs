@@ -346,13 +346,8 @@ struct CacheEntry {
 
 static QUERY_CACHE: Mutex<Vec<CacheEntry>> = Mutex::new(Vec::new());
 
-#[link(wasm_import_module = "env")]
-extern "C" {
-    fn host_now_ms() -> i64;
-}
-
 fn now_ms() -> i64 {
-    unsafe { host_now_ms() }
+    unsafe { crate::wasm_dispatch::host_now_ms() as i64 }
 }
 
 fn query_cache_get(key: &str) -> Option<Vec<f32>> {
