@@ -581,7 +581,7 @@ fn close(body: &Value) -> u64 {
     if task_id == 0 { return err("close", "taskId required"); }
     let key = format!("{}", task_id);
     let rc = unsafe { host_kv_put("outbox".as_ptr(), 6, key.as_ptr(), key.len() as u32, "closed".as_ptr(), 6) };
-    if rc != 0 { ok("close", json!({ "taskId": task_id })) } else { err("close", "close failed") }
+    if rc == 0 { ok("close", json!({ "taskId": task_id })) } else { err("close", "close failed") }
 }
 
 fn kill_port(body: &Value) -> u64 {
@@ -600,9 +600,8 @@ fn forget(body: &Value) -> u64 {
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if key.is_empty() { return err("forget", "key required"); }
-    let tombstone = format!("__deleted__{}", unsafe { host_now_ms() });
-    let _ = unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, tombstone.as_ptr(), tombstone.len() as u32) };
-    ok("forget", json!({ "namespace": ns, "key": key }))
+    let rc = unsafe { host_kv_delete(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32) };
+    if rc == 0 { ok("forget", json!({ "namespace": ns, "key": key })) } else { err("forget", "delete failed") }
 }
 
 fn feedback(body: &Value) -> u64 {
@@ -612,7 +611,7 @@ fn feedback(body: &Value) -> u64 {
     let key = format!("fb-{}", request_id);
     let val = json!({ "requestId": request_id, "quality": quality, "ts": unsafe { host_now_ms() } }).to_string();
     let rc = unsafe { host_kv_put("feedback".as_ptr(), 8, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
-    if rc != 0 { ok("feedback", json!({ "requestId": request_id, "quality": quality })) } else { err("feedback", "store failed") }
+    if rc == 0 { ok("feedback", json!({ "requestId": request_id, "quality": quality })) } else { err("feedback", "store failed") }
 }
 
 fn kv_ns_count(n: &str) -> usize {
