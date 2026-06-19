@@ -80,27 +80,25 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn sql_quote(s: &str) -> String {
-    s.replace('\'', "''")
-}
-
 pub fn persist_state(step_id: &str, state: &Value, deadline_ms: u64, created_ms: u64) -> Result<(), String> {
     ensure_pipeline_schema()?;
     let state_s = state.to_string();
-    let sql = format!(
-        "INSERT OR REPLACE INTO pipeline_state(step_id, state, deadline_ms, created_ms) VALUES('{}','{}',{},{})",
-        sql_quote(step_id), sql_quote(&state_s), deadline_ms, created_ms
-    );
-    libsql_wasm::exec(GM_DB, &sql)
+    let dl = deadline_ms.to_string();
+    let cr = created_ms.to_string();
+    libsql_wasm::exec_params(
+        GM_DB,
+        "INSERT OR REPLACE INTO pipeline_state(step_id, state, deadline_ms, created_ms) VALUES(?1,?2,?3,?4)",
+        &[step_id, &state_s, &dl, &cr],
+    )
 }
 
 pub fn load_state(step_id: &str) -> Option<Value> {
     let _ = ensure_pipeline_schema();
-    let sql = format!(
-        "SELECT state, deadline_ms FROM pipeline_state WHERE step_id='{}'",
-        sql_quote(step_id)
-    );
-    let rows = libsql_wasm::query(GM_DB, &sql).ok()?;
+    let rows = libsql_wasm::query_params(
+        GM_DB,
+        "SELECT state, deadline_ms FROM pipeline_state WHERE step_id=?1",
+        &[step_id],
+    ).ok()?;
     let arr = rows.as_array()?;
     let row = arr.first()?;
     let state_s = row.get("state").and_then(|v| v.as_str())?;
@@ -108,8 +106,7 @@ pub fn load_state(step_id: &str) -> Option<Value> {
 }
 
 pub fn delete_state(step_id: &str) {
-    let sql = format!("DELETE FROM pipeline_state WHERE step_id='{}'", sql_quote(step_id));
-    let _ = libsql_wasm::exec(GM_DB, &sql);
+    let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM pipeline_state WHERE step_id=?1", &[step_id]);
 }
 
 pub fn evict_expired() {

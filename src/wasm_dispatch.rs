@@ -132,6 +132,10 @@ fn fs_write(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let data = body.get("data").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() { return err("fs_write", "path required"); }
+    let normalized = path.replace('\\', "/");
+    if normalized.contains("../") || normalized.starts_with('/') || normalized.contains(':') {
+        return err("fs_write", "path must be relative and within the project");
+    }
     if host_write(path, data) { ok("fs_write", json!({ "bytes": data.len() })) } else { err("fs_write", "write failed") }
 }
 
@@ -311,11 +315,16 @@ fn kv_get(body: &Value) -> u64 {
     }
 }
 
+const KV_PUT_ALLOWED_NAMESPACES: &[&str] = &["default", "session", "config", "cache", "user"];
+
 fn kv_put(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
     let val = body.get("value").and_then(|v| v.as_str()).unwrap_or("");
     if key.is_empty() { return err("kv_put", "key required"); }
+    if !KV_PUT_ALLOWED_NAMESPACES.contains(&ns) {
+        return err("kv_put", "namespace not permitted; allowed: default, session, config, cache, user");
+    }
     let rc = unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
     if rc != 0 { ok("kv_put", json!({"bytes": val.len()})) } else { err("kv_put", "put failed") }
 }
@@ -431,11 +440,15 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
         Some(e) => e,
         None => return err("memorize", "embed failed; refusing to write a text-only memory with no vector (un-vector-recallable orphan)"),
     };
-    let rc = unsafe { host_kv_put(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32, text.as_ptr(), text.len() as u32) };
-    if rc == 0 { return err("memorize", "kv_put failed"); }
     let vec_ns = format!("{}-vec", namespace);
     let emb_str = emb.to_string();
-    let _ = unsafe { host_kv_put(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32, emb_str.as_ptr(), emb_str.len() as u32) };
+    let vec_rc = unsafe { host_kv_put(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32, emb_str.as_ptr(), emb_str.len() as u32) };
+    if vec_rc == 0 { return err("memorize", "vec kv_put failed; aborting to prevent orphaned text-only memory"); }
+    let rc = unsafe { host_kv_put(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32, text.as_ptr(), text.len() as u32) };
+    if rc == 0 {
+        let _ = unsafe { host_kv_put(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32, "".as_ptr(), 0) };
+        return err("memorize", "text kv_put failed; rolled back vec entry");
+    }
     ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true}))
 }
 
@@ -587,12 +600,23 @@ fn close(body: &Value) -> u64 {
 fn kill_port(body: &Value) -> u64 {
     let port = body.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
     if port == 0 { return err("kill-port", "port required"); }
-    let code = format!("(function(){{ try{{ const p={}; return JSON.stringify({{ok:true,port:p}}); }}catch(e){{ return JSON.stringify({{ok:false,error:e.message}}); }} }})()", port);
-    let opts = "{}";
+    let timeout_ms = body.get("timeoutMs").and_then(|v| v.as_u64()).unwrap_or(5000);
+    let code = format!(
+        "(function(){{try{{require('child_process').execSync('npx kill-port {}',{{timeout:{}}});return JSON.stringify({{ok:true,port:{}}});}}catch(e){{return JSON.stringify({{ok:false,port:{},error:e.message}});}}}})();",
+        port, timeout_ms, port, port
+    );
+    let opts = format!("{{\"timeoutMs\":{}}}", timeout_ms + 1000);
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
-        Some(s) => ok("kill-port", serde_json::from_str(&s).unwrap_or(Value::String(s))),
-        None => ok("kill-port", json!({ "port": port, "note": "port kill emulated via exec_js" })),
+        Some(s) => {
+            let v: Value = serde_json::from_str(&s).unwrap_or(json!({"ok": false, "error": "parse failure"}));
+            if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+                ok("kill-port", v)
+            } else {
+                err("kill-port", v.get("error").and_then(|x| x.as_str()).unwrap_or("kill failed"))
+            }
+        }
+        None => err("kill-port", "exec_js returned no output"),
     }
 }
 
