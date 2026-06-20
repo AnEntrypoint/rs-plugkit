@@ -104,7 +104,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
                 return (
                     String::new(),
                     format!(
-                        "transition to COMPLETE rejected: four-observation gate not satisfied — worktree-clean={} remote-pushed={} (branch={} ahead={} behind={}) prd-empty={} mutables-witnessed={}. All four must hold simultaneously per VERIFY convergence.",
+                        "transition to COMPLETE rejected: four-observation gate not satisfied -- worktree-clean={} remote-pushed={} (branch={} ahead={} behind={}) prd-empty={} mutables-witnessed={}. All four must hold simultaneously per VERIFY convergence.",
                         worktree_clean, remote_pushed, branch, ahead, behind, prd_empty, mutables_witnessed
                     ),
                     1,
@@ -119,7 +119,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
             return (
                 String::new(),
                 format!(
-                    "transition to COMPLETE rejected: {} mutables still pending — resolve them with witness_evidence before transitioning. Pending: {}",
+                    "transition to COMPLETE rejected: {} mutables still pending -- resolve them with witness_evidence before transitioning. Pending: {}",
                     pending_muts.len(),
                     ids.join(", ")
                 ),
@@ -141,7 +141,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
                         return (
                             String::new(),
                             format!(
-                                "transition to COMPLETE rejected: {} PRD items still pending — execute or remove them before transitioning. Pending: {}",
+                                "transition to COMPLETE rejected: {} PRD items still pending -- execute or remove them before transitioning. Pending: {}",
                                 pending_prd.len(),
                                 pending_prd.join(", ")
                             ),

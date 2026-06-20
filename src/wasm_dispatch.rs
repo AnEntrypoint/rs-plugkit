@@ -478,7 +478,7 @@ fn memorize_prune(body: &Value) -> u64 {
         let mut resp = json!({"namespace": namespace, "deleted": deleted, "mode": "explicit-key"});
         if !not_found.is_empty() {
             resp["not_found"] = json!(not_found);
-            resp["note"] = json!("Keys in not_found did not exist in this namespace — nothing was pruned for them. The key is likely under a different namespace (pass {namespace:<the recall hit's namespace>}) or the key string did not match exactly. Re-run memorize-prune {query} to get live candidates with their exact keys + namespaces.");
+            resp["note"] = json!("Keys in not_found did not exist in this namespace -- nothing was pruned for them. The key is likely under a different namespace (pass {namespace:<the recall hit's namespace>}) or the key string did not match exactly. Re-run memorize-prune {query} to get live candidates with their exact keys + namespaces.");
         }
         return ok("memorize-prune", resp);
     }
@@ -692,7 +692,7 @@ fn learn_debug(_body: &Value) -> u64 {
 }
 
 fn learn_build(_body: &Value) -> u64 {
-    ok("learn-build", json!({ "note": "WASM build uses thebird host bindings — no separate build step" }))
+    ok("learn-build", json!({ "note": "WASM build uses thebird host bindings -- no separate build step" }))
 }
 
 pub struct PlugkitKv;
@@ -1178,11 +1178,11 @@ fn git_push(body: &Value) -> u64 {
             "branch": branch,
             "porcelain": porcelain_preview.clone() + &more,
             "reason": format!(
-                "worktree dirty in {} — commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice. Porcelain:\n{}{}",
+                "worktree dirty in {} -- commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice. Porcelain:\n{}{}",
                 repo.as_deref().unwrap_or("cwd"), branch, porcelain_preview, more
             ),
             "next_dispatch": "instruction",
-            "next_action_hint": "Read porcelain field, decide stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. Do NOT retry git_push with the same dirty tree — the gate will deny again.",
+            "next_action_hint": "Read porcelain field, decide stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. Do NOT retry git_push with the same dirty tree -- the gate will deny again.",
         }).to_string());
     }
     let mut push_out = exec_git_push_in(repo.as_deref(), &branch);
@@ -1201,7 +1201,7 @@ fn git_push(body: &Value) -> u64 {
                 "repo": repo,
                 "branch": branch,
                 "reason": format!(
-                    "push rejected (remote moved); pull --rebase origin {} conflicted and was aborted — worktree could not be cleanly replayed onto origin. Resolve manually. Rebase output:\n{}",
+                    "push rejected (remote moved); pull --rebase origin {} conflicted and was aborted -- worktree could not be cleanly replayed onto origin. Resolve manually. Rebase output:\n{}",
                     branch, rebase_out
                 ),
                 "next_dispatch": "instruction",
@@ -1219,7 +1219,7 @@ fn git_push(body: &Value) -> u64 {
             "repo": repo,
             "branch": branch,
             "reason": format!(
-                "push to {} rejected after {} rebase-retries — remote is moving faster than the push can land. Re-dispatch git_push after the remote settles. Last output:\n{}",
+                "push to {} rejected after {} rebase-retries -- remote is moving faster than the push can land. Re-dispatch git_push after the remote settles. Last output:\n{}",
                 branch, attempts, push_out
             ),
             "next_dispatch": "instruction",
@@ -1296,7 +1296,7 @@ fn git_finalize(body: &Value) -> u64 {
     let dirty = !git_porcelain_in(cwd_ref).trim().is_empty();
     if dirty {
         if message.is_empty() {
-            return err("git_finalize", "worktree dirty but no commit message provided — pass {message}");
+            return err("git_finalize", "worktree dirty but no commit message provided -- pass {message}");
         }
         let _ = git_call_argv(&["add", "-A"], cwd_ref);
         let cr = git_call_argv(&["commit", "-m", message.as_str()], cwd_ref);
@@ -1329,7 +1329,7 @@ fn git_finalize(body: &Value) -> u64 {
 
     let leftover = git_porcelain_in(cwd_ref);
     if !leftover.trim().is_empty() {
-        return err("git_finalize", &format!("worktree still dirty after commit (untriaged residual) — refusing push. Porcelain:\n{}", leftover.lines().take(8).collect::<Vec<_>>().join("\n")));
+        return err("git_finalize", &format!("worktree still dirty after commit (untriaged residual) -- refusing push. Porcelain:\n{}", leftover.lines().take(8).collect::<Vec<_>>().join("\n")));
     }
 
     let push_resp_packed = git_push(body);
@@ -1344,7 +1344,7 @@ fn git_finalize(body: &Value) -> u64 {
             "sha": sha,
             "steps": steps,
             "push_result": push_resp,
-            "reason": "commit landed (or nothing to commit) but push was refused — read push_result.reason",
+            "reason": "commit landed (or nothing to commit) but push was refused -- read push_result.reason",
             "next_dispatch": "instruction",
         }).to_string());
     }
