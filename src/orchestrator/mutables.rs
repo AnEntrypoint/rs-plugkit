@@ -244,7 +244,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             String::from(" (no mutables in file)")
         } else {
             let near: Vec<String> = candidates.iter().take(3).map(|c| c.0.clone()).collect();
-            format!(" — did you mean one of: {}", near.join(", "))
+            format!(" -- did you mean one of: {}", near.join(", "))
         };
         return (String::new(), format!("mutable id not found: {}{}", trimmed, hint), 1);
     }

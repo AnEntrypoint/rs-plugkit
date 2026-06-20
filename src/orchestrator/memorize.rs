@@ -95,7 +95,7 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             "text_prefix": prefix,
             "namespace": namespace,
         }));
-        return (String::new(), format!("rejected: {} — memo not stored", reason), 1);
+        return (String::new(), format!("rejected: {} -- memo not stored", reason), 1);
     }
     let now = unsafe { crate::wasm_dispatch::host_now_ms() };
     static HANDLE_FIRE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

@@ -122,7 +122,7 @@ mod wasm_hooks {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
-                    "permissionDecisionReason": "HARD CONSTRAINT: dispatch the gm-skill instruction verb before any other tool. Write .gm/exec-spool/in/instruction/<N>.txt with {\"prompt\":\"<request>\"} and read the response. This is the portable gate — it works identically on every agent because it depends only on the spool, not on any tool-specific invocation form."
+                    "permissionDecisionReason": "HARD CONSTRAINT: dispatch the gm-skill instruction verb before any other tool. Write .gm/exec-spool/in/instruction/<N>.txt with {\"prompt\":\"<request>\"} and read the response. This is the portable gate -- it works identically on every agent because it depends only on the spool, not on any tool-specific invocation form."
                 }
             });
         }
@@ -186,7 +186,7 @@ mod wasm_hooks {
             t == "status: pending" || t == "status: open" || t == "status: in_progress"
         }).count();
         if open_count > 0 {
-            ctx.push_str(&format!("\n{} open PRD item(s) — finish what's already planned before adding new scope.\n", open_count));
+            ctx.push_str(&format!("\n{} open PRD item(s) -- finish what's already planned before adding new scope.\n", open_count));
         }
         json!({
             "hookSpecificOutput": {
@@ -198,7 +198,7 @@ mod wasm_hooks {
 
     pub fn pre_compact(_input: &Value) -> Value {
         write_marker("needs-gm");
-        let policy = "=== RESPONSE POLICY — ALWAYS ACTIVE (post-compact reinforcement) ===\n\nTerse. Drop filler. Pattern: [thing] [action] [reason]. [next step].\n\n=== POST-COMPACT FIRST RESPONSE — HARD RULE ===\n\nThe very next response after this compaction invokes the gm-skill and dispatches the instruction verb as the FIRST action.";
+        let policy = "=== RESPONSE POLICY -- ALWAYS ACTIVE (post-compact reinforcement) ===\n\nTerse. Drop filler. Pattern: [thing] [action] [reason]. [next step].\n\n=== POST-COMPACT FIRST RESPONSE -- HARD RULE ===\n\nThe very next response after this compaction invokes the gm-skill and dispatches the instruction verb as the FIRST action.";
         json!({ "systemMessage": policy })
     }
 
