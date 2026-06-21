@@ -163,7 +163,7 @@ fn prd_has_open_items() -> bool {
             })
         }
         Ok(_) => false,
-        Err(_) => content.contains("status: pending") || content.contains("status: in_progress"),
+        Err(_) => true,
     }
 }
 
@@ -180,7 +180,7 @@ fn mutables_unresolved() -> bool {
             })
         }
         Ok(_) => false,
-        Err(_) => content.contains("status: unknown"),
+        Err(_) => true,
     }
 }
 

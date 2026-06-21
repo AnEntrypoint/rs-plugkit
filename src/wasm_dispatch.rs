@@ -40,7 +40,15 @@ pub fn git_call(args: &str, cwd: Option<&str>) -> Value {
 }
 
 pub fn git_porcelain() -> String {
-    let v = git_call("status --porcelain", None);
+    porcelain_or_dirty(git_call("status --porcelain", None))
+}
+
+fn porcelain_or_dirty(v: Value) -> String {
+    let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
+    let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if !ok || exit_code != 0 {
+        return "?? git-status-failed".to_string();
+    }
     v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
@@ -1515,7 +1523,7 @@ fn exec_git_in(repo: Option<&str>, args: &str) -> String {
 }
 
 fn git_porcelain_in(repo: Option<&str>) -> String {
-    exec_git_in(repo, "status --porcelain")
+    porcelain_or_dirty(git_call("status --porcelain", repo))
 }
 
 fn exec_git_push_in(repo: Option<&str>, branch: &str) -> String {
