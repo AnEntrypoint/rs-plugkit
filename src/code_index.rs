@@ -390,10 +390,13 @@ fn write_chunk(libsql_ok: bool, fp: &str, c: &ChunkRecord) {
     if libsql_ok {
         let embedding_sql = format!("vector('{}')", vec_to_json_literal(&c.emb));
         let sql = format!(
-            "INSERT INTO code_chunks(path, kind, name, line_start, line_end, body, embedding) VALUES('{}','{}','{}',{},{},'{}',{})",
-            sql_quote(fp), sql_quote(&c.kind), sql_quote(&c.name), c.ls, c.le, sql_quote(&c.body[..c.body.len().min(8192)]), embedding_sql
+            "INSERT INTO code_chunks(path, kind, name, line_start, line_end, body, embedding) VALUES(?1,?2,?3,?4,?5,?6,{})",
+            embedding_sql
         );
-        let _ = libsql_wasm::exec(GM_DB, &sql);
+        let ls = c.ls.to_string();
+        let le = c.le.to_string();
+        let body = &c.body[..c.body.len().min(8192)];
+        let _ = libsql_wasm::exec_params(GM_DB, &sql, &[fp, &c.kind, &c.name, &ls, &le, body]);
     }
     fv_put("codeinsight", &c.key, &c.text);
     let emb_json = serde_json::json!({ "embedding": c.emb }).to_string();
@@ -620,11 +623,12 @@ pub fn memorize_at_finalize(embed_source: &str, stored_text: &str, namespace: &s
         }
     };
     let embedding_sql = format!("vector('{}')", vec_to_json_literal(&v));
+    let ts = unsafe { crate::wasm_dispatch::host_now_ms() }.to_string();
     let sql = format!(
-        "INSERT INTO memories(namespace, text, ts, embedding) VALUES('{}','{}',{},{})",
-        sql_quote(namespace), sql_quote(stored_text), unsafe { crate::wasm_dispatch::host_now_ms() }, embedding_sql
+        "INSERT INTO memories(namespace, text, ts, embedding) VALUES(?1,?2,?3,{})",
+        embedding_sql
     );
-    match libsql_wasm::exec(&db_name, &sql) {
+    match libsql_wasm::exec_params(&db_name, &sql, &[namespace, stored_text, &ts]) {
         Ok(()) => json!({ "ok": true, "memorized": true, "embedded": true, "inline": inline_embedding.is_some(), "project_path": project_path }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
