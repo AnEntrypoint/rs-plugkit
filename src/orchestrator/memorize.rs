@@ -131,12 +131,10 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     let emb_str = match crate::embed::embed_text_json(&text) {
         Some(v) => v.to_string(),
         None => {
-            let tombstone = format!("__deleted__{}", now);
             let _ = unsafe {
-                crate::wasm_dispatch::host_kv_put(
+                crate::wasm_dispatch::host_kv_delete(
                     namespace.as_ptr(), namespace.len() as u32,
                     key.as_ptr(), key.len() as u32,
-                    tombstone.as_ptr(), tombstone.len() as u32,
                 )
             };
             let msg = format!("memorize: embed_text failed for key={}; rolled back text row; refusing silent-NULL-embedding insert", key);
@@ -158,12 +156,10 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         )
     };
     if vrc == 0 {
-        let tombstone = format!("__deleted__{}", now);
         let _ = unsafe {
-            crate::wasm_dispatch::host_kv_put(
+            crate::wasm_dispatch::host_kv_delete(
                 namespace.as_ptr(), namespace.len() as u32,
                 key.as_ptr(), key.len() as u32,
-                tombstone.as_ptr(), tombstone.len() as u32,
             )
         };
         let msg = format!("memorize: vector kv_put failed for key={}; rolled back text row", key);
