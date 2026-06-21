@@ -36,7 +36,7 @@ fn hmac_key() -> String {
     HMAC_KEY_DEFAULT.to_string()
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut h: u64 = 1469598103934665603;
     for b in bytes {
         h ^= *b as u64;

@@ -98,9 +98,26 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         return (String::new(), format!("rejected: {} -- memo not stored", reason), 1);
     }
     let now = unsafe { crate::wasm_dispatch::host_now_ms() };
-    static HANDLE_FIRE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let counter = HANDLE_FIRE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let key = format!("mem-{}-{}-{}", now, counter, text.len());
+    let content_hash = crate::pipeline::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
+    let key = format!("mem-{:016x}-{}", content_hash, text.len());
+    if let Some(existing) = crate::wasm_dispatch::host_kv_read(&namespace, &key) {
+        if existing == text {
+            crate::wasm_dispatch::emit_event("memorize_deduped", serde_json::json!({
+                "key": key,
+                "namespace": namespace,
+            }));
+            let payload = serde_json::json!({
+                "ok": true,
+                "key": key,
+                "namespace": namespace,
+                "embedded": true,
+                "deduped": true,
+                "bytes": text.len(),
+                "agents_drain": agents_drain_obligation(),
+            });
+            return (payload.to_string(), String::new(), 0);
+        }
+    }
     let rc = unsafe {
         crate::wasm_dispatch::host_kv_put(
             namespace.as_ptr(), namespace.len() as u32,
