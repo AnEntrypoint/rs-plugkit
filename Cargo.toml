@@ -1,6 +1,6 @@
 [package]
 name = "rs-plugkit"
-version = "0.1.689"
+version = "0.1.690"
 edition = "2021"
 
 [lib]
