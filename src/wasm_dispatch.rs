@@ -1,10 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static MEMORIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 #[link(wasm_import_module = "env")]
 extern "C" {
     pub fn host_fs_read(path_ptr: *const u8, path_len: u32) -> u64;
@@ -441,9 +437,13 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
     if text.is_empty() { return err("memorize", "text required"); }
     let text = text.as_str();
     check_sigil_ignored(text, namespace);
-    let now = unsafe { host_now_ms() };
-    let counter = MEMORIZE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let key = format!("mem-{}-{}-{}", now, counter, text.len());
+    let content_hash = crate::pipeline::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
+    let key = format!("mem-{:016x}-{}", content_hash, text.len());
+    if let Some(existing) = host_kv_read(namespace, &key) {
+        if existing == text {
+            return ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true, "deduped": true}));
+        }
+    }
     let emb = match crate::embed::embed_text_json(text) {
         Some(e) => e,
         None => return err("memorize", "embed failed; refusing to write a text-only memory with no vector (un-vector-recallable orphan)"),
