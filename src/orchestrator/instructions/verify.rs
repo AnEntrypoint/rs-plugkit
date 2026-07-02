@@ -18,6 +18,21 @@ The `git_push` verb is the only admissible push surface, any repo, any cwd; it r
 
 Verification is thinking run rather than reasoned: the question "is this correct?" is not argued in prose, it is executed -- the real test, the real matrix, the real page answer it. The push IS the validation dispatch. Local proof covers one platform; the matrix covers all. Red = a divergent observation that holds the trajectory until you name the cause and push green; toolchain skew is an observation to converge, not stop.
 
+## Adversarial corner-case sweep (hard rule)
+
+VERIFY is adversarial, not confirmatory: hunt for every way what EMIT just wrote breaks, via real `exec_js`/`browser` execution against it -- never prose reasoning about correctness. Enumerated checklist, each class gets its own exec_js/browser dispatch witnessing the outcome (pass or found-and-fixed) before you transition onward; skipping a reachable class is an unswept surface, not an implicit pass:
+
+- **empty/overflow/reentry**: zero-length input, max-size/overflow input, calling the same op while it is mid-flight (reentrant call).
+- **concurrency/races**: two writers on the same surface, interleaved ordering, TOCTOU windows (check-then-act where atomic was required).
+- **partial failure**: crash/kill mid-operation, one step of a multi-step write succeeding while the next fails, network/IO cut mid-call.
+- **degenerate input**: null/undefined, wrong type, malformed encoding, boundary-adjacent-but-invalid values.
+- **boundary conditions**: off-by-one, exact-limit values (0, 1, max, max+1), first/last element of a collection.
+- **injection**: untrusted input reaching a shell/query/eval/template-render surface unescaped.
+- **resource exhaustion**: unbounded loop/recursion, unclosed handle/session, memory growth under repeated calls.
+- **adjacent-row interaction**: does this row's change break an already-landed sibling row's invariant -- exercise the interaction, not just each row solo.
+
+Each class exercised = an exec_js/browser dispatch + witness (pass or fix-then-rewitness), same turn, before `transition`. A VERIFY that only re-ran the happy path has not verified.
+
 ## Integration witness
 
 Write `test.js` at root, 200-line ceiling, real services only (mock-free) -- this single witness IS the test surface, proving a full real session end-to-end. It is not one gate beside a conventional unit suite: a growing mock-heavy multi-file `test/` directory is the pattern gm replaces, never a coexisting exemption, and `test.js` being capped does not bless a parallel suite. More than the single real-services witness is a re-scope to justify, not a default. Pass = integration witness; on fail `transition` back to EXECUTE. A `recursive` classifier means the cover is incomplete -- snake back, do not narrate past signal.
@@ -55,6 +70,10 @@ The chain enters COMPLETE only when your `transition` returns COMPLETE phase; th
 rs-learn never calls a model; it emits the need and you supply the answer. Skipping the self-report leaves the cores untrained.
 
 **No summary, no prose-only turn here.** A summary, recap, announced-but-undispatched next move, or any tool-less message IS a stop -- VERIFY is where the temptation peaks. Until this surface returns phase=COMPLETE after your `transition`, every turn ends in a verb (`phase-status`, `residual-scan`, the push verbs, `instruction`, `transition`). Catching yourself composing a summary IS the drift signal -> dispatch `phase-status` instead.
+
+## Constraints
+
+Gauge every design/code decision against `.gm/constraints.md` (create from bundled default if absent) -- the standing decision-arbiter, checked at every phase.
 
 ## Dispatch
 

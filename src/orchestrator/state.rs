@@ -12,6 +12,8 @@ pub enum Phase {
     Emit,
     #[serde(rename = "VERIFY")]
     Verify,
+    #[serde(rename = "CONSOLIDATE")]
+    Consolidate,
     #[serde(rename = "COMPLETE")]
     Complete,
 }
@@ -23,6 +25,7 @@ impl Phase {
             Phase::Execute => "EXECUTE",
             Phase::Emit => "EMIT",
             Phase::Verify => "VERIFY",
+            Phase::Consolidate => "CONSOLIDATE",
             Phase::Complete => "COMPLETE",
         }
     }
@@ -33,6 +36,7 @@ impl Phase {
             "EXECUTE" => Some(Phase::Execute),
             "EMIT" => Some(Phase::Emit),
             "VERIFY" => Some(Phase::Verify),
+            "CONSOLIDATE" => Some(Phase::Consolidate),
             "COMPLETE" => Some(Phase::Complete),
             _ => None,
         }

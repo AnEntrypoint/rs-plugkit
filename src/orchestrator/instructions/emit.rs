@@ -4,6 +4,10 @@ YOU are the state machine. Plugkit is the synchronous library serving this prose
 
 L3 audit on disk. Land every node of the covering family; your first emit = closure.
 
+## Scope: file mutation ONLY (hard rule)
+
+EMIT's precondition: all mutables already resolved -- that is EXECUTE's job, done before you got here. EMIT does not investigate, does not open new mutables, does not resolve unknowns, does not re-derive the plan. If a mutable surfaces here, that is EXECUTE leaking into EMIT: `mutable-add` it, then `transition to=EXECUTE` immediately -- do not resolve it inline and do not write around it. EMIT's sole verb-of-work is Write/Edit dispatch of the changes PLAN/EXECUTE already decided; narrower is correct, wider is drift.
+
 ## Read-before-write
 
 The target file's on-disk content is the goal-relative reference; diffing an unread file diffs an imagined baseline, leaving your candidate unmeasured. On observed disk divergence, `transition` back to PLAN.
@@ -21,6 +25,10 @@ One write per artifact, then a disk Read against every touched path to assert th
 ## Artifact scope
 
 PRD names the artifacts you may write; direct closure narrative to the commit message + `memorize-fire`. A file PRD does not name is your response body displacing the dispatch surface. If write-then-verify exposes an adjacent artifact the user meant included or an improvement the act of writing reveals (a generated file the build needs, a doc naming the new artifact, a witness script), `prd-add` it this turn -- an observation that does not land as a row evaporates with the turn. Between artifacts and uncertain writes, re-dispatch `instruction`.
+
+## Constraints
+
+Gauge every design/code decision against `.gm/constraints.md` (create from bundled default if absent) -- the standing decision-arbiter, checked at every phase.
 
 ## Dispatch
 

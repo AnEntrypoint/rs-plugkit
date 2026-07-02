@@ -144,6 +144,9 @@ fn classify_operation(verb: &str, body: &Value) -> &'static str {
             if to.eq_ignore_ascii_case("complete") || to.eq_ignore_ascii_case("stop") {
                 return "complete";
             }
+            if to.eq_ignore_ascii_case("consolidate") {
+                return "consolidate";
+            }
         }
     }
     if verb == "fs_write" { return "write"; }
@@ -324,12 +327,39 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
 
     let operation = classify_operation(verb, body);
 
+    if operation == "consolidate" {
+        let mut residuals: Vec<String> = vec![];
+        let mut next_recovery: Option<&str> = None;
+        if host_exists(".gm/prd.yml") && prd_has_open_items() {
+            residuals.push("PRD has open items - resolve (prd-resolve with witness_evidence) before CONSOLIDATE".into());
+            next_recovery.get_or_insert("prd-resolve");
+        }
+        if host_exists(".gm/mutables.yml") && mutables_unresolved() {
+            residuals.push("unresolved mutables present - resolve with witness_evidence before CONSOLIDATE".into());
+            next_recovery.get_or_insert("mutable-resolve");
+        }
+        if !host_exists(".gm/residual-check-fired") {
+            residuals.push("residual-scan not fired in this stop window - dispatch residual-scan before CONSOLIDATE".into());
+            log_deviation("consolidate-without-residual-scan", "");
+            next_recovery.get_or_insert("residual-scan");
+        }
+        if !residuals.is_empty() {
+            log_deviation("gate-deny", &format!("consolidate-gate residuals={}", residuals.len()));
+            let mut v = GateVerdict::deny(format!("consolidate-gate residuals: {}", residuals.join("; ")));
+            v.residuals = residuals;
+            if let Some(n) = next_recovery { v.next_dispatch = Some(n.to_string()); }
+            return v;
+        }
+    }
+
     if operation == "complete" {
         let mut residuals: Vec<String> = vec![];
         // The recovery verb is the FIRST blocker in dependency order (resolve the work, then commit,
         // then re-scan): open PRD -> prd-resolve, mutables -> mutable-resolve, dirty -> git_finalize,
-        // missing residual-scan -> residual-scan, client-edit -> browser. A concurrent/weak agent that
-        // keys on next_dispatch then recovers in one mechanical step instead of looping on the gate.
+        // missing residual-scan -> residual-scan, client-edit -> browser, missing CI witness -> the
+        // CI-validating verb. A concurrent/weak agent that keys on next_dispatch then recovers in one
+        // mechanical step instead of looping on the gate. PRD/mutables/residual are re-checked here as
+        // defense-in-depth even though CONSOLIDATE's own gate already required them.
         let mut next_recovery: Option<&str> = None;
         if host_exists(".gm/prd.yml") && prd_has_open_items() {
             residuals.push("PRD has open items - resolve (prd-resolve with witness_evidence) or name-and-stop before declaring done".into());
@@ -348,6 +378,11 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             residuals.push("residual-scan not fired in this stop window - dispatch residual-scan before COMPLETE".into());
             log_deviation("complete-without-residual-scan", "");
             next_recovery.get_or_insert("residual-scan");
+        }
+        if !host_exists(".gm/exec-spool/.ci-validated") {
+            residuals.push("CI/CD validation not witnessed - .gm/exec-spool/.ci-validated marker missing; CONSOLIDATE's CI-check verb must write it fresh before COMPLETE".into());
+            log_deviation("complete-without-ci-validation", "");
+            next_recovery.get_or_insert("instruction");
         }
         let bw_check = check_browser_witness_coverage();
         if !bw_check.is_empty() {

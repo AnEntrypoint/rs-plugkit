@@ -8,7 +8,8 @@ pub fn next_skill(current: Phase) -> &'static str {
         Phase::Plan => "gm-execute",
         Phase::Execute => "gm-emit",
         Phase::Emit => "gm-verify",
-        Phase::Verify => "gm-complete",
+        Phase::Verify => "gm-consolidate",
+        Phase::Consolidate => "gm-complete",
         Phase::Complete => "update-docs",
     }
 }
@@ -18,7 +19,8 @@ pub fn next_phase(current: Phase) -> Phase {
         Phase::Plan => Phase::Execute,
         Phase::Execute => Phase::Emit,
         Phase::Emit => Phase::Verify,
-        Phase::Verify => Phase::Complete,
+        Phase::Verify => Phase::Consolidate,
+        Phase::Consolidate => Phase::Complete,
         Phase::Complete => Phase::Complete,
     }
 }
@@ -55,9 +57,75 @@ pub fn handle(content: &str) -> (String, String, i32) {
         }
     };
 
+    if matches!(target, Phase::Consolidate) {
+        let pending_muts = mutables::pending_detailed();
+        if !pending_muts.is_empty() {
+            let ids: Vec<String> = pending_muts.iter()
+                .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
+                .collect();
+            return (
+                String::new(),
+                format!(
+                    "transition to CONSOLIDATE rejected: {} mutables still pending -- resolve them with witness_evidence before transitioning. Pending: {}",
+                    pending_muts.len(),
+                    ids.join(", ")
+                ),
+                1,
+            );
+        }
+        let (body, _err, code) = prd::handle_list("");
+        if code == 0 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                if let Some(items) = v.get("items").and_then(|v| v.as_array()) {
+                    let pending_prd: Vec<String> = items.iter()
+                        .filter(|it| {
+                            let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+                            status != "done" && status != "complete" && status != "completed"
+                        })
+                        .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
+                        .collect();
+                    if !pending_prd.is_empty() {
+                        return (
+                            String::new(),
+                            format!(
+                                "transition to CONSOLIDATE rejected: {} PRD items still pending -- execute or remove them before transitioning. Pending: {}",
+                                pending_prd.len(),
+                                pending_prd.join(", ")
+                            ),
+                            1,
+                        );
+                    }
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let residual_marker = super::gm_dir().join("residual-check-fired");
+            let residual_ps = residual_marker.to_string_lossy().to_string();
+            if !crate::pkfs::exists(&residual_ps) {
+                return (
+                    String::new(),
+                    "transition to CONSOLIDATE rejected: residual-scan not fired in this stop window -- dispatch `residual-scan` before CONSOLIDATE.".to_string(),
+                    1,
+                );
+            }
+        }
+    }
+
     if matches!(target, Phase::Complete) {
         #[cfg(target_arch = "wasm32")]
         {
+            let cur = read_state();
+            if cur.phase != Phase::Consolidate {
+                return (
+                    String::new(),
+                    format!(
+                        "transition to COMPLETE rejected: current phase is {}, not CONSOLIDATE -- CONSOLIDATE is the mandatory git-consolidation + CI/CD-validation phase between VERIFY and COMPLETE; transition to CONSOLIDATE first.",
+                        cur.phase.as_str()
+                    ),
+                    1,
+                );
+            }
             let porcelain = crate::wasm_dispatch::git_porcelain();
             let worktree_clean = porcelain.trim().is_empty();
             let (ahead, behind, branch) = {
@@ -76,36 +144,15 @@ pub fn handle(content: &str) -> (String, String, i32) {
                 (a, b, branch)
             };
             let remote_pushed = ahead == 0;
-            let prd_empty = {
-                let prd_path = super::gm_dir().join("prd.yml");
-                let prd_ps = prd_path.to_string_lossy().to_string();
-                let file_empty_or_missing = !crate::pkfs::exists(&prd_ps)
-                    || crate::pkfs::read_to_string(&prd_ps)
-                        .map(|c| c.trim().is_empty())
-                        .unwrap_or(true);
-                if file_empty_or_missing {
-                    true
-                } else {
-                    let (b, _e, c) = prd::handle_list("");
-                    if c != 0 { false } else {
-                        serde_json::from_str::<serde_json::Value>(&b).ok()
-                            .and_then(|v| v.get("items").cloned())
-                            .and_then(|v| v.as_array().cloned())
-                            .map(|arr| arr.iter().all(|it| {
-                                let s = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                                s == "done" || s == "complete" || s == "completed"
-                            }))
-                            .unwrap_or(true)
-                    }
-                }
-            };
-            let mutables_witnessed = mutables::pending_detailed().is_empty();
-            if !(worktree_clean && remote_pushed && prd_empty && mutables_witnessed) {
+            let ci_marker = super::gm_dir().join("exec-spool").join(".ci-validated");
+            let ci_ps = ci_marker.to_string_lossy().to_string();
+            let ci_validated = crate::pkfs::exists(&ci_ps);
+            if !(worktree_clean && remote_pushed && ci_validated) {
                 return (
                     String::new(),
                     format!(
-                        "transition to COMPLETE rejected: four-observation gate not satisfied -- worktree-clean={} remote-pushed={} (branch={} ahead={} behind={}) prd-empty={} mutables-witnessed={}. All four must hold simultaneously per VERIFY convergence.",
-                        worktree_clean, remote_pushed, branch, ahead, behind, prd_empty, mutables_witnessed
+                        "transition to COMPLETE rejected: CONSOLIDATE gate not satisfied -- worktree-clean={} remote-pushed={} (branch={} ahead={} behind={}) ci-validated={} (marker=.gm/exec-spool/.ci-validated). All three must hold; git_finalize/git_push handles worktree-clean+remote-pushed, ci-validated requires the marker written fresh this session.",
+                        worktree_clean, remote_pushed, branch, ahead, behind, ci_validated
                     ),
                     1,
                 );
