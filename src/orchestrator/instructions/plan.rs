@@ -6,11 +6,15 @@ L1 baseline + L2 covering family. You loaded prior memory on entry via `instruct
 
 ## Orient
 
-First non-trivial dispatch = a single-message parallel fan-out of `recall` + `codesearch` against the request's nouns. This is where planning-thought becomes executed query rather than recalled-from-memory assumption: what you would otherwise assume about the codebase, you instead hypothesize and look up. Hits are your baseline; misses delimit fresh ground to investigate. Skip orient and you commit to an unobserved envelope -- a plan reasoned from memory instead of from a witnessed read of the real tree.
+First non-trivial dispatch = single-message parallel fan-out, `recall` + `codesearch`, against request nouns. Query beats recalled-from-memory assumption. Hits = baseline; misses = fresh ground. Skip orient -> plan reasoned from stale memory, not witnessed tree-read.
+
+**Search-only-via-verb, hard rule.** `codesearch`/`recall` are the ONLY code/file/symbol discovery surfaces at PLAN. Raw `Read`/`Glob`/`Grep` used AS exploration/discovery (open-ended "where is X", "what calls Y", tree-walk) is a deviation -- same class as reaching for puppeteer over the `browser` verb. Exempt: `Read` on a SPECIFIC already-located path (e.g. sibling-repo file whose path you already hold; codesearch is cwd-indexed only, so a sibling repo is read by path, never expected from codesearch) -- that is retrieval of a known target, not discovery. `exec_js` remains open for exploration/investigation (probing live state, running snippets) -- it is not a search surface and carries no restriction. The line: known-path fetch = `Read` OK; discovery/search = verb only, always.
 
 ## Cover
 
 Write the PRD as the central plan-item store (`|F|=1`): enumerate every content node as the closure of the destructive transform admissible over the session, a dependency DAG partitioned along dependency edges, not schedule. Reach permits the next node; the next node is in-scope. Naming a smaller slice while a larger reachable shape exists is non-monotonic. Expand the PRD by dispatching `prd-add` on every in-spirit reachable residual you find, declaring the read in one line.
+
+**Maximal expansiveness, hard rule.** PRD scope is every in-spirit item conceivable from the request, not the literal ask alone. Directly-requested items are the floor, not the ceiling: every adjacent/implied/downstream/cleanup/hygiene item reachable from the request's closure is IN, unprompted. A PRD covering only what was literally typed under-covers by construction -- expand until "every possible" yields nothing new (see Expansion below), then check again.
 
 **Inherited rows resume first.** A non-empty `ready_wave` / `prd_pending > 0` at entry is undone work a prior turn or an abandoned session left mid-transform -- it is THIS cover's first slice, not someone else's problem. Resume each inherited row to `prd-resolve` (with witness) or an explicit re-scope/close before adding new rows; never plan a disjoint fresh cover that orphans them. A finishing agent that leaves inherited rows pending has stopped mid-transform, not completed.
 
@@ -29,6 +33,10 @@ Anything noticed during orient or expansion that is not yet a row -- outstanding
 ## Mutables
 
 Enter unknowns into `.gm/mutables.yml` via `mutable-add` with `status: unknown`; witness = `file:line`, codesearch hit, or exec output. Narrative resolution is rejected; unwitnessed rows block every `transition`. Between sub-steps -- orient and PRD write, rows you are unsure of, recall hits you cannot weight -- re-dispatch `instruction`; uncertainty is the signal to re-read, never to invent the next step from memory.
+
+## Constraints
+
+Gauge every design/code decision against `.gm/constraints.md` (create from bundled default if absent) -- the standing decision-arbiter, checked at every phase.
 
 ## Dispatch
 

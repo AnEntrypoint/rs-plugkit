@@ -3,6 +3,7 @@ pub mod plan;
 pub mod execute;
 pub mod emit;
 pub mod verify;
+pub mod consolidate;
 pub mod update_docs;
 pub mod browser;
 
@@ -79,6 +80,7 @@ pub fn get_instruction(phase: &str) -> String {
         "EXECUTE" => ("execute", execute::TEXT),
         "EMIT" => ("emit", emit::TEXT),
         "VERIFY" => ("verify", verify::TEXT),
+        "CONSOLIDATE" => ("consolidate", consolidate::TEXT),
         "COMPLETE" => ("update_docs", update_docs::TEXT),
         "BROWSER" => ("browser", browser::TEXT),
         _ => ("entry", entry::TEXT),
@@ -92,7 +94,8 @@ fn next_phase_hint(phase: &str) -> Option<&'static str> {
         "PLAN" => Some("EXECUTE"),
         "EXECUTE" => Some("EMIT"),
         "EMIT" => Some("VERIFY"),
-        "VERIFY" => Some("COMPLETE"),
+        "VERIFY" => Some("CONSOLIDATE"),
+        "CONSOLIDATE" => Some("COMPLETE"),
         "COMPLETE" => None,
         _ => None,
     }
@@ -245,7 +248,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         Some(trimmed.to_string())
     };
 
-    let valid_phases = ["ENTRY", "ORCHESTRATOR", "PLAN", "EXECUTE", "EMIT", "VERIFY", "COMPLETE", "BROWSER"];
+    let valid_phases = ["ENTRY", "ORCHESTRATOR", "PLAN", "EXECUTE", "EMIT", "VERIFY", "CONSOLIDATE", "COMPLETE", "BROWSER"];
     let phase = match raw_phase_opt.as_deref() {
         None => read_state().phase.as_str().to_string(),
         Some(p) => {
@@ -254,7 +257,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
                 if upper.is_empty() { read_state().phase.as_str().to_string() } else { upper }
             } else {
                 ilog(&format!(
-                    "instruction::handle invalid phase '{}' (len={}); falling back to disk state. Valid: PLAN|EXECUTE|EMIT|VERIFY|COMPLETE|BROWSER",
+                    "instruction::handle invalid phase '{}' (len={}); falling back to disk state. Valid: PLAN|EXECUTE|EMIT|VERIFY|CONSOLIDATE|COMPLETE|BROWSER",
                     &p.chars().take(80).collect::<String>(),
                     p.len()
                 ));

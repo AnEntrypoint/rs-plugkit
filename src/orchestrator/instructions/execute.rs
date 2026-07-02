@@ -4,11 +4,17 @@ YOU are the state machine. Plugkit is the synchronous library serving this prose
 
 L3 distance + audit: real input -> real code -> real output, witnessed.
 
-## Surfaces
+## Mutable-gate (hard rule)
+
+EXECUTE's job: drain every pending mutable to resolved before EMIT. Zero-tolerance -- EXECUTE never proceeds to `transition to=EMIT` with ANY mutable in `unknown`/pending status. Loop: `mutable-resolve {mutable_id, witness_evidence}` each pending row; if resolving one surfaces a NEW unknown, `mutable-add` it immediately and resolve that too, same turn, before advancing. The gate is structural, not advisory: pending mutable = EXECUTE not done, full stop, regardless of how much other work landed.
 
 Route every mutation through PRD rows, mutables, KV memos; attach an audit tuple `(id, hash, ts)` to each accepted write, where `hash` is the witness (`file:line`, codesearch hit, exec snippet). `mutable-resolve` rejects resolution without witness; single-dispatch resolve with body `{mutable_id, witness_evidence}` applies the inline evidence before flipping status.
 
-Every code/file/symbol lookup is a `codesearch` dispatch -- never a platform Explore agent, Task/general-purpose search subagent, or raw grep -- the same drift as reaching for puppeteer over the `browser` verb. This binds mid-execution most of all: every ad-hoc where-is-this / what-calls-that / find-the-definition is the same surface that orients at PLAN, not a quick grep you reach around it for. The capability is a verb; dispatch the verb.
+**Search-only-via-verb, hard rule, binds mid-EXECUTE hardest.** Every code/file/symbol lookup -- every ad-hoc where-is-this / what-calls-that / find-the-definition -- is a `codesearch` dispatch, full stop. Never a platform Explore agent, Task/general-purpose search subagent, raw `Grep`/`Glob`, or a "quick" cat/read used as discovery -- same drift class as reaching for puppeteer over the `browser` verb. Mid-EXECUTE lookups are not exempt as "just checking something": the orienting surface at PLAN is the SAME surface mid-EXECUTE, no downgrade to raw tools because you are already inside the phase. Exempt only: `Read` on an already-known specific path (sibling-repo file, a path a prior codesearch/recall hit already named). The capability is a verb; dispatch the verb, every time, no exceptions carved for convenience.
+
+## Always-rearchitect-immediately (hard rule)
+
+Discovering an in-spirit architectural improvement mid-EXECUTE -- a shape change that is clearly better, not merely different -- is NOT a note-for-later and NOT a "finish this pass then reconsider." It is an IMMEDIATE `transition to=PLAN`, this turn, the moment the shape realization lands. Re-`prd-add` the affected row(s) with their EXISTING id (upsert-rescopes in place, `{"rescoped": id}`, preserving handle/position/dependents) -- never delete-and-re-add. Max-effort correctness over preservation-for-its-own-sake: sunk cost in the old shape is not a reason to ship the worse design. The urge to write "I should rearchitect this" IS the transition trigger -- narrating it in the response body instead of dispatching `transition to=PLAN` strands the chain pointed at a stale plan. This generalizes the additive-vs-reshaping split below: reshaping discoveries are always immediate, never batched, never deferred to "after this row."
 
 ## Witness
 
@@ -43,6 +49,10 @@ Data first -- get the structures and their invariants right and the code writes 
 ## Memorize
 
 Write the recall index only via `memorize-fire`; other surfaces produce memos the index never sees. Prune bad memory on sight -- `memorize-prune {key}` for a stale/wrong hit, `{query}` for review-only candidates to judge before deleting by `{keys}`.
+
+## Constraints
+
+Gauge every design/code decision against `.gm/constraints.md` (create from bundled default if absent) -- the standing decision-arbiter, checked at every phase.
 
 ## Dispatch
 
