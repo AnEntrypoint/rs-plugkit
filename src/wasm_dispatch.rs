@@ -710,8 +710,9 @@ impl rs_learn::KvBackend for PlugkitKv {
         let packed = unsafe { host_kv_get(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
         unpack_to_string(packed).map(|s| s.into_bytes())
     }
-    fn put(&mut self, namespace: &str, key: &str, val: &[u8]) {
+    fn put(&mut self, namespace: &str, key: &str, val: &[u8]) -> Result<(), String> {
         let _ = unsafe { host_kv_put(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
+        Ok(())
     }
     fn list_prefix(&self, namespace: &str, prefix: &str) -> Vec<String> {
         let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, prefix.as_ptr(), prefix.len() as u32) };
