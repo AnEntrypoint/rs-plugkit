@@ -14,8 +14,8 @@ pub fn exists(path: &str) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn remove(_path: &str) -> bool {
-    false
+pub fn remove(path: &str) -> bool {
+    crate::wasm_dispatch::host_remove(path)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -37,7 +37,14 @@ pub fn write(_path: &str, _data: &str) -> bool { false }
 #[cfg(not(target_arch = "wasm32"))]
 pub fn exists(_path: &str) -> bool { false }
 #[cfg(not(target_arch = "wasm32"))]
-pub fn remove(_path: &str) -> bool { false }
+pub fn remove(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        std::fs::remove_dir_all(p).is_ok()
+    } else {
+        std::fs::remove_file(p).is_ok()
+    }
+}
 #[cfg(not(target_arch = "wasm32"))]
 pub fn readdir(_path: &str) -> Option<serde_json::Value> { None }
 #[cfg(not(target_arch = "wasm32"))]

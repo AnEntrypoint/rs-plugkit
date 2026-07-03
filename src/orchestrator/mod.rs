@@ -1,5 +1,6 @@
 pub mod state;
 pub mod transitions;
+pub mod cas;
 pub mod mutables;
 pub mod memorize;
 pub mod residual;

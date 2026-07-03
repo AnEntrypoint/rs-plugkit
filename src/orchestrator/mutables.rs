@@ -1,4 +1,5 @@
 use serde_yaml::Value;
+use super::cas;
 use super::gm_dir;
 use super::memorize;
 use super::yaml_util::yaml_to_json;
@@ -53,16 +54,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     let path = mutables_path();
     let path_s = path.to_string_lossy().to_string();
 
-    let max_attempts = 5;
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let before_raw = if pkfs::exists(&path_s) { pkfs::read_to_string(&path_s).unwrap_or_default() } else { String::new() };
-        let mut doc: Value = if before_raw.is_empty() {
-            Value::Sequence(vec![])
-        } else {
-            serde_yaml::from_str(&before_raw).unwrap_or(Value::Sequence(vec![]))
-        };
+    let outcome = cas::cas_retry_write(&path_s, 5, "mutable-add", |mut doc: Value| {
         if let Some(seq) = doc.as_sequence_mut() {
             let mut new_with_id = map.clone();
             new_with_id.insert(Value::String("id".to_string()), Value::String(id.clone()));
@@ -71,20 +63,12 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             }
             seq.push(Value::Mapping(new_with_id));
         } else {
-            return (String::new(), "mutables.yml is not a sequence".to_string(), 1);
+            return cas::CasOutcome::Abort(String::new(), "mutables.yml is not a sequence".to_string(), 1);
         }
-        let new_raw = serde_yaml::to_string(&doc).unwrap_or_default();
-        let recheck_raw = if pkfs::exists(&path_s) { pkfs::read_to_string(&path_s).unwrap_or_default() } else { String::new() };
-        if recheck_raw != before_raw {
-            if attempt >= max_attempts {
-                return (String::new(), format!("mutable-add CAS failed after {} attempts: concurrent writer keeps changing {}", max_attempts, path_s), 1);
-            }
-            continue;
-        }
-        if !pkfs::write(&path_s, &new_raw) {
-            return (String::new(), "write failed".to_string(), 1);
-        }
-        break;
+        cas::CasOutcome::Write(doc, ())
+    });
+    if let Err((out, err, rc)) = outcome {
+        return (out, err, rc);
     }
     invalidate_residual_marker();
     (serde_json::json!({ "added": id }).to_string(), String::new(), 0)
@@ -189,26 +173,10 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         return (String::new(), format!("{} does not exist", path.display()), 1);
     }
 
-    let mut resolved_id: Option<String> = None;
-    let mut resolved_evidence: Option<String> = None;
-    let max_attempts = 5;
-    let mut attempt = 0;
-
-    loop {
-        attempt += 1;
-        let raw = match pkfs::read_to_string(&path_s) {
-            Some(s) => s,
-            None => return (String::new(), "read failed".to_string(), 1),
-        };
-
-        let mut doc: Value = match serde_yaml::from_str(&raw) {
-            Ok(v) => v,
-            Err(e) => return (String::new(), format!("parse failed: {}", e), 1),
-        };
-
-        resolved_id = None;
-        resolved_evidence = None;
+    let outcome = cas::cas_retry_write(&path_s, 5, "mutable-resolve", |mut doc: Value| {
         let mut found_id = false;
+        let mut resolved_id: Option<String> = None;
+        let mut resolved_evidence: Option<String> = None;
 
         if let Some(seq) = doc.as_sequence_mut() {
             for item in seq.iter_mut() {
@@ -236,7 +204,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                                 "Refused: mutable {} cannot be witnessed without evidence. Pass {{\"mutable_id\":\"{}\",\"witness_evidence\":\"<concrete proof>\"}} in the body, or add evidence to the .gm/mutables.yml row first.",
                                 trimmed, trimmed
                             );
-                            return (String::new(), msg, 1);
+                            return cas::CasOutcome::Abort(String::new(), msg, 1);
                         }
                         if !row_had_evidence {
                             map.insert(
@@ -276,25 +244,15 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 let near: Vec<String> = candidates.iter().take(3).map(|c| c.0.clone()).collect();
                 format!(" -- did you mean one of: {}", near.join(", "))
             };
-            return (String::new(), format!("mutable id not found: {}{}", trimmed, hint), 1);
+            return cas::CasOutcome::Abort(String::new(), format!("mutable id not found: {}{}", trimmed, hint), 1);
         }
 
-        let new_raw = match serde_yaml::to_string(&doc) {
-            Ok(s) => s,
-            Err(e) => return (String::new(), format!("serialize failed: {}", e), 1),
-        };
-        let recheck_raw = pkfs::read_to_string(&path_s).unwrap_or_default();
-        if recheck_raw != raw {
-            if attempt >= max_attempts {
-                return (String::new(), format!("mutable-resolve CAS failed after {} attempts: concurrent writer keeps changing {}", max_attempts, path_s), 1);
-            }
-            continue;
-        }
-        if !pkfs::write(&path_s, &new_raw) {
-            return (String::new(), "write failed".to_string(), 1);
-        }
-        break;
-    }
+        cas::CasOutcome::Write(doc, (resolved_id, resolved_evidence))
+    });
+    let (resolved_id, resolved_evidence) = match outcome {
+        Ok(v) => v,
+        Err((out, err, rc)) => return (out, err, rc),
+    };
 
     let evidence_body = resolved_evidence.clone().unwrap_or_else(|| format!("mutable {} resolved", trimmed));
     let memo = format!(

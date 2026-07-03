@@ -118,13 +118,14 @@ fn read_pending_step_full() -> Option<Value> {
     if step_id.is_empty() { return None; }
     let deadline = v.get("pending_step_deadline_ms").and_then(|n| n.as_u64()).unwrap_or(0);
     if deadline > 0 && now_ms() > deadline { return None; }
-    let kv_key = format!("rs-learn/pipeline/{}", step_id);
-    let state_raw = crate::wasm_dispatch::host_kv_read("rs-learn/pipeline", &step_id).unwrap_or_default();
+    let kv_namespace = "rs-learn/pipeline";
+    let state_raw = crate::wasm_dispatch::host_kv_read(kv_namespace, &step_id).unwrap_or_default();
     let state: Value = serde_json::from_str(&state_raw).unwrap_or(Value::Null);
     Some(json!({
         "step_id": step_id,
         "deadline_ms": deadline,
-        "kv_key": kv_key,
+        "kv_namespace": kv_namespace,
+        "kv_key": step_id,
         "state": state,
     }))
 }

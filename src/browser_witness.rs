@@ -86,10 +86,10 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-fn sha256_hex_first12(data: &[u8]) -> String {
+fn sha256_hex_first32(data: &[u8]) -> String {
     let hash = sha256(data);
-    let mut s = String::with_capacity(12);
-    for b in hash.iter().take(6) {
+    let mut s = String::with_capacity(32);
+    for b in hash.iter().take(16) {
         s.push_str(&format!("{:02x}", b));
     }
     s
@@ -97,7 +97,7 @@ fn sha256_hex_first12(data: &[u8]) -> String {
 
 fn hash_file_short(rel: &str) -> String {
     match host_read(rel) {
-        Some(content) => sha256_hex_first12(content.as_bytes()),
+        Some(content) => sha256_hex_first32(content.as_bytes()),
         None => String::new(),
     }
 }

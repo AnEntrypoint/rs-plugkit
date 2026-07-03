@@ -7,6 +7,7 @@ extern "C" {
     pub fn host_fs_write(path_ptr: *const u8, path_len: u32, data_ptr: *const u8, data_len: u32) -> u32;
     pub fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
     pub fn host_fs_stat(path_ptr: *const u8, path_len: u32) -> u64;
+    pub fn host_fs_remove(path_ptr: *const u8, path_len: u32) -> u32;
     pub fn host_fetch(url_ptr: *const u8, url_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
     pub fn host_kv_get(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u64;
     pub fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
@@ -102,6 +103,11 @@ pub fn host_stat(path: &str) -> Option<Value> {
 
 pub fn host_exists(path: &str) -> bool {
     host_stat(path).map(|v| !v.is_null()).unwrap_or(false)
+}
+
+pub fn host_remove(path: &str) -> bool {
+    let rc = unsafe { host_fs_remove(path.as_ptr(), path.len() as u32) };
+    rc != 0
 }
 
 fn err(verb: &str, reason: &str) -> u64 {

@@ -80,7 +80,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
                     let pending_prd: Vec<String> = items.iter()
                         .filter(|it| {
                             let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                            status != "done" && status != "complete" && status != "completed"
+                            status == "pending" || status == "in_progress"
                         })
                         .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
                         .collect();
@@ -180,7 +180,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
                     let pending_prd: Vec<String> = items.iter()
                         .filter(|it| {
                             let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                            status != "done" && status != "complete" && status != "completed"
+                            status == "pending" || status == "in_progress"
                         })
                         .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
                         .collect();
@@ -213,7 +213,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
                         .and_then(|arr| {
                             arr.iter().find(|it| {
                                 let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                                status != "done" && status != "complete" && status != "completed"
+                                status == "pending" || status == "in_progress"
                             }).cloned()
                         })
                         .and_then(|it| it.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()))
