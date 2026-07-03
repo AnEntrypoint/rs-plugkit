@@ -7,7 +7,6 @@ use crate::wasm_dispatch::host_now_ms;
 
 const GM_DB: &str = "gm";
 const TTL_MS: u64 = 120_000;
-const HMAC_KEY_DEFAULT: &str = "dev-only-not-secret-rotate-in-prod";
 const SUMMARIZE_THRESHOLD: usize = 2048;
 
 #[link(wasm_import_module = "env")]
@@ -22,7 +21,7 @@ pub fn ensure_pipeline_schema() -> Result<(), String> {
     )
 }
 
-fn hmac_key() -> String {
+fn hmac_key() -> Result<String, String> {
     let k = "RS_LEARN_PIPELINE_HMAC_KEY";
     let packed = unsafe { host_env_get(k.as_ptr(), k.len() as u32) };
     let ptr = (packed & 0xFFFF_FFFF) as u32;
@@ -30,10 +29,10 @@ fn hmac_key() -> String {
     if ptr != 0 && len != 0 {
         let s = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
         if !s.is_empty() {
-            return String::from_utf8_lossy(s).into_owned();
+            return Ok(String::from_utf8_lossy(s).into_owned());
         }
     }
-    HMAC_KEY_DEFAULT.to_string()
+    Err("RS_LEARN_PIPELINE_HMAC_KEY is not set".to_string())
 }
 
 pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -63,14 +62,15 @@ fn mint_flow_id() -> String {
     format!("flw_{:016x}", r)
 }
 
-pub fn mint_token(step_id: &str, kv_key: &str, deadline_ms: u64) -> String {
+pub fn mint_token(step_id: &str, kv_key: &str, deadline_ms: u64) -> Result<String, String> {
     let payload = format!("{}|{}|{}", step_id, kv_key, deadline_ms);
-    format!("tkn_{}.{}", step_id, keyed_hash(&hmac_key(), &payload))
+    let key = hmac_key()?;
+    Ok(format!("tkn_{}.{}", step_id, keyed_hash(&key, &payload)))
 }
 
-pub fn verify_token(token: &str, step_id: &str, kv_key: &str, deadline_ms: u64) -> bool {
-    let expected = mint_token(step_id, kv_key, deadline_ms);
-    token.len() == expected.len() && constant_time_eq(token.as_bytes(), expected.as_bytes())
+pub fn verify_token(token: &str, step_id: &str, kv_key: &str, deadline_ms: u64) -> Result<bool, String> {
+    let expected = mint_token(step_id, kv_key, deadline_ms)?;
+    Ok(token.len() == expected.len() && constant_time_eq(token.as_bytes(), expected.as_bytes()))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -166,7 +166,13 @@ pub fn build_pending_step(text: &str, namespace: &str, project_path: Option<&str
         return json!({ "ok": false, "error": format!("pipeline persist failed: {}", e) });
     }
 
-    let token = mint_token(&step_id, &kv_key, deadline_ms);
+    let token = match mint_token(&step_id, &kv_key, deadline_ms) {
+        Ok(t) => t,
+        Err(e) => {
+            delete_state(&step_id);
+            return json!({ "ok": false, "error": format!("pipeline token mint failed: {}", e) });
+        }
+    };
     let _ = mark_turn_pending(&step_id, deadline_ms);
 
     json!({
@@ -272,8 +278,10 @@ pub fn handle_continue(body: &Value) -> Value {
 
     let kv_key = state.get("kv_key").and_then(|v| v.as_str()).unwrap_or("");
     let deadline_ms = state.get("deadline_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-    if !verify_token(token, step_id, kv_key, deadline_ms) {
-        return json!({ "ok": false, "error": "invalid_token" });
+    match verify_token(token, step_id, kv_key, deadline_ms) {
+        Ok(true) => {}
+        Ok(false) => return json!({ "ok": false, "error": "invalid_token" }),
+        Err(e) => return json!({ "ok": false, "error": format!("token verify failed: {}", e) }),
     }
 
     let now = unsafe { host_now_ms() } as u64;

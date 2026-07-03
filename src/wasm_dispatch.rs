@@ -208,9 +208,20 @@ fn inference(body: &Value) -> u64 {
     ok("inference", parsed)
 }
 
+const ENV_GET_ALLOWED_EXACT: &[&str] = &["RS_LEARN_PIPELINE_HMAC_KEY", "CLAUDE_PROJECT_DIR"];
+const ENV_GET_ALLOWED_PREFIXES: &[&str] = &["PLUGKIT_", "GM_"];
+
+fn env_get_allowed(key: &str) -> bool {
+    ENV_GET_ALLOWED_EXACT.contains(&key)
+        || ENV_GET_ALLOWED_PREFIXES.iter().any(|p| key.starts_with(p))
+}
+
 fn env_get(body: &Value) -> u64 {
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
     if key.is_empty() { return err("env_get", "key required"); }
+    if !env_get_allowed(key) {
+        return err("env_get", "key not on env_get allowlist");
+    }
     let packed = unsafe { host_env_get(key.as_ptr(), key.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok("env_get", Value::String(s)),
