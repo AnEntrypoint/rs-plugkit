@@ -145,6 +145,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     let subject_str = subject_from_fields(&item_map);
     let slug = if provided_id.is_none() { slug_from_subject(subject_str) } else { None };
     if provided_id.is_none() && slug.is_none() {
+        #[cfg(target_arch = "wasm32")]
         crate::wasm_dispatch::emit_event("deviation.prd-add-no-id", serde_json::json!({
             "subject": subject_str,
             "hint": "Pass `id` in prd-add body. No usable text in any of id/slug/prd_id or subject/title/name/task/goal/description/notes -- every one was empty or unslugifiable, so the row was REJECTED. An item-<ms> fallback cannot be referenced by intent in recall or prd-resolve, so it is never admitted. Pass `id` directly, or put the intent in any of subject/title/name/task/goal/description so slug derivation succeeds.",

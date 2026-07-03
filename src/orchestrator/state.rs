@@ -100,6 +100,7 @@ pub fn read_state() -> TurnState {
                 let _ = pkfs::write(&backup_path, &s);
                 let detail = format!("turn-state.json parse failed ({}): backed up to {}", e, backup_path);
                 eprintln!("{}", detail);
+                #[cfg(target_arch = "wasm32")]
                 crate::wasm_dispatch::emit_event("turn-state-corrupted", serde_json::json!({
                     "error": e.to_string(),
                     "backupPath": backup_path,

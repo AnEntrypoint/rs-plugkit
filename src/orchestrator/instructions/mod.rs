@@ -378,7 +378,10 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let turn_state = super::state::read_state();
     let await_result = pending_step_block(&turn_state);
 
+    #[cfg(target_arch = "wasm32")]
     let route_hint = crate::wasm_dispatch::route_hint(&prompt, 8000);
+    #[cfg(not(target_arch = "wasm32"))]
+    let route_hint = serde_json::Value::Null;
 
     let payload = json!({
         "phase": phase,

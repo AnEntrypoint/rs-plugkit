@@ -34,6 +34,29 @@ fn ok_resp(verb: &str, data: Value) -> (String, String, i32) {
     (json!({ "ok": true, "verb": verb, "data": data }).to_string(), String::new(), 0)
 }
 
+#[cfg(target_arch = "wasm32")]
+fn host_task(action: &str, params: &Value) -> Value {
+    crate::wasm_dispatch::host_task(action, params)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn host_task(_action: &str, _params: &Value) -> Value {
+    json!({ "ok": false, "error": "task exec unavailable on native target" })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn host_now_ms() -> u64 {
+    unsafe { crate::wasm_dispatch::host_now_ms() }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn host_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 pub fn handle_spawn(content: &str) -> (String, String, i32) {
     let body: Value = match serde_json::from_str(content) {
         Ok(v) => v,
@@ -53,7 +76,7 @@ pub fn handle_spawn(content: &str) -> (String, String, i32) {
         "code": code,
         "timeoutMs": timeout,
     });
-    let result = crate::wasm_dispatch::host_task("spawn", &params);
+    let result = host_task("spawn", &params);
     if !result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
         let msg = result.get("error").and_then(|v| v.as_str()).unwrap_or("spawn failed").to_string();
         return err_resp("task-spawn", &msg);
@@ -71,7 +94,7 @@ pub fn handle_spawn(content: &str) -> (String, String, i32) {
 }
 
 pub fn handle_list(_content: &str) -> (String, String, i32) {
-    let result = crate::wasm_dispatch::host_task("list", &json!({}));
+    let result = host_task("list", &json!({}));
     let tasks = result.get("tasks").cloned().unwrap_or(Value::Array(Vec::new()));
     ok_resp("task-list", json!({ "tasks": tasks }))
 }
@@ -89,7 +112,7 @@ pub fn handle_stop(content: &str) -> (String, String, i32) {
         Some(s) if !s.is_empty() => s,
         _ => return err_resp("task-stop", "task id required"),
     };
-    let result = crate::wasm_dispatch::host_task("stop", &json!({ "id": id }));
+    let result = host_task("stop", &json!({ "id": id }));
     if result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
         ok_resp("task-stop", result)
     } else {
@@ -106,14 +129,14 @@ pub fn handle_output(content: &str) -> (String, String, i32) {
         .unwrap_or("");
     if id.is_empty() { return err_resp("task-output", "task id required"); }
     let max_bytes = body.get("max_bytes").and_then(|v| v.as_u64()).unwrap_or(65536);
-    let result = crate::wasm_dispatch::host_task("output", &json!({ "id": id, "max_bytes": max_bytes }));
+    let result = host_task("output", &json!({ "id": id, "max_bytes": max_bytes }));
     ok_resp("task-output", result)
 }
 
 pub fn live_running_tasks() -> Value {
-    let result = crate::wasm_dispatch::host_task("list", &json!({}));
+    let result = host_task("list", &json!({}));
     let tasks = result.get("tasks").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as u64;
+    let now_ms = host_now_ms() as u64;
     let mut running: Vec<Value> = Vec::new();
     for t in tasks {
         if t.get("status").and_then(|v| v.as_str()) == Some("running") {
@@ -185,7 +208,7 @@ pub fn stuck_spool() -> Value {
     let out_dir = gm_dir().join("exec-spool").join("out");
     let in_ps = in_dir.to_string_lossy().to_string();
     let out_ps = out_dir.to_string_lossy().to_string();
-    let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as u64;
+    let now_ms = host_now_ms() as u64;
     let mut stuck: Vec<Value> = Vec::new();
     let verbs = match pkfs::readdir(&in_ps) {
         Some(v) => v,
