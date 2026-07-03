@@ -443,8 +443,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    let is_closing_to_complete = matches!(classify_operation(verb, body), "complete")
-        || (verb == "transition" && body.get("to").and_then(|v| v.as_str()) == Some("COMPLETE"));
+    let is_closing_to_complete = matches!(classify_operation(verb, body), "complete");
     if is_closing_to_complete {
         let (body_s, _err, code) = crate::orchestrator::prd::handle_list("");
         if code == 0 {

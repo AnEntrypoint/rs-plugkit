@@ -30,6 +30,10 @@ pub fn stat(path: &str) -> Option<serde_json::Value> {
     crate::wasm_dispatch::host_stat(path)
 }
 
+// Native (non-wasm32) builds of this crate exist only for `cargo check`/dev-loop
+// syntax checking (see AGENTS.md: plugkit is WASM-only, never runs natively).
+// These are intentional no-ops, not a real native filesystem backend -- do not
+// mistake their None/false returns for absence-of-file signals in real usage.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_to_string(_path: &str) -> Option<String> { None }
 #[cfg(not(target_arch = "wasm32"))]

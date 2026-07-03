@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 use crate::wasm_dispatch::{host_read, host_write, host_log};
 
-const BROWSER_DIR_PREFIXES: &[&str] = &["public/", "site/", "app/", "pages/", "components/", "client/", "web/"];
+const BROWSER_DIR_PREFIXES: &[&str] = &["public/", "site/", "app/", "pages/", "components/", "client/", "web/", "src/frontend/", "packages/web-app/", "frontend/", "webapp/"];
 
 fn lower_ends_with(s: &str, ext: &str) -> bool {
     let ll = s.len();

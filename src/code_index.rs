@@ -576,9 +576,9 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
     let qvec = match inline_embedding.and_then(json_to_f32_vec).or_else(|| embed_text(query)) {
         Some(v) => v,
         None => {
-            let like = format!("%{}%", sql_quote(query));
-            let sql = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM code_chunks WHERE body LIKE '{}' OR name LIKE '{}' LIMIT {}", like, like, k);
-            return match libsql_wasm::query(GM_DB, &sql) {
+            let like = format!("%{}%", query);
+            let sql = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM code_chunks WHERE body LIKE ?1 OR name LIKE ?1 LIMIT {}", k);
+            return match libsql_wasm::query_params(GM_DB, &sql, &[&like]) {
                 Ok(rows) => json!({ "ok": true, "mode": "fallback_like", "rows": rows }),
                 Err(e) => json!({ "ok": false, "mode": "fallback_like", "error": e }),
             };
@@ -587,10 +587,10 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
     let qlit = vec_to_json_literal(&qvec);
     let pool = k.saturating_mul(5).max(20);
     let sql = format!(
-        "SELECT c.path, c.kind, c.name, c.line_start, c.line_end, substr(c.body,1,400) AS snippet, vector_distance_cos(c.embedding, vector('{}')) AS distance FROM vector_top_k('code_chunks_vec', vector('{}'), {}) AS v JOIN code_chunks AS c ON c.rowid = v.id ORDER BY distance ASC LIMIT {}",
-        qlit, qlit, pool, k
+        "SELECT c.path, c.kind, c.name, c.line_start, c.line_end, substr(c.body,1,400) AS snippet, vector_distance_cos(c.embedding, vector(?1)) AS distance FROM vector_top_k('code_chunks_vec', vector(?2), {}) AS v JOIN code_chunks AS c ON c.rowid = v.id ORDER BY distance ASC LIMIT {}",
+        pool, k
     );
-    match libsql_wasm::query(GM_DB, &sql) {
+    match libsql_wasm::query_params(GM_DB, &sql, &[&qlit, &qlit]) {
         Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows }),
         Err(e) => {
             let like = format!("%{}%", sql_quote(query));

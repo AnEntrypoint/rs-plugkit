@@ -219,7 +219,7 @@ pub fn is_spool_poll_command(cmd: &str) -> Option<&'static str> {
     if has_loop && (ci_contains(&stripped, "-f ") || ci_contains(&stripped, "-e ")) {
         return Some("loop-test-file-spool");
     }
-    if has_read {
+    if has_read && has_loop {
         return Some("read-spool-direct");
     }
     None

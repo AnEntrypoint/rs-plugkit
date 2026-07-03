@@ -111,8 +111,14 @@ fn tree(input: &str, body: &Value) -> Value {
     let mut out_lines: Vec<String> = Vec::new();
     let mut skipped_depth = 0usize;
     let mut skipped_cap = 0usize;
+    let indent_unit = input
+        .lines()
+        .map(|l| l.chars().take_while(|c| matches!(c, ' ' | '\u{2502}' | '\u{251C}' | '\u{2514}' | '\u{2500}' | '|' | '`' | '-')).count())
+        .find(|&n| n > 0)
+        .unwrap_or(4)
+        .max(1);
     for line in input.lines() {
-        let depth = line.chars().take_while(|c| matches!(c, ' ' | '\u{2502}' | '\u{251C}' | '\u{2514}' | '\u{2500}' | '|' | '`' | '-')).count() / 4;
+        let depth = line.chars().take_while(|c| matches!(c, ' ' | '\u{2502}' | '\u{251C}' | '\u{2514}' | '\u{2500}' | '|' | '`' | '-')).count() / indent_unit;
         if depth > max_depth { skipped_depth += 1; continue; }
         if out_lines.len() >= max_lines { skipped_cap += 1; continue; }
         out_lines.push(line.trim_end().to_string());
