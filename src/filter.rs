@@ -292,8 +292,11 @@ fn normalize_log_line(line: &str) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() }
-    else { format!("{}...", &s[..max.saturating_sub(3)]) }
+    if s.len() <= max { return s.to_string(); }
+    let target = max.saturating_sub(3);
+    let mut e = target.min(s.len());
+    while e > 0 && !s.is_char_boundary(e) { e -= 1; }
+    format!("{}...", &s[..e])
 }
 
 fn pct_saved(input: usize, output: usize) -> u64 {

@@ -108,7 +108,23 @@ pub fn ensure_managed_gitignore(cwd: &str) -> Result<bool, String> {
     }
     block.push_str(END_MARKER);
 
-    let mut cleaned = stripped.trim_end_matches('\n').trim_end_matches('\r').to_string();
+    let mut hostile_stripped: Vec<String> = Vec::new();
+    let stripped_of_hostile: String = stripped
+        .lines()
+        .filter(|line| {
+            let t = line.trim();
+            if MUST_STAY_TRACKED.iter().any(|e| *e == t) {
+                hostile_stripped.push(t.to_string());
+                log_warn(&format!("plugkit gitignore: stripping hostile entry outside managed block, must stay tracked: {}", t));
+                false
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut cleaned = stripped_of_hostile.trim_end_matches('\n').trim_end_matches('\r').to_string();
     if cleaned.is_empty() {
         cleaned = block;
     } else {
@@ -120,15 +136,6 @@ pub fn ensure_managed_gitignore(cwd: &str) -> Result<bool, String> {
     }
 
     let changed = cleaned != original;
-
-    for line in cleaned.lines() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') { continue; }
-        if MANAGED_ENTRIES.iter().any(|e| *e == t) { continue; }
-        if MUST_STAY_TRACKED.iter().any(|e| *e == t) {
-            log_warn(&format!("plugkit gitignore: hostile entry must stay tracked: {}", t));
-        }
-    }
 
     if changed {
         if !host_write(&path, &cleaned) {

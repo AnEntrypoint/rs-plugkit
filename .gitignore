@@ -35,3 +35,4 @@ Cargo.lock
 
 weights/*.safetensors
 weights/*.gguf
+.gm/pw-sock-*/

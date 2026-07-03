@@ -12,7 +12,31 @@ pub mod task;
 use std::path::PathBuf;
 use std::env;
 
+#[cfg(target_arch = "wasm32")]
+fn git_common_dir_project_root() -> Option<PathBuf> {
+    let v = crate::wasm_dispatch::git_call("rev-parse --show-toplevel --git-common-dir", None);
+    let out = v.get("stdout").and_then(|x| x.as_str())?;
+    let mut lines = out.lines();
+    let toplevel = lines.next()?.trim();
+    let common_dir = lines.next()?.trim();
+    if toplevel.is_empty() || common_dir.is_empty() { return None; }
+    let common_path = PathBuf::from(common_dir);
+    if common_path.ends_with(".git") {
+        Some(PathBuf::from(toplevel))
+    } else {
+        common_path.parent().map(|p| p.to_path_buf())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn git_common_dir_project_root() -> Option<PathBuf> {
+    None
+}
+
 pub fn gm_dir() -> PathBuf {
+    if let Some(root) = git_common_dir_project_root() {
+        return root.join(".gm");
+    }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());

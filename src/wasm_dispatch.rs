@@ -137,7 +137,8 @@ fn fs_write(body: &Value) -> u64 {
     let data = body.get("data").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() { return err("fs_write", "path required"); }
     let normalized = path.replace('\\', "/");
-    if normalized.contains("../") || normalized.starts_with('/') || normalized.contains(':') {
+    let has_dotdot_component = normalized.split('/').any(|seg| seg == "..");
+    if has_dotdot_component || normalized.starts_with('/') || normalized.contains(':') {
         return err("fs_write", "path must be relative and within the project");
     }
     if host_write(path, data) { ok("fs_write", json!({ "bytes": data.len() })) } else { err("fs_write", "write failed") }
@@ -1169,10 +1170,26 @@ fn branch_status(body: &Value) -> u64 {
 
 fn git_push(body: &Value) -> u64 {
     let repo = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str())).map(String::from);
-    let branch = body.get("branch").and_then(|v| v.as_str()).map(String::from)
-        .unwrap_or_else(|| exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD").trim().to_string());
+    let explicit_branch = body.get("branch").and_then(|v| v.as_str()).map(String::from);
+    let current_branch = exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD").trim().to_string();
+    let branch = explicit_branch.clone().unwrap_or_else(|| current_branch.clone());
     if branch.is_empty() {
         return err("git_push", "unable to determine branch");
+    }
+    if explicit_branch.is_none() && current_branch != "main" && current_branch != "HEAD" {
+        log_deviation_push("push-non-main-branch", &current_branch);
+        return pack(json!({
+            "ok": false,
+            "verb": "git_push",
+            "gate_denied": true,
+            "repo": repo,
+            "branch": current_branch,
+            "reason": format!(
+                "current checkout is on branch '{}', not 'main' -- project rule is direct-push to main always, never a branch. This is likely a worktree checked out on a non-main ref. Pass explicit {{\"branch\":\"main\"}} to push to main from this worktree (git_push pushes HEAD to that ref), or {{\"branch\":\"{}\"}} if a non-main push is genuinely intended.",
+                current_branch, current_branch
+            ),
+            "next_dispatch": "instruction",
+        }).to_string());
     }
     let porcelain = git_porcelain_in(repo.as_deref());
     if !porcelain.trim().is_empty() {
@@ -1324,15 +1341,26 @@ fn git_finalize(body: &Value) -> u64 {
             steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
         }
     } else {
-        let ahead = exec_git_in(cwd_ref, "rev-list --count @{u}..HEAD").trim().to_string();
-        let ahead_n: u64 = ahead.parse().unwrap_or(0);
-        if ahead_n > 0 {
+        let ahead_result = git_call("rev-list --count @{u}..HEAD", cwd_ref);
+        let ahead_code = ahead_result.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        let ahead_stderr = ahead_result.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+        let no_upstream = ahead_code != 0 && (ahead_stderr.contains("no upstream") || ahead_stderr.contains("unknown revision") || ahead_stderr.contains("@{u}"));
+        if no_upstream {
             sha = exec_git_in(cwd_ref, "rev-parse --short HEAD").trim().to_string();
             summary = exec_git_in(cwd_ref, "log -1 --pretty=%s").trim().to_string();
             committed = true;
-            steps.push(json!({ "step": "commit", "already_committed": true, "sha": sha, "summary": summary, "ahead": ahead_n }));
+            steps.push(json!({ "step": "commit", "already_committed": true, "sha": sha, "summary": summary, "no_upstream": true }));
         } else {
-            steps.push(json!({ "step": "commit", "nothing_to_commit": true }));
+            let ahead = ahead_result.get("stdout").and_then(|x| x.as_str()).unwrap_or("0").trim().to_string();
+            let ahead_n: u64 = ahead.parse().unwrap_or(0);
+            if ahead_n > 0 {
+                sha = exec_git_in(cwd_ref, "rev-parse --short HEAD").trim().to_string();
+                summary = exec_git_in(cwd_ref, "log -1 --pretty=%s").trim().to_string();
+                committed = true;
+                steps.push(json!({ "step": "commit", "already_committed": true, "sha": sha, "summary": summary, "ahead": ahead_n }));
+            } else {
+                steps.push(json!({ "step": "commit", "nothing_to_commit": true }));
+            }
         }
     }
 
@@ -1528,7 +1556,7 @@ fn git_porcelain_in(repo: Option<&str>) -> String {
 }
 
 fn exec_git_push_in(repo: Option<&str>, branch: &str) -> String {
-    let v = git_call(&format!("push origin {}", branch), repo);
+    let v = git_call(&format!("push origin HEAD:{}", branch), repo);
     let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
     let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
     format!("{}{}", stdout, stderr)

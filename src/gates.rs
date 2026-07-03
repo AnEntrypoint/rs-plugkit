@@ -191,15 +191,49 @@ fn worktree_dirty() -> bool {
     !crate::wasm_dispatch::git_porcelain().trim().is_empty()
 }
 
+fn residual_scan_fired() -> bool {
+    !host_read(".gm/residual-check-fired").unwrap_or_default().trim().is_empty()
+}
+
+fn ci_validation_fresh() -> bool {
+    let raw = host_read(".gm/exec-spool/.ci-validated").unwrap_or_default();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() { return false; }
+    let current_head = crate::wasm_dispatch::git_call("rev-parse HEAD", None)
+        .get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    if current_head.is_empty() { return false; }
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(v) => {
+            let marker_sha = v.get("head_sha").and_then(|s| s.as_str()).unwrap_or("");
+            !marker_sha.is_empty() && marker_sha == current_head
+        }
+        Err(_) => false,
+    }
+}
+
 fn check_browser_witness_coverage() -> Vec<String> {
-    let edits_raw = host_read(".gm/exec-spool/.turn-browser-edits.json").unwrap_or_default();
+    check_browser_witness_coverage_for_cwd("")
+}
+
+fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
+    let edits_path = if cwd.is_empty() {
+        ".gm/exec-spool/.turn-browser-edits.json".to_string()
+    } else {
+        format!("{}/.gm/exec-spool/.turn-browser-edits.json", cwd.trim_end_matches('/').trim_end_matches('\\'))
+    };
+    let edits_raw = host_read(&edits_path).unwrap_or_default();
     if edits_raw.trim().is_empty() { return vec![]; }
     let edits: Vec<Value> = match serde_json::from_str::<Value>(&edits_raw) {
         Ok(Value::Array(arr)) => arr,
         _ => return vec![],
     };
     if edits.is_empty() { return vec![]; }
-    let witness_raw = host_read(".gm/exec-spool/.turn-browser-witnessed").unwrap_or_default();
+    let witness_path = if cwd.is_empty() {
+        ".gm/exec-spool/.turn-browser-witnessed".to_string()
+    } else {
+        format!("{}/.gm/exec-spool/.turn-browser-witnessed", cwd.trim_end_matches('/').trim_end_matches('\\'))
+    };
+    let witness_raw = host_read(&witness_path).unwrap_or_default();
     let witnessed_hashes: serde_json::Map<String, Value> = if witness_raw.trim().is_empty() {
         serde_json::Map::new()
     } else {
@@ -338,7 +372,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             residuals.push("unresolved mutables present - resolve with witness_evidence before CONSOLIDATE".into());
             next_recovery.get_or_insert("mutable-resolve");
         }
-        if !host_exists(".gm/residual-check-fired") {
+        if !residual_scan_fired() {
             residuals.push("residual-scan not fired in this stop window - dispatch residual-scan before CONSOLIDATE".into());
             log_deviation("consolidate-without-residual-scan", "");
             next_recovery.get_or_insert("residual-scan");
@@ -374,17 +408,18 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             log_deviation("push-dirty", "COMPLETE attempted with dirty worktree");
             next_recovery.get_or_insert("git_finalize");
         }
-        if !host_exists(".gm/residual-check-fired") {
+        if !residual_scan_fired() {
             residuals.push("residual-scan not fired in this stop window - dispatch residual-scan before COMPLETE".into());
             log_deviation("complete-without-residual-scan", "");
             next_recovery.get_or_insert("residual-scan");
         }
-        if !host_exists(".gm/exec-spool/.ci-validated") {
-            residuals.push("CI/CD validation not witnessed - .gm/exec-spool/.ci-validated marker missing; CONSOLIDATE's CI-check verb must write it fresh before COMPLETE".into());
+        if !ci_validation_fresh() {
+            residuals.push("CI/CD validation not witnessed fresh - .gm/exec-spool/.ci-validated marker missing, stale, or not matching current HEAD sha; CONSOLIDATE's CI-check verb must write {\"head_sha\":\"<current HEAD>\"} fresh before COMPLETE".into());
             log_deviation("complete-without-ci-validation", "");
             next_recovery.get_or_insert("instruction");
         }
-        let bw_check = check_browser_witness_coverage();
+        let bw_cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+        let bw_check = check_browser_witness_coverage_for_cwd(bw_cwd);
         if !bw_check.is_empty() {
             residuals.push(format!("client-edit-no-witness: {} client-side file(s) edited without browser-witness in this session - dispatch `browser` verb to page.evaluate the invariant each edit establishes, then re-attempt COMPLETE. Files: {}", bw_check.len(), bw_check.join(", ")));
             log_deviation("client-edit-no-witness", &format!("files={}", bw_check.join(",")));

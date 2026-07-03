@@ -156,38 +156,63 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .unwrap_or_else(|| format!("item-{}", crate::orchestrator::state::now_ms()));
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
-    let mut doc: Value = if pkfs::exists(&path_s) {
-        let raw = pkfs::read_to_string(&path_s).unwrap_or_default();
-        serde_yaml::from_str(&raw).unwrap_or(Value::Sequence(vec![]))
-    } else {
-        Value::Sequence(vec![])
-    };
+
+    let max_attempts = 5;
     let mut upserted = false;
-    if let Some(seq) = doc.as_sequence_mut() {
-        let mut new_with_id = item_map.clone();
-        new_with_id.insert(Value::String("id".to_string()), Value::String(id.clone()));
-        if !new_with_id.contains_key(&Value::String("status".to_string())) {
-            new_with_id.insert(Value::String("status".to_string()), Value::String("pending".to_string()));
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let before_raw = if pkfs::exists(&path_s) { pkfs::read_to_string(&path_s).unwrap_or_default() } else { String::new() };
+        let mut doc: Value = if before_raw.is_empty() {
+            Value::Sequence(vec![])
+        } else {
+            serde_yaml::from_str(&before_raw).unwrap_or(Value::Sequence(vec![]))
+        };
+        upserted = false;
+        if let Some(seq) = doc.as_sequence_mut() {
+            let mut new_with_id = item_map.clone();
+            new_with_id.insert(Value::String("id".to_string()), Value::String(id.clone()));
+            if !new_with_id.contains_key(&Value::String("status".to_string())) {
+                new_with_id.insert(Value::String("status".to_string()), Value::String("pending".to_string()));
+            }
+            let existing = seq.iter_mut().find(|it| {
+                it.as_mapping()
+                    .and_then(|m| m.get(&Value::String("id".to_string())))
+                    .and_then(|v| v.as_str())
+                    == Some(id.as_str())
+            });
+            match existing {
+                Some(slot) => { *slot = Value::Mapping(new_with_id); upserted = true; }
+                None => seq.push(Value::Mapping(new_with_id)),
+            }
+        } else {
+            return (String::new(), "prd.yml is not a sequence".to_string(), 1);
         }
-        let existing = seq.iter_mut().find(|it| {
-            it.as_mapping()
-                .and_then(|m| m.get(&Value::String("id".to_string())))
-                .and_then(|v| v.as_str())
-                == Some(id.as_str())
-        });
-        match existing {
-            Some(slot) => { *slot = Value::Mapping(new_with_id); upserted = true; }
-            None => seq.push(Value::Mapping(new_with_id)),
+        let new_raw = serde_yaml::to_string(&doc).unwrap_or_default();
+
+        let recheck_raw = if pkfs::exists(&path_s) { pkfs::read_to_string(&path_s).unwrap_or_default() } else { String::new() };
+        if recheck_raw != before_raw {
+            if attempt >= max_attempts {
+                return (String::new(), format!("prd-add CAS failed after {} attempts: concurrent writer keeps changing {}", max_attempts, path_s), 1);
+            }
+            continue;
         }
-    } else {
-        return (String::new(), "prd.yml is not a sequence".to_string(), 1);
+        if !pkfs::write(&path_s, &new_raw) {
+            return (String::new(), "write failed".to_string(), 1);
+        }
+        break;
     }
-    let new_raw = serde_yaml::to_string(&doc).unwrap_or_default();
-    if !pkfs::write(&path_s, &new_raw) {
-        return (String::new(), "write failed".to_string(), 1);
-    }
+    invalidate_residual_marker();
     let key = if upserted { "rescoped" } else { "added" };
     (serde_json::json!({ key: id }).to_string(), String::new(), 0)
+}
+
+fn invalidate_residual_marker() {
+    let marker = gm_dir().join("residual-check-fired");
+    let marker_s = marker.to_string_lossy().to_string();
+    if pkfs::exists(&marker_s) {
+        let _ = pkfs::write(&marker_s, "");
+    }
 }
 
 fn parse_resolve_target(trimmed: &str) -> (String, Option<String>) {
@@ -320,54 +345,67 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     if !pkfs::exists(&path_s) {
         return (String::new(), format!("{} does not exist", path.display()), 1);
     }
-    let raw = pkfs::read_to_string(&path_s).unwrap_or_default();
-    let mut doc: Value = match serde_yaml::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => return (String::new(), format!("parse failed: {}", e), 1),
-    };
-    let mut found = false;
-    if let Some(seq) = doc.as_sequence_mut() {
-        for item in seq.iter_mut() {
-            if let Some(map) = item.as_mapping_mut() {
-                if map.get(&Value::String("id".to_string())).and_then(|v| v.as_str()) == Some(&id_target) {
-                    map.insert(Value::String("status".to_string()), Value::String("completed".to_string()));
-                    if let Some(w) = witness.as_ref() {
-                        map.insert(Value::String("witness".to_string()), Value::String(w.clone()));
+
+    let max_attempts = 5;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let raw = pkfs::read_to_string(&path_s).unwrap_or_default();
+        let mut doc: Value = match serde_yaml::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => return (String::new(), format!("parse failed: {}", e), 1),
+        };
+        let mut found = false;
+        if let Some(seq) = doc.as_sequence_mut() {
+            for item in seq.iter_mut() {
+                if let Some(map) = item.as_mapping_mut() {
+                    if map.get(&Value::String("id".to_string())).and_then(|v| v.as_str()) == Some(&id_target) {
+                        map.insert(Value::String("status".to_string()), Value::String("completed".to_string()));
+                        if let Some(w) = witness.as_ref() {
+                            map.insert(Value::String("witness".to_string()), Value::String(w.clone()));
+                        }
+                        found = true;
                     }
-                    found = true;
                 }
             }
         }
-    }
-    if !found {
-        let mut known_ids: Vec<String> = Vec::new();
-        if let Some(seq) = doc.as_sequence() {
-            for item in seq {
-                if let Some(m) = item.as_mapping() {
-                    if let Some(id_v) = m.get(&Value::String("id".to_string())) {
-                        if let Some(id_s) = id_v.as_str() {
-                            known_ids.push(id_s.to_string());
+        if !found {
+            let mut known_ids: Vec<String> = Vec::new();
+            if let Some(seq) = doc.as_sequence() {
+                for item in seq {
+                    if let Some(m) = item.as_mapping() {
+                        if let Some(id_v) = m.get(&Value::String("id".to_string())) {
+                            if let Some(id_s) = id_v.as_str() {
+                                known_ids.push(id_s.to_string());
+                            }
                         }
                     }
                 }
             }
+            let suggested_id = nearest_known_id(&id_target, &known_ids);
+            let body = serde_json::json!({
+                "error": format!("prd id not found: {}", id_target),
+                "deviation_kind": "prd-resolve-unknown-id",
+                "prd_id": id_target,
+                "known_ids": known_ids,
+                "suggested_id": suggested_id,
+                "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; aliases accepted: prd_id, mutable_id, item_id, slug, key (all map to id). A nested envelope (prd_id holding a stringified {\"key\":..,\"witness\":..} object) is unwrapped automatically and the inner key/id/prd_id/slug is recovered. Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If `suggested_id` is non-null it is the closest known id to what you passed -- likely a typo; re-dispatch with it. If the recovered id is not in `known_ids` above, the row was never `prd-add`ed in this chain -- your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added; never retry the same unknown id unchanged.",
+            }).to_string();
+            return (body, format!("prd id not found: {}", id_target), 1);
         }
-        let suggested_id = nearest_known_id(&id_target, &known_ids);
-        let body = serde_json::json!({
-            "error": format!("prd id not found: {}", id_target),
-            "deviation_kind": "prd-resolve-unknown-id",
-            "prd_id": id_target,
-            "known_ids": known_ids,
-            "suggested_id": suggested_id,
-            "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; aliases accepted: prd_id, mutable_id, item_id, slug, key (all map to id). A nested envelope (prd_id holding a stringified {\"key\":..,\"witness\":..} object) is unwrapped automatically and the inner key/id/prd_id/slug is recovered. Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If `suggested_id` is non-null it is the closest known id to what you passed -- likely a typo; re-dispatch with it. If the recovered id is not in `known_ids` above, the row was never `prd-add`ed in this chain -- your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added; never retry the same unknown id unchanged.",
-        }).to_string();
-        return (body, format!("prd id not found: {}", id_target), 1);
+        let new_raw = serde_yaml::to_string(&doc).unwrap_or_default();
+        let recheck_raw = pkfs::read_to_string(&path_s).unwrap_or_default();
+        if recheck_raw != raw {
+            if attempt >= max_attempts {
+                return (String::new(), format!("prd-resolve CAS failed after {} attempts: concurrent writer keeps changing {}", max_attempts, path_s), 1);
+            }
+            continue;
+        }
+        if !pkfs::write(&path_s, &new_raw) {
+            return (String::new(), "write failed".to_string(), 1);
+        }
+        return (serde_json::json!({ "resolved": id_target }).to_string(), String::new(), 0);
     }
-    let new_raw = serde_yaml::to_string(&doc).unwrap_or_default();
-    if !pkfs::write(&path_s, &new_raw) {
-        return (String::new(), "write failed".to_string(), 1);
-    }
-    (serde_json::json!({ "resolved": id_target }).to_string(), String::new(), 0)
 }
 
 #[cfg(test)]

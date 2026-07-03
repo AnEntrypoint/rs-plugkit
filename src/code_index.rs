@@ -395,7 +395,11 @@ fn write_chunk(libsql_ok: bool, fp: &str, c: &ChunkRecord) {
         );
         let ls = c.ls.to_string();
         let le = c.le.to_string();
-        let body = &c.body[..c.body.len().min(8192)];
+        let body = {
+            let mut e = c.body.len().min(8192);
+            while e > 0 && !c.body.is_char_boundary(e) { e -= 1; }
+            &c.body[..e]
+        };
         let _ = libsql_wasm::exec_params(GM_DB, &sql, &[fp, &c.kind, &c.name, &ls, &le, body]);
     }
     fv_put("codeinsight", &c.key, &c.text);
@@ -487,7 +491,12 @@ pub fn index(root: &str, max_files: usize) -> Value {
             chunked += 1;
             embedded += 1;
             let key = format!("ci-{:x}-{}", file_hash, idx);
-            let text = format!("{}:{}:{} {}\n{}", fp, ls, le, name, &body[..body.len().min(8192)]);
+            let text_body_end = {
+                let mut e = body.len().min(8192);
+                while e > 0 && !body.is_char_boundary(e) { e -= 1; }
+                e
+            };
+            let text = format!("{}:{}:{} {}\n{}", fp, ls, le, name, &body[..text_body_end]);
             let rec = ChunkRecord { key, kind, name, ls, le, body, text, emb: v };
             write_chunk(libsql_ok, fp, &rec);
             records.push(rec);
