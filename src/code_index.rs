@@ -149,6 +149,7 @@ fn embedding_col_dim(db_name: &str, table: &str) -> Option<usize> {
     let ty = row.get("type")?.as_str()?;
     let start = ty.find('(')? + 1;
     let end = ty.find(')')?;
+    if end < start { return None; }
     ty[start..end].parse::<usize>().ok()
 }
 
