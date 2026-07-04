@@ -16,10 +16,6 @@ fn porcelain_output() -> String {
         .unwrap_or_default()
 }
 
-fn worktree_dirty() -> bool {
-    !porcelain_output().trim().is_empty()
-}
-
 fn count_modified_untracked(porcelain: &str) -> (usize, usize) {
     let mut modified = 0usize;
     let mut untracked = 0usize;

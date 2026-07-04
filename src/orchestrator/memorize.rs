@@ -199,11 +199,6 @@ fn agents_drain_obligation() -> serde_json::Value {
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn agents_drain_obligation() -> serde_json::Value {
-    serde_json::Value::Null
-}
-
 #[cfg(target_arch = "wasm32")]
 fn insert_memory_edge(namespace: &str, key: &str, text: &str, emb_str: &str, now: i64) -> bool {
     let embedding: serde_json::Value = serde_json::from_str(emb_str).unwrap_or(serde_json::Value::Null);

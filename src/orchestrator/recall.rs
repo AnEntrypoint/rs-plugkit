@@ -151,7 +151,7 @@ pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (query, namespace, limit);
+        let _ = (&query, embed_input, namespace, limit);
         serde_json::Value::Array(Vec::new())
     }
 }
@@ -187,7 +187,10 @@ pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
         }
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let results = serde_json::Value::Array(Vec::new());
+    let results = {
+        let _ = (embed_input, namespace);
+        serde_json::Value::Array(Vec::new())
+    };
     #[cfg(target_arch = "wasm32")]
     emit_recall(&query, &results, "auto_recall", namespace);
     let payload = serde_json::json!({

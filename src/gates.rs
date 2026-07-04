@@ -249,12 +249,6 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
             Some(f) if !f.is_empty() => f,
             _ => continue,
         };
-        // Self-heal stale entries: re-classify each recorded file against the CURRENT
-        // ruleset. A pre-fix watcher (e.g. before 'src/' was dropped from BROWSER_DIR_PREFIXES)
-        // may have written a now-exempt file (a Node CLI bin like src/cli.js) into the edits
-        // ledger; after the watcher upgrades mid-session, that ledger entry would otherwise keep
-        // blocking COMPLETE with an unsatisfiable client-edit-no-witness (no page to evaluate).
-        // Skipping entries that are no longer browser-running lets the gate self-heal on upgrade.
         if !crate::browser_witness::is_browser_running_file(file) { continue; }
         let edit_hash = entry.get("hash").and_then(|v| v.as_str()).unwrap_or("");
         if edit_hash.is_empty() { continue; }
@@ -389,12 +383,6 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
 
     if operation == "complete" {
         let mut residuals: Vec<String> = vec![];
-        // The recovery verb is the FIRST blocker in dependency order (resolve the work, then commit,
-        // then re-scan): open PRD -> prd-resolve, mutables -> mutable-resolve, dirty -> git_finalize,
-        // missing residual-scan -> residual-scan, client-edit -> browser, missing CI witness -> the
-        // CI-validating verb. A concurrent/weak agent that keys on next_dispatch then recovers in one
-        // mechanical step instead of looping on the gate. PRD/mutables/residual are re-checked here as
-        // defense-in-depth even though CONSOLIDATE's own gate already required them.
         let mut next_recovery: Option<&str> = None;
         if host_exists(".gm/prd.yml") && prd_has_open_items() {
             residuals.push("PRD has open items - resolve (prd-resolve with witness_evidence) or name-and-stop before declaring done".into());
@@ -443,8 +431,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    let is_closing_to_complete = matches!(classify_operation(verb, body), "complete");
-    if is_closing_to_complete {
+    if operation == "complete" {
         let (body_s, _err, code) = crate::orchestrator::prd::handle_list("");
         if code == 0 {
             if let Ok(v) = serde_json::from_str::<Value>(&body_s) {
