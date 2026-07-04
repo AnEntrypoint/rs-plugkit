@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 pub fn dispatch(body: &Value, raw: &str) -> (Value, Option<String>) {
     let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     let input = body.get("input").and_then(|v| v.as_str())
+        .or_else(|| body.get("stdout").and_then(|v| v.as_str()))
+        .or_else(|| body.get("text").and_then(|v| v.as_str()))
         .map(|s| s.to_string())
         .unwrap_or_else(|| raw.to_string());
     match kind {

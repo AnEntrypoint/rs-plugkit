@@ -213,6 +213,20 @@ macro_rules! step {
 }
 
 pub fn embed_text(text: &str) -> Option<Vec<f32>> {
+    let cacheable = text.len() <= PLAIN_CACHE_MAX_TEXT;
+    if cacheable {
+        if let Some(v) = cache_get(&PLAIN_CACHE, text) {
+            return Some(v);
+        }
+    }
+    let v = embed_text_uncached(text)?;
+    if cacheable {
+        cache_put(&PLAIN_CACHE, text, &v);
+    }
+    Some(v)
+}
+
+fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
     if let Some(v) = try_host_embed(text) {
         return Some(v);
     }
@@ -345,13 +359,16 @@ struct CacheEntry {
 }
 
 static QUERY_CACHE: Mutex<Vec<CacheEntry>> = Mutex::new(Vec::new());
+static PLAIN_CACHE: Mutex<Vec<CacheEntry>> = Mutex::new(Vec::new());
+
+const PLAIN_CACHE_MAX_TEXT: usize = 4096;
 
 fn now_ms() -> i64 {
     unsafe { crate::wasm_dispatch::host_now_ms() as i64 }
 }
 
-fn query_cache_get(key: &str) -> Option<Vec<f32>> {
-    let mut guard = QUERY_CACHE.lock().ok()?;
+fn cache_get(cache: &Mutex<Vec<CacheEntry>>, key: &str) -> Option<Vec<f32>> {
+    let mut guard = cache.lock().ok()?;
     let now = now_ms();
     guard.retain(|e| now - e.ts_ms < QUERY_CACHE_TTL_MS);
     let idx = guard.iter().position(|e| e.key == key)?;
@@ -361,12 +378,20 @@ fn query_cache_get(key: &str) -> Option<Vec<f32>> {
     Some(emb)
 }
 
-fn query_cache_put(key: &str, embedding: &[f32]) {
-    let mut guard = match QUERY_CACHE.lock() { Ok(g) => g, Err(_) => return };
+fn cache_put(cache: &Mutex<Vec<CacheEntry>>, key: &str, embedding: &[f32]) {
+    let mut guard = match cache.lock() { Ok(g) => g, Err(_) => return };
     let now = now_ms();
     guard.retain(|e| now - e.ts_ms < QUERY_CACHE_TTL_MS && e.key != key);
     while guard.len() >= QUERY_CACHE_CAP { guard.remove(0); }
     guard.push(CacheEntry { key: key.to_string(), embedding: embedding.to_vec(), ts_ms: now });
+}
+
+fn query_cache_get(key: &str) -> Option<Vec<f32>> {
+    cache_get(&QUERY_CACHE, key)
+}
+
+fn query_cache_put(key: &str, embedding: &[f32]) {
+    cache_put(&QUERY_CACHE, key, embedding)
 }
 
 #[cfg(test)]
