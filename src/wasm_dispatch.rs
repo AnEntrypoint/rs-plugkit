@@ -557,12 +557,31 @@ fn codesearch(body: &Value) -> u64 {
             return codesearch(&retry);
         }
     }
+    let cand_k = k.saturating_mul(5).max(50);
     let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": "codeinsight" }).to_string();
-    let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, k) };
+    let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, cand_k) };
     let vec_hits = unpack_to_value(packed);
-    if !vec_hits.is_null() && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
-        return ok("codesearch", vec_hits);
+    let vec_ids: Vec<String> = vec_hits.as_array().map(|a| {
+        a.iter().filter_map(|h| h.get("key").and_then(|x| x.as_str()).map(String::from)).collect()
+    }).unwrap_or_default();
+    let mut corpus = crate::code_index::FusionCorpus::load();
+    let bm25_ids = corpus.bm25_rank(query, cand_k as usize);
+    let commits = crate::code_index::git_commit_rank(query, 5);
+    if !vec_ids.is_empty() || !bm25_ids.is_empty() {
+        let lists = vec![vec_ids, bm25_ids];
+        let weights = [1.0, rs_search::fusion::IDENTIFIER_BOOST];
+        let fused = rs_search::fusion::fuse_n(&lists, &weights, query);
+        let hits: Vec<Value> = fused.into_iter().take(k as usize).map(|(key, score)| {
+            let text = corpus.text_for_key(&key)
+                .or_else(|| vec_hits.as_array().and_then(|a| {
+                    a.iter().find(|h| h.get("key").and_then(|x| x.as_str()) == Some(key.as_str()))
+                        .and_then(|h| h.get("text").and_then(|t| t.as_str()).map(String::from))
+                }))
+                .unwrap_or_default();
+            json!({ "key": key, "text": text, "score": score })
+        }).collect();
+        return ok("codesearch", json!({ "mode": "fusion", "hits": hits, "commits": commits }));
     }
     let ns = "codeinsight";
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, query.as_ptr(), query.len() as u32) };
@@ -576,7 +595,7 @@ fn codesearch(body: &Value) -> u64 {
         }
         return codesearch(&retry);
     }
-    ok("codesearch", hits)
+    ok("codesearch", json!({ "mode": "fallback_kv", "hits": hits, "commits": commits }))
 }
 
 fn health(_body: &Value) -> u64 {

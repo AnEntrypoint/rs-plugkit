@@ -320,6 +320,7 @@ fn sql_quote(s: &str) -> String {
 }
 
 const MANIFEST_NS: &str = "codeinsight-manifest";
+const MANIFEST_VERSION: u64 = 2;
 
 #[derive(Clone)]
 struct ChunkRecord {
@@ -328,8 +329,6 @@ struct ChunkRecord {
     name: String,
     ls: usize,
     le: usize,
-    body: String,
-    text: String,
     emb: Vec<f32>,
 }
 
@@ -345,15 +344,14 @@ fn manifest_to_json(fp: &str, hash: u32, chunks: &[ChunkRecord]) -> String {
         "name": c.name,
         "ls": c.ls,
         "le": c.le,
-        "body": c.body,
-        "text": c.text,
         "emb": c.emb,
     })).collect();
-    json!({ "path": fp, "hash": hash, "chunks": arr }).to_string()
+    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "chunks": arr }).to_string()
 }
 
 fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     let parsed: Value = serde_json::from_str(val).ok()?;
+    if parsed.get("v").and_then(|v| v.as_u64()) != Some(MANIFEST_VERSION) { return None; }
     let fp = parsed.get("path").and_then(|p| p.as_str())?.to_string();
     let hash = parsed.get("hash").and_then(|h| h.as_u64())? as u32;
     let arr = parsed.get("chunks").and_then(|c| c.as_array())?;
@@ -364,12 +362,24 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
         let name = c.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
         let ls = c.get("ls").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
         let le = c.get("le").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-        let body = c.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let text = c.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
         let emb = json_to_f32_vec(c.get("emb")?)?;
-        chunks.push(ChunkRecord { key, kind, name, ls, le, body, text, emb });
+        chunks.push(ChunkRecord { key, kind, name, ls, le, emb });
     }
     Some((fp, FileManifest { hash, chunks }))
+}
+
+fn purge_stale_manifest_row(row_key: &str, val: &str) {
+    if let Ok(parsed) = serde_json::from_str::<Value>(val) {
+        if let Some(arr) = parsed.get("chunks").and_then(|c| c.as_array()) {
+            for c in arr {
+                if let Some(k) = c.get("key").and_then(|x| x.as_str()) {
+                    fv_delete("codeinsight", k);
+                    fv_delete("codeinsight-vec", k);
+                }
+            }
+        }
+    }
+    fv_delete(MANIFEST_NS, row_key);
 }
 
 fn load_manifests() -> std::collections::HashMap<String, FileManifest> {
@@ -378,15 +388,25 @@ fn load_manifests() -> std::collections::HashMap<String, FileManifest> {
     if let Some(arr) = rows.as_array() {
         for row in arr {
             let val = match row.get("value").and_then(|v| v.as_str()) { Some(v) => v, None => continue };
-            if let Some((fp, m)) = parse_manifest(val) {
-                out.insert(fp, m);
+            match parse_manifest(val) {
+                Some((fp, m)) => { out.insert(fp, m); }
+                None => {
+                    if let Some(k) = row.get("key").and_then(|k| k.as_str()) {
+                        purge_stale_manifest_row(k, val);
+                    }
+                }
             }
         }
     }
     out
 }
 
-fn write_chunk(libsql_ok: bool, fp: &str, c: &ChunkRecord) {
+fn slice_lines(content: &str, ls: usize, le: usize) -> String {
+    if ls == 0 || le < ls { return String::new(); }
+    content.lines().skip(ls - 1).take(le - ls + 1).collect::<Vec<_>>().join("\n")
+}
+
+fn write_chunk(libsql_ok: bool, fp: &str, c: &ChunkRecord, body: &str) {
     if libsql_ok {
         let embedding_sql = format!("vector('{}')", vec_to_json_literal(&c.emb));
         let sql = format!(
@@ -395,14 +415,13 @@ fn write_chunk(libsql_ok: bool, fp: &str, c: &ChunkRecord) {
         );
         let ls = c.ls.to_string();
         let le = c.le.to_string();
-        let body = {
-            let mut e = c.body.len().min(8192);
-            while e > 0 && !c.body.is_char_boundary(e) { e -= 1; }
-            &c.body[..e]
+        let body_trunc = {
+            let mut e = body.len().min(8192);
+            while e > 0 && !body.is_char_boundary(e) { e -= 1; }
+            &body[..e]
         };
-        let _ = libsql_wasm::exec_params(GM_DB, &sql, &[fp, &c.kind, &c.name, &ls, &le, body]);
+        let _ = libsql_wasm::exec_params(GM_DB, &sql, &[fp, &c.kind, &c.name, &ls, &le, body_trunc]);
     }
-    fv_put("codeinsight", &c.key, &c.text);
     let emb_json = serde_json::json!({ "embedding": c.emb }).to_string();
     fv_put("codeinsight-vec", &c.key, &emb_json);
 }
@@ -456,11 +475,16 @@ pub fn index(root: &str, max_files: usize) -> Value {
         indexed += 1;
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
         let file_hash = crc32(&content);
+        let path_hash = crc32(fp);
+        if libsql_ok {
+            let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
+        }
 
         if let Some(m) = prior.get(fp) {
             if m.hash == file_hash {
                 for c in &m.chunks {
-                    write_chunk(libsql_ok, fp, c);
+                    let body = slice_lines(&content, c.ls, c.le);
+                    write_chunk(libsql_ok, fp, c, &body);
                     chunked += 1;
                     reused += 1;
                 }
@@ -490,15 +514,9 @@ pub fn index(root: &str, max_files: usize) -> Value {
             };
             chunked += 1;
             embedded += 1;
-            let key = format!("ci-{:x}-{}", file_hash, idx);
-            let text_body_end = {
-                let mut e = body.len().min(8192);
-                while e > 0 && !body.is_char_boundary(e) { e -= 1; }
-                e
-            };
-            let text = format!("{}:{}:{} {}\n{}", fp, ls, le, name, &body[..text_body_end]);
-            let rec = ChunkRecord { key, kind, name, ls, le, body, text, emb: v };
-            write_chunk(libsql_ok, fp, &rec);
+            let key = format!("ci-{:x}-{:x}-{}", path_hash, file_hash, idx);
+            let rec = ChunkRecord { key, kind, name, ls, le, emb: v };
+            write_chunk(libsql_ok, fp, &rec, &body);
             records.push(rec);
         }
         fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, &records));
@@ -569,6 +587,143 @@ pub fn stored_digest() -> Option<String> {
 
 pub fn store_digest(digest: &str) {
     fv_put("codeinsight", "__digest__", digest);
+}
+
+pub struct ChunkMeta {
+    pub key: String,
+    pub path: String,
+    pub name: String,
+    pub ls: usize,
+    pub le: usize,
+}
+
+pub struct FusionCorpus {
+    metas: Vec<ChunkMeta>,
+    file_cache: std::collections::HashMap<String, Option<String>>,
+}
+
+impl FusionCorpus {
+    pub fn load() -> Self {
+        let mut metas = Vec::new();
+        for (fp, m) in load_manifests() {
+            for c in &m.chunks {
+                metas.push(ChunkMeta {
+                    key: c.key.clone(),
+                    path: fp.clone(),
+                    name: c.name.clone(),
+                    ls: c.ls,
+                    le: c.le,
+                });
+            }
+        }
+        FusionCorpus { metas, file_cache: std::collections::HashMap::new() }
+    }
+
+    fn file_content(&mut self, path: &str) -> Option<String> {
+        if let Some(cached) = self.file_cache.get(path) { return cached.clone(); }
+        let content = host_read(path).or_else(|| host_read(&format!("/{}", path)));
+        self.file_cache.insert(path.to_string(), content.clone());
+        content
+    }
+
+    pub fn text_for_key(&mut self, key: &str) -> Option<String> {
+        let i = self.metas.iter().position(|m| m.key == key)?;
+        let (path, name, ls, le) = {
+            let m = &self.metas[i];
+            (m.path.clone(), m.name.clone(), m.ls, m.le)
+        };
+        let content = self.file_content(&path)?;
+        let body = slice_lines(&content, ls, le);
+        let body_trunc = {
+            let mut e = body.len().min(8192);
+            while e > 0 && !body.is_char_boundary(e) { e -= 1; }
+            body[..e].to_string()
+        };
+        Some(format!("{}:{}:{} {}\n{}", path, ls, le, name, body_trunc))
+    }
+
+    pub fn bm25_rank(&mut self, query: &str, k: usize) -> Vec<String> {
+        const K1: f64 = 1.2;
+        const B: f64 = 0.75;
+        let q_tokens = rs_search::tokenize::tokenize(query);
+        if q_tokens.is_empty() || self.metas.is_empty() { return Vec::new(); }
+        let mut doc_tfs: Vec<(usize, std::collections::HashMap<String, u32>, f64)> = Vec::new();
+        for i in 0..self.metas.len() {
+            let (path, name, ls, le) = {
+                let m = &self.metas[i];
+                (m.path.clone(), m.name.clone(), m.ls, m.le)
+            };
+            let content = match self.file_content(&path) { Some(c) => c, None => continue };
+            let body = slice_lines(&content, ls, le);
+            let tf = term_freqs(&format!("{} {} {}", path, name, body));
+            let dl: u32 = tf.values().sum();
+            doc_tfs.push((i, tf, dl as f64));
+        }
+        if doc_tfs.is_empty() { return Vec::new(); }
+        let n = doc_tfs.len() as f64;
+        let avgdl = doc_tfs.iter().map(|(_, _, dl)| dl).sum::<f64>() / n;
+        let avgdl = if avgdl > 0.0 { avgdl } else { 1.0 };
+        let mut df: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        for t in &q_tokens {
+            let c = doc_tfs.iter().filter(|(_, tf, _)| tf.contains_key(t)).count() as u32;
+            df.insert(t.as_str(), c);
+        }
+        let mut scored: Vec<(usize, f64)> = Vec::new();
+        for (i, tf, dl) in &doc_tfs {
+            let mut score = 0.0;
+            for t in &q_tokens {
+                let f = *tf.get(t).unwrap_or(&0) as f64;
+                if f == 0.0 { continue; }
+                let d = *df.get(t.as_str()).unwrap_or(&0) as f64;
+                let idf = (1.0 + (n - d + 0.5) / (d + 0.5)).ln();
+                score += idf * (f * (K1 + 1.0)) / (f + K1 * (1.0 - B + B * dl / avgdl));
+            }
+            if score > 0.0 { scored.push((*i, score)); }
+        }
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().take(k).map(|(i, _)| self.metas[i].key.clone()).collect()
+    }
+}
+
+fn term_freqs(text: &str) -> std::collections::HashMap<String, u32> {
+    let mut out: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for word in text.split(|c: char| c.is_whitespace() || "(){}[]<>,;:\"'`=+*&|!?/\\#".contains(c)) {
+        if word.is_empty() { continue; }
+        let mut set = std::collections::HashSet::new();
+        rs_search::tokenize::add_word_tokens(word, &mut set);
+        for t in set { *out.entry(t).or_insert(0) += 1; }
+    }
+    out
+}
+
+pub fn git_commit_rank(query: &str, k: usize) -> Vec<String> {
+    let q_tokens = rs_search::tokenize::tokenize(query);
+    if q_tokens.is_empty() { return Vec::new(); }
+    let log = crate::wasm_dispatch::git_call("log --format=%H --name-only -n 100 --no-decorate", None);
+    let stdout = log.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let mut commits: Vec<(String, f64)> = Vec::new();
+    let mut cur_hash: Option<String> = None;
+    let mut cur_score = 0.0f64;
+    let flush = |commits: &mut Vec<(String, f64)>, hash: Option<String>, score: f64| {
+        if let Some(h) = hash {
+            if score > 0.0 { commits.push((h, score)); }
+        }
+    };
+    for line in stdout.lines() {
+        let t = line.trim();
+        if t.is_empty() { continue; }
+        if t.len() == 40 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+            flush(&mut commits, cur_hash.take(), cur_score);
+            cur_hash = Some(t.to_string());
+            cur_score = 0.0;
+        } else if cur_hash.is_some() {
+            let ftoks = rs_search::tokenize::tokenize(t);
+            cur_score += q_tokens.iter().filter(|q| ftoks.contains(q)).count() as f64;
+        }
+    }
+    flush(&mut commits, cur_hash.take(), cur_score);
+    commits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    commits.into_iter().take(k).map(|(h, _)| h).collect()
 }
 
 pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value {
