@@ -265,7 +265,8 @@ jobs:
           echo "$VER" > bin/plugkit.version
           cp ../release-assets/plugkit.wasm.sha256 bin/plugkit.wasm.sha256 2>/dev/null || \
             curl -sL "https://github.com/AnEntrypoint/plugkit-bin/releases/download/v${VER}/plugkit.wasm.sha256" -o bin/plugkit.wasm.sha256
-          git add gm.json bin/plugkit.version bin/plugkit.wasm.sha256
+          echo "$VER" > gm-plugkit/plugkit.version
+          git add gm.json bin/plugkit.version bin/plugkit.wasm.sha256 gm-plugkit/plugkit.version
           if git diff --cached --quiet; then
             echo "No metadata changes"
             exit 0
