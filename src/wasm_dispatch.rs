@@ -1630,6 +1630,21 @@ fn install_panic_hook() {
 #[no_mangle]
 pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
     install_panic_hook();
+    let result = std::panic::catch_unwind(|| {
+        dispatch_verb_inner(verb_ptr, verb_len, body_ptr, body_len)
+    });
+    match result {
+        Ok(packed) => packed,
+        Err(payload) => {
+            let msg = payload.downcast_ref::<&str>().map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panic during dispatch".to_string());
+            err("dispatch_verb", &msg)
+        }
+    }
+}
+
+fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
     let verb = read_str(verb_ptr as *const u8, verb_len);
     let body_s = read_str(body_ptr as *const u8, body_len);
     let body: Value = if body_s.is_empty() { Value::Null } else {
