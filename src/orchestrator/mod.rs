@@ -11,12 +11,9 @@ pub mod prd;
 pub mod task;
 
 use std::path::PathBuf;
-use std::env;
+use std::sync::OnceLock;
 
-#[cfg(target_arch = "wasm32")]
-fn git_common_dir_project_root() -> Option<PathBuf> {
-    let v = crate::wasm_dispatch::git_call("rev-parse --show-toplevel --git-common-dir", None);
-    let out = v.get("stdout").and_then(|x| x.as_str())?;
+fn parse_toplevel_common_dir(out: &str) -> Option<PathBuf> {
     let mut lines = out.lines();
     let toplevel = lines.next()?.trim();
     let common_dir = lines.next()?.trim();
@@ -29,22 +26,61 @@ fn git_common_dir_project_root() -> Option<PathBuf> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn git_common_dir_project_root() -> Option<PathBuf> {
-    None
+#[cfg(target_arch = "wasm32")]
+fn git_common_dir_project_root_once() -> Option<PathBuf> {
+    let v = crate::wasm_dispatch::git_call("rev-parse --show-toplevel --git-common-dir", None);
+    let out = v.get("stdout").and_then(|x| x.as_str())?;
+    parse_toplevel_common_dir(out)
 }
 
-pub fn gm_dir() -> PathBuf {
-    if let Some(root) = git_common_dir_project_root() {
-        return root.join(".gm");
+#[cfg(not(target_arch = "wasm32"))]
+fn git_common_dir_project_root_once() -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    let out = String::from_utf8_lossy(&output.stdout);
+    parse_toplevel_common_dir(&out)
+}
+
+const RESOLVE_MAX_ATTEMPTS: u32 = 5;
+const RESOLVE_BACKOFF_BASE_MS: u64 = 20;
+
+fn sleep_ms(ms: u64) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    env::var("CLAUDE_PROJECT_DIR")
-        .ok()
-        .map(|p| PathBuf::from(p).join(".gm"))
-        .unwrap_or_else(|| PathBuf::from(home).join(".gm"))
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = ms;
+    }
+}
+
+fn resolve_project_root_with_retry() -> PathBuf {
+    let mut last_err_attempts = 0u32;
+    for attempt in 0..RESOLVE_MAX_ATTEMPTS {
+        if let Some(root) = git_common_dir_project_root_once() {
+            return root;
+        }
+        last_err_attempts = attempt + 1;
+        if attempt + 1 < RESOLVE_MAX_ATTEMPTS {
+            sleep_ms(RESOLVE_BACKOFF_BASE_MS * 2u64.pow(attempt));
+        }
+    }
+    panic!(
+        "gm_dir: project root resolution failed after {} attempts via `git rev-parse --show-toplevel --git-common-dir` -- refusing to silently fall back to CLAUDE_PROJECT_DIR/HOME, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory.",
+        last_err_attempts
+    );
+}
+
+static PROJECT_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn gm_dir() -> PathBuf {
+    PROJECT_ROOT
+        .get_or_init(resolve_project_root_with_retry)
+        .join(".gm")
 }
 
 pub fn is_orchestrator_verb(verb: &str) -> bool {
