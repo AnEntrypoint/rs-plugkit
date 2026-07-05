@@ -140,7 +140,9 @@ fn fs_read(body: &Value) -> u64 {
 
 fn fs_write(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let data = body.get("data").and_then(|v| v.as_str()).unwrap_or("");
+    let data = body.get("content").and_then(|v| v.as_str())
+        .or_else(|| body.get("data").and_then(|v| v.as_str()))
+        .unwrap_or("");
     if path.is_empty() { return err("fs_write", "path required"); }
     let normalized = path.replace('\\', "/");
     let has_dotdot_component = normalized.split('/').any(|seg| seg == "..");
