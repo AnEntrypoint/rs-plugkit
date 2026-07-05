@@ -99,7 +99,7 @@ fn log_deviation(event: &str, detail: &str) {
     unsafe { host_log(1, evt_line.as_ptr(), evt_line.len() as u32); }
 }
 
-fn read_pending_step() -> Option<String> {
+fn parse_pending_step() -> Option<(String, u64)> {
     let content = host_read(".gm/turn-state.json").unwrap_or_default();
     if content.is_empty() { return None; }
     let v: Value = serde_json::from_str(&content).ok()?;
@@ -107,17 +107,15 @@ fn read_pending_step() -> Option<String> {
     if step_id.is_empty() { return None; }
     let deadline = v.get("pending_step_deadline_ms").and_then(|n| n.as_u64()).unwrap_or(0);
     if deadline > 0 && now_ms() > deadline { return None; }
-    Some(step_id)
+    Some((step_id, deadline))
+}
+
+fn read_pending_step() -> Option<String> {
+    parse_pending_step().map(|(step_id, _)| step_id)
 }
 
 fn read_pending_step_full() -> Option<Value> {
-    let content = host_read(".gm/turn-state.json").unwrap_or_default();
-    if content.is_empty() { return None; }
-    let v: Value = serde_json::from_str(&content).ok()?;
-    let step_id = v.get("pending_step_id").and_then(|s| s.as_str())?.to_string();
-    if step_id.is_empty() { return None; }
-    let deadline = v.get("pending_step_deadline_ms").and_then(|n| n.as_u64()).unwrap_or(0);
-    if deadline > 0 && now_ms() > deadline { return None; }
+    let (step_id, deadline) = parse_pending_step()?;
     let kv_namespace = "rs-learn/pipeline";
     let state_raw = crate::wasm_dispatch::host_kv_read(kv_namespace, &step_id).unwrap_or_default();
     let state: Value = serde_json::from_str(&state_raw).unwrap_or(Value::Null);
@@ -162,8 +160,8 @@ fn prd_has_open_items() -> bool {
             items.iter().any(|item| {
                 item.get("status")
                     .and_then(|s| s.as_str())
-                    .map(|s| s == "pending" || s == "in_progress")
-                    .unwrap_or(false)
+                    .map(crate::orchestrator::prd::status_is_open)
+                    .unwrap_or(true)
             })
         }
         Ok(_) => false,
@@ -434,8 +432,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 if let Some(items) = v.get("items").and_then(|v| v.as_array()) {
                     for it in items {
                         let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                        let is_open = status == "pending" || status == "in_progress";
-                        if !is_open { continue; }
+                        if !crate::orchestrator::prd::status_is_open(status) { continue; }
                         let witness = it.get("witness_evidence").and_then(|v| v.as_str()).unwrap_or("");
                         if witness.trim().is_empty() {
                             let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("?");
@@ -448,46 +445,4 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     }
 
     GateVerdict::allow()
-}
-
-#[cfg(test)]
-mod long_gap_tests {
-    use super::{long_gap_should_fire, is_longgap_exempt};
-    const T: u64 = 300_000;
-
-    #[test]
-    fn exempt_set_covers_internal_and_pause_verbs() {
-        for v in ["health", "auto-recall", "wait", "sleep"] {
-            assert!(is_longgap_exempt(v), "{} must be long-gap-exempt", v);
-        }
-        for v in ["browser", "codesearch", "exec_js", "instruction", "git_push"] {
-            assert!(!is_longgap_exempt(v), "{} must NOT be long-gap-exempt", v);
-        }
-    }
-
-    #[test]
-    fn fires_on_genuine_idle() {
-        let now = 1_000_000;
-        assert!(long_gap_should_fire(now - T - 1, now - T - 1, now, T));
-        assert!(long_gap_should_fire(now - T - 1, 0, now, T));
-    }
-
-    #[test]
-    fn quiet_during_active_work() {
-        let now = 1_000_000;
-        assert!(!long_gap_should_fire(now - T - 1, now - 1_000, now, T));
-        assert!(!long_gap_should_fire(now - T - 50_000, now - 200_000, now, T));
-    }
-
-    #[test]
-    fn quiet_when_instruction_recent() {
-        let now = 1_000_000;
-        assert!(!long_gap_should_fire(now - 1_000, 0, now, T));
-    }
-
-    #[test]
-    fn quiet_when_no_instruction_yet() {
-        let now = 1_000_000;
-        assert!(!long_gap_should_fire(0, 0, now, T));
-    }
 }

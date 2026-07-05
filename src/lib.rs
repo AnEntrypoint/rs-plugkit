@@ -182,8 +182,11 @@ mod wasm_hooks {
         }
         let prd = host_read(&path_for("prd.yml")).unwrap_or_default();
         let open_count = prd.lines().filter(|l| {
-            let t = l.trim_start();
-            t == "status: pending" || t == "status: open" || t == "status: in_progress"
+            let t = l.trim_start().trim_start_matches("- ");
+            match t.strip_prefix("status:") {
+                Some(v) => crate::orchestrator::prd::status_is_open(v),
+                None => false,
+            }
         }).count();
         if open_count > 0 {
             ctx.push_str(&format!("\n{} open PRD item(s) -- finish what's already planned before adding new scope.\n", open_count));

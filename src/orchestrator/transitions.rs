@@ -51,7 +51,7 @@ fn pending_prd_rejection(target: &str) -> Option<(String, String, i32)> {
     let pending_prd: Vec<String> = items.iter()
         .filter(|it| {
             let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-            status == "pending" || status == "in_progress"
+            prd::status_is_open(status)
         })
         .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
         .collect();
@@ -180,7 +180,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
                         .and_then(|arr| {
                             arr.iter().find(|it| {
                                 let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                                status == "pending" || status == "in_progress"
+                                prd::status_is_open(status)
                             }).cloned()
                         })
                         .and_then(|it| it.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()))

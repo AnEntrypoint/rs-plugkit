@@ -393,8 +393,3 @@ fn query_cache_get(key: &str) -> Option<Vec<f32>> {
 fn query_cache_put(key: &str, embedding: &[f32]) {
     cache_put(&QUERY_CACHE, key, embedding)
 }
-
-#[cfg(test)]
-pub fn query_cache_clear() {
-    if let Ok(mut g) = QUERY_CACHE.lock() { g.clear(); }
-}

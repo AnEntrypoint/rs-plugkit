@@ -81,7 +81,7 @@ fn prd_pending_count(items: &[serde_json::Value]) -> usize {
 
 fn item_is_open(it: &serde_json::Value) -> bool {
     let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-    status != "done" && status != "complete" && status != "completed"
+    prd::status_is_open(status)
 }
 
 fn ready_wave(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
