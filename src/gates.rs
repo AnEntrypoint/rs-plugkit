@@ -287,10 +287,15 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             .or_else(|| body.get("code").and_then(|v| v.as_str()))
             .or_else(|| body.get("script").and_then(|v| v.as_str()))
             .unwrap_or("");
-        let first = cmd.trim_start().split_whitespace().next().unwrap_or("");
-        let git_dominant = first == "git"
-            || first.ends_with("/git") || first.ends_with("\\git")
-            || cmd.trim_start().starts_with("git ");
+        let git_dominant = cmd
+            .split(|c| c == ';' || c == '\n' || c == '|' || c == '&')
+            .map(|s| s.trim_start())
+            .any(|s| {
+                let first = s.split_whitespace().next().unwrap_or("");
+                first == "git" || first == "git.exe"
+                    || first.ends_with("/git") || first.ends_with("\\git")
+                    || first.ends_with("/git.exe") || first.ends_with("\\git.exe")
+            });
         if git_dominant {
             log_deviation("bash-git-bypass", &format!("verb={} cmd={}", verb, cmd.chars().take(80).collect::<String>()));
             return GateVerdict::deny(format!(
@@ -353,6 +358,11 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     if operation == "consolidate" {
         let mut residuals: Vec<String> = vec![];
         let mut next_recovery: Option<&str> = None;
+        if !residual_scan_fired() {
+            residuals.push("residual-scan not fired in this stop window - dispatch `residual-scan` now, then re-attempt transition to=CONSOLIDATE".into());
+            log_deviation("consolidate-without-residual-scan", "");
+            next_recovery.get_or_insert("residual-scan");
+        }
         if host_exists(".gm/prd.yml") && prd_has_open_items() {
             residuals.push("PRD has open items - resolve (prd-resolve with witness_evidence) before CONSOLIDATE".into());
             next_recovery.get_or_insert("prd-resolve");
@@ -360,11 +370,6 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         if host_exists(".gm/mutables.yml") && mutables_unresolved() {
             residuals.push("unresolved mutables present - resolve with witness_evidence before CONSOLIDATE".into());
             next_recovery.get_or_insert("mutable-resolve");
-        }
-        if !residual_scan_fired() {
-            residuals.push("residual-scan not fired in this stop window - dispatch residual-scan before CONSOLIDATE".into());
-            log_deviation("consolidate-without-residual-scan", "");
-            next_recovery.get_or_insert("residual-scan");
         }
         if !residuals.is_empty() {
             log_deviation("gate-deny", &format!("consolidate-gate residuals={}", residuals.len()));
@@ -397,9 +402,9 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             next_recovery.get_or_insert("residual-scan");
         }
         if !ci_validation_fresh() {
-            residuals.push("CI/CD validation not witnessed fresh - .gm/exec-spool/.ci-validated marker missing, stale, or not matching current HEAD sha; CONSOLIDATE's CI-check verb must write {\"head_sha\":\"<current HEAD>\"} fresh before COMPLETE".into());
+            residuals.push("CI/CD validation not witnessed fresh - .gm/exec-spool/.ci-validated missing, stale, or not matching current HEAD sha. Witness the pipeline green for the pushed HEAD (exec_js/fetch: `gh run list`/`gh run watch` or the CI provider API), then fs_write .gm/exec-spool/.ci-validated with {\"head_sha\":\"<git rev-parse HEAD>\"} and re-attempt COMPLETE".into());
             log_deviation("complete-without-ci-validation", "");
-            next_recovery.get_or_insert("instruction");
+            next_recovery.get_or_insert("exec_js");
         }
         let bw_cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
         let bw_check = check_browser_witness_coverage_for_cwd(bw_cwd);

@@ -96,8 +96,28 @@ mod wasm_hooks {
         host_read(&path_for(name)).unwrap_or_default()
     }
 
+    fn signal_platform_search_drift(tool_name: &str) {
+        let ts = read_file("turn-state.json");
+        let phase = serde_json::from_str::<Value>(&ts).ok()
+            .and_then(|v| v.get("phase").and_then(|p| p.as_str()).map(|p| p.to_string()))
+            .unwrap_or_default();
+        if phase.is_empty() || phase == "COMPLETE" { return; }
+        let evt = json!({
+            "event": "deviation.platform-search-drift",
+            "sub": "hook",
+            "detail": format!("tool={} during in-flight chain (phase={}); codesearch/recall are the discovery surfaces, platform Grep/Glob is exploration outside the spool", tool_name, phase),
+            "ts": crate::orchestrator::state::now_ms() as u64,
+            "source": "rs-plugkit/hooks",
+        });
+        let line = format!("evt: {}", evt);
+        unsafe { crate::wasm_dispatch::host_log(1, line.as_ptr(), line.len() as u32); }
+    }
+
     pub fn pre_tool_use(input: &Value) -> Value {
         let tool_name = input.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+        if tool_name == "Grep" || tool_name == "Glob" {
+            signal_platform_search_drift(tool_name);
+        }
         let needs_gm = read_marker("needs-gm");
         let gm_fired = read_marker("gm-fired-this-turn");
 

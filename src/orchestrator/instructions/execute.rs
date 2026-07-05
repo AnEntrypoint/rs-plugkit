@@ -68,4 +68,3 @@ Spool every exec. Between mutable resolutions, failed exec retries, and unfamili
 - PRD rows: `prd-resolve` body `{"id": "<id>", "witness_evidence": "<...>"}` (top-level `id`/`prd_id` beside `witness_evidence`; bare-id body works but loses the audit trail; never nest the whole envelope as a string). `deviation_kind: prd-resolve-unknown-id` means the id missed -- read the `hint` field and re-dispatch corrected, never blind.
 - `transition` when the slice is closed and every mutable is witnessed; `transition to=PLAN` on a new unknown or reshaping discovery.
 "#;
-
