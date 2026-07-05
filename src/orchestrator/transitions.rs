@@ -25,6 +25,49 @@ pub fn next_phase(current: Phase) -> Phase {
     }
 }
 
+fn pending_mutables_rejection(target: &str) -> Option<(String, String, i32)> {
+    let pending_muts = mutables::pending_detailed();
+    if pending_muts.is_empty() { return None; }
+    let ids: Vec<String> = pending_muts.iter()
+        .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    Some((
+        String::new(),
+        format!(
+            "transition to {} rejected: {} mutables still pending -- resolve them with witness_evidence before transitioning. Pending: {}",
+            target,
+            pending_muts.len(),
+            ids.join(", ")
+        ),
+        1,
+    ))
+}
+
+fn pending_prd_rejection(target: &str) -> Option<(String, String, i32)> {
+    let (body, _err, code) = prd::handle_list("");
+    if code != 0 { return None; }
+    let v = serde_json::from_str::<serde_json::Value>(&body).ok()?;
+    let items = v.get("items").and_then(|v| v.as_array())?;
+    let pending_prd: Vec<String> = items.iter()
+        .filter(|it| {
+            let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+            status == "pending" || status == "in_progress"
+        })
+        .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    if pending_prd.is_empty() { return None; }
+    Some((
+        String::new(),
+        format!(
+            "transition to {} rejected: {} PRD items still pending -- execute or remove them before transitioning. Pending: {}",
+            target,
+            pending_prd.len(),
+            pending_prd.join(", ")
+        ),
+        1,
+    ))
+}
+
 pub fn handle(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     let mut session_id: Option<String> = None;
@@ -58,46 +101,8 @@ pub fn handle(content: &str) -> (String, String, i32) {
     };
 
     if matches!(target, Phase::Consolidate) {
-        let pending_muts = mutables::pending_detailed();
-        if !pending_muts.is_empty() {
-            let ids: Vec<String> = pending_muts.iter()
-                .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
-                .collect();
-            return (
-                String::new(),
-                format!(
-                    "transition to CONSOLIDATE rejected: {} mutables still pending -- resolve them with witness_evidence before transitioning. Pending: {}",
-                    pending_muts.len(),
-                    ids.join(", ")
-                ),
-                1,
-            );
-        }
-        let (body, _err, code) = prd::handle_list("");
-        if code == 0 {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(items) = v.get("items").and_then(|v| v.as_array()) {
-                    let pending_prd: Vec<String> = items.iter()
-                        .filter(|it| {
-                            let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                            status == "pending" || status == "in_progress"
-                        })
-                        .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
-                        .collect();
-                    if !pending_prd.is_empty() {
-                        return (
-                            String::new(),
-                            format!(
-                                "transition to CONSOLIDATE rejected: {} PRD items still pending -- execute or remove them before transitioning. Pending: {}",
-                                pending_prd.len(),
-                                pending_prd.join(", ")
-                            ),
-                            1,
-                        );
-                    }
-                }
-            }
-        }
+        if let Some(r) = pending_mutables_rejection("CONSOLIDATE") { return r; }
+        if let Some(r) = pending_prd_rejection("CONSOLIDATE") { return r; }
         #[cfg(target_arch = "wasm32")]
         {
             let residual_marker = super::gm_dir().join("residual-check-fired");
@@ -158,46 +163,8 @@ pub fn handle(content: &str) -> (String, String, i32) {
                 );
             }
         }
-        let pending_muts = mutables::pending_detailed();
-        if !pending_muts.is_empty() {
-            let ids: Vec<String> = pending_muts.iter()
-                .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
-                .collect();
-            return (
-                String::new(),
-                format!(
-                    "transition to COMPLETE rejected: {} mutables still pending -- resolve them with witness_evidence before transitioning. Pending: {}",
-                    pending_muts.len(),
-                    ids.join(", ")
-                ),
-                1,
-            );
-        }
-        let (body, _err, code) = prd::handle_list("");
-        if code == 0 {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(items) = v.get("items").and_then(|v| v.as_array()) {
-                    let pending_prd: Vec<String> = items.iter()
-                        .filter(|it| {
-                            let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                            status == "pending" || status == "in_progress"
-                        })
-                        .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
-                        .collect();
-                    if !pending_prd.is_empty() {
-                        return (
-                            String::new(),
-                            format!(
-                                "transition to COMPLETE rejected: {} PRD items still pending -- execute or remove them before transitioning. Pending: {}",
-                                pending_prd.len(),
-                                pending_prd.join(", ")
-                            ),
-                            1,
-                        );
-                    }
-                }
-            }
-        }
+        if let Some(r) = pending_mutables_rejection("COMPLETE") { return r; }
+        if let Some(r) = pending_prd_rejection("COMPLETE") { return r; }
     }
 
     let skill = next_skill(target);

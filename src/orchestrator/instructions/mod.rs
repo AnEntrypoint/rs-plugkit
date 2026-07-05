@@ -14,44 +14,8 @@ use super::prd;
 use super::recall;
 use crate::pkfs;
 
-fn read_update_available() -> serde_json::Value {
-    let path = super::gm_dir().join("exec-spool").join(".update-available.json");
-    let ps = path.to_string_lossy().to_string();
-    if !pkfs::exists(&ps) {
-        return serde_json::Value::Null;
-    }
-    match pkfs::read_to_string(&ps) {
-        Some(content) => serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::Value::Null),
-        None => serde_json::Value::Null,
-    }
-}
-
-fn read_unsupervised_watcher() -> serde_json::Value {
-    let path = super::gm_dir().join("exec-spool").join(".pre-supervised-watcher.json");
-    let ps = path.to_string_lossy().to_string();
-    if !pkfs::exists(&ps) {
-        return serde_json::Value::Null;
-    }
-    match pkfs::read_to_string(&ps) {
-        Some(content) => serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::Value::Null),
-        None => serde_json::Value::Null,
-    }
-}
-
-fn read_gm_plugkit_stale() -> serde_json::Value {
-    let path = super::gm_dir().join("exec-spool").join(".gm-plugkit-stale.json");
-    let ps = path.to_string_lossy().to_string();
-    if !pkfs::exists(&ps) {
-        return serde_json::Value::Null;
-    }
-    match pkfs::read_to_string(&ps) {
-        Some(content) => serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::Value::Null),
-        None => serde_json::Value::Null,
-    }
-}
-
-fn read_wrapper_stale_in_memory() -> serde_json::Value {
-    let path = super::gm_dir().join("exec-spool").join(".wrapper-stale-in-memory.json");
+fn read_spool_json(name: &str) -> serde_json::Value {
+    let path = super::gm_dir().join("exec-spool").join(name);
     let ps = path.to_string_lossy().to_string();
     if !pkfs::exists(&ps) {
         return serde_json::Value::Null;
@@ -112,10 +76,7 @@ fn prd_items_json() -> Vec<serde_json::Value> {
 }
 
 fn prd_pending_count(items: &[serde_json::Value]) -> usize {
-    items.iter().filter(|it| {
-        let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-        status != "done" && status != "complete" && status != "completed"
-    }).count()
+    items.iter().filter(|it| item_is_open(it)).count()
 }
 
 fn item_is_open(it: &serde_json::Value) -> bool {
@@ -342,10 +303,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         if p.is_empty() { String::new() } else { p.chars().take(400).collect() }
     };
     let prd_subject_query = prd_items.iter()
-        .find(|it| {
-            let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-            status != "done" && status != "complete" && status != "completed"
-        })
+        .find(|it| item_is_open(it))
         .and_then(|it| it.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .unwrap_or_default();
     let query = if !prompt_query.is_empty() { prompt_query } else { prd_subject_query };
@@ -357,13 +315,13 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
     ilog("instruction::handle post-recall");
 
-    let update_available = read_update_available();
+    let update_available = read_spool_json(".update-available.json");
     let running_tasks = super::task::live_running_tasks();
     let open_browser_sessions = super::task::open_browser_sessions();
     let stuck_spool = super::task::stuck_spool();
-    let unsupervised_watcher = read_unsupervised_watcher();
-    let gm_plugkit_stale = read_gm_plugkit_stale();
-    let wrapper_stale_in_memory = read_wrapper_stale_in_memory();
+    let unsupervised_watcher = read_spool_json(".pre-supervised-watcher.json");
+    let gm_plugkit_stale = read_spool_json(".gm-plugkit-stale.json");
+    let wrapper_stale_in_memory = read_spool_json(".wrapper-stale-in-memory.json");
     let running_tasks_count = match &running_tasks {
         serde_json::Value::Array(a) => a.len(),
         _ => 0,

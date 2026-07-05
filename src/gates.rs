@@ -212,10 +212,6 @@ fn ci_validation_fresh() -> bool {
     }
 }
 
-fn check_browser_witness_coverage() -> Vec<String> {
-    check_browser_witness_coverage_for_cwd("")
-}
-
 fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
     let edits_path = if cwd.is_empty() {
         ".gm/exec-spool/.turn-browser-edits.json".to_string()
