@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::shared_db::{shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
+use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
 
 const TABLE: &str = "rssearch_vectors";
 const INDEX: &str = "rssearch_vectors_vec";
@@ -38,6 +38,7 @@ fn drop_if_dim_mismatch() -> bool {
 }
 
 pub fn ensure_schema() -> Result<(), String> {
+    shared_ensure_open(":memory:")?;
     let _ = drop_if_dim_mismatch();
     shared_exec(&format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, namespace TEXT NOT NULL, key TEXT NOT NULL, text TEXT, embedding F32_BLOB({}), updated_at INTEGER, UNIQUE(namespace, key))",
