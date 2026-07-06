@@ -137,7 +137,7 @@ const SKIP_DIRS: &[&str] = &[
     ".gm",
 ];
 
-const GM_DB: &str = "gm";
+const GM_DB: &str = crate::shared_db::SHARED_DB;
 
 const EXPECTED_EMBED_DIM: usize = 384;
 

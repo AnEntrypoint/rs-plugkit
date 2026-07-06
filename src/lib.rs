@@ -5,6 +5,9 @@ pub mod wasm_dispatch;
 pub mod libsql_wasm;
 
 #[cfg(target_arch = "wasm32")]
+pub mod shared_db;
+
+#[cfg(target_arch = "wasm32")]
 pub mod code_index;
 
 #[cfg(target_arch = "wasm32")]
