@@ -48,7 +48,11 @@ jobs:
           else
             git commit -m "chore: auto-bump version to $NEW_VERSION [skip ci]"
             git fetch origin main
-            git rebase -s recursive -X theirs origin/main
+            if ! git rebase origin/main; then
+              echo "::error::Rebase onto origin/main hit a real conflict; refusing to auto-resolve with -X theirs (would silently discard concurrent main changes)."
+              git rebase --abort
+              exit 1
+            fi
             git push origin HEAD:main
             echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
             echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -226,15 +230,14 @@ jobs:
           ls -la npm-pkg/
 
       - name: Publish to npm
-        continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VER: ${{ needs.bump.outputs.version }}
         run: |
           set -e
           if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
-            echo "NPM_TOKEN not set; skipping npm publish"
-            exit 0
+            echo "::error::NPM_TOKEN not set; cannot publish plugkit-wasm@$VER"
+            exit 1
           fi
           cd npm-pkg
           if npm view "plugkit-wasm@$VER" version >/dev/null 2>&1; then
@@ -245,9 +248,9 @@ jobs:
             echo "plugkit-wasm@$VER published to npm"
           else
             ERR=$(cat npm-publish-err.log | tr '\n' ' ' | head -c 400)
-            echo "::warning title=npm publish failed for plugkit-wasm@$VER::$ERR"
-            echo "npm publish failed; gh-releases path remains canonical, cascade continues"
+            echo "::error title=npm publish failed for plugkit-wasm@$VER::$ERR"
             cat npm-publish-err.log
+            exit 1
           fi
 
       - name: Bump gm metadata

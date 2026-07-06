@@ -32,6 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -40,6 +41,9 @@ jobs:
 
       - name: Cargo check (fast)
         run: cargo check --target wasm32-wasip1 --no-default-features --features wasm --lib
+
+      - name: Cargo clippy (lint report, no auto-fix)
+        run: cargo clippy --target wasm32-wasip1 --no-default-features --features wasm --lib
 
   build:
     if: github.event_name != 'pull_request'
@@ -76,7 +80,7 @@ jobs:
           rm -f Cargo.lock
           cargo generate-lockfile
 
-      - name: Fetch embedding weights (MiniLM-L6-v2 safetensors + tokenizer)
+      - name: Fetch embedding weights (BAAI/bge-small-en-v1.5 safetensors + tokenizer)
         shell: bash
         run: bash scripts/fetch-weights.sh
 
