@@ -3,6 +3,7 @@ pub mod transitions;
 pub mod cas;
 pub mod mutables;
 pub mod memorize;
+pub mod discipline_note;
 pub mod residual;
 pub mod recall;
 pub mod instructions;
@@ -87,7 +88,7 @@ pub fn is_orchestrator_verb(verb: &str) -> bool {
     matches!(
         verb,
         "transition" | "mutable-resolve" | "mutable-add" | "mutable-list"
-            | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall"
+            | "memorize-fire" | "discipline-note" | "phase-status" | "residual-scan" | "auto-recall"
             | "instruction" | "prd-add" | "prd-resolve" | "prd-list"
             | "task-spawn" | "task-list" | "task-stop" | "task-output"
             | "memorize-continue"
@@ -114,6 +115,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "mutable-add" => mutables::handle_add(content),
         "mutable-list" => mutables::handle_list(content),
         "memorize-fire" => memorize::handle_fire(content),
+        "discipline-note" => discipline_note::handle(content),
         "phase-status" => state::handle_status(),
         "residual-scan" => residual::handle_scan(content),
         "auto-recall" => recall::handle_auto_recall(content),

@@ -365,6 +365,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "unsupervised_watcher": unsupervised_watcher,
         "should_residual_scan": should_scan,
         "route_hint": route_hint,
+        "discipline_policies": super::discipline_note::active_policies(),
     });
     let s = payload.to_string();
     ilog(&format!("instruction::handle done out_len={}", s.len()));
