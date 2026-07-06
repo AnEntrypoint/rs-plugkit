@@ -1,9 +1,11 @@
 # rs-plugkit
 
-Unified CLI binary that bundles `rs-exec` (background-task spool + RPC runner),
-`rs-search` (BM25 code retrieval), and `rs-codeinsight` (tree-sitter project
-analyzer) behind one entry point. Installed at `~/.claude/gm-tools/plugkit.exe`
-and self-updates on every invocation via `self_update.rs`.
+Unified CLI binary with a natively-implemented background-task spool + RPC
+runner (exec_js dispatch, `wasm_dispatch.rs`), plus `rs-search` (BM25 code
+retrieval) and `rs-codeinsight` (tree-sitter project analyzer) behind one
+entry point. Installed at `~/.claude/gm-tools/plugkit.exe` and self-updates
+on every invocation via `self_update.rs`. (The `rs-exec` crate is retired
+and archived; this crate has never depended on it.)
 
 ## Subcommands
 
