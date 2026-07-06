@@ -28,6 +28,9 @@ pub mod browser_witness;
 #[cfg(target_arch = "wasm32")]
 pub mod poll_detect;
 
+#[cfg(target_arch = "wasm32")]
+pub mod rssearch_vectors;
+
 pub mod pkfs;
 pub mod prose;
 pub mod orchestrator;

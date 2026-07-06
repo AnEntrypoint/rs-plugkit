@@ -1,11 +1,11 @@
 #![cfg(target_arch = "wasm32")]
 
-// Contract for rs-learn/rs-search: mirror the KvBackend pattern (PlugkitKv in
+// Contract for rs-learn/rs-search: mirror the KvBackend pattern (SqlKv in
 // wasm_dispatch.rs), not a wasm host-import. Define a trait shaped like this
 // module's fns in your own crate, implement it on a struct here whose methods
 // delegate to shared_exec/shared_query/shared_exec_params/shared_query_params,
 // then inject that struct at your session constructor the same way
-// rs_learn::LearnSession::new(PlugkitKv) already does. All tables share
+// rs_learn::LearnSession::new(SqlKv) already does. All tables share
 // SHARED_DB ("gm") with rs-plugkit's own code_chunks/memories/pipeline_state --
 // prefix every owned table (rslearn_*, rssearch_*) via CREATE TABLE IF NOT
 // EXISTS to avoid name collisions; shared_ensure_open is idempotent (no-op if

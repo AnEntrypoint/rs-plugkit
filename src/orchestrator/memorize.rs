@@ -172,6 +172,14 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         return (String::new(), msg, 1);
     }
     let edge_inserted = insert_memory_edge(&namespace, &key, &text, &emb_str, now as i64);
+    let emb_val: serde_json::Value = serde_json::from_str(&emb_str).unwrap_or(serde_json::Value::Null);
+    if let Err(e) = crate::rssearch_vectors::write(&namespace, &key, &text, &emb_val, now as i64) {
+        crate::wasm_dispatch::emit_event("rssearch_vectors_write_failed", serde_json::json!({
+            "key": key,
+            "namespace": namespace,
+            "error": e,
+        }));
+    }
     let payload = serde_json::json!({
         "ok": true,
         "key": key,
@@ -217,7 +225,7 @@ fn insert_memory_edge(namespace: &str, key: &str, text: &str, emb_str: &str, now
         }
     });
     let raw = edge_req.to_string();
-    let mut session = rs_learn::LearnSession::new(crate::wasm_dispatch::PlugkitKv);
+    let mut session = rs_learn::LearnSession::new(crate::wasm_dispatch::SqlKv);
     let resp = rs_learn::dispatch_json(&mut session, raw.as_bytes());
     serde_json::from_slice::<serde_json::Value>(&resp).ok()
         .and_then(|v| v.get("ok").and_then(|o| o.as_bool()))

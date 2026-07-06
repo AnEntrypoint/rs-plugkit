@@ -477,6 +477,14 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
         let _ = unsafe { host_kv_put(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32, "".as_ptr(), 0) };
         return err("memorize", "text kv_put failed; rolled back vec entry");
     }
+    let now_ms = unsafe { host_now_ms() } as i64;
+    if let Err(e) = crate::rssearch_vectors::write(namespace, &key, text, &emb, now_ms) {
+        emit_event("rssearch_vectors_write_failed", json!({
+            "key": key,
+            "namespace": namespace,
+            "error": e,
+        }));
+    }
     ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true}))
 }
 
@@ -742,30 +750,83 @@ fn learn_build(_body: &Value) -> u64 {
     ok("learn-build", json!({ "note": "WASM build uses thebird host bindings -- no separate build step" }))
 }
 
-pub struct PlugkitKv;
+pub struct SqlKv;
 
-impl rs_learn::KvBackend for PlugkitKv {
+fn sqlkv_ensure_schema() -> Result<(), String> {
+    crate::shared_db::shared_ensure_open(":memory:")?;
+    crate::shared_db::shared_exec(
+        "CREATE TABLE IF NOT EXISTS rslearn_kv (namespace TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(namespace, key))",
+    )
+}
+
+fn sqlkv_escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' | '%' | '_' => { out.push('\\'); out.push(c); }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+impl rs_learn::KvBackend for SqlKv {
     fn get(&self, namespace: &str, key: &str) -> Option<Vec<u8>> {
+        if sqlkv_ensure_schema().is_ok() {
+            let sql = "SELECT value FROM rslearn_kv WHERE namespace=?1 AND key=?2";
+            if let Ok(rows) = crate::shared_db::shared_query_params(sql, &[namespace, key]) {
+                if let Some(row) = rows.as_array().and_then(|a| a.first()) {
+                    if let Some(v) = row.get("value").and_then(|v| v.as_str()) {
+                        if let Some(bytes) = b64_decode(v) {
+                            return Some(bytes);
+                        }
+                    }
+                }
+            }
+        }
         let packed = unsafe { host_kv_get(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
         unpack_to_string(packed).map(|s| s.into_bytes())
     }
     fn put(&mut self, namespace: &str, key: &str, val: &[u8]) -> Result<(), String> {
-        let _ = unsafe { host_kv_put(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
-        Ok(())
+        sqlkv_ensure_schema()?;
+        let now = unsafe { host_now_ms() }.to_string();
+        let encoded = b64_encode(val);
+        let sql = "INSERT INTO rslearn_kv(namespace, key, value, updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(namespace, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at";
+        crate::shared_db::shared_exec_params(sql, &[namespace, key, &encoded, &now])
     }
     fn list_prefix(&self, namespace: &str, prefix: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if sqlkv_ensure_schema().is_ok() {
+            let like = format!("{}%", sqlkv_escape_like(prefix));
+            let sql = "SELECT key FROM rslearn_kv WHERE namespace=?1 AND key LIKE ?2 ESCAPE '\\'";
+            if let Ok(rows) = crate::shared_db::shared_query_params(sql, &[namespace, &like]) {
+                if let Some(arr) = rows.as_array() {
+                    for row in arr {
+                        if let Some(k) = row.get("key").and_then(|v| v.as_str()) {
+                            out.push(k.to_string());
+                        }
+                    }
+                }
+            }
+        }
         let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, prefix.as_ptr(), prefix.len() as u32) };
-        match unpack_to_value(packed) {
+        let legacy: Vec<String> = match unpack_to_value(packed) {
             Value::Array(a) => a.into_iter().filter_map(|v| v.as_str().map(String::from)).collect(),
             Value::Object(o) => o.keys().cloned().collect(),
             _ => Vec::new(),
+        };
+        for k in legacy {
+            if !out.contains(&k) {
+                out.push(k);
+            }
         }
+        out
     }
 }
 
 fn learn(body: &Value, raw: &str) -> u64 {
     let _ = body;
-    let mut session = rs_learn::LearnSession::new(PlugkitKv);
+    let mut session = rs_learn::LearnSession::new(SqlKv);
     let resp = rs_learn::dispatch_json(&mut session, raw.as_bytes());
     match String::from_utf8(resp) {
         Ok(s) => pack(s),
@@ -776,7 +837,7 @@ fn learn(body: &Value, raw: &str) -> u64 {
 const ROUTER_MODELS: &[&str] = &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"];
 
 fn learn_dispatch_value(req: &Value) -> Value {
-    let mut session = rs_learn::LearnSession::new(PlugkitKv);
+    let mut session = rs_learn::LearnSession::new(SqlKv);
     let raw = req.to_string();
     let resp = rs_learn::dispatch_json(&mut session, raw.as_bytes());
     String::from_utf8(resp).ok()

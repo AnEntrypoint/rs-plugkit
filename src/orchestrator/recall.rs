@@ -71,7 +71,7 @@ pub fn rerank_by_adapter(query_text: &str, hits: serde_json::Value) -> serde_jso
         "verb": "apply_adapter",
         "body": { "embedding": embedding, "targets": targets }
     });
-    let mut session = rs_learn::LearnSession::new(crate::wasm_dispatch::PlugkitKv);
+    let mut session = rs_learn::LearnSession::new(crate::wasm_dispatch::SqlKv);
     let resp = rs_learn::dispatch_json(&mut session, req.to_string().as_bytes());
     let resp_val: serde_json::Value = serde_json::from_slice(&resp).unwrap_or(serde_json::Value::Null);
     let data = resp_val.get("data").cloned().unwrap_or(serde_json::Value::Null);
