@@ -144,9 +144,19 @@ fn ok(verb: &str, data: Value) -> u64 {
     pack(json!({ "ok": true, "verb": verb, "data": data, "next_dispatch_hint": next_dispatch_hint_for(verb) }).to_string())
 }
 
+fn path_within_project(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    !normalized.split('/').any(|seg| seg == "..")
+        && !normalized.starts_with('/')
+        && !normalized.contains(':')
+}
+
 fn fs_read(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() { return err("fs_read", "path required"); }
+    if !path_within_project(path) {
+        return err("fs_read", "path must be relative and within the project");
+    }
     match host_read(path) {
         Some(s) => ok("fs_read", Value::String(s)),
         None => err("fs_read", "not found or empty"),
@@ -159,9 +169,7 @@ fn fs_write(body: &Value) -> u64 {
         .or_else(|| body.get("data").and_then(|v| v.as_str()))
         .unwrap_or("");
     if path.is_empty() { return err("fs_write", "path required"); }
-    let normalized = path.replace('\\', "/");
-    let has_dotdot_component = normalized.split('/').any(|seg| seg == "..");
-    if has_dotdot_component || normalized.starts_with('/') || normalized.contains(':') {
+    if !path_within_project(path) {
         return err("fs_write", "path must be relative and within the project");
     }
     if host_write(path, data) { ok("fs_write", json!({ "bytes": data.len() })) } else { err("fs_write", "write failed") }
@@ -169,6 +177,9 @@ fn fs_write(body: &Value) -> u64 {
 
 fn fs_readdir(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    if !path_within_project(path) {
+        return err("fs_readdir", "path must be relative and within the project");
+    }
     let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
     let v = unpack_to_value(packed);
     if v.is_null() { return err("fs_readdir", "empty"); }
@@ -178,6 +189,9 @@ fn fs_readdir(body: &Value) -> u64 {
 fn fs_stat(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() { return err("fs_stat", "path required"); }
+    if !path_within_project(path) {
+        return err("fs_stat", "path must be relative and within the project");
+    }
     match host_stat(path) {
         Some(v) if !v.is_null() => ok("fs_stat", v),
         _ => err("fs_stat", "not found"),
@@ -556,14 +570,9 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
         Some(e) => e,
         None => return err("memorize", "embed failed; refusing to write a text-only memory with no vector (un-vector-recallable orphan)"),
     };
-    let vec_ns = format!("{}-vec", namespace);
-    let emb_str = emb.to_string();
-    let vec_rc = unsafe { host_kv_put(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32, emb_str.as_ptr(), emb_str.len() as u32) };
-    if vec_rc == 0 { return err("memorize", "vec kv_put failed; aborting to prevent orphaned text-only memory"); }
-    let rc = unsafe { host_kv_put(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32, text.as_ptr(), text.len() as u32) };
-    if rc == 0 {
-        let _ = unsafe { host_kv_put(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32, "".as_ptr(), 0) };
-        return err("memorize", "text kv_put failed; rolled back vec entry");
+    let md_path = memory_md_write_path(namespace, &key, text);
+    if md_path.is_none() {
+        return err("memorize", "memory md write failed; the md corpus is the durable store, refusing an unbacked memory");
     }
     let now_ms = unsafe { host_now_ms() } as i64;
     if let Err(e) = crate::rssearch_vectors::write(namespace, &key, text, &emb, now_ms) {
@@ -573,7 +582,6 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
             "error": e,
         }));
     }
-    let md_path = memory_md_write_path(namespace, &key, text);
     ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true, "md_file": md_path}))
 }
 

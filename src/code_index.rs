@@ -579,42 +579,44 @@ pub fn index(root: &str, max_files: usize) -> Value {
     })
 }
 
-fn porcelain_path(line: &str) -> &str {
-    let rest = if line.len() > 3 { &line[3..] } else { line.trim_start() };
-    match rest.rfind(" -> ") {
-        Some(i) => &rest[i + 4..],
-        None => rest,
-    }
-}
-
-fn skipped_path(path: &str) -> bool {
-    let p = path.trim_matches('"');
-    p.split('/').any(|seg| SKIP_DIRS.iter().any(|d| seg == *d))
-}
-
-fn indexable_porcelain(porcelain: &str) -> String {
-    porcelain
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter(|line| !skipped_path(porcelain_path(line)))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+const DIGEST_MAX_FILES: usize = 2000;
+const DIGEST_PATH: &str = ".gm/exec-spool/.codeinsight-digest";
 
 pub fn current_digest() -> String {
-    let head = crate::wasm_dispatch::git_call("rev-parse HEAD", None)
-        .get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-    let porcelain = crate::wasm_dispatch::git_porcelain();
-    let dirty = crc32(&indexable_porcelain(&porcelain));
-    format!("{}:{}", head, dirty)
+    let files = collect_files(".", DIGEST_MAX_FILES);
+    let mut entries: Vec<(String, u32)> = Vec::new();
+    for raw_fp in &files {
+        let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();
+        let ext = match canon.rfind('.') { Some(i) => &canon[i..], None => "" };
+        if lang_for_ext(ext).is_none() { continue; }
+        let content = match host_read(&canon)
+            .or_else(|| host_read(raw_fp))
+            .or_else(|| host_read(&format!("/{}", canon)))
+        { Some(c) => c, None => continue };
+        if content.len() > 256 * 1024 { continue; }
+        entries.push((canon, crc32(&content)));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.dedup_by(|a, b| a.0 == b.0);
+    let mut acc = String::with_capacity(entries.len() * 32);
+    for (path, hash) in &entries {
+        acc.push_str(path);
+        acc.push('|');
+        acc.push_str(&format!("{:08x}", hash));
+        acc.push('\n');
+    }
+    format!("v2:{:016x}:files={}", crate::pipeline::fnv1a64(acc.as_bytes()), entries.len())
 }
 
 pub fn stored_digest() -> Option<String> {
-    crate::wasm_dispatch::host_kv_read("codeinsight", "__digest__")
+    crate::wasm_dispatch::host_read(DIGEST_PATH)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 pub fn store_digest(digest: &str) {
-    fv_put("codeinsight", "__digest__", digest);
+    let _ = crate::wasm_dispatch::host_write(DIGEST_PATH, digest);
+    fv_delete("codeinsight", "__digest__");
 }
 
 pub struct ChunkMeta {

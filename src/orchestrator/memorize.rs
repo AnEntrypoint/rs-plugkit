@@ -125,28 +125,12 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             return (payload.to_string(), String::new(), 0);
         }
     }
-    let rc = unsafe {
-        crate::wasm_dispatch::host_kv_put(
-            namespace.as_ptr(), namespace.len() as u32,
-            key.as_ptr(), key.len() as u32,
-            text.as_ptr(), text.len() as u32,
-        )
-    };
-    if rc == 0 {
-        return (String::new(), "kv_put failed".to_string(), 1);
-    }
     let emb_str = match crate::embed::embed_text_json(&text) {
         Some(v) => v.to_string(),
         None => {
-            let _ = unsafe {
-                crate::wasm_dispatch::host_kv_delete(
-                    namespace.as_ptr(), namespace.len() as u32,
-                    key.as_ptr(), key.len() as u32,
-                )
-            };
-            let msg = format!("memorize: embed_text failed for key={}; rolled back text row; refusing silent-NULL-embedding insert", key);
+            let msg = format!("memorize: embed_text failed for key={}; refusing silent-NULL-embedding insert", key);
             let _ = unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
-            crate::wasm_dispatch::emit_event("memorize_embed_rollback", serde_json::json!({
+            crate::wasm_dispatch::emit_event("memorize_embed_failed", serde_json::json!({
                 "key": key,
                 "namespace": namespace,
                 "error": "embed_text returned None",
@@ -154,30 +138,20 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             return (String::new(), msg, 1);
         }
     };
-    let vec_ns = format!("{}-vec", namespace);
-    let vrc = unsafe {
-        crate::wasm_dispatch::host_kv_put(
-            vec_ns.as_ptr(), vec_ns.len() as u32,
-            key.as_ptr(), key.len() as u32,
-            emb_str.as_ptr(), emb_str.len() as u32,
-        )
+    let md_path = match crate::memory_md::write_memory(&namespace, &key, &text, now as i64) {
+        crate::memory_md::WriteOutcome::Created(p)
+        | crate::memory_md::WriteOutcome::Updated(p)
+        | crate::memory_md::WriteOutcome::Deduped(p) => Some(p),
+        crate::memory_md::WriteOutcome::Invalid(reason) => {
+            crate::wasm_dispatch::emit_event("memory_md_write_invalid", serde_json::json!({
+                "key": key, "namespace": namespace, "reason": reason,
+            }));
+            return (String::new(), format!("memorize: md write invalid: {}", reason), 1);
+        }
+        crate::memory_md::WriteOutcome::Failed(p) => {
+            return (String::new(), format!("memorize: md write failed at {}; the md corpus is the durable store, refusing an unbacked memory", p), 1);
+        }
     };
-    if vrc == 0 {
-        let _ = unsafe {
-            crate::wasm_dispatch::host_kv_delete(
-                namespace.as_ptr(), namespace.len() as u32,
-                key.as_ptr(), key.len() as u32,
-            )
-        };
-        let msg = format!("memorize: vector kv_put failed for key={}; rolled back text row", key);
-        let _ = unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
-        crate::wasm_dispatch::emit_event("memorize_embed_rollback", serde_json::json!({
-            "key": key,
-            "namespace": namespace,
-            "error": "vector kv_put failed",
-        }));
-        return (String::new(), msg, 1);
-    }
     let edge_inserted = insert_memory_edge(&namespace, &key, &text, &emb_str, now as i64);
     let emb_val: serde_json::Value = serde_json::from_str(&emb_str).unwrap_or(serde_json::Value::Null);
     if let Err(e) = crate::rssearch_vectors::write(&namespace, &key, &text, &emb_val, now as i64) {
@@ -187,18 +161,6 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             "error": e,
         }));
     }
-    let md_path = match crate::memory_md::write_memory(&namespace, &key, &text, now as i64) {
-        crate::memory_md::WriteOutcome::Created(p)
-        | crate::memory_md::WriteOutcome::Updated(p)
-        | crate::memory_md::WriteOutcome::Deduped(p) => Some(p),
-        crate::memory_md::WriteOutcome::Invalid(reason) => {
-            crate::wasm_dispatch::emit_event("memory_md_write_invalid", serde_json::json!({
-                "key": key, "namespace": namespace, "reason": reason,
-            }));
-            None
-        }
-        crate::memory_md::WriteOutcome::Failed(_) => None,
-    };
     let payload = serde_json::json!({
         "ok": true,
         "key": key,
