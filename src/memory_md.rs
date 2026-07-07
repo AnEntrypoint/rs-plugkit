@@ -303,6 +303,21 @@ fn store_meta_digest(ns: &str, digest: &str) {
     );
 }
 
+pub fn has_stored_digest(namespaces: &[String]) -> bool {
+    if ensure_meta_table().is_err() {
+        return false;
+    }
+    for ns in namespaces {
+        if ns == "codeinsight" {
+            continue;
+        }
+        if meta_digest(ns).is_none() {
+            return false;
+        }
+    }
+    true
+}
+
 const SYNC_EMBED_BUDGET_MS: u64 = 1500;
 const SYNC_TOTAL_BUDGET_MS: u64 = 2000;
 const SYNC_REKEY_ROWS_DEADLINE_MS: u64 = 3500;

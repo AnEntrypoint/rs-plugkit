@@ -389,7 +389,7 @@ fn discipline_fanout_namespaces(base: &str) -> Vec<String> {
     out
 }
 
-fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32) -> (Value, Option<Vec<String>>) {
+fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do_sync: bool) -> (Value, Option<Vec<String>>) {
     let namespaces = discipline_fanout_namespaces(namespace);
     let now_ms = unsafe { host_now_ms() } as i64;
     let mut memory_namespaces: Vec<String> = Vec::new();
@@ -399,15 +399,20 @@ fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32) ->
                 emit_event("rssearch_vectors_migration_failed", json!({ "namespace": ns, "error": e }));
             }
         } else {
-            let _ = crate::memory_md::export_flat_json(ns, now_ms);
+            if do_sync {
+                let _ = crate::memory_md::export_flat_json(ns, now_ms);
+            }
             memory_namespaces.push(ns.clone());
         }
     }
-    let mut converged = false;
-    if !memory_namespaces.is_empty() {
+    let converged = if memory_namespaces.is_empty() {
+        false
+    } else if do_sync {
         let sync = crate::memory_md::sync_index(&memory_namespaces, now_ms);
-        converged = sync.get("converged").and_then(|v| v.as_bool()).unwrap_or(false);
-    }
+        sync.get("converged").and_then(|v| v.as_bool()).unwrap_or(false)
+    } else {
+        crate::memory_md::has_stored_digest(&memory_namespaces)
+    };
     let hits = match crate::rssearch_vectors::search_with_recency(query_embedding, &namespaces, limit as usize, now_ms) {
         Ok(hits) => hits,
         Err(e) => json!({ "error": e }),
@@ -419,7 +424,7 @@ pub fn memory_recall_backend(query_embedding: &Value, namespace: &str, limit: u3
     if query_embedding.is_null() {
         return None;
     }
-    let (_, mem_ns) = rssearch_vector_hits(query_embedding, namespace, limit);
+    let (_, mem_ns) = rssearch_vector_hits(query_embedding, namespace, limit, true);
     let mem_ns = mem_ns?;
     let now_ms = unsafe { host_now_ms() } as i64;
     crate::rssearch_vectors::search_memory_hits(query_embedding, &mem_ns, limit as usize, now_ms, 0.0)
@@ -435,7 +440,7 @@ fn recall(body: &Value) -> u64 {
     check_sigil_ignored(query, namespace);
     let derived_query = query.to_string();
     let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
-    let (vector_hits, mem_ns) = rssearch_vector_hits(&embedding, namespace, limit);
+    let (vector_hits, mem_ns) = rssearch_vector_hits(&embedding, namespace, limit, false);
     if let Some(mem_ns) = &mem_ns {
         let now_ms = unsafe { host_now_ms() } as i64;
         if let Ok(md_hits) = crate::rssearch_vectors::search_memory_hits(&embedding, mem_ns, limit as usize, now_ms, 0.0) {
@@ -628,7 +633,7 @@ fn memorize_prune(body: &Value) -> u64 {
     }
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
     let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
-    let (vector_candidates, _) = rssearch_vector_hits(&embedding, namespace, k);
+    let (vector_candidates, _) = rssearch_vector_hits(&embedding, namespace, k, true);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": namespace }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, k) };
     let hits = unpack_to_value(packed);
@@ -675,7 +680,7 @@ fn codesearch(body: &Value) -> u64 {
     }
     let cand_k = k.saturating_mul(5).max(50);
     let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
-    let (vector_hits, _) = rssearch_vector_hits(&embedding, "codeinsight", k);
+    let (vector_hits, _) = rssearch_vector_hits(&embedding, "codeinsight", k, false);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": "codeinsight" }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, cand_k) };
     let vec_hits = unpack_to_value(packed);
