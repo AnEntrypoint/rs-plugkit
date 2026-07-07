@@ -817,7 +817,7 @@ fn emit_recall(query: &str, rows: &Value, mode: &str, namespace: Option<&str>) {
         .and_then(|d| d.as_f64())
         .map(|d| 1.0 - d);
     let mut fields = serde_json::Map::new();
-    fields.insert("sub".to_string(), Value::String("rs_learn".to_string()));
+    fields.insert("sub".to_string(), Value::String("memory".to_string()));
     fields.insert("query".to_string(), Value::String(query.chars().take(200).collect::<String>()));
     fields.insert("hit".to_string(), Value::Bool(n_hits > 0));
     fields.insert("mode".to_string(), Value::String(mode.to_string()));

@@ -41,13 +41,27 @@ fn shared_db_path() -> String {
     crate::code_index::project_db_path(None)
 }
 
+fn has_deleted_column() -> bool {
+    let sql = format!("SELECT name FROM pragma_table_info('{}') WHERE name = 'deleted'", TABLE);
+    crate::libsql_wasm::query(SHARED_DB, &sql)
+        .ok()
+        .and_then(|rows| rows.as_array().map(|a| !a.is_empty()))
+        .unwrap_or(false)
+}
+
 pub fn ensure_schema() -> Result<(), String> {
     shared_ensure_open(&shared_db_path())?;
     let _ = drop_if_dim_mismatch();
     shared_exec(&format!(
-        "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, edge_id TEXT NOT NULL, src TEXT, dst TEXT, relation TEXT, group_id TEXT, embedding F32_BLOB({}), created_at INTEGER, UNIQUE(edge_id))",
+        "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, edge_id TEXT NOT NULL, src TEXT, dst TEXT, relation TEXT, group_id TEXT, embedding F32_BLOB({}), created_at INTEGER, deleted INTEGER NOT NULL DEFAULT 0, UNIQUE(edge_id))",
         TABLE, EXPECTED_EMBED_DIM
     ))?;
+    if !has_deleted_column() {
+        shared_exec(&format!(
+            "ALTER TABLE {} ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
+            TABLE
+        ))?;
+    }
     let _ = shared_exec(&format!(
         "CREATE INDEX IF NOT EXISTS {} ON {}(libsql_vector_idx(embedding, 'metric=cosine'))",
         INDEX, TABLE
@@ -92,20 +106,20 @@ pub fn write(
     }
     let embedding_sql = format!("vector('{}')", vec_to_json_literal(&vec));
     let sql = format!(
-        "INSERT INTO {}(edge_id, src, dst, relation, group_id, embedding, created_at) VALUES(?1,?2,?3,?4,?5,{},?6) \
+        "INSERT INTO {}(edge_id, src, dst, relation, group_id, embedding, created_at, deleted) VALUES(?1,?2,?3,?4,?5,{},?6,0) \
          ON CONFLICT(edge_id) DO UPDATE SET src=excluded.src, dst=excluded.dst, relation=excluded.relation, \
-         group_id=excluded.group_id, embedding=excluded.embedding, created_at=excluded.created_at",
+         group_id=excluded.group_id, embedding=excluded.embedding, created_at=excluded.created_at, deleted=0",
         TABLE, embedding_sql
     );
     let created_s = created_at_ms.to_string();
     shared_exec_params(&sql, &[edge_id, src, dst, relation, group_id, &created_s])
 }
 
-pub fn delete(edge_id: &str) -> Result<(), String> {
+pub fn mark_deleted(edge_id: &str) -> Result<(), String> {
     if let Err(e) = ensure_schema() {
         return Err(format!("rslearn_vectors ensure_schema failed: {}", e));
     }
-    let sql = format!("DELETE FROM {} WHERE edge_id=?1", TABLE);
+    let sql = format!("UPDATE {} SET deleted=1 WHERE edge_id=?1", TABLE);
     shared_exec_params(&sql, &[edge_id])
 }
 
@@ -126,7 +140,7 @@ pub fn search(query_embedding: &Value, limit: usize) -> Result<Value, String> {
         "SELECT r.edge_id, r.src, r.dst, r.relation, r.group_id, r.created_at, \
          vector_distance_cos(r.embedding, vector(?1)) AS distance \
          FROM vector_top_k('{}', vector(?2), {}) AS v JOIN {} AS r ON r.rowid = v.id \
-         ORDER BY distance ASC LIMIT {}",
+         WHERE r.deleted=0 ORDER BY distance ASC LIMIT {}",
         INDEX, pool, TABLE, limit
     );
     shared_query_params(&sql, &[&qlit, &qlit])

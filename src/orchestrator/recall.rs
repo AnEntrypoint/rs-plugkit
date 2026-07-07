@@ -36,7 +36,7 @@ fn emit_recall(query: &str, hits: &serde_json::Value, mode: &str, namespace: &st
     let n_hits = arr.map(|a| a.len()).unwrap_or(0);
     let top_score = arr.and_then(|a| a.first()).and_then(|r| r.get("score")).and_then(|d| d.as_f64());
     let mut fields = serde_json::Map::new();
-    fields.insert("sub".to_string(), serde_json::Value::String("rs_learn".to_string()));
+    fields.insert("sub".to_string(), serde_json::Value::String("memory".to_string()));
     fields.insert("query".to_string(), serde_json::Value::String(query.chars().take(200).collect::<String>()));
     fields.insert("hit".to_string(), serde_json::Value::Bool(n_hits > 0));
     fields.insert("mode".to_string(), serde_json::Value::String(mode.to_string()));
@@ -45,72 +45,6 @@ fn emit_recall(query: &str, hits: &serde_json::Value, mode: &str, namespace: &st
     if let Some(s) = top_score { if let Some(num) = serde_json::Number::from_f64(s) { fields.insert("top_score".to_string(), serde_json::Value::Number(num)); } }
     crate::wasm_dispatch::emit_event("recall", serde_json::Value::Object(fields));
 }
-
-#[cfg(target_arch = "wasm32")]
-pub fn rerank_by_adapter(query_text: &str, hits: serde_json::Value) -> serde_json::Value {
-    let mut arr = match hits.as_array() {
-        Some(a) if a.len() > 1 => a.clone(),
-        _ => return hits,
-    };
-    let namespaces: Vec<String> = {
-        let mut seen = Vec::new();
-        for h in &arr {
-            if let Some(ns) = h.get("namespace").and_then(|v| v.as_str()) {
-                if !ns.is_empty() && !seen.iter().any(|s| s == ns) { seen.push(ns.to_string()); }
-            }
-        }
-        seen
-    };
-    if namespaces.len() < 2 { return hits; }
-    let embedding = match crate::embed::embed_text(query_text) {
-        Some(e) => e,
-        None => return hits,
-    };
-    let targets: Vec<serde_json::Value> = namespaces.iter().map(|n| serde_json::Value::String(n.clone())).collect();
-    let req = serde_json::json!({
-        "verb": "apply_adapter",
-        "body": { "embedding": embedding, "targets": targets }
-    });
-    let mut session = rs_learn::LearnSession::new(crate::wasm_dispatch::SqlKv);
-    let resp = rs_learn::dispatch_json(&mut session, req.to_string().as_bytes());
-    let resp_val: serde_json::Value = serde_json::from_slice(&resp).unwrap_or(serde_json::Value::Null);
-    let data = resp_val.get("data").cloned().unwrap_or(serde_json::Value::Null);
-    let logits: Vec<f64> = data.get("logits").cloned()
-        .and_then(|l| serde_json::from_value::<Vec<f64>>(l).ok())
-        .unwrap_or_default();
-    let adapter_targets: Vec<String> = data.get("targets").cloned()
-        .and_then(|t| serde_json::from_value::<Vec<String>>(t).ok())
-        .unwrap_or_default();
-    if logits.len() != adapter_targets.len() || logits.iter().all(|x| x.abs() < 1e-9) {
-        return hits;
-    }
-    let n = logits.len() as f64;
-    let max = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let spread = max - logits.iter().cloned().fold(f64::INFINITY, f64::min);
-    let tau = if spread > 1e-12 { spread } else { 1.0 };
-    let exps: Vec<f64> = logits.iter().map(|l| ((l - max) / tau).exp()).collect();
-    let sum: f64 = exps.iter().sum();
-    let weights: Vec<f64> = if sum > 0.0 { exps.iter().map(|e| e / sum).collect() } else { vec![1.0 / n; logits.len()] };
-    let uniform = 1.0 / n;
-    let ns_factor = |ns: &str| -> f64 {
-        match adapter_targets.iter().position(|x| x == ns) {
-            Some(i) => 1.0 + LAMBDA * (weights[i] - uniform),
-            None => 1.0,
-        }
-    };
-    const LAMBDA: f64 = 1.0;
-    arr.sort_by(|a, b| {
-        let fa = a.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0)
-            * ns_factor(a.get("namespace").and_then(|v| v.as_str()).unwrap_or(""));
-        let fb = b.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0)
-            * ns_factor(b.get("namespace").and_then(|v| v.as_str()).unwrap_or(""));
-        fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    serde_json::Value::Array(arr)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn rerank_by_adapter(_query_text: &str, hits: serde_json::Value) -> serde_json::Value { hits }
 
 pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
     if query_text.trim().is_empty() {
@@ -135,9 +69,8 @@ pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
             && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false)
         {
             rlog("recall::recall_hits done via vec_search");
-            let reranked = rerank_by_adapter(embed_input, vec_hits);
-            emit_recall(&query, &reranked, "vector_top_k", namespace);
-            return reranked;
+            emit_recall(&query, &vec_hits, "vector_top_k", namespace);
+            return vec_hits;
         }
         let packed = unsafe {
             host_kv_query(namespace.as_ptr(), namespace.len() as u32,

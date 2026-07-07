@@ -86,6 +86,8 @@ fn unpack_to_value(packed: u64) -> Value {
 
 pub fn unpack_to_value_pub(packed: u64) -> Value { unpack_to_value(packed) }
 
+pub fn unpack_to_string_pub(packed: u64) -> Option<String> { unpack_to_string(packed) }
+
 pub fn host_read(path: &str) -> Option<String> {
     let packed = unsafe { host_fs_read(path.as_ptr(), path.len() as u32) };
     unpack_to_string(packed)
@@ -379,12 +381,21 @@ fn discipline_fanout_namespaces(base: &str) -> Vec<String> {
 
 fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32) -> Value {
     let namespaces = discipline_fanout_namespaces(namespace);
+    let now_ms = unsafe { host_now_ms() } as i64;
+    let mut memory_namespaces: Vec<String> = Vec::new();
     for ns in &namespaces {
-        if let Err(e) = crate::rssearch_vectors::migrate_namespace_from_flat_json(ns, unsafe { host_now_ms() } as i64) {
-            emit_event("rssearch_vectors_migration_failed", json!({ "namespace": ns, "error": e }));
+        if ns == "codeinsight" {
+            if let Err(e) = crate::rssearch_vectors::migrate_namespace_from_flat_json(ns, now_ms) {
+                emit_event("rssearch_vectors_migration_failed", json!({ "namespace": ns, "error": e }));
+            }
+        } else {
+            let _ = crate::memory_md::export_flat_json(ns, now_ms);
+            memory_namespaces.push(ns.clone());
         }
     }
-    let now_ms = unsafe { host_now_ms() } as i64;
+    if !memory_namespaces.is_empty() {
+        let _ = crate::memory_md::sync_index(&memory_namespaces, now_ms);
+    }
     match crate::rssearch_vectors::search_with_recency(query_embedding, &namespaces, limit as usize, now_ms) {
         Ok(hits) => hits,
         Err(e) => json!({ "error": e }),
@@ -405,12 +416,11 @@ fn recall(body: &Value) -> u64 {
     let vec_hits = unpack_to_value(packed);
     if !vec_hits.is_null() && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
         let annotated = annotate_hits_with_score(vec_hits);
-        let reranked = crate::orchestrator::recall::rerank_by_adapter(query, annotated);
         return ok("recall", json!({
             "mode": "vector_top_k",
             "namespace": namespace,
             "derived_query": derived_query,
-            "hits": reranked,
+            "hits": annotated,
             "vector_hits": vector_hits,
         }));
     }
@@ -494,7 +504,8 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
     let key = format!("mem-{:016x}-{}", content_hash, text.len());
     if let Some(existing) = host_kv_read(namespace, &key) {
         if existing == text {
-            return ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true, "deduped": true}));
+            let md_path = memory_md_write_path(namespace, &key, text);
+            return ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true, "deduped": true, "md_file": md_path}));
         }
     }
     let emb = match crate::embed::embed_text_json(text) {
@@ -518,7 +529,24 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
             "error": e,
         }));
     }
-    ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true}))
+    let md_path = memory_md_write_path(namespace, &key, text);
+    ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true, "md_file": md_path}))
+}
+
+fn memory_md_write_path(namespace: &str, key: &str, text: &str) -> Option<String> {
+    let now_ms = unsafe { host_now_ms() } as i64;
+    match crate::memory_md::write_memory(namespace, key, text, now_ms) {
+        crate::memory_md::WriteOutcome::Created(p)
+        | crate::memory_md::WriteOutcome::Updated(p)
+        | crate::memory_md::WriteOutcome::Deduped(p) => Some(p),
+        crate::memory_md::WriteOutcome::Invalid(reason) => {
+            emit_event("memory_md_write_invalid", json!({
+                "key": key, "namespace": namespace, "reason": reason,
+            }));
+            None
+        }
+        crate::memory_md::WriteOutcome::Failed(_) => None,
+    }
 }
 
 fn memorize_prune(body: &Value) -> u64 {
@@ -531,14 +559,18 @@ fn memorize_prune(body: &Value) -> u64 {
         for v in arr { if let Some(s) = v.as_str() { keys.push(s.to_string()); } }
     }
     if !keys.is_empty() {
+        let vec_ns = format!("{}-vec", namespace);
         let mut deleted = Vec::new();
         let mut not_found = Vec::new();
         for key in &keys {
-            let rc = unsafe { host_kv_delete(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
-            if rc != 0 {
+            let flat_rc = unsafe { host_kv_delete(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
+            let _ = unsafe { host_kv_delete(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32) };
+            let md_deleted = crate::memory_md::delete_memory(namespace, key);
+            let idx_marked = crate::rssearch_vectors::mark_deleted(namespace, key).is_ok();
+            let _ = crate::rslearn_vectors::mark_deleted(key);
+            if flat_rc != 0 || md_deleted {
                 deleted.push(key.clone());
-                invalidate_memory_edge(key);
-                emit_event("memory.pruned", json!({"key": key, "namespace": namespace, "mode": "explicit-key"}));
+                emit_event("memory.pruned", json!({"key": key, "namespace": namespace, "mode": "explicit-key", "md_deleted": md_deleted, "index_marked": idx_marked}));
             } else {
                 not_found.push(key.clone());
                 emit_event("memory.prune-miss", json!({"key": key, "namespace": namespace, "mode": "explicit-key"}));
@@ -812,6 +844,7 @@ fn learn_status(body: &Value) -> u64 {
     let vec_ns = format!("{}-vec", ns);
     let text_rows = kv_ns_count(ns);
     let vec_rows = kv_ns_count(&vec_ns);
+    let md_files = crate::memory_md::md_file_count(ns);
     ok("learn-status", json!({
         "ok": true,
         "now": now,
@@ -819,6 +852,7 @@ fn learn_status(body: &Value) -> u64 {
         "namespace": ns,
         "text_rows": text_rows,
         "vec_rows": vec_rows,
+        "md_files": md_files,
         "balanced": text_rows == vec_rows,
     }))
 }
@@ -854,152 +888,29 @@ fn learn_build(_body: &Value) -> u64 {
     ok("learn-build", json!({ "note": "WASM build uses thebird host bindings -- no separate build step" }))
 }
 
-pub struct SqlKv;
-
-fn sqlkv_ensure_schema() -> Result<(), String> {
-    crate::shared_db::shared_ensure_open(":memory:")?;
-    crate::shared_db::shared_exec(
-        "CREATE TABLE IF NOT EXISTS rslearn_kv (namespace TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(namespace, key))",
-    )
-}
-
-fn sqlkv_escape_like(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' | '%' | '_' => { out.push('\\'); out.push(c); }
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-impl rs_learn::KvBackend for SqlKv {
-    fn get(&self, namespace: &str, key: &str) -> Option<Vec<u8>> {
-        if sqlkv_ensure_schema().is_ok() {
-            let sql = "SELECT value FROM rslearn_kv WHERE namespace=?1 AND key=?2";
-            if let Ok(rows) = crate::shared_db::shared_query_params(sql, &[namespace, key]) {
-                if let Some(row) = rows.as_array().and_then(|a| a.first()) {
-                    if let Some(v) = row.get("value").and_then(|v| v.as_str()) {
-                        if let Some(bytes) = b64_decode(v) {
-                            return Some(bytes);
-                        }
-                    }
-                }
-            }
-        }
-        let packed = unsafe { host_kv_get(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
-        unpack_to_string(packed).map(|s| s.into_bytes())
-    }
-    fn put(&mut self, namespace: &str, key: &str, val: &[u8]) -> Result<(), String> {
-        sqlkv_ensure_schema()?;
-        let now = unsafe { host_now_ms() }.to_string();
-        let encoded = b64_encode(val);
-        let sql = "INSERT INTO rslearn_kv(namespace, key, value, updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(namespace, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at";
-        crate::shared_db::shared_exec_params(sql, &[namespace, key, &encoded, &now])
-    }
-    fn list_prefix(&self, namespace: &str, prefix: &str) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        if sqlkv_ensure_schema().is_ok() {
-            let like = format!("{}%", sqlkv_escape_like(prefix));
-            let sql = "SELECT key FROM rslearn_kv WHERE namespace=?1 AND key LIKE ?2 ESCAPE '\\'";
-            if let Ok(rows) = crate::shared_db::shared_query_params(sql, &[namespace, &like]) {
-                if let Some(arr) = rows.as_array() {
-                    for row in arr {
-                        if let Some(k) = row.get("key").and_then(|v| v.as_str()) {
-                            out.push(k.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, prefix.as_ptr(), prefix.len() as u32) };
-        let legacy: Vec<String> = match unpack_to_value(packed) {
-            Value::Array(a) => a.into_iter().filter_map(|v| v.as_str().map(String::from)).collect(),
-            Value::Object(o) => o.keys().cloned().collect(),
-            _ => Vec::new(),
-        };
-        for k in legacy {
-            if !out.contains(&k) {
-                out.push(k);
-            }
-        }
-        out
-    }
-}
-
-fn learn(body: &Value, raw: &str) -> u64 {
-    let _ = body;
-    let mut session = rs_learn::LearnSession::new(SqlKv);
-    let resp = rs_learn::dispatch_json(&mut session, raw.as_bytes());
-    match String::from_utf8(resp) {
-        Ok(s) => pack(s),
-        Err(_) => err("learn", "rs_learn dispatch returned non-utf8"),
-    }
-}
-
 const ROUTER_MODELS: &[&str] = &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"];
 
-fn learn_dispatch_value(req: &Value) -> Value {
-    let mut session = rs_learn::LearnSession::new(SqlKv);
-    let raw = req.to_string();
-    let resp = rs_learn::dispatch_json(&mut session, raw.as_bytes());
-    String::from_utf8(resp).ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .unwrap_or(Value::Null)
-}
+const ROUTE_BUCKET_CAPS: &[u64] = &[1000, 4000, 16000, 64000];
 
-fn invalidate_memory_edge(key: &str) {
-    let now = unsafe { host_now_ms() };
-    let req = serde_json::json!({
-        "verb": "invalidate_edge",
-        "body": { "edge_id": key, "invalid_at": now, "expired_at": now }
-    });
-    let _ = learn_dispatch_value(&req);
+fn bucket_for_tokens(n: u64) -> u8 {
+    for (i, &cap) in ROUTE_BUCKET_CAPS.iter().enumerate() {
+        if n <= cap {
+            return i as u8;
+        }
+    }
+    4
 }
 
 pub fn route_hint(prompt: &str, estimated_tokens: u64) -> Value {
     if prompt.trim().is_empty() { return Value::Null; }
-    let embedding = match crate::embed::embed_text(prompt) {
-        Some(e) => e,
-        None => return Value::Null,
-    };
-    let route_req = serde_json::json!({
-        "verb": "route",
-        "body": { "embedding": embedding, "task_type": "code", "estimated_tokens": estimated_tokens }
-    });
-    let resp = learn_dispatch_value(&route_req);
-    let routed_ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-    if routed_ok {
-        if let Some(d) = resp.get("data") { if !d.is_null() { return d.clone(); } }
-    }
-    let targets: Vec<Value> = ROUTER_MODELS.iter().map(|m| Value::String((*m).into())).collect();
-    let init_req = serde_json::json!({
-        "verb": "init_router",
-        "body": { "in_dim": 384, "targets": targets }
-    });
-    let _ = learn_dispatch_value(&init_req);
-    let resp2 = learn_dispatch_value(&route_req);
-    if resp2.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        if let Some(d) = resp2.get("data") { if !d.is_null() { return d.clone(); } }
-    }
-    let cfg = rs_learn::RouterConfig::new(384, ROUTER_MODELS.iter().map(|m| (*m).to_string()).collect());
-    let mut router = match rs_learn::Router::new(cfg) {
-        Ok(r) => r,
-        Err(e) => return serde_json::json!({"ok": false, "error": e}),
-    };
-    let mut ctx = rs_learn::RouteCtx::default();
-    ctx.task_type = Some("code".into());
-    ctx.estimated_tokens = estimated_tokens;
-    let r = router.route(&embedding, &ctx);
     serde_json::json!({
-        "model": r.model,
-        "context_bucket": r.context_bucket,
-        "temperature": r.temperature,
-        "top_p": r.top_p,
-        "confidence": r.confidence,
-        "algo": r.algo,
-        "exploration": r.exploration,
+        "model": ROUTER_MODELS[0],
+        "context_bucket": bucket_for_tokens(estimated_tokens),
+        "temperature": 0.7f32,
+        "top_p": 0.9f32,
+        "confidence": 0.5f32,
+        "algo": "rule",
+        "exploration": false,
     })
 }
 
@@ -1272,11 +1183,6 @@ fn recall_libsql(body: &Value, raw: &str) -> u64 {
     let inline = body.get("embedding");
     let project_path = body.get("projectPath").and_then(|v| v.as_str());
     pack(crate::code_index::recall_at(&query, limit, ns, inline, project_path).to_string())
-}
-
-fn exec_git(args: &str) -> String {
-    let v = git_call(args, None);
-    v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
 fn log_deviation_push(event: &str, detail: &str) {
@@ -1891,7 +1797,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "git_reset" => git_reset(&body),
         "forget" => forget(&body),
         "feedback" => feedback(&body),
-        "learn" => learn(&body, &body_s),
+        "learn" => err("learn", "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index), graph edges through graph_similarity_search"),
         "learn-status" => learn_status(&body),
         "learn-debug" => learn_debug(&body),
         "learn-build" => learn_build(&body),

@@ -43,13 +43,27 @@ fn drop_if_dim_mismatch() -> bool {
     }
 }
 
+fn has_deleted_column() -> bool {
+    let sql = format!("SELECT name FROM pragma_table_info('{}') WHERE name = 'deleted'", TABLE);
+    crate::libsql_wasm::query(SHARED_DB, &sql)
+        .ok()
+        .and_then(|rows| rows.as_array().map(|a| !a.is_empty()))
+        .unwrap_or(false)
+}
+
 pub fn ensure_schema() -> Result<(), String> {
     shared_ensure_open(&shared_db_path())?;
     let _ = drop_if_dim_mismatch();
     shared_exec(&format!(
-        "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, namespace TEXT NOT NULL, key TEXT NOT NULL, text TEXT, embedding F32_BLOB({}), updated_at INTEGER, UNIQUE(namespace, key))",
+        "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, namespace TEXT NOT NULL, key TEXT NOT NULL, text TEXT, embedding F32_BLOB({}), updated_at INTEGER, deleted INTEGER NOT NULL DEFAULT 0, UNIQUE(namespace, key))",
         TABLE, EXPECTED_EMBED_DIM
     ))?;
+    if !has_deleted_column() {
+        shared_exec(&format!(
+            "ALTER TABLE {} ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
+            TABLE
+        ))?;
+    }
     let _ = shared_exec(&format!(
         "CREATE INDEX IF NOT EXISTS {} ON {}(libsql_vector_idx(embedding, 'metric=cosine'))",
         INDEX, TABLE
@@ -86,18 +100,18 @@ pub fn write(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: 
     }
     let embedding_sql = format!("vector('{}')", vec_to_json_literal(&vec));
     let sql = format!(
-        "INSERT INTO {}(namespace, key, text, embedding, updated_at) VALUES(?1,?2,?3,{},?4) ON CONFLICT(namespace, key) DO UPDATE SET text=excluded.text, embedding=excluded.embedding, updated_at=excluded.updated_at",
+        "INSERT INTO {}(namespace, key, text, embedding, updated_at, deleted) VALUES(?1,?2,?3,{},?4,0) ON CONFLICT(namespace, key) DO UPDATE SET text=excluded.text, embedding=excluded.embedding, updated_at=excluded.updated_at, deleted=0",
         TABLE, embedding_sql
     );
     let now_s = now_ms.to_string();
     shared_exec_params(&sql, &[namespace, key, text, &now_s])
 }
 
-pub fn delete(namespace: &str, key: &str) -> Result<(), String> {
+pub fn mark_deleted(namespace: &str, key: &str) -> Result<(), String> {
     if let Err(e) = ensure_schema() {
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
     }
-    let sql = format!("DELETE FROM {} WHERE namespace=?1 AND key=?2", TABLE);
+    let sql = format!("UPDATE {} SET deleted=1 WHERE namespace=?1 AND key=?2", TABLE);
     shared_exec_params(&sql, &[namespace, key])
 }
 
@@ -123,7 +137,7 @@ pub fn search(query_embedding: &Value, namespaces: &[String], limit: usize) -> R
     let sql = format!(
         "SELECT r.namespace, r.key, r.text, vector_distance_cos(r.embedding, vector(?1)) AS distance \
          FROM vector_top_k('{}', vector(?2), {}) AS v JOIN {} AS r ON r.rowid = v.id \
-         WHERE 1=1{} ORDER BY distance ASC LIMIT {}",
+         WHERE r.deleted=0{} ORDER BY distance ASC LIMIT {}",
         INDEX, pool, TABLE, ns_filter, limit
     );
     let mut params: Vec<&str> = vec![&qlit, &qlit];
@@ -146,7 +160,7 @@ pub fn search_with_recency(query_embedding: &Value, namespaces: &[String], limit
     let sql = format!(
         "SELECT r.namespace, r.key, r.text, r.updated_at, vector_distance_cos(r.embedding, vector(?1)) AS distance \
          FROM vector_top_k('{}', vector(?2), {}) AS v JOIN {} AS r ON r.rowid = v.id \
-         WHERE 1=1{} ORDER BY distance ASC LIMIT {}",
+         WHERE r.deleted=0{} ORDER BY distance ASC LIMIT {}",
         INDEX, pool, TABLE, ns_filter, pool
     );
     let mut params: Vec<&str> = vec![&qlit, &qlit];

@@ -54,7 +54,7 @@ Never create a unit-test file, spec file, `test/`/`__tests__/`/`spec/` directory
 
 ## Memorize
 
-Write the recall index only via `memorize-fire`; other surfaces produce memos the index never sees. Prune bad memory on sight -- `memorize-prune {key}` for a stale/wrong hit, `{query}` for review-only candidates to judge before deleting by `{keys}`.
+Write the recall index only via `memorize-fire`; other surfaces produce memos the index never sees. Route at write time: project fact -> `.gm/memories/<key>.md`, transferable discipline knowledge -> `.gm/disciplines/<name>/memories/<key>.md` (`namespace:"<name>"`). Dedup before write -- identical text re-fires as a byte-level no-op, near-duplicates collapse into the existing memory. Prune bad memory on sight -- `memorize-prune {key}` for a stale/wrong hit (deletes md + retires index row), `{query}` for review-only candidates to judge before deleting by `{keys}`.
 
 ## Constraints
 

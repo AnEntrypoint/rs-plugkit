@@ -102,6 +102,12 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     let key = format!("mem-{:016x}-{}", content_hash, text.len());
     if let Some(existing) = crate::wasm_dispatch::host_kv_read(&namespace, &key) {
         if existing == text {
+            let md_path = match crate::memory_md::write_memory(&namespace, &key, &text, now as i64) {
+                crate::memory_md::WriteOutcome::Created(p)
+                | crate::memory_md::WriteOutcome::Updated(p)
+                | crate::memory_md::WriteOutcome::Deduped(p) => Some(p),
+                _ => None,
+            };
             crate::wasm_dispatch::emit_event("memorize_deduped", serde_json::json!({
                 "key": key,
                 "namespace": namespace,
@@ -113,6 +119,7 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
                 "embedded": true,
                 "deduped": true,
                 "bytes": text.len(),
+                "md_file": md_path,
                 "agents_drain": agents_drain_obligation(),
             });
             return (payload.to_string(), String::new(), 0);
@@ -180,6 +187,18 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             "error": e,
         }));
     }
+    let md_path = match crate::memory_md::write_memory(&namespace, &key, &text, now as i64) {
+        crate::memory_md::WriteOutcome::Created(p)
+        | crate::memory_md::WriteOutcome::Updated(p)
+        | crate::memory_md::WriteOutcome::Deduped(p) => Some(p),
+        crate::memory_md::WriteOutcome::Invalid(reason) => {
+            crate::wasm_dispatch::emit_event("memory_md_write_invalid", serde_json::json!({
+                "key": key, "namespace": namespace, "reason": reason,
+            }));
+            None
+        }
+        crate::memory_md::WriteOutcome::Failed(_) => None,
+    };
     let payload = serde_json::json!({
         "ok": true,
         "key": key,
@@ -187,6 +206,7 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         "embedded": true,
         "bytes": text.len(),
         "graph_edge": edge_inserted,
+        "md_file": md_path,
         "agents_drain": agents_drain_obligation(),
     });
     (payload.to_string(), String::new(), 0)
@@ -208,38 +228,21 @@ fn agents_drain_obligation() -> serde_json::Value {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn insert_memory_edge(namespace: &str, key: &str, text: &str, emb_str: &str, now: i64) -> bool {
+fn insert_memory_edge(namespace: &str, key: &str, _text: &str, emb_str: &str, now: i64) -> bool {
     let embedding: serde_json::Value = serde_json::from_str(emb_str).unwrap_or(serde_json::Value::Null);
-    let fact: String = text.chars().take(280).collect();
-    let relation = "memorize";
-    let edge_req = serde_json::json!({
-        "verb": "insert_edge",
-        "body": {
-            "id": key,
-            "src": namespace,
-            "dst": key,
-            "relation": relation,
-            "fact": fact,
-            "embedding": embedding,
-            "created_at": now,
-            "valid_at": now,
-        }
-    });
-    let raw = edge_req.to_string();
-    let mut session = rs_learn::LearnSession::new(crate::wasm_dispatch::SqlKv);
-    let resp = rs_learn::dispatch_json(&mut session, raw.as_bytes());
-    let inserted = serde_json::from_slice::<serde_json::Value>(&resp).ok()
-        .and_then(|v| v.get("ok").and_then(|o| o.as_bool()))
-        .unwrap_or(false);
-    if inserted && !embedding.is_null() {
-        if let Err(e) = crate::rslearn_vectors::write(key, namespace, key, relation, "", &embedding, now) {
+    if embedding.is_null() {
+        return false;
+    }
+    match crate::rslearn_vectors::write(key, namespace, key, "memorize", "", &embedding, now) {
+        Ok(()) => true,
+        Err(e) => {
             crate::wasm_dispatch::emit_event("rslearn_vectors_write_failed", serde_json::json!({
                 "edge_id": key,
                 "error": e,
             }));
+            false
         }
     }
-    inserted
 }
 
 #[cfg(not(target_arch = "wasm32"))]

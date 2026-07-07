@@ -57,7 +57,7 @@ A supervisor respawns the watcher under fresh code on `wrapper.drift`/`version.d
 
 ## State
 
-`cwd/.gm/`: `prd.yml`, `mutables.yml`, `exec-spool/{in,out}/`, `gm-fired-<sessionId>`, `rs-learn.db`, `disciplines/<ns>/`, `code-search/`. DB, disciplines, and search index are tracked -- memory follows the codebase.
+`cwd/.gm/`: `prd.yml`, `mutables.yml`, `exec-spool/{in,out}/`, `gm-fired-<sessionId>`, `memories/<key>.md`, `disciplines/<ns>/memories/`, `code-search/`. Memory md files, disciplines, and search index are tracked -- memory follows the codebase; the embedding index (shared gm.db) is derived state, rebuilt on digest mismatch, never committed.
 
 ## Spool ABI
 
@@ -85,7 +85,7 @@ Every capability has exactly one sanctioned surface and the platform's native to
 
 ## Memorize
 
-Write the recall index only via `memorize-fire`; surfaces outside it produce memos the index never sees. Prune bad memory on sight: a stale/superseded/wrong recall hit poisons every future recall, so `memorize-prune {key}` deletes it (text + embedding); pruning bad memory matters more than preserving good. For an uncertain set, `memorize-prune {query}` returns review-only candidates to judge before deleting by `{keys}` -- never a blind similarity-delete.
+Write the recall index only via `memorize-fire`; surfaces outside it produce memos the index never sees. Each memory is a human-readable md file -- project fact -> `.gm/memories/<key>.md`, knowledge transferable to any similar repo -> `.gm/disciplines/<name>/memories/<key>.md` (body `{text, namespace:"<name>"}`; an unknown discipline auto-creates) -- judge the routing at write time, a fact useless outside this repo never pollutes a discipline. Dedup before write: re-firing identical text is a byte-level no-op, so collapse duplicate-shaped prose into the existing memory instead of minting a sibling. Prune bad memory on sight: a stale/superseded/wrong recall hit poisons every future recall, so `memorize-prune {key}` deletes the md file and retires its index row; pruning bad memory matters more than preserving good. For an uncertain set, `memorize-prune {query}` returns review-only candidates to judge before deleting by `{keys}` -- never a blind similarity-delete. Hand-deleting an md file converges the same way; md memories commit with the tree.
 
 ## Constraints
 
