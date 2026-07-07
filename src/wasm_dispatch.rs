@@ -611,6 +611,62 @@ fn codesearch(body: &Value) -> u64 {
     ok("codesearch", json!({ "mode": "fallback_kv", "hits": hits, "commits": commits }))
 }
 
+fn embed(body: &Value) -> u64 {
+    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    if text.is_empty() { return err("embed", "text required"); }
+    let is_query = body.get("kind").and_then(|v| v.as_str()) == Some("query");
+    let result = if is_query {
+        crate::embed::embed_text_json_query(text)
+    } else {
+        crate::embed::embed_text_json(text)
+    };
+    match result {
+        Some(v) => ok("embed", json!({ "embedding": v, "dim": v.as_array().map(|a| a.len()).unwrap_or(0), "model": "BAAI/bge-small-en-v1.5" })),
+        None => err("embed", "embedding failed (see host log for step detail)"),
+    }
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
+    if a.len() != b.len() || a.is_empty() { return None; }
+    let mut dot = 0f32;
+    let mut na = 0f32;
+    let mut nb = 0f32;
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom == 0.0 { return None; }
+    Some(dot / denom)
+}
+
+fn similarity(body: &Value) -> u64 {
+    let text_a = body.get("text_a").or_else(|| body.get("a")).and_then(|v| v.as_str()).unwrap_or("");
+    let text_b = body.get("text_b").or_else(|| body.get("b")).and_then(|v| v.as_str()).unwrap_or("");
+    if text_a.is_empty() || text_b.is_empty() { return err("similarity", "text_a and text_b required"); }
+    let emb_a = match crate::embed::embed_text(text_a) {
+        Some(v) => v,
+        None => return err("similarity", "embedding failed for text_a"),
+    };
+    let emb_b = match crate::embed::embed_text(text_b) {
+        Some(v) => v,
+        None => return err("similarity", "embedding failed for text_b"),
+    };
+    match cosine(&emb_a, &emb_b) {
+        // distance = 1 - cos(a, b) matches WFGY's own stated Delta-S formula
+        // (delta_s = 1 - cos(I, G)); embeddings here are real (BGE-small,
+        // L2-normalized), so this is a genuine measurement, not a
+        // self-reported estimate.
+        Some(sim) => ok("similarity", json!({
+            "similarity": sim,
+            "distance": 1.0 - sim,
+            "model": "BAAI/bge-small-en-v1.5",
+        })),
+        None => err("similarity", "cosine computation failed (dimension mismatch or zero vector)"),
+    }
+}
+
 fn health(_body: &Value) -> u64 {
     let now = unsafe { host_now_ms() };
     ok("health", json!({
@@ -620,7 +676,7 @@ fn health(_body: &Value) -> u64 {
         "imports": [
             "host_fs_read","host_fs_write","host_fs_readdir","host_fs_stat",
             "host_fetch","host_kv_get","host_kv_put","host_kv_query",
-            "host_vec_search",
+            "host_vec_search","host_vec_embed",
             "host_exec_js","host_log","host_now_ms","host_env_get","host_browser_exec","host_task_proc"
         ]
     }))
@@ -1732,6 +1788,8 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "lang" => lang(&body),
         "browser" => browser(&body, &body_s),
         "health" => health(&body),
+        "embed" => embed(&body),
+        "similarity" => similarity(&body),
         "sql_open" => sql_open(&body),
         "sql_close" => sql_close(&body),
         "sql_list_dbs" => sql_list_dbs(&body),
