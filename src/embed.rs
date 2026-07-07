@@ -68,7 +68,7 @@ struct EmbedCtx {
     host_delegated: bool,
 }
 
-static CTX: OnceLock<Result<EmbedCtx, String>> = OnceLock::new();
+static CTX: OnceLock<EmbedCtx> = OnceLock::new();
 
 fn probe_host_embed() -> bool {
     let probe_text = "init-probe";
@@ -153,32 +153,26 @@ fn init_ctx() -> Result<EmbedCtx, String> {
 }
 
 fn ctx() -> Result<&'static EmbedCtx, &'static str> {
-    let r = CTX.get_or_init(|| {
-        let res = init_ctx();
-        if let Err(ref e) = res {
-            elog(&format!("embed::init_ctx FAILED: {}", e));
-            crate::wasm_dispatch::emit_event("embed_init_fail", serde_json::json!({
-                "error": e,
-            }));
-        } else {
-            let host_delegated = res.as_ref().map(|c| c.host_delegated).unwrap_or(false);
+    if let Some(c) = CTX.get() {
+        return Ok(c);
+    }
+    let res = init_ctx();
+    match res {
+        Ok(c) => {
             elog(&format!(
                 "embed::init_ctx OK (host_delegated={})",
-                host_delegated
+                c.host_delegated
             ));
             crate::wasm_dispatch::emit_event("embed_init_ok", serde_json::json!({
-                "host_delegated": host_delegated,
-                "safetensors_bytes": if host_delegated { 0 } else { MODEL_SAFETENSORS.len() },
-                "tokenizer_bytes": if host_delegated { 0 } else { TOKENIZER_JSON.len() },
+                "host_delegated": c.host_delegated,
+                "safetensors_bytes": if c.host_delegated { 0 } else { MODEL_SAFETENSORS.len() },
+                "tokenizer_bytes": if c.host_delegated { 0 } else { TOKENIZER_JSON.len() },
             }));
+            Ok(CTX.get_or_init(|| c))
         }
-        res
-    });
-    match r {
-        Ok(c) => Ok(c),
         Err(e) => {
-            elog(&format!("embed::ctx returning cached init failure: {}", e));
-            crate::wasm_dispatch::emit_event("embed_init_cached_fail", serde_json::json!({
+            elog(&format!("embed::init_ctx FAILED (will retry next call): {}", e));
+            crate::wasm_dispatch::emit_event("embed_init_fail", serde_json::json!({
                 "error": e,
             }));
             Err("embed init failed")

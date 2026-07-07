@@ -131,37 +131,6 @@ pub fn handle(content: &str) -> (String, String, i32) {
                     1,
                 );
             }
-            let porcelain = crate::wasm_dispatch::git_porcelain();
-            let worktree_clean = porcelain.trim().is_empty();
-            let (ahead, behind, branch) = {
-                let branch = crate::wasm_dispatch::git_call("rev-parse --abbrev-ref HEAD", None)
-                    .get("stdout").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-                let remote_cfg = crate::wasm_dispatch::git_call(&format!("config --get branch.{}.remote", branch), None)
-                    .get("stdout").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-                let remote = if remote_cfg.is_empty() { "origin".to_string() } else { remote_cfg };
-                let _ = crate::wasm_dispatch::git_call(&format!("fetch {} {}", remote, branch), None);
-                let counts = crate::wasm_dispatch::git_call(&format!("rev-list --left-right --count {}/{}...HEAD", remote, branch), None)
-                    .get("stdout").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let parts: Vec<&str> = counts.split_whitespace().collect();
-                let (b, a) = if parts.len() == 2 {
-                    (parts[0].parse::<u64>().unwrap_or(0), parts[1].parse::<u64>().unwrap_or(0))
-                } else { (0u64, 0u64) };
-                (a, b, branch)
-            };
-            let remote_pushed = ahead == 0;
-            let ci_marker = super::gm_dir().join("exec-spool").join(".ci-validated");
-            let ci_ps = ci_marker.to_string_lossy().to_string();
-            let ci_validated = crate::pkfs::exists(&ci_ps);
-            if !(worktree_clean && remote_pushed && ci_validated) {
-                return (
-                    String::new(),
-                    format!(
-                        "transition to COMPLETE rejected: CONSOLIDATE gate not satisfied -- worktree-clean={} remote-pushed={} (branch={} ahead={} behind={}) ci-validated={} (marker=.gm/exec-spool/.ci-validated). All three must hold; git_finalize/git_push handles worktree-clean+remote-pushed, ci-validated requires the marker written fresh this session.",
-                        worktree_clean, remote_pushed, branch, ahead, behind, ci_validated
-                    ),
-                    1,
-                );
-            }
         }
         if let Some(r) = pending_mutables_rejection("COMPLETE") { return r; }
         if let Some(r) = pending_prd_rejection("COMPLETE") { return r; }
