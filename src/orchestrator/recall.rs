@@ -59,6 +59,11 @@ pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
         rlog(&format!("recall::recall_hits start query_len={} embed_len={} limit={}", query.len(), embed_input.len(), limit));
         let embedding = crate::embed::embed_text_json_query(embed_input).unwrap_or(serde_json::Value::Null);
         rlog(&format!("recall::recall_hits embed_done embedded={}", !embedding.is_null()));
+        if let Some(md_hits) = crate::wasm_dispatch::memory_recall_backend(&embedding, namespace, limit) {
+            rlog("recall::recall_hits done via md-index");
+            emit_recall(&query, &md_hits, "vector_top_k", namespace);
+            return md_hits;
+        }
         let q_json = serde_json::json!({
             "query": query, "embedding": embedding, "namespace": namespace
         }).to_string();
@@ -102,21 +107,25 @@ pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
     let results = {
         use crate::wasm_dispatch::{host_vec_search, host_kv_query};
         let embedding = crate::embed::embed_text_json_query(embed_input).unwrap_or(serde_json::Value::Null);
-        let q_json = serde_json::json!({
-            "query": query, "embedding": embedding, "namespace": namespace
-        }).to_string();
-        let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, limit) };
-        let vec_hits = crate::wasm_dispatch::unpack_to_value_pub(packed);
-        if !vec_hits.is_null()
-            && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false)
-        {
-            vec_hits
+        if let Some(md_hits) = crate::wasm_dispatch::memory_recall_backend(&embedding, namespace, limit) {
+            md_hits
         } else {
-            let packed = unsafe {
-                host_kv_query(namespace.as_ptr(), namespace.len() as u32,
-                              query.as_ptr(), query.len() as u32)
-            };
-            crate::wasm_dispatch::unpack_to_value_pub(packed)
+            let q_json = serde_json::json!({
+                "query": query, "embedding": embedding, "namespace": namespace
+            }).to_string();
+            let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, limit) };
+            let vec_hits = crate::wasm_dispatch::unpack_to_value_pub(packed);
+            if !vec_hits.is_null()
+                && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false)
+            {
+                vec_hits
+            } else {
+                let packed = unsafe {
+                    host_kv_query(namespace.as_ptr(), namespace.len() as u32,
+                                  query.as_ptr(), query.len() as u32)
+                };
+                crate::wasm_dispatch::unpack_to_value_pub(packed)
+            }
         }
     };
     #[cfg(not(target_arch = "wasm32"))]

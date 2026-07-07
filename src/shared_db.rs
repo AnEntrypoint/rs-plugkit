@@ -14,6 +14,14 @@ pub fn shared_ensure_open(path: &str) -> Result<(), String> {
     crate::libsql_wasm::open(SHARED_DB, path)
 }
 
+pub fn recreate_shared_db(path: &str) -> Result<(), String> {
+    let _ = crate::libsql_wasm::close(SHARED_DB);
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let _ = std::fs::remove_file(format!("{}{}", path, suffix));
+    }
+    shared_ensure_open(path)
+}
+
 pub fn shared_exec(sql: &str) -> Result<(), String> {
     crate::libsql_wasm::exec(SHARED_DB, sql)
 }

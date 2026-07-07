@@ -100,7 +100,7 @@ pub fn write(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: 
     }
     let embedding_sql = format!("vector('{}')", vec_to_json_literal(&vec));
     let sql = format!(
-        "INSERT INTO {}(namespace, key, text, embedding, updated_at, deleted) VALUES(?1,?2,?3,{},?4,0) ON CONFLICT(namespace, key) DO UPDATE SET text=excluded.text, embedding=excluded.embedding, updated_at=excluded.updated_at, deleted=0",
+        "INSERT INTO {}(namespace, key, text, embedding, updated_at, deleted) VALUES(?1,?2,?3,{},?4,0) ON CONFLICT(namespace, key) DO UPDATE SET text=excluded.text, updated_at=excluded.updated_at, deleted=0",
         TABLE, embedding_sql
     );
     let now_s = now_ms.to_string();
@@ -113,6 +113,15 @@ pub fn mark_deleted(namespace: &str, key: &str) -> Result<(), String> {
     }
     let sql = format!("UPDATE {} SET deleted=1 WHERE namespace=?1 AND key=?2", TABLE);
     shared_exec_params(&sql, &[namespace, key])
+}
+
+pub fn undelete(namespace: &str, key: &str, updated_at_ms: i64) -> Result<(), String> {
+    if let Err(e) = ensure_schema() {
+        return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
+    }
+    let upd = updated_at_ms.to_string();
+    let sql = format!("UPDATE {} SET deleted=0, updated_at=?1 WHERE namespace=?2 AND key=?3", TABLE);
+    shared_exec_params(&sql, &[&upd, namespace, key])
 }
 
 pub fn row_count(namespace: &str) -> Option<i64> {
@@ -183,6 +192,84 @@ pub fn search_with_recency(query_embedding: &Value, namespaces: &[String], limit
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let out: Vec<Value> = scored.into_iter().take(limit).map(|(_, v)| v).collect();
+    Ok(Value::Array(out))
+}
+
+fn jaccard_overlap(a: &str, b: &str) -> f64 {
+    let tokenize = |s: &str| -> std::collections::HashSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|t| t.len() >= 3)
+            .map(|t| t.to_string())
+            .collect()
+    };
+    let ta = tokenize(a);
+    let tb = tokenize(b);
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    let inter = ta.intersection(&tb).count() as f64;
+    inter / (ta.len() as f64 + tb.len() as f64 - inter)
+}
+
+pub fn search_memory_hits(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64, cos_floor: f64) -> Result<Value, String> {
+    const DEDUP_JACCARD: f64 = 0.7;
+    let qvec = json_to_f32_vec(query_embedding)
+        .ok_or_else(|| "rssearch_vectors search_memory_hits: invalid query embedding".to_string())?;
+    ensure_schema()?;
+    let qlit = vec_to_json_literal(&qvec);
+    let pool = limit.saturating_mul(5).max(20);
+    let ns_placeholders: Vec<String> = (0..namespaces.len()).map(|i| format!("?{}", i + 3)).collect();
+    let ns_filter = if namespaces.is_empty() {
+        String::new()
+    } else {
+        format!(" AND r.namespace IN ({})", ns_placeholders.join(","))
+    };
+    let sql = format!(
+        "SELECT r.namespace, r.key, r.text, r.updated_at, vector_distance_cos(r.embedding, vector(?1)) AS distance \
+         FROM vector_top_k('{}', vector(?2), {}) AS v JOIN {} AS r ON r.rowid = v.id \
+         WHERE r.deleted=0{} ORDER BY distance ASC LIMIT {}",
+        INDEX, pool, TABLE, ns_filter, pool
+    );
+    let mut params: Vec<&str> = vec![&qlit, &qlit];
+    for n in namespaces { params.push(n.as_str()); }
+    let rows = shared_query_params(&sql, &params)?;
+    let arr = rows.as_array().cloned().unwrap_or_default();
+    let mut scored: Vec<(f64, Value)> = Vec::with_capacity(arr.len());
+    for row in arr {
+        let distance = row.get("distance").and_then(|d| d.as_f64()).unwrap_or(2.0);
+        let cos = 1.0 - distance;
+        if cos < cos_floor {
+            continue;
+        }
+        let updated_at = row.get("updated_at").and_then(|u| u.as_i64()).unwrap_or(now_ms);
+        let age_ms = (now_ms - updated_at).max(0) as f64;
+        let recency = RECENCY_FLOOR + (1.0 - RECENCY_FLOOR) * (-age_ms / HALF_LIFE_MS).exp();
+        let score = cos * recency;
+        let hit = json!({
+            "key": row.get("key").cloned().unwrap_or(Value::Null),
+            "namespace": row.get("namespace").cloned().unwrap_or(Value::Null),
+            "text": row.get("text").cloned().unwrap_or(Value::Null),
+            "cos": cos,
+            "recency": recency,
+            "score": score,
+        });
+        scored.push((score, hit));
+    }
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out: Vec<Value> = Vec::new();
+    for (_, hit) in scored {
+        let text = hit.get("text").and_then(|t| t.as_str()).unwrap_or("");
+        let dup = out.iter().any(|kept| {
+            jaccard_overlap(text, kept.get("text").and_then(|t| t.as_str()).unwrap_or("")) >= DEDUP_JACCARD
+        });
+        if !dup {
+            out.push(hit);
+        }
+        if out.len() >= limit {
+            break;
+        }
+    }
     Ok(Value::Array(out))
 }
 

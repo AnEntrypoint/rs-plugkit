@@ -108,7 +108,7 @@ pub fn write(
     let sql = format!(
         "INSERT INTO {}(edge_id, src, dst, relation, group_id, embedding, created_at, deleted) VALUES(?1,?2,?3,?4,?5,{},?6,0) \
          ON CONFLICT(edge_id) DO UPDATE SET src=excluded.src, dst=excluded.dst, relation=excluded.relation, \
-         group_id=excluded.group_id, embedding=excluded.embedding, created_at=excluded.created_at, deleted=0",
+         group_id=excluded.group_id, created_at=excluded.created_at, deleted=0",
         TABLE, embedding_sql
     );
     let created_s = created_at_ms.to_string();
