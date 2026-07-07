@@ -1,0 +1,28 @@
+name: Diag gm test
+on:
+  workflow_dispatch: {}
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Clone gm main
+        run: git clone --depth 1 https://github.com/AnEntrypoint/gm.git gm
+      - name: Run gm test.js
+        working-directory: gm
+        continue-on-error: true
+        run: node test.js
+      - name: Show watcher log tail
+        if: always()
+        run: tail -c 20000 gm/.gm/exec-spool/.watcher.log || true
+      - name: Upload watcher log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-log
+          path: gm/.gm/exec-spool/.watcher.log
+          if-no-files-found: ignore
