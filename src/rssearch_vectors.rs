@@ -294,21 +294,37 @@ fn host_kv_query_raw(namespace: &str, query: &str) -> Value {
     crate::wasm_dispatch::unpack_to_value_pub(packed)
 }
 
+const MIGRATE_BUDGET_MS: u64 = 2000;
+
 pub fn migrate_namespace_from_flat_json(namespace: &str, now_ms: i64) -> Result<Value, String> {
     if namespace.is_empty() {
         return Err("migrate_namespace_from_flat_json: namespace required".to_string());
     }
     ensure_schema()?;
-    let existing = row_count(namespace).unwrap_or(0);
-    if existing > 0 {
-        return Ok(json!({ "migrated": false, "reason": "already-populated", "existing_rows": existing }));
-    }
     let vec_ns = format!("{}-vec", namespace);
     let vec_entries = host_kv_query_raw(&vec_ns, "");
     let entries = match vec_entries.as_array() {
         Some(a) if !a.is_empty() => a.clone(),
         _ => return Ok(json!({ "migrated": false, "reason": "no-flat-json-entries", "namespace": namespace })),
     };
+    let flat_total = entries.iter().filter(|e| e.get("key").and_then(|k| k.as_str()).map(|k| k != "__digest__").unwrap_or(false)).count() as i64;
+    let existing = row_count(namespace).unwrap_or(0);
+    if existing >= flat_total {
+        return Ok(json!({ "migrated": false, "reason": "already-populated", "existing_rows": existing }));
+    }
+    let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(rows) = shared_query_params(
+        &format!("SELECT key FROM {} WHERE namespace=?1", TABLE),
+        &[namespace],
+    ) {
+        if let Some(arr) = rows.as_array() {
+            for row in arr {
+                if let Some(k) = row.get("key").and_then(|v| v.as_str()) {
+                    present.insert(k.to_string());
+                }
+            }
+        }
+    }
     let text_entries = host_kv_query_raw(namespace, "");
     let mut text_by_key: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     if let Some(arr) = text_entries.as_array() {
@@ -320,11 +336,19 @@ pub fn migrate_namespace_from_flat_json(namespace: &str, now_ms: i64) -> Result<
     }
     let is_codeinsight = namespace == "codeinsight";
     let mut corpus = if is_codeinsight { Some(crate::code_index::FusionCorpus::load()) } else { None };
+    let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut migrated = 0u32;
     let mut skipped = 0u32;
+    let mut deferred = 0u32;
     for entry in &entries {
         let key = match entry.get("key").and_then(|k| k.as_str()) { Some(k) => k, None => { skipped += 1; continue; } };
         if key == "__digest__" { continue; }
+        if present.contains(key) { continue; }
+        let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+        if elapsed > MIGRATE_BUDGET_MS {
+            deferred += 1;
+            continue;
+        }
         let raw_value = match entry.get("value").and_then(|v| v.as_str()) { Some(v) => v, None => { skipped += 1; continue; } };
         let parsed: Value = match serde_json::from_str(raw_value) { Ok(v) => v, Err(_) => { skipped += 1; continue; } };
         let embedding = match extract_embedding_value(&parsed) { Some(e) => e, None => { skipped += 1; continue; } };
@@ -349,6 +373,7 @@ pub fn migrate_namespace_from_flat_json(namespace: &str, now_ms: i64) -> Result<
         "namespace": namespace,
         "migrated_count": migrated,
         "skipped_count": skipped,
+        "deferred_count": deferred,
     }));
-    Ok(json!({ "migrated": true, "namespace": namespace, "migrated_count": migrated, "skipped_count": skipped }))
+    Ok(json!({ "migrated": true, "namespace": namespace, "migrated_count": migrated, "skipped_count": skipped, "deferred_count": deferred }))
 }
