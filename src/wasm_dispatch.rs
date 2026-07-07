@@ -7,7 +7,6 @@ extern "C" {
     pub fn host_fs_write(path_ptr: *const u8, path_len: u32, data_ptr: *const u8, data_len: u32) -> u32;
     pub fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
     pub fn host_fs_stat(path_ptr: *const u8, path_len: u32) -> u64;
-    pub fn host_fs_remove(path_ptr: *const u8, path_len: u32) -> u32;
     pub fn host_fetch(url_ptr: *const u8, url_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
     pub fn host_kv_get(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u64;
     pub fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
@@ -108,8 +107,19 @@ pub fn host_exists(path: &str) -> bool {
 }
 
 pub fn host_remove(path: &str) -> bool {
-    let rc = unsafe { host_fs_remove(path.as_ptr(), path.len() as u32) };
-    rc != 0
+    let path_js = match serde_json::to_string(path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let code = format!(
+        "const fs=require('fs');try{{fs.unlinkSync({});process.stdout.write('removed');}}catch(e){{process.stdout.write('miss');}}",
+        path_js
+    );
+    let opts = "{\"timeoutMs\":15000}";
+    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    let out = unpack_to_string(packed).unwrap_or_default();
+    let parsed: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+    parsed.get("stdout").and_then(|v| v.as_str()).map(|s| s.contains("removed")).unwrap_or(false)
 }
 
 fn next_dispatch_hint_for(verb: &str) -> Value {
