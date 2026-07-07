@@ -417,6 +417,14 @@ fn slice_lines(content: &str, ls: usize, le: usize) -> String {
     content.lines().skip(ls - 1).take(le - ls + 1).collect::<Vec<_>>().join("\n")
 }
 
+fn chunk_rows_for_path(fp: &str) -> usize {
+    libsql_wasm::query_params(GM_DB, "SELECT COUNT(*) AS c FROM code_chunks WHERE path=?1", &[fp])
+        .ok()
+        .and_then(|rows| rows.as_array().and_then(|a| a.first().cloned()))
+        .and_then(|row| row.get("c").and_then(|v| v.as_u64()).or_else(|| row.get("c").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())))
+        .unwrap_or(0) as usize
+}
+
 fn write_chunk(libsql_ok: bool, fp: &str, c: &ChunkRecord, body: &str) {
     if libsql_ok {
         let embedding_sql = format!("vector('{}')", vec_to_json_literal(&c.emb));
@@ -495,12 +503,18 @@ pub fn index(root: &str, max_files: usize) -> Value {
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
         let file_hash = crc32(&content);
         let path_hash = crc32(fp);
-        if libsql_ok {
-            let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
-        }
 
         if let Some(m) = prior.get(fp) {
             if m.hash == file_hash {
+                if libsql_ok && chunk_rows_for_path(fp) == m.chunks.len() {
+                    chunked += m.chunks.len();
+                    reused += m.chunks.len();
+                    reused_files += 1;
+                    continue;
+                }
+                if libsql_ok {
+                    let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
+                }
                 for c in &m.chunks {
                     let body = slice_lines(&content, c.ls, c.le);
                     write_chunk(libsql_ok, fp, c, &body);
@@ -510,7 +524,12 @@ pub fn index(root: &str, max_files: usize) -> Value {
                 reused_files += 1;
                 continue;
             }
+            if libsql_ok {
+                let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
+            }
             delete_chunk_keys(&m.chunks);
+        } else if libsql_ok {
+            let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
         }
 
         let chunks = extract_chunks(fp, &content, lang);
