@@ -463,15 +463,23 @@ pub fn index(root: &str, max_files: usize) -> Value {
         let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     }
+    const INDEX_WALL_BUDGET_MS: u64 = 12000;
+    let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut indexed = 0;
     let mut chunked = 0;
     let mut embedded = 0;
     let mut reused = 0;
     let mut reused_files = 0;
     let mut skipped_no_embed = 0u32;
+    let mut deferred_files = 0u32;
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for raw_fp in &files {
+        let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+        if elapsed > INDEX_WALL_BUDGET_MS {
+            deferred_files += 1;
+            continue;
+        }
         let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();
         let fp = &canon;
         let dot = fp.rfind('.');
@@ -534,18 +542,26 @@ pub fn index(root: &str, max_files: usize) -> Value {
     }
 
     let mut removed_files = 0;
-    for (fp, m) in &prior {
-        if !seen.contains(fp) {
-            delete_chunk_keys(&m.chunks);
-            fv_delete(MANIFEST_NS, fp);
-            removed_files += 1;
+    if deferred_files == 0 {
+        for (fp, m) in &prior {
+            if !seen.contains(fp) {
+                delete_chunk_keys(&m.chunks);
+                fv_delete(MANIFEST_NS, fp);
+                removed_files += 1;
+            }
         }
-    }
-    let digest = current_digest();
-    store_digest(&digest);
-    {
+        let digest = current_digest();
+        store_digest(&digest);
         let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} removed_files={} skipped_no_embed={} digest={}", indexed, chunked, embedded, reused, reused_files, removed_files, skipped_no_embed, digest);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+    } else {
+        let msg = format!("code_index: partial pass (wall budget) files_indexed={} deferred_files={} embedded={} reused={} -- digest withheld, next call resumes", indexed, deferred_files, embedded, reused);
+        let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+        crate::wasm_dispatch::emit_event("codeinsight_index_partial", json!({
+            "files_indexed": indexed,
+            "deferred_files": deferred_files,
+            "embedded": embedded,
+        }));
     }
     json!({
         "ok": true,
@@ -557,6 +573,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
         "reused_files": reused_files,
         "removed_files": removed_files,
         "skipped_no_embed": skipped_no_embed,
+        "deferred_files": deferred_files,
         "kvvec_cleared_dim_mismatch": kvvec_cleared,
         "by_language": langs,
     })
