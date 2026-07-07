@@ -192,7 +192,7 @@ pub fn ensure_schema_at(db_name: &str, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn project_db_path(project_path: Option<&str>) -> String {
+pub(crate) fn project_db_path(project_path: Option<&str>) -> String {
     match project_path {
         Some(p) if !p.is_empty() => format!("ext-{:x}.db", crc32(p)),
         _ => "gm.db".to_string(),

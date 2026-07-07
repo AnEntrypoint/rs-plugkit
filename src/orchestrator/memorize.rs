@@ -211,13 +211,14 @@ fn agents_drain_obligation() -> serde_json::Value {
 fn insert_memory_edge(namespace: &str, key: &str, text: &str, emb_str: &str, now: i64) -> bool {
     let embedding: serde_json::Value = serde_json::from_str(emb_str).unwrap_or(serde_json::Value::Null);
     let fact: String = text.chars().take(280).collect();
+    let relation = "memorize";
     let edge_req = serde_json::json!({
         "verb": "insert_edge",
         "body": {
             "id": key,
             "src": namespace,
             "dst": key,
-            "relation": "memorize",
+            "relation": relation,
             "fact": fact,
             "embedding": embedding,
             "created_at": now,
@@ -227,9 +228,18 @@ fn insert_memory_edge(namespace: &str, key: &str, text: &str, emb_str: &str, now
     let raw = edge_req.to_string();
     let mut session = rs_learn::LearnSession::new(crate::wasm_dispatch::SqlKv);
     let resp = rs_learn::dispatch_json(&mut session, raw.as_bytes());
-    serde_json::from_slice::<serde_json::Value>(&resp).ok()
+    let inserted = serde_json::from_slice::<serde_json::Value>(&resp).ok()
         .and_then(|v| v.get("ok").and_then(|o| o.as_bool()))
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if inserted && !embedding.is_null() {
+        if let Err(e) = crate::rslearn_vectors::write(key, namespace, key, relation, "", &embedding, now) {
+            crate::wasm_dispatch::emit_event("rslearn_vectors_write_failed", serde_json::json!({
+                "edge_id": key,
+                "error": e,
+            }));
+        }
+    }
+    inserted
 }
 
 #[cfg(not(target_arch = "wasm32"))]

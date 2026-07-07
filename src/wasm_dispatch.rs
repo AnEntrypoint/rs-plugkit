@@ -364,6 +364,33 @@ fn kv_query(body: &Value) -> u64 {
     ok("kv_query", v)
 }
 
+fn discipline_fanout_namespaces(base: &str) -> Vec<String> {
+    let mut out = vec![base.to_string()];
+    if let Some(content) = host_read(".gm/disciplines/enabled.txt") {
+        for line in content.lines() {
+            let name = line.trim();
+            if !name.is_empty() && !name.starts_with('#') && !out.iter().any(|n| n == name) {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32) -> Value {
+    let namespaces = discipline_fanout_namespaces(namespace);
+    for ns in &namespaces {
+        if let Err(e) = crate::rssearch_vectors::migrate_namespace_from_flat_json(ns, unsafe { host_now_ms() } as i64) {
+            emit_event("rssearch_vectors_migration_failed", json!({ "namespace": ns, "error": e }));
+        }
+    }
+    let now_ms = unsafe { host_now_ms() } as i64;
+    match crate::rssearch_vectors::search_with_recency(query_embedding, &namespaces, limit as usize, now_ms) {
+        Ok(hits) => hits,
+        Err(e) => json!({ "error": e }),
+    }
+}
+
 fn recall(body: &Value) -> u64 {
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(8) as u32;
@@ -372,6 +399,7 @@ fn recall(body: &Value) -> u64 {
     check_sigil_ignored(query, namespace);
     let derived_query = query.to_string();
     let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
+    let vector_hits = rssearch_vector_hits(&embedding, namespace, limit);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": namespace }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, limit) };
     let vec_hits = unpack_to_value(packed);
@@ -383,6 +411,7 @@ fn recall(body: &Value) -> u64 {
             "namespace": namespace,
             "derived_query": derived_query,
             "hits": reranked,
+            "vector_hits": vector_hits,
         }));
     }
     let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, query.as_ptr(), query.len() as u32) };
@@ -393,6 +422,7 @@ fn recall(body: &Value) -> u64 {
         "namespace": namespace,
         "derived_query": derived_query,
         "hits": annotated,
+        "vector_hits": vector_hits,
     }))
 }
 
@@ -527,6 +557,7 @@ fn memorize_prune(body: &Value) -> u64 {
     }
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
     let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
+    let vector_candidates = rssearch_vector_hits(&embedding, namespace, k);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": namespace }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, k) };
     let hits = unpack_to_value(packed);
@@ -534,7 +565,8 @@ fn memorize_prune(body: &Value) -> u64 {
         "namespace": namespace,
         "mode": "review",
         "candidates": hits,
-        "note": "Review-only: re-dispatch memorize-prune with {keys:[...]} naming the stale ones to delete. Pruning is agent-judged, never auto-similarity-deleted.",
+        "vector_candidates": vector_candidates,
+        "note": "Review-only: re-dispatch memorize-prune with {keys:[...]} naming the stale ones to delete. Pruning is agent-judged, never auto-similarity-deleted. candidates=legacy flat-JSON host_vec_search; vector_candidates=independent rssearch_vectors libsql result, kept separate, never fused.",
     }))
 }
 
@@ -572,6 +604,7 @@ fn codesearch(body: &Value) -> u64 {
     }
     let cand_k = k.saturating_mul(5).max(50);
     let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
+    let vector_hits = rssearch_vector_hits(&embedding, "codeinsight", k);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": "codeinsight" }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, cand_k) };
     let vec_hits = unpack_to_value(packed);
@@ -594,7 +627,7 @@ fn codesearch(body: &Value) -> u64 {
                 .unwrap_or_default();
             json!({ "key": key, "text": text, "score": score })
         }).collect();
-        return ok("codesearch", json!({ "mode": "fusion", "hits": hits, "commits": commits }));
+        return ok("codesearch", json!({ "mode": "fusion", "hits": hits, "commits": commits, "vector_hits": vector_hits }));
     }
     let ns = "codeinsight";
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, query.as_ptr(), query.len() as u32) };
@@ -608,7 +641,7 @@ fn codesearch(body: &Value) -> u64 {
         }
         return codesearch(&retry);
     }
-    ok("codesearch", json!({ "mode": "fallback_kv", "hits": hits, "commits": commits }))
+    ok("codesearch", json!({ "mode": "fallback_kv", "hits": hits, "commits": commits, "vector_hits": vector_hits }))
 }
 
 fn embed(body: &Value) -> u64 {
@@ -664,6 +697,27 @@ fn similarity(body: &Value) -> u64 {
             "model": "BAAI/bge-small-en-v1.5",
         })),
         None => err("similarity", "cosine computation failed (dimension mismatch or zero vector)"),
+    }
+}
+
+fn graph_similarity_search(body: &Value) -> u64 {
+    let limit = body.get("limit").or_else(|| body.get("k")).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let embedding = if let Some(inline) = body.get("embedding") {
+        inline.clone()
+    } else if let Some(text) = body.get("text").and_then(|v| v.as_str()) {
+        if text.is_empty() {
+            return err("graph_similarity_search", "text or embedding required");
+        }
+        match crate::embed::embed_text_json_query(text) {
+            Some(v) => v,
+            None => return err("graph_similarity_search", "embedding failed for text"),
+        }
+    } else {
+        return err("graph_similarity_search", "text or embedding required");
+    };
+    match crate::rslearn_vectors::search(&embedding, limit) {
+        Ok(rows) => ok("graph_similarity_search", json!({ "edges": rows, "limit": limit })),
+        Err(e) => err_json("graph_similarity_search", json!({ "error": e })),
     }
 }
 
@@ -1819,6 +1873,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "close" => close(&body),
         "kill-port" => kill_port(&body),
         "filter" => filter(&body, &body_s),
+        "graph_similarity_search" => graph_similarity_search(&body),
         "git_status" => git_status(&body),
         "branch_status" => branch_status(&body),
         "git_push" => git_push(&body),
