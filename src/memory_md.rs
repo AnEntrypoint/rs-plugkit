@@ -303,11 +303,11 @@ fn store_meta_digest(ns: &str, digest: &str) {
     );
 }
 
-const SYNC_EMBED_BUDGET_MS: u64 = 5000;
-const SYNC_TOTAL_BUDGET_MS: u64 = 9000;
-const SYNC_REKEY_ROWS_DEADLINE_MS: u64 = 16000;
+const SYNC_EMBED_BUDGET_MS: u64 = 4000;
+const SYNC_TOTAL_BUDGET_MS: u64 = 6000;
+const SYNC_REKEY_ROWS_DEADLINE_MS: u64 = 10000;
 const SYNC_SHADOW_ABORT_THRESHOLD: u32 = 5;
-const REKEY_BATCH_MAX: usize = 150;
+const REKEY_BATCH_MAX: usize = 60;
 
 fn is_malformed(err: &str) -> bool {
     err.contains("malformed")

@@ -28,7 +28,9 @@
 # <<< gm managed
 
 dist/
-.gm/
+!.gm/
+.gm/*
+!.gm/memories/
 .codeinsight/
 rs-learn.db
 Cargo.lock
