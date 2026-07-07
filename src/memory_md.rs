@@ -303,11 +303,53 @@ fn store_meta_digest(ns: &str, digest: &str) {
     );
 }
 
-const SYNC_EMBED_BUDGET_MS: u64 = 4000;
-const SYNC_TOTAL_BUDGET_MS: u64 = 6000;
-const SYNC_REKEY_ROWS_DEADLINE_MS: u64 = 10000;
+const SYNC_EMBED_BUDGET_MS: u64 = 1500;
+const SYNC_TOTAL_BUDGET_MS: u64 = 2000;
+const SYNC_REKEY_ROWS_DEADLINE_MS: u64 = 3500;
 const SYNC_SHADOW_ABORT_THRESHOLD: u32 = 5;
-const REKEY_BATCH_MAX: usize = 60;
+const REKEY_BATCH_MAX: usize = 25;
+
+fn scan_corpus(ns: &str) -> (String, Vec<MemoryDoc>) {
+    let dir = match md_dir(ns) {
+        Some(d) => d,
+        None => return ("invalid".to_string(), Vec::new()),
+    };
+    let entries = match crate::pkfs::readdir(&dir) {
+        Some(Value::Array(a)) => a,
+        _ => return ("empty".to_string(), Vec::new()),
+    };
+    let mut names: Vec<String> = entries
+        .iter()
+        .filter_map(|e| e.get("name").and_then(|n| n.as_str()).or_else(|| e.as_str()))
+        .filter(|n| n.ends_with(".md"))
+        .map(|n| n.to_string())
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        return ("empty".to_string(), Vec::new());
+    }
+    let mut acc = String::new();
+    let mut docs = Vec::new();
+    for name in &names {
+        let path = format!("{}/{}", dir, name);
+        let content = host_read(&path).unwrap_or_default();
+        acc.push_str(name);
+        acc.push('\0');
+        acc.push_str(&format!("{:016x}", crate::pipeline::fnv1a64(content.as_bytes())));
+        acc.push('\0');
+        match parse(&content) {
+            Some(doc) => docs.push(doc),
+            None => {
+                crate::wasm_dispatch::emit_event("memory_md_parse_failed", json!({
+                    "path": path,
+                    "namespace": ns,
+                }));
+            }
+        }
+    }
+    docs.sort_by(|a, b| a.key.cmp(&b.key));
+    (format!("{:016x}", crate::pipeline::fnv1a64(acc.as_bytes())), docs)
+}
 
 fn is_malformed(err: &str) -> bool {
     err.contains("malformed")
@@ -404,11 +446,10 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
         if ns == "codeinsight" {
             continue;
         }
-        let digest = corpus_digest(ns);
+        let (digest, docs) = scan_corpus(ns);
         if meta_digest(ns).as_deref() == Some(digest.as_str()) {
             continue;
         }
-        let docs = list_docs(ns);
         let rows = crate::shared_db::shared_query_params(
             "SELECT key, text, updated_at, deleted FROM rssearch_vectors WHERE namespace=?1",
             &[ns],
