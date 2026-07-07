@@ -110,12 +110,16 @@ pub fn host_remove(path: &str) -> bool {
     rc != 0
 }
 
+fn next_dispatch_hint_for(verb: &str) -> Value {
+    if verb == "instruction" { Value::Null } else { json!("instruction") }
+}
+
 fn err(verb: &str, reason: &str) -> u64 {
-    pack(json!({ "ok": false, "verb": verb, "error": reason }).to_string())
+    pack(json!({ "ok": false, "verb": verb, "error": reason, "next_dispatch_hint": next_dispatch_hint_for(verb) }).to_string())
 }
 
 fn err_json(verb: &str, detail: Value) -> u64 {
-    let mut obj = json!({ "ok": false, "verb": verb });
+    let mut obj = json!({ "ok": false, "verb": verb, "next_dispatch_hint": next_dispatch_hint_for(verb) });
     if let Some(map) = detail.as_object() {
         for (k, v) in map {
             obj[k] = v.clone();
@@ -125,8 +129,7 @@ fn err_json(verb: &str, detail: Value) -> u64 {
 }
 
 fn ok(verb: &str, data: Value) -> u64 {
-    let hint = if verb == "instruction" { Value::Null } else { json!("instruction") };
-    pack(json!({ "ok": true, "verb": verb, "data": data, "next_dispatch_hint": hint }).to_string())
+    pack(json!({ "ok": true, "verb": verb, "data": data, "next_dispatch_hint": next_dispatch_hint_for(verb) }).to_string())
 }
 
 fn fs_read(body: &Value) -> u64 {
@@ -635,15 +638,6 @@ fn status(body: &Value) -> u64 {
     }
 }
 
-fn wait(body: &Value) -> u64 {
-    let ms = body.get("ms").and_then(|v| v.as_u64()).unwrap_or(1000);
-    let start = unsafe { host_now_ms() };
-    let _ = start; let _ = ms;
-    ok("wait", json!({ "waitedMs": ms, "startMs": start, "note": "use exec:sleep for async wait" }))
-}
-
-fn sleep(body: &Value) -> u64 { wait(body) }
-
 fn close(body: &Value) -> u64 {
     let task_id = body.get("taskId").and_then(|v| v.as_u64()).unwrap_or(0);
     if task_id == 0 { return err("close", "taskId required"); }
@@ -1001,10 +995,6 @@ fn browser(body: &Value, body_s: &str) -> u64 {
         }
         None => err("browser", "host_browser_exec returned empty"),
     }
-}
-
-fn rejected(verb: &str) -> u64 {
-    err(verb, "verb unavailable in browser; use exec:nodejs or host-side dispatch")
 }
 
 fn db_name_from(body: &Value) -> String {
@@ -1721,14 +1711,11 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     crate::browser_witness::record_from_body(cwd_for_witness, &body);
     if crate::orchestrator::is_orchestrator_verb(&verb) {
         let (out, err_msg, code) = crate::orchestrator::dispatch(&verb, "", &body_s);
-        let ok_flag = code == 0;
-        let response = if ok_flag {
+        if code == 0 {
             let data: Value = serde_json::from_str(&out).unwrap_or(Value::String(out));
-            json!({ "ok": true, "verb": verb, "data": data })
-        } else {
-            json!({ "ok": false, "verb": verb, "error": err_msg, "stdout": out, "exitCode": code })
-        };
-        return pack(response.to_string());
+            return ok(&verb, data);
+        }
+        return err_json(&verb, json!({ "error": err_msg, "stdout": out, "exitCode": code }));
     }
     match verb.as_str() {
         "fs_read" => fs_read(&body),
@@ -1770,8 +1757,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "ssh" => shell_exec(&body, &body_s, "ssh"),
         "go" | "rust" | "c" | "cpp" | "java" | "deno" => shell_exec(&body, &body_s, &verb),
         "status" => status(&body),
-        "wait" => wait(&body),
-        "sleep" => sleep(&body),
+        "wait" | "sleep" => err(&verb, "verb not supported: wasm has no real timer/async-sleep primitive here; use exec:sleep (bash `sleep N`, JS setTimeout via exec_js, or PowerShell Start-Sleep) for an actual wait"),
         "close" => close(&body),
         "kill-port" => kill_port(&body),
         "filter" => filter(&body, &body_s),
@@ -1799,21 +1785,6 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "discipline" => discipline(&body),
         "pause" => pause(&body),
         "runner" => runner(&body),
-        "instruction" | "transition" | "mutable-resolve" | "memorize-fire" | "phase-status" | "residual-scan" | "auto-recall" => {
-            let body_str = match &body {
-                Value::Null => String::new(),
-                Value::String(s) => s.clone(),
-                v => v.to_string(),
-            };
-            let (stdout, stderr, exit_code) = crate::orchestrator::dispatch(&verb, "wasm", &body_str);
-            pack(json!({
-                "ok": exit_code == 0,
-                "verb": verb,
-                "stdout": stdout,
-                "stderr": stderr,
-                "exitCode": exit_code,
-            }).to_string())
-        }
         "" => err("", "verb required"),
         _ => err(&verb, "unknown verb"),
     }

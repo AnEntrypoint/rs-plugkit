@@ -15,8 +15,16 @@ extern "C" {
     fn host_kv_delete(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u32;
 }
 
-fn fv_put(ns: &str, key: &str, val: &str) {
-    let _ = unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
+fn fv_put(ns: &str, key: &str, val: &str) -> bool {
+    let rc = unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
+    let succeeded = rc != 0;
+    if !succeeded {
+        crate::wasm_dispatch::emit_event("codeinsight_kv_put_failed", json!({
+            "namespace": ns,
+            "key": key,
+        }));
+    }
+    succeeded
 }
 
 fn fv_query(ns: &str, q: &str) -> Value {

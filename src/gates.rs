@@ -262,6 +262,41 @@ fn is_unsolicited_toplevel_doc(rel: &str) -> bool {
     !TOPLEVEL_DOC_ALLOWLIST.iter().any(|a| a.eq_ignore_ascii_case(&norm))
 }
 
+fn extract_substitution_bodies(cmd: &str) -> Vec<String> {
+    let bytes: Vec<char> = cmd.chars().collect();
+    let mut bodies: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == '$' && i + 1 < bytes.len() && bytes[i + 1] == '(' {
+            let mut depth = 1i32;
+            let mut j = i + 2;
+            let start = j;
+            while j < bytes.len() && depth > 0 {
+                match bytes[j] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                if depth > 0 { j += 1; }
+            }
+            bodies.push(bytes[start..j.min(bytes.len())].iter().collect());
+            i = if j < bytes.len() { j + 1 } else { bytes.len() };
+            continue;
+        }
+        if bytes[i] == '`' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] != '`' {
+                j += 1;
+            }
+            bodies.push(bytes[(i + 1)..j.min(bytes.len())].iter().collect());
+            i = if j < bytes.len() { j + 1 } else { bytes.len() };
+            continue;
+        }
+        i += 1;
+    }
+    bodies
+}
+
 pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     if let Some(step_id) = read_pending_step() {
         if !AWAIT_ALLOWED_VERBS.contains(&verb) {
@@ -287,16 +322,28 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             .or_else(|| body.get("code").and_then(|v| v.as_str()))
             .or_else(|| body.get("script").and_then(|v| v.as_str()))
             .unwrap_or("");
+        let is_git_token = |first: &str| {
+            first == "git" || first == "git.exe"
+                || first.ends_with("/git") || first.ends_with("\\git")
+                || first.ends_with("/git.exe") || first.ends_with("\\git.exe")
+        };
         let git_dominant = cmd
             .split(|c| c == ';' || c == '\n' || c == '|' || c == '&')
             .map(|s| s.trim_start())
             .any(|s| {
                 let first = s.split_whitespace().next().unwrap_or("");
-                first == "git" || first == "git.exe"
-                    || first.ends_with("/git") || first.ends_with("\\git")
-                    || first.ends_with("/git.exe") || first.ends_with("\\git.exe")
+                is_git_token(first)
             });
-        if git_dominant {
+        let git_in_subshell = extract_substitution_bodies(cmd).into_iter().any(|inner| {
+            inner
+                .split(|c| c == ';' || c == '\n' || c == '|' || c == '&')
+                .map(|s| s.trim_start())
+                .any(|s| {
+                    let first = s.split_whitespace().next().unwrap_or("");
+                    is_git_token(first)
+                })
+        });
+        if git_dominant || git_in_subshell {
             log_deviation("bash-git-bypass", &format!("verb={} cmd={}", verb, cmd.chars().take(80).collect::<String>()));
             return GateVerdict::deny(format!(
                 "bash-git-bypass: a `{}` verb invoking `git` is denied - git is a first-class spool surface, not a shell command. Use the git verb instead: \
