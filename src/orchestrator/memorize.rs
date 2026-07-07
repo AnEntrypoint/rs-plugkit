@@ -100,30 +100,31 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     let now = unsafe { crate::wasm_dispatch::host_now_ms() };
     let content_hash = crate::pipeline::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
     let key = format!("mem-{:016x}-{}", content_hash, text.len());
-    if let Some(existing) = crate::wasm_dispatch::host_kv_read(&namespace, &key) {
-        if existing == text {
-            let md_path = match crate::memory_md::write_memory(&namespace, &key, &text, now as i64) {
-                crate::memory_md::WriteOutcome::Created(p)
-                | crate::memory_md::WriteOutcome::Updated(p)
-                | crate::memory_md::WriteOutcome::Deduped(p) => Some(p),
-                _ => None,
-            };
-            crate::wasm_dispatch::emit_event("memorize_deduped", serde_json::json!({
-                "key": key,
-                "namespace": namespace,
-            }));
-            let payload = serde_json::json!({
-                "ok": true,
-                "key": key,
-                "namespace": namespace,
-                "embedded": true,
-                "deduped": true,
-                "bytes": text.len(),
-                "md_file": md_path,
-                "agents_drain": agents_drain_obligation(),
-            });
-            return (payload.to_string(), String::new(), 0);
-        }
+    let flat_dedup = crate::wasm_dispatch::host_kv_read(&namespace, &key)
+        .map(|existing| existing == text)
+        .unwrap_or(false);
+    if flat_dedup || crate::memory_md::memory_text_matches(&namespace, &key, &text) {
+        let md_path = match crate::memory_md::write_memory(&namespace, &key, &text, now as i64) {
+            crate::memory_md::WriteOutcome::Created(p)
+            | crate::memory_md::WriteOutcome::Updated(p)
+            | crate::memory_md::WriteOutcome::Deduped(p) => Some(p),
+            _ => None,
+        };
+        crate::wasm_dispatch::emit_event("memorize_deduped", serde_json::json!({
+            "key": key,
+            "namespace": namespace,
+        }));
+        let payload = serde_json::json!({
+            "ok": true,
+            "key": key,
+            "namespace": namespace,
+            "embedded": true,
+            "deduped": true,
+            "bytes": text.len(),
+            "md_file": md_path,
+            "agents_drain": agents_drain_obligation(),
+        });
+        return (payload.to_string(), String::new(), 0);
     }
     let emb_str = match crate::embed::embed_text_json(&text) {
         Some(v) => v.to_string(),

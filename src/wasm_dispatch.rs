@@ -560,11 +560,12 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
     check_sigil_ignored(text, namespace);
     let content_hash = crate::pipeline::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
     let key = format!("mem-{:016x}-{}", content_hash, text.len());
-    if let Some(existing) = host_kv_read(namespace, &key) {
-        if existing == text {
-            let md_path = memory_md_write_path(namespace, &key, text);
-            return ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true, "deduped": true, "md_file": md_path}));
-        }
+    let flat_dedup = host_kv_read(namespace, &key)
+        .map(|existing| existing == text)
+        .unwrap_or(false);
+    if flat_dedup || crate::memory_md::memory_text_matches(namespace, &key, text) {
+        let md_path = memory_md_write_path(namespace, &key, text);
+        return ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true, "deduped": true, "md_file": md_path}));
     }
     let emb = match crate::embed::embed_text_json(text) {
         Some(e) => e,

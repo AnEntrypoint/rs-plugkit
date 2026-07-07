@@ -93,6 +93,18 @@ pub fn parse(content: &str) -> Option<MemoryDoc> {
     Some(MemoryDoc { key, ns, created, updated, text })
 }
 
+pub fn memory_text_matches(ns: &str, key: &str, text: &str) -> bool {
+    let path = match md_path(ns, key) {
+        Some(p) => p,
+        None => return false,
+    };
+    let content = match host_read(&path) {
+        Some(c) => c,
+        None => return false,
+    };
+    parse(&content).map(|doc| doc.text == normalize_text(text)).unwrap_or(false)
+}
+
 fn tmp_path_for(path: &str) -> String {
     let now = unsafe { crate::wasm_dispatch::host_now_ms() };
     format!("{}.tmp-{}", path, now)
