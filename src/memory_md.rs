@@ -434,9 +434,82 @@ fn recover_malformed_db() -> bool {
     crate::rssearch_vectors::ensure_schema().is_ok() && ensure_meta_table().is_ok()
 }
 
+fn scan_manifest(ns: &str) -> Option<(String, Vec<(String, String)>)> {
+    let dir = md_dir(ns)?;
+    let out_path = format!(".gm/exec-spool/.mem-scan-{}.json", ns);
+    let dir_js = serde_json::to_string(&dir).ok()?;
+    let out_js = serde_json::to_string(&out_path).ok()?;
+    let code = format!(
+        "const fs=require('fs');const path=require('path');const crypto=require('crypto');const dir={};let entries=[];try{{entries=fs.readdirSync(dir).filter(n=>n.endsWith('.md')).sort();}}catch(e){{}}const files=[];const h=crypto.createHash('sha256');for(const n of entries){{let c=Buffer.alloc(0);try{{c=fs.readFileSync(path.join(dir,n));}}catch(e){{}}const fh=crypto.createHash('sha256').update(c).digest('hex').slice(0,16);h.update(n+':'+fh+'\\n');files.push([n,fh]);}}const digest=files.length?h.digest('hex').slice(0,16):'empty';fs.writeFileSync({},JSON.stringify({{digest:digest,files:files}}));process.stdout.write('scan:'+digest);",
+        dir_js, out_js
+    );
+    let opts = "{\"timeoutMs\":30000}";
+    let packed = unsafe {
+        crate::wasm_dispatch::host_exec_js(
+            code.as_ptr(), code.len() as u32,
+            opts.as_ptr(), opts.len() as u32,
+        )
+    };
+    let out = crate::wasm_dispatch::unpack_to_string_pub(packed).unwrap_or_default();
+    let parsed: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+    let stdout = parsed.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+    if !stdout.starts_with("scan:") {
+        return None;
+    }
+    let manifest_raw = host_read(&out_path)?;
+    let manifest: Value = serde_json::from_str(&manifest_raw).ok()?;
+    let digest = manifest.get("digest").and_then(|d| d.as_str())?.to_string();
+    let mut files = Vec::new();
+    for f in manifest.get("files").and_then(|f| f.as_array())? {
+        let pair = f.as_array()?;
+        files.push((pair.first()?.as_str()?.to_string(), pair.get(1)?.as_str()?.to_string()));
+    }
+    Some((digest, files))
+}
+
+fn ensure_files_table() -> Result<(), String> {
+    crate::shared_db::shared_exec(
+        "CREATE TABLE IF NOT EXISTS memories_md_files (namespace TEXT NOT NULL, name TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(namespace, name))",
+    )
+}
+
+fn stored_file_hashes(ns: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if let Ok(rows) = crate::shared_db::shared_query_params(
+        "SELECT name, hash FROM memories_md_files WHERE namespace=?1",
+        &[ns],
+    ) {
+        if let Some(arr) = rows.as_array() {
+            for row in arr {
+                if let (Some(n), Some(h)) = (
+                    row.get("name").and_then(|v| v.as_str()),
+                    row.get("hash").and_then(|v| v.as_str()),
+                ) {
+                    out.insert(n.to_string(), h.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn store_file_hash(ns: &str, name: &str, hash: &str) {
+    let _ = crate::shared_db::shared_exec_params(
+        "INSERT INTO memories_md_files(namespace, name, hash) VALUES(?1,?2,?3) ON CONFLICT(namespace, name) DO UPDATE SET hash=excluded.hash",
+        &[ns, name, hash],
+    );
+}
+
+fn drop_file_hash(ns: &str, name: &str) {
+    let _ = crate::shared_db::shared_exec_params(
+        "DELETE FROM memories_md_files WHERE namespace=?1 AND name=?2",
+        &[ns, name],
+    );
+}
+
 pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
-    if ensure_meta_table().is_err() {
-        return json!({ "converged": false, "error": "memories_md_meta ensure failed" });
+    if ensure_meta_table().is_err() || ensure_files_table().is_err() {
+        return json!({ "converged": false, "error": "memories md meta/files table ensure failed" });
     }
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut recreated = false;
@@ -446,44 +519,47 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
         if ns == "codeinsight" {
             continue;
         }
-        let (digest, docs) = scan_corpus(ns);
+        let (digest, files) = match scan_manifest(ns) {
+            Some(v) => v,
+            None => {
+                let (d, docs) = scan_corpus(ns);
+                (d.clone(), docs.iter().map(|doc| (format!("{}.md", doc.key), d.clone())).collect())
+            }
+        };
         if meta_digest(ns).as_deref() == Some(digest.as_str()) {
             continue;
         }
-        let rows = crate::shared_db::shared_query_params(
-            "SELECT key, text, updated_at, deleted FROM rssearch_vectors WHERE namespace=?1",
-            &[ns],
-        ).ok().and_then(|r| r.as_array().cloned()).unwrap_or_default();
-        let mut existing: std::collections::HashMap<String, (String, i64, i64)> = std::collections::HashMap::new();
-        for row in &rows {
-            let k = row.get("key").and_then(|v| v.as_str()).unwrap_or("");
-            if k.is_empty() {
-                continue;
+        converged = false;
+        let known = stored_file_hashes(ns);
+        let manifest_names: std::collections::HashSet<String> = files.iter().map(|(n, _)| n.clone()).collect();
+        let mut removed_keys = 0u32;
+        for (name, _) in &known {
+            if !manifest_names.contains(name) {
+                let key = name.trim_end_matches(".md");
+                let _ = crate::rssearch_vectors::mark_deleted(ns, key);
+                drop_file_hash(ns, name);
+                removed_keys += 1;
             }
-            existing.insert(
-                k.to_string(),
-                (
-                    row.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    row.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(0),
-                    row.get("deleted").and_then(|v| v.as_i64()).unwrap_or(0),
-                ),
-            );
         }
+        let changed: Vec<&(String, String)> = files
+            .iter()
+            .filter(|(n, h)| known.get(n).map(|kh| kh != h).unwrap_or(true))
+            .collect();
         let mut upserted = 0u32;
         let mut retimed = 0u32;
         let mut resurrected = 0u32;
-        let mut marked_deleted = 0u32;
         let mut failed = 0u32;
         let mut deferred = 0u32;
         let mut rekeyed = 0u32;
         let mut shadow_failed = 0u32;
         let mut embeds = 0u32;
-        let mut doc_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut rekey_new_files: Vec<(String, String)> = Vec::new();
         let mut rekey_pairs: Vec<(String, String)> = Vec::new();
         let mut rekey_rows: Vec<(String, String, Value, i64)> = Vec::new();
+        let mut rekey_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut processed_hashes: Vec<(String, String)> = Vec::new();
         let mut flat_by_content: Option<std::collections::HashMap<String, String>> = None;
-        let mut flat_embedding_for = |doc_key: &str, text: &str, cache: &mut Option<std::collections::HashMap<String, String>>| -> Option<Value> {
+        let mut flat_embedding_for = |doc_key: &str, cache: &mut Option<std::collections::HashMap<String, String>>| -> Option<Value> {
             if let Some(e) = flat_vec_embedding(ns, doc_key) {
                 return Some(e);
             }
@@ -496,13 +572,12 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                 }
                 *cache = Some(map);
             }
-            let _ = text;
             cache.as_ref()
                 .and_then(|m| m.get(doc_key))
                 .and_then(|old_key| flat_vec_embedding(ns, old_key))
         };
         let write_row = |key: &str, text: &str, emb: &Value, updated: i64,
-                             upserted: &mut u32, failed: &mut u32, shadow_failed: &mut u32| -> i8 {
+                         upserted: &mut u32, failed: &mut u32, shadow_failed: &mut u32| -> i8 {
             match crate::rssearch_vectors::write(ns, key, text, emb, updated) {
                 Ok(()) => { *upserted += 1; 0 }
                 Err(e) => {
@@ -516,14 +591,30 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                 }
             }
         };
-        for doc in &docs {
+        for (name, hash) in &changed {
             let total_elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
             if total_elapsed > SYNC_TOTAL_BUDGET_MS {
                 deferred += 1;
                 continue;
             }
+            let dir = match md_dir(ns) { Some(d) => d, None => break };
+            let path = format!("{}/{}", dir, name);
+            let content = match host_read(&path) {
+                Some(c) => c,
+                None => { deferred += 1; continue; }
+            };
+            let doc = match parse(&content) {
+                Some(d) => d,
+                None => {
+                    crate::wasm_dispatch::emit_event("memory_md_parse_failed", json!({
+                        "path": path, "namespace": ns,
+                    }));
+                    processed_hashes.push((name.to_string(), hash.to_string()));
+                    continue;
+                }
+            };
             let expected = content_key(ns, &doc.text);
-            if doc.key != expected {
+            if doc.key != expected || *name != format!("{}.md", expected) {
                 if rekey_pairs.len() >= REKEY_BATCH_MAX {
                     deferred += 1;
                     continue;
@@ -533,51 +624,52 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                     Some(p) => p,
                     None => { failed += 1; continue; }
                 };
-                if let Some(old_path) = md_path(ns, &doc.key) {
-                    rekey_pairs.push((old_path, new_path.clone()));
-                }
-                if doc_keys.insert(expected.clone()) {
+                rekey_pairs.push((path.clone(), new_path.clone()));
+                if rekey_targets.insert(expected.clone()) {
                     if host_read(&new_path).is_none() {
                         rekey_new_files.push((new_path, compose(&expected, ns, doc.created, doc.updated, &doc.text)));
                     }
-                    let need_row = match existing.get(&expected) {
-                        Some((t, _, d)) => t != &doc.text || *d != 0,
-                        None => true,
-                    };
-                    if need_row {
-                        if let Some(emb) = flat_vec_embedding(ns, &doc.key) {
-                            rekey_rows.push((expected.clone(), doc.text.clone(), emb, doc.updated));
-                        }
+                    if let Some(emb) = flat_embedding_for(&doc.key, &mut flat_by_content) {
+                        rekey_rows.push((expected.clone(), doc.text.clone(), emb, doc.updated));
                     }
                 }
+                let _ = crate::rssearch_vectors::mark_deleted(ns, &doc.key);
+                drop_file_hash(ns, name);
                 continue;
             }
-            doc_keys.insert(doc.key.clone());
-            match existing.get(&doc.key) {
-                Some((text, updated_at, deleted)) if text == &doc.text && *deleted == 0 => {
-                    if *updated_at != doc.updated {
-                        let upd = doc.updated.to_string();
-                        let _ = crate::shared_db::shared_exec_params(
-                            "UPDATE rssearch_vectors SET updated_at=?1 WHERE namespace=?2 AND key=?3",
-                            &[&upd, ns, &doc.key],
-                        );
-                        retimed += 1;
+            let row = crate::shared_db::shared_query_params(
+                "SELECT text, updated_at, deleted FROM rssearch_vectors WHERE namespace=?1 AND key=?2",
+                &[ns, &doc.key],
+            ).ok().and_then(|r| r.as_array().and_then(|a| a.first().cloned()));
+            match row {
+                Some(r) => {
+                    let text = r.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    let updated_at = r.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let deleted = r.get("deleted").and_then(|v| v.as_i64()).unwrap_or(0);
+                    if text == doc.text && deleted == 0 {
+                        if updated_at != doc.updated {
+                            let upd = doc.updated.to_string();
+                            let _ = crate::shared_db::shared_exec_params(
+                                "UPDATE rssearch_vectors SET updated_at=?1 WHERE namespace=?2 AND key=?3",
+                                &[&upd, ns, &doc.key],
+                            );
+                            retimed += 1;
+                        }
+                        processed_hashes.push((name.to_string(), hash.to_string()));
+                    } else if text == doc.text {
+                        match crate::rssearch_vectors::undelete(ns, &doc.key, doc.updated) {
+                            Ok(()) => { resurrected += 1; processed_hashes.push((name.to_string(), hash.to_string())); }
+                            Err(_) => failed += 1,
+                        }
+                    } else {
+                        failed += 1;
+                        crate::wasm_dispatch::emit_event("memory_md_key_text_mismatch", json!({
+                            "namespace": ns, "key": doc.key,
+                        }));
                     }
                 }
-                Some((text, _, deleted)) if text == &doc.text && *deleted != 0 => {
-                    match crate::rssearch_vectors::undelete(ns, &doc.key, doc.updated) {
-                        Ok(()) => resurrected += 1,
-                        Err(_) => failed += 1,
-                    }
-                }
-                Some((text, _, _)) if text != &doc.text => {
-                    failed += 1;
-                    crate::wasm_dispatch::emit_event("memory_md_key_text_mismatch", json!({
-                        "namespace": ns, "key": doc.key,
-                    }));
-                }
-                _ => {
-                    let emb = match flat_embedding_for(&doc.key, &doc.text, &mut flat_by_content) {
+                None => {
+                    let emb = match flat_embedding_for(&doc.key, &mut flat_by_content) {
                         Some(e) => Some(e),
                         None => {
                             let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
@@ -592,7 +684,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                     match emb {
                         Some(emb) => {
                             match write_row(&doc.key, &doc.text, &emb, doc.updated, &mut upserted, &mut failed, &mut shadow_failed) {
-                                0 => {}
+                                0 => processed_hashes.push((name.to_string(), hash.to_string())),
                                 1 => {
                                     converged = false;
                                     if !recreated {
@@ -605,7 +697,6 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                                     break 'ns;
                                 }
                                 _ => {
-                                    converged = false;
                                     crate::wasm_dispatch::emit_event("memory_md_sync_aborted", json!({
                                         "namespace": ns,
                                         "reason": "repeated vector-index shadow-row failures; pass abandoned without digest store, will retry next sync",
@@ -652,22 +743,30 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                 }
             }
         }
-        if deferred == 0 {
-            for (key, (_, _, deleted)) in &existing {
-                if *deleted == 0 && !doc_keys.contains(key) {
-                    match crate::rssearch_vectors::mark_deleted(ns, key) {
-                        Ok(()) => marked_deleted += 1,
-                        Err(_) => failed += 1,
+        for (name, hash) in &processed_hashes {
+            store_file_hash(ns, name, hash);
+        }
+        if failed == 0 && deferred == 0 && rekeyed == 0 {
+            let manifest_keys: std::collections::HashSet<String> = manifest_names
+                .iter()
+                .map(|n| n.trim_end_matches(".md").to_string())
+                .collect();
+            if let Ok(rows) = crate::shared_db::shared_query_params(
+                "SELECT key FROM rssearch_vectors WHERE namespace=?1 AND deleted=0",
+                &[ns],
+            ) {
+                if let Some(arr) = rows.as_array() {
+                    for row in arr {
+                        if let Some(k) = row.get("key").and_then(|v| v.as_str()) {
+                            if !manifest_keys.contains(k) {
+                                let _ = crate::rssearch_vectors::mark_deleted(ns, k);
+                            }
+                        }
                     }
                 }
             }
-        }
-        if failed == 0 && deferred == 0 && rekeyed == 0 {
             store_meta_digest(ns, &digest);
-        } else {
-            converged = false;
-        }
-        if deferred > 0 || rekeyed > 0 {
+        } else if deferred > 0 || rekeyed > 0 {
             crate::wasm_dispatch::emit_event("memory_md_sync_partial", json!({
                 "namespace": ns,
                 "deferred": deferred,
@@ -677,10 +776,11 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
         }
         report.push(json!({
             "namespace": ns,
+            "changed": changed.len(),
             "upserted": upserted,
             "retimed": retimed,
             "resurrected": resurrected,
-            "marked_deleted": marked_deleted,
+            "removed_keys": removed_keys,
             "failed": failed,
             "deferred": deferred,
             "rekeyed": rekeyed,
