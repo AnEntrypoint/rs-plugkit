@@ -50,6 +50,10 @@ jobs:
           key: check-wasm32-wasip1-v2
           cache-on-failure: false
 
+      - name: Fetch embedding weights (BAAI/bge-small-en-v1.5 safetensors + tokenizer)
+        shell: bash
+        run: bash scripts/fetch-weights.sh
+
       - name: Cargo check (fast)
         run: cargo check --target wasm32-wasip1 --no-default-features --features wasm --lib
 
