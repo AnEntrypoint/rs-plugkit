@@ -131,6 +131,22 @@ pub fn row_count(namespace: &str) -> Option<i64> {
     rows.as_array()?.first()?.get("n")?.as_i64()
 }
 
+fn recover_and_retry<F>(op: F) -> Result<Value, String>
+where
+    F: Fn() -> Result<Value, String>,
+{
+    match op() {
+        Err(e) if crate::shared_db::is_malformed(&e) => {
+            if crate::shared_db::recover_malformed_shared_db() {
+                op()
+            } else {
+                Err(e)
+            }
+        }
+        other => other,
+    }
+}
+
 pub fn search(query_embedding: &Value, namespaces: &[String], limit: usize) -> Result<Value, String> {
     let qvec = json_to_f32_vec(query_embedding)
         .ok_or_else(|| "rssearch_vectors search: invalid query embedding".to_string())?;
@@ -151,7 +167,7 @@ pub fn search(query_embedding: &Value, namespaces: &[String], limit: usize) -> R
     );
     let mut params: Vec<&str> = vec![&qlit, &qlit];
     for n in namespaces { params.push(n.as_str()); }
-    shared_query_params(&sql, &params)
+    recover_and_retry(|| shared_query_params(&sql, &params))
 }
 
 pub fn search_with_recency(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64) -> Result<Value, String> {
@@ -174,7 +190,7 @@ pub fn search_with_recency(query_embedding: &Value, namespaces: &[String], limit
     );
     let mut params: Vec<&str> = vec![&qlit, &qlit];
     for n in namespaces { params.push(n.as_str()); }
-    let rows = shared_query_params(&sql, &params)?;
+    let rows = recover_and_retry(|| shared_query_params(&sql, &params))?;
     let arr = rows.as_array().cloned().unwrap_or_default();
     let mut scored: Vec<(f64, Value)> = Vec::with_capacity(arr.len());
     for row in arr {
@@ -233,7 +249,7 @@ pub fn search_memory_hits(query_embedding: &Value, namespaces: &[String], limit:
     );
     let mut params: Vec<&str> = vec![&qlit, &qlit];
     for n in namespaces { params.push(n.as_str()); }
-    let rows = shared_query_params(&sql, &params)?;
+    let rows = recover_and_retry(|| shared_query_params(&sql, &params))?;
     let arr = rows.as_array().cloned().unwrap_or_default();
     let mut scored: Vec<(f64, Value)> = Vec::with_capacity(arr.len());
     for row in arr {

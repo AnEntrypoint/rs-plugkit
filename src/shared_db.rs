@@ -22,6 +22,23 @@ pub fn recreate_shared_db(path: &str) -> Result<(), String> {
     shared_ensure_open(path)
 }
 
+pub fn is_malformed(err: &str) -> bool {
+    err.contains("malformed")
+}
+
+pub fn recover_malformed_shared_db() -> bool {
+    let path = crate::code_index::project_db_path(None);
+    crate::wasm_dispatch::emit_event("shared_db_recreated", serde_json::json!({
+        "path": path,
+        "reason": "database disk image is malformed; derived state dropped for full rebuild",
+    }));
+    if let Err(e) = recreate_shared_db(&path) {
+        crate::wasm_dispatch::emit_event("shared_db_recreate_failed", serde_json::json!({ "path": path, "error": e }));
+        return false;
+    }
+    crate::rssearch_vectors::ensure_schema().is_ok()
+}
+
 pub fn shared_exec(sql: &str) -> Result<(), String> {
     crate::libsql_wasm::exec(SHARED_DB, sql)
 }

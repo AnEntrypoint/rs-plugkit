@@ -379,7 +379,7 @@ fn scan_corpus(ns: &str) -> (String, Vec<MemoryDoc>) {
 }
 
 fn is_malformed(err: &str) -> bool {
-    err.contains("malformed")
+    crate::shared_db::is_malformed(err)
 }
 
 fn is_shadow_row(err: &str) -> bool {
@@ -852,6 +852,28 @@ const EXPORT_BATCH_MAX: usize = 200;
 
 const RENAME_BATCH_CHUNK: usize = 60;
 
+fn flat_store_digest(entries: &[(String, String)]) -> (String, usize) {
+    let mut keyed: Vec<(&String, &String)> = entries
+        .iter()
+        .filter(|(k, _)| k.starts_with("mem-") && valid_component(k))
+        .map(|(k, v)| (k, v))
+        .collect();
+    keyed.sort_by(|a, b| a.0.cmp(b.0));
+    let mut acc = String::new();
+    for (k, v) in &keyed {
+        acc.push_str(k);
+        acc.push('\0');
+        acc.push_str(&format!("{:016x}", crate::pipeline::fnv1a64(v.as_bytes())));
+        acc.push('\0');
+    }
+    (format!("{:016x}:n={}", crate::pipeline::fnv1a64(acc.as_bytes()), keyed.len()), keyed.len())
+}
+
+fn export_marker_digest(marker_body: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(marker_body).ok()?;
+    parsed.get("digest").and_then(|v| v.as_str()).map(String::from)
+}
+
 fn atomic_write_batch(files: &[(String, String)]) -> usize {
     if files.is_empty() {
         return 0;
@@ -872,10 +894,13 @@ pub fn export_flat_json(ns: &str, now_ms: i64) -> Value {
         None => return json!({ "exported": 0, "reason": "invalid-namespace" }),
     };
     let marker = format!("{}/{}", dir, EXPORT_MARKER);
-    if host_read(&marker).is_some() {
-        return json!({ "exported": 0, "reason": "already-exported" });
-    }
     let entries = flat_kv_entries(ns);
+    let (current_digest, total) = flat_store_digest(&entries);
+    if let Some(stored) = host_read(&marker) {
+        if export_marker_digest(&stored).as_deref() == Some(current_digest.as_str()) {
+            return json!({ "exported": 0, "reason": "already-exported", "digest": current_digest, "total": total });
+        }
+    }
     let mut pending: Vec<(String, String)> = Vec::new();
     let mut skipped = 0u32;
     let mut deferred = 0u32;
@@ -901,18 +926,23 @@ pub fn export_flat_json(ns: &str, now_ms: i64) -> Value {
     }
     let exported = atomic_write_batch(&pending);
     let complete = deferred == 0 && exported == pending.len();
-    if complete && atomic_write(&marker, "flat-json memory export complete\n") {
-        crate::wasm_dispatch::emit_event("memory_md_exported", json!({
-            "namespace": ns,
-            "exported": exported,
-            "skipped": skipped,
-        }));
+    if complete {
+        let marker_body = json!({ "digest": current_digest, "total": total }).to_string();
+        if atomic_write(&marker, &marker_body) {
+            crate::wasm_dispatch::emit_event("memory_md_exported", json!({
+                "namespace": ns,
+                "exported": exported,
+                "skipped": skipped,
+                "total": total,
+            }));
+        }
     } else if deferred > 0 {
         crate::wasm_dispatch::emit_event("memory_md_export_partial", json!({
             "namespace": ns,
             "exported": exported,
             "deferred": deferred,
+            "total": total,
         }));
     }
-    json!({ "exported": exported, "skipped": skipped, "deferred": deferred, "namespace": ns })
+    json!({ "exported": exported, "skipped": skipped, "deferred": deferred, "namespace": ns, "total": total })
 }

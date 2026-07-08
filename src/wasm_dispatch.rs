@@ -429,7 +429,13 @@ fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do
     };
     let hits = match crate::rssearch_vectors::search_with_recency(query_embedding, &namespaces, limit as usize, now_ms) {
         Ok(hits) => hits,
-        Err(e) => json!({ "error": e }),
+        Err(e) => {
+            emit_event("rssearch_vector_hits_failed", json!({
+                "namespace": namespace, "error": e,
+                "reason": "search_with_recency failed even after malformed-db recovery attempt",
+            }));
+            json!({ "error": e })
+        }
     };
     (hits, if converged { Some(memory_namespaces) } else { None })
 }

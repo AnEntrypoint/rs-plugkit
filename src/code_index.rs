@@ -796,6 +796,13 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
     );
     match libsql_wasm::query_params(GM_DB, &sql, &[&qlit, &qlit]) {
         Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows }),
+        Err(e) if crate::shared_db::is_malformed(&e) && crate::shared_db::recover_malformed_shared_db() => {
+            let _ = ensure_schema();
+            match libsql_wasm::query_params(GM_DB, &sql, &[&qlit, &qlit]) {
+                Ok(rows) => json!({ "ok": true, "mode": "vector_top_k_after_recover", "recovered_from": e, "rows": rows }),
+                Err(e2) => json!({ "ok": false, "mode": "recovered_but_still_failing", "vec_err": e, "retry_err": e2 }),
+            }
+        }
         Err(e) => {
             let like = format!("%{}%", sql_quote(query));
             let sql2 = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM code_chunks WHERE body LIKE '{}' OR name LIKE '{}' LIMIT {}", like, like, k);
