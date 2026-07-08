@@ -137,6 +137,7 @@ const CHUNK_NODE_TYPES: &[&str] = &[
     "impl_item", "struct_item", "enum_item", "trait_item",
     "arrow_function",
     "generator_function_declaration",
+    "section",
 ];
 
 const SKIP_DIRS: &[&str] = &[
@@ -532,7 +533,12 @@ pub fn index(root: &str, max_files: usize) -> Value {
             let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
         }
 
-        let chunks = extract_chunks(fp, &content, lang);
+        let mut chunks = extract_chunks(fp, &content, lang);
+        if chunks.is_empty() && lang_name == "markdown" && !content.trim().is_empty() {
+            let whole = content.chars().take(4000).collect::<String>();
+            let line_end = content.lines().count().max(1);
+            chunks.push(("document".to_string(), String::new(), 1, line_end, whole));
+        }
         let mut records: Vec<ChunkRecord> = Vec::new();
         for (idx, (kind, name, ls, le, body)) in chunks.into_iter().enumerate() {
             let body_head = {
