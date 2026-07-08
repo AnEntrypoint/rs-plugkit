@@ -332,7 +332,7 @@ fn sql_quote(s: &str) -> String {
 }
 
 const MANIFEST_NS: &str = "codeinsight-manifest";
-const MANIFEST_VERSION: u64 = 2;
+const MANIFEST_VERSION: u64 = 3;
 
 #[derive(Clone)]
 struct ChunkRecord {
