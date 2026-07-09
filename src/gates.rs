@@ -1,7 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use serde_json::{json, Value};
-use crate::wasm_dispatch::{host_read, host_exists, host_log};
+use crate::wasm_dispatch::{host_read, host_exists, host_log, host_write};
 use serde_yaml;
 
 pub const TOPLEVEL_DOC_ALLOWLIST: &[&str] = &[
@@ -9,6 +9,37 @@ pub const TOPLEVEL_DOC_ALLOWLIST: &[&str] = &[
 ];
 
 const AWAIT_ALLOWED_VERBS: &[&str] = &["memorize-continue", "instruction", "phase-status", "health"];
+
+const GATE_REPEAT_ESCALATE_THRESHOLD: u64 = 3;
+const GATE_REPEAT_STATE_PATH: &str = ".gm/exec-spool/.gate-deviation-repeats.json";
+
+fn gate_repeat_key(operation: &str, event: &str) -> String {
+    format!("{}::{}", operation, event)
+}
+
+fn record_gate_repeat(operation: &str, event: &str) -> u64 {
+    let key = gate_repeat_key(operation, event);
+    let mut state: Value = host_read(GATE_REPEAT_STATE_PATH)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    let count = state.get(&key).and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert(key, json!(count));
+    }
+    let _ = host_write(GATE_REPEAT_STATE_PATH, &state.to_string());
+    count
+}
+
+pub fn clear_gate_repeats(operation: &str) {
+    let prefix = format!("{}::", operation);
+    let mut state: Value = host_read(GATE_REPEAT_STATE_PATH)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    if let Some(obj) = state.as_object_mut() {
+        obj.retain(|k, _| !k.starts_with(&prefix));
+        let _ = host_write(GATE_REPEAT_STATE_PATH, &state.to_string());
+    }
+}
 
 pub struct GateVerdict {
     pub allowed: bool,
@@ -420,11 +451,21 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
         if !residuals.is_empty() {
             log_deviation("gate-deny", &format!("consolidate-gate residuals={}", residuals.len()));
-            let mut v = GateVerdict::deny(format!("consolidate-gate residuals: {}", residuals.join("; ")));
+            let repeat_count = record_gate_repeat("consolidate", "gate-deny");
+            let mut reason = format!("consolidate-gate residuals: {}", residuals.join("; "));
+            if repeat_count >= GATE_REPEAT_ESCALATE_THRESHOLD {
+                log_deviation("stuck-loop-escalation", &format!("operation=consolidate repeat_count={}", repeat_count));
+                reason = format!(
+                    "{} -- STUCK LOOP DETECTED: this exact gate denial has now fired {} times in a row with no successful transition between attempts. Retrying the bare transition again will repeat the same denial. Stop retrying: (1) `prd-add` a row describing the concrete stuck state (which residual, what you tried, why it did not clear), (2) invoke the wfgy-method skill's BBCR bounded-retry-then-surface discipline to recover instead of blind-retrying, (3) only then re-attempt the transition.",
+                    reason, repeat_count
+                );
+            }
+            let mut v = GateVerdict::deny(reason);
             v.residuals = residuals;
             if let Some(n) = next_recovery { v.next_dispatch = Some(n.to_string()); }
             return v;
         }
+        clear_gate_repeats("consolidate");
     }
 
     if operation == "complete" {
@@ -462,11 +503,21 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
         if !residuals.is_empty() {
             log_deviation("gate-deny", &format!("stop-gate residuals={}", residuals.len()));
-            let mut v = GateVerdict::deny(format!("stop-gate residuals: {}", residuals.join("; ")));
+            let repeat_count = record_gate_repeat("complete", "gate-deny");
+            let mut reason = format!("stop-gate residuals: {}", residuals.join("; "));
+            if repeat_count >= GATE_REPEAT_ESCALATE_THRESHOLD {
+                log_deviation("stuck-loop-escalation", &format!("operation=complete repeat_count={}", repeat_count));
+                reason = format!(
+                    "{} -- STUCK LOOP DETECTED: this exact gate denial has now fired {} times in a row with no successful transition between attempts. Retrying the bare transition again will repeat the same denial. Stop retrying: (1) `prd-add` a row describing the concrete stuck state (which residual, what you tried, why it did not clear), (2) invoke the wfgy-method skill's BBCR bounded-retry-then-surface discipline to recover instead of blind-retrying, (3) only then re-attempt the transition.",
+                    reason, repeat_count
+                );
+            }
+            let mut v = GateVerdict::deny(reason);
             v.residuals = residuals;
             if let Some(n) = next_recovery { v.next_dispatch = Some(n.to_string()); }
             return v;
         }
+        clear_gate_repeats("complete");
     }
 
     if verb == "fs_write" {
