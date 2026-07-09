@@ -334,6 +334,35 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         return (String::new(), format!("{} does not exist", path.display()), 1);
     }
 
+    if let Some(w) = witness.as_ref() {
+        let trimmed_w = w.trim();
+        if trimmed_w.len() >= 24 {
+            if let Some(existing) = pkfs::read_to_string(&path_s) {
+                if let Ok(doc) = serde_yaml::from_str::<Value>(&existing) {
+                    if let Some(seq) = doc.as_sequence() {
+                        for item in seq {
+                            if let Some(map) = item.as_mapping() {
+                                let other_id = map.get(&Value::String("id".to_string())).and_then(|v| v.as_str());
+                                if other_id == Some(id_target.as_str()) { continue; }
+                                let other_witness = map.get(&Value::String("witness".to_string())).and_then(|v| v.as_str());
+                                if other_witness.map(|ow| ow.trim() == trimmed_w).unwrap_or(false) {
+                                    let body = serde_json::json!({
+                                        "error": format!("prd-resolve refused: witness_evidence for {} is byte-identical to the witness already recorded for {}", id_target, other_id.unwrap_or("?")),
+                                        "deviation_kind": "prd-resolve-duplicate-witness",
+                                        "prd_id": id_target,
+                                        "duplicate_of": other_id,
+                                        "hint": "Identical witness text across structurally distinct PRD rows is the rubber-stamp tell -- generic phrasing like 'code written and tested' copy-pasted across multiple ids means the rows were marked completed without each one's own real, distinct evidence. Every row's witness_evidence must be specific to what THAT row actually did: a distinct file:line, a distinct exec_js/browser output, a distinct codesearch hit. If the rows genuinely share one piece of evidence (rare), that itself is a sign they should have been one row, not three -- re-scope via prd-add instead of resolving separately with copy-pasted text.",
+                                    }).to_string();
+                                    return (body, format!("prd-resolve refused: duplicate witness_evidence for {}", id_target), 1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let outcome = cas::cas_retry_write(&path_s, 5, "prd-resolve", |mut doc: Value| {
         let mut found = false;
         if let Some(seq) = doc.as_sequence_mut() {
