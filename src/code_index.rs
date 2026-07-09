@@ -751,7 +751,10 @@ fn term_freqs(text: &str) -> std::collections::HashMap<String, u32> {
     out
 }
 
-pub fn git_commit_rank(query: &str, k: usize) -> Vec<String> {
+/// Filename-token-overlap fallback, used only when embedding is unavailable
+/// (embed model failed to load, or the git_commit_vectors table has zero
+/// usable rows for this query) -- never the primary ranking path.
+fn git_commit_rank_fallback(query: &str, k: usize) -> Vec<String> {
     let q_tokens = rs_search::tokenize::tokenize(query);
     if q_tokens.is_empty() { return Vec::new(); }
     let log = crate::wasm_dispatch::git_call("log --format=%H --name-only -n 100 --no-decorate", None);
@@ -779,6 +782,24 @@ pub fn git_commit_rank(query: &str, k: usize) -> Vec<String> {
     flush(&mut commits, cur_hash.take(), cur_score);
     commits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     commits.into_iter().take(k).map(|(h, _)| h).collect()
+}
+
+/// Top-k commit hashes ranked by cosine similarity of a diff+message
+/// embedding against the query embedding -- the git_commit_vectors table is
+/// synced incrementally (wall-budgeted) on each call so a large backlog never
+/// blocks a single dispatch. Falls back to plain filename-token overlap if
+/// the embed model is unavailable or the table has nothing usable yet.
+pub fn git_commit_rank(query: &str, k: usize) -> Vec<String> {
+    let _ = crate::git_commit_vectors::sync_incremental();
+    let embedding = crate::embed::embed_text_json_query(query);
+    if let Some(emb) = embedding {
+        if let Ok(hits) = crate::git_commit_vectors::search(&emb, k) {
+            if !hits.is_empty() {
+                return hits.into_iter().map(|(hash, _, _)| hash).collect();
+            }
+        }
+    }
+    git_commit_rank_fallback(query, k)
 }
 
 pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value {

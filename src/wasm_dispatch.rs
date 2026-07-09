@@ -704,7 +704,20 @@ fn codesearch(body: &Value) -> u64 {
     }).unwrap_or_default();
     let mut corpus = crate::code_index::FusionCorpus::load();
     let bm25_ids = corpus.bm25_rank(query, cand_k as usize);
-    let commits = crate::code_index::git_commit_rank(query, 5);
+    // 10 most relevant git hashes, ranked by a diff+commit-message embedding
+    // DB keyed by hash (git_commit_vectors), not the fused file-hit list.
+    let commits = crate::code_index::git_commit_rank(query, 10);
+    // Separate top-10 vector and top-10 BM25 views so the calling agent can
+    // judge each ranking independently, alongside the existing fused `hits`
+    // (kept for backward compat -- additive fields, nothing removed).
+    let vector_top10: Vec<Value> = vector_hits.as_array()
+        .filter(|a| !a.is_empty())
+        .map(|a| a.iter().take(10).cloned().collect())
+        .unwrap_or_else(|| vec_hits.as_array().map(|a| a.iter().take(10).cloned().collect()).unwrap_or_default());
+    let bm25_top10: Vec<Value> = bm25_ids.iter().take(10).map(|key| {
+        let text = corpus.text_for_key(key).unwrap_or_default();
+        json!({ "key": key, "text": text })
+    }).collect();
     if !vec_ids.is_empty() || !bm25_ids.is_empty() {
         let lists = vec![vec_ids, bm25_ids];
         let weights = [1.0, rs_search::fusion::IDENTIFIER_BOOST];
@@ -718,7 +731,10 @@ fn codesearch(body: &Value) -> u64 {
                 .unwrap_or_default();
             json!({ "key": key, "text": text, "score": score })
         }).collect();
-        return ok("codesearch", json!({ "mode": "fusion", "hits": hits, "commits": commits, "vector_hits": vector_hits }));
+        return ok("codesearch", json!({
+            "mode": "fusion", "hits": hits, "commits": commits, "vector_hits": vector_hits,
+            "vector_top10": vector_top10, "bm25_top10": bm25_top10,
+        }));
     }
     let ns = "codeinsight";
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, query.as_ptr(), query.len() as u32) };
@@ -732,7 +748,10 @@ fn codesearch(body: &Value) -> u64 {
         }
         return codesearch(&retry);
     }
-    ok("codesearch", json!({ "mode": "fallback_kv", "hits": hits, "commits": commits, "vector_hits": vector_hits }))
+    ok("codesearch", json!({
+        "mode": "fallback_kv", "hits": hits, "commits": commits, "vector_hits": vector_hits,
+        "vector_top10": vector_top10, "bm25_top10": bm25_top10,
+    }))
 }
 
 fn embed(body: &Value) -> u64 {

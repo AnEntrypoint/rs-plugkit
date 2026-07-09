@@ -32,6 +32,9 @@ pub mod poll_detect;
 pub mod rssearch_vectors;
 
 #[cfg(target_arch = "wasm32")]
+pub mod git_commit_vectors;
+
+#[cfg(target_arch = "wasm32")]
 pub mod rslearn_vectors;
 
 #[cfg(target_arch = "wasm32")]
