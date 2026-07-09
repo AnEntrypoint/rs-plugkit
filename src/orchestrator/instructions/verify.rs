@@ -67,6 +67,14 @@ Before accepting the slice convergent, trace every shipped change to a human out
 
 Chain enters COMPLETE only when your `transition` returns COMPLETE phase; on-disk state moves only on `transition`. **Done is plugkit's pronouncement, not yours** -- gate-allowance is not done, only a dispatched `transition` returning COMPLETE is; a narrated PLAN->COMPLETE walk with the gate open or the verb un-dispatched is fabrication. "I'm finished" before the gate flips is narrating; cure = `phase-status`. Not-COMPLETE means a next transition exists; idle/"waiting for the user" mid-chain are deviations (closure authorized at request time). Between the four observations, between residual-scan and COMPLETE, between push and transition, re-dispatch `instruction` -- VERIFY is where premature COMPLETE happens.
 
+**You close rs-learn's learning loop here -- you are the model in the loop, holding the one signal every core needs: how well this turn went.** Before COMPLETE, self-report turn quality 0.0-1.0 (1.0 = clean convergent walk, no deviations, pushed, gate-allowed; lower as deviations/rework accumulate). That number drives every core, none observable to it without you:
+
+- **Instant MicroLoRA adapter:** only >=2 enabled disciplines (default-only = correct no-op, skip). Init once/session `learn {verb:init_instant, body:{targets:[<enabled namespaces>]}}`, then `learn {verb:feedback, body:{embedding:<bge embedding of this turn's task>, payload:{quality:<0-1>}}}` -- high quality shifts the helpful namespace's logit up so recall promotes it.
+- **FastGRNN router:** `learn {verb:record_outcome, body:{target:"<your model id>", quality:<0-1>}}` so the next `route_hint` reflects learned outcomes.
+- **Deep EWC core** and **GAT attention relation weights:** same quality as `record_loss` / `nudge_relation`.
+
+rs-learn never calls a model; it emits the need, you supply the answer. Skipping the self-report leaves the cores untrained.
+
 **No summary, no prose-only turn here.** A summary, recap, announced-but-undispatched next move, or any tool-less message IS a stop -- VERIFY is where the temptation peaks. Until this surface returns phase=COMPLETE after `transition`, every turn ends in a verb (`phase-status`, `residual-scan`, the push verbs, `instruction`, `transition`). Catching yourself composing a summary IS the drift signal -> dispatch `phase-status` instead.
 
 ## Constraints
