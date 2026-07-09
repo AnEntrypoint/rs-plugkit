@@ -67,7 +67,6 @@ Chain enters COMPLETE only when your `transition` returns COMPLETE phase; on-dis
 
 ## Constraints
 
-Gauge every design/code decision against `.gm/constraints.md` (create from bundled default if absent) -- the standing decision-arbiter, checked at every phase.
 
 ## Dispatch
 
