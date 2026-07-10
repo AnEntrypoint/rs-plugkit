@@ -1489,6 +1489,7 @@ fn git_commit(body: &Value) -> u64 {
     }
     let _ = git_call_argv(&["add", "-A"], cwd);
     let bundled_message = bundle_prd_commit_comments(cwd, message);
+    let _ = git_call_argv(&["add", "-A"], cwd);
     let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
     if allow_empty { argv.push("--allow-empty"); }
     let r = git_call_argv(&argv, cwd);
@@ -1523,6 +1524,7 @@ fn git_finalize(body: &Value) -> u64 {
         }
         let _ = git_call_argv(&["add", "-A"], cwd_ref);
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
+        let _ = git_call_argv(&["add", "-A"], cwd_ref);
         let cr = git_call_argv(&["commit", "-m", bundled_message.as_str()], cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if ccode != 0 {
