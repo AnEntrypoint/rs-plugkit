@@ -8,6 +8,45 @@ pub fn prd_path() -> std::path::PathBuf {
     gm_dir().join("prd.yml")
 }
 
+pub fn prd_path_for(cwd: Option<&str>) -> std::path::PathBuf {
+    match cwd {
+        Some(c) => std::path::Path::new(c).join(".gm").join("prd.yml"),
+        None => prd_path(),
+    }
+}
+
+pub fn drain_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)> {
+    let path = prd_path_for(cwd);
+    let path_s = path.to_string_lossy().to_string();
+    if !pkfs::exists(&path_s) {
+        return Vec::new();
+    }
+    let mut drained: Vec<(String, String)> = Vec::new();
+    let _ = cas::cas_retry_write(&path_s, 5, "prd-drain-commit-comments", |mut doc: Value| {
+        drained.clear();
+        if let Some(seq) = doc.as_sequence_mut() {
+            seq.retain(|item| {
+                if let Some(map) = item.as_mapping() {
+                    let status = map.get(&Value::String("status".to_string())).and_then(|v| v.as_str()).unwrap_or("");
+                    let comment = map.get(&Value::String("commit_comment".to_string())).and_then(|v| v.as_str());
+                    if !status_is_open(status) {
+                        if let Some(c) = comment {
+                            if !c.trim().is_empty() {
+                                let id = map.get(&Value::String("id".to_string())).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                drained.push((id, c.trim().to_string()));
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            });
+        }
+        cas::CasOutcome::Write(doc, ())
+    });
+    drained
+}
+
 pub fn status_is_open(status: &str) -> bool {
     !matches!(status.trim().to_ascii_lowercase().as_str(), "done" | "complete" | "completed")
 }
@@ -203,7 +242,7 @@ fn invalidate_residual_marker() {
     }
 }
 
-fn parse_resolve_target(trimmed: &str) -> (String, Option<String>) {
+fn parse_resolve_target(trimmed: &str) -> (String, Option<String>, Option<String>) {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         let id = v.get("id")
             .or_else(|| v.get("prd_id"))
@@ -217,6 +256,11 @@ fn parse_resolve_target(trimmed: &str) -> (String, Option<String>) {
         let mut wit = v.get("witness_evidence")
             .or_else(|| v.get("witness"))
             .or_else(|| v.get("evidence"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let mut comment = v.get("commit_comment")
+            .or_else(|| v.get("commit_message"))
+            .or_else(|| v.get("resolution_note"))
             .and_then(|s| s.as_str())
             .map(|s| s.to_string());
         let id = if let Ok(inner) = serde_json::from_str::<serde_json::Value>(&id) {
@@ -234,6 +278,13 @@ fn parse_resolve_target(trimmed: &str) -> (String, Option<String>) {
                         .and_then(|s| s.as_str())
                         .map(|s| s.to_string());
                 }
+                if comment.is_none() {
+                    comment = im.get("commit_comment")
+                        .or_else(|| im.get("commit_message"))
+                        .or_else(|| im.get("resolution_note"))
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                }
                 recovered.unwrap_or(id)
             } else {
                 id
@@ -241,14 +292,14 @@ fn parse_resolve_target(trimmed: &str) -> (String, Option<String>) {
         } else {
             id
         };
-        (id, wit)
+        (id, wit, comment)
     } else if let Some((id, wit)) = recover_truncated_envelope(trimmed) {
-        (id, wit)
+        (id, wit, None)
     } else {
         let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
         let id = parts.first().map(|s| s.to_string()).unwrap_or_else(|| trimmed.to_string());
         let wit = parts.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        (id, wit)
+        (id, wit, None)
     }
 }
 
@@ -317,14 +368,14 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     if trimmed.is_empty() {
         return (String::new(), "missing PRD item id".to_string(), 1);
     }
-    let (id_target, witness) = parse_resolve_target(trimmed);
+    let (id_target, witness, commit_comment) = parse_resolve_target(trimmed);
     let has_witness = witness.as_ref().map(|w| !w.trim().is_empty()).unwrap_or(false);
     if !has_witness {
         let body = serde_json::json!({
             "error": format!("prd-resolve refused: no witness_evidence for {}", id_target),
             "deviation_kind": "prd-resolve-no-witness",
             "prd_id": id_target,
-            "hint": "resolve requires non-empty witness_evidence (file:line | codesearch hit | exec snippet | browser page.evaluate result). A row cannot be marked completed without evidence the work is real - this gate exists because an agent under closure-pressure marked undone tasks completed with an absent witness. Body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}. Do the work, capture its witness, then resolve.",
+            "hint": "resolve requires non-empty witness_evidence (file:line | codesearch hit | exec snippet | browser page.evaluate result). A row cannot be marked completed without evidence the work is real - this gate exists because an agent under closure-pressure marked undone tasks completed with an absent witness. Body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\", \"commit_comment\": \"<optional one-line resolution note, bundled into the next commit message>\"}. Do the work, capture its witness, then resolve.",
         }).to_string();
         return (body, format!("prd-resolve refused: no witness_evidence for {}", id_target), 1);
     }
@@ -373,6 +424,9 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                         if let Some(w) = witness.as_ref() {
                             map.insert(Value::String("witness".to_string()), Value::String(w.clone()));
                         }
+                        if let Some(c) = commit_comment.as_ref() {
+                            map.insert(Value::String("commit_comment".to_string()), Value::String(c.clone()));
+                        }
                         found = true;
                     }
                 }
@@ -398,14 +452,14 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 "prd_id": id_target,
                 "known_ids": known_ids,
                 "suggested_id": suggested_id,
-                "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\"}; aliases accepted: prd_id, mutable_id, item_id, slug, key (all map to id). A nested envelope (prd_id holding a stringified {\"key\":..,\"witness\":..} object) is unwrapped automatically and the inner key/id/prd_id/slug is recovered. Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If `suggested_id` is non-null it is the closest known id to what you passed -- likely a typo; re-dispatch with it. If the recovered id is not in `known_ids` above, the row was never `prd-add`ed in this chain -- your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added; never retry the same unknown id unchanged.",
+                "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\", \"commit_comment\": \"<optional one-line resolution note>\"}; aliases accepted: prd_id, mutable_id, item_id, slug, key (all map to id); commit_message, resolution_note (map to commit_comment). commit_comment is optional -- when present it rides on the row until the next git_commit/git_finalize bundles it into that commit's message and clears the row. A nested envelope (prd_id holding a stringified {\"key\":..,\"witness\":..} object) is unwrapped automatically and the inner key/id/prd_id/slug is recovered. Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If `suggested_id` is non-null it is the closest known id to what you passed -- likely a typo; re-dispatch with it. If the recovered id is not in `known_ids` above, the row was never `prd-add`ed in this chain -- your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added; never retry the same unknown id unchanged.",
             }).to_string();
             return cas::CasOutcome::Abort(body, format!("prd id not found: {}", id_target), 1);
         }
         cas::CasOutcome::Write(doc, ())
     });
     match outcome {
-        Ok(()) => (serde_json::json!({ "resolved": id_target }).to_string(), String::new(), 0),
+        Ok(()) => (serde_json::json!({ "resolved": id_target, "commit_comment_attached": commit_comment.is_some() }).to_string(), String::new(), 0),
         Err((out, err, rc)) => (out, err, rc),
     }
 }

@@ -1463,6 +1463,19 @@ fn git_add(body: &Value) -> u64 {
     ok("git_add", json!({ "staged": if paths.is_empty() { vec!["-A".to_string()] } else { paths } }))
 }
 
+fn bundle_prd_commit_comments(cwd: Option<&str>, message: &str) -> String {
+    let notes = crate::orchestrator::prd::drain_pending_commit_comments(cwd);
+    if notes.is_empty() {
+        return message.to_string();
+    }
+    let mut out = message.to_string();
+    out.push_str("\n\nResolved PRD rows:\n");
+    for (id, comment) in &notes {
+        out.push_str(&format!("- {}: {}\n", id, comment));
+    }
+    out
+}
+
 fn git_commit(body: &Value) -> u64 {
     let repo = body.get("repo").and_then(|v| v.as_str());
     let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
@@ -1475,7 +1488,8 @@ fn git_commit(body: &Value) -> u64 {
         return ok("git_commit", json!({ "nothing_to_commit": true }));
     }
     let _ = git_call_argv(&["add", "-A"], cwd);
-    let mut argv: Vec<&str> = vec!["commit", "-m", message];
+    let bundled_message = bundle_prd_commit_comments(cwd, message);
+    let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
     if allow_empty { argv.push("--allow-empty"); }
     let r = git_call_argv(&argv, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -1508,7 +1522,8 @@ fn git_finalize(body: &Value) -> u64 {
             return err("git_finalize", "worktree dirty but no commit message provided -- pass {message}");
         }
         let _ = git_call_argv(&["add", "-A"], cwd_ref);
-        let cr = git_call_argv(&["commit", "-m", message.as_str()], cwd_ref);
+        let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
+        let cr = git_call_argv(&["commit", "-m", bundled_message.as_str()], cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if ccode != 0 {
             let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
