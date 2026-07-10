@@ -15,6 +15,40 @@ pub fn prd_path_for(cwd: Option<&str>) -> std::path::PathBuf {
     }
 }
 
+pub fn peek_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)> {
+    let path = prd_path_for(cwd);
+    let path_s = path.to_string_lossy().to_string();
+    if !pkfs::exists(&path_s) {
+        return Vec::new();
+    }
+    let raw = match pkfs::read_to_string(&path_s) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let doc: Value = match serde_yaml::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    if let Some(seq) = doc.as_sequence() {
+        for item in seq {
+            if let Some(map) = item.as_mapping() {
+                let status = map.get(&Value::String("status".to_string())).and_then(|v| v.as_str()).unwrap_or("");
+                let comment = map.get(&Value::String("commit_comment".to_string())).and_then(|v| v.as_str());
+                if !status_is_open(status) {
+                    if let Some(c) = comment {
+                        if !c.trim().is_empty() {
+                            let id = map.get(&Value::String("id".to_string())).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            out.push((id, c.trim().to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn drain_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)> {
     let path = prd_path_for(cwd);
     let path_s = path.to_string_lossy().to_string();

@@ -1541,11 +1541,25 @@ fn git_finalize(body: &Value) -> u64 {
             steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
         }
     } else {
+        let pending_notes = crate::orchestrator::prd::peek_pending_commit_comments(cwd_ref);
+        if !pending_notes.is_empty() {
+            let flush_message = if message.is_empty() { "chore: flush resolved PRD notes".to_string() } else { message.clone() };
+            let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
+            let cr = git_call_argv(&["commit", "--allow-empty", "-m", bundled_message.as_str()], cwd_ref);
+            let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+            if ccode == 0 {
+                committed = true;
+                sha = exec_git_in(cwd_ref, "rev-parse --short HEAD").trim().to_string();
+                summary = bundled_message.lines().next().unwrap_or("").to_string();
+                steps.push(json!({ "step": "commit", "sha": sha, "summary": summary, "flushed_pending_prd_notes": true }));
+            }
+        }
         let ahead_result = git_call("rev-list --count @{u}..HEAD", cwd_ref);
         let ahead_code = ahead_result.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         let ahead_stderr = ahead_result.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
         let no_upstream = ahead_code != 0 && (ahead_stderr.contains("no upstream") || ahead_stderr.contains("unknown revision") || ahead_stderr.contains("@{u}"));
-        if no_upstream {
+        if committed {
+        } else if no_upstream {
             sha = exec_git_in(cwd_ref, "rev-parse --short HEAD").trim().to_string();
             summary = exec_git_in(cwd_ref, "log -1 --pretty=%s").trim().to_string();
             committed = true;
