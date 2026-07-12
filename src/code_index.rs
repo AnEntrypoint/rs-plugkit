@@ -5,6 +5,7 @@ use tree_sitter::{Language, Parser};
 
 use crate::libsql_wasm;
 use crate::wasm_dispatch::{host_read, unpack_to_value_pub};
+use crate::vecstore::{drop_if_dim_mismatch_at as drop_if_dim_mismatch, EXPECTED_EMBED_DIM};
 
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -147,37 +148,6 @@ const SKIP_DIRS: &[&str] = &[
 ];
 
 const GM_DB: &str = crate::shared_db::SHARED_DB;
-
-const EXPECTED_EMBED_DIM: usize = 384;
-
-fn embedding_col_dim(db_name: &str, table: &str) -> Option<usize> {
-    let sql = format!("SELECT type FROM pragma_table_info('{}') WHERE name = 'embedding'", table);
-    let rows = libsql_wasm::query(db_name, &sql).ok()?;
-    let arr = rows.as_array()?;
-    let row = arr.first()?;
-    let ty = row.get("type")?.as_str()?;
-    let start = ty.find('(')? + 1;
-    let end = ty.find(')')?;
-    if end < start { return None; }
-    ty[start..end].parse::<usize>().ok()
-}
-
-fn drop_if_dim_mismatch(db_name: &str, table: &str) -> Result<bool, String> {
-    match embedding_col_dim(db_name, table) {
-        Some(dim) if dim == EXPECTED_EMBED_DIM => Ok(false),
-        Some(old_dim) => {
-            let _ = libsql_wasm::exec(db_name, &format!("DROP INDEX IF EXISTS {}_vec", table));
-            libsql_wasm::exec(db_name, &format!("DROP TABLE IF EXISTS {}", table))?;
-            crate::wasm_dispatch::emit_event("table_dropped", serde_json::json!({
-                "table": table,
-                "old_dim": old_dim,
-                "new_dim": EXPECTED_EMBED_DIM,
-            }));
-            Ok(true)
-        }
-        None => Ok(false),
-    }
-}
 
 pub fn ensure_schema_at(db_name: &str, path: &str) -> Result<(), String> {
     if let Some(parent) = std::path::Path::new(path).parent() {
