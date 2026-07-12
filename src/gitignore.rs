@@ -12,7 +12,6 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/residual-check-fired",
     ".gm/bootstrap-status.json",
     ".gm/bootstrap-error.json",
-    ".gm/rslearn-counter.json",
     ".gm/trajectory-drafts/",
     ".gm/ingest-drafts/",
     ".gm/prd-state.json",

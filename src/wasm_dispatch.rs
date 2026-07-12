@@ -626,7 +626,6 @@ fn memorize_prune(body: &Value) -> u64 {
             let _ = unsafe { host_kv_delete(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32) };
             let md_deleted = crate::memory_md::delete_memory(namespace, key);
             let idx_marked = crate::rssearch_vectors::mark_deleted(namespace, key).is_ok();
-            let _ = crate::rslearn_vectors::mark_deleted(key);
             if flat_rc != 0 || md_deleted {
                 deleted.push(key.clone());
                 emit_event("memory.pruned", json!({"key": key, "namespace": namespace, "mode": "explicit-key", "md_deleted": md_deleted, "index_marked": idx_marked}));
@@ -807,27 +806,6 @@ fn similarity(body: &Value) -> u64 {
             "model": "BAAI/bge-small-en-v1.5",
         })),
         None => err("similarity", "cosine computation failed (dimension mismatch or zero vector)"),
-    }
-}
-
-fn graph_similarity_search(body: &Value) -> u64 {
-    let limit = body.get("limit").or_else(|| body.get("k")).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-    let embedding = if let Some(inline) = body.get("embedding") {
-        inline.clone()
-    } else if let Some(text) = body.get("text").and_then(|v| v.as_str()) {
-        if text.is_empty() {
-            return err("graph_similarity_search", "text or embedding required");
-        }
-        match crate::embed::embed_text_json_query(text) {
-            Some(v) => v,
-            None => return err("graph_similarity_search", "embedding failed for text"),
-        }
-    } else {
-        return err("graph_similarity_search", "text or embedding required");
-    };
-    match crate::rslearn_vectors::search(&embedding, limit) {
-        Ok(rows) => ok("graph_similarity_search", json!({ "edges": rows, "limit": limit })),
-        Err(e) => err_json("graph_similarity_search", json!({ "error": e })),
     }
 }
 
@@ -1892,7 +1870,6 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "close" => close(&body),
         "kill-port" => kill_port(&body),
         "filter" => filter(&body, &body_s),
-        "graph_similarity_search" => graph_similarity_search(&body),
         "git_status" => git_status(&body),
         "branch_status" => branch_status(&body),
         "git_push" => git_push(&body),
@@ -1910,7 +1887,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "git_reset" => git_reset(&body),
         "forget" => forget(&body),
         "feedback" => feedback(&body),
-        "learn" => err("learn", "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index), graph edges through graph_similarity_search"),
+        "learn" => err("learn", "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index)"),
         "learn-status" => learn_status(&body),
         "learn-debug" => learn_debug(&body),
         "learn-build" => learn_build(&body),

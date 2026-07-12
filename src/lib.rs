@@ -35,7 +35,6 @@ pub mod rssearch_vectors;
 pub mod git_commit_vectors;
 
 #[cfg(target_arch = "wasm32")]
-pub mod rslearn_vectors;
 
 #[cfg(target_arch = "wasm32")]
 pub mod memory_md;

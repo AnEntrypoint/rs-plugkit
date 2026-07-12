@@ -1,11 +1,5 @@
 #![cfg(target_arch = "wasm32")]
 
-// All tables share SHARED_DB ("gm") with rs-plugkit's own
-// code_chunks/memories/pipeline_state -- prefix every owned table
-// (rslearn_*, rssearch_*, memories_md_*) via CREATE TABLE IF NOT EXISTS to
-// avoid name collisions; shared_ensure_open is idempotent (no-op if already
-// open under this name).
-
 use serde_json::Value;
 
 pub const SHARED_DB: &str = "gm";
