@@ -22,7 +22,7 @@ pub fn ensure_pipeline_schema() -> Result<(), String> {
 }
 
 fn hmac_key() -> Result<String, String> {
-    let k = "RS_LEARN_PIPELINE_HMAC_KEY";
+    let k = "GM_PIPELINE_HMAC_KEY";
     let packed = unsafe { host_env_get(k.as_ptr(), k.len() as u32) };
     let ptr = (packed & 0xFFFF_FFFF) as u32;
     let len = (packed >> 32) as u32;
@@ -32,7 +32,7 @@ fn hmac_key() -> Result<String, String> {
             return Ok(String::from_utf8_lossy(s).into_owned());
         }
     }
-    Err("RS_LEARN_PIPELINE_HMAC_KEY is not set".to_string())
+    Err("GM_PIPELINE_HMAC_KEY is not set".to_string())
 }
 
 pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {

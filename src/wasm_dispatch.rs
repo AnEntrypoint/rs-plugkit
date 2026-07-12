@@ -208,38 +208,7 @@ fn fetch(body: &Value) -> u64 {
     ok("fetch", v)
 }
 
-fn inference(body: &Value) -> u64 {
-    let messages = body.get("messages").cloned().unwrap_or(Value::Null);
-    if messages.is_null() {
-        let prompt = body.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-        if prompt.is_empty() { return err("inference", "messages or prompt required"); }
-    }
-    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("http://127.0.0.1:4800/v1/chat/completions");
-    let model = body.get("model").and_then(|v| v.as_str()).map(String::from);
-    let messages_value = if !messages.is_null() {
-        messages
-    } else {
-        let prompt = body.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-        json!([{ "role": "user", "content": prompt }])
-    };
-    let mut req_body = json!({ "messages": messages_value });
-    if let Some(m) = model { req_body["model"] = Value::String(m); }
-    let body_str = req_body.to_string();
-    let opts = json!({ "method": "POST", "headers": {"content-type": "application/json"}, "body": body_str }).to_string();
-    let packed = unsafe { host_fetch(url.as_ptr(), url.len() as u32, opts.as_ptr(), opts.len() as u32) };
-    let v = unpack_to_value(packed);
-    if v.is_null() { return err("inference", "host_fetch empty - inference must be served via the callback protocol (agent callback)"); }
-    let status = v.get("status").and_then(|s| s.as_u64()).unwrap_or(0);
-    if status < 200 || status >= 300 {
-        let detail = v.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string();
-        return err("inference", &format!("inference endpoint returned {}: {}", status, detail));
-    }
-    let body_text = v.get("body").and_then(|b| b.as_str()).unwrap_or("");
-    let parsed: Value = serde_json::from_str(body_text).unwrap_or(Value::String(body_text.to_string()));
-    ok("inference", parsed)
-}
-
-const ENV_GET_ALLOWED_EXACT: &[&str] = &["RS_LEARN_PIPELINE_HMAC_KEY", "CLAUDE_PROJECT_DIR"];
+const ENV_GET_ALLOWED_EXACT: &[&str] = &["CLAUDE_PROJECT_DIR"];
 const ENV_GET_ALLOWED_PREFIXES: &[&str] = &["PLUGKIT_", "GM_"];
 
 fn env_get_allowed(key: &str) -> bool {
@@ -753,62 +722,6 @@ fn codesearch(body: &Value) -> u64 {
     }))
 }
 
-fn embed(body: &Value) -> u64 {
-    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
-    if text.is_empty() { return err("embed", "text required"); }
-    let is_query = body.get("kind").and_then(|v| v.as_str()) == Some("query");
-    let result = if is_query {
-        crate::embed::embed_text_json_query(text)
-    } else {
-        crate::embed::embed_text_json(text)
-    };
-    match result {
-        Some(v) => ok("embed", json!({ "embedding": v, "dim": v.as_array().map(|a| a.len()).unwrap_or(0), "model": "BAAI/bge-small-en-v1.5" })),
-        None => err("embed", "embedding failed (see host log for step detail)"),
-    }
-}
-
-fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
-    if a.len() != b.len() || a.is_empty() { return None; }
-    let mut dot = 0f32;
-    let mut na = 0f32;
-    let mut nb = 0f32;
-    for i in 0..a.len() {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    let denom = na.sqrt() * nb.sqrt();
-    if denom == 0.0 { return None; }
-    Some(dot / denom)
-}
-
-fn similarity(body: &Value) -> u64 {
-    let text_a = body.get("text_a").or_else(|| body.get("a")).and_then(|v| v.as_str()).unwrap_or("");
-    let text_b = body.get("text_b").or_else(|| body.get("b")).and_then(|v| v.as_str()).unwrap_or("");
-    if text_a.is_empty() || text_b.is_empty() { return err("similarity", "text_a and text_b required"); }
-    let emb_a = match crate::embed::embed_text(text_a) {
-        Some(v) => v,
-        None => return err("similarity", "embedding failed for text_a"),
-    };
-    let emb_b = match crate::embed::embed_text(text_b) {
-        Some(v) => v,
-        None => return err("similarity", "embedding failed for text_b"),
-    };
-    match cosine(&emb_a, &emb_b) {
-        // distance = 1 - cos(a, b) matches WFGY's own stated Delta-S formula
-        // (delta_s = 1 - cos(I, G)); embeddings here are real (BGE-small,
-        // L2-normalized), so this is a genuine measurement, not a
-        // self-reported estimate.
-        Some(sim) => ok("similarity", json!({
-            "similarity": sim,
-            "distance": 1.0 - sim,
-            "model": "BAAI/bge-small-en-v1.5",
-        })),
-        None => err("similarity", "cosine computation failed (dimension mismatch or zero vector)"),
-    }
-}
-
 fn health(_body: &Value) -> u64 {
     let now = unsafe { host_now_ms() };
     ok("health", json!({
@@ -844,104 +757,12 @@ fn close(body: &Value) -> u64 {
     if rc != 0 { ok("close", json!({ "taskId": task_id })) } else { err("close", "close failed") }
 }
 
-fn kill_port(body: &Value) -> u64 {
-    let port = body.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
-    if port == 0 { return err("kill-port", "port required"); }
-    let timeout_ms = body.get("timeoutMs").and_then(|v| v.as_u64()).unwrap_or(5000);
-    let code = format!(
-        "(function(){{try{{require('child_process').execSync('npx kill-port {}',{{timeout:{}}});return JSON.stringify({{ok:true,port:{}}});}}catch(e){{return JSON.stringify({{ok:false,port:{},error:e.message}});}}}})();",
-        port, timeout_ms, port, port
-    );
-    let opts = format!("{{\"timeoutMs\":{}}}", timeout_ms + 1000);
-    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
-    match unpack_to_string(packed) {
-        Some(s) => {
-            let v: Value = serde_json::from_str(&s).unwrap_or(json!({"ok": false, "error": "parse failure"}));
-            if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
-                ok("kill-port", v)
-            } else {
-                err("kill-port", v.get("error").and_then(|x| x.as_str()).unwrap_or("kill failed"))
-            }
-        }
-        None => err("kill-port", "exec_js returned no output"),
-    }
-}
-
 fn forget(body: &Value) -> u64 {
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if key.is_empty() { return err("forget", "key required"); }
     let rc = unsafe { host_kv_delete(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32) };
     if rc == 0 { ok("forget", json!({ "namespace": ns, "key": key })) } else { err("forget", "delete failed") }
-}
-
-fn feedback(body: &Value) -> u64 {
-    let request_id = body.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
-    let quality = body.get("quality").and_then(|v| v.as_f64()).unwrap_or(0.5);
-    if request_id.is_empty() { return err("feedback", "requestId required"); }
-    let key = format!("fb-{}", request_id);
-    let val = json!({ "requestId": request_id, "quality": quality, "ts": unsafe { host_now_ms() } }).to_string();
-    let rc = unsafe { host_kv_put("feedback".as_ptr(), 8, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
-    if rc == 0 { ok("feedback", json!({ "requestId": request_id, "quality": quality })) } else { err("feedback", "store failed") }
-}
-
-fn kv_ns_count(n: &str) -> usize {
-    let packed = unsafe { host_kv_query(n.as_ptr(), n.len() as u32, "".as_ptr(), 0) };
-    match unpack_to_value(packed) {
-        Value::Array(a) => a.len(),
-        Value::Object(o) => o.len(),
-        _ => 0,
-    }
-}
-
-fn learn_status(body: &Value) -> u64 {
-    let now = unsafe { host_now_ms() };
-    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
-    let vec_ns = format!("{}-vec", ns);
-    let text_rows = kv_ns_count(ns);
-    let vec_rows = kv_ns_count(&vec_ns);
-    let md_files = crate::memory_md::md_file_count(ns);
-    ok("learn-status", json!({
-        "ok": true,
-        "now": now,
-        "mode": "wasm",
-        "namespace": ns,
-        "text_rows": text_rows,
-        "vec_rows": vec_rows,
-        "md_files": md_files,
-        "balanced": text_rows == vec_rows,
-    }))
-}
-
-fn learn_debug(_body: &Value) -> u64 {
-    let packed = unsafe { host_kv_query("disciplines".as_ptr(), 11, "".as_ptr(), 0) };
-    let names: Vec<String> = match unpack_to_value(packed) {
-        Value::Array(a) => a.into_iter().filter_map(|v| v.as_str().map(String::from)).collect(),
-        Value::Object(o) => o.keys().cloned().collect(),
-        _ => Vec::new(),
-    };
-    let mut disciplines = Vec::new();
-    for ns in std::iter::once("default".to_string()).chain(names.into_iter().filter(|n| n != "default")) {
-        let text_rows = kv_ns_count(&ns);
-        let vec_rows = kv_ns_count(&format!("{}-vec", ns));
-        if text_rows == 0 && vec_rows == 0 { continue; }
-        disciplines.push(json!({
-            "namespace": ns,
-            "text_rows": text_rows,
-            "vec_rows": vec_rows,
-            "balanced": text_rows == vec_rows,
-            "orphans": (text_rows as i64 - vec_rows as i64).abs(),
-        }));
-    }
-    ok("learn-debug", json!({
-        "ok": true,
-        "mode": "wasm",
-        "disciplines": disciplines,
-    }))
-}
-
-fn learn_build(_body: &Value) -> u64 {
-    ok("learn-build", json!({ "note": "WASM build uses thebird host bindings -- no separate build step" }))
 }
 
 const ROUTER_MODELS: &[&str] = &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"];
@@ -987,47 +808,6 @@ fn discipline(body: &Value) -> u64 {
             }
         }
         _ => err("discipline", "unknown action"),
-    }
-}
-
-fn pause(body: &Value) -> u64 {
-    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("toggle");
-    let key = "pause-state";
-    match action {
-        "on" => {
-            let val = json!({ "paused": true, "ts": unsafe { host_now_ms() } }).to_string();
-            let _ = unsafe { host_kv_put("runner".as_ptr(), 6, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
-            ok("pause", json!({ "paused": true }))
-        }
-        "off" => {
-            let val = json!({ "paused": false, "ts": unsafe { host_now_ms() } }).to_string();
-            let _ = unsafe { host_kv_put("runner".as_ptr(), 6, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
-            ok("pause", json!({ "paused": false }))
-        }
-        _ => {
-            let packed = unsafe { host_kv_get("runner".as_ptr(), 6, key.as_ptr(), key.len() as u32) };
-            ok("pause", unpack_to_value(packed))
-        }
-    }
-}
-
-fn runner(body: &Value) -> u64 {
-    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("status");
-    match action {
-        "start" => {
-            let val = json!({ "running": true, "ts": unsafe { host_now_ms() } }).to_string();
-            let _ = unsafe { host_kv_put("runner".as_ptr(), 6, "state".as_ptr(), 5, val.as_ptr(), val.len() as u32) };
-            ok("runner", json!({ "running": true }))
-        }
-        "stop" => {
-            let val = json!({ "running": false, "ts": unsafe { host_now_ms() } }).to_string();
-            let _ = unsafe { host_kv_put("runner".as_ptr(), 6, "state".as_ptr(), 5, val.as_ptr(), val.len() as u32) };
-            ok("runner", json!({ "running": false }))
-        }
-        _ => {
-            let packed = unsafe { host_kv_get("runner".as_ptr(), 6, "state".as_ptr(), 5) };
-            ok("runner", unpack_to_value(packed))
-        }
     }
 }
 
@@ -1204,41 +984,6 @@ fn codeinsight_index(body: &Value) -> u64 {
     let root = body.get("root").and_then(|v| v.as_str()).unwrap_or("/");
     let max_files = body.get("max_files").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
     pack(crate::code_index::index(root, max_files).to_string())
-}
-
-fn codesearch_libsql(body: &Value, raw: &str) -> u64 {
-    let query = body.get("query").and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| body.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| raw.trim().to_string());
-    let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-    let inline = body.get("embedding");
-    pack(crate::code_index::search(&query, k, inline).to_string())
-}
-
-fn memorize_libsql(body: &Value, raw: &str) -> u64 {
-    let text = body.get("text").and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| body.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| raw.trim().to_string());
-    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
-    if text.is_empty() { return err("memorize", "missing text"); }
-    let inline = body.get("embedding");
-    let project_path = body.get("projectPath").and_then(|v| v.as_str());
-    pack(crate::code_index::memorize_at(&text, ns, inline, project_path).to_string())
-}
-
-fn recall_libsql(body: &Value, raw: &str) -> u64 {
-    let query = body.get("query").and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| body.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| raw.trim().to_string());
-    let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
-    let ns = body.get("namespace").and_then(|v| v.as_str());
-    if query.is_empty() { return err("recall", "missing query"); }
-    let inline = body.get("embedding");
-    let project_path = body.get("projectPath").and_then(|v| v.as_str());
-    pack(crate::code_index::recall_at(&query, limit, ns, inline, project_path).to_string())
 }
 
 fn log_deviation_push(event: &str, detail: &str) {
@@ -1830,7 +1575,6 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "fs_readdir" => fs_readdir(&body),
         "fs_stat" => fs_stat(&body),
         "fetch" => fetch(&body),
-        "inference" | "chat" | "complete" => inference(&body),
         "env_get" => env_get(&body),
         "kv_get" => kv_get(&body),
         "kv_put" => kv_put(&body),
@@ -1839,8 +1583,6 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "lang" => lang(&body),
         "browser" => browser(&body, &body_s),
         "health" => health(&body),
-        "embed" => embed(&body),
-        "similarity" => similarity(&body),
         "sql_open" => sql_open(&body),
         "sql_close" => sql_close(&body),
         "sql_list_dbs" => sql_list_dbs(&body),
@@ -1854,12 +1596,6 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "memorize" => memorize_with_raw(&body, &body_s),
         "memorize-prune" | "memorize_prune" => memorize_prune(&body),
         "recall" => recall(&body),
-        "recall_kv" => recall(&body),
-        "memorize_kv" => memorize_with_raw(&body, &body_s),
-        "codesearch_kv" => codesearch(&body),
-        "recall_libsql" => recall_libsql(&body, &body_s),
-        "memorize_libsql" => memorize_libsql(&body, &body_s),
-        "codesearch_libsql" => codesearch_libsql(&body, &body_s),
         "python" | "py" => shell_exec(&body, &body_s, "python"),
         "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, &body_s, "bash"),
         "powershell" | "ps1" => shell_exec(&body, &body_s, "powershell"),
@@ -1868,7 +1604,6 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "status" => status(&body),
         "wait" | "sleep" => err(&verb, "verb not supported: wasm has no real timer/async-sleep primitive here; use exec:sleep (bash `sleep N`, JS setTimeout via exec_js, or PowerShell Start-Sleep) for an actual wait"),
         "close" => close(&body),
-        "kill-port" => kill_port(&body),
         "filter" => filter(&body, &body_s),
         "git_status" => git_status(&body),
         "branch_status" => branch_status(&body),
@@ -1886,14 +1621,8 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "git_revert" => git_revert(&body),
         "git_reset" => git_reset(&body),
         "forget" => forget(&body),
-        "feedback" => feedback(&body),
         "learn" => err("learn", "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index)"),
-        "learn-status" => learn_status(&body),
-        "learn-debug" => learn_debug(&body),
-        "learn-build" => learn_build(&body),
         "discipline" => discipline(&body),
-        "pause" => pause(&body),
-        "runner" => runner(&body),
         "" => err("", "verb required"),
         _ => err(&verb, "unknown verb"),
     }
