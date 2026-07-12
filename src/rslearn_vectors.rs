@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query, shared_query_params, SHARED_DB};
+use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
 
 const TABLE: &str = "rslearn_vectors";
 const INDEX: &str = "rslearn_vectors_vec";
@@ -121,13 +121,6 @@ pub fn mark_deleted(edge_id: &str) -> Result<(), String> {
     }
     let sql = format!("UPDATE {} SET deleted=1 WHERE edge_id=?1", TABLE);
     shared_exec_params(&sql, &[edge_id])
-}
-
-pub fn row_count() -> Option<i64> {
-    ensure_schema().ok()?;
-    let sql = format!("SELECT COUNT(*) AS n FROM {}", TABLE);
-    let rows = shared_query(&sql).ok()?;
-    rows.as_array()?.first()?.get("n")?.as_i64()
 }
 
 pub fn search(query_embedding: &Value, limit: usize) -> Result<Value, String> {

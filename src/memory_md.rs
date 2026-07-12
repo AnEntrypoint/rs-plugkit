@@ -163,12 +163,6 @@ fn atomic_write(path: &str, content: &str) -> bool {
     renamed
 }
 
-pub fn read_doc(ns: &str, key: &str) -> Option<MemoryDoc> {
-    let path = md_path(ns, key)?;
-    let content = host_read(&path)?;
-    parse(&content)
-}
-
 pub fn write_memory(ns: &str, key: &str, text: &str, now_ms: i64) -> WriteOutcome {
     let path = match md_path(ns, key) {
         Some(p) => p,
@@ -260,37 +254,6 @@ pub fn md_file_count(ns: &str) -> usize {
             .count(),
         _ => 0,
     }
-}
-
-pub fn corpus_digest(ns: &str) -> String {
-    let dir = match md_dir(ns) {
-        Some(d) => d,
-        None => return "invalid".to_string(),
-    };
-    let entries = match crate::pkfs::readdir(&dir) {
-        Some(Value::Array(a)) => a,
-        _ => return "empty".to_string(),
-    };
-    let mut names: Vec<String> = entries
-        .iter()
-        .filter_map(|e| e.get("name").and_then(|n| n.as_str()).or_else(|| e.as_str()))
-        .filter(|n| n.ends_with(".md"))
-        .map(|n| n.to_string())
-        .collect();
-    names.sort();
-    let mut acc = String::new();
-    for name in &names {
-        let path = format!("{}/{}", dir, name);
-        let content = host_read(&path).unwrap_or_default();
-        acc.push_str(name);
-        acc.push('\0');
-        acc.push_str(&format!("{:016x}", crate::pipeline::fnv1a64(content.as_bytes())));
-        acc.push('\0');
-    }
-    if names.is_empty() {
-        return "empty".to_string();
-    }
-    format!("{:016x}", crate::pipeline::fnv1a64(acc.as_bytes()))
 }
 
 fn ensure_meta_table() -> Result<(), String> {
@@ -586,7 +549,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
         let mut rekey_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut processed_hashes: Vec<(String, String)> = Vec::new();
         let mut flat_by_content: Option<std::collections::HashMap<String, String>> = None;
-        let mut flat_embedding_for = |doc_key: &str, cache: &mut Option<std::collections::HashMap<String, String>>| -> Option<Value> {
+        let flat_embedding_for = |doc_key: &str, cache: &mut Option<std::collections::HashMap<String, String>>| -> Option<Value> {
             if let Some(e) = flat_vec_embedding(ns, doc_key) {
                 return Some(e);
             }

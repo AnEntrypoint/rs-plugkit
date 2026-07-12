@@ -19,7 +19,7 @@ fn home_dir() -> String {
 
 fn ms_to_ymd(ms: u64) -> (i64, u32, u32) {
     let days = (ms / 86_400_000) as i64;
-    let mut z = days + 719_468;
+    let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;

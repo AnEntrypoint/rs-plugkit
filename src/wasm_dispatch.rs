@@ -1295,8 +1295,27 @@ pub(crate) fn emit_event(event: &str, fields: Value) {
     unsafe { host_log(1, msg.as_ptr(), msg.len() as u32); }
 }
 
+/// Extract the working directory for a git verb: `cwd` if present, else `repo`.
+/// Every git handler accepts either key interchangeably.
+fn body_cwd(body: &Value) -> Option<&str> {
+    body.get("cwd").and_then(|v| v.as_str())
+        .or_else(|| body.get("repo").and_then(|v| v.as_str()))
+}
+
+/// Run `git <argv>` in `cwd`, and on non-zero exit return the packed `err(verb, stderr)`;
+/// on success return `Ok(result_value)` so the caller can shape its own ok-payload.
+/// `fallback` is the error message used when git wrote nothing to stderr.
+fn run_git_checked(argv: &[&str], cwd: Option<&str>, verb: &str, fallback: &str) -> Result<Value, u64> {
+    let r = git_call_argv(argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 0 {
+        return Err(err(verb, r.get("stderr").and_then(|x| x.as_str()).unwrap_or(fallback)));
+    }
+    Ok(r)
+}
+
 fn git_status(body: &Value) -> u64 {
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let cwd = body_cwd(body);
     let porcelain = git_porcelain_in(cwd);
     let mut modified: Vec<String> = vec![];
     let mut untracked: Vec<String> = vec![];
@@ -1324,7 +1343,7 @@ fn git_status(body: &Value) -> u64 {
 }
 
 fn branch_status(body: &Value) -> u64 {
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let cwd = body_cwd(body);
     let branch = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
     if branch.is_empty() {
         return err("branch_status", "unable to determine branch");
@@ -1352,7 +1371,7 @@ fn branch_status(body: &Value) -> u64 {
 }
 
 fn git_push(body: &Value) -> u64 {
-    let repo = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str())).map(String::from);
+    let repo = body_cwd(body).map(String::from);
     let explicit_branch = body.get("branch").and_then(|v| v.as_str()).map(String::from);
     let current_branch = exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD").trim().to_string();
     let branch = explicit_branch.clone().unwrap_or_else(|| current_branch.clone());
@@ -1508,7 +1527,7 @@ fn git_commit(body: &Value) -> u64 {
 }
 
 fn git_finalize(body: &Value) -> u64 {
-    let repo = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str())).map(String::from);
+    let repo = body_cwd(body).map(String::from);
     let cwd = repo.clone();
     let cwd_ref = cwd.as_deref();
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
@@ -1614,7 +1633,7 @@ fn git_finalize(body: &Value) -> u64 {
 }
 
 fn git_log(body: &Value) -> u64 {
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let cwd = body_cwd(body);
     let count = body.get("count").and_then(|v| v.as_u64()).unwrap_or(10);
     let nflag = format!("-{}", count);
     let r = git_call_argv(&["log", &nflag, "--oneline", "--no-color"], cwd);
@@ -1629,7 +1648,7 @@ fn git_log(body: &Value) -> u64 {
 }
 
 fn git_diff(body: &Value) -> u64 {
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let cwd = body_cwd(body);
     let staged = body.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
     let path = body.get("path").and_then(|v| v.as_str());
     let mut argv: Vec<&str> = vec!["diff", "--no-color"];
@@ -1643,7 +1662,7 @@ fn git_diff(body: &Value) -> u64 {
 }
 
 fn git_show(body: &Value) -> u64 {
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let cwd = body_cwd(body);
     let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
     let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
     let mut argv: Vec<&str> = vec!["show", "--no-color"];
@@ -1656,7 +1675,7 @@ fn git_show(body: &Value) -> u64 {
 }
 
 fn git_fetch(body: &Value) -> u64 {
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let cwd = body_cwd(body);
     let remote = body.get("remote").and_then(|v| v.as_str()).unwrap_or("origin");
     let r = git_call_argv(&["fetch", remote], cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -1668,7 +1687,7 @@ fn git_fetch(body: &Value) -> u64 {
 }
 
 fn git_branch(body: &Value) -> u64 {
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let cwd = body_cwd(body);
     let current = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
     let listing = exec_git_in(cwd, "branch --no-color");
     let branches: Vec<String> = listing.lines()
@@ -1679,21 +1698,17 @@ fn git_branch(body: &Value) -> u64 {
 }
 
 fn git_checkout(body: &Value) -> u64 {
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let cwd = body_cwd(body);
     let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("").trim();
     if refspec.is_empty() { return err("git_checkout", "ref required"); }
     let create = body.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
     let argv: Vec<&str> = if create { vec!["checkout", "-b", refspec] } else { vec!["checkout", refspec] };
-    let r = git_call_argv(&argv, cwd);
-    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    if code != 0 {
-        return err("git_checkout", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("checkout failed"));
-    }
+    if let Err(e) = run_git_checked(&argv, cwd, "git_checkout", "checkout failed") { return e; }
     ok("git_checkout", json!({ "checked_out": refspec, "created": create }))
 }
 
 fn git_rm(body: &Value) -> u64 {
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let cwd = body_cwd(body);
     let paths: Vec<String> = body.get("paths").and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
@@ -1703,37 +1718,29 @@ fn git_rm(body: &Value) -> u64 {
     if cached { argv.push("--cached"); }
     argv.push("-r");
     for p in &paths { argv.push(p.as_str()); }
-    let r = git_call_argv(&argv, cwd);
-    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    if code != 0 {
-        return err("git_rm", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("git rm failed"));
-    }
+    if let Err(e) = run_git_checked(&argv, cwd, "git_rm", "git rm failed") { return e; }
     ok("git_rm", json!({ "removed": paths, "cached": cached }))
 }
 
 fn git_revert(body: &Value) -> u64 {
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let cwd = body_cwd(body);
     if let Some(arr) = body.get("paths").and_then(|v| v.as_array()) {
         let paths: Vec<String> = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
         if paths.is_empty() { return err("git_revert", "paths empty"); }
         let mut argv: Vec<&str> = vec!["checkout", "--"];
         for p in &paths { argv.push(p.as_str()); }
-        let r = git_call_argv(&argv, cwd);
-        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-        if code != 0 { return err("git_revert", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("discard failed")); }
+        if let Err(e) = run_git_checked(&argv, cwd, "git_revert", "discard failed") { return e; }
         return ok("git_revert", json!({ "discarded": paths }));
     }
     if let Some(refspec) = body.get("ref").and_then(|v| v.as_str()) {
-        let r = git_call_argv(&["revert", "--no-edit", refspec], cwd);
-        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-        if code != 0 { return err("git_revert", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("revert failed")); }
+        if let Err(e) = run_git_checked(&["revert", "--no-edit", refspec], cwd, "git_revert", "revert failed") { return e; }
         return ok("git_revert", json!({ "reverted": refspec }));
     }
     err("git_revert", "pass {paths:[...]} to discard working changes or {ref} to revert a commit")
 }
 
 fn git_reset(body: &Value) -> u64 {
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(body.get("repo").and_then(|v| v.as_str()));
+    let cwd = body_cwd(body);
     let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
     let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("mixed");
     let mode_flag = match mode {
@@ -1741,11 +1748,7 @@ fn git_reset(body: &Value) -> u64 {
         "hard" => "--hard",
         _ => "--mixed",
     };
-    let r = git_call_argv(&["reset", mode_flag, refspec], cwd);
-    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    if code != 0 {
-        return err("git_reset", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("reset failed"));
-    }
+    if let Err(e) = run_git_checked(&["reset", mode_flag, refspec], cwd, "git_reset", "reset failed") { return e; }
     ok("git_reset", json!({ "reset_to": refspec, "mode": mode }))
 }
 

@@ -123,10 +123,6 @@ pub fn write_state(state: &TurnState) -> Result<(), std::io::Error> {
     }
 }
 
-pub fn set_phase(phase: Phase, last_skill: Option<String>) -> Result<TurnState, std::io::Error> {
-    set_phase_with_session(phase, last_skill, None)
-}
-
 pub fn set_phase_with_session(phase: Phase, last_skill: Option<String>, session_id: Option<String>) -> Result<TurnState, std::io::Error> {
     let mut s = read_state();
     s.phase = phase;

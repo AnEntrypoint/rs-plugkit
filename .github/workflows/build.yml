@@ -33,7 +33,7 @@ jobs:
           targets: wasm32-wasip1
           components: clippy
 
-      - name: Install wasi-sdk (clang + sysroot for tree-sitter C grammars via rs-codeinsight)
+      - name: Install wasi-sdk (clang + sysroot for the vendored tree-sitter C grammars)
         run: |
           WASI_VERSION=24
           WASI_VERSION_FULL=${WASI_VERSION}.0
@@ -71,7 +71,7 @@ jobs:
         with:
           targets: wasm32-wasip1
 
-      - name: Install wasi-sdk (clang + sysroot for tree-sitter C grammars via rs-codeinsight)
+      - name: Install wasi-sdk (clang + sysroot for the vendored tree-sitter C grammars)
         run: |
           WASI_VERSION=24
           WASI_VERSION_FULL=${WASI_VERSION}.0

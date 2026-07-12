@@ -271,13 +271,13 @@ fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>) {
     }
 }
 
-fn extract_chunks(path: &str, source: &str, lang: Language) -> Vec<(String, String, usize, usize, String)> {
+fn extract_chunks(_path: &str, source: &str, lang: Language) -> Vec<(String, String, usize, usize, String)> {
     let mut parser = Parser::new();
     if parser.set_language(&lang).is_err() { return Vec::new(); }
     let tree = match parser.parse(source, None) { Some(t) => t, None => return Vec::new() };
     let mut out = Vec::new();
     let src_bytes = source.as_bytes();
-    let mut cursor = tree.walk();
+    let cursor = tree.walk();
     let mut stack: Vec<tree_sitter::Node> = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
@@ -841,10 +841,6 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
     }
 }
 
-pub fn memorize(text: &str, namespace: &str, inline_embedding: Option<&Value>) -> Value {
-    memorize_at(text, namespace, inline_embedding, None)
-}
-
 pub fn memorize_at(text: &str, namespace: &str, inline_embedding: Option<&Value>, project_path: Option<&str>) -> Value {
     if inline_embedding.is_none() && crate::pipeline::needs_summarize(text) {
         if let Err(e) = ensure_schema_for(project_path) {
@@ -897,10 +893,6 @@ fn emit_recall(query: &str, rows: &Value, mode: &str, namespace: Option<&str>) {
     if let Some(n) = namespace { fields.insert("namespace".to_string(), Value::String(n.to_string())); }
     if let Some(s) = top_score { if let Some(num) = serde_json::Number::from_f64(s) { fields.insert("top_score".to_string(), Value::Number(num)); } }
     crate::wasm_dispatch::emit_event("recall", Value::Object(fields));
-}
-
-pub fn recall(query: &str, limit: usize, namespace: Option<&str>, inline_embedding: Option<&Value>) -> Value {
-    recall_at(query, limit, namespace, inline_embedding, None)
 }
 
 pub fn recall_at(query: &str, limit: usize, namespace: Option<&str>, inline_embedding: Option<&Value>, project_path: Option<&str>) -> Value {
