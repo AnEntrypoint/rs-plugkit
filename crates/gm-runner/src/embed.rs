@@ -26,6 +26,16 @@ fn weights_dir() -> PathBuf {
     crate::download::install_dir().join("weights")
 }
 
+/// True once both weight files are present on disk (does NOT verify sha256
+/// or trigger a download -- a cheap presence check for capability-gating
+/// callers before they dispatch a verb that would otherwise block on a
+/// first-run download). Content not yet available -> callers report a clear
+/// "downloading" status instead of the dispatch silently hanging.
+pub fn is_ready() -> bool {
+    let dir = weights_dir();
+    dir.join("bge-small-en-v1.5.safetensors").exists() && dir.join("bge-tokenizer.json").exists()
+}
+
 /// Downloads (if absent/mismatched) and loads the bge-small-en-v1.5 BERT
 /// weights natively -- same model/source/sha as rs-plugkit's wasm-embedded
 /// fallback (crates/plugkit-core/src/embed.rs), but served over

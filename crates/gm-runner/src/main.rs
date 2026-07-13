@@ -85,9 +85,25 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         "progress" => {
-            match download::current_progress() {
-                Some(p) => println!("{p}"),
-                None => println!(r#"{{"in_flight":false}}"#),
+            let in_flight = download::current_progress();
+            let ready = serde_json::json!({
+                "embed_weights_ready": embed::is_ready(),
+                "wasm_ready": wasm_path().exists(),
+            });
+            match in_flight {
+                Some(mut p) => {
+                    if let Some(obj) = p.as_object_mut() {
+                        obj.insert("in_flight".to_string(), serde_json::Value::Bool(true));
+                        obj.insert("subsystems".to_string(), ready);
+                    }
+                    println!("{p}");
+                }
+                None => {
+                    println!(
+                        "{}",
+                        serde_json::json!({"in_flight": false, "subsystems": ready})
+                    );
+                }
             }
             Ok(())
         }
