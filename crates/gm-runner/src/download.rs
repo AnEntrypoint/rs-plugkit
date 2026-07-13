@@ -1,11 +1,40 @@
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn install_dir() -> PathBuf {
     let base = directories::BaseDirs::new().expect("no home directory resolvable on this platform");
     base.home_dir().join(".gm-tools")
+}
+
+fn progress_file() -> PathBuf {
+    install_dir().join(".download-progress.json")
+}
+
+/// Written before/during/after every download so a dispatching agent can
+/// poll `~/.gm-tools/.download-progress.json` (same pattern as the spool
+/// watcher's `.status.json` heartbeat) to know content isn't available yet
+/// rather than a dispatch failing opaquely mid-download. Cleared (removed)
+/// on completion -- absence of the file means no download in flight.
+fn write_progress(artifact: &str, downloaded: u64, total: Option<u64>, done: bool) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if done {
+        let _ = fs::remove_file(progress_file());
+        return;
+    }
+    let body = serde_json::json!({
+        "artifact": artifact,
+        "downloaded_bytes": downloaded,
+        "total_bytes": total,
+        "pct": total.map(|t| if t > 0 { (downloaded as f64 / t as f64 * 100.0).round() } else { 0.0 }),
+        "ts": now_ms,
+    });
+    let _ = fs::write(progress_file(), body.to_string());
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -18,13 +47,35 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// Downloads `url` into `dest`, verifying against `expected_sha256_hex` before
 /// the atomic rename lands. A checksum mismatch leaves `dest` untouched and
 /// returns an explicit error -- never a silently-accepted corrupt artifact.
+/// Streams in chunks (not one read_to_end) so `.download-progress.json` gets
+/// real byte-level updates during large transfers (the 133MB embed weights
+/// take real wall-clock time; a dispatching agent polling progress sees
+/// actual movement, not a single all-or-nothing jump).
 pub fn download_and_verify(url: &str, dest: &Path, expected_sha256_hex: &str) -> anyhow::Result<()> {
+    let artifact_name = dest.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     let resp = ureq::get(url).call()?;
+    let total: Option<u64> = resp
+        .header("Content-Length")
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let mut reader = resp.into_reader();
     let mut bytes = Vec::new();
-    resp.into_reader().read_to_end(&mut bytes)?;
+    let mut buf = [0u8; 65536];
+    let mut downloaded: u64 = 0;
+    write_progress(&artifact_name, 0, total, false);
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+        downloaded += n as u64;
+        write_progress(&artifact_name, downloaded, total, false);
+    }
 
     let actual = sha256_hex(&bytes);
     if !actual.eq_ignore_ascii_case(expected_sha256_hex) {
+        write_progress(&artifact_name, downloaded, total, true);
         anyhow::bail!(
             "sha256 mismatch downloading {url}: expected {expected_sha256_hex}, got {actual}"
         );
@@ -40,7 +91,17 @@ pub fn download_and_verify(url: &str, dest: &Path, expected_sha256_hex: &str) ->
         f.sync_all()?;
     }
     fs::rename(&tmp, dest)?;
+    write_progress(&artifact_name, downloaded, total, true);
     Ok(())
+}
+
+/// Reads the current in-flight download's progress, if any. Callers (the
+/// spool watcher, or an agent probing via a future dedicated verb) use this
+/// to report "content not yet available" instead of guessing from a hung
+/// dispatch.
+pub fn current_progress() -> Option<serde_json::Value> {
+    let content = fs::read_to_string(progress_file()).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 pub fn sha256_of_file(path: &Path) -> anyhow::Result<String> {

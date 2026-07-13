@@ -84,9 +84,16 @@ fn main() -> anyhow::Result<()> {
             println!("gm-runner {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        "progress" => {
+            match download::current_progress() {
+                Some(p) => println!("{p}"),
+                None => println!(r#"{{"in_flight":false}}"#),
+            }
+            Ok(())
+        }
         other => {
             eprintln!(
-                "gm-runner: unknown command '{other}'. Usage: gm-runner <bootstrap [version]|spool|dispatch|version>"
+                "gm-runner: unknown command '{other}'. Usage: gm-runner <bootstrap [version]|spool|dispatch|progress|version>"
             );
             std::process::exit(1);
         }
