@@ -40,6 +40,9 @@ pub mod git_commit_vectors;
 #[cfg(target_arch = "wasm32")]
 pub mod memory_md;
 
+#[cfg(target_arch = "wasm32")]
+pub mod mediator;
+
 pub mod pkfs;
 pub mod prose;
 pub mod orchestrator;

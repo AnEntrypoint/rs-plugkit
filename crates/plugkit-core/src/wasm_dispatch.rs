@@ -724,6 +724,10 @@ fn codesearch(body: &Value) -> u64 {
 
 fn health(_body: &Value) -> u64 {
     let now = unsafe { host_now_ms() };
+    let subsystems: Vec<Value> = crate::mediator::all_verbs_by_subsystem()
+        .into_iter()
+        .map(|(sub, verbs)| json!({ "subsystem": sub.as_str(), "verbs": verbs }))
+        .collect();
     ok("health", json!({
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
@@ -733,7 +737,8 @@ fn health(_body: &Value) -> u64 {
             "host_fetch","host_kv_get","host_kv_put","host_kv_query",
             "host_vec_search","host_vec_embed",
             "host_exec_js","host_log","host_now_ms","host_env_get","host_browser_exec","host_task_proc"
-        ]
+        ],
+        "subsystems": subsystems
     }))
 }
 
