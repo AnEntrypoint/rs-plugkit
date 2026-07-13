@@ -20,13 +20,20 @@ pub fn run_supervised(wasm_path: PathBuf, cwd: PathBuf, spool_dir: PathBuf) -> a
         let cwd = cwd.clone();
         let spool_dir = spool_dir.clone();
 
-        let result = std::panic::catch_unwind(move || -> anyhow::Result<()> {
+        let result = std::panic::catch_unwind(move || -> anyhow::Result<crate::spool::StopReason> {
             let mut runtime = crate::spool::PlugkitRuntime::load(&wasm_path, cwd)?;
             crate::spool::run_spool_watcher(&mut runtime, &spool_dir)
         });
 
         match result {
-            Ok(Ok(())) => return Ok(()), // clean exit (idle timeout inside the loop)
+            // Module::from_file re-reads wasm_path's bytes fresh next loop
+            // iteration -- the install path is stable (always
+            // ~/.gm-tools/plugkit.wasm), only its CONTENT changed, so simply
+            // looping (not returning) picks up the new version.
+            Ok(Ok(crate::spool::StopReason::Reload)) => {
+                eprintln!("[gm-runner] reloading wasm module for version-skew self-heal");
+                continue;
+            }
             Ok(Err(e)) => {
                 eprintln!("[gm-runner] watcher error: {e:#}");
             }

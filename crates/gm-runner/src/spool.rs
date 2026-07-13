@@ -95,12 +95,22 @@ impl PlugkitRuntime {
     }
 }
 
+/// Distinguishes why the watcher loop stopped -- a version-skew reload must
+/// re-run ensure_wasm_installed + PlugkitRuntime::load with the fresh
+/// binary, while any other clean stop is terminal. Conflating the two
+/// (an earlier version returned plain `Ok(())` for both) made the
+/// supervisor treat a detected version skew as "done, exit the whole
+/// process" instead of "reload and keep serving."
+pub enum StopReason {
+    Reload,
+}
+
 /// Polls `<spool_dir>/in/<verb>/*.txt`, dispatches each to the wasm instance,
 /// writes `<spool_dir>/out/<verb>-<name>.json`. Mirrors runSpoolWatcher in
 /// gm-plugkit/plugkit-wasm-wrapper.js: same directory layout, same
 /// verb-N naming, so existing gm-skill dispatch code needs no ABI change to
 /// talk to this runner instead of the JS wrapper.
-pub fn run_spool_watcher(runtime: &mut PlugkitRuntime, spool_dir: &Path) -> anyhow::Result<()> {
+pub fn run_spool_watcher(runtime: &mut PlugkitRuntime, spool_dir: &Path) -> anyhow::Result<StopReason> {
     let in_dir = spool_dir.join("in");
     let out_dir = spool_dir.join("out");
     fs::create_dir_all(&in_dir)?;
@@ -108,9 +118,35 @@ pub fn run_spool_watcher(runtime: &mut PlugkitRuntime, spool_dir: &Path) -> anyh
 
     let status_path = spool_dir.join(".status.json");
     let mut processed: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let booted_version_path = crate::download::install_dir().join("plugkit.version");
+    let booted_version = fs::read_to_string(&booted_version_path).unwrap_or_default();
+    let mut last_version_check = std::time::Instant::now();
+    const VERSION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
     loop {
         write_status(&status_path)?;
+
+        // Version-skew self-heal: another process (a bootstrap re-run, or a
+        // concurrent gm-runner instance) may have written a newer
+        // plugkit.version to disk after this process loaded its wasm module.
+        // Serving stale prose/gates against fresh plugkit.wasm content is the
+        // exact staleness class AGENTS.md calls out as a same-turn deviation
+        // to resolve -- exit cleanly so the supervisor (or the next boot
+        // probe) picks up the fresh binary, rather than silently serving old
+        // behavior indefinitely.
+        if last_version_check.elapsed() >= VERSION_CHECK_INTERVAL {
+            last_version_check = std::time::Instant::now();
+            if let Ok(on_disk) = fs::read_to_string(&booted_version_path) {
+                if !booted_version.is_empty() && on_disk.trim() != booted_version.trim() {
+                    eprintln!(
+                        "[gm-runner] version skew detected (booted {}, on-disk {}) -- exiting for supervisor reload",
+                        booted_version.trim(),
+                        on_disk.trim()
+                    );
+                    return Ok(StopReason::Reload);
+                }
+            }
+        }
 
         let mut work_done = false;
         if let Ok(verb_dirs) = fs::read_dir(&in_dir) {
