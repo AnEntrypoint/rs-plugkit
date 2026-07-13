@@ -224,34 +224,94 @@ pub fn register_env_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()
             not_implemented(caller)
         },
     )?;
+    // kv: one JSON file per (namespace, key), under
+    // <project>/.gm/disciplines/<safe-ns>/<safe-key>.json -- matches
+    // plugkit-wasm-wrapper.js's kvFilePath/safeName layout exactly, so an
+    // existing project's kv store is readable identically by either host.
     linker.func_wrap(
         "env",
         "host_kv_get",
-        move |caller: Caller<'_, HostState>, _a: u32, _b: u32, _c: u32, _d: u32| -> u64 {
-            not_implemented(caller)
+        |mut caller: Caller<'_, HostState>, ns_ptr: u32, ns_len: u32, key_ptr: u32, key_len: u32| -> u64 {
+            let ns = read_guest_string(&mut caller, ns_ptr, ns_len);
+            let key = read_guest_string(&mut caller, key_ptr, key_len);
+            if ns.is_empty() || key.is_empty() {
+                return 0;
+            }
+            let path = kv_file_path(&caller.data().cwd, &ns, &key);
+            match fs::read_to_string(&path) {
+                Ok(content) => write_guest_bytes(&mut caller, content.as_bytes()),
+                Err(_) => 0,
+            }
         },
     )?;
     linker.func_wrap(
         "env",
         "host_kv_put",
-        move |caller: Caller<'_, HostState>, _a: u32, _b: u32, _c: u32, _d: u32, _e: u32, _f: u32| -> u32 {
-            let _ = not_implemented(caller);
-            0
+        |mut caller: Caller<'_, HostState>,
+         ns_ptr: u32,
+         ns_len: u32,
+         key_ptr: u32,
+         key_len: u32,
+         val_ptr: u32,
+         val_len: u32|
+         -> u32 {
+            let ns = read_guest_string(&mut caller, ns_ptr, ns_len);
+            let key = read_guest_string(&mut caller, key_ptr, key_len);
+            let val = read_guest_string(&mut caller, val_ptr, val_len);
+            if ns.is_empty() || key.is_empty() {
+                return 0;
+            }
+            let path = kv_file_path(&caller.data().cwd, &ns, &key);
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            match fs::write(&path, val) {
+                Ok(()) => 1,
+                Err(_) => 0,
+            }
         },
     )?;
     linker.func_wrap(
         "env",
         "host_kv_delete",
-        move |caller: Caller<'_, HostState>, _a: u32, _b: u32, _c: u32, _d: u32| -> u32 {
-            let _ = not_implemented(caller);
-            0
+        |mut caller: Caller<'_, HostState>, ns_ptr: u32, ns_len: u32, key_ptr: u32, key_len: u32| -> u32 {
+            let ns = read_guest_string(&mut caller, ns_ptr, ns_len);
+            let key = read_guest_string(&mut caller, key_ptr, key_len);
+            if ns.is_empty() || key.is_empty() {
+                return 0;
+            }
+            let path = kv_file_path(&caller.data().cwd, &ns, &key);
+            match fs::remove_file(&path) {
+                Ok(()) => 1,
+                Err(_) => 0,
+            }
         },
     )?;
     linker.func_wrap(
         "env",
         "host_kv_query",
-        move |caller: Caller<'_, HostState>, _a: u32, _b: u32, _c: u32, _d: u32| -> u64 {
-            not_implemented(caller)
+        |mut caller: Caller<'_, HostState>, ns_ptr: u32, ns_len: u32, q_ptr: u32, q_len: u32| -> u64 {
+            let ns = read_guest_string(&mut caller, ns_ptr, ns_len);
+            let q = read_guest_string(&mut caller, q_ptr, q_len).to_lowercase();
+            if ns.is_empty() {
+                return 0;
+            }
+            let dir = kv_namespace_dir(&caller.data().cwd, &ns);
+            let mut results = Vec::new();
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                        continue;
+                    }
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        if q.is_empty() || content.to_lowercase().contains(&q) {
+                            results.push(content);
+                        }
+                    }
+                }
+            }
+            write_guest_json(&mut caller, serde_json::json!(results))
         },
     )?;
     linker.func_wrap(
@@ -285,13 +345,60 @@ pub fn register_env_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()
             not_implemented(caller)
         },
     )?;
+    // args is either a JSON array ('["status","--porcelain"]', from
+    // git_call_argv) or a raw whitespace-split string ("status --porcelain",
+    // from git_call) -- same dual-format contract plugkit-wasm-wrapper.js's
+    // host_git implements, so callers on either host parse identically.
     linker.func_wrap(
         "env",
         "host_git",
-        move |caller: Caller<'_, HostState>, _a: u32, _al: u32, _c: u32, _cl: u32| -> u64 {
-            not_implemented(caller)
+        |mut caller: Caller<'_, HostState>, args_ptr: u32, args_len: u32, cwd_ptr: u32, cwd_len: u32| -> u64 {
+            let args = read_guest_string(&mut caller, args_ptr, args_len);
+            let cwd_arg = read_guest_string(&mut caller, cwd_ptr, cwd_len);
+            let trimmed = args.trim();
+            let argv: Vec<String> = if trimmed.starts_with('[') {
+                serde_json::from_str::<Vec<String>>(trimmed)
+                    .unwrap_or_else(|_| trimmed.split_whitespace().map(String::from).collect())
+            } else {
+                trimmed.split_whitespace().map(String::from).collect()
+            };
+            let cwd = if cwd_arg.is_empty() {
+                caller.data().cwd.clone()
+            } else {
+                PathBuf::from(&cwd_arg)
+            };
+            let output = std::process::Command::new("git").args(&argv).current_dir(&cwd).output();
+            let v = match output {
+                Ok(out) => serde_json::json!({
+                    "stdout": String::from_utf8_lossy(&out.stdout),
+                    "stderr": String::from_utf8_lossy(&out.stderr),
+                    "exit_code": out.status.code().unwrap_or(-1),
+                }),
+                Err(e) => serde_json::json!({"stdout": "", "stderr": e.to_string(), "exit_code": 1}),
+            };
+            write_guest_json(&mut caller, v)
         },
     )?;
 
     Ok(())
+}
+
+fn kv_namespace_dir(cwd: &std::path::Path, ns: &str) -> PathBuf {
+    cwd.join(".gm").join("disciplines").join(safe_name(ns))
+}
+
+fn kv_file_path(cwd: &std::path::Path, ns: &str, key: &str) -> PathBuf {
+    kv_namespace_dir(cwd, ns).join(format!("{}.json", safe_name(key)))
+}
+
+fn safe_name(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
