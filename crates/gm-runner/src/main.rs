@@ -1,4 +1,5 @@
 mod download;
+mod exec_js;
 mod lock;
 mod spool;
 mod wasm_host;
