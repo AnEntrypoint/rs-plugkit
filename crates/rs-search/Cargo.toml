@@ -1,0 +1,9 @@
+[package]
+name = "rs-search"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "rs_search"
+path = "src/lib.rs"
+crate-type = ["rlib"]

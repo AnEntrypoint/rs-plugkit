@@ -88,13 +88,6 @@ jobs:
           key: build-wasm32-wasip1-v2
           cache-on-failure: false
 
-      - name: Wipe cargo git cache and lockfile (force fresh dep resolution)
-        shell: bash
-        run: |
-          rm -rf ~/.cargo/git/db ~/.cargo/git/checkouts || true
-          rm -f Cargo.lock
-          cargo generate-lockfile
-
       - name: Fetch embedding weights (BAAI/bge-small-en-v1.5 safetensors + tokenizer)
         shell: bash
         run: bash scripts/fetch-weights.sh
