@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use wasmtime::{Caller, Instance, Linker, Memory};
 use wasmtime_wasi::p1::WasiP1Ctx;
-use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 pub struct HostState {
     pub cwd: PathBuf,
@@ -15,7 +15,23 @@ pub struct HostState {
 
 impl HostState {
     pub fn new(cwd: PathBuf) -> Self {
-        let wasi = WasiCtxBuilder::new().inherit_stderr().build_p1();
+        // libsql-ffi (linked into plugkit-core for wasm32) opens its sqlite
+        // db file ("gm.db") via real WASI filesystem syscalls, resolved
+        // relative to the wasm's WASI cwd -- a default WasiCtxBuilder grants
+        // ZERO directory preopens, so sqlite3_open_v2 fails with rc=14
+        // ("unable to open database file") on every attempt. Preopen the
+        // project dir itself as "." so relative paths the wasm module opens
+        // (gm.db, ext-<hash>.db, .gm/exec-spool/...) resolve the same way
+        // they did in the JS wrapper (unrestricted Node fs access).
+        let mut builder = WasiCtxBuilder::new();
+        builder.inherit_stderr();
+        if let Err(e) = builder.preopened_dir(&cwd, ".", DirPerms::all(), FilePerms::all()) {
+            eprintln!(
+                "[gm-runner] WARNING: failed to preopen {} for WASI: {e} -- sqlite/libsql db opens will fail",
+                cwd.display()
+            );
+        }
+        let wasi = builder.build_p1();
         Self {
             cwd,
             instance: Arc::new(Mutex::new(None)),
@@ -319,10 +335,36 @@ pub fn register_env_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()
         "host_vec_search",
         move |caller: Caller<'_, HostState>, _q: u32, _l: u32, _k: u32| -> u64 { not_implemented(caller) },
     )?;
+    // Writes directly into the caller-owned out_ptr buffer (same convention
+    // as host_random_fill), returning the embedding dimension on success or
+    // -1 on failure -- matches embed.rs's probe_host_embed contract exactly,
+    // so plugkit-core's existing host-delegation probe (skip loading the
+    // 133MB wasm-embedded safetensors fallback if the host already serves
+    // embeddings) picks this up with zero changes on the wasm side.
     linker.func_wrap(
         "env",
         "host_vec_embed",
-        move |_caller: Caller<'_, HostState>, _t: u32, _l: u32, _o: u32, _ol: u32| -> i32 { -1 },
+        |mut caller: Caller<'_, HostState>, text_ptr: u32, text_len: u32, out_ptr: u32, out_len: u32| -> i32 {
+            let text = read_guest_string(&mut caller, text_ptr, text_len);
+            match crate::embed::embed(&text) {
+                Ok(values) => {
+                    let dim = values.len().min(out_len as usize);
+                    let mut bytes = Vec::with_capacity(dim * 4);
+                    for v in &values[..dim] {
+                        bytes.extend_from_slice(&v.to_le_bytes());
+                    }
+                    let memory = guest_memory(&mut caller);
+                    if memory.write(&mut caller, out_ptr as usize, &bytes).is_err() {
+                        return -1;
+                    }
+                    dim as i32
+                }
+                Err(e) => {
+                    eprintln!("[gm-runner] host_vec_embed failed: {e}");
+                    -1
+                }
+            }
+        },
     )?;
     linker.func_wrap(
         "env",

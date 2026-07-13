@@ -1,4 +1,5 @@
 mod download;
+mod embed;
 mod exec_js;
 mod lock;
 mod spool;

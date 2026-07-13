@@ -17,3 +17,7 @@ ureq = { version = "2", features = ["tls"] }
 directories = "5"
 anyhow = "1"
 wait-timeout = "0.2"
+candle-core = { version = "0.8", default-features = false }
+candle-nn = "0.8"
+candle-transformers = "0.8"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
