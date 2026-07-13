@@ -1,3 +1,4 @@
+mod browser;
 mod download;
 mod embed;
 mod exec_js;

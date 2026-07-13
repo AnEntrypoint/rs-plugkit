@@ -385,8 +385,21 @@ pub fn register_env_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()
     linker.func_wrap(
         "env",
         "host_browser_exec",
-        move |caller: Caller<'_, HostState>, _b: u32, _bl: u32, _c: u32, _cl: u32, _s: u32, _sl: u32| -> u64 {
-            not_implemented(caller)
+        |mut caller: Caller<'_, HostState>,
+         body_ptr: u32,
+         body_len: u32,
+         cwd_ptr: u32,
+         cwd_len: u32,
+         sid_ptr: u32,
+         sid_len: u32|
+         -> u64 {
+            let body = read_guest_string(&mut caller, body_ptr, body_len);
+            let cwd_arg = read_guest_string(&mut caller, cwd_ptr, cwd_len);
+            let session_id = read_guest_string(&mut caller, sid_ptr, sid_len);
+            let session_id = if session_id.is_empty() { "default".to_string() } else { session_id };
+            let cwd = if cwd_arg.is_empty() { caller.data().cwd.clone() } else { PathBuf::from(&cwd_arg) };
+            let result = crate::browser::run(&body, &cwd, &session_id);
+            write_guest_json(&mut caller, result)
         },
     )?;
     linker.func_wrap(
