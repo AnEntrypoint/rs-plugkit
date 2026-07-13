@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "artifacts": {
+    "core": {
+      "kind": "wasm-module",
+      "target": "wasm32-wasip1",
+      "path": "plugkit.wasm",
+      "description": "orchestrator/gates/state-machine/spool dispatch -- rebuilds on any plugkit-core src change"
+    },
+    "embed-weights": {
+      "kind": "model-weights",
+      "path": "weights/bge-small-en-v1.5.safetensors",
+      "sha256": "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad",
+      "source_url": "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/model.safetensors",
+      "description": "BERT embedding model weights, served natively by gm-runner's host_vec_embed; also embedded in the browser/wasm-fallback build variant",
+      "consumers": ["gm-runner", "plugkit-wasm (browser fallback build)"]
+    },
+    "embed-tokenizer": {
+      "kind": "tokenizer",
+      "path": "weights/bge-tokenizer.json",
+      "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+      "source_url": "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json",
+      "consumers": ["gm-runner", "plugkit-wasm (browser fallback build)"]
+    },
+    "grammar-javascript": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-javascript", "version": "0.23.1" },
+    "grammar-typescript": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-typescript", "version": "0.23.2" },
+    "grammar-python": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-python", "version": "0.23.6" },
+    "grammar-rust": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-rust", "version": "0.23.3" },
+    "grammar-go": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-go", "version": "0.23.4" },
+    "grammar-c": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-c", "version": "0.23.4" },
+    "grammar-cpp": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-cpp", "version": "0.23.4" },
+    "grammar-java": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-java", "version": "0.23.5" },
+    "grammar-json": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-json", "version": "0.23.0" },
+    "grammar-html": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-html", "version": "0.23.2" },
+    "grammar-css": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-css", "version": "0.25.0" },
+    "grammar-bash": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-bash", "version": "0.25.1" },
+    "grammar-md": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-md", "version": "0.5.3" }
+  },
+  "note": "Tree-sitter grammars are currently statically linked into plugkit-core's wasm build (Rust cdylib, no dynamic-load ABI for wasm-compiled C grammars exists yet) -- entries here document the version pin and CONTENT identity (crate+version, since each grammar is small, deterministic C source compiled once) for the incremental-CI-rebuild design in ci-per-artifact-rebuild, not yet a runtime-downloadable split like embed-weights. Splitting them into truly separate runtime-loadable artifacts needs a wasm dynamic-linking mechanism plugkit-core does not have; tracked as a follow-up, not silently claimed done here."
+}
