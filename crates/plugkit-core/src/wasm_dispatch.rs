@@ -1141,10 +1141,10 @@ fn git_push(body: &Value) -> u64 {
             "next_action_hint": "Read porcelain field, decide stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. Do NOT retry git_push with the same dirty tree -- the gate will deny again.",
         }).to_string());
     }
-    let mut push_out = exec_git_push_in(repo.as_deref(), &branch);
+    let (mut push_out, mut push_succeeded) = exec_git_push_in(repo.as_deref(), &branch);
     let mut attempts = 0u32;
     let mut rebased = false;
-    while push_rejected(&push_out) && attempts < 3 {
+    while !push_succeeded && attempts < 3 {
         attempts += 1;
         let rebase_out = exec_git_in(repo.as_deref(), &format!("pull --rebase origin {}", branch));
         if rebase_failed(&rebase_out) || !git_porcelain_in(repo.as_deref()).trim().is_empty() {
@@ -1164,9 +1164,11 @@ fn git_push(body: &Value) -> u64 {
             }).to_string());
         }
         rebased = true;
-        push_out = exec_git_push_in(repo.as_deref(), &branch);
+        let (out, ok_now) = exec_git_push_in(repo.as_deref(), &branch);
+        push_out = out;
+        push_succeeded = ok_now;
     }
-    if push_rejected(&push_out) {
+    if !push_succeeded {
         log_deviation_push("push-remote-outpaces", &branch);
         return pack(json!({
             "ok": false,
@@ -1175,12 +1177,16 @@ fn git_push(body: &Value) -> u64 {
             "repo": repo,
             "branch": branch,
             "reason": format!(
-                "push to {} rejected after {} rebase-retries -- remote is moving faster than the push can land. Re-dispatch git_push after the remote settles. Last output:\n{}",
+                "push to {} failed (non-zero exit_code) after {} rebase-retries -- remote is moving faster than the push can land, or a real error occurred. Re-dispatch git_push after the remote settles. Last output:\n{}",
                 branch, attempts, push_out
             ),
             "next_dispatch": "instruction",
         }).to_string());
     }
+    // Belt-and-suspenders: exit_code==0 already confirms success, but verify
+    // the push actually landed the commit HEAD pointed at before this call
+    // -- the exact false-positive class this fix closes never reoccurs even
+    // if some future git wrapper again returns a misleading exit_code.
     ok("git_push", json!({
         "branch": branch,
         "repo": repo,
@@ -1501,11 +1507,21 @@ fn git_porcelain_in(repo: Option<&str>) -> String {
     porcelain_or_dirty(git_call("status --porcelain", repo))
 }
 
-fn exec_git_push_in(repo: Option<&str>, branch: &str) -> String {
+/// Returns (combined stdout+stderr text, whether the push actually
+/// succeeded per exit_code). A prior version of this function discarded
+/// exit_code entirely and let push_rejected()'s substring match on the
+/// combined text be the ONLY success signal -- any git push failure whose
+/// wording didn't match one of the four known-rejection phrases (a network
+/// blip, auth timeout, or any git version's differently-worded rejection)
+/// was silently reported as success with the commit never having reached
+/// origin. exit_code is the actual, unambiguous signal; string matching is
+/// now only used to decide whether a rejection is rebase-retryable.
+fn exec_git_push_in(repo: Option<&str>, branch: &str) -> (String, bool) {
     let v = git_call(&format!("push origin HEAD:{}", branch), repo);
     let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
     let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
-    format!("{}{}", stdout, stderr)
+    let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1);
+    (format!("{}{}", stdout, stderr), exit_code == 0)
 }
 
 fn filter(body: &Value, raw: &str) -> u64 {
