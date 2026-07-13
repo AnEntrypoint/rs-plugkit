@@ -2,6 +2,7 @@ mod download;
 mod exec_js;
 mod lock;
 mod spool;
+mod supervisor;
 mod wasm_host;
 
 use std::path::PathBuf;
@@ -64,9 +65,8 @@ fn main() -> anyhow::Result<()> {
             let _lock = lock::SpoolLock::acquire(&spool_dir)?;
             let wasm = ensure_wasm_installed(None)?;
             eprintln!("[gm-runner] compiling plugkit.wasm module (first load takes longer; cranelift caches after)...");
-            let mut runtime = spool::PlugkitRuntime::load(&wasm, cwd)?;
             eprintln!("[gm-runner] watching {}", spool_dir.display());
-            spool::run_spool_watcher(&mut runtime, &spool_dir)
+            supervisor::run_supervised(wasm, cwd, spool_dir)
         }
         "dispatch" => {
             let verb = args.get(2).cloned().unwrap_or_default();
