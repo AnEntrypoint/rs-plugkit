@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rs-search", "crates/plugkit-core"]
+members = ["crates/rs-search", "crates/plugkit-core", "crates/gm-runner"]
 default-members = ["crates/plugkit-core"]
 
 [workspace.package]

@@ -35,8 +35,8 @@ fn elog(msg: &str) {
     let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
 }
 
-static MODEL_SAFETENSORS: &[u8] = include_bytes!("../weights/bge-small-en-v1.5.safetensors");
-static TOKENIZER_JSON: &[u8] = include_bytes!("../weights/bge-tokenizer.json");
+static MODEL_SAFETENSORS: &[u8] = include_bytes!("../../../weights/bge-small-en-v1.5.safetensors");
+static TOKENIZER_JSON: &[u8] = include_bytes!("../../../weights/bge-tokenizer.json");
 
 const EMBED_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 const EMBED_DIM: usize = 384;
