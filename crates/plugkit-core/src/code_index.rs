@@ -614,6 +614,49 @@ pub fn store_digest(digest: &str) {
     fv_delete("codeinsight", "__digest__");
 }
 
+/// A cheap, read-only summary of the ALREADY-indexed code_chunks table --
+/// file count, per-kind symbol counts, and the largest files by chunk
+/// count. Never triggers a scan/parse/embed pass (that only happens via
+/// the codesearch verb's own index() call); this is purely a query over
+/// whatever is already in the shared db, so it's safe to attach to every
+/// turn-entry instruction dispatch without adding real per-dispatch cost.
+/// Returns null if no index exists yet (stored_digest() is None) rather
+/// than an empty-but-misleading summary.
+pub fn overview() -> Value {
+    if stored_digest().is_none() {
+        return Value::Null;
+    }
+    let file_count = libsql_wasm::query_params(GM_DB, "SELECT COUNT(DISTINCT path) AS c FROM code_chunks", &[])
+        .ok()
+        .and_then(|rows| rows.as_array().and_then(|a| a.first().cloned()))
+        .and_then(|row| row.get("c").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    let symbol_count = libsql_wasm::query_params(GM_DB, "SELECT COUNT(*) AS c FROM code_chunks", &[])
+        .ok()
+        .and_then(|rows| rows.as_array().and_then(|a| a.first().cloned()))
+        .and_then(|row| row.get("c").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    let by_kind = libsql_wasm::query_params(
+        GM_DB,
+        "SELECT kind, COUNT(*) AS c FROM code_chunks GROUP BY kind ORDER BY c DESC LIMIT 10",
+        &[],
+    )
+    .unwrap_or(Value::Array(Vec::new()));
+    let largest_files = libsql_wasm::query_params(
+        GM_DB,
+        "SELECT path, COUNT(*) AS c FROM code_chunks GROUP BY path ORDER BY c DESC LIMIT 10",
+        &[],
+    )
+    .unwrap_or(Value::Array(Vec::new()));
+    json!({
+        "file_count": file_count,
+        "symbol_count": symbol_count,
+        "by_kind": by_kind,
+        "largest_files": largest_files,
+        "digest": stored_digest(),
+    })
+}
+
 pub struct ChunkMeta {
     pub key: String,
     pub path: String,

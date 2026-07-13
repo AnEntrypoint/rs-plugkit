@@ -346,6 +346,19 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     #[cfg(not(target_arch = "wasm32"))]
     let route_hint = serde_json::Value::Null;
 
+    // Proactive delivery: attach the already-indexed codeinsight overview
+    // (file/symbol counts, top kinds, largest files) to every instruction
+    // response instead of requiring a separate codesearch dispatch just to
+    // learn "what's in this codebase" -- a one-shot overview the agent
+    // would otherwise have to explicitly ask for. Purely a query over the
+    // EXISTING index (never triggers a scan/parse/embed pass), so this is
+    // cheap on every dispatch; null when no index exists yet (first-ever
+    // session in a fresh repo, before any codesearch has run).
+    #[cfg(target_arch = "wasm32")]
+    let codeinsight_overview = crate::code_index::overview();
+    #[cfg(not(target_arch = "wasm32"))]
+    let codeinsight_overview = serde_json::Value::Null;
+
     let payload = json!({
         "phase": phase,
         "sub_phase": if await_result.is_some() { "AWAIT-RESULT" } else { "" },
@@ -360,6 +373,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "next_phase_hint": next,
         "recall_hits": recall_hits,
         "orient_nouns": nouns,
+        "codeinsight_overview": codeinsight_overview,
         "ready_wave": wave,
         "update_available": update_available,
         "gm_plugkit_stale": gm_plugkit_stale,
