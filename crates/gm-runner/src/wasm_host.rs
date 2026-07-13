@@ -233,11 +233,46 @@ pub fn register_env_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()
         )
     };
 
+    // Matches plugkit-wasm-wrapper.js host_fetch's {status, body} contract
+    // (or {status:0, error} on failure) -- a plain GET/POST-with-body fetch,
+    // never streaming, matching the wasm-side callers' usage (they always
+    // await the full response text).
     linker.func_wrap(
         "env",
         "host_fetch",
-        move |caller: Caller<'_, HostState>, _u: u32, _v: u32, _o: u32, _l: u32| -> u64 {
-            not_implemented(caller)
+        |mut caller: Caller<'_, HostState>, url_ptr: u32, url_len: u32, opts_ptr: u32, opts_len: u32| -> u64 {
+            let url = read_guest_string(&mut caller, url_ptr, url_len);
+            let opts_str = read_guest_string(&mut caller, opts_ptr, opts_len);
+            let opts: serde_json::Value = if opts_str.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&opts_str).unwrap_or(serde_json::json!({}))
+            };
+            let method = opts.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_uppercase();
+            let body = opts.get("body").and_then(|v| v.as_str());
+
+            let agent = ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(10))
+                .build();
+            let req = agent.request(&method, &url);
+            let resp = match body {
+                Some(b) => req.send_string(b),
+                None => req.call(),
+            };
+            let result = match resp {
+                Ok(r) => {
+                    let status = r.status();
+                    let text = r.into_string().unwrap_or_default();
+                    serde_json::json!({"status": status, "body": text})
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    let text = r.into_string().unwrap_or_default();
+                    serde_json::json!({"status": code, "body": text})
+                }
+                Err(e) => serde_json::json!({"status": 0, "error": e.to_string()}),
+            };
+
+            write_guest_json(&mut caller, result)
         },
     )?;
     // kv: one JSON file per (namespace, key), under
