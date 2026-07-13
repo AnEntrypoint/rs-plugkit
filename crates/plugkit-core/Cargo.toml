@@ -11,6 +11,13 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 wasm = []
+# Excludes the embed.rs wasm-side safetensors fallback (the ~133MB
+# include_bytes! payload) from the build. Only valid for consumers that
+# implement host_vec_embed themselves (the native gm-runner does, via
+# candle -- see crates/gm-runner/src/embed.rs) -- a slim build loaded by a
+# host WITHOUT host_vec_embed has no embedding capability at all, by
+# design: this is an explicit opt-in trade, not a silent capability loss.
+slim = []
 
 [dependencies]
 serde_json = "1"

@@ -35,7 +35,9 @@ fn elog(msg: &str) {
     let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
 }
 
+#[cfg(not(feature = "slim"))]
 static MODEL_SAFETENSORS: &[u8] = include_bytes!("../../../weights/bge-small-en-v1.5.safetensors");
+#[cfg(not(feature = "slim"))]
 static TOKENIZER_JSON: &[u8] = include_bytes!("../../../weights/bge-tokenizer.json");
 
 const EMBED_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
@@ -120,36 +122,47 @@ fn init_ctx() -> Result<EmbedCtx, String> {
         });
     }
 
-    crate::wasm_dispatch::emit_event("embed.wasm-loading", serde_json::json!({
-        "reason": "host_vec_embed probe failed; loading wasm-side bert model",
-    }));
+    #[cfg(feature = "slim")]
+    {
+        crate::wasm_dispatch::emit_event("embed.slim-build-no-fallback", serde_json::json!({
+            "reason": "this is a slim build (feature=slim): no wasm-embedded safetensors fallback exists, and the host_vec_embed probe just failed -- embedding is genuinely unavailable this session, not a bug",
+        }));
+        return Err("slim build has no wasm-side embedding fallback -- host_vec_embed must be implemented by the host (e.g. gm-runner's native candle path)".to_string());
+    }
 
-    let tokenizer = Tokenizer::from_bytes(TOKENIZER_JSON)
-        .map_err(|e| format!("tokenizer load: {}", e))?;
+    #[cfg(not(feature = "slim"))]
+    {
+        crate::wasm_dispatch::emit_event("embed.wasm-loading", serde_json::json!({
+            "reason": "host_vec_embed probe failed; loading wasm-side bert model",
+        }));
 
-    let device = Device::Cpu;
+        let tokenizer = Tokenizer::from_bytes(TOKENIZER_JSON)
+            .map_err(|e| format!("tokenizer load: {}", e))?;
 
-    let vb = VarBuilder::from_slice_safetensors(MODEL_SAFETENSORS, DType::F32, &device)
-        .map_err(|e| format!("varbuilder safetensors: {}", e))?;
+        let device = Device::Cpu;
 
-    let config = bge_small_config();
-    let model = BertModel::load(vb, &config)
-        .map_err(|e| format!("bert init: {}", e))?;
+        let vb = VarBuilder::from_slice_safetensors(MODEL_SAFETENSORS, DType::F32, &device)
+            .map_err(|e| format!("varbuilder safetensors: {}", e))?;
 
-    crate::wasm_dispatch::emit_event("embed.model-loaded", serde_json::json!({
-        "model": EMBED_MODEL_NAME,
-        "embed_dim": EMBED_DIM,
-        "num_hidden_layers": config.num_hidden_layers,
-        "safetensors_bytes": MODEL_SAFETENSORS.len(),
-        "tokenizer_bytes": TOKENIZER_JSON.len(),
-    }));
+        let config = bge_small_config();
+        let model = BertModel::load(vb, &config)
+            .map_err(|e| format!("bert init: {}", e))?;
 
-    Ok(EmbedCtx {
-        tokenizer: Some(tokenizer),
-        model: Some(model),
-        device,
-        host_delegated: false,
-    })
+        crate::wasm_dispatch::emit_event("embed.model-loaded", serde_json::json!({
+            "model": EMBED_MODEL_NAME,
+            "embed_dim": EMBED_DIM,
+            "num_hidden_layers": config.num_hidden_layers,
+            "safetensors_bytes": MODEL_SAFETENSORS.len(),
+            "tokenizer_bytes": TOKENIZER_JSON.len(),
+        }));
+
+        Ok(EmbedCtx {
+            tokenizer: Some(tokenizer),
+            model: Some(model),
+            device,
+            host_delegated: false,
+        })
+    }
 }
 
 fn ctx() -> Result<&'static EmbedCtx, &'static str> {
@@ -163,10 +176,18 @@ fn ctx() -> Result<&'static EmbedCtx, &'static str> {
                 "embed::init_ctx OK (host_delegated={})",
                 c.host_delegated
             ));
+            #[cfg(not(feature = "slim"))]
+            let (safetensors_bytes, tokenizer_bytes) = if c.host_delegated {
+                (0, 0)
+            } else {
+                (MODEL_SAFETENSORS.len(), TOKENIZER_JSON.len())
+            };
+            #[cfg(feature = "slim")]
+            let (safetensors_bytes, tokenizer_bytes) = (0, 0);
             crate::wasm_dispatch::emit_event("embed_init_ok", serde_json::json!({
                 "host_delegated": c.host_delegated,
-                "safetensors_bytes": if c.host_delegated { 0 } else { MODEL_SAFETENSORS.len() },
-                "tokenizer_bytes": if c.host_delegated { 0 } else { TOKENIZER_JSON.len() },
+                "safetensors_bytes": safetensors_bytes,
+                "tokenizer_bytes": tokenizer_bytes,
             }));
             Ok(CTX.get_or_init(|| c))
         }
