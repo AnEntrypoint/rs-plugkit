@@ -83,7 +83,16 @@ jobs:
 
   release:
     needs: build
-    if: github.ref == 'refs/heads/main'
+    # `needs: build` normally requires every matrix leg to finish -- a single
+    # unschedulable leg (e.g. the macos-13/x86_64 runner label stuck queued
+    # for hours on GitHub's side, a real observed outage) then blocks release
+    # forever even though 5/6 platform binaries built fine, and blocks
+    # gm-runner-bin from ever getting its first release. `always()` runs this
+    # job regardless of the build job's overall conclusion; the per-artifact
+    # `if-no-files-found: warn` change below (matched by the `|| true` glob
+    # tolerance here) means a missing single-platform artifact degrades to
+    # "release without that platform yet" instead of "no release at all."
+    if: always() && github.ref == 'refs/heads/main' && needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -93,20 +102,29 @@ jobs:
         run: echo "version=$(grep '^version' crates/gm-runner/Cargo.toml | head -1 | sed 's/.*= *\"//;s/\"//')" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v5
+        continue-on-error: true
         with:
           path: artifacts
 
       - name: Stage release assets with checksums
         run: |
-          mkdir -p release-assets
-          for f in artifacts/*/*; do
+          mkdir -p release-assets artifacts
+          shopt -s nullglob
+          files=(artifacts/*/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no build artifacts available yet (every matrix leg still pending/failed) -- skipping release"
+            exit 0
+          fi
+          for f in "${files[@]}"; do
             name=$(basename "$f")
             cp "$f" "release-assets/$name"
             sha256sum "release-assets/$name" | sed 's/ \*/  /' > "release-assets/$name.sha256"
           done
           ls -la release-assets
+          echo "have_assets=true" >> "$GITHUB_ENV"
 
       - name: Publish to gm-runner-bin Release
+        if: env.have_assets == 'true'
         env:
           GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
           VER: ${{ steps.ver.outputs.version }}

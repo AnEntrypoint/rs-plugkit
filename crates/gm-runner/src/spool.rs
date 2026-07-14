@@ -122,6 +122,16 @@ pub fn run_spool_watcher(runtime: &mut PlugkitRuntime, spool_dir: &Path) -> anyh
     let booted_version = fs::read_to_string(&booted_version_path).unwrap_or_default();
     let mut last_version_check = std::time::Instant::now();
     const VERSION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+    // Remote-latest polling is deliberately much coarser than the local-skew
+    // check above (30s): it costs a real network round-trip, and unlike the
+    // local check (another process on this same machine already did the
+    // download) a remote miss just means "nothing new yet" -- no reason to
+    // hammer the GitHub API every 30s. This is the actual auto-update
+    // mechanism: without it, ensure_wasm_installed only ever short-circuits
+    // on existing.exists() and a wasm installed once is served forever, even
+    // after a newer plugkit-bin release ships.
+    let mut last_remote_check = std::time::Instant::now();
+    const REMOTE_CHECK_INTERVAL: Duration = Duration::from_secs(600);
 
     loop {
         write_status(&status_path)?;
@@ -144,6 +154,33 @@ pub fn run_spool_watcher(runtime: &mut PlugkitRuntime, spool_dir: &Path) -> anyh
                         on_disk.trim()
                     );
                     return Ok(StopReason::Reload);
+                }
+            }
+        }
+
+        // Real auto-update: periodically ask plugkit-bin's GitHub Releases
+        // API what the latest published version is, and if it differs from
+        // what's booted, download + verify it and write it to disk so the
+        // local-skew check above (which runs every 30s) picks it up and
+        // triggers the same clean reload path. Best-effort -- a network
+        // failure here is silently ignored (Ok(None) or an Err both just
+        // skip this cycle) so a flaky connection never blocks dispatch.
+        if last_remote_check.elapsed() >= REMOTE_CHECK_INTERVAL {
+            last_remote_check = std::time::Instant::now();
+            if let Ok(Some(latest)) = crate::download::fetch_latest_plugkit_version() {
+                let current = fs::read_to_string(&booted_version_path).unwrap_or_default();
+                if !latest.is_empty() && latest.trim() != current.trim() {
+                    eprintln!(
+                        "[gm-runner] remote plugkit-bin latest is {} (booted {}) -- downloading",
+                        latest,
+                        current.trim()
+                    );
+                    if let Err(e) = crate::download::bootstrap_plugkit_wasm(&latest) {
+                        eprintln!("[gm-runner] auto-update download failed: {e:#} -- will retry next interval");
+                    }
+                    // bootstrap_plugkit_wasm already wrote plugkit.version on
+                    // success; the next VERSION_CHECK_INTERVAL tick (<=30s
+                    // away) will see the on-disk/booted mismatch and reload.
                 }
             }
         }

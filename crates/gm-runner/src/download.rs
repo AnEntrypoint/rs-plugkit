@@ -109,6 +109,28 @@ pub fn sha256_of_file(path: &Path) -> anyhow::Result<String> {
     Ok(sha256_hex(&bytes))
 }
 
+/// Queries the plugkit-bin GitHub Releases API for the latest published tag
+/// (`vX.Y.Z` -> `X.Y.Z`), giving gm-runner parity with the JS wrapper's
+/// self-heal (`bun x gm-plugkit@latest` forces a version check+reinstall
+/// every boot). Prior to this, `ensure_wasm_installed` only ever checked
+/// `existing.exists()` -- once a wasm was installed it was never compared
+/// against a newer release, so a stale binary served forever. Best-effort:
+/// network failure returns Ok(None) rather than erroring the whole spool
+/// loop, since a failed freshness check must never block already-working
+/// dispatch.
+pub fn fetch_latest_plugkit_version() -> anyhow::Result<Option<String>> {
+    let url = "https://api.github.com/repos/AnEntrypoint/plugkit-bin/releases/latest";
+    let resp = ureq::get(url)
+        .set("User-Agent", "gm-runner")
+        .call()?;
+    let body: serde_json::Value = serde_json::from_str(&resp.into_string()?)?;
+    let tag = body
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim_start_matches('v').to_string());
+    Ok(tag)
+}
+
 /// Downloads plugkit.wasm for `version` from the plugkit-bin GitHub Releases
 /// channel (same source gm-plugkit/bootstrap.js's downloadFromGithubReleases
 /// uses), verified against the release's own .sha256 sidecar.
