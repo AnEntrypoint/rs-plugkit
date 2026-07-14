@@ -112,15 +112,50 @@ fn scrub(s: &str) -> String {
         .replace("puppeteer", "managed browser session")
 }
 
+/// Mirrors plugkit-wasm-wrapper.js's findBrowserRunner precedence exactly --
+/// the prior version of this function tried a raw `which("playwriter")`
+/// FIRST, which on a system where playwriter was only ever installed via
+/// `bun x` resolves to a bare content-addressed cache copy
+/// (`~/.bun/install/cache/playwriter@version`) that has no node_modules of
+/// its own, so invoking its bin.js directly fails dependency resolution
+/// (live-witnessed: "Cannot find package 'goke' from .../playwriter@0.4.0.../dist/cli.js").
+/// `bun x playwriter@latest` sets up real dependency resolution for the same
+/// cached copy and does not fail. The JS wrapper already fixed this
+/// (patchAllCachedPlaywriterCopies + bun-x-before-raw-which ordering); this
+/// port applies the same fix so gm-runner's browser dispatch does not
+/// regress into the bug the JS wrapper already solved.
 fn find_browser_runner() -> Option<(String, Vec<String>)> {
-    if let Some(p) = which("playwriter") {
-        return Some((p.to_string_lossy().into_owned(), vec![]));
+    let bun_global = directories::BaseDirs::new().map(|b| {
+        b.home_dir()
+            .join(".bun")
+            .join("install")
+            .join("global")
+            .join("node_modules")
+            .join("playwriter")
+            .join("bin.js")
+    });
+    if let Some(p) = &bun_global {
+        if p.exists() {
+            // bin.js is a JS entrypoint -- invoke it with a real JS runtime
+            // on PATH (node preferred, bun as fallback), never gm-runner's
+            // own (non-JS) executable.
+            let runtime = which("node").or_else(|| which("bun"));
+            if let Some(rt) = runtime {
+                return Some((rt.to_string_lossy().into_owned(), vec![p.to_string_lossy().into_owned()]));
+            }
+        }
     }
     if which("bun").is_some() {
         return Some(("bun".to_string(), vec!["x".to_string(), "playwriter@latest".to_string()]));
     }
     if which("npx").is_some() {
         return Some(("npx".to_string(), vec!["-y".to_string(), "playwriter".to_string()]));
+    }
+    // Raw `which("playwriter")` is the LAST resort, not the first -- it is
+    // the exact broken-cached-bin.js path when it resolves to a bun-cache
+    // copy rather than a real npm-global install.
+    if let Some(p) = which("playwriter") {
+        return Some((p.to_string_lossy().into_owned(), vec![]));
     }
     None
 }
