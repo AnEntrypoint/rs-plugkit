@@ -271,7 +271,31 @@ fn list_dir(path: &str) -> Vec<String> {
     }
 }
 
+fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
+    let path = if root.is_empty() || root == "/" || root == "." {
+        ".gitignore".to_string()
+    } else if root.ends_with('/') {
+        format!("{}.gitignore", root)
+    } else {
+        format!("{}/.gitignore", root)
+    };
+    let content = host_read(&path)?;
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    for line in content.lines() {
+        let _ = builder.add_line(None, line);
+    }
+    builder.build().ok()
+}
+
+fn gitignore_excludes(gi: &Option<ignore::gitignore::Gitignore>, rel_path: &str, is_dir: bool) -> bool {
+    match gi {
+        Some(g) => g.matched(rel_path, is_dir).is_ignore(),
+        None => false,
+    }
+}
+
 fn collect_files(root: &str, max_files: usize) -> Vec<String> {
+    let gi = load_repo_gitignore(root);
     let entries = list_dir(root);
     if entries.is_empty() { return Vec::new(); }
     let has_slashes = entries.iter().any(|e| e.contains('/'));
@@ -282,25 +306,28 @@ fn collect_files(root: &str, max_files: usize) -> Vec<String> {
                 let name = p.rsplit('/').next().unwrap_or(p.as_str());
                 !is_skipped_filename(name)
             })
+            .filter(|p| !gitignore_excludes(&gi, p, false))
             .take(max_files)
             .collect();
     }
     let mut files = Vec::new();
-    walk_posix(root, max_files, &mut files);
+    walk_posix(root, max_files, &mut files, &gi);
     files
 }
 
-fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>) {
+fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option<ignore::gitignore::Gitignore>) {
     if files.len() >= max_files { return; }
     if SKIP_DIRS.iter().any(|d| root.ends_with(d) || root.contains(&format!("/{}/", d))) { return; }
     for entry in list_dir(root) {
         if files.len() >= max_files { return; }
         if is_skipped_filename(&entry) { continue; }
         let next = if root.ends_with('/') { format!("{}{}", root, entry) } else { format!("{}/{}", root, entry) };
-        if entry.contains('.') {
+        let is_dir_entry = !entry.contains('.');
+        if gitignore_excludes(gi, &next, is_dir_entry) { continue; }
+        if !is_dir_entry {
             files.push(next);
         } else {
-            walk_posix(&next, max_files, files);
+            walk_posix(&next, max_files, files, gi);
         }
     }
 }

@@ -71,3 +71,6 @@ gemm = { version = "0.17", default-features = false }
 tokenizers = { version = "0.23", default-features = false, features = ["unstable_wasm"] }
 getrandom = { version = "0.2", features = ["custom"] }
 rs-search = { git = "https://github.com/AnEntrypoint/rs-search.git", package = "rs-search", default-features = false }
+
+[target.wasm32-wasip1.dependencies]
+ignore = "0.4.30"
