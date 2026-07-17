@@ -70,4 +70,4 @@ candle-transformers = { version = "0.8", default-features = false }
 gemm = { version = "0.17", default-features = false }
 tokenizers = { version = "0.23", default-features = false, features = ["unstable_wasm"] }
 getrandom = { version = "0.2", features = ["custom"] }
-rs-search = { path = "../rs-search", package = "rs-search", default-features = false }
+rs-search = { git = "https://github.com/AnEntrypoint/rs-search.git", package = "rs-search", default-features = false }
