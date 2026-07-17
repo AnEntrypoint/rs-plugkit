@@ -83,17 +83,19 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
-    # `needs: build` normally requires every matrix leg to finish -- a single
-    # unschedulable leg (e.g. the macos-13/x86_64 runner label stuck queued
-    # for hours on GitHub's side, a real observed outage) then blocks release
-    # forever even though 5/6 platform binaries built fine, and blocks
-    # gm-runner-bin from ever getting its first release. `always()` runs this
-    # job regardless of the build job's overall conclusion; the per-artifact
-    # `if-no-files-found: warn` change below (matched by the `|| true` glob
-    # tolerance here) means a missing single-platform artifact degrades to
-    # "release without that platform yet" instead of "no release at all."
-    if: always() && github.ref == 'refs/heads/main' && needs.build.result != 'cancelled'
+    # No `needs: build` -- GitHub Actions holds a job with `needs:` unscheduled
+    # until EVERY dependency reaches a terminal state, regardless of `if:
+    # always()` on the dependent job; `always()` only controls whether an
+    # already-scheduled job runs, not whether the scheduler will schedule it.
+    # A single stuck-queued (not failed, not cancelled -- genuinely queued with
+    # no runner assigned) matrix leg like macos-13 therefore blocks `needs.build`
+    # from ever resolving, hanging release indefinitely even with 5/6 platforms
+    # built and their artifacts already uploaded. Fix: this job runs on every
+    # push independent of build's state, with a bounded poll-and-wait for
+    # artifacts to appear (covers the common case where build finishes shortly
+    # before this job's own steps run) before falling back to "release
+    # whatever's available" -- never blocked on a leg that may never schedule.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -101,6 +103,22 @@ jobs:
       - name: Read version
         id: ver
         run: echo "version=$(grep '^version' crates/gm-runner/Cargo.toml | head -1 | sed 's/.*= *\"//;s/\"//')" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for as many build-matrix artifacts as show up within a bound
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          echo "polling for build-job artifacts (bounded, never blocks on a leg that never schedules)"
+          for i in $(seq 1 20); do
+            count=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" --jq '.total_count')
+            echo "poll $i: $count artifact(s) so far"
+            if [ "$count" -ge 6 ]; then
+              echo "all 6 platform artifacts present"
+              break
+            fi
+            sleep 30
+          done
 
       - uses: actions/download-artifact@v5
         continue-on-error: true
