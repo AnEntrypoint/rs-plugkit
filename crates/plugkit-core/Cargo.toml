@@ -47,18 +47,27 @@ tree-sitter-html = "0.23"
 tree-sitter-css = "0.25"
 tree-sitter-bash = "0.25"
 tree-sitter-md = "0.5"
-candle-core = { version = "0.11", default-features = false }
-candle-nn = { version = "0.11", default-features = false }
-candle-transformers = { version = "0.11", default-features = false }
+# REVERTED from 0.11 back to 0.8 (2026-07-17): candle-core 0.11.0 fails to
+# compile for wasm32-wasip1 with default-features=false -- a genuine
+# upstream bug (131x error[E0433] "cannot find type CurrentCpuF16/
+# CurrentCpuBF16 in this scope" in candle-core-0.11.0/src/cpu/mod.rs, a
+# cfg-gated SIMD dispatch type alias that isn't defined for this target,
+# confirmed via live CI: rs-plugkit Build workflow run 29571585368).
+# Reverting to the known-good 0.8 pin per this project's own
+# regression-first-revert-second discipline; a follow-up bump is tracked
+# separately once a safe target version is identified (research pending
+# on whether a later 0.11.x patch or an intermediate 0.9/0.10 fixes it).
+candle-core = { version = "0.8", default-features = false }
+candle-nn = { version = "0.8", default-features = false }
+candle-transformers = { version = "0.8", default-features = false }
 # Direct dependency purely to reach gemm::set_wasm_simd128() -- candle-core
-# 0.11 pins gemm 0.19.x transitively WITH features=["wasm-simd128-enable"]
-# already set in candle's own workspace (verified via upstream Cargo.toml),
-# meaning the runtime SIMD dispatch gate now defaults OPEN via Cargo feature
-# unification alone -- the explicit set_wasm_simd128(true) call in
-# embed.rs::init_ctx is kept as a belt-and-suspenders no-op-if-already-true
-# safeguard rather than removed, since it costs nothing and guards against a
-# future candle version reverting that default.
-gemm = { version = "0.19", default-features = false }
+# 0.8.x pulls gemm 0.17.x transitively (Cargo unifies the version, no
+# duplicate build) but does not itself call set_wasm_simd128(), so gemm's
+# runtime SIMD dispatch gate defaults closed on wasm32 regardless of the
+# -C target-feature=+simd128 rustflag -- this direct dependency plus the
+# set_wasm_simd128(true) call in embed.rs::init_ctx is the real fix (see
+# that file's comment for the full root-cause explanation).
+gemm = { version = "0.17", default-features = false }
 tokenizers = { version = "0.23", default-features = false, features = ["unstable_wasm"] }
 getrandom = { version = "0.2", features = ["custom"] }
 rs-search = { path = "../rs-search", package = "rs-search", default-features = false }
