@@ -547,13 +547,44 @@ pub fn index(root: &str, max_files: usize) -> Value {
             chunks.push(("document".to_string(), String::new(), 1, line_end, whole));
         }
 
+        // A single file's chunk set can itself blow past the wall budget --
+        // the outer per-file elapsed() check only fires BETWEEN files, so a
+        // pathological file (many/long chunks, slow unaccelerated wasm32
+        // BERT inference) previously ran to completion regardless of how
+        // long it took, live-witnessed this session as a single dispatch
+        // taking 328s against a 45s intended budget. Cap embedding to
+        // MAX_CHUNKS_PER_FILE_PER_PASS chunks per file per pass; any file
+        // whose chunk count exceeds that gets its embedding work (and thus
+        // its manifest write) deferred entirely to the next pass, same
+        // treatment as a deferred file -- never marked `seen`, so it's
+        // retried fresh rather than left in a partially-indexed state.
+        const MAX_CHUNKS_PER_FILE_PER_PASS: usize = 64;
+        if chunks.len() > MAX_CHUNKS_PER_FILE_PER_PASS {
+            deferred_files += 1;
+            seen.remove(fp);
+            let msg = format!("code_index: deferring {} chunks={} (exceeds {}-chunk per-pass cap)", fp, chunks.len(), MAX_CHUNKS_PER_FILE_PER_PASS);
+            let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+            continue;
+        }
+
         // Batch every chunk's embed input for this file into one
         // embed_texts_batch call (one candle model.forward over the whole
         // batch dimension) instead of one forward pass per chunk.
         let embed_inputs: Vec<String> = chunks.iter()
             .map(|(_, name, _, _, body)| format!("{} {}", name, truncate_body(body)))
             .collect();
+        let embed_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let embed_results = embed_texts_batch(&embed_inputs);
+        let embed_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(embed_started);
+        if embed_ms > 3000 {
+            let msg = format!("code_index: SLOW embed_texts_batch fp={} chunks={} embed_ms={}", fp, embed_inputs.len(), embed_ms);
+            let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+            crate::wasm_dispatch::emit_event("code_index_slow_file_embed", json!({
+                "path": fp,
+                "chunks": embed_inputs.len(),
+                "embed_ms": embed_ms,
+            }));
+        }
 
         let mut records: Vec<ChunkRecord> = Vec::new();
         for (idx, ((kind, name, ls, le, body), emb_opt)) in chunks.into_iter().zip(embed_results.into_iter()).enumerate() {
