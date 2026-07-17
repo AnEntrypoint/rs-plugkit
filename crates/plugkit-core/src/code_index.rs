@@ -181,6 +181,9 @@ const SKIP_DIRS: &[&str] = &[
     // Caches / AI-agent tool state
     ".llamaindex", ".chroma", ".vectorstore", ".embeddings", ".langchain",
     "embeddings", "vector-db", "faiss-index", "chromadb",
+    ".claude", ".wfgy", ".kilo", ".agents", ".code-search",
+    ".plugkit-browser-profile-default", ".plugkit-agent-worktree",
+    ".test-chrome-profile",
     // Editors / IDEs
     ".vscode", ".idea", ".vs", ".sublime-text", ".cursor", ".windsurf",
     ".zed", ".helix",
@@ -188,7 +191,12 @@ const SKIP_DIRS: &[&str] = &[
     "coverage", ".nyc_output", "test-results", "playwright-report",
     ".plugkit-browser-profile",
     // Build/doc output that mirrors source, not source itself
-    "_site", "public", "static",
+    "_site", "public", "static", "site", "output", "builds", "artifacts",
+    "compiled", "generated", "gen",
+    // Mobile
+    "Carthage", "fastlane",
+    // ML experiment tracking
+    "mlruns", "wandb",
     // User-home tool caches (relevant when a repo root sits under $HOME)
     ".cargo", ".rustup", ".rbenv", ".rvm", ".nvm", ".pyenv", ".conda",
     ".m2", ".sbt", ".ivy2", ".gem",
@@ -202,7 +210,36 @@ const SKIP_FILE_SUFFIXES: &[&str] = &[
     ".min.js", ".min.css", ".bundle.js", ".chunk.js", ".map",
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
     "bun.lock", "Cargo.lock", "composer.lock", "Gemfile.lock", "poetry.lock",
-    "Pipfile.lock", "go.sum",
+    "Pipfile.lock", "go.sum", "uv.lock",
+    // AI-agent-tool generated state files (not source)
+    ".codeinsight", ".codeinsight.digest", ".perf-baseline.json",
+    ".rs-exec.lock",
+    // 3D models / game-engine assets (binary, not source)
+    ".glb", ".gltf", ".vrm", ".fbx", ".blend", ".blend1", ".usdz", ".hf",
+    ".uasset", ".umap",
+    // Compiled binaries
+    ".wasm", ".exe", ".dll", ".dylib", ".so", ".o", ".obj", ".a", ".lib",
+    ".pdb", ".class", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa",
+    ".hex", ".elf", ".uf2", ".dfu",
+    // Images / media / fonts / archives / office docs (binary, not source)
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp", ".tiff",
+    ".pdf", ".mov", ".mp4", ".avi", ".flv", ".mkv", ".webm", ".mp3",
+    ".m4a", ".wav", ".flac", ".ogg", ".woff", ".woff2", ".ttf", ".otf",
+    ".eot", ".zip", ".tar", ".tar.gz", ".tgz", ".rar", ".7z", ".iso",
+    ".bz2", ".xz", ".lz4", ".zst", ".cab", ".deb", ".rpm", ".dmg", ".msi",
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    // Design tool binaries
+    ".psd", ".ai", ".sketch", ".aep",
+    // Data science / ML
+    ".pkl", ".pickle", ".h5", ".hdf5", ".parquet", ".npy", ".npz",
+    ".safetensors", ".ckpt", ".pt", ".pth", ".onnx", ".gguf",
+    // Crash/debug dumps
+    ".stackdump", ".dmp", ".core",
+    // Secrets / certificates (leak-prevention, independent of relevance)
+    ".key", ".pem", ".p12", ".pfx", ".p8", ".crt", ".cer", ".der",
+    "credentials.json", "secrets.yaml", "secrets.yml",
+    // Database
+    ".db", ".sqlite", ".sqlite3",
 ];
 
 fn is_skipped_filename(name: &str) -> bool {
@@ -304,6 +341,15 @@ fn gitignore_excludes(gi: &Option<ignore::gitignore::Gitignore>, rel_path: &str,
     }
 }
 
+// Any path segment starting with "." is tool/editor/VCS/CI/agent-tooling
+// metadata by convention, never indexable source -- unconditional, same rule
+// as gitoutput's blanket ".*" default. Applied alongside the named SKIP_DIRS
+// list (which stays, since it also matches non-dot-prefixed junk dirs like
+// "node_modules"/"build"/"vendor").
+fn is_hidden_segment(seg: &str) -> bool {
+    seg.starts_with('.') && seg != "." && seg != ".."
+}
+
 fn collect_files(root: &str, max_files: usize) -> Vec<String> {
     let gi = load_repo_gitignore(root);
     let entries = list_dir(root);
@@ -311,6 +357,7 @@ fn collect_files(root: &str, max_files: usize) -> Vec<String> {
     let has_slashes = entries.iter().any(|e| e.contains('/'));
     if has_slashes {
         return entries.into_iter()
+            .filter(|p| !p.split('/').any(is_hidden_segment))
             .filter(|p| !SKIP_DIRS.iter().any(|d| p.split('/').any(|seg| seg == *d)))
             .filter(|p| {
                 let name = p.rsplit('/').next().unwrap_or(p.as_str());
@@ -330,6 +377,7 @@ fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option
     if SKIP_DIRS.iter().any(|d| root.ends_with(d) || root.contains(&format!("/{}/", d))) { return; }
     for entry in list_dir(root) {
         if files.len() >= max_files { return; }
+        if is_hidden_segment(&entry) { continue; }
         if is_skipped_filename(&entry) { continue; }
         let next = if root.ends_with('/') { format!("{}{}", root, entry) } else { format!("{}/{}", root, entry) };
         let is_dir_entry = !entry.contains('.');
