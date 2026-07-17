@@ -331,7 +331,7 @@ fn extract_chunks(_path: &str, source: &str, lang: Language) -> Vec<(String, Str
                 continue;
             }
         }
-        for i in 0..node.child_count() {
+        for i in 0..node.child_count() as u32 {
             if let Some(c) = node.child(i) { stack.push(c); }
         }
     }
