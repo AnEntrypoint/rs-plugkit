@@ -271,18 +271,25 @@ fn list_dir(path: &str) -> Vec<String> {
     }
 }
 
-fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
-    let path = if root.is_empty() || root == "/" || root == "." {
-        ".gitignore".to_string()
+fn ignore_file_path(root: &str, filename: &str) -> String {
+    if root.is_empty() || root == "/" || root == "." {
+        filename.to_string()
     } else if root.ends_with('/') {
-        format!("{}.gitignore", root)
+        format!("{}{}", root, filename)
     } else {
-        format!("{}/.gitignore", root)
-    };
-    let content = host_read(&path)?;
+        format!("{}/{}", root, filename)
+    }
+}
+
+fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
+    let gitignore_content = host_read(&ignore_file_path(root, ".gitignore"));
+    let custom_content = host_read(&ignore_file_path(root, ".codesearchignore"));
+    if gitignore_content.is_none() && custom_content.is_none() { return None; }
     let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
-    for line in content.lines() {
-        let _ = builder.add_line(None, line);
+    for content in [gitignore_content, custom_content].into_iter().flatten() {
+        for line in content.lines() {
+            let _ = builder.add_line(None, line);
+        }
     }
     builder.build().ok()
 }
