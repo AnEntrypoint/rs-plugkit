@@ -233,6 +233,7 @@ fn write_status(status_path: &Path) -> anyhow::Result<()> {
         "pid": std::process::id(),
         "ts": now_ms(),
         "runtime": "gm-runner-native",
+        "abi_version": 1,
     });
     fs::write(status_path, status.to_string())?;
     Ok(())
