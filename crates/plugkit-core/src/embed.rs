@@ -136,6 +136,22 @@ fn init_ctx() -> Result<EmbedCtx, String> {
             "reason": "host_vec_embed probe failed; loading wasm-side bert model",
         }));
 
+        // gemm's wasm32 SIMD dispatch (gemm_common::get_wasm_simd128()) is
+        // gated by a runtime AtomicBool that defaults FALSE regardless of
+        // whether this binary was compiled with -C target-feature=+simd128
+        // -- the compile flag only makes the simd128 microkernels buildable,
+        // it does not select them at runtime. Without this call every
+        // matmul in candle's BertModel::forward silently falls back to
+        // gemm's scalar path, live-witnessed this session as a ~10-14
+        // second single-chunk embed floor (consistent with the FLOP cost of
+        // scalar BERT-small matmul at realistic wasm32 throughput). Safe to
+        // force-enable unconditionally here: every real host that loads
+        // this wasm module (gm-plugkit's JS wrapper via bun/Node's
+        // WebAssembly.Instance, or gm-runner via wasmtime with simd
+        // support) runs on a wasm engine with simd128 support, which has
+        // been a baseline feature of both V8 and wasmtime since ~2021.
+        gemm::set_wasm_simd128(true);
+
         let tokenizer = Tokenizer::from_bytes(TOKENIZER_JSON)
             .map_err(|e| format!("tokenizer load: {}", e))?;
 
@@ -277,7 +293,9 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
         }
     };
 
+    let t0 = now_ms();
     let enc = step!("tokenizer.encode", tokenizer.encode(text, true));
+    let t_tokenize = now_ms();
     let mut ids: Vec<u32> = enc.get_ids().to_vec();
     let mut mask: Vec<u32> = enc.get_attention_mask().to_vec();
     if ids.len() > MAX_TOKENS {
@@ -293,8 +311,26 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
     let ids_t = step!("Tensor::from_vec(ids)", Tensor::from_vec(ids.clone(), (1, seq_len), &c.device));
     let mask_t = step!("Tensor::from_vec(mask)", Tensor::from_vec(mask.clone(), (1, seq_len), &c.device));
     let token_type_ids = step!("Tensor::zeros(token_type_ids)", Tensor::zeros((1, seq_len), DType::U32, &c.device));
+    let t_tensor_build = now_ms();
 
     let hidden_raw = step!("model.forward", model.forward(&ids_t, &token_type_ids, Some(&mask_t)));
+    let t_forward = now_ms();
+    let total_ms = t_forward - t0;
+    if total_ms > 1000 {
+        let msg = format!(
+            "embed::embed_text_uncached SLOW total={}ms tokenize={}ms tensor_build={}ms forward={}ms seq_len={} text_len={}",
+            total_ms, t_tokenize - t0, t_tensor_build - t_tokenize, t_forward - t_tensor_build, seq_len, text.len()
+        );
+        elog(&msg);
+        crate::wasm_dispatch::emit_event("embed_text_step_timing", serde_json::json!({
+            "total_ms": total_ms,
+            "tokenize_ms": t_tokenize - t0,
+            "tensor_build_ms": t_tensor_build - t_tokenize,
+            "forward_ms": t_forward - t_tensor_build,
+            "seq_len": seq_len,
+            "text_len": text.len(),
+        }));
+    }
     drop(ids_t);
     drop(token_type_ids);
     let hidden = step!("hidden.to_dtype(F32)", hidden_raw.to_dtype(DType::F32));

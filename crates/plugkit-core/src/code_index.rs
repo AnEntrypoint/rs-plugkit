@@ -141,11 +141,70 @@ const CHUNK_NODE_TYPES: &[&str] = &[
     "section",
 ];
 
+// Directory-name ignore list -- checked by exact path-segment match, applied
+// BEFORE descending (walk_posix) or BEFORE the flat-list filter
+// (collect_files), so an ignored directory's contents are never even listed
+// via host_fs_readdir, not merely filtered out after the fact. Modeled on
+// mcp-thorns' .thornsignore breadth (c:\dev\mcp-thorns) -- every major
+// language/framework/tool/IDE/cache ecosystem gets its build-artifact and
+// dependency directories skipped, since a codesearch index has zero value
+// from indexing vendored/generated/cached content and every directory
+// skipped here is a host_fs_readdir call (and everything under it) never
+// made.
 const SKIP_DIRS: &[&str] = &[
-    "node_modules", ".git", "target", "dist", "build", ".cache",
-    ".next", ".nuxt", ".turbo", "coverage", "vendor", ".plugkit-browser-profile",
-    ".gm",
+    // VCS
+    ".git", ".svn", ".hg", ".bzr", "CVS", ".gm",
+    // Node / JS / TS
+    "node_modules", ".npm", ".yarn", ".pnp", ".next", ".nuxt", "dist", "out",
+    "build", ".cache", ".parcel-cache", ".vite", ".turbo", ".nx", ".rush",
+    ".lerna", ".pnpm-store", ".docusaurus", ".vuepress",
+    // Python
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".hypothesis", ".pyre",
+    ".pytype", "env", "venv", "ENV", ".venv", ".tox", "htmlcov", "site-packages",
+    // Rust
+    "target",
+    // Go
+    "vendor",
+    // Java / JVM
+    ".gradle", ".mvn", "bin", "obj",
+    // Ruby
+    ".bundle",
+    // Swift / Xcode
+    "Pods", "DerivedData",
+    // Cloud / infra
+    ".terraform", ".serverless",
+    // Docker
+    ".docker",
+    // Caches / AI-agent tool state
+    ".llamaindex", ".chroma", ".vectorstore", ".embeddings", ".langchain",
+    "embeddings", "vector-db", "faiss-index", "chromadb",
+    // Editors / IDEs
+    ".vscode", ".idea", ".vs", ".sublime-text", ".cursor", ".windsurf",
+    ".zed", ".helix",
+    // Test artifacts
+    "coverage", ".nyc_output", "test-results", "playwright-report",
+    ".plugkit-browser-profile",
+    // Build/doc output that mirrors source, not source itself
+    "_site", "public", "static",
+    // User-home tool caches (relevant when a repo root sits under $HOME)
+    ".cargo", ".rustup", ".rbenv", ".rvm", ".nvm", ".pyenv", ".conda",
+    ".m2", ".sbt", ".ivy2", ".gem",
 ];
+
+// Filename SUFFIX ignore list -- files whose name ends with one of these are
+// skipped regardless of directory, checked before host_read (the expensive
+// step) ever fires. Lock files and minified/generated bundles carry zero
+// codesearch value and are often large enough to meaningfully slow a walk.
+const SKIP_FILE_SUFFIXES: &[&str] = &[
+    ".min.js", ".min.css", ".bundle.js", ".chunk.js", ".map",
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
+    "bun.lock", "Cargo.lock", "composer.lock", "Gemfile.lock", "poetry.lock",
+    "Pipfile.lock", "go.sum",
+];
+
+fn is_skipped_filename(name: &str) -> bool {
+    SKIP_FILE_SUFFIXES.iter().any(|suf| name.ends_with(suf))
+}
 
 const GM_DB: &str = crate::shared_db::SHARED_DB;
 
@@ -219,6 +278,10 @@ fn collect_files(root: &str, max_files: usize) -> Vec<String> {
     if has_slashes {
         return entries.into_iter()
             .filter(|p| !SKIP_DIRS.iter().any(|d| p.split('/').any(|seg| seg == *d)))
+            .filter(|p| {
+                let name = p.rsplit('/').next().unwrap_or(p.as_str());
+                !is_skipped_filename(name)
+            })
             .take(max_files)
             .collect();
     }
@@ -232,6 +295,7 @@ fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>) {
     if SKIP_DIRS.iter().any(|d| root.ends_with(d) || root.contains(&format!("/{}/", d))) { return; }
     for entry in list_dir(root) {
         if files.len() >= max_files { return; }
+        if is_skipped_filename(&entry) { continue; }
         let next = if root.ends_with('/') { format!("{}{}", root, entry) } else { format!("{}/{}", root, entry) };
         if entry.contains('.') {
             files.push(next);
@@ -302,7 +366,11 @@ fn sql_quote(s: &str) -> String {
 }
 
 const MANIFEST_NS: &str = "codeinsight-manifest";
-const MANIFEST_VERSION: u64 = 3;
+// v4 adds mtime_ms, enabling a stat-only skip before any content read/hash
+// for the common unchanged-file case -- old v3 manifests fail the version
+// check below and are purged (one-time re-index of the whole repo, same
+// cost as any other manifest-schema migration this codebase already does).
+const MANIFEST_VERSION: u64 = 4;
 
 #[derive(Clone)]
 struct ChunkRecord {
@@ -316,10 +384,11 @@ struct ChunkRecord {
 
 struct FileManifest {
     hash: u32,
+    mtime_ms: f64,
     chunks: Vec<ChunkRecord>,
 }
 
-fn manifest_to_json(fp: &str, hash: u32, chunks: &[ChunkRecord]) -> String {
+fn manifest_to_json(fp: &str, hash: u32, mtime_ms: f64, chunks: &[ChunkRecord]) -> String {
     let arr: Vec<Value> = chunks.iter().map(|c| json!({
         "key": c.key,
         "kind": c.kind,
@@ -328,7 +397,7 @@ fn manifest_to_json(fp: &str, hash: u32, chunks: &[ChunkRecord]) -> String {
         "le": c.le,
         "emb": c.emb,
     })).collect();
-    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "chunks": arr }).to_string()
+    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "mtime_ms": mtime_ms, "chunks": arr }).to_string()
 }
 
 fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
@@ -336,6 +405,7 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     if parsed.get("v").and_then(|v| v.as_u64()) != Some(MANIFEST_VERSION) { return None; }
     let fp = parsed.get("path").and_then(|p| p.as_str())?.to_string();
     let hash = parsed.get("hash").and_then(|h| h.as_u64())? as u32;
+    let mtime_ms = parsed.get("mtime_ms").and_then(|m| m.as_f64()).unwrap_or(0.0);
     let arr = parsed.get("chunks").and_then(|c| c.as_array())?;
     let mut chunks = Vec::with_capacity(arr.len());
     for c in arr {
@@ -347,7 +417,7 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
         let emb = json_to_f32_vec(c.get("emb")?)?;
         chunks.push(ChunkRecord { key, kind, name, ls, le, emb });
     }
-    Some((fp, FileManifest { hash, chunks }))
+    Some((fp, FileManifest { hash, mtime_ms, chunks }))
 }
 
 fn purge_stale_manifest_row(row_key: &str, val: &str) {
@@ -500,11 +570,47 @@ pub fn index(root: &str, max_files: usize) -> Value {
         let dot = fp.rfind('.');
         let ext = match dot { Some(i) => &fp[i..], None => "" };
         let (lang_name, lang) = match lang_for_ext(ext) { Some(x) => x, None => continue };
+
+        // Stat-only fast path: if this file's mtime exactly matches the
+        // prior manifest's recorded mtime AND the DB still has the expected
+        // chunk-row count, skip host_read + crc32 entirely -- the single
+        // biggest remaining per-file cost for the common "nothing changed"
+        // case, since a full content read was previously unconditional on
+        // every pass regardless of whether the file had touched since the
+        // last index. Falls through to the normal read+hash path (which
+        // itself still short-circuits on hash match) for any file with no
+        // stat, no prior manifest, or a changed mtime -- never silently
+        // skips a genuinely-changed file, since mtime is a strict
+        // prerequisite check, not a substitute for the hash comparison.
+        if let Some(m) = prior.get(fp) {
+            if let Some(stat) = crate::wasm_dispatch::host_stat(fp)
+                .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
+            {
+                let stat_mtime = stat.get("mtime_ms").and_then(|v| v.as_f64());
+                if let Some(mtime) = stat_mtime {
+                    if mtime == m.mtime_ms && libsql_ok && chunk_rows_for_path(fp) == m.chunks.len() {
+                        seen.insert(fp.clone());
+                        indexed += 1;
+                        *langs.entry(lang_name.to_string()).or_insert(0) += 1;
+                        chunked += m.chunks.len() as i32;
+                        reused += m.chunks.len() as i32;
+                        reused_files += 1;
+                        digest_entries.push((fp.clone(), m.hash));
+                        continue;
+                    }
+                }
+            }
+        }
+
         let content = match host_read(fp)
             .or_else(|| host_read(raw_fp))
             .or_else(|| host_read(&format!("/{}", fp)))
         { Some(c) => c, None => continue };
         if content.len() > 256 * 1024 { continue; }
+        let file_mtime = crate::wasm_dispatch::host_stat(fp)
+            .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
+            .and_then(|s| s.get("mtime_ms").and_then(|v| v.as_f64()))
+            .unwrap_or(0.0);
         seen.insert(fp.clone());
         indexed += 1;
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
@@ -604,7 +710,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
             write_chunk(libsql_ok, stmt.as_ref(), fp, &rec, &body);
             records.push(rec);
         }
-        fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, &records));
+        fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, file_mtime, &records));
     }
 
     if txn_active {

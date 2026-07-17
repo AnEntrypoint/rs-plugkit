@@ -25,24 +25,40 @@ serde_yaml = "0.9"
 serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-libsql-ffi = { version = "=0.9.0", default-features = false, features = ["wasm32-wasi-vfs"] }
-tree-sitter = "0.24"
-tree-sitter-javascript = "0.23"
+# Bumped from the original =0.9.0 exact pin to =0.9.30: researched the full
+# 0.9.0-0.9.30 commit range (SQLite3MultipleCiphers bundling, cross-compile
+# build-script fixes, pager perf) -- nothing touches wasm32/WASI/wasm32-wasi-vfs
+# anywhere in that range. The =0.9.0 pin traces to a Windows-only build
+# regression in 0.9.1 (fixed by 0.9.2), not a wasm-specific concern; kept as
+# an exact pin (not a range) as the same defensive posture, just updated to
+# the current known-good tag.
+libsql-ffi = { version = "=0.9.30", default-features = false, features = ["wasm32-wasi-vfs"] }
+tree-sitter = "0.26"
+tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23"
-tree-sitter-python = "0.23"
-tree-sitter-rust = "0.23"
-tree-sitter-go = "0.23"
-tree-sitter-c = "0.23"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-go = "0.25"
+tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
 tree-sitter-java = "0.23"
-tree-sitter-json = "0.23"
+tree-sitter-json = "0.24"
 tree-sitter-html = "0.23"
 tree-sitter-css = "0.25"
 tree-sitter-bash = "0.25"
 tree-sitter-md = "0.5"
-candle-core = { version = "0.8", default-features = false }
-candle-nn = { version = "0.8", default-features = false }
-candle-transformers = { version = "0.8", default-features = false }
-tokenizers = { version = "0.20", default-features = false, features = ["unstable_wasm"] }
+candle-core = { version = "0.11", default-features = false }
+candle-nn = { version = "0.11", default-features = false }
+candle-transformers = { version = "0.11", default-features = false }
+# Direct dependency purely to reach gemm::set_wasm_simd128() -- candle-core
+# 0.11 pins gemm 0.19.x transitively WITH features=["wasm-simd128-enable"]
+# already set in candle's own workspace (verified via upstream Cargo.toml),
+# meaning the runtime SIMD dispatch gate now defaults OPEN via Cargo feature
+# unification alone -- the explicit set_wasm_simd128(true) call in
+# embed.rs::init_ctx is kept as a belt-and-suspenders no-op-if-already-true
+# safeguard rather than removed, since it costs nothing and guards against a
+# future candle version reverting that default.
+gemm = { version = "0.19", default-features = false }
+tokenizers = { version = "0.23", default-features = false, features = ["unstable_wasm"] }
 getrandom = { version = "0.2", features = ["custom"] }
 rs-search = { path = "../rs-search", package = "rs-search", default-features = false }
