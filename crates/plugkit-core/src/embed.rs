@@ -151,6 +151,19 @@ fn init_ctx() -> Result<EmbedCtx, String> {
         // support) runs on a wasm engine with simd128 support, which has
         // been a baseline feature of both V8 and wasmtime since ~2021.
         gemm::set_wasm_simd128(true);
+        // Diagnostic: prove the write actually took effect in THIS runtime,
+        // rather than assuming from the fact that the call compiled and
+        // didn't panic -- live-witnessed this session that setting the flag
+        // did not produce the expected embed-speed improvement (still
+        // ~10-27s/chunk post-fix, same order of magnitude as pre-fix), so
+        // the next elimination step is confirming whether the flag itself
+        // reads back true (ruling out a silently-no-op call) before
+        // investigating further upstream (whether gemm's own simd128
+        // microkernel path is reachable at all on this exact wasm engine).
+        crate::wasm_dispatch::emit_event("gemm_simd128_flag_check", serde_json::json!({
+            "set_to": true,
+            "read_back": gemm::get_wasm_simd128(),
+        }));
 
         let tokenizer = Tokenizer::from_bytes(TOKENIZER_JSON)
             .map_err(|e| format!("tokenizer load: {}", e))?;
