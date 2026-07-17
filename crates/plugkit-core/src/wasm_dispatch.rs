@@ -1199,7 +1199,9 @@ fn git_push(body: &Value) -> u64 {
 fn git_add(body: &Value) -> u64 {
     let repo = body.get("repo").and_then(|v| v.as_str());
     let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
-    let paths: Vec<String> = body.get("paths").and_then(|v| v.as_array())
+    let paths: Vec<String> = body.get("paths")
+        .or_else(|| body.get("files"))
+        .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
     let mut argv: Vec<&str> = vec!["add"];
