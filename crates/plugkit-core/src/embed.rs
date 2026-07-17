@@ -413,81 +413,112 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
 
     let mut per_item_ids: Vec<Vec<u32>> = Vec::with_capacity(encodings.len());
     let mut per_item_mask: Vec<Vec<u32>> = Vec::with_capacity(encodings.len());
-    let mut max_len = 1usize;
     for enc in &encodings {
         let mut ids = enc.get_ids().to_vec();
         let mut mask = enc.get_attention_mask().to_vec();
         if ids.len() > MAX_TOKENS { ids.truncate(MAX_TOKENS); mask.truncate(MAX_TOKENS); }
-        max_len = max_len.max(ids.len().max(1));
         per_item_ids.push(ids);
         per_item_mask.push(mask);
     }
 
-    let batch_n = per_item_ids.len();
-    let mut ids_flat: Vec<u32> = Vec::with_capacity(batch_n * max_len);
-    let mut mask_flat: Vec<u32> = Vec::with_capacity(batch_n * max_len);
-    for i in 0..batch_n {
-        let ids = &per_item_ids[i];
-        let mask = &per_item_mask[i];
-        let len = ids.len();
-        ids_flat.extend_from_slice(ids);
-        ids_flat.extend(std::iter::repeat(0u32).take(max_len - len));
-        mask_flat.extend_from_slice(mask);
-        mask_flat.extend(std::iter::repeat(0u32).take(max_len - len));
-    }
+    // BERT's attention matrix is O(batch_n * heads * max_len^2) per layer --
+    // padding every item in an unbounded-size batch to the batch's own
+    // longest sequence caused a real OOM crash live-witnessed this session
+    // (a ~1.8GB single allocation) once batch_n and max_len were both large
+    // at once. Cap sub-batches by BOTH item count and total padded elements
+    // (batch_n * max_len) so no single model.forward call can allocate past
+    // a bounded ceiling, regardless of how many/how long a file's chunks are.
+    const MAX_SUBBATCH_ITEMS: usize = 32;
+    const MAX_SUBBATCH_PADDED_ELEMENTS: usize = 32 * 512; // items * max_len budget
 
-    let build = || -> Result<Vec<Option<Vec<f32>>>, String> {
-        let ids_t = Tensor::from_vec(ids_flat.clone(), (batch_n, max_len), &c.device)
-            .map_err(|e| format!("Tensor::from_vec(ids) batch: {}", e))?;
-        let mask_t = Tensor::from_vec(mask_flat.clone(), (batch_n, max_len), &c.device)
-            .map_err(|e| format!("Tensor::from_vec(mask) batch: {}", e))?;
-        let token_type_ids = Tensor::zeros((batch_n, max_len), DType::U32, &c.device)
-            .map_err(|e| format!("Tensor::zeros(token_type_ids) batch: {}", e))?;
-
-        let hidden_raw = model.forward(&ids_t, &token_type_ids, Some(&mask_t))
-            .map_err(|e| format!("model.forward batch: {}", e))?;
-        let hidden = hidden_raw.to_dtype(DType::F32).map_err(|e| format!("hidden.to_dtype batch: {}", e))?;
-        let mask_f = mask_t.to_dtype(DType::F32).map_err(|e| format!("mask.to_dtype batch: {}", e))?;
-        let mask_e = mask_f.unsqueeze(2).map_err(|e| format!("mask.unsqueeze batch: {}", e))?;
-        let masked = hidden.broadcast_mul(&mask_e).map_err(|e| format!("broadcast_mul batch: {}", e))?;
-        let sum = masked.sum(1).map_err(|e| format!("masked.sum batch: {}", e))?;
-        let denom_s = mask_f.sum(1).map_err(|e| format!("mask.sum batch: {}", e))?;
-        let denom = denom_s.unsqueeze(1).map_err(|e| format!("denom.unsqueeze batch: {}", e))?;
-        let pooled = sum.broadcast_div(&denom).map_err(|e| format!("broadcast_div batch: {}", e))?;
-
-        let mut results = Vec::with_capacity(batch_n);
-        for row in 0..batch_n {
-            let row_t = pooled.get(row).map_err(|e| format!("pooled.get({}): {}", row, e))?;
-            let flat: Vec<f32> = row_t.to_vec1().map_err(|e| format!("row.to_vec1({}): {}", row, e))?;
-            if flat.len() != EMBED_DIM {
-                results.push(None);
-                continue;
+    let n = per_item_ids.len();
+    let mut start = 0usize;
+    while start < n {
+        let mut end = start;
+        let mut sub_max_len = 1usize;
+        while end < n && (end - start) < MAX_SUBBATCH_ITEMS {
+            let candidate_max_len = sub_max_len.max(per_item_ids[end].len().max(1));
+            let candidate_items = end - start + 1;
+            if candidate_items * candidate_max_len > MAX_SUBBATCH_PADDED_ELEMENTS && candidate_items > 1 {
+                break;
             }
-            let mut v = flat;
-            l2_normalize(&mut v);
-            results.push(Some(v));
+            sub_max_len = candidate_max_len;
+            end += 1;
         }
-        Ok(results)
-    };
+        if end == start { end = start + 1; sub_max_len = sub_max_len.max(per_item_ids[start].len().max(1)); }
 
-    match build() {
-        Ok(results) => {
-            for (j, &i) in still_uncached.iter().enumerate() {
-                if let Some(v) = &results[j] {
-                    let cacheable = texts[i].len() <= PLAIN_CACHE_MAX_TEXT;
-                    if cacheable { cache_put(&PLAIN_CACHE, &texts[i], v); }
+        let sub_ids = &per_item_ids[start..end];
+        let sub_mask = &per_item_mask[start..end];
+        let batch_n = sub_ids.len();
+        let max_len = sub_max_len;
+
+        let mut ids_flat: Vec<u32> = Vec::with_capacity(batch_n * max_len);
+        let mut mask_flat: Vec<u32> = Vec::with_capacity(batch_n * max_len);
+        for i in 0..batch_n {
+            let ids = &sub_ids[i];
+            let mask = &sub_mask[i];
+            let len = ids.len();
+            ids_flat.extend_from_slice(ids);
+            ids_flat.extend(std::iter::repeat(0u32).take(max_len - len));
+            mask_flat.extend_from_slice(mask);
+            mask_flat.extend(std::iter::repeat(0u32).take(max_len - len));
+        }
+
+        let build = || -> Result<Vec<Option<Vec<f32>>>, String> {
+            let ids_t = Tensor::from_vec(ids_flat.clone(), (batch_n, max_len), &c.device)
+                .map_err(|e| format!("Tensor::from_vec(ids) batch: {}", e))?;
+            let mask_t = Tensor::from_vec(mask_flat.clone(), (batch_n, max_len), &c.device)
+                .map_err(|e| format!("Tensor::from_vec(mask) batch: {}", e))?;
+            let token_type_ids = Tensor::zeros((batch_n, max_len), DType::U32, &c.device)
+                .map_err(|e| format!("Tensor::zeros(token_type_ids) batch: {}", e))?;
+
+            let hidden_raw = model.forward(&ids_t, &token_type_ids, Some(&mask_t))
+                .map_err(|e| format!("model.forward batch: {}", e))?;
+            let hidden = hidden_raw.to_dtype(DType::F32).map_err(|e| format!("hidden.to_dtype batch: {}", e))?;
+            let mask_f = mask_t.to_dtype(DType::F32).map_err(|e| format!("mask.to_dtype batch: {}", e))?;
+            let mask_e = mask_f.unsqueeze(2).map_err(|e| format!("mask.unsqueeze batch: {}", e))?;
+            let masked = hidden.broadcast_mul(&mask_e).map_err(|e| format!("broadcast_mul batch: {}", e))?;
+            let sum = masked.sum(1).map_err(|e| format!("masked.sum batch: {}", e))?;
+            let denom_s = mask_f.sum(1).map_err(|e| format!("mask.sum batch: {}", e))?;
+            let denom = denom_s.unsqueeze(1).map_err(|e| format!("denom.unsqueeze batch: {}", e))?;
+            let pooled = sum.broadcast_div(&denom).map_err(|e| format!("broadcast_div batch: {}", e))?;
+
+            let mut results = Vec::with_capacity(batch_n);
+            for row in 0..batch_n {
+                let row_t = pooled.get(row).map_err(|e| format!("pooled.get({}): {}", row, e))?;
+                let flat: Vec<f32> = row_t.to_vec1().map_err(|e| format!("row.to_vec1({}): {}", row, e))?;
+                if flat.len() != EMBED_DIM {
+                    results.push(None);
+                    continue;
                 }
-                out[i] = results[j].clone();
+                let mut v = flat;
+                l2_normalize(&mut v);
+                results.push(Some(v));
+            }
+            Ok(results)
+        };
+
+        let sub_uncached = &still_uncached[start..end];
+        match build() {
+            Ok(results) => {
+                for (j, &i) in sub_uncached.iter().enumerate() {
+                    if let Some(v) = &results[j] {
+                        let cacheable = texts[i].len() <= PLAIN_CACHE_MAX_TEXT;
+                        if cacheable { cache_put(&PLAIN_CACHE, &texts[i], v); }
+                    }
+                    out[i] = results[j].clone();
+                }
+            }
+            Err(e) => {
+                elog(&format!("embed::embed_texts_batch sub-batch failed: {}; falling back per-item for this sub-batch", e));
+                crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
+                    "step": "embed_texts_batch",
+                    "error": e,
+                }));
+                for &i in sub_uncached { out[i] = embed_text(&texts[i]); }
             }
         }
-        Err(e) => {
-            elog(&format!("embed::embed_texts_batch failed: {}; falling back per-item", e));
-            crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
-                "step": "embed_texts_batch",
-                "error": e,
-            }));
-            for &i in &still_uncached { out[i] = embed_text(&texts[i]); }
-        }
+        start = end;
     }
     Some(out)
 }
