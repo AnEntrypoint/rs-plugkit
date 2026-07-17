@@ -329,6 +329,169 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
     Some(out)
 }
 
+/// Batched sibling of embed_text: tokenizes and forwards every input in
+/// `texts` through the BERT model in ONE model.forward call (batch dimension
+/// = texts.len()) instead of one forward pass per text -- the same tensor
+/// math, just amortized over a real batch, which is where candle's
+/// vectorized matmul actually pays off. Falls back item-by-item (via the
+/// existing embed_text, including its plain-text cache) whenever the batch
+/// path isn't usable: host-delegated mode (no wasm model loaded at all),
+/// model/tokenizer missing, or any tokenize/tensor-build step failing for
+/// the whole batch. Returns None only when the caller should fall back to
+/// its own per-item embed_text loop entirely (mirrors embed_text's None
+/// contract); returns Some(vec) with per-item None entries preserved when
+/// the batch mostly succeeded but individual items were empty/failed.
+pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
+    if texts.is_empty() { return Some(Vec::new()); }
+    if texts.len() == 1 {
+        return Some(vec![embed_text(&texts[0])]);
+    }
+
+    // Cache-hit short circuit: if EVERY item is already cached, skip the
+    // model entirely. Partial-cache-hit is handled per-item below via the
+    // uncached-only sub-batch so warm entries never re-run the model.
+    let mut out: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
+    let mut uncached_idx: Vec<usize> = Vec::new();
+    for (i, t) in texts.iter().enumerate() {
+        let cacheable = t.len() <= PLAIN_CACHE_MAX_TEXT;
+        if cacheable {
+            if let Some(v) = cache_get(&PLAIN_CACHE, t) {
+                out[i] = Some(v);
+                continue;
+            }
+        }
+        uncached_idx.push(i);
+    }
+    if uncached_idx.is_empty() { return Some(out); }
+
+    // try_host_embed is per-item only (host_vec_embed has no batch entry
+    // point, see mut-host-vec-embed-batch-capability) -- if the host path is
+    // live, use it per-item for the uncached set rather than falling through
+    // to the wasm model, matching embed_text_uncached's own priority order.
+    let mut still_uncached: Vec<usize> = Vec::new();
+    for &i in &uncached_idx {
+        if let Some(v) = try_host_embed(&texts[i]) {
+            let cacheable = texts[i].len() <= PLAIN_CACHE_MAX_TEXT;
+            if cacheable { cache_put(&PLAIN_CACHE, &texts[i], &v); }
+            out[i] = Some(v);
+        } else {
+            still_uncached.push(i);
+        }
+    }
+    if still_uncached.is_empty() { return Some(out); }
+
+    let c = match ctx() {
+        Ok(c) => c,
+        Err(_) => {
+            for &i in &still_uncached { out[i] = embed_text(&texts[i]); }
+            return Some(out);
+        }
+    };
+    if c.host_delegated {
+        // host_vec_embed was probed live at init but returned non-EMBED_DIM
+        // for these specific items (already tried above); no wasm model was
+        // loaded in this ctx so there is no batch fallback available either.
+        return Some(out);
+    }
+    let (tokenizer, model) = match (c.tokenizer.as_ref(), c.model.as_ref()) {
+        (Some(t), Some(m)) => (t, m),
+        _ => {
+            for &i in &still_uncached { out[i] = embed_text(&texts[i]); }
+            return Some(out);
+        }
+    };
+
+    let batch_texts: Vec<&str> = still_uncached.iter().map(|&i| texts[i].as_str()).collect();
+    let encodings = match tokenizer.encode_batch(batch_texts, true) {
+        Ok(e) => e,
+        Err(e) => {
+            elog(&format!("embed::embed_texts_batch tokenizer.encode_batch failed: {}; falling back per-item", e));
+            for &i in &still_uncached { out[i] = embed_text(&texts[i]); }
+            return Some(out);
+        }
+    };
+
+    let mut per_item_ids: Vec<Vec<u32>> = Vec::with_capacity(encodings.len());
+    let mut per_item_mask: Vec<Vec<u32>> = Vec::with_capacity(encodings.len());
+    let mut max_len = 1usize;
+    for enc in &encodings {
+        let mut ids = enc.get_ids().to_vec();
+        let mut mask = enc.get_attention_mask().to_vec();
+        if ids.len() > MAX_TOKENS { ids.truncate(MAX_TOKENS); mask.truncate(MAX_TOKENS); }
+        max_len = max_len.max(ids.len().max(1));
+        per_item_ids.push(ids);
+        per_item_mask.push(mask);
+    }
+
+    let batch_n = per_item_ids.len();
+    let mut ids_flat: Vec<u32> = Vec::with_capacity(batch_n * max_len);
+    let mut mask_flat: Vec<u32> = Vec::with_capacity(batch_n * max_len);
+    for i in 0..batch_n {
+        let ids = &per_item_ids[i];
+        let mask = &per_item_mask[i];
+        let len = ids.len();
+        ids_flat.extend_from_slice(ids);
+        ids_flat.extend(std::iter::repeat(0u32).take(max_len - len));
+        mask_flat.extend_from_slice(mask);
+        mask_flat.extend(std::iter::repeat(0u32).take(max_len - len));
+    }
+
+    let build = || -> Result<Vec<Option<Vec<f32>>>, String> {
+        let ids_t = Tensor::from_vec(ids_flat.clone(), (batch_n, max_len), &c.device)
+            .map_err(|e| format!("Tensor::from_vec(ids) batch: {}", e))?;
+        let mask_t = Tensor::from_vec(mask_flat.clone(), (batch_n, max_len), &c.device)
+            .map_err(|e| format!("Tensor::from_vec(mask) batch: {}", e))?;
+        let token_type_ids = Tensor::zeros((batch_n, max_len), DType::U32, &c.device)
+            .map_err(|e| format!("Tensor::zeros(token_type_ids) batch: {}", e))?;
+
+        let hidden_raw = model.forward(&ids_t, &token_type_ids, Some(&mask_t))
+            .map_err(|e| format!("model.forward batch: {}", e))?;
+        let hidden = hidden_raw.to_dtype(DType::F32).map_err(|e| format!("hidden.to_dtype batch: {}", e))?;
+        let mask_f = mask_t.to_dtype(DType::F32).map_err(|e| format!("mask.to_dtype batch: {}", e))?;
+        let mask_e = mask_f.unsqueeze(2).map_err(|e| format!("mask.unsqueeze batch: {}", e))?;
+        let masked = hidden.broadcast_mul(&mask_e).map_err(|e| format!("broadcast_mul batch: {}", e))?;
+        let sum = masked.sum(1).map_err(|e| format!("masked.sum batch: {}", e))?;
+        let denom_s = mask_f.sum(1).map_err(|e| format!("mask.sum batch: {}", e))?;
+        let denom = denom_s.unsqueeze(1).map_err(|e| format!("denom.unsqueeze batch: {}", e))?;
+        let pooled = sum.broadcast_div(&denom).map_err(|e| format!("broadcast_div batch: {}", e))?;
+
+        let mut results = Vec::with_capacity(batch_n);
+        for row in 0..batch_n {
+            let row_t = pooled.get(row).map_err(|e| format!("pooled.get({}): {}", row, e))?;
+            let flat: Vec<f32> = row_t.to_vec1().map_err(|e| format!("row.to_vec1({}): {}", row, e))?;
+            if flat.len() != EMBED_DIM {
+                results.push(None);
+                continue;
+            }
+            let mut v = flat;
+            l2_normalize(&mut v);
+            results.push(Some(v));
+        }
+        Ok(results)
+    };
+
+    match build() {
+        Ok(results) => {
+            for (j, &i) in still_uncached.iter().enumerate() {
+                if let Some(v) = &results[j] {
+                    let cacheable = texts[i].len() <= PLAIN_CACHE_MAX_TEXT;
+                    if cacheable { cache_put(&PLAIN_CACHE, &texts[i], v); }
+                }
+                out[i] = results[j].clone();
+            }
+        }
+        Err(e) => {
+            elog(&format!("embed::embed_texts_batch failed: {}; falling back per-item", e));
+            crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
+                "step": "embed_texts_batch",
+                "error": e,
+            }));
+            for &i in &still_uncached { out[i] = embed_text(&texts[i]); }
+        }
+    }
+    Some(out)
+}
+
 pub fn embed_text_json(text: &str) -> Option<serde_json::Value> {
     embed_text_json_passage(text)
 }

@@ -396,24 +396,42 @@ fn chunk_rows_for_path(fp: &str) -> usize {
         .unwrap_or(0) as usize
 }
 
-fn write_chunk(libsql_ok: bool, fp: &str, c: &ChunkRecord, body: &str) {
+const INSERT_CHUNK_SQL: &str = "INSERT INTO code_chunks(path, kind, name, line_start, line_end, body, embedding) VALUES(?1,?2,?3,?4,?5,?6,vector(?7))";
+
+fn truncate_body(body: &str) -> &str {
+    let mut e = body.len().min(8192);
+    while e > 0 && !body.is_char_boundary(e) { e -= 1; }
+    &body[..e]
+}
+
+/// Writes one chunk row. When `stmt` is Some (the index() batch path), binds
+/// against the caller's already-prepared/reused statement inside their own
+/// transaction -- avoids re-preparing the same INSERT and re-fsyncing per row.
+/// Falls back to a one-off exec_params call (its own implicit autocommit
+/// transaction) when `stmt` is None, for call sites outside a batch.
+fn write_chunk(libsql_ok: bool, stmt: Option<&libsql_wasm::PreparedStmt>, fp: &str, c: &ChunkRecord, body: &str) {
     if libsql_ok {
-        let embedding_sql = format!("vector('{}')", vec_to_json_literal(&c.emb));
-        let sql = format!(
-            "INSERT INTO code_chunks(path, kind, name, line_start, line_end, body, embedding) VALUES(?1,?2,?3,?4,?5,?6,{})",
-            embedding_sql
-        );
+        let embedding_lit = vec_to_json_literal(&c.emb);
         let ls = c.ls.to_string();
         let le = c.le.to_string();
-        let body_trunc = {
-            let mut e = body.len().min(8192);
-            while e > 0 && !body.is_char_boundary(e) { e -= 1; }
-            &body[..e]
-        };
-        let _ = libsql_wasm::exec_params(GM_DB, &sql, &[fp, &c.kind, &c.name, &ls, &le, body_trunc]);
+        let body_trunc = truncate_body(body);
+        let params: [&str; 7] = [fp, &c.kind, &c.name, &ls, &le, body_trunc, &embedding_lit];
+        match stmt {
+            Some(s) => { let _ = s.execute_bound(&params); }
+            None => { let _ = libsql_wasm::exec_params(GM_DB, INSERT_CHUNK_SQL, &params); }
+        }
     }
+    // Namespace "codeinsight" (NOT "codeinsight-vec") -- host_vec_search's
+    // fusion candidate lookup in codesearch() queries exactly this namespace
+    // (wasm_dispatch.rs q_json.namespace="codeinsight"); writing to
+    // "codeinsight-vec" left that fusion input structurally always empty,
+    // silently dropping the KV-vector-search signal from every fused
+    // codesearch result (see fix-codeinsight-vec-namespace-mismatch-bug).
+    // clear_codeinsight()/delete_chunk_keys already scrub both namespace
+    // names defensively, so this write-side rename is safe against stale
+    // "codeinsight-vec" rows left by a pre-fix index.
     let emb_json = serde_json::json!({ "embedding": c.emb }).to_string();
-    fv_put("codeinsight-vec", &c.key, &emb_json);
+    fv_put("codeinsight", &c.key, &emb_json);
 }
 
 fn delete_chunk_keys(chunks: &[ChunkRecord]) {
@@ -442,7 +460,16 @@ pub fn index(root: &str, max_files: usize) -> Value {
         let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     }
-    const INDEX_WALL_BUDGET_MS: u64 = 12000;
+    // Batched writes (single txn + prepared-statement reuse, see
+    // libsql_wasm::begin/commit/prepare) and batched per-file embedding (see
+    // embed::embed_texts_batch) cut per-row fsync/parse/forward-pass cost
+    // enough that the old 12s budget -- tuned for the unbatched
+    // autocommit-per-row, one-chunk-per-forward-pass path -- can be raised
+    // substantially; a still-finite ceiling is kept so a pathological repo
+    // (huge files, cold model load) can't hang a dispatch forever, but a
+    // healthy-size repo (tens to low hundreds of files) now completes in one
+    // pass instead of deferring across many.
+    const INDEX_WALL_BUDGET_MS: u64 = 45000;
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut indexed = 0;
     let mut chunked = 0;
@@ -453,6 +480,15 @@ pub fn index(root: &str, max_files: usize) -> Value {
     let mut deferred_files = 0u32;
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Digest entries accumulated from the same file reads this loop already
+    // does, so a full completion never needs a second collect_files+host_read
+    // pass just to compute current_digest() (see current_digest's own
+    // doc comment for the still-separate pre-check use at the call site).
+    let mut digest_entries: Vec<(String, u32)> = Vec::with_capacity(files.len());
+
+    let stmt = if libsql_ok { libsql_wasm::prepare(GM_DB, INSERT_CHUNK_SQL).ok() } else { None };
+    let txn_active = libsql_ok && stmt.is_some() && libsql_wasm::begin(GM_DB).is_ok();
+
     for raw_fp in &files {
         let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
         if elapsed > INDEX_WALL_BUDGET_MS {
@@ -474,12 +510,13 @@ pub fn index(root: &str, max_files: usize) -> Value {
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
         let file_hash = crc32(&content);
         let path_hash = crc32(fp);
+        digest_entries.push((fp.clone(), file_hash));
 
         if let Some(m) = prior.get(fp) {
             if m.hash == file_hash {
                 if libsql_ok && chunk_rows_for_path(fp) == m.chunks.len() {
-                    chunked += m.chunks.len();
-                    reused += m.chunks.len();
+                    chunked += m.chunks.len() as i32;
+                    reused += m.chunks.len() as i32;
                     reused_files += 1;
                     continue;
                 }
@@ -488,7 +525,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
                 }
                 for c in &m.chunks {
                     let body = slice_lines(&content, c.ls, c.le);
-                    write_chunk(libsql_ok, fp, c, &body);
+                    write_chunk(libsql_ok, stmt.as_ref(), fp, c, &body);
                     chunked += 1;
                     reused += 1;
                 }
@@ -509,15 +546,18 @@ pub fn index(root: &str, max_files: usize) -> Value {
             let line_end = content.lines().count().max(1);
             chunks.push(("document".to_string(), String::new(), 1, line_end, whole));
         }
+
+        // Batch every chunk's embed input for this file into one
+        // embed_texts_batch call (one candle model.forward over the whole
+        // batch dimension) instead of one forward pass per chunk.
+        let embed_inputs: Vec<String> = chunks.iter()
+            .map(|(_, name, _, _, body)| format!("{} {}", name, truncate_body(body)))
+            .collect();
+        let embed_results = embed_texts_batch(&embed_inputs);
+
         let mut records: Vec<ChunkRecord> = Vec::new();
-        for (idx, (kind, name, ls, le, body)) in chunks.into_iter().enumerate() {
-            let body_head = {
-                let mut e = body.len().min(512);
-                while e > 0 && !body.is_char_boundary(e) { e -= 1; }
-                &body[..e]
-            };
-            let emb_blob = embed_text(&format!("{} {}", name, body_head));
-            let v = match emb_blob {
+        for (idx, ((kind, name, ls, le, body), emb_opt)) in chunks.into_iter().zip(embed_results.into_iter()).enumerate() {
+            let v = match emb_opt {
                 Some(v) => v,
                 None => {
                     skipped_no_embed += 1;
@@ -530,11 +570,16 @@ pub fn index(root: &str, max_files: usize) -> Value {
             embedded += 1;
             let key = format!("ci-{:x}-{:x}-{}", path_hash, file_hash, idx);
             let rec = ChunkRecord { key, kind, name, ls, le, emb: v };
-            write_chunk(libsql_ok, fp, &rec, &body);
+            write_chunk(libsql_ok, stmt.as_ref(), fp, &rec, &body);
             records.push(rec);
         }
         fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, &records));
     }
+
+    if txn_active {
+        let _ = libsql_wasm::commit(GM_DB);
+    }
+    drop(stmt);
 
     let mut removed_files = 0;
     if deferred_files == 0 {
@@ -545,7 +590,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
                 removed_files += 1;
             }
         }
-        let digest = current_digest();
+        let digest = digest_from_entries(digest_entries);
         store_digest(&digest);
         let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} removed_files={} skipped_no_embed={} digest={}", indexed, chunked, embedded, reused, reused_files, removed_files, skipped_no_embed, digest);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
@@ -574,9 +619,42 @@ pub fn index(root: &str, max_files: usize) -> Value {
     })
 }
 
+fn embed_text_batch_fallback(inputs: &[String]) -> Vec<Option<Vec<f32>>> {
+    inputs.iter().map(|t| embed_text(t)).collect()
+}
+
+fn embed_texts_batch(inputs: &[String]) -> Vec<Option<Vec<f32>>> {
+    if inputs.is_empty() { return Vec::new(); }
+    match crate::embed::embed_texts_batch(inputs) {
+        Some(v) => v,
+        None => embed_text_batch_fallback(inputs),
+    }
+}
+
 const DIGEST_MAX_FILES: usize = 2000;
 const DIGEST_PATH: &str = ".gm/exec-spool/.codeinsight-digest";
 
+fn digest_from_entries(mut entries: Vec<(String, u32)>) -> String {
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.dedup_by(|a, b| a.0 == b.0);
+    let mut acc = String::with_capacity(entries.len() * 32);
+    for (path, hash) in &entries {
+        acc.push_str(path);
+        acc.push('|');
+        acc.push_str(&format!("{:08x}", hash));
+        acc.push('\n');
+    }
+    format!("v2:{:016x}:files={}", crate::pipeline::fnv1a64(acc.as_bytes()), entries.len())
+}
+
+/// Standalone digest computation, used by callers that need to know whether
+/// the index is stale BEFORE deciding to run index() at all (wasm_dispatch's
+/// codesearch stale-digest check) -- necessarily a separate file-read pass
+/// from index()'s own loop, since at this call site it isn't yet known
+/// whether index() will run. index() itself never calls this: it accumulates
+/// the same (path, hash) pairs from its own read loop and feeds them to
+/// digest_from_entries directly, avoiding a second full-repo file-content
+/// read on every stale-digest dispatch.
 pub fn current_digest() -> String {
     let files = collect_files(".", DIGEST_MAX_FILES);
     let mut entries: Vec<(String, u32)> = Vec::new();
@@ -591,16 +669,7 @@ pub fn current_digest() -> String {
         if content.len() > 256 * 1024 { continue; }
         entries.push((canon, crc32(&content)));
     }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries.dedup_by(|a, b| a.0 == b.0);
-    let mut acc = String::with_capacity(entries.len() * 32);
-    for (path, hash) in &entries {
-        acc.push_str(path);
-        acc.push('|');
-        acc.push_str(&format!("{:08x}", hash));
-        acc.push('\n');
-    }
-    format!("v2:{:016x}:files={}", crate::pipeline::fnv1a64(acc.as_bytes()), entries.len())
+    digest_from_entries(entries)
 }
 
 pub fn stored_digest() -> Option<String> {

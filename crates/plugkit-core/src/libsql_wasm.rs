@@ -171,6 +171,69 @@ pub fn exec_params(name: &str, sql: &str, params: &[&str]) -> Result<(), String>
     })
 }
 
+/// begin/commit/rollback wrap the default autocommit-per-statement mode into
+/// a single fsync-backed transaction for callers issuing many INSERT/UPDATE
+/// statements in a loop (e.g. code_index::index()) -- one commit for the
+/// whole batch instead of one per row. code_index::index() calls these
+/// directly (not via a closure-wrapping helper) since its loop body has many
+/// early `continue`s that don't map cleanly onto a single wrapped closure.
+pub fn begin(name: &str) -> Result<(), String> { exec(name, "BEGIN IMMEDIATE") }
+pub fn commit(name: &str) -> Result<(), String> { exec(name, "COMMIT") }
+pub fn rollback(name: &str) -> Result<(), String> { exec(name, "ROLLBACK") }
+
+pub struct PreparedStmt {
+    db: *mut ffi::sqlite3,
+    stmt: *mut ffi::sqlite3_stmt,
+}
+unsafe impl Send for PreparedStmt {}
+
+impl Drop for PreparedStmt {
+    fn drop(&mut self) {
+        if !self.stmt.is_null() {
+            unsafe { ffi::sqlite3_finalize(self.stmt); }
+        }
+    }
+}
+
+/// Prepares `sql` once against `name`'s open connection; reuse via
+/// `execute_bound` for every row in a batch to avoid re-parsing/re-planning
+/// the same INSERT statement on every call (exec_params does prepare+finalize
+/// per invocation, which is fine for one-off writes but wasteful in a loop).
+pub fn prepare(name: &str, sql: &str) -> Result<PreparedStmt, String> {
+    with_db(name, |db| {
+        let csql = CString::new(sql).map_err(|e| e.to_string())?;
+        let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
+        let rc = unsafe { ffi::sqlite3_prepare_v2(db, csql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
+        if rc != ffi::SQLITE_OK {
+            let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
+            return Err(format!("prepare rc={} msg={}", rc, msg));
+        }
+        Ok(PreparedStmt { db, stmt })
+    })
+}
+
+impl PreparedStmt {
+    pub fn execute_bound(&self, params: &[&str]) -> Result<(), String> {
+        let cparams: Vec<CString> = params.iter()
+            .map(|p| CString::new(*p).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        unsafe { ffi::sqlite3_reset(self.stmt); }
+        unsafe { ffi::sqlite3_clear_bindings(self.stmt); }
+        for (i, cp) in cparams.iter().enumerate() {
+            let rc = unsafe { ffi::sqlite3_bind_text(self.stmt, (i + 1) as i32, cp.as_ptr(), -1, None) };
+            if rc != ffi::SQLITE_OK {
+                return Err(format!("bind param {} rc={}", i, rc));
+            }
+        }
+        let step = unsafe { ffi::sqlite3_step(self.stmt) };
+        if step != ffi::SQLITE_DONE && step != ffi::SQLITE_ROW {
+            let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(self.db)).to_string_lossy().into_owned() };
+            return Err(format!("step rc={} msg={}", step, msg));
+        }
+        Ok(())
+    }
+}
+
 pub fn query_params(name: &str, sql: &str, params: &[&str]) -> Result<Value, String> {
     with_db(name, |db| {
         let csql = CString::new(sql).map_err(|e| e.to_string())?;
