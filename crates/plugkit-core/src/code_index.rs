@@ -474,6 +474,29 @@ fn truncate_body(body: &str) -> &str {
     &body[..e]
 }
 
+// Embed input gets its OWN, much smaller cap than the DB-stored body
+// snippet (truncate_body's 8192 chars is sized for human-readable search
+// result context, not for embedding cost). Live-witnessed this session via
+// embed_text_step_timing instrumentation: an 8192-char/512-token chunk
+// costs ~7.2s in model.forward ALONE (tokenize/tensor_build near-zero),
+// confirmed NOT a cold-start artifact -- BERT's attention cost is
+// genuinely dominant at the full MAX_TOKENS ceiling regardless of SIMD
+// or warm-model state. ~1200 chars keeps most real code/prose chunks
+// around 200-300 wordpiece tokens (roughly 4-6 chars/token for dense
+// code, English prose runs closer to 4-5), comfortably under the
+// quadratic-cost region of self-attention while still capturing a
+// function's essential signature+body opening for semantic matching --
+// full body content remains searchable via BM25 (which reads the
+// UNtruncated DB body column) and remains fully visible in search
+// result snippets (write_chunk still uses the original 8192-char
+// truncate_body for storage), so this only affects what the embedding
+// vector itself is computed over, not what a human/BM25 sees.
+fn truncate_for_embed(body: &str) -> &str {
+    let mut e = body.len().min(1200);
+    while e > 0 && !body.is_char_boundary(e) { e -= 1; }
+    &body[..e]
+}
+
 /// Writes one chunk row. When `stmt` is Some (the index() batch path), binds
 /// against the caller's already-prepared/reused statement inside their own
 /// transaction -- avoids re-preparing the same INSERT and re-fsyncing per row.
@@ -676,8 +699,10 @@ pub fn index(root: &str, max_files: usize) -> Value {
         // Batch every chunk's embed input for this file into one
         // embed_texts_batch call (one candle model.forward over the whole
         // batch dimension) instead of one forward pass per chunk.
+        // truncate_for_embed (not truncate_body) caps this specific input --
+        // see that function's doc comment for the live-measured rationale.
         let embed_inputs: Vec<String> = chunks.iter()
-            .map(|(_, name, _, _, body)| format!("{} {}", name, truncate_body(body)))
+            .map(|(_, name, _, _, body)| format!("{} {}", name, truncate_for_embed(body)))
             .collect();
         let embed_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let embed_results = embed_texts_batch(&embed_inputs);
