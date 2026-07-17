@@ -370,6 +370,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "prd_items": prd_items_open,
         "prd_total_count": prd_items.len(),
         "prd_pending_count": prd_pending,
+        "prd_pending": prd_pending,
         "next_phase_hint": next,
         "recall_hits": recall_hits,
         "orient_nouns": nouns,
