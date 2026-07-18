@@ -40,3 +40,5 @@ weights/*.gguf
 weights/bge-tokenizer.json
 weights/bge-config.json
 .gm/pw-sock-*/
+node_modules/
+site/package-lock.json

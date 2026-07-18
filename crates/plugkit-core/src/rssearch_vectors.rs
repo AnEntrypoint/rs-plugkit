@@ -29,7 +29,7 @@ fn has_deleted_column() -> bool {
 
 pub fn ensure_schema() -> Result<(), String> {
     shared_ensure_open(&shared_db_path())?;
-    let _ = drop_if_dim_mismatch(TABLE, INDEX);
+    let _ = SPEC.drop_if_dim_mismatch();
     shared_exec(&format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, namespace TEXT NOT NULL, key TEXT NOT NULL, text TEXT, embedding F32_BLOB({}), updated_at INTEGER, deleted INTEGER NOT NULL DEFAULT 0, UNIQUE(namespace, key))",
         TABLE, EXPECTED_EMBED_DIM
@@ -40,45 +40,12 @@ pub fn ensure_schema() -> Result<(), String> {
             TABLE
         ))?;
     }
-    let _ = shared_exec(&format!(
-        "CREATE INDEX IF NOT EXISTS {} ON {}(libsql_vector_idx(embedding, 'metric=cosine'))",
-        INDEX, TABLE
-    ));
+    SPEC.ensure_index();
     Ok(())
 }
 
 fn json_to_f32_vec(v: &Value) -> Option<Vec<f32>> {
-    let arr = v.as_array()?;
-    let mut out = Vec::with_capacity(arr.len());
-    for x in arr {
-        out.push(x.as_f64()? as f32);
-    }
-    Some(out)
-}
-
-fn is_shadow_row_err(err: &str) -> bool {
-    err.contains("shadow row")
-}
-
-// A "vector index(insert): failed to insert shadow row" error was live-observed
-// on brand-new keys that had never been written before -- ruling out an
-// ON-CONFLICT-DO-UPDATE race against an existing row (the original hypothesis;
-// a delete-then-insert rewrite of the upsert did NOT resolve it). The shadow
-// table backing libsql_vector_idx is a real on-disk structure that this
-// session's earlier watcher crash storm (multiple abrupt process kills
-// mid-write, before the boot-heartbeat and event-loop-starvation fixes landed)
-// could plausibly have left corrupted -- corruption that persists across
-// restarts since the shadow table lives on disk, not in memory, and nothing
-// ever drops+recreates the index once CREATE INDEX IF NOT EXISTS has run once.
-// Recover by dropping and recreating the vector index and retrying the insert
-// exactly once; if the retry still fails, surface the (now index-rebuilt)
-// error rather than looping.
-fn rebuild_vector_index() -> Result<(), String> {
-    let _ = shared_exec(&format!("DROP INDEX IF EXISTS {}", INDEX));
-    shared_exec(&format!(
-        "CREATE INDEX {} ON {}(libsql_vector_idx(embedding, 'metric=cosine'))",
-        INDEX, TABLE
-    ))
+    vecns::json_to_f32_vec(v)
 }
 
 pub fn write(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: i64) -> Result<(), String> {
@@ -90,24 +57,22 @@ pub fn write(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: 
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
     }
     let delete_sql = format!("DELETE FROM {} WHERE namespace=?1 AND key=?2", TABLE);
-    shared_exec_params(&delete_sql, &[namespace, key])?;
-    let embedding_sql = format!("vector('{}')", vec_to_json_literal(&vec));
+    let embedding_sql = format!("vector('{}')", vecns::qlit(&vec));
     let sql = format!(
         "INSERT INTO {}(namespace, key, text, embedding, updated_at, deleted) VALUES(?1,?2,?3,{},?4,0)",
         TABLE, embedding_sql
     );
     let now_s = now_ms.to_string();
-    match shared_exec_params(&sql, &[namespace, key, text, &now_s]) {
-        Ok(()) => Ok(()),
-        Err(e) if is_shadow_row_err(&e) => {
+    vecns::delete_then_insert_with_recovery(
+        &SPEC,
+        |spec| spec.exec_params(&delete_sql, &[namespace, key]),
+        &sql, &[namespace, key, text, &now_s],
+        |e| {
             crate::wasm_dispatch::emit_event("rssearch_vectors_shadow_row_recovery", json!({
                 "namespace": namespace, "key": key, "error": e,
             }));
-            rebuild_vector_index()?;
-            shared_exec_params(&sql, &[namespace, key, text, &now_s])
-        }
-        Err(e) => Err(e),
-    }
+        },
+    )
 }
 
 pub fn mark_deleted(namespace: &str, key: &str) -> Result<(), String> {
@@ -154,8 +119,8 @@ pub fn search(query_embedding: &Value, namespaces: &[String], limit: usize) -> R
     let qvec = json_to_f32_vec(query_embedding)
         .ok_or_else(|| "rssearch_vectors search: invalid query embedding".to_string())?;
     ensure_schema()?;
-    let qlit = vec_to_json_literal(&qvec);
-    let pool = limit.saturating_mul(5).max(20);
+    let qlit = vecns::qlit(&qvec);
+    let pool = BUDGET.pool(limit);
     let ns_placeholders: Vec<String> = (0..namespaces.len()).map(|i| format!("?{}", i + 3)).collect();
     let ns_filter = if namespaces.is_empty() {
         String::new()
@@ -177,8 +142,8 @@ pub fn search_with_recency(query_embedding: &Value, namespaces: &[String], limit
     let qvec = json_to_f32_vec(query_embedding)
         .ok_or_else(|| "rssearch_vectors search_with_recency: invalid query embedding".to_string())?;
     ensure_schema()?;
-    let qlit = vec_to_json_literal(&qvec);
-    let pool = limit.saturating_mul(5).max(20);
+    let qlit = vecns::qlit(&qvec);
+    let pool = BUDGET.pool(limit);
     let ns_placeholders: Vec<String> = (0..namespaces.len()).map(|i| format!("?{}", i + 3)).collect();
     let ns_filter = if namespaces.is_empty() {
         String::new()
@@ -200,9 +165,7 @@ pub fn search_with_recency(query_embedding: &Value, namespaces: &[String], limit
         let distance = row.get("distance").and_then(|d| d.as_f64()).unwrap_or(2.0);
         let cos = 1.0 - distance;
         let updated_at = row.get("updated_at").and_then(|u| u.as_i64()).unwrap_or(now_ms);
-        let age_ms = (now_ms - updated_at).max(0) as f64;
-        let recency = RECENCY_FLOOR + (1.0 - RECENCY_FLOOR) * (-age_ms / HALF_LIFE_MS).exp();
-        let score = cos * recency;
+        let (recency, score) = vecns::recency_score(cos, updated_at, now_ms, &RECENCY);
         let mut obj = row.as_object().cloned().unwrap_or_default();
         obj.insert("cos".to_string(), json!(cos));
         obj.insert("recency".to_string(), json!(recency));
@@ -236,8 +199,8 @@ pub fn search_memory_hits(query_embedding: &Value, namespaces: &[String], limit:
     let qvec = json_to_f32_vec(query_embedding)
         .ok_or_else(|| "rssearch_vectors search_memory_hits: invalid query embedding".to_string())?;
     ensure_schema()?;
-    let qlit = vec_to_json_literal(&qvec);
-    let pool = limit.saturating_mul(5).max(20);
+    let qlit = vecns::qlit(&qvec);
+    let pool = BUDGET.pool(limit);
     let ns_placeholders: Vec<String> = (0..namespaces.len()).map(|i| format!("?{}", i + 3)).collect();
     let ns_filter = if namespaces.is_empty() {
         String::new()
@@ -262,9 +225,7 @@ pub fn search_memory_hits(query_embedding: &Value, namespaces: &[String], limit:
             continue;
         }
         let updated_at = row.get("updated_at").and_then(|u| u.as_i64()).unwrap_or(now_ms);
-        let age_ms = (now_ms - updated_at).max(0) as f64;
-        let recency = RECENCY_FLOOR + (1.0 - RECENCY_FLOOR) * (-age_ms / HALF_LIFE_MS).exp();
-        let score = cos * recency;
+        let (recency, score) = vecns::recency_score(cos, updated_at, now_ms, &RECENCY);
         let hit = json!({
             "key": row.get("key").cloned().unwrap_or(Value::Null),
             "namespace": row.get("namespace").cloned().unwrap_or(Value::Null),

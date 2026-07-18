@@ -2,8 +2,9 @@
 
 use serde_json::{json, Value};
 
-use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
-use crate::vecstore::{drop_if_dim_mismatch, vec_to_json_literal, EXPECTED_EMBED_DIM};
+use crate::shared_db::{shared_ensure_open, shared_exec, shared_query_params, SHARED_DB};
+use crate::vecns::{self, QueryBudget, VecTableSpec};
+use crate::vecstore::EXPECTED_EMBED_DIM;
 
 const TABLE: &str = "git_commit_vectors";
 const INDEX: &str = "git_commit_vectors_vec";
@@ -11,21 +12,21 @@ const EMBED_BUDGET_MS: u64 = 2000;
 const DIFF_CHAR_CAP: usize = 4000;
 const LOG_WINDOW: usize = 500;
 
+const SPEC: VecTableSpec = VecTableSpec { db_name: SHARED_DB, table: TABLE, index: INDEX };
+const BUDGET: QueryBudget = QueryBudget { pool_multiplier: 5, pool_floor: 20 };
+
 fn shared_db_path() -> String {
     crate::code_index::project_db_path(None)
 }
 
 pub fn ensure_schema() -> Result<(), String> {
     shared_ensure_open(&shared_db_path())?;
-    let _ = drop_if_dim_mismatch(TABLE, INDEX);
+    let _ = SPEC.drop_if_dim_mismatch();
     shared_exec(&format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE, message TEXT, embedding F32_BLOB({}), updated_at INTEGER, deleted INTEGER NOT NULL DEFAULT 0)",
         TABLE, EXPECTED_EMBED_DIM
     ))?;
-    let _ = shared_exec(&format!(
-        "CREATE INDEX IF NOT EXISTS {} ON {}(libsql_vector_idx(embedding, 'metric=cosine'))",
-        INDEX, TABLE
-    ));
+    SPEC.ensure_index();
     Ok(())
 }
 
@@ -148,7 +149,7 @@ pub fn sync_incremental() -> Result<Value, String> {
             Some(v) if !v.is_empty() => v,
             _ => { skipped += 1; continue; }
         };
-        let embedding_sql = format!("vector('{}')", vec_to_json_literal(&vec));
+        let embedding_sql = format!("vector('{}')", vecns::qlit(&vec));
         let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
         // Same shadow-index UPDATE hazard as rssearch_vectors::write (libsql's
         // libsql_vector_idx does not reliably support ON CONFLICT DO UPDATE for
@@ -157,13 +158,13 @@ pub fn sync_incremental() -> Result<Value, String> {
         // in the common case, but a concurrent writer racing between the
         // present-check and this insert would otherwise hit the same failure.
         let delete_sql = format!("DELETE FROM {} WHERE hash=?1", TABLE);
-        let _ = shared_exec_params(&delete_sql, &[hash]);
+        let _ = SPEC.exec_params(&delete_sql, &[hash]);
         let sql = format!(
             "INSERT INTO {}(hash, message, embedding, updated_at, deleted) VALUES(?1,?2,{},?3,0)",
             TABLE, embedding_sql
         );
         let now_s = now_ms.to_string();
-        match shared_exec_params(&sql, &[hash, subject, &now_s]) {
+        match SPEC.exec_params(&sql, &[hash, subject, &now_s]) {
             Ok(()) => embedded += 1,
             Err(_) => skipped += 1,
         }
@@ -188,8 +189,8 @@ pub fn search(query_embedding: &Value, limit: usize) -> Result<Vec<(String, Stri
         return Err("git_commit_vectors search: empty query embedding".to_string());
     }
     ensure_schema()?;
-    let qlit = vec_to_json_literal(&qvec);
-    let pool = limit.saturating_mul(5).max(20);
+    let qlit = vecns::qlit(&qvec);
+    let pool = BUDGET.pool(limit);
     let sql = format!(
         "SELECT r.hash, r.message, vector_distance_cos(r.embedding, vector(?1)) AS distance \
          FROM vector_top_k('{}', vector(?2), {}) AS v JOIN {} AS r ON r.rowid = v.id \

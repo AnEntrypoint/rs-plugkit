@@ -264,8 +264,8 @@ pub fn ensure_schema_at(db_name: &str, path: &str) -> Result<(), String> {
     let _ = drop_if_dim_mismatch(db_name, "memories");
     libsql_wasm::exec(db_name, "CREATE TABLE IF NOT EXISTS code_chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, body TEXT, embedding F32_BLOB(384))")?;
     libsql_wasm::exec(db_name, "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, namespace TEXT, text TEXT, ts INTEGER, embedding F32_BLOB(384))")?;
-    let _ = libsql_wasm::exec(db_name, "CREATE INDEX IF NOT EXISTS code_chunks_vec ON code_chunks(libsql_vector_idx(embedding, 'metric=cosine'))");
-    let _ = libsql_wasm::exec(db_name, "CREATE INDEX IF NOT EXISTS memories_vec ON memories(libsql_vector_idx(embedding, 'metric=cosine'))");
+    crate::vecns::VecTableSpec { db_name, table: "code_chunks", index: "code_chunks_vec" }.ensure_index();
+    crate::vecns::VecTableSpec { db_name, table: "memories", index: "memories_vec" }.ensure_index();
     Ok(())
 }
 
@@ -1196,7 +1196,7 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
         }
     };
     let qlit = vec_to_json_literal(&qvec);
-    let pool = k.saturating_mul(5).max(20);
+    let pool = crate::vecns::QueryBudget::default().pool(k);
     let sql = format!(
         "SELECT c.path, c.kind, c.name, c.line_start, c.line_end, substr(c.body,1,400) AS snippet, vector_distance_cos(c.embedding, vector(?1)) AS distance FROM vector_top_k('code_chunks_vec', vector(?2), {}) AS v JOIN code_chunks AS c ON c.rowid = v.id ORDER BY distance ASC LIMIT {}",
         pool, k
@@ -1300,7 +1300,7 @@ pub fn recall_at(query: &str, limit: usize, namespace: Option<&str>, inline_embe
         ),
         None => format!(
             "SELECT m.id, m.namespace, m.text, m.ts, vector_distance_cos(m.embedding, vector('{}')) AS distance FROM vector_top_k('memories_vec', vector('{}'), {}) AS v JOIN memories AS m ON m.rowid = v.id ORDER BY distance ASC LIMIT {}",
-            qlit, qlit, limit.saturating_mul(5).max(20), limit
+            qlit, qlit, crate::vecns::QueryBudget::default().pool(limit), limit
         ),
     };
     match libsql_wasm::query(&db_name, &sql) {

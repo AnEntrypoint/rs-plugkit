@@ -12,13 +12,13 @@ use crate::vecstore::{drop_if_dim_mismatch_at, vec_to_json_literal};
 /// mechanics below to it, instead of reimplementing dim-mismatch drop /
 /// index create-or-rebuild / shadow-row-recovery insert per call site with
 /// slightly different constants.
-pub struct VecTableSpec {
-    pub db_name: &'static str,
-    pub table: &'static str,
-    pub index: &'static str,
+pub struct VecTableSpec<'a> {
+    pub db_name: &'a str,
+    pub table: &'a str,
+    pub index: &'a str,
 }
 
-impl VecTableSpec {
+impl<'a> VecTableSpec<'a> {
     /// DROP INDEX IF EXISTS + CREATE INDEX (unconditional, not IF NOT EXISTS)
     /// -- the shadow-row recovery step: rebuild the vector index from
     /// scratch after a corrupted shadow-table read.
@@ -46,11 +46,11 @@ impl VecTableSpec {
         drop_if_dim_mismatch_at(self.db_name, self.table).unwrap_or(false)
     }
 
-    fn exec(&self, sql: &str) -> Result<(), String> {
+    pub fn exec(&self, sql: &str) -> Result<(), String> {
         libsql_wasm::exec(self.db_name, sql)
     }
 
-    fn exec_params(&self, sql: &str, params: &[&str]) -> Result<(), String> {
+    pub fn exec_params(&self, sql: &str, params: &[&str]) -> Result<(), String> {
         libsql_wasm::exec_params(self.db_name, sql, params)
     }
 
@@ -79,7 +79,7 @@ pub fn is_shadow_row_err(err: &str) -> bool {
 /// event name/fields (each of the 3 call sites emits a differently-named
 /// event today; this preserves that instead of forcing one shared name).
 pub fn exec_with_shadow_row_recovery(
-    spec: &VecTableSpec,
+    spec: &VecTableSpec<'_>,
     sql: &str,
     params: &[&str],
     on_recovery: impl FnOnce(&str),
@@ -95,20 +95,22 @@ pub fn exec_with_shadow_row_recovery(
     }
 }
 
-/// Delete-then-insert a single embedding row, the shape all 3 call sites use
-/// to sidestep libsql_vector_idx's unreliable ON CONFLICT DO UPDATE support
-/// -- always a fresh insert. `delete_sql`/`delete_params` runs first
-/// (best-effort, error ignored, matching every existing call site), then
-/// `insert_sql`/`insert_params` runs through the shadow-row-recovery path.
+/// Runs a caller-supplied delete step (each call site's own error-handling:
+/// rssearch_vectors::write propagates the delete error with `?`,
+/// git_commit_vectors::sync_incremental swallows it with `let _ =` since its
+/// prior `present` check already makes the delete a no-op in the common
+/// case -- callers pass that choice in as `delete`), then inserts through
+/// the shadow-row-recovery path. This is the delete-then-insert shape all 3
+/// call sites use to sidestep libsql_vector_idx's unreliable ON CONFLICT DO
+/// UPDATE support -- always a fresh insert.
 pub fn delete_then_insert_with_recovery(
-    spec: &VecTableSpec,
-    delete_sql: &str,
-    delete_params: &[&str],
+    spec: &VecTableSpec<'_>,
+    delete: impl FnOnce(&VecTableSpec<'_>) -> Result<(), String>,
     insert_sql: &str,
     insert_params: &[&str],
     on_recovery: impl FnOnce(&str),
 ) -> Result<(), String> {
-    let _ = spec.exec_params(delete_sql, delete_params);
+    delete(spec)?;
     exec_with_shadow_row_recovery(spec, insert_sql, insert_params, on_recovery)
 }
 
