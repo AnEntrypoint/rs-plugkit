@@ -59,9 +59,18 @@ pub fn write(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: 
     if let Err(e) = ensure_schema() {
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
     }
+    // libsql's libsql_vector_idx shadow table does not reliably support the
+    // ON CONFLICT DO UPDATE path for a row that already has a vector-index
+    // entry (observed live: "vector index(insert): failed to insert shadow
+    // row" on re-syncing an existing key) -- the shadow index appears to be
+    // insert-oriented and gets out of sync on an UPDATE. Delete any existing
+    // row for this (namespace, key) first so the insert below is always a
+    // fresh shadow-index entry, never an update through the vector column.
+    let delete_sql = format!("DELETE FROM {} WHERE namespace=?1 AND key=?2", TABLE);
+    shared_exec_params(&delete_sql, &[namespace, key])?;
     let embedding_sql = format!("vector('{}')", vec_to_json_literal(&vec));
     let sql = format!(
-        "INSERT INTO {}(namespace, key, text, embedding, updated_at, deleted) VALUES(?1,?2,?3,{},?4,0) ON CONFLICT(namespace, key) DO UPDATE SET text=excluded.text, updated_at=excluded.updated_at, deleted=0",
+        "INSERT INTO {}(namespace, key, text, embedding, updated_at, deleted) VALUES(?1,?2,?3,{},?4,0)",
         TABLE, embedding_sql
     );
     let now_s = now_ms.to_string();

@@ -150,8 +150,16 @@ pub fn sync_incremental() -> Result<Value, String> {
         };
         let embedding_sql = format!("vector('{}')", vec_to_json_literal(&vec));
         let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
+        // Same shadow-index UPDATE hazard as rssearch_vectors::write (libsql's
+        // libsql_vector_idx does not reliably support ON CONFLICT DO UPDATE for
+        // a row with an existing vector-index entry) -- delete first so this is
+        // always a fresh insert. The `present` check above makes this a no-op
+        // in the common case, but a concurrent writer racing between the
+        // present-check and this insert would otherwise hit the same failure.
+        let delete_sql = format!("DELETE FROM {} WHERE hash=?1", TABLE);
+        let _ = shared_exec_params(&delete_sql, &[hash]);
         let sql = format!(
-            "INSERT INTO {}(hash, message, embedding, updated_at, deleted) VALUES(?1,?2,{},?3,0) ON CONFLICT(hash) DO UPDATE SET message=excluded.message, embedding=excluded.embedding, updated_at=excluded.updated_at, deleted=0",
+            "INSERT INTO {}(hash, message, embedding, updated_at, deleted) VALUES(?1,?2,{},?3,0)",
             TABLE, embedding_sql
         );
         let now_s = now_ms.to_string();
