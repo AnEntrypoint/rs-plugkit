@@ -257,6 +257,8 @@ pub fn run_spool_watcher(runtime: &mut PlugkitRuntime, spool_dir: &Path) -> anyh
 
                     let out_path = out_dir.join(format!("{verb}-{stem}.json"));
                     fs::write(&out_path, result)?;
+                    let ready_path = out_dir.join(format!("{verb}-{stem}.json.ready"));
+                    let _ = fs::write(&ready_path, b"");
                     processed.insert(path.clone());
                     let _ = fs::remove_file(&path);
                     work_done = true;

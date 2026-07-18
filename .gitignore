@@ -37,4 +37,6 @@ Cargo.lock
 
 weights/*.safetensors
 weights/*.gguf
+weights/bge-tokenizer.json
+weights/bge-config.json
 .gm/pw-sock-*/

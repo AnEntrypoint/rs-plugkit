@@ -80,6 +80,32 @@ fn main() -> anyhow::Result<()> {
             println!("{out}");
             Ok(())
         }
+        // One-shot native embed, no wasm module involved at all -- exists so
+        // a slim-build JS-wrapper host (plugkit-wasm-wrapper.js's
+        // globalThis.__hostEmbedSync) can delegate a single host_vec_embed
+        // call to gm-runner's own candle path (crates/gm-runner/src/embed.rs)
+        // via a synchronous spawnSync subprocess, without paying wasm
+        // instantiation/compile cost per call. Input is raw text on stdin (a
+        // pipe avoids argv length/quoting limits the JSON-arg `dispatch`
+        // command already accepts for its own body); output is
+        // `{"embedding":[f32...]}` on success or `{"error":"..."}` (exit
+        // code 1) on failure -- caller distinguishes by exit code, never by
+        // parsing prose.
+        "embed-text" => {
+            use std::io::Read as _;
+            let mut text = String::new();
+            std::io::stdin().read_to_string(&mut text)?;
+            match embed::embed(&text) {
+                Ok(values) => {
+                    println!("{}", serde_json::json!({ "embedding": values }));
+                    Ok(())
+                }
+                Err(e) => {
+                    println!("{}", serde_json::json!({ "error": e }));
+                    std::process::exit(1);
+                }
+            }
+        }
         "--version" | "version" => {
             println!("gm-runner {}", env!("CARGO_PKG_VERSION"));
             Ok(())

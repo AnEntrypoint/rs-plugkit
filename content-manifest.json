@@ -22,19 +22,64 @@
       "source_url": "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json",
       "consumers": ["gm-runner", "plugkit-wasm (browser fallback build)"]
     },
-    "grammar-javascript": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-javascript", "version": "0.23.1" },
+    "grammar-javascript": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-javascript", "version": "0.25.0" },
     "grammar-typescript": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-typescript", "version": "0.23.2" },
-    "grammar-python": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-python", "version": "0.23.6" },
-    "grammar-rust": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-rust", "version": "0.23.3" },
-    "grammar-go": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-go", "version": "0.23.4" },
-    "grammar-c": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-c", "version": "0.23.4" },
+    "grammar-python": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-python", "version": "0.25.0" },
+    "grammar-rust": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-rust", "version": "0.24.2" },
+    "grammar-go": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-go", "version": "0.25.0" },
+    "grammar-c": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-c", "version": "0.24.2" },
     "grammar-cpp": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-cpp", "version": "0.23.4" },
     "grammar-java": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-java", "version": "0.23.5" },
-    "grammar-json": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-json", "version": "0.23.0" },
+    "grammar-json": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-json", "version": "0.24.8" },
     "grammar-html": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-html", "version": "0.23.2" },
     "grammar-css": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-css", "version": "0.25.0" },
     "grammar-bash": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-bash", "version": "0.25.1" },
     "grammar-md": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-md", "version": "0.5.3" }
   },
-  "note": "Tree-sitter grammars are currently statically linked into plugkit-core's wasm build (Rust cdylib, no dynamic-load ABI for wasm-compiled C grammars exists yet) -- entries here document the version pin and CONTENT identity (crate+version, since each grammar is small, deterministic C source compiled once) for the incremental-CI-rebuild design in ci-per-artifact-rebuild, not yet a runtime-downloadable split like embed-weights. Splitting them into truly separate runtime-loadable artifacts needs a wasm dynamic-linking mechanism plugkit-core does not have; tracked as a follow-up, not silently claimed done here."
+  "note": "Tree-sitter grammars are currently statically linked into plugkit-core's wasm build (Rust cdylib, no dynamic-load ABI for wasm-compiled C grammars exists yet) -- entries here document the version pin and CONTENT identity (crate+version, since each grammar is small, deterministic C source compiled once) for the incremental-CI-rebuild design in ci-per-artifact-rebuild, not yet a runtime-downloadable split like embed-weights. Splitting them into truly separate runtime-loadable artifacts needs a wasm dynamic-linking mechanism plugkit-core does not have; tracked as a follow-up (treesitter-grammar-runtime-split), not silently claimed done here.",
+  "tree_sitter_cross_repo_manifest": {
+    "purpose": "Single source of truth for tree-sitter GRAMMAR version pins shared between rs-plugkit (crates/plugkit-core, AST-node-boundary extraction for embedding chunks, code_index.rs) and rs-codeinsight (per-language metrics extraction for conventions/depgraph output, analyzer.rs). These are two genuinely independent crates with different extraction purposes -- NOT a shared dependency, NOT a candidate for crate merge -- this section only pins the grammar version each repo resolves to when both use the same language grammar, so the two repos never silently drift on which exact grammar release they parse with.",
+    "core_pin_intentionally_diverges": {
+      "rs-plugkit": "tree-sitter core 0.26.11 (crates/plugkit-core/Cargo.toml)",
+      "rs-codeinsight": "tree-sitter core 0.24.7 (Cargo.toml)",
+      "reason": "The tree-sitter CORE crate (the parser runtime API, not a language grammar) is pinned independently per repo by design -- rs-plugkit bumped to 0.26 this session for its own reasons; rs-codeinsight's broader 28-language optional-feature grammar set has not been re-validated against 0.26 yet. This is the genuine API-incompatibility surface named in treesitter-surface-consolidation-version-drift-documented and is NOT covered by this manifest -- only per-language GRAMMAR crate versions are pinned here, never the tree-sitter core version itself."
+    },
+    "shared_grammars": {
+      "description": "Every language grammar both repos currently depend on, and its pinned version. Owner = which repo's Cargo.toml is authoritative when a version bump is needed; the other repo's Cargo.toml must be bumped in lockstep in the same PR/session. All entries below were verified to already resolve identically in both Cargo.lock files as of this manifest's authoring.",
+      "javascript": { "crate": "tree-sitter-javascript", "version": "0.25.0", "owner": "rs-plugkit" },
+      "typescript": { "crate": "tree-sitter-typescript", "version": "0.23.2", "owner": "rs-plugkit" },
+      "python": { "crate": "tree-sitter-python", "version": "0.25.0", "owner": "rs-plugkit" },
+      "rust": { "crate": "tree-sitter-rust", "version": "0.24.2", "owner": "rs-plugkit" },
+      "go": { "crate": "tree-sitter-go", "version": "0.25.0", "owner": "rs-plugkit" },
+      "c": { "crate": "tree-sitter-c", "version": "0.24.2", "owner": "rs-plugkit" },
+      "cpp": { "crate": "tree-sitter-cpp", "version": "0.23.4", "owner": "rs-plugkit" },
+      "java": { "crate": "tree-sitter-java", "version": "0.23.5", "owner": "rs-plugkit" },
+      "json": { "crate": "tree-sitter-json", "version": "0.24.8", "owner": "rs-plugkit" },
+      "html": { "crate": "tree-sitter-html", "version": "0.23.2", "owner": "rs-plugkit" },
+      "css": { "crate": "tree-sitter-css", "version": "0.25.0", "owner": "rs-plugkit" },
+      "bash": { "crate": "tree-sitter-bash", "version": "0.25.1", "owner": "rs-plugkit" },
+      "md": { "crate": "tree-sitter-md", "version": "0.5.3", "owner": "rs-plugkit" },
+      "c-sharp": { "crate": "tree-sitter-c-sharp", "version": "0.23.5", "owner": "rs-plugkit" },
+      "haskell": { "crate": "tree-sitter-haskell", "version": "0.23.1", "owner": "rs-plugkit" },
+      "julia": { "crate": "tree-sitter-julia", "version": "0.23.1", "owner": "rs-plugkit" },
+      "php": { "crate": "tree-sitter-php", "version": "0.24.2", "owner": "rs-plugkit" },
+      "ruby": { "crate": "tree-sitter-ruby", "version": "0.23.1", "owner": "rs-codeinsight" }
+    },
+    "codeinsight_only_grammars": {
+      "description": "Languages rs-codeinsight supports via its broader 28-language optional-feature set that rs-plugkit does not integrate at all -- these have no shared-pin obligation, owned solely by rs-codeinsight, listed here only for completeness so a future grammar addition to rs-plugkit checks this list first instead of independently picking a version.",
+      "yaml": { "crate": "tree-sitter-yaml", "version": "0.7.2" },
+      "scala": { "crate": "tree-sitter-scala", "version": "0.26.0" },
+      "ocaml": { "crate": "tree-sitter-ocaml", "version": "0.24.2" },
+      "elixir": { "crate": "tree-sitter-elixir", "version": "0.3.5" },
+      "erlang": { "crate": "tree-sitter-erlang", "version": "0.16.0" },
+      "zig": { "crate": "tree-sitter-zig", "version": "1.1.2" },
+      "lua": { "crate": "tree-sitter-lua", "version": "0.5.0" },
+      "regex": { "crate": "tree-sitter-regex", "version": "0.25.0" },
+      "r": { "crate": "tree-sitter-r", "version": "1.2.0" },
+      "swift": { "crate": "tree-sitter-swift", "version": "0.7.1" }
+    },
+    "maintenance_rule": "When bumping any shared grammar's version in either repo's Cargo.toml, update this manifest in the SAME commit and bump the other repo's Cargo.toml to match in the same session -- this file is the check, not a passive record. A grammar bump landing in one repo without the paired bump + manifest update here is itself a version-drift regression of the exact kind this row exists to close.",
+    "authored_by_row": "treesitter-surface-consolidation",
+    "last_verified_against_lockfiles": "2026-07-18"
+  }
 }

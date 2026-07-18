@@ -2,13 +2,18 @@
 
 use serde_json::{json, Value};
 
-use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
-use crate::vecstore::{drop_if_dim_mismatch, vec_to_json_literal, EXPECTED_EMBED_DIM};
+use crate::shared_db::{shared_ensure_open, shared_exec, shared_query_params, SHARED_DB};
+use crate::vecns::{self, QueryBudget, RecencyParams, VecTableSpec};
+use crate::vecstore::EXPECTED_EMBED_DIM;
 
 const TABLE: &str = "rssearch_vectors";
 const INDEX: &str = "rssearch_vectors_vec";
 const HALF_LIFE_MS: f64 = 30.0 * 24.0 * 60.0 * 60.0 * 1000.0;
 const RECENCY_FLOOR: f64 = 0.4;
+
+const SPEC: VecTableSpec = VecTableSpec { db_name: SHARED_DB, table: TABLE, index: INDEX };
+const RECENCY: RecencyParams = RecencyParams { half_life_ms: HALF_LIFE_MS, recency_floor: RECENCY_FLOOR };
+const BUDGET: QueryBudget = QueryBudget { pool_multiplier: 5, pool_floor: 20 };
 
 fn shared_db_path() -> String {
     crate::code_index::project_db_path(None)

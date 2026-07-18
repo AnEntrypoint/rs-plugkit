@@ -7,13 +7,7 @@ use crate::shared_db::{shared_exec, SHARED_DB};
 pub const EXPECTED_EMBED_DIM: usize = 384;
 
 pub fn vec_to_json_literal(v: &[f32]) -> String {
-    let mut s = String::from("[");
-    for (i, f) in v.iter().enumerate() {
-        if i > 0 { s.push(','); }
-        s.push_str(&format!("{:.6}", f));
-    }
-    s.push(']');
-    s
+    serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string())
 }
 
 pub fn embedding_col_dim(table: &str) -> Option<usize> {

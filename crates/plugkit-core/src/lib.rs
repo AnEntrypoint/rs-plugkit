@@ -32,6 +32,9 @@ pub mod poll_detect;
 pub mod vecstore;
 
 #[cfg(target_arch = "wasm32")]
+pub mod vecns;
+
+#[cfg(target_arch = "wasm32")]
 pub mod rssearch_vectors;
 
 #[cfg(target_arch = "wasm32")]
