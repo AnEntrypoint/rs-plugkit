@@ -24,6 +24,7 @@
 .gm/exec-spool.in
 .gm/exec-spool.out
 .gm/exec-spool.started
+.agentplug-kv/
 # tracked: .gm/rs-learn.db, .gm/code-search/, AGENTS.md, .gm/prd.yml
 # <<< gm managed
 
