@@ -34,6 +34,10 @@ pub fn run_supervised(wasm_path: PathBuf, cwd: PathBuf, spool_dir: PathBuf) -> a
                 eprintln!("[gm-runner] reloading wasm module for version-skew self-heal");
                 continue;
             }
+            Ok(Ok(crate::spool::StopReason::ExeUpdated)) => {
+                eprintln!("[gm-runner] executable self-updated on disk -- exiting for external relaunch");
+                return Ok(());
+            }
             Ok(Err(e)) => {
                 eprintln!("[gm-runner] watcher error: {e:#}");
             }

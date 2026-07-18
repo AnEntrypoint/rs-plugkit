@@ -103,6 +103,15 @@ impl PlugkitRuntime {
 /// process" instead of "reload and keep serving."
 pub enum StopReason {
     Reload,
+    /// gm-runner's own executable was self-updated on disk (see
+    /// bootstrap_gm_runner_self_update). Unlike a wasm Reload, a new exe
+    /// cannot take effect inside the current process -- the OS already
+    /// mapped this process's code pages from the OLD binary. run_supervised
+    /// must exit the whole process on this variant (not loop internally,
+    /// unlike Reload) so whatever launched gm-runner (the gm skill's boot
+    /// line, or a future external supervisor) relaunches from the new bytes
+    /// on the next invocation.
+    ExeUpdated,
 }
 
 /// Polls `<spool_dir>/in/<verb>/*.txt`, dispatches each to the wasm instance,
@@ -132,6 +141,14 @@ pub fn run_spool_watcher(runtime: &mut PlugkitRuntime, spool_dir: &Path) -> anyh
     // after a newer plugkit-bin release ships.
     let mut last_remote_check = std::time::Instant::now();
     const REMOTE_CHECK_INTERVAL: Duration = Duration::from_secs(600);
+
+    // gm-runner's own executable self-update: same 600s cadence and
+    // best-effort-network-failure semantics as the plugkit.wasm remote check
+    // above, but checked against gm-runner-bin's release channel instead.
+    // Reuses that check's own timer slot (both fire on the same tick) rather
+    // than a second independent Instant, since there's no reason to stagger
+    // them -- one GitHub API round-trip per 600s tick either way.
+    let gm_runner_version_path = crate::download::install_dir().join("gm-runner.version");
 
     loop {
         write_status(&status_path)?;
@@ -181,6 +198,31 @@ pub fn run_spool_watcher(runtime: &mut PlugkitRuntime, spool_dir: &Path) -> anyh
                     // bootstrap_plugkit_wasm already wrote plugkit.version on
                     // success; the next VERSION_CHECK_INTERVAL tick (<=30s
                     // away) will see the on-disk/booted mismatch and reload.
+                }
+            }
+
+            // Executable self-update: unlike the wasm path above, a new exe
+            // cannot be picked up by looping inside this same process (the OS
+            // already mapped this process's code from the old binary's
+            // pages), so a successful swap returns StopReason::ExeUpdated
+            // immediately instead of waiting for the next VERSION_CHECK
+            // tick -- run_supervised exits the whole process on that variant
+            // so an external relauncher starts fresh from the new bytes.
+            if let Ok(Some(latest)) = crate::download::fetch_latest_gm_runner_version() {
+                let current = fs::read_to_string(&gm_runner_version_path).unwrap_or_default();
+                if !latest.is_empty() && latest.trim() != current.trim() {
+                    eprintln!(
+                        "[gm-runner] remote gm-runner-bin latest is {} (booted {}) -- self-updating executable",
+                        latest,
+                        current.trim()
+                    );
+                    match std::env::current_exe().and_then(|p| p.canonicalize()) {
+                        Ok(exe_path) => match crate::download::bootstrap_gm_runner_self_update(&latest, &exe_path) {
+                            Ok(_) => return Ok(StopReason::ExeUpdated),
+                            Err(e) => eprintln!("[gm-runner] executable self-update failed: {e:#} -- will retry next interval"),
+                        },
+                        Err(e) => eprintln!("[gm-runner] could not resolve current_exe for self-update: {e:#}"),
+                    }
                 }
             }
         }

@@ -163,3 +163,88 @@ pub fn bootstrap_plugkit_wasm(version: &str) -> anyhow::Result<PathBuf> {
     fs::write(install_dir().join("plugkit.version"), version)?;
     Ok(dest)
 }
+
+/// The gm-runner-bin release asset name for the current host platform/arch,
+/// mirroring bin/install.js's gmRunnerAssetName() exactly (that JS function's
+/// own comment names this Rust function as the other place the mapping is
+/// spelled). Returns None for a host combination CI does not build.
+pub fn gm_runner_asset_name() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => Some("gm-runner-windows-x64.exe"),
+        ("windows", "aarch64") => Some("gm-runner-windows-arm64.exe"),
+        ("macos", "x86_64") => Some("gm-runner-macos-x64"),
+        ("macos", "aarch64") => Some("gm-runner-macos-arm64"),
+        ("linux", "x86_64") => Some("gm-runner-linux-x64"),
+        ("linux", "aarch64") => Some("gm-runner-linux-arm64"),
+        _ => None,
+    }
+}
+
+/// Queries gm-runner-bin's GitHub Releases API for the latest published tag,
+/// same shape as fetch_latest_plugkit_version. Best-effort: network failure
+/// returns Ok(None) so a flaky connection never blocks the spool loop.
+pub fn fetch_latest_gm_runner_version() -> anyhow::Result<Option<String>> {
+    let url = "https://api.github.com/repos/AnEntrypoint/gm-runner-bin/releases/latest";
+    let resp = ureq::get(url)
+        .set("User-Agent", "gm-runner")
+        .call()?;
+    let body: serde_json::Value = serde_json::from_str(&resp.into_string()?)?;
+    let tag = body
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim_start_matches('v').to_string());
+    Ok(tag)
+}
+
+/// Downloads gm-runner's own executable for `version` from the gm-runner-bin
+/// GitHub Releases channel, verified against the release's own .sha256
+/// sidecar (identical machinery to bootstrap_plugkit_wasm), and atomically
+/// swaps it into place at `current_exe`. The running process keeps executing
+/// from its already-mapped file descriptor / loaded pages on every platform
+/// this targets (Windows allows overwrite-via-rename of a running exe's file
+/// entry; Unix unlink-then-replace never touches the inode the running
+/// process holds open) -- the NEW binary takes effect on the next process
+/// start, not the current run. Caller is responsible for triggering that next
+/// start (e.g. a clean exit for the supervisor/OS service manager to relaunch
+/// from, mirroring the existing plugkit.wasm version-skew reload path).
+pub fn bootstrap_gm_runner_self_update(version: &str, current_exe: &Path) -> anyhow::Result<PathBuf> {
+    let asset = gm_runner_asset_name()
+        .ok_or_else(|| anyhow::anyhow!("no gm-runner-bin release asset published for this host platform/arch"))?;
+
+    let base = format!("https://github.com/AnEntrypoint/gm-runner-bin/releases/download/v{version}");
+    let bin_url = format!("{base}/{asset}");
+    let sha_url = format!("{base}/{asset}.sha256");
+
+    let sha_resp = ureq::get(&sha_url).call()?;
+    let sha_line = sha_resp.into_string()?;
+    let expected_sha = sha_line
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty sha256 sidecar at {sha_url}"))?
+        .to_string();
+
+    let staged = install_dir().join(format!("{asset}.new"));
+    download_and_verify(&bin_url, &staged, &expected_sha)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&staged)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&staged, perms)?;
+    }
+
+    // Rename-over-running-exe: on Unix this unlinks the old inode (the
+    // running process keeps its already-open fd/mapped pages, unaffected)
+    // and the new file takes over the path atomically. On Windows a running
+    // exe's own file cannot be replaced while it holds an exclusive handle
+    // on itself in the general case, but Windows does permit renaming an
+    // open-for-execute file when opened with FILE_SHARE_DELETE (the default
+    // sharing mode Rust's own std::fs::rename target-side handling assumes);
+    // if this fails, the caller keeps the staged `.new` file for a follow-up
+    // attempt on the current_exe.with_extension("new") path rather than
+    // losing the verified download.
+    fs::rename(&staged, current_exe)?;
+    fs::write(install_dir().join("gm-runner.version"), version)?;
+    Ok(current_exe.to_path_buf())
+}
