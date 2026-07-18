@@ -48,6 +48,7 @@
       "description": "Every language grammar rs-plugkit's runtime dispatch (lang_for_ext in code_index.rs) sends to the treesitter plugin, and rs-codeinsight's own in-process pinned version for the same language. `owner: rs-plugkit` = this repo's code_index.rs::lang_for_ext names this language string and expects the treesitter plugin to resolve it (no local crate pin to bump); `owner: rs-codeinsight` = only rs-codeinsight consumes this grammar, in-process, via its own Cargo.toml pin.",
       "javascript": { "crate": "tree-sitter-javascript", "version": "0.25.0", "owner": "rs-plugkit" },
       "typescript": { "crate": "tree-sitter-typescript", "version": "0.23.2", "owner": "rs-plugkit" },
+      "tsx": { "crate": "tree-sitter-typescript", "version": "0.23.2", "owner": "rs-plugkit", "note": "same crate as typescript above -- tree-sitter-typescript publishes both LANGUAGE_TYPESCRIPT and LANGUAGE_TSX grammars from one crate version; live-witnessed via agentplug-runner dispatch treesitter parse {lang:tsx} returning real AST nodes" },
       "python": { "crate": "tree-sitter-python", "version": "0.25.0", "owner": "rs-plugkit" },
       "rust": { "crate": "tree-sitter-rust", "version": "0.24.2", "owner": "rs-plugkit" },
       "go": { "crate": "tree-sitter-go", "version": "0.25.0", "owner": "rs-plugkit" },
@@ -58,11 +59,12 @@
       "html": { "crate": "tree-sitter-html", "version": "0.23.2", "owner": "rs-plugkit" },
       "css": { "crate": "tree-sitter-css", "version": "0.25.0", "owner": "rs-plugkit" },
       "bash": { "crate": "tree-sitter-bash", "version": "0.25.1", "owner": "rs-plugkit" },
-      "md": { "crate": "tree-sitter-md", "version": "0.5.3", "owner": "rs-plugkit" },
-      "c-sharp": { "crate": "tree-sitter-c-sharp", "version": "0.23.5", "owner": "rs-plugkit" },
+      "markdown": { "crate": "tree-sitter-md", "version": "0.5.3", "owner": "rs-plugkit" },
+      "csharp": { "crate": "tree-sitter-c-sharp", "version": "0.23.5", "owner": "rs-plugkit" },
       "haskell": { "crate": "tree-sitter-haskell", "version": "0.23.1", "owner": "rs-plugkit" },
       "julia": { "crate": "tree-sitter-julia", "version": "0.23.1", "owner": "rs-plugkit" },
       "php": { "crate": "tree-sitter-php", "version": "0.24.2", "owner": "rs-plugkit" },
+      "powershell": { "crate": "tree-sitter-powershell", "version": "unpinned", "owner": "rs-plugkit", "note": "version not independently verifiable from rs-plugkit -- code_index.rs lang_for_ext maps .ps1/.psm1/.psd1 to this language string and the treesitter plugin resolves it live (confirmed via agentplug-runner dispatch treesitter parse {lang:powershell} returning real AST nodes), but the plugin's compiled treesitter.wasm binary carries no extractable crate-version string; track the real pin from the treesitter-plugin build repo once accessible" },
       "ruby": { "crate": "tree-sitter-ruby", "version": "0.23.1", "owner": "rs-codeinsight" }
     },
     "codeinsight_only_grammars": {
