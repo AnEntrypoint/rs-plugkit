@@ -105,7 +105,7 @@ jobs:
           rm -f target/wasm32-wasip1/release/rs_plugkit.wasm || true
           cargo clean --release --target wasm32-wasip1 -p rs-plugkit || true
 
-      - name: Build WASM
+      - name: Build WASM (fat -- wasm-embedded safetensors fallback)
         shell: bash
         run: |
           set -o pipefail
@@ -120,31 +120,85 @@ jobs:
             exit 1
           }
 
-      - name: Verify WASM was produced fresh this run
+      - name: Verify fat WASM was produced fresh this run
         shell: bash
         run: |
           test -f "target/wasm32-wasip1/release/rs_plugkit.wasm" || { echo "rs_plugkit.wasm not built"; exit 1; }
 
-      - name: Rename WASM binary
+      - name: Rename fat WASM binary
         shell: bash
         run: |
           cp "target/wasm32-wasip1/release/rs_plugkit.wasm" "plugkit.wasm"
 
-      - name: Upload WASM artifact
+      - name: Upload fat WASM artifact
         uses: actions/upload-artifact@v5
         with:
           name: plugkit.wasm
           path: plugkit.wasm
+
+      - name: Force fresh compile for slim build (defeat stale-cache artifact)
+        shell: bash
+        run: |
+          rm -f target/wasm32-wasip1/release/rs_plugkit.wasm || true
+          cargo clean --release --target wasm32-wasip1 -p rs-plugkit || true
+
+      - name: Build WASM (slim -- no embedded safetensors, requires host_vec_embed)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --release --target wasm32-wasip1 --no-default-features --features wasm,slim --lib 2>&1 | tee /tmp/wasm-slim-build.log || {
+            echo "::group::last 80 lines of build output"
+            tail -80 /tmp/wasm-slim-build.log
+            echo "::endgroup::"
+            echo "::group::all error lines (rustc + C)"
+            grep -iE 'error' /tmp/wasm-slim-build.log | head -60
+            echo "::endgroup::"
+            grep -iE 'error\[E[0-9]+\]|^error:|error: use of undeclared|error: unknown type|undefined symbol|cannot find' /tmp/wasm-slim-build.log | head -12 | while IFS= read -r line; do echo "::error::${line:0:300}"; done
+            exit 1
+          }
+
+      - name: Verify slim WASM was produced fresh this run
+        shell: bash
+        run: |
+          test -f "target/wasm32-wasip1/release/rs_plugkit.wasm" || { echo "rs_plugkit.wasm (slim) not built"; exit 1; }
+
+      - name: Verify slim artifact is genuinely smaller (no embedded safetensors)
+        shell: bash
+        run: |
+          fat_size=$(stat -c%s plugkit.wasm)
+          slim_size=$(stat -c%s target/wasm32-wasip1/release/rs_plugkit.wasm)
+          echo "fat=${fat_size} slim=${slim_size}"
+          if [ "$slim_size" -ge "$fat_size" ]; then
+            echo "::error::slim build (${slim_size} bytes) is not smaller than fat build (${fat_size} bytes) -- the slim feature is not actually excluding the embedded safetensors, refusing to publish a mislabeled artifact"
+            exit 1
+          fi
+
+      - name: Rename slim WASM binary
+        shell: bash
+        run: |
+          cp "target/wasm32-wasip1/release/rs_plugkit.wasm" "plugkit-slim.wasm"
+
+      - name: Upload slim WASM artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: plugkit-slim.wasm
+          path: plugkit-slim.wasm
 
   publish-binaries:
     needs: [bump, build]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-      - name: Download WASM artifact
+      - name: Download fat WASM artifact
         uses: actions/download-artifact@v5
         with:
           name: plugkit.wasm
+          path: bins/
+
+      - name: Download slim WASM artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: plugkit-slim.wasm
           path: bins/
 
       - name: Stage release assets
@@ -156,11 +210,14 @@ jobs:
           set -e
           mkdir -p release-assets
           cp bins/plugkit.wasm release-assets/
+          cp bins/plugkit-slim.wasm release-assets/
           cd release-assets
           sha256sum plugkit.wasm | sed 's/ \*/  /' > plugkit.wasm.sha256
+          sha256sum plugkit-slim.wasm | sed 's/ \*/  /' > plugkit-slim.wasm.sha256
           echo "$VER" > plugkit.wasm.version
           ls -la
           cat plugkit.wasm.sha256
+          cat plugkit-slim.wasm.sha256
 
       - name: Upload to plugkit-bin Release
         env:
@@ -179,7 +236,9 @@ jobs:
             --clobber \
             release-assets/plugkit.wasm \
             release-assets/plugkit.wasm.sha256 \
-            release-assets/plugkit.wasm.version
+            release-assets/plugkit.wasm.version \
+            release-assets/plugkit-slim.wasm \
+            release-assets/plugkit-slim.wasm.sha256
 
       - name: Setup Node.js for npm publish
         uses: actions/setup-node@v4
@@ -260,8 +319,11 @@ jobs:
           echo "$VER" > bin/plugkit.version
           cp ../release-assets/plugkit.wasm.sha256 bin/plugkit.wasm.sha256 2>/dev/null || \
             curl -sL "https://github.com/AnEntrypoint/plugkit-bin/releases/download/v${VER}/plugkit.wasm.sha256" -o bin/plugkit.wasm.sha256
+          cp ../release-assets/plugkit-slim.wasm.sha256 bin/plugkit-slim.wasm.sha256 2>/dev/null || \
+            curl -sL "https://github.com/AnEntrypoint/plugkit-bin/releases/download/v${VER}/plugkit-slim.wasm.sha256" -o bin/plugkit-slim.wasm.sha256
           echo "$VER" > gm-plugkit/plugkit.version
-          git add gm.json bin/plugkit.version bin/plugkit.wasm.sha256 gm-plugkit/plugkit.version
+          cp bin/plugkit-slim.wasm.sha256 gm-plugkit/plugkit-slim.wasm.sha256
+          git add gm.json bin/plugkit.version bin/plugkit.wasm.sha256 bin/plugkit-slim.wasm.sha256 gm-plugkit/plugkit.version gm-plugkit/plugkit-slim.wasm.sha256
           if git diff --cached --quiet; then
             echo "No metadata changes"
             exit 0

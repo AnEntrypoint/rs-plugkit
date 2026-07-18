@@ -131,9 +131,26 @@ pub fn fetch_latest_plugkit_version() -> anyhow::Result<Option<String>> {
     Ok(tag)
 }
 
-/// Downloads plugkit.wasm for `version` from the plugkit-bin GitHub Releases
-/// channel (same source gm-plugkit/bootstrap.js's downloadFromGithubReleases
-/// uses), verified against the release's own .sha256 sidecar.
+/// gm-runner registers `host_vec_embed` unconditionally in
+/// `wasm_host.rs::register_env_imports` (real native candle inference via
+/// `crate::embed::embed`, not a stub -- see `crates/gm-runner/src/embed.rs`),
+/// so every gm-runner process is always a valid slim-wasm host: the slim
+/// artifact's `cfg(feature = "slim")` build has no wasm-embedded safetensors
+/// fallback and *requires* a host that answers `host_vec_embed` for real,
+/// which gm-runner always does. Fetching the fat (embedded-weights) artifact
+/// on a gm-runner host would only waste ~130MB of download+disk for a
+/// fallback path that never triggers. Local install still lands at the fixed
+/// `plugkit.wasm` filename (`wasm_path()` in main.rs) -- this only changes
+/// which REMOTE artifact is fetched under that local name.
+const REMOTE_ARTIFACT_NAME: &str = "plugkit-slim.wasm";
+
+/// Downloads plugkit's wasm module for `version` from the plugkit-bin GitHub
+/// Releases channel (same source gm-plugkit/bootstrap.js's
+/// downloadFromGithubReleases uses), verified against the release's own
+/// .sha256 sidecar. Always fetches the slim artifact (see
+/// `REMOTE_ARTIFACT_NAME`) -- gm-runner always implements `host_vec_embed`
+/// natively, so the fat artifact's embedded-safetensors fallback is never
+/// needed on this host.
 pub fn bootstrap_plugkit_wasm(version: &str) -> anyhow::Result<PathBuf> {
     let dest = install_dir().join("plugkit.wasm");
     if dest.exists() {
@@ -148,8 +165,8 @@ pub fn bootstrap_plugkit_wasm(version: &str) -> anyhow::Result<PathBuf> {
     }
 
     let base = format!("https://github.com/AnEntrypoint/plugkit-bin/releases/download/v{version}");
-    let wasm_url = format!("{base}/plugkit.wasm");
-    let sha_url = format!("{base}/plugkit.wasm.sha256");
+    let wasm_url = format!("{base}/{REMOTE_ARTIFACT_NAME}");
+    let sha_url = format!("{base}/{REMOTE_ARTIFACT_NAME}.sha256");
 
     let sha_resp = ureq::get(&sha_url).call()?;
     let sha_line = sha_resp.into_string()?;
