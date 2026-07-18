@@ -38,80 +38,15 @@ fn plugin_ok(resp: &Value) -> bool {
     resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
-fn plugin_err(resp: &Value) -> String {
-    resp.get("error").and_then(|v| v.as_str()).unwrap_or("plugin call failed").to_string()
-}
-
-fn plugin_rows(resp: Value) -> Value {
-    resp.get("rows").cloned().unwrap_or(Value::Array(Vec::new()))
-}
-
-mod libsql_wasm {
-    use super::{call_plugin, json, plugin_err, plugin_ok, plugin_rows, Value};
-
-    pub fn open(name: &str, path: &str) -> Result<(), String> {
-        let resp = call_plugin("libsql", "open", &json!({ "db": name, "path": path }));
-        if plugin_ok(&resp) { Ok(()) } else { Err(plugin_err(&resp)) }
-    }
-
-    pub fn exec(name: &str, sql: &str) -> Result<(), String> {
-        let resp = call_plugin("libsql", "exec", &json!({ "db": name, "sql": sql }));
-        if plugin_ok(&resp) { Ok(()) } else { Err(plugin_err(&resp)) }
-    }
-
-    pub fn exec_params(name: &str, sql: &str, params: &[&str]) -> Result<(), String> {
-        let resp = call_plugin("libsql", "exec_params", &json!({ "db": name, "sql": sql, "params": params }));
-        if plugin_ok(&resp) { Ok(()) } else { Err(plugin_err(&resp)) }
-    }
-
-    pub fn query(name: &str, sql: &str) -> Result<Value, String> {
-        query_params(name, sql, &[])
-    }
-
-    pub fn query_params(name: &str, sql: &str, params: &[&str]) -> Result<Value, String> {
-        let resp = call_plugin("libsql", "query_params", &json!({ "db": name, "sql": sql, "params": params }));
-        if plugin_ok(&resp) { Ok(plugin_rows(resp)) } else { Err(plugin_err(&resp)) }
-    }
-
-    pub fn begin(name: &str) -> Result<(), String> { exec(name, "BEGIN IMMEDIATE") }
-    pub fn commit(name: &str) -> Result<(), String> { exec(name, "COMMIT") }
-
-    /// Handle to a plugin-side prepared statement -- the live libsql_ffi
-    /// statement object can't cross the wasm-to-wasm boundary, so this holds
-    /// only the plugin's opaque handle id; execute_bound re-dispatches a
-    /// bind+step call against it on every invocation instead of stepping a
-    /// local pointer.
-    pub struct PreparedStmt {
-        db: String,
-        handle: String,
-    }
-
-    pub fn prepare(name: &str, sql: &str) -> Result<PreparedStmt, String> {
-        let resp = call_plugin("libsql", "prepare", &json!({ "db": name, "sql": sql }));
-        if !plugin_ok(&resp) { return Err(plugin_err(&resp)); }
-        let handle = resp.get("handle").and_then(|v| v.as_str())
-            .ok_or_else(|| "prepare: missing handle in plugin response".to_string())?
-            .to_string();
-        Ok(PreparedStmt { db: name.to_string(), handle })
-    }
-
-    impl PreparedStmt {
-        pub fn execute_bound(&self, params: &[&str]) -> Result<(), String> {
-            let resp = call_plugin("libsql", "execute_bound", &json!({
-                "db": self.db,
-                "handle": self.handle,
-                "params": params,
-            }));
-            if plugin_ok(&resp) { Ok(()) } else { Err(plugin_err(&resp)) }
-        }
-    }
-
-    impl Drop for PreparedStmt {
-        fn drop(&mut self) {
-            let _ = call_plugin("libsql", "finalize", &json!({ "db": self.db, "handle": self.handle }));
-        }
-    }
-}
+// This file used to define its OWN private `mod libsql_wasm { ... }` here,
+// a second, independent, drifted-stale copy of crate::libsql_wasm (the real
+// crate-level module in libsql_wasm.rs) -- it shadowed the crate module
+// since this file never `use crate::libsql_wasm;`'d, so every bare
+// `libsql_wasm::` call below resolved to this local copy, not the shared
+// one pipeline.rs used. Deleted in favor of `use crate::libsql_wasm;`
+// (below) so there is exactly one implementation of the now-stateless,
+// absolute-path-based libsql wrapper, matching pipeline.rs.
+use crate::libsql_wasm;
 
 fn fv_put(ns: &str, key: &str, val: &str) -> bool {
     let rc = unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
@@ -350,34 +285,46 @@ fn is_skipped_filename(name: &str) -> bool {
     SKIP_FILE_SUFFIXES.iter().any(|suf| name.ends_with(suf))
 }
 
-const GM_DB: &str = crate::shared_db::SHARED_DB;
-
-pub fn ensure_schema_at(db_name: &str, path: &str) -> Result<(), String> {
+pub fn ensure_schema_at(path: &str) -> Result<(), String> {
     if let Some(parent) = std::path::Path::new(path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    libsql_wasm::open(db_name, path)?;
-    let _ = drop_if_dim_mismatch(db_name, "code_chunks");
-    let _ = drop_if_dim_mismatch(db_name, "memories");
-    libsql_wasm::exec(db_name, "CREATE TABLE IF NOT EXISTS code_chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, body TEXT, embedding F32_BLOB(384))")?;
-    libsql_wasm::exec(db_name, "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, namespace TEXT, text TEXT, ts INTEGER, embedding F32_BLOB(384))")?;
-    crate::vecns::VecTableSpec { db_name, table: "code_chunks", index: "code_chunks_vec" }.ensure_index();
-    crate::vecns::VecTableSpec { db_name, table: "memories", index: "memories_vec" }.ensure_index();
+    libsql_wasm::open(path)?;
+    let _ = drop_if_dim_mismatch(path, "code_chunks");
+    let _ = drop_if_dim_mismatch(path, "memories");
+    libsql_wasm::exec(path, "CREATE TABLE IF NOT EXISTS code_chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, body TEXT, embedding F32_BLOB(384))")?;
+    libsql_wasm::exec(path, "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, namespace TEXT, text TEXT, ts INTEGER, embedding F32_BLOB(384))")?;
+    crate::vecns::VecTableSpec { db_name: path, table: "code_chunks", index: "code_chunks_vec" }.ensure_index();
+    crate::vecns::VecTableSpec { db_name: path, table: "memories", index: "memories_vec" }.ensure_index();
     Ok(())
 }
 
-pub(crate) fn project_db_path(project_path: Option<&str>) -> String {
+/// Bare filename only, NOT what gets passed to the plugin -- the plugin is
+/// now a stateless process-wide instance shared across every concurrently
+/// active project, so a bare relative filename ("gm.db") is no longer a
+/// safe identifier: two different projects both resolving to "gm.db" would
+/// silently collide/share the SAME file if the plugin ever resolved
+/// relative paths against its own process cwd rather than the calling
+/// project's. `project_db_path` (below) is what callers actually use --
+/// it resolves this filename against the CURRENT dispatch's project root
+/// via host_cwd_string(), fresh every call.
+fn project_db_filename(project_path: Option<&str>) -> String {
     match project_path {
         Some(p) if !p.is_empty() => format!("ext-{:x}.db", crc32(p)),
         _ => "gm.db".to_string(),
     }
 }
 
-fn project_db_name(project_path: Option<&str>) -> String {
-    match project_path {
-        Some(p) if !p.is_empty() => format!("gm_ext_{:x}", crc32(p)),
-        _ => GM_DB.to_string(),
-    }
+/// Absolute `<host_cwd>/.gm/<filename>` path -- the only thing the
+/// now-stateless shared libsql plugin actually uses to identify a db.
+/// project_path=None resolves against THIS call's own project root
+/// (host_cwd_string(), fresh every dispatch); Some(p) namespaces an
+/// "external" project's db by a crc32-hash filename but still resolves the
+/// directory against the CURRENT host_cwd, matching pre-existing
+/// project_db_name's "gm_ext_<hash>" naming intent for a project-scoped
+/// but locally-rooted extra db.
+pub(crate) fn project_db_path(project_path: Option<&str>) -> String {
+    libsql_wasm::absolute_db_path(&project_db_filename(project_path))
 }
 
 fn crc32(s: &str) -> u32 {
@@ -392,14 +339,13 @@ fn crc32(s: &str) -> u32 {
 }
 
 pub fn ensure_schema() -> Result<(), String> {
-    ensure_schema_at(GM_DB, &project_db_path(None))
+    ensure_schema_at(&project_db_path(None))
 }
 
 fn ensure_schema_for(project_path: Option<&str>) -> Result<String, String> {
-    let name = project_db_name(project_path);
     let path = project_db_path(project_path);
-    ensure_schema_at(&name, &path)?;
-    Ok(name)
+    ensure_schema_at(&path)?;
+    Ok(path)
 }
 
 fn list_dir(path: &str) -> Vec<String> {
@@ -706,8 +652,8 @@ fn slice_lines(content: &str, ls: usize, le: usize) -> String {
     content.lines().skip(ls - 1).take(le - ls + 1).collect::<Vec<_>>().join("\n")
 }
 
-fn chunk_rows_for_path(fp: &str) -> usize {
-    libsql_wasm::query_params(GM_DB, "SELECT COUNT(*) AS c FROM code_chunks WHERE path=?1", &[fp])
+fn chunk_rows_for_path(db_path: &str, fp: &str) -> usize {
+    libsql_wasm::query_params(db_path, "SELECT COUNT(*) AS c FROM code_chunks WHERE path=?1", &[fp])
         .ok()
         .and_then(|rows| rows.as_array().and_then(|a| a.first().cloned()))
         .and_then(|row| row.get("c").and_then(|v| v.as_u64()).or_else(|| row.get("c").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())))
@@ -745,22 +691,22 @@ fn truncate_for_embed(body: &str) -> &str {
     &body[..e]
 }
 
-/// Writes one chunk row. When `stmt` is Some (the index() batch path), binds
-/// against the caller's already-prepared/reused statement inside their own
-/// transaction -- avoids re-preparing the same INSERT and re-fsyncing per row.
-/// Falls back to a one-off exec_params call (its own implicit autocommit
-/// transaction) when `stmt` is None, for call sites outside a batch.
-fn write_chunk(libsql_ok: bool, stmt: Option<&libsql_wasm::PreparedStmt>, fp: &str, c: &ChunkRecord, body: &str) {
+/// Writes one chunk row via exec_params -- the now-stateless libsql plugin
+/// does its own open-prepare-bind-step-finalize-close cycle per call
+/// regardless (see agentplug-libsql's src/db.rs handle() doc comment: the
+/// old prepare-once/execute_bound-many handle sequence no longer exists
+/// plugin-side), so there is no batching benefit left to a separate
+/// prepared-statement path -- every row pays the same per-call cost either
+/// way. `db_path` is the absolute path resolved once by the caller
+/// (index()'s own db_path local), forwarded on every row.
+fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: &str) {
     if libsql_ok {
         let embedding_lit = vec_to_json_literal(&c.emb);
         let ls = c.ls.to_string();
         let le = c.le.to_string();
         let body_trunc = truncate_body(body);
         let params: [&str; 7] = [fp, &c.kind, &c.name, &ls, &le, body_trunc, &embedding_lit];
-        match stmt {
-            Some(s) => { let _ = s.execute_bound(&params); }
-            None => { let _ = libsql_wasm::exec_params(GM_DB, INSERT_CHUNK_SQL, &params); }
-        }
+        let _ = libsql_wasm::exec_params(db_path, INSERT_CHUNK_SQL, &params);
     }
     // Namespace "codeinsight" (NOT "codeinsight-vec") -- host_vec_search's
     // fusion candidate lookup in codesearch() queries exactly this namespace
@@ -783,7 +729,8 @@ fn delete_chunk_keys(chunks: &[ChunkRecord]) {
 }
 
 pub fn index(root: &str, max_files: usize) -> Value {
-    let libsql_ok = ensure_schema().is_ok();
+    let db_path = project_db_path(None);
+    let libsql_ok = ensure_schema_at(&db_path).is_ok();
     let kvvec_cleared = clear_codeinsight_if_dim_mismatch();
     if kvvec_cleared {
         let rows = fv_query(MANIFEST_NS, "");
@@ -801,15 +748,15 @@ pub fn index(root: &str, max_files: usize) -> Value {
         let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     }
-    // Batched writes (single txn + prepared-statement reuse, see
-    // libsql_wasm::begin/commit/prepare) and batched per-file embedding (see
-    // embed::embed_texts_batch) cut per-row fsync/parse/forward-pass cost
-    // enough that the old 12s budget -- tuned for the unbatched
-    // autocommit-per-row, one-chunk-per-forward-pass path -- can be raised
-    // substantially; a still-finite ceiling is kept so a pathological repo
-    // (huge files, cold model load) can't hang a dispatch forever, but a
-    // healthy-size repo (tens to low hundreds of files) now completes in one
-    // pass instead of deferring across many.
+    // Per-file batched embedding (see embed::embed_texts_batch) still cuts
+    // per-file forward-pass cost the way it always did; the write side no
+    // longer batches across a single begin/commit transaction or a reused
+    // prepared statement -- the now-stateless shared libsql plugin opens,
+    // operates, and closes on every single exec_params call regardless (see
+    // agentplug-libsql's src/db.rs handle() doc comment), so there is no
+    // txn/prepare amortization left to perform wasm-side. The wall budget
+    // below still exists to bound a pathological repo (huge files, cold
+    // model load), unrelated to the write-batching change.
     const INDEX_WALL_BUDGET_MS: u64 = 45000;
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut indexed = 0;
@@ -826,9 +773,6 @@ pub fn index(root: &str, max_files: usize) -> Value {
     // pass just to compute current_digest() (see current_digest's own
     // doc comment for the still-separate pre-check use at the call site).
     let mut digest_entries: Vec<(String, u32)> = Vec::with_capacity(files.len());
-
-    let stmt = if libsql_ok { libsql_wasm::prepare(GM_DB, INSERT_CHUNK_SQL).ok() } else { None };
-    let txn_active = libsql_ok && stmt.is_some() && libsql_wasm::begin(GM_DB).is_ok();
 
     for raw_fp in &files {
         let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
@@ -859,7 +803,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
             {
                 let stat_mtime = stat.get("mtime_ms").and_then(|v| v.as_f64());
                 if let Some(mtime) = stat_mtime {
-                    if mtime == m.mtime_ms && libsql_ok && chunk_rows_for_path(fp) == m.chunks.len() {
+                    if mtime == m.mtime_ms && libsql_ok && chunk_rows_for_path(&db_path, fp) == m.chunks.len() {
                         seen.insert(fp.clone());
                         indexed += 1;
                         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
@@ -891,18 +835,18 @@ pub fn index(root: &str, max_files: usize) -> Value {
 
         if let Some(m) = prior.get(fp) {
             if m.hash == file_hash {
-                if libsql_ok && chunk_rows_for_path(fp) == m.chunks.len() {
+                if libsql_ok && chunk_rows_for_path(&db_path, fp) == m.chunks.len() {
                     chunked += m.chunks.len() as i32;
                     reused += m.chunks.len() as i32;
                     reused_files += 1;
                     continue;
                 }
                 if libsql_ok {
-                    let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
+                    let _ = libsql_wasm::exec_params(&db_path, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
                 }
                 for c in &m.chunks {
                     let body = slice_lines(&content, c.ls, c.le);
-                    write_chunk(libsql_ok, stmt.as_ref(), fp, c, &body);
+                    write_chunk(libsql_ok, &db_path, fp, c, &body);
                     chunked += 1;
                     reused += 1;
                 }
@@ -910,11 +854,11 @@ pub fn index(root: &str, max_files: usize) -> Value {
                 continue;
             }
             if libsql_ok {
-                let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
+                let _ = libsql_wasm::exec_params(&db_path, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
             }
             delete_chunk_keys(&m.chunks);
         } else if libsql_ok {
-            let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
+            let _ = libsql_wasm::exec_params(&db_path, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
         }
 
         let mut chunks = extract_chunks(fp, &content, lang_name);
@@ -986,16 +930,11 @@ pub fn index(root: &str, max_files: usize) -> Value {
             embedded += 1;
             let key = format!("ci-{:x}-{:x}-{}", path_hash, file_hash, idx);
             let rec = ChunkRecord { key, kind, name, ls, le, emb: v };
-            write_chunk(libsql_ok, stmt.as_ref(), fp, &rec, &body);
+            write_chunk(libsql_ok, &db_path, fp, &rec, &body);
             records.push(rec);
         }
         fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, file_mtime, &records));
     }
-
-    if txn_active {
-        let _ = libsql_wasm::commit(GM_DB);
-    }
-    drop(stmt);
 
     let mut removed_files = 0;
     if deferred_files == 0 {
@@ -1115,24 +1054,25 @@ pub fn overview() -> Value {
     if stored_digest().is_none() {
         return Value::Null;
     }
-    let file_count = libsql_wasm::query_params(GM_DB, "SELECT COUNT(DISTINCT path) AS c FROM code_chunks", &[])
+    let db_path = project_db_path(None);
+    let file_count = libsql_wasm::query_params(&db_path, "SELECT COUNT(DISTINCT path) AS c FROM code_chunks", &[])
         .ok()
         .and_then(|rows| rows.as_array().and_then(|a| a.first().cloned()))
         .and_then(|row| row.get("c").and_then(|v| v.as_u64()))
         .unwrap_or(0);
-    let symbol_count = libsql_wasm::query_params(GM_DB, "SELECT COUNT(*) AS c FROM code_chunks", &[])
+    let symbol_count = libsql_wasm::query_params(&db_path, "SELECT COUNT(*) AS c FROM code_chunks", &[])
         .ok()
         .and_then(|rows| rows.as_array().and_then(|a| a.first().cloned()))
         .and_then(|row| row.get("c").and_then(|v| v.as_u64()))
         .unwrap_or(0);
     let by_kind = libsql_wasm::query_params(
-        GM_DB,
+        &db_path,
         "SELECT kind, COUNT(*) AS c FROM code_chunks GROUP BY kind ORDER BY c DESC LIMIT 10",
         &[],
     )
     .unwrap_or(Value::Array(Vec::new()));
     let largest_files = libsql_wasm::query_params(
-        GM_DB,
+        &db_path,
         "SELECT path, COUNT(*) AS c FROM code_chunks GROUP BY path ORDER BY c DESC LIMIT 10",
         &[],
     )
@@ -1306,12 +1246,13 @@ pub fn git_commit_rank(query: &str, k: usize) -> Vec<String> {
 
 pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value {
     if let Err(e) = ensure_schema() { return json!({ "ok": false, "error": e }); }
+    let db_path = project_db_path(None);
     let qvec = match inline_embedding.and_then(json_to_f32_vec).or_else(|| embed_text(query)) {
         Some(v) => v,
         None => {
             let like = format!("%{}%", query);
             let sql = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM code_chunks WHERE body LIKE ?1 OR name LIKE ?1 LIMIT {}", k);
-            return match libsql_wasm::query_params(GM_DB, &sql, &[&like]) {
+            return match libsql_wasm::query_params(&db_path, &sql, &[&like]) {
                 Ok(rows) => json!({ "ok": true, "mode": "fallback_like", "rows": rows }),
                 Err(e) => json!({ "ok": false, "mode": "fallback_like", "error": e }),
             };
@@ -1323,11 +1264,11 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
         "SELECT c.path, c.kind, c.name, c.line_start, c.line_end, substr(c.body,1,400) AS snippet, vector_distance_cos(c.embedding, vector(?1)) AS distance FROM vector_top_k('code_chunks_vec', vector(?2), {}) AS v JOIN code_chunks AS c ON c.rowid = v.id ORDER BY distance ASC LIMIT {}",
         pool, k
     );
-    match libsql_wasm::query_params(GM_DB, &sql, &[&qlit, &qlit]) {
+    match libsql_wasm::query_params(&db_path, &sql, &[&qlit, &qlit]) {
         Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows }),
         Err(e) if crate::shared_db::is_malformed(&e) && crate::shared_db::recover_malformed_shared_db() => {
             let _ = ensure_schema();
-            match libsql_wasm::query_params(GM_DB, &sql, &[&qlit, &qlit]) {
+            match libsql_wasm::query_params(&db_path, &sql, &[&qlit, &qlit]) {
                 Ok(rows) => json!({ "ok": true, "mode": "vector_top_k_after_recover", "recovered_from": e, "rows": rows }),
                 Err(e2) => json!({ "ok": false, "mode": "recovered_but_still_failing", "vec_err": e, "retry_err": e2 }),
             }
@@ -1335,7 +1276,7 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
         Err(e) => {
             let like = format!("%{}%", sql_quote(query));
             let sql2 = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM code_chunks WHERE body LIKE '{}' OR name LIKE '{}' LIMIT {}", like, like, k);
-            match libsql_wasm::query(GM_DB, &sql2) {
+            match libsql_wasm::query(&db_path, &sql2) {
                 Ok(rows) => json!({ "ok": true, "mode": "fallback_like_after_vec_err", "vec_err": e, "rows": rows }),
                 Err(e2) => json!({ "ok": false, "vec_err": e, "fallback_err": e2 }),
             }

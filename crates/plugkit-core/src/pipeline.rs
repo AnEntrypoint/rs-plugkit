@@ -5,7 +5,6 @@ use serde_json::{json, Value};
 use crate::libsql_wasm;
 use crate::wasm_dispatch::host_now_ms;
 
-const GM_DB: &str = "gm";
 const TTL_MS: u64 = 120_000;
 const SUMMARIZE_THRESHOLD: usize = 2048;
 
@@ -14,9 +13,25 @@ extern "C" {
     fn host_env_get(key_ptr: *const u8, key_len: u32) -> u64;
 }
 
+/// pipeline_state always lives in the CURRENT dispatch's own default
+/// project db (crate::code_index::project_db_path(None)) -- never the
+/// project_path-scoped "external" db a memorize_at call might target. This
+/// matches pre-existing behavior (pipeline.rs's old bare GM_DB="gm" const
+/// and code_index.rs's old GM_DB label always resolved to the SAME literal
+/// string, so both modules were always already reading/writing the same
+/// db); build_pending_step still records the caller's `project_path`
+/// inside the persisted JSON payload for later replay, it just never used
+/// it to choose WHICH db to write pipeline_state into. Resolved fresh
+/// every call (never a `const`), matching the now-stateless
+/// process-wide-shared libsql plugin's requirement for a real absolute
+/// path on every call.
+fn pipeline_db_path() -> String {
+    crate::code_index::project_db_path(None)
+}
+
 pub fn ensure_pipeline_schema() -> Result<(), String> {
     libsql_wasm::exec(
-        GM_DB,
+        &pipeline_db_path(),
         "CREATE TABLE IF NOT EXISTS pipeline_state (step_id TEXT PRIMARY KEY, state TEXT NOT NULL, deadline_ms INTEGER NOT NULL, created_ms INTEGER NOT NULL)",
     )
 }
@@ -86,7 +101,7 @@ pub fn persist_state(step_id: &str, state: &Value, deadline_ms: u64, created_ms:
     let dl = deadline_ms.to_string();
     let cr = created_ms.to_string();
     libsql_wasm::exec_params(
-        GM_DB,
+        &pipeline_db_path(),
         "INSERT OR REPLACE INTO pipeline_state(step_id, state, deadline_ms, created_ms) VALUES(?1,?2,?3,?4)",
         &[step_id, &state_s, &dl, &cr],
     )
@@ -95,7 +110,7 @@ pub fn persist_state(step_id: &str, state: &Value, deadline_ms: u64, created_ms:
 pub fn load_state(step_id: &str) -> Option<Value> {
     let _ = ensure_pipeline_schema();
     let rows = libsql_wasm::query_params(
-        GM_DB,
+        &pipeline_db_path(),
         "SELECT state, deadline_ms FROM pipeline_state WHERE step_id=?1",
         &[step_id],
     ).ok()?;
@@ -106,14 +121,14 @@ pub fn load_state(step_id: &str) -> Option<Value> {
 }
 
 pub fn delete_state(step_id: &str) {
-    let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM pipeline_state WHERE step_id=?1", &[step_id]);
+    let _ = libsql_wasm::exec_params(&pipeline_db_path(), "DELETE FROM pipeline_state WHERE step_id=?1", &[step_id]);
 }
 
 pub fn evict_expired() {
     let _ = ensure_pipeline_schema();
     let now = unsafe { host_now_ms() } as u64;
     let now_s = now.to_string();
-    let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM pipeline_state WHERE deadline_ms < ?1", &[&now_s]);
+    let _ = libsql_wasm::exec_params(&pipeline_db_path(), "DELETE FROM pipeline_state WHERE deadline_ms < ?1", &[&now_s]);
 }
 
 pub fn needs_summarize(text: &str) -> bool {

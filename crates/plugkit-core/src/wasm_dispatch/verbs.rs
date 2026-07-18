@@ -764,8 +764,31 @@ fn db_name_from(body: &Value) -> String {
     body.get("db_name").or_else(|| body.get("db")).and_then(|v| v.as_str()).unwrap_or("main").to_string()
 }
 
+/// agentplug-libsql is now stateless and process-wide shared across every
+/// concurrently active project -- open/close are accepted-but-inert
+/// no-ops plugin-side, and every exec/query/serialize/deserialize call is
+/// keyed PURELY off the JSON body's `path` field (defaulting to
+/// `:memory:`, silently throwaway, if absent); the plugin never looks at
+/// `db`. There is no remembered connection to carry a path forward from an
+/// earlier sql_open call to a later sql_exec/sql_query -- every sql_* verb
+/// below now requires (or defaults) an explicit `path` on EVERY call, not
+/// just sql_open. Falls back to this dispatch's own default project db
+/// (crate::code_index::project_db_path(None)) when the caller's body omits
+/// `path` entirely, so an old caller that only ever called sql_open with a
+/// path and expected later calls to inherit it silently gets routed to the
+/// default project db instead of a throwaway :memory: -- a real behavior
+/// change forced by the plugin's statelessness (the old remembered-path
+/// behavior is gone), but strictly safer than the alternative silent
+/// :memory: default.
+fn db_path_from(body: &Value) -> String {
+    match body.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => crate::code_index::project_db_path(None),
+    }
+}
+
 fn sql_open(body: &Value) -> u64 {
-    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(":memory:");
+    let path = db_path_from(body);
     let name = db_name_from(body);
     let resp = call_plugin("libsql", "open", &json!({ "db": name, "path": path }));
     if plugin_ok(&resp) {
@@ -777,7 +800,8 @@ fn sql_open(body: &Value) -> u64 {
 
 fn sql_close(body: &Value) -> u64 {
     let name = db_name_from(body);
-    let resp = call_plugin("libsql", "close", &json!({ "db": name }));
+    let path = db_path_from(body);
+    let resp = call_plugin("libsql", "close", &json!({ "db": name, "path": path }));
     if plugin_ok(&resp) {
         ok("sql_close", json!({ "db_name": name }))
     } else {
@@ -797,7 +821,8 @@ fn sql_exec(body: &Value) -> u64 {
         None => return err("sql_exec", "missing sql"),
     };
     let name = db_name_from(body);
-    let resp = call_plugin("libsql", "exec", &json!({ "db": name, "sql": sql }));
+    let path = db_path_from(body);
+    let resp = call_plugin("libsql", "exec", &json!({ "db": name, "path": path, "sql": sql }));
     if plugin_ok(&resp) {
         ok("sql_exec", json!({}))
     } else {
@@ -811,7 +836,8 @@ fn sql_query(body: &Value) -> u64 {
         None => return err("sql_query", "missing sql"),
     };
     let name = db_name_from(body);
-    let resp = call_plugin("libsql", "query", &json!({ "db": name, "sql": sql }));
+    let path = db_path_from(body);
+    let resp = call_plugin("libsql", "query", &json!({ "db": name, "path": path, "sql": sql }));
     if plugin_ok(&resp) {
         let rows = resp.get("rows").cloned().unwrap_or_else(|| json!([]));
         ok("sql_query", json!({ "rows": rows }))
@@ -867,7 +893,8 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
 
 fn sql_serialize(body: &Value) -> u64 {
     let name = db_name_from(body);
-    let resp = call_plugin("libsql", "serialize", &json!({ "db": name }));
+    let path = db_path_from(body);
+    let resp = call_plugin("libsql", "serialize", &json!({ "db": name, "path": path }));
     if !plugin_ok(&resp) {
         return err("sql_serialize", &plugin_error(&resp, "serialize failed"));
     }
@@ -888,7 +915,8 @@ fn sql_deserialize(body: &Value) -> u64 {
     let bytes = match b64_decode(s) { Some(b) => b, None => return err("sql_deserialize", "invalid base64") };
     let size = bytes.len();
     let name = db_name_from(body);
-    let resp = call_plugin("libsql", "deserialize", &json!({ "db": name, "bytes_b64": s }));
+    let path = db_path_from(body);
+    let resp = call_plugin("libsql", "deserialize", &json!({ "db": name, "path": path, "bytes_b64": s }));
     if plugin_ok(&resp) {
         ok("sql_deserialize", json!({ "restored": size, "db_name": name }))
     } else {

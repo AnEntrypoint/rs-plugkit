@@ -13,27 +13,36 @@ const EMBED_BUDGET_MS: u64 = 2000;
 const DIFF_CHAR_CAP: usize = 4000;
 const LOG_WINDOW: usize = 500;
 
-const SPEC: VecTableSpec = VecTableSpec { db_name: SHARED_DB, table: TABLE, index: INDEX };
 const BUDGET: QueryBudget = QueryBudget { pool_multiplier: 5, pool_floor: 20 };
 
 fn shared_db_path() -> String {
     crate::code_index::project_db_path(None)
 }
 
+/// Resolved fresh every call (never a `const`) -- the plugin is stateless
+/// and process-wide shared, so `db_name` must be THIS dispatch's real
+/// absolute path (host_cwd_string() underneath), not a value baked in at
+/// compile time. `table`/`index` stay static string literals.
+fn spec(path: &str) -> VecTableSpec<'_> {
+    VecTableSpec { db_name: path, table: TABLE, index: INDEX }
+}
+
 pub fn ensure_schema() -> Result<(), String> {
-    shared_ensure_open(&shared_db_path())?;
-    let _ = SPEC.drop_if_dim_mismatch();
+    let path = shared_db_path();
+    shared_ensure_open(&path)?;
+    let _ = spec(&path).drop_if_dim_mismatch();
     shared_exec(&format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE, message TEXT, embedding F32_BLOB({}), updated_at INTEGER, deleted INTEGER NOT NULL DEFAULT 0)",
         TABLE, EXPECTED_EMBED_DIM
     ))?;
-    SPEC.ensure_index();
+    spec(&path).ensure_index();
     Ok(())
 }
 
 fn read_watermark() -> Option<String> {
+    let path = shared_db_path();
     let sql = format!("SELECT hash FROM {} ORDER BY id DESC LIMIT 1", TABLE);
-    let resp = plugin_call("libsql", "query", &json!({ "db": SHARED_DB, "sql": sql, "params": [] }));
+    let resp = plugin_call("libsql", "query", &json!({ "db": SHARED_DB, "path": path, "sql": sql, "params": [] }));
     if !resp.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
         return None;
     }
@@ -83,6 +92,7 @@ fn commit_diff_text(hash: &str) -> String {
 /// (history rewrite: rebase/squash/force-push) by marking them deleted.
 pub fn sync_incremental() -> Result<Value, String> {
     ensure_schema()?;
+    let db_path = shared_db_path();
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let log = crate::wasm_dispatch::git_call(
         &format!("log --format=%x00%H%x00%s%x1e -n {}", LOG_WINDOW),
@@ -172,13 +182,13 @@ pub fn sync_incremental() -> Result<Value, String> {
         // in the common case, but a concurrent writer racing between the
         // present-check and this insert would otherwise hit the same failure.
         let delete_sql = format!("DELETE FROM {} WHERE hash=?1", TABLE);
-        let _ = SPEC.exec_params(&delete_sql, &[hash]);
+        let _ = spec(&db_path).exec_params(&delete_sql, &[hash]);
         let sql = format!(
             "INSERT INTO {}(hash, message, embedding, updated_at, deleted) VALUES(?1,?2,{},?3,0)",
             TABLE, embedding_sql
         );
         let now_s = now_ms.to_string();
-        match SPEC.exec_params(&sql, &[hash, subject, &now_s]) {
+        match spec(&db_path).exec_params(&sql, &[hash, subject, &now_s]) {
             Ok(()) => embedded += 1,
             Err(_) => skipped += 1,
         }

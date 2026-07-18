@@ -39,18 +39,25 @@ fn plugin_ok_err(resp: &Value) -> Result<(), String> {
     }
 }
 
+/// `db_name` is always a real absolute path by the time it reaches this
+/// function -- every real VecTableSpec construction site (code_index.rs,
+/// git_commit_vectors.rs, rssearch_vectors.rs) resolves it via
+/// crate::code_index::project_db_path before building the spec. The
+/// agentplug-libsql plugin is stateless and process-wide shared now; it
+/// reads ONLY the JSON body's `path` field (defaulting to `:memory:`,
+/// silently throwaway, if absent), never `db`.
 fn libsql_exec(db_name: &str, sql: &str) -> Result<(), String> {
-    let resp = call_plugin("libsql", "exec", &json!({ "db": db_name, "sql": sql }));
+    let resp = call_plugin("libsql", "exec", &json!({ "path": db_name, "sql": sql }));
     plugin_ok_err(&resp)
 }
 
 fn libsql_exec_params(db_name: &str, sql: &str, params: &[&str]) -> Result<(), String> {
-    let resp = call_plugin("libsql", "exec_params", &json!({ "db": db_name, "sql": sql, "params": params }));
+    let resp = call_plugin("libsql", "exec_params", &json!({ "path": db_name, "sql": sql, "params": params }));
     plugin_ok_err(&resp)
 }
 
 fn libsql_query_params(db_name: &str, sql: &str, params: &[&str]) -> Result<Value, String> {
-    let resp = call_plugin("libsql", "query_params", &json!({ "db": db_name, "sql": sql, "params": params }));
+    let resp = call_plugin("libsql", "query_params", &json!({ "path": db_name, "sql": sql, "params": params }));
     let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if ok {
         Ok(resp.get("rows").cloned().unwrap_or(Value::Array(vec![])))

@@ -11,7 +11,6 @@ const INDEX: &str = "rssearch_vectors_vec";
 const HALF_LIFE_MS: f64 = 30.0 * 24.0 * 60.0 * 60.0 * 1000.0;
 const RECENCY_FLOOR: f64 = 0.4;
 
-const SPEC: VecTableSpec = VecTableSpec { db_name: SHARED_DB, table: TABLE, index: INDEX };
 const RECENCY: RecencyParams = RecencyParams { half_life_ms: HALF_LIFE_MS, recency_floor: RECENCY_FLOOR };
 const BUDGET: QueryBudget = QueryBudget { pool_multiplier: 5, pool_floor: 20 };
 
@@ -19,9 +18,17 @@ fn shared_db_path() -> String {
     crate::code_index::project_db_path(None)
 }
 
-fn has_deleted_column() -> bool {
+/// Resolved fresh every call (never a `const`) -- the plugin is stateless
+/// and process-wide shared, so `db_name` must be THIS dispatch's real
+/// absolute path (host_cwd_string() underneath), not a value baked in at
+/// compile time.
+fn spec(path: &str) -> VecTableSpec<'_> {
+    VecTableSpec { db_name: path, table: TABLE, index: INDEX }
+}
+
+fn has_deleted_column(path: &str) -> bool {
     let sql = format!("SELECT name FROM pragma_table_info('{}') WHERE name = 'deleted'", TABLE);
-    let resp = crate::wasm_dispatch::plugin_call("libsql", "query", &json!({ "db": SHARED_DB, "sql": sql }));
+    let resp = crate::wasm_dispatch::plugin_call("libsql", "query", &json!({ "db": SHARED_DB, "path": path, "sql": sql }));
     if resp.get("ok").and_then(Value::as_bool) != Some(true) {
         return false;
     }
@@ -29,19 +36,20 @@ fn has_deleted_column() -> bool {
 }
 
 pub fn ensure_schema() -> Result<(), String> {
-    shared_ensure_open(&shared_db_path())?;
-    let _ = SPEC.drop_if_dim_mismatch();
+    let path = shared_db_path();
+    shared_ensure_open(&path)?;
+    let _ = spec(&path).drop_if_dim_mismatch();
     shared_exec(&format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, namespace TEXT NOT NULL, key TEXT NOT NULL, text TEXT, embedding F32_BLOB({}), updated_at INTEGER, deleted INTEGER NOT NULL DEFAULT 0, UNIQUE(namespace, key))",
         TABLE, EXPECTED_EMBED_DIM
     ))?;
-    if !has_deleted_column() {
+    if !has_deleted_column(&path) {
         shared_exec(&format!(
             "ALTER TABLE {} ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
             TABLE
         ))?;
     }
-    SPEC.ensure_index();
+    spec(&path).ensure_index();
     Ok(())
 }
 
@@ -64,9 +72,10 @@ pub fn write(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: 
         TABLE, embedding_sql
     );
     let now_s = now_ms.to_string();
+    let path = shared_db_path();
     vecns::delete_then_insert_with_recovery(
-        &SPEC,
-        |spec| spec.exec_params(&delete_sql, &[namespace, key]),
+        &spec(&path),
+        |s| s.exec_params(&delete_sql, &[namespace, key]),
         &sql, &[namespace, key, text, &now_s],
         |e| {
             crate::wasm_dispatch::emit_event("rssearch_vectors_shadow_row_recovery", json!({

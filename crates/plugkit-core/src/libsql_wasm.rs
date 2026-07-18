@@ -1,13 +1,19 @@
 #![cfg(target_arch = "wasm32")]
 
 use serde_json::{json, Value};
-use std::collections::HashSet;
-use std::sync::Mutex;
 
-use crate::wasm_dispatch::plugin_call;
+use crate::wasm_dispatch::{host_cwd_string, plugin_call};
 
-static OPEN_DBS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-
+/// agentplug-libsql is now stateless and shared as ONE process-wide instance
+/// across every concurrently active project -- every call opens the db
+/// fresh, does its one operation, and closes it before returning (see that
+/// plugin's src/db.rs `handle()` doc comment). `open`/`close`/`begin`/
+/// `commit`/`rollback`/`finalize` are accepted-but-inert no-ops on the
+/// plugin side now; there is no persistent connection to remember, so a
+/// bare `name` (formerly a lookup key into a name->connection map) means
+/// nothing anymore. Every call below takes a real, absolute `path` and
+/// forwards it in the JSON body's `path` field -- the plugin defaults to
+/// `:memory:` (silently throwaway) when `path` is absent, so never omit it.
 fn plugin_ok_err(resp: &Value) -> Result<(), String> {
     let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if ok {
@@ -26,105 +32,97 @@ fn plugin_ok_rows(resp: &Value) -> Result<Value, String> {
     }
 }
 
-pub fn open(name: &str, path: &str) -> Result<(), String> {
-    let resp = plugin_call("libsql", "open", &json!({ "db": name, "path": path }));
-    plugin_ok_err(&resp)?;
-    let mut guard = OPEN_DBS.lock().map_err(|e| e.to_string())?;
-    guard.get_or_insert_with(HashSet::new).insert(name.to_string());
-    Ok(())
-}
-
-pub fn close(name: &str) -> Result<(), String> {
-    let resp = plugin_call("libsql", "close", &json!({ "db": name }));
-    plugin_ok_err(&resp)?;
-    if let Ok(mut guard) = OPEN_DBS.lock() {
-        if let Some(set) = guard.as_mut() {
-            set.remove(name);
+/// Resolves `<host_cwd>/.gm/<filename>` fresh on every call -- host_cwd is
+/// asked of the host per-dispatch (never cached wasm-side, see
+/// host_cwd_string's own doc comment), since the same wasm instance may be
+/// serving a different project's dispatch on the very next call. Returns
+/// `filename` unchanged if host_cwd is unavailable (e.g. a loader that
+/// hasn't wired the import yet, or `:memory:`/an already-absolute path
+/// passed straight through) rather than fabricating a bad path -- callers
+/// needing a guaranteed-absolute path should check the host_cwd_string()
+/// Option themselves if that distinction matters.
+pub fn absolute_db_path(filename: &str) -> String {
+    if filename.is_empty() || filename == ":memory:" || filename.starts_with('/') || (filename.len() > 1 && filename.as_bytes()[1] == b':') {
+        return filename.to_string();
+    }
+    match host_cwd_string() {
+        Some(cwd) if !cwd.is_empty() => {
+            let cwd = cwd.trim_end_matches(['/', '\\']);
+            format!("{}/.gm/{}", cwd, filename)
         }
+        _ => filename.to_string(),
     }
-    Ok(())
 }
 
-pub fn list_dbs() -> Vec<String> {
-    let guard = OPEN_DBS.lock().ok();
-    guard.as_ref().and_then(|g| g.as_ref()).map(|s| s.iter().cloned().collect()).unwrap_or_default()
-}
-
-pub fn exec(name: &str, sql: &str) -> Result<(), String> {
-    let resp = plugin_call("libsql", "exec", &json!({ "db": name, "sql": sql }));
+pub fn open(path: &str) -> Result<(), String> {
+    let resp = plugin_call("libsql", "open", &json!({ "path": path }));
     plugin_ok_err(&resp)
 }
 
-pub fn query(name: &str, sql: &str) -> Result<Value, String> {
-    let resp = plugin_call("libsql", "query", &json!({ "db": name, "sql": sql }));
+pub fn close(path: &str) -> Result<(), String> {
+    let resp = plugin_call("libsql", "close", &json!({ "path": path }));
+    plugin_ok_err(&resp)
+}
+
+pub fn exec(path: &str, sql: &str) -> Result<(), String> {
+    let resp = plugin_call("libsql", "exec", &json!({ "path": path, "sql": sql }));
+    plugin_ok_err(&resp)
+}
+
+pub fn query(path: &str, sql: &str) -> Result<Value, String> {
+    let resp = plugin_call("libsql", "query", &json!({ "path": path, "sql": sql }));
     plugin_ok_rows(&resp)
 }
 
-pub fn exec_params(name: &str, sql: &str, params: &[&str]) -> Result<(), String> {
-    let resp = plugin_call("libsql", "exec_params", &json!({ "db": name, "sql": sql, "params": params }));
+pub fn exec_params(path: &str, sql: &str, params: &[&str]) -> Result<(), String> {
+    let resp = plugin_call("libsql", "exec_params", &json!({ "path": path, "sql": sql, "params": params }));
     plugin_ok_err(&resp)
 }
 
-pub fn query_params(name: &str, sql: &str, params: &[&str]) -> Result<Value, String> {
-    let resp = plugin_call("libsql", "query_params", &json!({ "db": name, "sql": sql, "params": params }));
+pub fn query_params(path: &str, sql: &str, params: &[&str]) -> Result<Value, String> {
+    let resp = plugin_call("libsql", "query_params", &json!({ "path": path, "sql": sql, "params": params }));
     plugin_ok_rows(&resp)
 }
 
-/// begin/commit/rollback wrap the default autocommit-per-statement mode into
-/// a single fsync-backed transaction for callers issuing many INSERT/UPDATE
-/// statements in a loop (e.g. code_index::index()) -- one commit for the
-/// whole batch instead of one per row. code_index::index() calls these
-/// directly (not via a closure-wrapping helper) since its loop body has many
-/// early `continue`s that don't map cleanly onto a single wrapped closure.
-pub fn begin(name: &str) -> Result<(), String> {
-    let resp = plugin_call("libsql", "begin", &json!({ "db": name }));
+/// begin/commit/rollback are accepted-but-inert on the now-stateless plugin
+/// side (every exec/query call is already its own atomic open-operate-close
+/// cycle) -- kept as no-op-forwarding calls rather than removed outright so
+/// existing call sites (code_index::index()'s batch loop) don't need every
+/// transaction-boundary call site ripped out in the same change; each row
+/// in a batch now commits independently regardless of whether begin/commit
+/// wrap it.
+pub fn begin(path: &str) -> Result<(), String> {
+    let resp = plugin_call("libsql", "begin", &json!({ "path": path }));
     plugin_ok_err(&resp)
 }
-pub fn commit(name: &str) -> Result<(), String> {
-    let resp = plugin_call("libsql", "commit", &json!({ "db": name }));
+pub fn commit(path: &str) -> Result<(), String> {
+    let resp = plugin_call("libsql", "commit", &json!({ "path": path }));
     plugin_ok_err(&resp)
 }
-pub fn rollback(name: &str) -> Result<(), String> {
-    let resp = plugin_call("libsql", "rollback", &json!({ "db": name }));
+pub fn rollback(path: &str) -> Result<(), String> {
+    let resp = plugin_call("libsql", "rollback", &json!({ "path": path }));
     plugin_ok_err(&resp)
 }
 
-pub struct PreparedStmt {
-    db: String,
-    handle: String,
+/// Prepare/execute_bound/finalize as a cross-call handle sequence no longer
+/// exists plugin-side (a prepared statement handle is inherently
+/// incompatible with per-call open-operate-close statelessness) -- the
+/// plugin collapsed it into a single `prepare_execute` verb that prepares,
+/// binds, steps, and finalizes atomically within one call, same shape as
+/// exec_params. This one-shot wrapper replaces the old two-step
+/// prepare()->PreparedStmt::execute_bound() API; callers doing a
+/// prepare-once/execute-many bulk-insert loop (code_index::index()) now
+/// call this once per row instead of once per loop, paying one
+/// open+prepare+bind+step+finalize per row rather than amortizing prepare
+/// across the loop -- a real, deliberate cost accepted in exchange for zero
+/// persistent state (see agentplug-libsql's src/db.rs handle() doc comment).
+pub fn prepare_execute(path: &str, sql: &str, params: &[&str]) -> Result<(), String> {
+    let resp = plugin_call("libsql", "prepare_execute", &json!({ "path": path, "sql": sql, "params": params }));
+    plugin_ok_err(&resp)
 }
 
-impl Drop for PreparedStmt {
-    fn drop(&mut self) {
-        let _ = plugin_call("libsql", "finalize", &json!({ "db": self.db, "handle": self.handle }));
-    }
-}
-
-/// Prepares `sql` once against `name`'s open connection; reuse via
-/// `execute_bound` for every row in a batch to avoid re-parsing/re-planning
-/// the same INSERT statement on every call (exec_params does prepare+finalize
-/// per invocation, which is fine for one-off writes but wasteful in a loop).
-/// The plugin call is cross-process, so the prepared statement is tracked
-/// plugin-side by an opaque `handle` id returned from `prepare`, not a raw
-/// `*mut sqlite3_stmt` pointer as it was when this ran in-process.
-pub fn prepare(name: &str, sql: &str) -> Result<PreparedStmt, String> {
-    let resp = plugin_call("libsql", "prepare", &json!({ "db": name, "sql": sql }));
-    plugin_ok_err(&resp)?;
-    let handle = resp.get("handle").and_then(|v| v.as_str())
-        .ok_or_else(|| "prepare: missing handle in plugin response".to_string())?
-        .to_string();
-    Ok(PreparedStmt { db: name.to_string(), handle })
-}
-
-impl PreparedStmt {
-    pub fn execute_bound(&self, params: &[&str]) -> Result<(), String> {
-        let resp = plugin_call("libsql", "execute_bound", &json!({ "db": self.db, "handle": self.handle, "params": params }));
-        plugin_ok_err(&resp)
-    }
-}
-
-pub fn serialize(name: &str) -> Result<Vec<u8>, String> {
-    let resp = plugin_call("libsql", "serialize", &json!({ "db": name }));
+pub fn serialize(path: &str) -> Result<Vec<u8>, String> {
+    let resp = plugin_call("libsql", "serialize", &json!({ "path": path }));
     let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if !ok {
         return Err(resp.get("error").and_then(|v| v.as_str()).unwrap_or("serialize failed").to_string());
@@ -134,21 +132,21 @@ pub fn serialize(name: &str) -> Result<Vec<u8>, String> {
     base64_decode(b64)
 }
 
-pub fn deserialize(name: &str, bytes: &[u8]) -> Result<(), String> {
+pub fn deserialize(path: &str, bytes: &[u8]) -> Result<(), String> {
     let b64 = base64_encode(bytes);
-    let resp = plugin_call("libsql", "deserialize", &json!({ "db": name, "data": b64 }));
+    let resp = plugin_call("libsql", "deserialize", &json!({ "path": path, "data": b64 }));
     plugin_ok_err(&resp)
 }
 
 pub fn smoke() -> Value {
     let mut log: Vec<Value> = Vec::new();
-    let n = "smoke";
-    log.push(json!({ "step": "open", "result": open(n, ":memory:").err() }));
-    log.push(json!({ "step": "create_table", "result": exec(n, "CREATE TABLE memos (id INTEGER PRIMARY KEY, text TEXT, emb F32_BLOB(4))").err() }));
-    log.push(json!({ "step": "insert", "result": exec(n, "INSERT INTO memos(text, emb) VALUES ('hello', vector('[0.1,0.2,0.3,0.4]'))").err() }));
-    log.push(json!({ "step": "create_index", "result": exec(n, "CREATE INDEX memos_idx ON memos(libsql_vector_idx(emb, 'metric=cosine'))").err() }));
-    log.push(json!({ "step": "vector_top_k", "rows": query(n, "SELECT id, text, vector_distance_cos(emb, vector('[0.1,0.2,0.3,0.4]')) AS d FROM vector_top_k('memos_idx', vector('[0.1,0.2,0.3,0.4]'), 5) JOIN memos ON memos.rowid = id").ok() }));
-    let _ = close(n);
+    let p = ":memory:";
+    log.push(json!({ "step": "open", "result": open(p).err() }));
+    log.push(json!({ "step": "create_table", "result": exec(p, "CREATE TABLE memos (id INTEGER PRIMARY KEY, text TEXT, emb F32_BLOB(4))").err() }));
+    log.push(json!({ "step": "insert", "result": exec(p, "INSERT INTO memos(text, emb) VALUES ('hello', vector('[0.1,0.2,0.3,0.4]'))").err() }));
+    log.push(json!({ "step": "create_index", "result": exec(p, "CREATE INDEX memos_idx ON memos(libsql_vector_idx(emb, 'metric=cosine'))").err() }));
+    log.push(json!({ "step": "vector_top_k", "rows": query(p, "SELECT id, text, vector_distance_cos(emb, vector('[0.1,0.2,0.3,0.4]')) AS d FROM vector_top_k('memos_idx', vector('[0.1,0.2,0.3,0.4]'), 5) JOIN memos ON memos.rowid = id").ok() }));
+    let _ = close(p);
     json!({ "ok": true, "smoke": log, "libsql_version": "delegated" })
 }
 
