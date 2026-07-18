@@ -99,6 +99,14 @@ pub fn register_wasi(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 pub fn register_env_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         "env",
+        "host_cwd",
+        |mut caller: Caller<'_, HostState>| -> u64 {
+            let cwd = caller.data().cwd.to_string_lossy().into_owned();
+            write_guest_bytes(&mut caller, cwd.as_bytes())
+        },
+    )?;
+    linker.func_wrap(
+        "env",
         "host_fs_read",
         |mut caller: Caller<'_, HostState>, path_ptr: u32, path_len: u32| -> u64 {
             let path = read_guest_string(&mut caller, path_ptr, path_len);
@@ -187,6 +195,21 @@ pub fn register_env_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
     })?;
+
+    // TEMP local-only verification stub for the fat-vs-slim artifact-selection
+    // witness (publish-real-slim-wasm-artifact PRD row) -- host_plugin_call is
+    // a genuine, separate, pre-existing gap in gm-runner (never registered
+    // here at all, unlike the JS wrapper's hostPluginCallViaAgentplugRunner)
+    // that blocks ANY gm-runner dispatch against either wasm variant, fat or
+    // slim, identically. NOT part of the slim/fat change; reverted before
+    // this task's edits are finalized. Real fix is a follow-up PRD row.
+    linker.func_wrap(
+        "env",
+        "host_plugin_call",
+        |_caller: Caller<'_, HostState>, _p: u32, _pl: u32, _v: u32, _vl: u32, _b: u32, _bl: u32| -> u64 {
+            0
+        },
+    )?;
 
     linker.func_wrap(
         "env",

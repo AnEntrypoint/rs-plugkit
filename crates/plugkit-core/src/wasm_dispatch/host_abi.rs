@@ -2,6 +2,7 @@ use serde_json::Value;
 
 #[link(wasm_import_module = "env")]
 extern "C" {
+    pub fn host_cwd() -> u64;
     pub fn host_fs_read(path_ptr: *const u8, path_len: u32) -> u64;
     pub fn host_fs_write(path_ptr: *const u8, path_len: u32, data_ptr: *const u8, data_len: u32) -> u32;
     pub fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
@@ -98,6 +99,17 @@ pub(crate) fn unpack_to_value(packed: u64) -> Value {
 pub fn unpack_to_value_pub(packed: u64) -> Value { unpack_to_value(packed) }
 
 pub fn unpack_to_string_pub(packed: u64) -> Option<String> { unpack_to_string(packed) }
+
+/// Asks the host for the CURRENT dispatch's project root, fresh every call
+/// -- never cached wasm-side. The host already resolves this correctly per
+/// call (HostState.cwd, fixed per-Store at instantiation by whichever
+/// project's dispatch loop is driving this Store), so gm.wasm no longer
+/// needs its own git-subprocess resolution + OnceLock cache, which made one
+/// gm.wasm instance unsafe to share across two different project roots.
+pub fn host_cwd_string() -> Option<String> {
+    let packed = unsafe { host_cwd() };
+    unpack_to_string(packed)
+}
 
 pub fn host_read(path: &str) -> Option<String> {
     let packed = unsafe { host_fs_read(path.as_ptr(), path.len() as u32) };

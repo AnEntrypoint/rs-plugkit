@@ -12,7 +12,6 @@ pub mod prd;
 pub mod task;
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 fn parse_toplevel_common_dir(out: &str) -> Option<PathBuf> {
     let mut lines = out.lines();
@@ -76,12 +75,19 @@ fn resolve_project_root_with_retry() -> PathBuf {
     );
 }
 
-static PROJECT_ROOT: OnceLock<PathBuf> = OnceLock::new();
-
+/// Resolved fresh on EVERY call, never cached -- a cached OnceLock made one
+/// gm.wasm instance permanently bound to whichever project root it first
+/// resolved, which is fine for one instance per project but breaks the
+/// moment a single shared instance serves multiple projects (a real
+/// architecture this repo now runs: agentplug-runner's daemon shares one
+/// bert/treesitter/libsql instance process-wide, and gm.wasm is a planned
+/// future addition to that shared set). The `git rev-parse` call itself
+/// routes through `host_git` (see git_common_dir_project_root_once above),
+/// which the host resolves against `caller.data().cwd` -- correct for
+/// whichever project's Store this specific dispatch is running under,
+/// however many projects share the underlying wasm Instance.
 pub fn gm_dir() -> PathBuf {
-    PROJECT_ROOT
-        .get_or_init(resolve_project_root_with_retry)
-        .join(".gm")
+    resolve_project_root_with_retry().join(".gm")
 }
 
 pub fn is_orchestrator_verb(verb: &str) -> bool {
