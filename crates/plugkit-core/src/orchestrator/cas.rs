@@ -41,7 +41,34 @@ pub fn cas_retry_write<T>(
             continue;
         }
         if !pkfs::write(path_s, &new_raw) {
-            return Err((String::new(), "write failed".to_string(), 1));
+            if attempt >= max_attempts {
+                return Err((String::new(), "write failed".to_string(), 1));
+            }
+            continue;
+        }
+
+        // Post-write read-back confirmation: the pre-write recheck above only
+        // catches a concurrent writer that completed strictly between our two
+        // reads. It does nothing against a second writer racing through the
+        // exact same window (both readers see identical `before_raw`, both
+        // compute a new doc, both write -- last write wins, silently
+        // discarding the other's change even though pkfs::write returned
+        // true for it). Host fs writes here have no O_EXCL/lock primitive
+        // reachable from wasm, so the only way to detect a lost update after
+        // the fact is to read the file straight back and confirm OUR bytes
+        // actually landed. A mismatch means we lost the race -- retry the
+        // whole read-modify-write cycle against the now-current on-disk
+        // state rather than returning a false success.
+        let confirm_raw = if pkfs::exists(path_s) { pkfs::read_to_string(path_s).unwrap_or_default() } else { String::new() };
+        if confirm_raw != new_raw {
+            if attempt >= max_attempts {
+                return Err((
+                    String::new(),
+                    format!("{} CAS write lost the race after {} attempts: {} was overwritten by a concurrent writer immediately after our write landed", verb_label, max_attempts, path_s),
+                    1,
+                ));
+            }
+            continue;
         }
         return Ok(result);
     }
