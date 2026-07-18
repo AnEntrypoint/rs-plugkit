@@ -423,6 +423,54 @@ fn extract_chunks(_path: &str, source: &str, lang: Language) -> Vec<(String, Str
     out
 }
 
+// A single tree-sitter AST node (function/class/etc) whose body exceeds
+// truncate_body's 8192-char storage cap previously had its tail silently
+// dropped -- the embedding, the stored body, and the search-result snippet
+// all only ever saw the first 8192 chars, so a long function's tail was
+// never searchable and never shown, unlike codebasesearch's documented
+// "Smart chunking: Files >1000 lines auto-split into overlapping chunks
+// (200-line overlap)" behavior for large content. Split an oversized node's
+// body into overlapping sub-chunks here (BEFORE truncate_body ever runs, so
+// each sub-chunk individually stays under the cap) rather than at the
+// per-file overlap point codebasesearch uses -- a single pathological
+// function is exactly the case a whole-file split wouldn't catch, since
+// most of the file's other AST nodes are already comfortably small.
+const OVERSIZED_CHUNK_SPLIT_THRESHOLD: usize = 8192;
+const OVERSIZED_CHUNK_OVERLAP: usize = 800;
+
+fn split_oversized_chunk(
+    kind: &str,
+    name: &str,
+    line_start: usize,
+    line_end: usize,
+    body: &str,
+) -> Vec<(String, String, usize, usize, String)> {
+    if body.len() <= OVERSIZED_CHUNK_SPLIT_THRESHOLD {
+        return vec![(kind.to_string(), name.to_string(), line_start, line_end, body.to_string())];
+    }
+    let total_lines = line_end.saturating_sub(line_start).max(1);
+    let bytes_per_line = (body.len() as f64 / total_lines as f64).max(1.0);
+    let stride = OVERSIZED_CHUNK_SPLIT_THRESHOLD - OVERSIZED_CHUNK_OVERLAP;
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut part = 0usize;
+    while start < body.len() {
+        let mut end = (start + OVERSIZED_CHUNK_SPLIT_THRESHOLD).min(body.len());
+        while end > start && !body.is_char_boundary(end) { end -= 1; }
+        let sub_body = &body[start..end];
+        let sub_line_start = line_start + ((start as f64 / bytes_per_line) as usize);
+        let sub_line_end = line_start + ((end as f64 / bytes_per_line) as usize);
+        let sub_name = if part == 0 { name.to_string() } else { format!("{}#part{}", name, part + 1) };
+        out.push((kind.to_string(), sub_name, sub_line_start, sub_line_end.max(sub_line_start), sub_body.to_string()));
+        if end >= body.len() { break; }
+        let mut next_start = end.saturating_sub(OVERSIZED_CHUNK_OVERLAP);
+        while next_start > 0 && !body.is_char_boundary(next_start) { next_start -= 1; }
+        start = next_start.max(start + stride.min(1));
+        part += 1;
+    }
+    out
+}
+
 fn embed_text(text: &str) -> Option<Vec<f32>> {
     crate::embed::embed_text(text)
 }
@@ -759,6 +807,12 @@ pub fn index(root: &str, max_files: usize) -> Value {
             let whole = content.chars().take(4000).collect::<String>();
             let line_end = content.lines().count().max(1);
             chunks.push(("document".to_string(), String::new(), 1, line_end, whole));
+        }
+        if chunks.iter().any(|(_, _, _, _, body)| body.len() > OVERSIZED_CHUNK_SPLIT_THRESHOLD) {
+            chunks = chunks
+                .into_iter()
+                .flat_map(|(kind, name, ls, le, body)| split_oversized_chunk(&kind, &name, ls, le, &body))
+                .collect();
         }
 
         // A single file's chunk set can itself blow past the wall budget --
