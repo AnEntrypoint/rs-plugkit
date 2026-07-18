@@ -130,6 +130,9 @@ fn lang_for_ext(ext: &str) -> Option<(&'static str, Language)> {
         ".ps1" | ".psm1" | ".psd1" => Some(("powershell", tree_sitter_powershell::LANGUAGE.into())),
         ".rb" => Some(("ruby", tree_sitter_ruby::LANGUAGE.into())),
         ".cs" => Some(("csharp", tree_sitter_c_sharp::LANGUAGE.into())),
+        ".php" | ".phtml" => Some(("php", tree_sitter_php::LANGUAGE_PHP.into())),
+        ".hs" | ".lhs" => Some(("haskell", tree_sitter_haskell::LANGUAGE.into())),
+        ".jl" => Some(("julia", tree_sitter_julia::LANGUAGE.into())),
         _ => None,
     }
 }
