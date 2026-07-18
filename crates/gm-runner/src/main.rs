@@ -94,7 +94,11 @@ fn main() -> anyhow::Result<()> {
             let verb = args.get(2).cloned().unwrap_or_default();
             let body = args.get(3).cloned().unwrap_or_else(|| "{}".to_string());
             let cwd = std::env::current_dir()?;
-            let wasm = ensure_wasm_installed(None)?;
+            let wasm = if let Ok(p) = std::env::var("GM_RUNNER_WASM_PATH_OVERRIDE") {
+                PathBuf::from(p)
+            } else {
+                ensure_wasm_installed(None)?
+            };
             let mut runtime = spool::PlugkitRuntime::load(&wasm, cwd)?;
             let out = runtime.dispatch(&verb, &body)?;
             println!("{out}");

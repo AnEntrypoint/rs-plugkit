@@ -21,8 +21,6 @@
 .gm/prd.paused.yml
 .gm/rs-learn.db-shm
 .gm/rs-learn.db-wal
-.gm/exec-spool.in
-.gm/exec-spool.out
 .gm/exec-spool.started
 .agentplug-kv/
 .agentplug/
@@ -33,6 +31,7 @@ dist/
 !.gm/
 .gm/*
 !.gm/memories/
+!.gm/prd.yml
 .codeinsight/
 rs-learn.db
 gm.db
@@ -51,3 +50,4 @@ site/package-lock.json
 *.local-test
 plugkit.wasm
 plugkit-slim.wasm
+.slim-verify-scratch/
