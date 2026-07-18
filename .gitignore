@@ -33,6 +33,10 @@ dist/
 !.gm/memories/
 .codeinsight/
 rs-learn.db
+gm.db
+gm.db-wal
+gm.db-shm
+gm.db-journal
 Cargo.lock
 
 weights/*.safetensors
