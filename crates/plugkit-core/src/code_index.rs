@@ -198,8 +198,8 @@ const SKIP_DIRS: &[&str] = &[
     "compiled", "generated", "gen",
     // Mobile
     "Carthage", "fastlane",
-    // ML experiment tracking
-    "mlruns", "wandb",
+    // ML experiment tracking / model weight+vocab dumps
+    "mlruns", "wandb", "weights",
     // User-home tool caches (relevant when a repo root sits under $HOME)
     ".cargo", ".rustup", ".rbenv", ".rvm", ".nvm", ".pyenv", ".conda",
     ".m2", ".sbt", ".ivy2", ".gem",
@@ -236,6 +236,10 @@ const SKIP_FILE_SUFFIXES: &[&str] = &[
     // Data science / ML
     ".pkl", ".pickle", ".h5", ".hdf5", ".parquet", ".npy", ".npz",
     ".safetensors", ".ckpt", ".pt", ".pth", ".onnx", ".gguf",
+    // ML tokenizer/vocab dumps -- large data files, not source, even though
+    // they're JSON/text and would otherwise pass a binary-content check
+    "tokenizer.json", "vocab.json", "vocab.txt", "merges.txt",
+    "-tokenizer.json", "-vocab.json",
     // Crash/debug dumps
     ".stackdump", ".dmp", ".core",
     // Secrets / certificates (leak-prevention, independent of relevance)
