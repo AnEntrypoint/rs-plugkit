@@ -129,6 +129,23 @@ pub fn register_env_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()
 
     linker.func_wrap(
         "env",
+        "host_fs_remove",
+        |mut caller: Caller<'_, HostState>, path_ptr: u32, path_len: u32| -> u32 {
+            let path = read_guest_string(&mut caller, path_ptr, path_len);
+            let full = caller.data().cwd.join(&path);
+            match fs::metadata(&full) {
+                Ok(md) if md.is_dir() => 0,
+                Ok(_) => match fs::remove_file(&full) {
+                    Ok(()) => 1,
+                    Err(_) => 0,
+                },
+                Err(_) => 0,
+            }
+        },
+    )?;
+
+    linker.func_wrap(
+        "env",
         "host_fs_readdir",
         |mut caller: Caller<'_, HostState>, path_ptr: u32, path_len: u32| -> u64 {
             let path = read_guest_string(&mut caller, path_ptr, path_len);
