@@ -5,7 +5,7 @@ use tree_sitter::{Language, Parser};
 
 use crate::libsql_wasm;
 use crate::wasm_dispatch::{host_read, unpack_to_value_pub};
-use crate::vecstore::{drop_if_dim_mismatch_at as drop_if_dim_mismatch, EXPECTED_EMBED_DIM};
+use crate::vecstore::{drop_if_dim_mismatch_at as drop_if_dim_mismatch, vec_to_json_literal, EXPECTED_EMBED_DIM};
 
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -482,16 +482,6 @@ fn json_to_f32_vec(v: &Value) -> Option<Vec<f32>> {
         if !out.is_empty() { return Some(out); }
     }
     None
-}
-
-fn vec_to_json_literal(v: &[f32]) -> String {
-    let mut s = String::from("[");
-    for (i, f) in v.iter().enumerate() {
-        if i > 0 { s.push(','); }
-        s.push_str(&format!("{:.6}", f));
-    }
-    s.push(']');
-    s
 }
 
 fn sql_quote(s: &str) -> String {
