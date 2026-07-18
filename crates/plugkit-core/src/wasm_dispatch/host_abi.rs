@@ -20,6 +20,19 @@ extern "C" {
     pub fn host_browser_exec(body_ptr: *const u8, body_len: u32, cwd_ptr: *const u8, cwd_len: u32, session_id_ptr: *const u8, session_id_len: u32) -> u64;
     pub fn host_task_proc(action_ptr: *const u8, action_len: u32, params_ptr: *const u8, params_len: u32) -> u64;
     pub fn host_git(args_ptr: *const u8, args_len: u32, cwd_ptr: *const u8, cwd_len: u32) -> u64;
+    pub fn host_plugin_call(plugin_ptr: *const u8, plugin_len: u32, verb_ptr: *const u8, verb_len: u32, body_ptr: *const u8, body_len: u32) -> u64;
+}
+
+pub fn plugin_call(plugin: &str, verb: &str, body: &Value) -> Value {
+    let body_s = body.to_string();
+    let packed = unsafe {
+        host_plugin_call(
+            plugin.as_ptr(), plugin.len() as u32,
+            verb.as_ptr(), verb.len() as u32,
+            body_s.as_ptr(), body_s.len() as u32,
+        )
+    };
+    unpack_to_value(packed)
 }
 
 pub fn host_task(action: &str, params: &Value) -> Value {

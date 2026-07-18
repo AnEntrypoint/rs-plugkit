@@ -1,9 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use serde_json::{json, Value};
-use tree_sitter::{Language, Parser};
 
-use crate::libsql_wasm;
 use crate::wasm_dispatch::{host_read, unpack_to_value_pub};
 use crate::vecstore::{drop_if_dim_mismatch_at as drop_if_dim_mismatch, vec_to_json_literal, EXPECTED_EMBED_DIM};
 
@@ -14,6 +12,105 @@ extern "C" {
     fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
     fn host_kv_query(ns_ptr: *const u8, ns_len: u32, q_ptr: *const u8, q_len: u32) -> u64;
     fn host_kv_delete(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u32;
+    fn host_plugin_call(plugin_ptr: *const u8, plugin_len: u32, verb_ptr: *const u8, verb_len: u32, body_ptr: *const u8, body_len: u32) -> u64;
+}
+
+/// Dispatches one call to an out-of-process plugin (libsql/bert/treesitter)
+/// via the host_plugin_call import, returning the raw JSON response --
+/// {"ok":true,...} or {"ok":false,"error":"..."}. Every libsql_wasm::*,
+/// crate::embed::*, and tree_sitter::* call this file used to make
+/// in-process now routes through here instead; callers below unwrap this
+/// into the same Result<T, String>/Option<T> shapes the old direct calls
+/// returned, so nothing outside this file needs to change.
+fn call_plugin(plugin: &str, verb: &str, body: &Value) -> Value {
+    let body_s = body.to_string();
+    let packed = unsafe {
+        host_plugin_call(
+            plugin.as_ptr(), plugin.len() as u32,
+            verb.as_ptr(), verb.len() as u32,
+            body_s.as_ptr(), body_s.len() as u32,
+        )
+    };
+    unpack_to_value_pub(packed)
+}
+
+fn plugin_ok(resp: &Value) -> bool {
+    resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn plugin_err(resp: &Value) -> String {
+    resp.get("error").and_then(|v| v.as_str()).unwrap_or("plugin call failed").to_string()
+}
+
+fn plugin_rows(resp: Value) -> Value {
+    resp.get("rows").cloned().unwrap_or(Value::Array(Vec::new()))
+}
+
+mod libsql_wasm {
+    use super::{call_plugin, json, plugin_err, plugin_ok, plugin_rows, Value};
+
+    pub fn open(name: &str, path: &str) -> Result<(), String> {
+        let resp = call_plugin("libsql", "open", &json!({ "db": name, "path": path }));
+        if plugin_ok(&resp) { Ok(()) } else { Err(plugin_err(&resp)) }
+    }
+
+    pub fn exec(name: &str, sql: &str) -> Result<(), String> {
+        let resp = call_plugin("libsql", "exec", &json!({ "db": name, "sql": sql }));
+        if plugin_ok(&resp) { Ok(()) } else { Err(plugin_err(&resp)) }
+    }
+
+    pub fn exec_params(name: &str, sql: &str, params: &[&str]) -> Result<(), String> {
+        let resp = call_plugin("libsql", "exec_params", &json!({ "db": name, "sql": sql, "params": params }));
+        if plugin_ok(&resp) { Ok(()) } else { Err(plugin_err(&resp)) }
+    }
+
+    pub fn query(name: &str, sql: &str) -> Result<Value, String> {
+        query_params(name, sql, &[])
+    }
+
+    pub fn query_params(name: &str, sql: &str, params: &[&str]) -> Result<Value, String> {
+        let resp = call_plugin("libsql", "query_params", &json!({ "db": name, "sql": sql, "params": params }));
+        if plugin_ok(&resp) { Ok(plugin_rows(resp)) } else { Err(plugin_err(&resp)) }
+    }
+
+    pub fn begin(name: &str) -> Result<(), String> { exec(name, "BEGIN IMMEDIATE") }
+    pub fn commit(name: &str) -> Result<(), String> { exec(name, "COMMIT") }
+
+    /// Handle to a plugin-side prepared statement -- the live libsql_ffi
+    /// statement object can't cross the wasm-to-wasm boundary, so this holds
+    /// only the plugin's opaque handle id; execute_bound re-dispatches a
+    /// bind+step call against it on every invocation instead of stepping a
+    /// local pointer.
+    pub struct PreparedStmt {
+        db: String,
+        handle: String,
+    }
+
+    pub fn prepare(name: &str, sql: &str) -> Result<PreparedStmt, String> {
+        let resp = call_plugin("libsql", "prepare", &json!({ "db": name, "sql": sql }));
+        if !plugin_ok(&resp) { return Err(plugin_err(&resp)); }
+        let handle = resp.get("handle").and_then(|v| v.as_str())
+            .ok_or_else(|| "prepare: missing handle in plugin response".to_string())?
+            .to_string();
+        Ok(PreparedStmt { db: name.to_string(), handle })
+    }
+
+    impl PreparedStmt {
+        pub fn execute_bound(&self, params: &[&str]) -> Result<(), String> {
+            let resp = call_plugin("libsql", "execute_bound", &json!({
+                "db": self.db,
+                "handle": self.handle,
+                "params": params,
+            }));
+            if plugin_ok(&resp) { Ok(()) } else { Err(plugin_err(&resp)) }
+        }
+    }
+
+    impl Drop for PreparedStmt {
+        fn drop(&mut self) {
+            let _ = call_plugin("libsql", "finalize", &json!({ "db": self.db, "handle": self.handle }));
+        }
+    }
 }
 
 fn fv_put(ns: &str, key: &str, val: &str) -> bool {
@@ -109,30 +206,30 @@ fn clear_codeinsight_if_dim_mismatch() -> bool {
     true
 }
 
-fn lang_for_ext(ext: &str) -> Option<(&'static str, Language)> {
+fn lang_for_ext(ext: &str) -> Option<&'static str> {
     let e = ext.to_lowercase();
     match e.as_str() {
-        ".js" | ".mjs" | ".jsx" => Some(("javascript", tree_sitter_javascript::LANGUAGE.into())),
-        ".ts" => Some(("typescript", tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())),
-        ".tsx" => Some(("typescript", tree_sitter_typescript::LANGUAGE_TSX.into())),
-        ".py" => Some(("python", tree_sitter_python::LANGUAGE.into())),
-        ".rs" => Some(("rust", tree_sitter_rust::LANGUAGE.into())),
-        ".go" => Some(("go", tree_sitter_go::LANGUAGE.into())),
-        ".c" | ".h" => Some(("c", tree_sitter_c::LANGUAGE.into())),
-        ".cpp" | ".cc" | ".hpp" | ".hh" | ".cxx" => Some(("cpp", tree_sitter_cpp::LANGUAGE.into())),
-        ".glsl" | ".vert" | ".frag" | ".comp" | ".geom" | ".tesc" | ".tese" | ".vsh" | ".fsh" | ".glslv" | ".glslf" => Some(("glsl", tree_sitter_c::LANGUAGE.into())),
-        ".java" => Some(("java", tree_sitter_java::LANGUAGE.into())),
-        ".json" => Some(("json", tree_sitter_json::LANGUAGE.into())),
-        ".html" | ".htm" => Some(("html", tree_sitter_html::LANGUAGE.into())),
-        ".css" => Some(("css", tree_sitter_css::LANGUAGE.into())),
-        ".sh" | ".bash" => Some(("bash", tree_sitter_bash::LANGUAGE.into())),
-        ".md" | ".markdown" => Some(("markdown", tree_sitter_md::LANGUAGE.into())),
-        ".ps1" | ".psm1" | ".psd1" => Some(("powershell", tree_sitter_powershell::LANGUAGE.into())),
-        ".rb" => Some(("ruby", tree_sitter_ruby::LANGUAGE.into())),
-        ".cs" => Some(("csharp", tree_sitter_c_sharp::LANGUAGE.into())),
-        ".php" | ".phtml" => Some(("php", tree_sitter_php::LANGUAGE_PHP.into())),
-        ".hs" | ".lhs" => Some(("haskell", tree_sitter_haskell::LANGUAGE.into())),
-        ".jl" => Some(("julia", tree_sitter_julia::LANGUAGE.into())),
+        ".js" | ".mjs" | ".jsx" => Some("javascript"),
+        ".ts" => Some("typescript"),
+        ".tsx" => Some("tsx"),
+        ".py" => Some("python"),
+        ".rs" => Some("rust"),
+        ".go" => Some("go"),
+        ".c" | ".h" => Some("c"),
+        ".cpp" | ".cc" | ".hpp" | ".hh" | ".cxx" => Some("cpp"),
+        ".glsl" | ".vert" | ".frag" | ".comp" | ".geom" | ".tesc" | ".tese" | ".vsh" | ".fsh" | ".glslv" | ".glslf" => Some("c"),
+        ".java" => Some("java"),
+        ".json" => Some("json"),
+        ".html" | ".htm" => Some("html"),
+        ".css" => Some("css"),
+        ".sh" | ".bash" => Some("bash"),
+        ".md" | ".markdown" => Some("markdown"),
+        ".ps1" | ".psm1" | ".psd1" => Some("powershell"),
+        ".rb" => Some("ruby"),
+        ".cs" => Some("csharp"),
+        ".php" | ".phtml" => Some("php"),
+        ".hs" | ".lhs" => Some("haskell"),
+        ".jl" => Some("julia"),
         _ => None,
     }
 }
@@ -397,35 +494,35 @@ fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option
     }
 }
 
-fn extract_chunks(_path: &str, source: &str, lang: Language) -> Vec<(String, String, usize, usize, String)> {
-    let mut parser = Parser::new();
-    if parser.set_language(&lang).is_err() { return Vec::new(); }
-    let tree = match parser.parse(source, None) { Some(t) => t, None => return Vec::new() };
-    let mut out = Vec::new();
+/// Parses `source` via the treesitter plugin's `parse` verb, which walks its
+/// own in-process tree_sitter::Tree (a live Tree/Node can't cross the
+/// wasm-to-wasm boundary) and returns a flat JSON node list -- kind,
+/// start_byte/end_byte, start_row/end_row, and a "name" field already
+/// resolved server-side via child_by_field_name("name") (also something only
+/// reachable while the tree is still live on the plugin side). code_index.rs
+/// keeps the CHUNK_NODE_TYPES filter as its own application-level policy,
+/// same as the old in-process walk did, just applied to the returned list
+/// instead of to a live Node stack.
+fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String, String, usize, usize, String)> {
+    let resp = call_plugin("treesitter", "parse", &json!({ "lang": lang_name, "source": source }));
+    if !plugin_ok(&resp) { return Vec::new(); }
+    let nodes = match resp.get("nodes").and_then(|v| v.as_array()) {
+        Some(n) => n,
+        None => return Vec::new(),
+    };
     let src_bytes = source.as_bytes();
-    let cursor = tree.walk();
-    let mut stack: Vec<tree_sitter::Node> = vec![tree.root_node()];
-    while let Some(node) = stack.pop() {
-        let kind = node.kind();
-        if CHUNK_NODE_TYPES.contains(&kind) {
-            let start = node.start_byte();
-            let end = node.end_byte().min(src_bytes.len());
-            if end > start {
-                let body = String::from_utf8_lossy(&src_bytes[start..end]).into_owned();
-                let line_start = node.start_position().row + 1;
-                let line_end = node.end_position().row + 1;
-                let name = node
-                    .child_by_field_name("name")
-                    .map(|n| String::from_utf8_lossy(&src_bytes[n.start_byte()..n.end_byte().min(src_bytes.len())]).into_owned())
-                    .unwrap_or_default();
-                out.push((kind.to_string(), name, line_start, line_end, body));
-                let _ = cursor;
-                continue;
-            }
-        }
-        for i in 0..node.child_count() as u32 {
-            if let Some(c) = node.child(i) { stack.push(c); }
-        }
+    let mut out = Vec::new();
+    for node in nodes {
+        let kind = match node.get("kind").and_then(|v| v.as_str()) { Some(k) => k, None => continue };
+        if !CHUNK_NODE_TYPES.contains(&kind) { continue; }
+        let start = node.get("start_byte").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let end = (node.get("end_byte").and_then(|v| v.as_u64()).unwrap_or(0) as usize).min(src_bytes.len());
+        if end <= start { continue; }
+        let body = String::from_utf8_lossy(&src_bytes[start..end]).into_owned();
+        let line_start = node.get("start_row").and_then(|v| v.as_u64()).unwrap_or(0) as usize + 1;
+        let line_end = node.get("end_row").and_then(|v| v.as_u64()).unwrap_or(0) as usize + 1;
+        let name = node.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        out.push((kind.to_string(), name, line_start, line_end, body));
     }
     out
 }
@@ -479,7 +576,28 @@ fn split_oversized_chunk(
 }
 
 fn embed_text(text: &str) -> Option<Vec<f32>> {
-    crate::embed::embed_text(text)
+    let resp = call_plugin("bert", "embed", &json!({ "text": text }));
+    if !plugin_ok(&resp) { return None; }
+    resp.get("embedding").and_then(json_to_f32_vec)
+}
+
+// BGE's query-prefix convention -- asymmetric embedding models score
+// higher when the query side of a query/passage pair carries this prefix
+// and the passage side doesn't. This is plugkit-side pre-processing around
+// the plain "bert: embed" verb, not something the bert plugin itself needs
+// to know about (mirrors crate::embed::embed_text_json_query's old
+// in-process behavior, kept local to this file's own query-embedding call
+// site rather than moved into the plugin).
+const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
+
+fn embed_text_json_query(query_text: &str) -> Option<Value> {
+    let trimmed = query_text.trim();
+    if trimmed.is_empty() { return None; }
+    let prefixed = format!("{}{}", BGE_QUERY_PREFIX, trimmed);
+    let v = embed_text(&prefixed)?;
+    Some(Value::Array(v.into_iter().map(|f| {
+        serde_json::Number::from_f64(f as f64).map(Value::Number).unwrap_or(Value::Null)
+    }).collect()))
 }
 
 fn json_to_f32_vec(v: &Value) -> Option<Vec<f32>> {
@@ -722,7 +840,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
         let fp = &canon;
         let dot = fp.rfind('.');
         let ext = match dot { Some(i) => &fp[i..], None => "" };
-        let (lang_name, lang) = match lang_for_ext(ext) { Some(x) => x, None => continue };
+        let lang_name = match lang_for_ext(ext) { Some(x) => x, None => continue };
 
         // Stat-only fast path: if this file's mtime exactly matches the
         // prior manifest's recorded mtime AND the DB still has the expected
@@ -799,7 +917,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
             let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
         }
 
-        let mut chunks = extract_chunks(fp, &content, lang);
+        let mut chunks = extract_chunks(fp, &content, lang_name);
         if chunks.is_empty() && lang_name == "markdown" && !content.trim().is_empty() {
             let whole = content.chars().take(4000).collect::<String>();
             let line_end = content.lines().count().max(1);
@@ -923,9 +1041,13 @@ fn embed_text_batch_fallback(inputs: &[String]) -> Vec<Option<Vec<f32>>> {
 
 fn embed_texts_batch(inputs: &[String]) -> Vec<Option<Vec<f32>>> {
     if inputs.is_empty() { return Vec::new(); }
-    match crate::embed::embed_texts_batch(inputs) {
-        Some(v) => v,
-        None => embed_text_batch_fallback(inputs),
+    let resp = call_plugin("bert", "embed_batch", &json!({ "texts": inputs }));
+    if !plugin_ok(&resp) { return embed_text_batch_fallback(inputs); }
+    match resp.get("embeddings").and_then(|v| v.as_array()) {
+        Some(arr) if arr.len() == inputs.len() => {
+            arr.iter().map(|e| if e.is_null() { None } else { json_to_f32_vec(e) }).collect()
+        }
+        _ => embed_text_batch_fallback(inputs),
     }
 }
 
@@ -1171,7 +1293,7 @@ fn git_commit_rank_fallback(query: &str, k: usize) -> Vec<String> {
 /// the embed model is unavailable or the table has nothing usable yet.
 pub fn git_commit_rank(query: &str, k: usize) -> Vec<String> {
     let _ = crate::git_commit_vectors::sync_incremental();
-    let embedding = crate::embed::embed_text_json_query(query);
+    let embedding = embed_text_json_query(query);
     if let Some(emb) = embedding {
         if let Ok(hits) = crate::git_commit_vectors::search(&emb, k) {
             if !hits.is_empty() {

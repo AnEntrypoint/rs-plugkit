@@ -112,8 +112,8 @@ pub fn delete_state(step_id: &str) {
 pub fn evict_expired() {
     let _ = ensure_pipeline_schema();
     let now = unsafe { host_now_ms() } as u64;
-    let sql = format!("DELETE FROM pipeline_state WHERE deadline_ms < {}", now);
-    let _ = libsql_wasm::exec(GM_DB, &sql);
+    let now_s = now.to_string();
+    let _ = libsql_wasm::exec_params(GM_DB, "DELETE FROM pipeline_state WHERE deadline_ms < ?1", &[&now_s]);
 }
 
 pub fn needs_summarize(text: &str) -> bool {

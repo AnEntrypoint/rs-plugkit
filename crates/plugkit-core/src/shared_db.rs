@@ -1,15 +1,67 @@
 #![cfg(target_arch = "wasm32")]
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub const SHARED_DB: &str = "gm";
 
+#[link(wasm_import_module = "env")]
+extern "C" {
+    fn host_plugin_call(
+        plugin_ptr: *const u8,
+        plugin_len: u32,
+        verb_ptr: *const u8,
+        verb_len: u32,
+        body_ptr: *const u8,
+        body_len: u32,
+    ) -> u64;
+}
+
+fn call_plugin(plugin: &str, verb: &str, body: Value) -> Value {
+    let body_str = body.to_string();
+    let packed = unsafe {
+        host_plugin_call(
+            plugin.as_ptr(),
+            plugin.len() as u32,
+            verb.as_ptr(),
+            verb.len() as u32,
+            body_str.as_ptr(),
+            body_str.len() as u32,
+        )
+    };
+    crate::wasm_dispatch::unpack_to_value_pub(packed)
+}
+
+fn plugin_ok(resp: &Value) -> Result<(), String> {
+    if resp.get("ok").and_then(Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        Err(resp
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("plugin call failed")
+            .to_string())
+    }
+}
+
+fn plugin_rows(resp: Value) -> Result<Value, String> {
+    if resp.get("ok").and_then(Value::as_bool) == Some(true) {
+        Ok(resp.get("rows").cloned().unwrap_or(Value::Array(vec![])))
+    } else {
+        Err(resp
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("plugin call failed")
+            .to_string())
+    }
+}
+
 pub fn shared_ensure_open(path: &str) -> Result<(), String> {
-    crate::libsql_wasm::open(SHARED_DB, path)
+    let resp = call_plugin("libsql", "open", json!({ "db": SHARED_DB, "path": path }));
+    plugin_ok(&resp)
 }
 
 pub fn recreate_shared_db(path: &str) -> Result<(), String> {
-    let _ = crate::libsql_wasm::close(SHARED_DB);
+    let _ = call_plugin("libsql", "close", json!({ "db": SHARED_DB }));
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let _ = std::fs::remove_file(format!("{}{}", path, suffix));
     }
@@ -34,17 +86,29 @@ pub fn recover_malformed_shared_db() -> bool {
 }
 
 pub fn shared_exec(sql: &str) -> Result<(), String> {
-    crate::libsql_wasm::exec(SHARED_DB, sql)
+    let resp = call_plugin("libsql", "exec", json!({ "db": SHARED_DB, "sql": sql }));
+    plugin_ok(&resp)
 }
 
 pub fn shared_query(sql: &str) -> Result<Value, String> {
-    crate::libsql_wasm::query(SHARED_DB, sql)
+    let resp = call_plugin("libsql", "query", json!({ "db": SHARED_DB, "sql": sql }));
+    plugin_rows(resp)
 }
 
 pub fn shared_exec_params(sql: &str, params: &[&str]) -> Result<(), String> {
-    crate::libsql_wasm::exec_params(SHARED_DB, sql, params)
+    let resp = call_plugin(
+        "libsql",
+        "exec_params",
+        json!({ "db": SHARED_DB, "sql": sql, "params": params }),
+    );
+    plugin_ok(&resp)
 }
 
 pub fn shared_query_params(sql: &str, params: &[&str]) -> Result<Value, String> {
-    crate::libsql_wasm::query_params(SHARED_DB, sql, params)
+    let resp = call_plugin(
+        "libsql",
+        "query_params",
+        json!({ "db": SHARED_DB, "sql": sql, "params": params }),
+    );
+    plugin_rows(resp)
 }

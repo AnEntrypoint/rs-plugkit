@@ -2,9 +2,10 @@
 
 use serde_json::{json, Value};
 
-use crate::shared_db::{shared_ensure_open, shared_exec, shared_query_params, SHARED_DB};
+use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
 use crate::vecns::{self, QueryBudget, VecTableSpec};
 use crate::vecstore::EXPECTED_EMBED_DIM;
+use crate::wasm_dispatch::plugin_call;
 
 const TABLE: &str = "git_commit_vectors";
 const INDEX: &str = "git_commit_vectors_vec";
@@ -32,7 +33,11 @@ pub fn ensure_schema() -> Result<(), String> {
 
 fn read_watermark() -> Option<String> {
     let sql = format!("SELECT hash FROM {} ORDER BY id DESC LIMIT 1", TABLE);
-    let rows = crate::libsql_wasm::query(SHARED_DB, &sql).ok()?;
+    let resp = plugin_call("libsql", "query", &json!({ "db": SHARED_DB, "sql": sql, "params": [] }));
+    if !resp.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    let rows = resp.get("rows")?;
     rows.as_array()?.first()?.get("hash")?.as_str().map(|s| s.to_string())
 }
 
@@ -145,10 +150,19 @@ pub fn sync_incremental() -> Result<Value, String> {
         } else {
             format!("{}\n\n{}", subject, diff)
         };
-        let vec = match crate::embed::embed_text(&text) {
-            Some(v) if !v.is_empty() => v,
-            _ => { skipped += 1; continue; }
+        let embed_resp = plugin_call("bert", "embed", &json!({ "text": text }));
+        let vec: Vec<f32> = if embed_resp.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+            embed_resp.get("embedding")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect::<Vec<f32>>())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         };
+        if vec.is_empty() {
+            skipped += 1;
+            continue;
+        }
         let embedding_sql = format!("vector('{}')", vecns::qlit(&vec));
         let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
         // Same shadow-index UPDATE hazard as rssearch_vectors::write (libsql's

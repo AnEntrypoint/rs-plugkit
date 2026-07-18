@@ -3,9 +3,31 @@ use super::host_abi::{
     host_fs_readdir, host_fs_stat, host_fetch, host_kv_get, host_kv_put, host_kv_delete, host_kv_query,
     host_vec_search, host_exec_js, host_now_ms, host_env_get, host_browser_exec,
     pack, read_str, unpack_to_string, unpack_to_value,
-    git_call, git_call_argv, host_read,
+    git_call, git_call_argv, host_read, plugin_call as call_plugin,
 };
 use super::events::{emit_event, log_deviation_push, install_panic_hook};
+
+fn plugin_ok(resp: &Value) -> bool {
+    resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn plugin_error(resp: &Value, fallback: &str) -> String {
+    resp.get("error").and_then(|v| v.as_str()).unwrap_or(fallback).to_string()
+}
+
+fn embed_query(query: &str) -> Value {
+    let trimmed = query.trim();
+    if trimmed.is_empty() { return Value::Null; }
+    let resp = call_plugin("bert", "embed", &json!({ "text": query, "kind": "query" }));
+    if !plugin_ok(&resp) { return Value::Null; }
+    resp.get("embedding").cloned().unwrap_or(Value::Null)
+}
+
+fn embed_passage(text: &str) -> Option<Value> {
+    let resp = call_plugin("bert", "embed", &json!({ "text": text, "kind": "passage" }));
+    if !plugin_ok(&resp) { return None; }
+    resp.get("embedding").cloned().filter(|v| !v.is_null())
+}
 
 fn next_dispatch_hint_for(verb: &str) -> Value {
     if verb == "instruction" { Value::Null } else { json!("instruction") }
@@ -307,7 +329,7 @@ fn recall(body: &Value) -> u64 {
     if query.is_empty() { return err("recall", "query required"); }
     check_sigil_ignored(query, namespace);
     let derived_query = query.to_string();
-    let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
+    let embedding = embed_query(query);
     let (vector_hits, mem_ns) = rssearch_vector_hits(&embedding, namespace, limit, false);
     if let Some(mem_ns) = &mem_ns {
         let now_ms = unsafe { host_now_ms() } as i64;
@@ -421,7 +443,7 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
         let md_path = memory_md_write_path(namespace, &key, text);
         return ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true, "deduped": true, "md_file": md_path}));
     }
-    let emb = match crate::embed::embed_text_json(text) {
+    let emb = match embed_passage(text) {
         Some(e) => e,
         None => return err("memorize", "embed failed; refusing to write a text-only memory with no vector (un-vector-recallable orphan)"),
     };
@@ -494,7 +516,7 @@ fn memorize_prune(body: &Value) -> u64 {
         return err("memorize-prune", "provide `key`/`keys` to delete, or `query` to list prune candidates");
     }
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
-    let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
+    let embedding = embed_query(query);
     let (vector_candidates, _) = rssearch_vector_hits(&embedding, namespace, k, true);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": namespace }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, k) };
@@ -541,7 +563,7 @@ fn codesearch(body: &Value) -> u64 {
         }
     }
     let cand_k = k.saturating_mul(5).max(50);
-    let embedding = crate::embed::embed_text_json_query(query).unwrap_or(Value::Null);
+    let embedding = embed_query(query);
     let (vector_hits, _) = rssearch_vector_hits(&embedding, "codeinsight", k, false);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": "codeinsight" }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, cand_k) };
@@ -745,22 +767,27 @@ fn db_name_from(body: &Value) -> String {
 fn sql_open(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(":memory:");
     let name = db_name_from(body);
-    match crate::libsql_wasm::open(&name, path) {
-        Ok(()) => ok("sql_open", json!({ "path": path, "db_name": name })),
-        Err(e) => err("sql_open", &e),
+    let resp = call_plugin("libsql", "open", &json!({ "db": name, "path": path }));
+    if plugin_ok(&resp) {
+        ok("sql_open", json!({ "path": path, "db_name": name }))
+    } else {
+        err("sql_open", &plugin_error(&resp, "open failed"))
     }
 }
 
 fn sql_close(body: &Value) -> u64 {
     let name = db_name_from(body);
-    match crate::libsql_wasm::close(&name) {
-        Ok(()) => ok("sql_close", json!({ "db_name": name })),
-        Err(e) => err("sql_close", &e),
+    let resp = call_plugin("libsql", "close", &json!({ "db": name }));
+    if plugin_ok(&resp) {
+        ok("sql_close", json!({ "db_name": name }))
+    } else {
+        err("sql_close", &plugin_error(&resp, "close failed"))
     }
 }
 
 fn sql_list_dbs(_body: &Value) -> u64 {
-    let names = crate::libsql_wasm::list_dbs();
+    let resp = call_plugin("libsql", "list_dbs", &json!({}));
+    let names = resp.get("dbs").cloned().unwrap_or_else(|| json!([]));
     ok("sql_list_dbs", json!({ "dbs": names }))
 }
 
@@ -770,9 +797,11 @@ fn sql_exec(body: &Value) -> u64 {
         None => return err("sql_exec", "missing sql"),
     };
     let name = db_name_from(body);
-    match crate::libsql_wasm::exec(&name, sql) {
-        Ok(()) => ok("sql_exec", json!({})),
-        Err(e) => err("sql_exec", &e),
+    let resp = call_plugin("libsql", "exec", &json!({ "db": name, "sql": sql }));
+    if plugin_ok(&resp) {
+        ok("sql_exec", json!({}))
+    } else {
+        err("sql_exec", &plugin_error(&resp, "exec failed"))
     }
 }
 
@@ -782,42 +811,36 @@ fn sql_query(body: &Value) -> u64 {
         None => return err("sql_query", "missing sql"),
     };
     let name = db_name_from(body);
-    match crate::libsql_wasm::query(&name, sql) {
-        Ok(rows) => ok("sql_query", json!({ "rows": rows })),
-        Err(e) => err("sql_query", &e),
+    let resp = call_plugin("libsql", "query", &json!({ "db": name, "sql": sql }));
+    if plugin_ok(&resp) {
+        let rows = resp.get("rows").cloned().unwrap_or_else(|| json!([]));
+        ok("sql_query", json!({ "rows": rows }))
+    } else {
+        err("sql_query", &plugin_error(&resp, "query failed"))
     }
 }
 
 fn sql_smoke() -> u64 {
-    pack(crate::libsql_wasm::smoke().to_string())
+    let n = "smoke";
+    let mut log: Vec<Value> = Vec::new();
+    let open_resp = call_plugin("libsql", "open", &json!({ "db": n, "path": ":memory:" }));
+    log.push(json!({ "step": "open", "result": if plugin_ok(&open_resp) { Value::Null } else { Value::String(plugin_error(&open_resp, "open failed")) } }));
+    let create_resp = call_plugin("libsql", "exec", &json!({ "db": n, "sql": "CREATE TABLE memos (id INTEGER PRIMARY KEY, text TEXT, emb F32_BLOB(4))" }));
+    log.push(json!({ "step": "create_table", "result": if plugin_ok(&create_resp) { Value::Null } else { Value::String(plugin_error(&create_resp, "exec failed")) } }));
+    let insert_resp = call_plugin("libsql", "exec", &json!({ "db": n, "sql": "INSERT INTO memos(text, emb) VALUES ('hello', vector('[0.1,0.2,0.3,0.4]'))" }));
+    log.push(json!({ "step": "insert", "result": if plugin_ok(&insert_resp) { Value::Null } else { Value::String(plugin_error(&insert_resp, "exec failed")) } }));
+    let index_resp = call_plugin("libsql", "exec", &json!({ "db": n, "sql": "CREATE INDEX memos_idx ON memos(libsql_vector_idx(emb, 'metric=cosine'))" }));
+    log.push(json!({ "step": "create_index", "result": if plugin_ok(&index_resp) { Value::Null } else { Value::String(plugin_error(&index_resp, "exec failed")) } }));
+    let query_resp = call_plugin("libsql", "query", &json!({ "db": n, "sql": "SELECT id, text, vector_distance_cos(emb, vector('[0.1,0.2,0.3,0.4]')) AS d FROM vector_top_k('memos_idx', vector('[0.1,0.2,0.3,0.4]'), 5) JOIN memos ON memos.rowid = id" }));
+    log.push(json!({ "step": "vector_top_k", "rows": resp_rows_or_null(&query_resp) }));
+    let _ = call_plugin("libsql", "close", &json!({ "db": n }));
+    let version_resp = call_plugin("libsql", "version", &json!({}));
+    let libsql_version = version_resp.get("version").cloned().unwrap_or(Value::Null);
+    pack(json!({ "ok": true, "smoke": log, "libsql_version": libsql_version }).to_string())
 }
 
-fn b64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
-    let mut i = 0;
-    while i + 3 <= bytes.len() {
-        let b = ((bytes[i] as u32) << 16) | ((bytes[i+1] as u32) << 8) | (bytes[i+2] as u32);
-        out.push(TABLE[((b >> 18) & 0x3F) as usize] as char);
-        out.push(TABLE[((b >> 12) & 0x3F) as usize] as char);
-        out.push(TABLE[((b >> 6) & 0x3F) as usize] as char);
-        out.push(TABLE[(b & 0x3F) as usize] as char);
-        i += 3;
-    }
-    let rem = bytes.len() - i;
-    if rem == 1 {
-        let b = (bytes[i] as u32) << 16;
-        out.push(TABLE[((b >> 18) & 0x3F) as usize] as char);
-        out.push(TABLE[((b >> 12) & 0x3F) as usize] as char);
-        out.push('='); out.push('=');
-    } else if rem == 2 {
-        let b = ((bytes[i] as u32) << 16) | ((bytes[i+1] as u32) << 8);
-        out.push(TABLE[((b >> 18) & 0x3F) as usize] as char);
-        out.push(TABLE[((b >> 12) & 0x3F) as usize] as char);
-        out.push(TABLE[((b >> 6) & 0x3F) as usize] as char);
-        out.push('=');
-    }
-    out
+fn resp_rows_or_null(resp: &Value) -> Value {
+    if plugin_ok(resp) { resp.get("rows").cloned().unwrap_or(Value::Null) } else { Value::Null }
 }
 
 fn b64_decode(s: &str) -> Option<Vec<u8>> {
@@ -844,10 +867,17 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
 
 fn sql_serialize(body: &Value) -> u64 {
     let name = db_name_from(body);
-    match crate::libsql_wasm::serialize(&name) {
-        Ok(bytes) => ok("sql_serialize", json!({ "bytes_b64": b64_encode(&bytes), "size": bytes.len(), "db_name": name })),
-        Err(e) => err("sql_serialize", &e),
+    let resp = call_plugin("libsql", "serialize", &json!({ "db": name }));
+    if !plugin_ok(&resp) {
+        return err("sql_serialize", &plugin_error(&resp, "serialize failed"));
     }
+    let bytes_b64 = match resp.get("bytes_b64").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return err("sql_serialize", "plugin response missing bytes_b64"),
+    };
+    let size = resp.get("size").and_then(|v| v.as_u64())
+        .unwrap_or_else(|| b64_decode(&bytes_b64).map(|b| b.len() as u64).unwrap_or(0));
+    ok("sql_serialize", json!({ "bytes_b64": bytes_b64, "size": size, "db_name": name }))
 }
 
 fn sql_deserialize(body: &Value) -> u64 {
@@ -858,9 +888,11 @@ fn sql_deserialize(body: &Value) -> u64 {
     let bytes = match b64_decode(s) { Some(b) => b, None => return err("sql_deserialize", "invalid base64") };
     let size = bytes.len();
     let name = db_name_from(body);
-    match crate::libsql_wasm::deserialize(&name, &bytes) {
-        Ok(()) => ok("sql_deserialize", json!({ "restored": size, "db_name": name })),
-        Err(e) => err("sql_deserialize", &e),
+    let resp = call_plugin("libsql", "deserialize", &json!({ "db": name, "bytes_b64": s }));
+    if plugin_ok(&resp) {
+        ok("sql_deserialize", json!({ "restored": size, "db_name": name }))
+    } else {
+        err("sql_deserialize", &plugin_error(&resp, "deserialize failed"))
     }
 }
 

@@ -1,4 +1,5 @@
 mod browser;
+mod daemon;
 mod download;
 mod embed;
 mod exec_js;
@@ -11,6 +12,10 @@ use std::path::PathBuf;
 
 fn wasm_path() -> PathBuf {
     download::install_dir().join("plugkit.wasm")
+}
+
+pub fn wasm_path_pub() -> PathBuf {
+    wasm_path()
 }
 
 /// Version to install when the local wasm is missing or stale. Resolution
@@ -60,6 +65,20 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| std::env::current_dir().expect("cwd unavailable"));
             let spool_dir = cwd.join(".gm").join("exec-spool");
             std::fs::create_dir_all(&spool_dir)?;
+
+            if std::env::var("GM_RUNNER_NO_DAEMON").is_err() {
+                ensure_wasm_installed(None)?;
+                daemon::register_project(&cwd)?;
+                if daemon::ensure_daemon_running()? {
+                    eprintln!(
+                        "[gm-runner] registered {} with the shared system-wide daemon -- no dedicated per-project process spawned",
+                        cwd.display()
+                    );
+                    return Ok(());
+                }
+                eprintln!("[gm-runner] shared daemon unavailable, falling back to a dedicated per-project process");
+            }
+
             // Atomic O_EXCL lock: two concurrent gm sessions in the same
             // project must never both spawn a watcher racing on the same
             // spool dir. A dead prior holder's stale lock is detected and
@@ -70,6 +89,7 @@ fn main() -> anyhow::Result<()> {
             eprintln!("[gm-runner] watching {}", spool_dir.display());
             supervisor::run_supervised(wasm, cwd, spool_dir)
         }
+        "daemon" => daemon::run_daemon(),
         "dispatch" => {
             let verb = args.get(2).cloned().unwrap_or_default();
             let body = args.get(3).cloned().unwrap_or_else(|| "{}".to_string());

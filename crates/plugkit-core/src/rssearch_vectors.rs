@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use crate::shared_db::{shared_ensure_open, shared_exec, shared_query_params, SHARED_DB};
+use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
 use crate::vecns::{self, QueryBudget, RecencyParams, VecTableSpec};
 use crate::vecstore::EXPECTED_EMBED_DIM;
 
@@ -21,10 +21,11 @@ fn shared_db_path() -> String {
 
 fn has_deleted_column() -> bool {
     let sql = format!("SELECT name FROM pragma_table_info('{}') WHERE name = 'deleted'", TABLE);
-    crate::libsql_wasm::query(SHARED_DB, &sql)
-        .ok()
-        .and_then(|rows| rows.as_array().map(|a| !a.is_empty()))
-        .unwrap_or(false)
+    let resp = crate::wasm_dispatch::plugin_call("libsql", "query", &json!({ "db": SHARED_DB, "sql": sql }));
+    if resp.get("ok").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    resp.get("rows").and_then(|rows| rows.as_array().map(|a| !a.is_empty())).unwrap_or(false)
 }
 
 pub fn ensure_schema() -> Result<(), String> {

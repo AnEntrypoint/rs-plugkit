@@ -1,9 +1,63 @@
 #![cfg(target_arch = "wasm32")]
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use crate::libsql_wasm;
 use crate::vecstore::{drop_if_dim_mismatch_at, vec_to_json_literal};
+use crate::wasm_dispatch::unpack_to_value_pub;
+
+#[link(wasm_import_module = "env")]
+extern "C" {
+    fn host_plugin_call(
+        plugin_ptr: *const u8, plugin_len: u32,
+        verb_ptr: *const u8, verb_len: u32,
+        body_ptr: *const u8, body_len: u32,
+    ) -> u64;
+}
+
+/// Dispatches one call through the host_plugin_call import and parses the
+/// JSON response. Every libsql/bert/treesitter call in this file routes
+/// through this instead of calling crate::libsql_wasm::*/crate::embed::*/
+/// tree_sitter::* in-process.
+fn call_plugin(plugin: &str, verb: &str, body: &Value) -> Value {
+    let body_s = body.to_string();
+    let packed = unsafe {
+        host_plugin_call(
+            plugin.as_ptr(), plugin.len() as u32,
+            verb.as_ptr(), verb.len() as u32,
+            body_s.as_ptr(), body_s.len() as u32,
+        )
+    };
+    unpack_to_value_pub(packed)
+}
+
+fn plugin_ok_err(resp: &Value) -> Result<(), String> {
+    let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err(resp.get("error").and_then(|v| v.as_str()).unwrap_or("plugin call failed").to_string())
+    }
+}
+
+fn libsql_exec(db_name: &str, sql: &str) -> Result<(), String> {
+    let resp = call_plugin("libsql", "exec", &json!({ "db": db_name, "sql": sql }));
+    plugin_ok_err(&resp)
+}
+
+fn libsql_exec_params(db_name: &str, sql: &str, params: &[&str]) -> Result<(), String> {
+    let resp = call_plugin("libsql", "exec_params", &json!({ "db": db_name, "sql": sql, "params": params }));
+    plugin_ok_err(&resp)
+}
+
+fn libsql_query_params(db_name: &str, sql: &str, params: &[&str]) -> Result<Value, String> {
+    let resp = call_plugin("libsql", "query_params", &json!({ "db": db_name, "sql": sql, "params": params }));
+    let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if ok {
+        Ok(resp.get("rows").cloned().unwrap_or(Value::Array(vec![])))
+    } else {
+        Err(resp.get("error").and_then(|v| v.as_str()).unwrap_or("plugin call failed").to_string())
+    }
+}
 
 /// Identifies one vector table's physical location: which db instance it
 /// lives in, its table name, and its libsql_vector_idx index name. Every
@@ -23,8 +77,8 @@ impl<'a> VecTableSpec<'a> {
     /// -- the shadow-row recovery step: rebuild the vector index from
     /// scratch after a corrupted shadow-table read.
     pub fn rebuild_index(&self) -> Result<(), String> {
-        let _ = libsql_wasm::exec(self.db_name, &format!("DROP INDEX IF EXISTS {}", self.index));
-        libsql_wasm::exec(self.db_name, &format!(
+        let _ = libsql_exec(self.db_name, &format!("DROP INDEX IF EXISTS {}", self.index));
+        libsql_exec(self.db_name, &format!(
             "CREATE INDEX {} ON {}(libsql_vector_idx(embedding, 'metric=cosine'))",
             self.index, self.table
         ))
@@ -32,7 +86,7 @@ impl<'a> VecTableSpec<'a> {
 
     /// CREATE INDEX IF NOT EXISTS -- the normal (non-recovery) schema-ensure path.
     pub fn ensure_index(&self) {
-        let _ = libsql_wasm::exec(self.db_name, &format!(
+        let _ = libsql_exec(self.db_name, &format!(
             "CREATE INDEX IF NOT EXISTS {} ON {}(libsql_vector_idx(embedding, 'metric=cosine'))",
             self.index, self.table
         ));
@@ -47,15 +101,15 @@ impl<'a> VecTableSpec<'a> {
     }
 
     pub fn exec(&self, sql: &str) -> Result<(), String> {
-        libsql_wasm::exec(self.db_name, sql)
+        libsql_exec(self.db_name, sql)
     }
 
     pub fn exec_params(&self, sql: &str, params: &[&str]) -> Result<(), String> {
-        libsql_wasm::exec_params(self.db_name, sql, params)
+        libsql_exec_params(self.db_name, sql, params)
     }
 
     pub fn query_params(&self, sql: &str, params: &[&str]) -> Result<Value, String> {
-        libsql_wasm::query_params(self.db_name, sql, params)
+        libsql_query_params(self.db_name, sql, params)
     }
 }
 

@@ -1,174 +1,73 @@
 #![cfg(target_arch = "wasm32")]
 
-use libsql_ffi as ffi;
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::ffi::{CStr, CString};
-use std::ptr;
+use std::collections::HashSet;
 use std::sync::Mutex;
 
-static DBS: Mutex<Option<HashMap<String, DbHandle>>> = Mutex::new(None);
+use crate::wasm_dispatch::plugin_call;
 
-struct DbHandle(*mut ffi::sqlite3);
-unsafe impl Send for DbHandle {}
+static OPEN_DBS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+fn plugin_ok_err(resp: &Value) -> Result<(), String> {
+    let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err(resp.get("error").and_then(|v| v.as_str()).unwrap_or("libsql plugin call failed").to_string())
+    }
+}
+
+fn plugin_ok_rows(resp: &Value) -> Result<Value, String> {
+    let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if ok {
+        Ok(resp.get("rows").cloned().unwrap_or(Value::Array(Vec::new())))
+    } else {
+        Err(resp.get("error").and_then(|v| v.as_str()).unwrap_or("libsql plugin call failed").to_string())
+    }
+}
 
 pub fn open(name: &str, path: &str) -> Result<(), String> {
-    let mut guard = DBS.lock().map_err(|e| e.to_string())?;
-    let map = guard.get_or_insert_with(HashMap::new);
-    if map.contains_key(name) { return Ok(()); }
-    let cpath = CString::new(path).map_err(|e| e.to_string())?;
-    let mut db: *mut ffi::sqlite3 = ptr::null_mut();
-    let rc = unsafe {
-        ffi::sqlite3_open_v2(
-            cpath.as_ptr(),
-            &mut db,
-            ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE,
-            ptr::null(),
-        )
-    };
-    if rc != ffi::SQLITE_OK {
-        let msg = if db.is_null() { format!("rc={}", rc) } else {
-            let m = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
-            unsafe { ffi::sqlite3_close(db); }
-            format!("rc={} msg={}", rc, m)
-        };
-        return Err(format!("sqlite3_open_v2 {}", msg));
-    }
-    map.insert(name.to_string(), DbHandle(db));
+    let resp = plugin_call("libsql", "open", &json!({ "db": name, "path": path }));
+    plugin_ok_err(&resp)?;
+    let mut guard = OPEN_DBS.lock().map_err(|e| e.to_string())?;
+    guard.get_or_insert_with(HashSet::new).insert(name.to_string());
     Ok(())
 }
 
 pub fn close(name: &str) -> Result<(), String> {
-    let mut guard = DBS.lock().map_err(|e| e.to_string())?;
-    let map = match guard.as_mut() { Some(m) => m, None => return Ok(()) };
-    if let Some(h) = map.remove(name) {
-        unsafe { ffi::sqlite3_close(h.0); }
+    let resp = plugin_call("libsql", "close", &json!({ "db": name }));
+    plugin_ok_err(&resp)?;
+    if let Ok(mut guard) = OPEN_DBS.lock() {
+        if let Some(set) = guard.as_mut() {
+            set.remove(name);
+        }
     }
     Ok(())
 }
 
 pub fn list_dbs() -> Vec<String> {
-    let guard = DBS.lock().ok();
-    guard.as_ref().and_then(|g| g.as_ref()).map(|m| m.keys().cloned().collect()).unwrap_or_default()
-}
-
-fn with_db<F, R>(name: &str, f: F) -> Result<R, String>
-where
-    F: FnOnce(*mut ffi::sqlite3) -> Result<R, String>,
-{
-    let guard = DBS.lock().map_err(|e| e.to_string())?;
-    let map = guard.as_ref().ok_or_else(|| "no dbs open".to_string())?;
-    let h = map.get(name).ok_or_else(|| format!("db '{}' not open", name))?;
-    f(h.0)
+    let guard = OPEN_DBS.lock().ok();
+    guard.as_ref().and_then(|g| g.as_ref()).map(|s| s.iter().cloned().collect()).unwrap_or_default()
 }
 
 pub fn exec(name: &str, sql: &str) -> Result<(), String> {
-    with_db(name, |db| {
-        let csql = CString::new(sql).map_err(|e| e.to_string())?;
-        let mut err_ptr: *mut i8 = ptr::null_mut();
-        let rc = unsafe { ffi::sqlite3_exec(db, csql.as_ptr(), None, ptr::null_mut(), &mut err_ptr) };
-        if rc != ffi::SQLITE_OK {
-            let msg = if err_ptr.is_null() {
-                "unknown".to_string()
-            } else {
-                let s = unsafe { CStr::from_ptr(err_ptr).to_string_lossy().into_owned() };
-                unsafe { ffi::sqlite3_free(err_ptr as *mut _); }
-                s
-            };
-            return Err(format!("exec rc={} msg={}", rc, msg));
-        }
-        Ok(())
-    })
+    let resp = plugin_call("libsql", "exec", &json!({ "db": name, "sql": sql }));
+    plugin_ok_err(&resp)
 }
 
 pub fn query(name: &str, sql: &str) -> Result<Value, String> {
-    with_db(name, |db| {
-        let csql = CString::new(sql).map_err(|e| e.to_string())?;
-        let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
-        let rc = unsafe { ffi::sqlite3_prepare_v2(db, csql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
-        if rc != ffi::SQLITE_OK {
-            let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
-            return Err(format!("prepare rc={} msg={}", rc, msg));
-        }
-        let ncols = unsafe { ffi::sqlite3_column_count(stmt) };
-        let mut col_names = Vec::with_capacity(ncols as usize);
-        for i in 0..ncols {
-            let nm = unsafe { CStr::from_ptr(ffi::sqlite3_column_name(stmt, i)).to_string_lossy().into_owned() };
-            col_names.push(nm);
-        }
-        let mut rows: Vec<Value> = Vec::new();
-        loop {
-            let step = unsafe { ffi::sqlite3_step(stmt) };
-            if step == ffi::SQLITE_DONE { break; }
-            if step != ffi::SQLITE_ROW {
-                let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
-                unsafe { ffi::sqlite3_finalize(stmt); }
-                return Err(format!("step rc={} msg={}", step, msg));
-            }
-            let mut row = serde_json::Map::new();
-            for i in 0..ncols {
-                let ctype = unsafe { ffi::sqlite3_column_type(stmt, i) };
-                let v = match ctype {
-                    ffi::SQLITE_INTEGER => Value::from(unsafe { ffi::sqlite3_column_int64(stmt, i) }),
-                    ffi::SQLITE_FLOAT => Value::from(unsafe { ffi::sqlite3_column_double(stmt, i) }),
-                    ffi::SQLITE_NULL => Value::Null,
-                    ffi::SQLITE_TEXT => {
-                        let p = unsafe { ffi::sqlite3_column_text(stmt, i) };
-                        if p.is_null() { Value::Null }
-                        else {
-                            let s = unsafe { CStr::from_ptr(p as *const _).to_string_lossy().into_owned() };
-                            Value::String(s)
-                        }
-                    }
-                    ffi::SQLITE_BLOB => {
-                        let n = unsafe { ffi::sqlite3_column_bytes(stmt, i) } as usize;
-                        let p = unsafe { ffi::sqlite3_column_blob(stmt, i) } as *const u8;
-                        if p.is_null() || n == 0 { Value::Null }
-                        else {
-                            let bytes = unsafe { std::slice::from_raw_parts(p, n) };
-                            Value::String(format!("blob:{}b", bytes.len()))
-                        }
-                    }
-                    _ => Value::Null,
-                };
-                row.insert(col_names[i as usize].clone(), v);
-            }
-            rows.push(Value::Object(row));
-        }
-        unsafe { ffi::sqlite3_finalize(stmt); }
-        Ok(Value::Array(rows))
-    })
+    let resp = plugin_call("libsql", "query", &json!({ "db": name, "sql": sql }));
+    plugin_ok_rows(&resp)
 }
 
 pub fn exec_params(name: &str, sql: &str, params: &[&str]) -> Result<(), String> {
-    with_db(name, |db| {
-        let csql = CString::new(sql).map_err(|e| e.to_string())?;
-        let cparams: Vec<CString> = params.iter()
-            .map(|p| CString::new(*p).map_err(|e| e.to_string()))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
-        let rc = unsafe { ffi::sqlite3_prepare_v2(db, csql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
-        if rc != ffi::SQLITE_OK {
-            let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
-            return Err(format!("prepare rc={} msg={}", rc, msg));
-        }
-        for (i, cp) in cparams.iter().enumerate() {
-            let rc = unsafe {
-                ffi::sqlite3_bind_text(stmt, (i + 1) as i32, cp.as_ptr(), -1, None)
-            };
-            if rc != ffi::SQLITE_OK {
-                unsafe { ffi::sqlite3_finalize(stmt); }
-                return Err(format!("bind param {} rc={}", i, rc));
-            }
-        }
-        let step = unsafe { ffi::sqlite3_step(stmt) };
-        unsafe { ffi::sqlite3_finalize(stmt); }
-        if step != ffi::SQLITE_DONE && step != ffi::SQLITE_ROW {
-            let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
-            return Err(format!("step rc={} msg={}", step, msg));
-        }
-        Ok(())
-    })
+    let resp = plugin_call("libsql", "exec_params", &json!({ "db": name, "sql": sql, "params": params }));
+    plugin_ok_err(&resp)
+}
+
+pub fn query_params(name: &str, sql: &str, params: &[&str]) -> Result<Value, String> {
+    let resp = plugin_call("libsql", "query_params", &json!({ "db": name, "sql": sql, "params": params }));
+    plugin_ok_rows(&resp)
 }
 
 /// begin/commit/rollback wrap the default autocommit-per-statement mode into
@@ -177,21 +76,27 @@ pub fn exec_params(name: &str, sql: &str, params: &[&str]) -> Result<(), String>
 /// whole batch instead of one per row. code_index::index() calls these
 /// directly (not via a closure-wrapping helper) since its loop body has many
 /// early `continue`s that don't map cleanly onto a single wrapped closure.
-pub fn begin(name: &str) -> Result<(), String> { exec(name, "BEGIN IMMEDIATE") }
-pub fn commit(name: &str) -> Result<(), String> { exec(name, "COMMIT") }
-pub fn rollback(name: &str) -> Result<(), String> { exec(name, "ROLLBACK") }
+pub fn begin(name: &str) -> Result<(), String> {
+    let resp = plugin_call("libsql", "begin", &json!({ "db": name }));
+    plugin_ok_err(&resp)
+}
+pub fn commit(name: &str) -> Result<(), String> {
+    let resp = plugin_call("libsql", "commit", &json!({ "db": name }));
+    plugin_ok_err(&resp)
+}
+pub fn rollback(name: &str) -> Result<(), String> {
+    let resp = plugin_call("libsql", "rollback", &json!({ "db": name }));
+    plugin_ok_err(&resp)
+}
 
 pub struct PreparedStmt {
-    db: *mut ffi::sqlite3,
-    stmt: *mut ffi::sqlite3_stmt,
+    db: String,
+    handle: String,
 }
-unsafe impl Send for PreparedStmt {}
 
 impl Drop for PreparedStmt {
     fn drop(&mut self) {
-        if !self.stmt.is_null() {
-            unsafe { ffi::sqlite3_finalize(self.stmt); }
-        }
+        let _ = plugin_call("libsql", "finalize", &json!({ "db": self.db, "handle": self.handle }));
     }
 }
 
@@ -199,131 +104,40 @@ impl Drop for PreparedStmt {
 /// `execute_bound` for every row in a batch to avoid re-parsing/re-planning
 /// the same INSERT statement on every call (exec_params does prepare+finalize
 /// per invocation, which is fine for one-off writes but wasteful in a loop).
+/// The plugin call is cross-process, so the prepared statement is tracked
+/// plugin-side by an opaque `handle` id returned from `prepare`, not a raw
+/// `*mut sqlite3_stmt` pointer as it was when this ran in-process.
 pub fn prepare(name: &str, sql: &str) -> Result<PreparedStmt, String> {
-    with_db(name, |db| {
-        let csql = CString::new(sql).map_err(|e| e.to_string())?;
-        let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
-        let rc = unsafe { ffi::sqlite3_prepare_v2(db, csql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
-        if rc != ffi::SQLITE_OK {
-            let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
-            return Err(format!("prepare rc={} msg={}", rc, msg));
-        }
-        Ok(PreparedStmt { db, stmt })
-    })
+    let resp = plugin_call("libsql", "prepare", &json!({ "db": name, "sql": sql }));
+    plugin_ok_err(&resp)?;
+    let handle = resp.get("handle").and_then(|v| v.as_str())
+        .ok_or_else(|| "prepare: missing handle in plugin response".to_string())?
+        .to_string();
+    Ok(PreparedStmt { db: name.to_string(), handle })
 }
 
 impl PreparedStmt {
     pub fn execute_bound(&self, params: &[&str]) -> Result<(), String> {
-        let cparams: Vec<CString> = params.iter()
-            .map(|p| CString::new(*p).map_err(|e| e.to_string()))
-            .collect::<Result<Vec<_>, _>>()?;
-        unsafe { ffi::sqlite3_reset(self.stmt); }
-        unsafe { ffi::sqlite3_clear_bindings(self.stmt); }
-        for (i, cp) in cparams.iter().enumerate() {
-            let rc = unsafe { ffi::sqlite3_bind_text(self.stmt, (i + 1) as i32, cp.as_ptr(), -1, None) };
-            if rc != ffi::SQLITE_OK {
-                return Err(format!("bind param {} rc={}", i, rc));
-            }
-        }
-        let step = unsafe { ffi::sqlite3_step(self.stmt) };
-        if step != ffi::SQLITE_DONE && step != ffi::SQLITE_ROW {
-            let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(self.db)).to_string_lossy().into_owned() };
-            return Err(format!("step rc={} msg={}", step, msg));
-        }
-        Ok(())
+        let resp = plugin_call("libsql", "execute_bound", &json!({ "db": self.db, "handle": self.handle, "params": params }));
+        plugin_ok_err(&resp)
     }
 }
 
-pub fn query_params(name: &str, sql: &str, params: &[&str]) -> Result<Value, String> {
-    with_db(name, |db| {
-        let csql = CString::new(sql).map_err(|e| e.to_string())?;
-        let cparams: Vec<CString> = params.iter()
-            .map(|p| CString::new(*p).map_err(|e| e.to_string()))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
-        let rc = unsafe { ffi::sqlite3_prepare_v2(db, csql.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
-        if rc != ffi::SQLITE_OK {
-            let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
-            return Err(format!("prepare rc={} msg={}", rc, msg));
-        }
-        for (i, cp) in cparams.iter().enumerate() {
-            let rc = unsafe {
-                ffi::sqlite3_bind_text(stmt, (i + 1) as i32, cp.as_ptr(), -1, None)
-            };
-            if rc != ffi::SQLITE_OK {
-                unsafe { ffi::sqlite3_finalize(stmt); }
-                return Err(format!("bind param {} rc={}", i, rc));
-            }
-        }
-        let ncols = unsafe { ffi::sqlite3_column_count(stmt) };
-        let mut col_names = Vec::with_capacity(ncols as usize);
-        for i in 0..ncols {
-            let nm = unsafe { CStr::from_ptr(ffi::sqlite3_column_name(stmt, i)).to_string_lossy().into_owned() };
-            col_names.push(nm);
-        }
-        let mut rows: Vec<Value> = Vec::new();
-        loop {
-            let step = unsafe { ffi::sqlite3_step(stmt) };
-            if step == ffi::SQLITE_DONE { break; }
-            if step != ffi::SQLITE_ROW {
-                let msg = unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned() };
-                unsafe { ffi::sqlite3_finalize(stmt); }
-                return Err(format!("step rc={} msg={}", step, msg));
-            }
-            let mut row = serde_json::Map::new();
-            for i in 0..ncols {
-                let ctype = unsafe { ffi::sqlite3_column_type(stmt, i) };
-                let v = match ctype {
-                    ffi::SQLITE_INTEGER => Value::from(unsafe { ffi::sqlite3_column_int64(stmt, i) }),
-                    ffi::SQLITE_FLOAT => Value::from(unsafe { ffi::sqlite3_column_double(stmt, i) }),
-                    ffi::SQLITE_NULL => Value::Null,
-                    ffi::SQLITE_TEXT => {
-                        let p = unsafe { ffi::sqlite3_column_text(stmt, i) };
-                        if p.is_null() { Value::Null }
-                        else {
-                            let s = unsafe { CStr::from_ptr(p as *const _).to_string_lossy().into_owned() };
-                            Value::String(s)
-                        }
-                    }
-                    _ => Value::Null,
-                };
-                row.insert(col_names[i as usize].clone(), v);
-            }
-            rows.push(Value::Object(row));
-        }
-        unsafe { ffi::sqlite3_finalize(stmt); }
-        Ok(Value::Array(rows))
-    })
-}
-
 pub fn serialize(name: &str) -> Result<Vec<u8>, String> {
-    with_db(name, |db| {
-        let schema = CString::new("main").unwrap();
-        let mut size: i64 = 0;
-        let p = unsafe { ffi::sqlite3_serialize(db, schema.as_ptr(), &mut size, 0) };
-        if p.is_null() || size <= 0 { return Err(format!("serialize null (size={})", size)); }
-        let bytes = unsafe { std::slice::from_raw_parts(p, size as usize).to_vec() };
-        unsafe { ffi::sqlite3_free(p as *mut _); }
-        Ok(bytes)
-    })
+    let resp = plugin_call("libsql", "serialize", &json!({ "db": name }));
+    let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !ok {
+        return Err(resp.get("error").and_then(|v| v.as_str()).unwrap_or("serialize failed").to_string());
+    }
+    let b64 = resp.get("data").and_then(|v| v.as_str())
+        .ok_or_else(|| "serialize: missing data in plugin response".to_string())?;
+    base64_decode(b64)
 }
 
 pub fn deserialize(name: &str, bytes: &[u8]) -> Result<(), String> {
-    with_db(name, |db| {
-        let schema = CString::new("main").unwrap();
-        let size = bytes.len() as i64;
-        let buf = unsafe { ffi::sqlite3_malloc64(size as u64) } as *mut u8;
-        if buf.is_null() { return Err("malloc failed".to_string()); }
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len()); }
-        let flags = (ffi::SQLITE_DESERIALIZE_FREEONCLOSE | ffi::SQLITE_DESERIALIZE_RESIZEABLE) as u32;
-        let rc = unsafe {
-            ffi::sqlite3_deserialize(db, schema.as_ptr(), buf, size, size, flags)
-        };
-        if rc != ffi::SQLITE_OK {
-            return Err(format!("deserialize rc={}", rc));
-        }
-        Ok(())
-    })
+    let b64 = base64_encode(bytes);
+    let resp = plugin_call("libsql", "deserialize", &json!({ "db": name, "data": b64 }));
+    plugin_ok_err(&resp)
 }
 
 pub fn smoke() -> Value {
@@ -335,13 +149,51 @@ pub fn smoke() -> Value {
     log.push(json!({ "step": "create_index", "result": exec(n, "CREATE INDEX memos_idx ON memos(libsql_vector_idx(emb, 'metric=cosine'))").err() }));
     log.push(json!({ "step": "vector_top_k", "rows": query(n, "SELECT id, text, vector_distance_cos(emb, vector('[0.1,0.2,0.3,0.4]')) AS d FROM vector_top_k('memos_idx', vector('[0.1,0.2,0.3,0.4]'), 5) JOIN memos ON memos.rowid = id").ok() }));
     let _ = close(n);
-    json!({ "ok": true, "smoke": log, "libsql_version": libsql_version() })
+    json!({ "ok": true, "smoke": log, "libsql_version": "delegated" })
 }
 
-fn libsql_version() -> String {
-    unsafe {
-        let p = ffi::sqlite3_libversion();
-        if p.is_null() { return "unknown".to_string(); }
-        CStr::from_ptr(p).to_string_lossy().into_owned()
+const B64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+        out.push(B64_CHARS[((n >> 18) & 0x3f) as usize] as char);
+        out.push(B64_CHARS[((n >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 { B64_CHARS[((n >> 6) & 0x3f) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { B64_CHARS[(n & 0x3f) as usize] as char } else { '=' });
     }
+    out
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let clean: Vec<u8> = s.bytes().filter(|&c| c != b'=' && !c.is_ascii_whitespace()).collect();
+    let mut out = Vec::with_capacity(clean.len() / 4 * 3 + 3);
+    for chunk in clean.chunks(4) {
+        let mut n: u32 = 0;
+        let mut bits = 0u32;
+        for &c in chunk {
+            let v = val(c).ok_or_else(|| "invalid base64 char".to_string())?;
+            n = (n << 6) | v;
+            bits += 6;
+        }
+        n <<= 24u32.saturating_sub(bits);
+        let nbytes = (bits / 8) as usize;
+        let b = n.to_be_bytes();
+        out.extend_from_slice(&b[..nbytes]);
+    }
+    Ok(out)
 }
