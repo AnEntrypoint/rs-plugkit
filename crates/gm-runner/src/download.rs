@@ -147,10 +147,16 @@ const REMOTE_ARTIFACT_NAME: &str = "plugkit-slim.wasm";
 /// Downloads plugkit's wasm module for `version` from the plugkit-bin GitHub
 /// Releases channel (same source gm-plugkit/bootstrap.js's
 /// downloadFromGithubReleases uses), verified against the release's own
-/// .sha256 sidecar. Always fetches the slim artifact (see
-/// `REMOTE_ARTIFACT_NAME`) -- gm-runner always implements `host_vec_embed`
-/// natively, so the fat artifact's embedded-safetensors fallback is never
-/// needed on this host.
+/// .sha256 sidecar. Prefers the slim artifact (see `REMOTE_ARTIFACT_NAME`)
+/// -- gm-runner always implements `host_vec_embed` natively, so the fat
+/// artifact's embedded-safetensors fallback is never functionally needed on
+/// this host. Falls back to the fat artifact ('plugkit.wasm') when the slim
+/// sidecar/asset isn't found (404) at this version's release -- an older
+/// release published before the slim-artifact publish step existed, or a
+/// release that otherwise never got a slim upload, would otherwise hard-fail
+/// bootstrap entirely on a host that is perfectly capable of running fat.
+/// Fat is a strict capability superset of slim, so this fallback can never
+/// produce incorrect behavior, only a larger download.
 pub fn bootstrap_plugkit_wasm(version: &str) -> anyhow::Result<PathBuf> {
     let dest = install_dir().join("plugkit.wasm");
     if dest.exists() {
@@ -165,8 +171,27 @@ pub fn bootstrap_plugkit_wasm(version: &str) -> anyhow::Result<PathBuf> {
     }
 
     let base = format!("https://github.com/AnEntrypoint/plugkit-bin/releases/download/v{version}");
-    let wasm_url = format!("{base}/{REMOTE_ARTIFACT_NAME}");
-    let sha_url = format!("{base}/{REMOTE_ARTIFACT_NAME}.sha256");
+
+    match fetch_artifact(&base, REMOTE_ARTIFACT_NAME, &dest) {
+        Ok(()) => {}
+        Err(slim_err) => {
+            fetch_artifact(&base, FAT_ARTIFACT_NAME, &dest).map_err(|fat_err| {
+                anyhow::anyhow!(
+                    "slim fetch failed ({slim_err}) and fat fallback also failed ({fat_err})"
+                )
+            })?;
+        }
+    }
+
+    fs::write(install_dir().join("plugkit.version"), version)?;
+    Ok(dest)
+}
+
+const FAT_ARTIFACT_NAME: &str = "plugkit.wasm";
+
+fn fetch_artifact(base: &str, artifact_name: &str, dest: &Path) -> anyhow::Result<()> {
+    let wasm_url = format!("{base}/{artifact_name}");
+    let sha_url = format!("{base}/{artifact_name}.sha256");
 
     let sha_resp = ureq::get(&sha_url).call()?;
     let sha_line = sha_resp.into_string()?;
@@ -176,9 +201,7 @@ pub fn bootstrap_plugkit_wasm(version: &str) -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("empty sha256 sidecar at {sha_url}"))?
         .to_string();
 
-    download_and_verify(&wasm_url, &dest, &expected_sha)?;
-    fs::write(install_dir().join("plugkit.version"), version)?;
-    Ok(dest)
+    download_and_verify(&wasm_url, dest, &expected_sha)
 }
 
 /// The gm-runner-bin release asset name for the current host platform/arch,
