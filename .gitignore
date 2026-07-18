@@ -48,3 +48,6 @@ weights/bge-config.json
 .gm/pw-sock-*/
 node_modules/
 site/package-lock.json
+*.local-test
+plugkit.wasm
+plugkit-slim.wasm
