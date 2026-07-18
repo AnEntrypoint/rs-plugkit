@@ -51,6 +51,31 @@ fn json_to_f32_vec(v: &Value) -> Option<Vec<f32>> {
     Some(out)
 }
 
+fn is_shadow_row_err(err: &str) -> bool {
+    err.contains("shadow row")
+}
+
+// A "vector index(insert): failed to insert shadow row" error was live-observed
+// on brand-new keys that had never been written before -- ruling out an
+// ON-CONFLICT-DO-UPDATE race against an existing row (the original hypothesis;
+// a delete-then-insert rewrite of the upsert did NOT resolve it). The shadow
+// table backing libsql_vector_idx is a real on-disk structure that this
+// session's earlier watcher crash storm (multiple abrupt process kills
+// mid-write, before the boot-heartbeat and event-loop-starvation fixes landed)
+// could plausibly have left corrupted -- corruption that persists across
+// restarts since the shadow table lives on disk, not in memory, and nothing
+// ever drops+recreates the index once CREATE INDEX IF NOT EXISTS has run once.
+// Recover by dropping and recreating the vector index and retrying the insert
+// exactly once; if the retry still fails, surface the (now index-rebuilt)
+// error rather than looping.
+fn rebuild_vector_index() -> Result<(), String> {
+    let _ = shared_exec(&format!("DROP INDEX IF EXISTS {}", INDEX));
+    shared_exec(&format!(
+        "CREATE INDEX {} ON {}(libsql_vector_idx(embedding, 'metric=cosine'))",
+        INDEX, TABLE
+    ))
+}
+
 pub fn write(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: i64) -> Result<(), String> {
     let vec = match json_to_f32_vec(embedding) {
         Some(v) if !v.is_empty() => v,
@@ -59,13 +84,6 @@ pub fn write(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: 
     if let Err(e) = ensure_schema() {
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
     }
-    // libsql's libsql_vector_idx shadow table does not reliably support the
-    // ON CONFLICT DO UPDATE path for a row that already has a vector-index
-    // entry (observed live: "vector index(insert): failed to insert shadow
-    // row" on re-syncing an existing key) -- the shadow index appears to be
-    // insert-oriented and gets out of sync on an UPDATE. Delete any existing
-    // row for this (namespace, key) first so the insert below is always a
-    // fresh shadow-index entry, never an update through the vector column.
     let delete_sql = format!("DELETE FROM {} WHERE namespace=?1 AND key=?2", TABLE);
     shared_exec_params(&delete_sql, &[namespace, key])?;
     let embedding_sql = format!("vector('{}')", vec_to_json_literal(&vec));
@@ -74,7 +92,17 @@ pub fn write(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: 
         TABLE, embedding_sql
     );
     let now_s = now_ms.to_string();
-    shared_exec_params(&sql, &[namespace, key, text, &now_s])
+    match shared_exec_params(&sql, &[namespace, key, text, &now_s]) {
+        Ok(()) => Ok(()),
+        Err(e) if is_shadow_row_err(&e) => {
+            crate::wasm_dispatch::emit_event("rssearch_vectors_shadow_row_recovery", json!({
+                "namespace": namespace, "key": key, "error": e,
+            }));
+            rebuild_vector_index()?;
+            shared_exec_params(&sql, &[namespace, key, text, &now_s])
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub fn mark_deleted(namespace: &str, key: &str) -> Result<(), String> {
