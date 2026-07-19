@@ -480,8 +480,17 @@ pub fn register_env_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()
     linker.func_wrap(
         "env",
         "host_task_proc",
-        move |caller: Caller<'_, HostState>, _a: u32, _al: u32, _p: u32, _pl: u32| -> u64 {
-            not_implemented(caller)
+        move |mut caller: Caller<'_, HostState>, a: u32, al: u32, p: u32, pl: u32| -> u64 {
+            let action = read_guest_string(&mut caller, a, al);
+            let params_str = read_guest_string(&mut caller, p, pl);
+            let params: serde_json::Value = if params_str.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&params_str).unwrap_or(serde_json::json!({}))
+            };
+            let cwd = caller.data().cwd.clone();
+            let result = crate::task::handle(&action, &params, &cwd);
+            write_guest_json(&mut caller, result)
         },
     )?;
     // args is either a JSON array ('["status","--porcelain"]', from

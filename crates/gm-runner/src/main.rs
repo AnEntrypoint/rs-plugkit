@@ -3,6 +3,7 @@ mod daemon;
 mod download;
 mod embed;
 mod exec_js;
+mod task;
 mod lock;
 mod spool;
 mod supervisor;
