@@ -1,6 +1,6 @@
 [package]
 name = "rs-plugkit"
-version = "0.1.918"
+version = "0.1.919"
 edition.workspace = true
 
 [lib]
