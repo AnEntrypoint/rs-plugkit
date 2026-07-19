@@ -247,6 +247,41 @@ pub fn fetch_latest_gm_runner_version() -> anyhow::Result<Option<String>> {
 /// start, not the current run. Caller is responsible for triggering that next
 /// start (e.g. a clean exit for the supervisor/OS service manager to relaunch
 /// from, mirroring the existing plugkit.wasm version-skew reload path).
+/// Adopt a `.new` binary staged by a previous run whose rename-over-the-
+/// running-exe failed. `bootstrap_gm_runner_self_update` below ends in
+/// `fs::rename(&staged, current_exe)?` -- the `?` returns on failure and its
+/// comment promises "the caller keeps the staged `.new` file for a follow-up
+/// attempt," but no follow-up was ever implemented, so a rename blocked by the
+/// running exe's own file lock abandoned the verified download permanently and
+/// gm-runner never self-updated its executable. Live-hit: a
+/// gm-runner-windows-x64.exe.new sat 29h next to a byte-different in-use
+/// gm-runner.exe. Called at startup, BEFORE the current process has any reason
+/// to hold the target locked by its own later work, so the retry has a real
+/// chance the original attempt did not.
+pub fn adopt_staged_self_update(current_exe: &Path) -> Option<PathBuf> {
+    let asset = gm_runner_asset_name()?;
+    let staged = install_dir().join(format!("{asset}.new"));
+    if !staged.exists() {
+        return None;
+    }
+    match fs::rename(&staged, current_exe) {
+        Ok(()) => {
+            eprintln!(
+                "[gm-runner] adopted staged self-update from {} -- the new binary takes effect on the next start",
+                staged.display()
+            );
+            Some(current_exe.to_path_buf())
+        }
+        Err(e) => {
+            eprintln!(
+                "[gm-runner] staged self-update at {} still cannot be renamed into place ({e}); leaving it for a later attempt",
+                staged.display()
+            );
+            None
+        }
+    }
+}
+
 pub fn bootstrap_gm_runner_self_update(version: &str, current_exe: &Path) -> anyhow::Result<PathBuf> {
     let asset = gm_runner_asset_name()
         .ok_or_else(|| anyhow::anyhow!("no gm-runner-bin release asset published for this host platform/arch"))?;

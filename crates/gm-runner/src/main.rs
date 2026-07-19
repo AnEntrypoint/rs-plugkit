@@ -49,6 +49,15 @@ fn ensure_wasm_installed(explicit_version: Option<&str>) -> anyhow::Result<PathB
 }
 
 fn main() -> anyhow::Result<()> {
+    // Retry a self-update whose rename was blocked last time by the running
+    // exe's own file lock. Runs before any command dispatch so the target is as
+    // unlocked as it will ever be during this process's life; without it a
+    // staged .new binary is abandoned forever and gm-runner never updates
+    // itself (witnessed: a 29h-old .new sitting beside a byte-different exe).
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = download::adopt_staged_self_update(&exe);
+    }
+
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
 
