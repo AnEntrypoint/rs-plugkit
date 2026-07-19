@@ -9,7 +9,17 @@ use crate::wasm_dispatch::plugin_call;
 
 const TABLE: &str = "git_commit_vectors";
 const INDEX: &str = "git_commit_vectors_vec";
-const EMBED_BUDGET_MS: u64 = 2000;
+// A single unaccelerated wasm32 bert embed of subject+diff routinely exceeds
+// 2000ms on its own, so the pre-embed elapsed check below admitted exactly ONE
+// commit per pass and deferred the rest -- live-witnessed as back-to-back
+// `git_commit_vectors_synced deferred=499 embedded=1` then `deferred=498
+// embedded=1` events, a backlog needing ~500 passes to drain while pegging a
+// core. The budget has to exceed the cost of the embeds it means to admit.
+const EMBED_BUDGET_MS: u64 = 30000;
+// Floor on real work per pass, independent of the wall clock: a budget that
+// expires mid-embed must never leave a pass having embedded nothing, or the
+// backlog cannot shrink at all.
+const MIN_EMBEDS_PER_PASS: u32 = 8;
 const DIFF_CHAR_CAP: usize = 4000;
 const LOG_WINDOW: usize = 500;
 
@@ -150,7 +160,7 @@ pub fn sync_incremental() -> Result<Value, String> {
         if present.contains(hash) { continue; }
         if Some(hash.as_str()) == watermark.as_deref() { continue; }
         let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        if elapsed > EMBED_BUDGET_MS {
+        if elapsed > EMBED_BUDGET_MS && embedded >= MIN_EMBEDS_PER_PASS {
             deferred += 1;
             continue;
         }
