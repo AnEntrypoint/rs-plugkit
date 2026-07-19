@@ -62,6 +62,39 @@ fn iso8601_to_ms(s: &str) -> Option<i64> {
     Some(((days * 86400 + h * 3600 + mi * 60 + sec) * 1000) + ms)
 }
 
+/// `.turn-summary.json` is what SKILL.md's documented boot probe reads at the
+/// start of every session, branching on its phase / prd_pending /
+/// last_instruction_age_ms. It was written ONLY by the JS wrapper's
+/// runSpoolWatcher, so once the native runtime took over nothing rewrote it and
+/// it froze -- live-hit as a file still reporting phase=VERIFY prd_pending=14
+/// from a retired watcher (version 0.1.905) while a real dispatch returned
+/// phase=PLAN prd_pending=0. Every session was starting from fabricated state
+/// and only recovering because the first instruction dispatch overrode it.
+/// Write it here, from the same authoritative values this response carries, so
+/// it cannot drift from what the orchestrator actually believes.
+fn write_turn_summary(phase: &str, prd_pending: usize, mutables_pending: usize) {
+    let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
+    let last_instruction_ts = pkfs::read_to_string(
+        &super::gm_dir().join("last-instruction-ts").to_string_lossy().to_string(),
+    )
+    .and_then(|s| s.trim().parse::<i64>().ok())
+    .filter(|n| *n > 0);
+    let summary = json!({
+        "ts": now_ms,
+        "runtime": "native",
+        "phase": phase,
+        "prd_pending": prd_pending,
+        "prd_pending_count": prd_pending,
+        "mutables_pending_count": mutables_pending,
+        "last_instruction_ts": last_instruction_ts,
+        "last_instruction_age_ms": last_instruction_ts.map(|t| now_ms.saturating_sub(t)),
+        "long_gap_threshold_ms": 300000,
+        "update_available": serde_json::Value::Null,
+    });
+    let path = super::gm_dir().join("exec-spool").join(".turn-summary.json");
+    let _ = pkfs::write(&path.to_string_lossy().to_string(), &summary.to_string());
+}
+
 fn read_spool_json(name: &str) -> serde_json::Value {
     let path = super::gm_dir().join("exec-spool").join(name);
     let ps = path.to_string_lossy().to_string();
@@ -406,6 +439,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let codeinsight_overview = crate::code_index::overview();
     #[cfg(not(target_arch = "wasm32"))]
     let codeinsight_overview = serde_json::Value::Null;
+
+    write_turn_summary(&phase, prd_pending, mutables_pending_count);
 
     let payload = json!({
         "phase": phase,
