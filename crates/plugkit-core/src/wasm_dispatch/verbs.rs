@@ -547,13 +547,23 @@ fn memorize_prune(body: &Value) -> u64 {
     let (vector_candidates, _) = rssearch_vector_hits(&embedding, namespace, k, true);
     let q_json = json!({ "query": query, "embedding": embedding, "namespace": namespace }).to_string();
     let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, k) };
-    let hits = unpack_to_value(packed);
+    let host_hits = unpack_to_value(packed);
+    // host_vec_search is a not_implemented stub in BOTH native runtimes
+    // (agentplug-host and gm-runner), so its return here is an
+    // {ok:false,error:not_implemented_*} envelope, not hits -- which surfaced
+    // to the agent as candidates:{error:...}, an error masquerading as data.
+    // vector_candidates above is the real, working libsql rssearch_vectors
+    // result (the same path codesearch/recall use), so fall back to it when the
+    // host import is unimplemented rather than handing back an error object.
+    let host_ok = host_hits.get("error").is_none()
+        && !(host_hits.is_object() && host_hits.get("ok").and_then(|v| v.as_bool()) == Some(false));
+    let candidates = if host_ok { host_hits } else { vector_candidates.clone() };
     ok("memorize-prune", json!({
         "namespace": namespace,
         "mode": "review",
-        "candidates": hits,
+        "candidates": candidates,
         "vector_candidates": vector_candidates,
-        "note": "Review-only: re-dispatch memorize-prune with {keys:[...]} naming the stale ones to delete. Pruning is agent-judged, never auto-similarity-deleted. candidates=legacy flat-JSON host_vec_search; vector_candidates=independent rssearch_vectors libsql result, kept separate, never fused.",
+        "note": "Review-only: re-dispatch memorize-prune with {keys:[...]} naming the stale ones to delete. Pruning is agent-judged, never auto-similarity-deleted. candidates falls back to the libsql rssearch_vectors result when host_vec_search is unimplemented (both native runtimes stub it).",
     }))
 }
 
