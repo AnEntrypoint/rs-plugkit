@@ -689,9 +689,33 @@ fn health(_body: &Value) -> u64 {
         .into_iter()
         .map(|(sub, verbs)| json!({ "subsystem": sub.as_str(), "verbs": verbs }))
         .collect();
+    // Read from the project's own gm.json rather than ~/.agentplug/plugins/
+    // gm.version: the latter is the authoritative installed tag but lives
+    // outside the wasm sandbox root, so it is not reliably readable here, while
+    // gm.json is in reach and is what the cascade auto-bumps in lockstep with
+    // the published release.
+    fn installed_release_tag() -> Value {
+        match crate::wasm_dispatch::host_read("gm.json")
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v.get("plugkitVersion").and_then(|p| p.as_str().map(String::from)))
+        {
+            Some(tag) => Value::String(tag),
+            None => Value::Null,
+        }
+    }
+
+    // `version` alone was env!("CARGO_PKG_VERSION") -- the plugkit-core CRATE
+    // version -- while gm.version / gm.json plugkitVersion track the RELEASE
+    // TAG that CI auto-bumps. Two different numbers in the same format invite a
+    // false comparison: a health reading of 0.1.923 against an installed 0.1.925
+    // reads as a stale deployment when the wasm is in fact current. Report both,
+    // named for what each actually is, so a "did my fix ship" check compares
+    // like with like.
     ok("health", json!({
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
+        "crate_version": env!("CARGO_PKG_VERSION"),
+        "serving_release_tag": installed_release_tag(),
         "now": now,
         "imports": [
             "host_fs_read","host_fs_write","host_fs_readdir","host_fs_stat",
