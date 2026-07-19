@@ -847,22 +847,51 @@ fn sql_query(body: &Value) -> u64 {
 }
 
 fn sql_smoke() -> u64 {
-    let n = "smoke";
+    // libsql is stateless now -- every exec/query is its own open-operate-close
+    // cycle, `open` is an inert no-op, and the plugin reads ONLY `path`
+    // (ignoring the legacy `db` handle entirely). This probe still passed
+    // `{"db": n}` with no path on every call after the first, so each step
+    // silently defaulted to `:memory:` and got a FRESH EMPTY database --
+    // which is why create_table reported success and the very next statement
+    // returned "no such table: memos". Under stateless semantics `:memory:`
+    // can never persist across calls, so the probe needs a real file path
+    // threaded through every step.
+    // The path must be ABSOLUTE. libsql's only WASI preopen is the drive root
+    // mapped to "/" (there is no "." preopen and WASI has no cwd), so a
+    // relative path is rooted at the filesystem root instead of the project --
+    // `.gm/x.db` becomes `C:\.gm\x.db`, which does not exist, and every
+    // statement fails `sqlite3_open_v2 rc=14 unable to open database file`
+    // while the identical statement on an absolute path succeeds. Resolving it
+    // here is exactly what code_index does via libsql_wasm::absolute_db_path.
+    let owned_path = crate::libsql_wasm::absolute_db_path(".sql-smoke.db");
+    let path = owned_path.as_str();
     let mut log: Vec<Value> = Vec::new();
-    let open_resp = call_plugin("libsql", "open", &json!({ "db": n, "path": ":memory:" }));
+    let _ = call_plugin("libsql", "exec", &json!({ "path": path, "sql": "DROP TABLE IF EXISTS memos" }));
+    let open_resp = call_plugin("libsql", "open", &json!({ "path": path }));
     log.push(json!({ "step": "open", "result": if plugin_ok(&open_resp) { Value::Null } else { Value::String(plugin_error(&open_resp, "open failed")) } }));
-    let create_resp = call_plugin("libsql", "exec", &json!({ "db": n, "sql": "CREATE TABLE memos (id INTEGER PRIMARY KEY, text TEXT, emb F32_BLOB(4))" }));
+    let create_resp = call_plugin("libsql", "exec", &json!({ "path": path, "sql": "CREATE TABLE memos (id INTEGER PRIMARY KEY, text TEXT, emb F32_BLOB(4))" }));
     log.push(json!({ "step": "create_table", "result": if plugin_ok(&create_resp) { Value::Null } else { Value::String(plugin_error(&create_resp, "exec failed")) } }));
-    let insert_resp = call_plugin("libsql", "exec", &json!({ "db": n, "sql": "INSERT INTO memos(text, emb) VALUES ('hello', vector('[0.1,0.2,0.3,0.4]'))" }));
+    let insert_resp = call_plugin("libsql", "exec", &json!({ "path": path, "sql": "INSERT INTO memos(text, emb) VALUES ('hello', vector('[0.1,0.2,0.3,0.4]'))" }));
     log.push(json!({ "step": "insert", "result": if plugin_ok(&insert_resp) { Value::Null } else { Value::String(plugin_error(&insert_resp, "exec failed")) } }));
-    let index_resp = call_plugin("libsql", "exec", &json!({ "db": n, "sql": "CREATE INDEX memos_idx ON memos(libsql_vector_idx(emb, 'metric=cosine'))" }));
+    let index_resp = call_plugin("libsql", "exec", &json!({ "path": path, "sql": "CREATE INDEX memos_idx ON memos(libsql_vector_idx(emb, 'metric=cosine'))" }));
     log.push(json!({ "step": "create_index", "result": if plugin_ok(&index_resp) { Value::Null } else { Value::String(plugin_error(&index_resp, "exec failed")) } }));
-    let query_resp = call_plugin("libsql", "query", &json!({ "db": n, "sql": "SELECT id, text, vector_distance_cos(emb, vector('[0.1,0.2,0.3,0.4]')) AS d FROM vector_top_k('memos_idx', vector('[0.1,0.2,0.3,0.4]'), 5) JOIN memos ON memos.rowid = id" }));
+    let query_resp = call_plugin("libsql", "query", &json!({ "path": path, "sql": "SELECT id, text, vector_distance_cos(emb, vector('[0.1,0.2,0.3,0.4]')) AS d FROM vector_top_k('memos_idx', vector('[0.1,0.2,0.3,0.4]'), 5) JOIN memos ON memos.rowid = id" }));
     log.push(json!({ "step": "vector_top_k", "rows": resp_rows_or_null(&query_resp) }));
-    let _ = call_plugin("libsql", "close", &json!({ "db": n }));
+    let _ = call_plugin("libsql", "exec", &json!({ "path": path, "sql": "DROP TABLE IF EXISTS memos" }));
+    let _ = call_plugin("libsql", "close", &json!({ "path": path }));
     let version_resp = call_plugin("libsql", "version", &json!({}));
     let libsql_version = version_resp.get("version").cloned().unwrap_or(Value::Null);
-    pack(json!({ "ok": true, "smoke": log, "libsql_version": libsql_version }).to_string())
+    // `ok` was hardcoded true, so the designated health probe for the whole sql
+    // subsystem could never fail -- it reported ok:true while its own steps
+    // returned "exec rc=1 msg=no such table: memos", which read as "libsql is
+    // broken" and cost a full investigation to disprove against a database that
+    // was in fact healthy. A probe that always passes is worse than no probe.
+    let failures: Vec<Value> = log.iter()
+        .filter(|s| s.get("result").map(|r| !r.is_null()).unwrap_or(false))
+        .cloned()
+        .collect();
+    let all_ok = failures.is_empty();
+    pack(json!({ "ok": all_ok, "smoke": log, "failures": failures, "libsql_version": libsql_version }).to_string())
 }
 
 fn resp_rows_or_null(resp: &Value) -> Value {
