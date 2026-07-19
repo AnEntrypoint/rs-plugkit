@@ -16,5 +16,5 @@ pub use host_abi::{
     host_kv_read, host_cwd_string,
 };
 pub(crate) use events::emit_event;
-pub use verbs::{memory_recall_backend, route_hint};
+pub use verbs::{memory_recall_backend, route_hint, vec_search_local};
 pub use verbs::dispatch_verb;

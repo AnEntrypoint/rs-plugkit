@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use super::host_abi::{
     host_fs_readdir, host_fetch, host_kv_get, host_kv_put, host_kv_delete, host_kv_query,
-    host_vec_search, host_exec_js, host_now_ms, host_env_get, host_browser_exec,
+    host_exec_js, host_now_ms, host_env_get, host_browser_exec,
     pack, read_str, unpack_to_string, unpack_to_value,
     git_call, git_call_argv, host_read, plugin_call as call_plugin,
 };
@@ -23,6 +23,19 @@ fn plugin_error(resp: &Value, fallback: &str) -> String {
 /// the query even though the query was fine and bert was the thing that
 /// failed. Still returns Null (callers treat it as "no vector half available"
 /// and fall back to BM25), but now says which of the three actually happened.
+/// Native replacement for the host_vec_search import, which was a
+/// not_implemented stub in every runtime. Runs the identical libsql
+/// vector_top_k query rssearch_vector_hits already uses successfully, so a
+/// vector search returns real scored hits in-guest instead of round-tripping
+/// to an unimplemented host function. The stub is eliminated at its root: no
+/// host import is needed for vector search at all, since the guest owns the
+/// libsql path. Returns the scored hit array (or an empty array), matching the
+/// shape callers previously unpacked from host_vec_search.
+pub fn vec_search_local(embedding: &Value, namespace: &str, k: u32) -> Value {
+    let (hits, _) = rssearch_vector_hits(embedding, namespace, k, false);
+    hits
+}
+
 fn embed_query(query: &str) -> Value {
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -372,9 +385,7 @@ fn recall(body: &Value) -> u64 {
             }
         }
     }
-    let q_json = json!({ "query": query, "embedding": embedding, "namespace": namespace }).to_string();
-    let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, limit) };
-    let vec_hits = unpack_to_value(packed);
+    let vec_hits = vec_search_local(&embedding, namespace, limit);
     if !vec_hits.is_null() && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
         let annotated = annotate_hits_with_score(vec_hits);
         return ok("recall", json!({
@@ -545,19 +556,11 @@ fn memorize_prune(body: &Value) -> u64 {
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
     let embedding = embed_query(query);
     let (vector_candidates, _) = rssearch_vector_hits(&embedding, namespace, k, true);
-    let q_json = json!({ "query": query, "embedding": embedding, "namespace": namespace }).to_string();
-    let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, k) };
-    let host_hits = unpack_to_value(packed);
-    // host_vec_search is a not_implemented stub in BOTH native runtimes
-    // (agentplug-host and gm-runner), so its return here is an
-    // {ok:false,error:not_implemented_*} envelope, not hits -- which surfaced
-    // to the agent as candidates:{error:...}, an error masquerading as data.
-    // vector_candidates above is the real, working libsql rssearch_vectors
-    // result (the same path codesearch/recall use), so fall back to it when the
-    // host import is unimplemented rather than handing back an error object.
-    let host_ok = host_hits.get("error").is_none()
-        && !(host_hits.is_object() && host_hits.get("ok").and_then(|v| v.as_bool()) == Some(false));
-    let candidates = if host_ok { host_hits } else { vector_candidates.clone() };
+    // Vector search runs the real libsql vector_top_k directly (vec_search_local),
+    // never the former host_vec_search stub, so candidates is always real scored
+    // hits. vector_candidates is the same libsql result, kept as a distinct field
+    // for callers that want it separately.
+    let candidates = vec_search_local(&embedding, namespace, k);
     ok("memorize-prune", json!({
         "namespace": namespace,
         "mode": "review",
@@ -602,9 +605,7 @@ fn codesearch(body: &Value) -> u64 {
     let cand_k = k.saturating_mul(5).max(50);
     let embedding = embed_query(query);
     let (vector_hits, _) = rssearch_vector_hits(&embedding, "codeinsight", k, false);
-    let q_json = json!({ "query": query, "embedding": embedding, "namespace": "codeinsight" }).to_string();
-    let packed = unsafe { host_vec_search(q_json.as_ptr(), q_json.len() as u32, cand_k) };
-    let vec_hits = unpack_to_value(packed);
+    let vec_hits = vec_search_local(&embedding, "codeinsight", cand_k);
     let vec_ids: Vec<String> = vec_hits.as_array().map(|a| {
         a.iter().filter_map(|h| h.get("key").and_then(|x| x.as_str()).map(String::from)).collect()
     }).unwrap_or_default();
