@@ -109,7 +109,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo build --release --target wasm32-wasip1 --no-default-features --features wasm --lib 2>&1 | tee /tmp/wasm-build.log || {
+          cargo build --release --target wasm32-wasip1 --no-default-features --lib 2>&1 | tee /tmp/wasm-build.log || {
             echo "::group::last 80 lines of build output"
             tail -80 /tmp/wasm-build.log
             echo "::endgroup::"
@@ -146,7 +146,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo build --release --target wasm32-wasip1 --no-default-features --features wasm,slim --lib 2>&1 | tee /tmp/wasm-slim-build.log || {
+          cargo build --release --target wasm32-wasip1 --no-default-features --features slim --lib 2>&1 | tee /tmp/wasm-slim-build.log || {
             echo "::group::last 80 lines of build output"
             tail -80 /tmp/wasm-slim-build.log
             echo "::endgroup::"
