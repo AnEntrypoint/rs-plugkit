@@ -885,13 +885,24 @@ pub fn index(root: &str, max_files: usize) -> Value {
         // its manifest write) deferred entirely to the next pass, same
         // treatment as a deferred file -- never marked `seen`, so it's
         // retried fresh rather than left in a partially-indexed state.
+        // Deferring an oversized file ENTIRELY (never marking it `seen`, so
+        // it retries fresh next pass) livelocks: it hits the identical cap
+        // every pass, so deferred_files can never reach 0, the digest is
+        // never stored, and every codesearch re-indexes the whole tree from
+        // scratch -- live-witnessed as a missing .codeinsight-digest with
+        // private memory climbing 397MB -> 2438MB across repeated passes on
+        // a tree holding a 2MB prd.yml and several 300-700KB files. Cap the
+        // work instead of discarding it: index the first
+        // MAX_CHUNKS_PER_FILE_PER_PASS chunks, mark the file seen, and write
+        // its manifest, so the pass still converges and the per-pass bound
+        // that the cap exists to enforce still holds.
         const MAX_CHUNKS_PER_FILE_PER_PASS: usize = 64;
-        if chunks.len() > MAX_CHUNKS_PER_FILE_PER_PASS {
-            deferred_files += 1;
-            seen.remove(fp);
-            let msg = format!("code_index: deferring {} chunks={} (exceeds {}-chunk per-pass cap)", fp, chunks.len(), MAX_CHUNKS_PER_FILE_PER_PASS);
+        let oversized = chunks.len() > MAX_CHUNKS_PER_FILE_PER_PASS;
+        if oversized {
+            let full = chunks.len();
+            chunks.truncate(MAX_CHUNKS_PER_FILE_PER_PASS);
+            let msg = format!("code_index: capping {} chunks={} -> {} (per-pass cap; file still indexed and marked seen)", fp, full, MAX_CHUNKS_PER_FILE_PER_PASS);
             let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
-            continue;
         }
 
         // Batch every chunk's embed input for this file into one
