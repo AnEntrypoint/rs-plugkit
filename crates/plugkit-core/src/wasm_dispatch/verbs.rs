@@ -15,12 +15,39 @@ fn plugin_error(resp: &Value, fallback: &str) -> String {
     resp.get("error").and_then(|v| v.as_str()).unwrap_or(fallback).to_string()
 }
 
+/// Three distinct failures used to collapse into the same bare `Value::Null`:
+/// an empty query, a failed bert plugin call, and a response carrying no
+/// `embedding` field. Downstream, `search_with_recency` reports any Null as
+/// "invalid query embedding", which misattributes a failed EMBED to a
+/// malformed QUERY -- the observed `rssearch_vector_hits_failed` event named
+/// the query even though the query was fine and bert was the thing that
+/// failed. Still returns Null (callers treat it as "no vector half available"
+/// and fall back to BM25), but now says which of the three actually happened.
 fn embed_query(query: &str) -> Value {
     let trimmed = query.trim();
-    if trimmed.is_empty() { return Value::Null; }
+    if trimmed.is_empty() {
+        emit_event("embed_query_failed", json!({ "reason": "empty query after trim" }));
+        return Value::Null;
+    }
     let resp = call_plugin("bert", "embed", &json!({ "text": query, "kind": "query" }));
-    if !plugin_ok(&resp) { return Value::Null; }
-    resp.get("embedding").cloned().unwrap_or(Value::Null)
+    if !plugin_ok(&resp) {
+        emit_event("embed_query_failed", json!({
+            "reason": "bert plugin call failed",
+            "error": plugin_error(&resp, "no error field on bert response"),
+            "query_len": query.len(),
+        }));
+        return Value::Null;
+    }
+    match resp.get("embedding") {
+        Some(v) if !v.is_null() => v.clone(),
+        _ => {
+            emit_event("embed_query_failed", json!({
+                "reason": "bert responded ok but carried no embedding field",
+                "query_len": query.len(),
+            }));
+            Value::Null
+        }
+    }
 }
 
 fn embed_passage(text: &str) -> Option<Value> {
@@ -572,6 +599,31 @@ fn codesearch(body: &Value) -> u64 {
         a.iter().filter_map(|h| h.get("key").and_then(|x| x.as_str()).map(String::from)).collect()
     }).unwrap_or_default();
     let mut corpus = crate::code_index::FusionCorpus::load();
+    // Code chunk embeddings live in the `code_chunks` table with their own
+    // `code_chunks_vec` index -- they are NEVER mirrored into rssearch_vectors,
+    // whose "codeinsight" namespace the lookup above searches. Measured live:
+    // code_chunks=305 rows while rssearch_vectors WHERE namespace='codeinsight'
+    // =0, so the vector half contributed nothing and every codesearch silently
+    // degraded to BM25-only despite a fully populated vector index. Fall back to
+    // the store that actually holds the chunks, mapping its (path, line_start)
+    // rows onto the fusion ranker's ci-<hash>-<idx> key space.
+    let vec_ids: Vec<String> = if vec_ids.is_empty() {
+        let vres = crate::code_index::search(query, cand_k as usize, Some(&embedding));
+        vres.get("rows")
+            .and_then(|r| r.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| {
+                        let path = r.get("path").and_then(|v| v.as_str())?;
+                        let ls = r.get("line_start").and_then(|v| v.as_u64())? as usize;
+                        corpus.key_for_path_line(path, ls)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        vec_ids
+    };
     let bm25_ids = corpus.bm25_rank(query, cand_k as usize);
     // 10 most relevant git hashes, ranked by a diff+commit-message embedding
     // DB keyed by hash (git_commit_vectors), not the fused file-hit list.
@@ -579,10 +631,18 @@ fn codesearch(body: &Value) -> u64 {
     // Separate top-10 vector and top-10 BM25 views so the calling agent can
     // judge each ranking independently, alongside the existing fused `hits`
     // (kept for backward compat -- additive fields, nothing removed).
+    // Both `vector_hits` and `vec_hits` come from the rssearch_vectors
+    // "codeinsight" namespace, which holds no code chunks -- so this field
+    // reported an empty vector half even once the code_chunks_vec fallback
+    // above started feeding real ids into fusion. Report what fusion actually
+    // consumed, falling back to the namespace views only when they have rows.
     let vector_top10: Vec<Value> = vector_hits.as_array()
         .filter(|a| !a.is_empty())
         .map(|a| a.iter().take(10).cloned().collect())
-        .unwrap_or_else(|| vec_hits.as_array().map(|a| a.iter().take(10).cloned().collect()).unwrap_or_default());
+        .or_else(|| vec_hits.as_array().filter(|a| !a.is_empty()).map(|a| a.iter().take(10).cloned().collect()))
+        .unwrap_or_else(|| vec_ids.iter().take(10).map(|key| {
+            json!({ "key": key, "text": corpus.text_for_key(key).unwrap_or_default() })
+        }).collect());
     let bm25_top10: Vec<Value> = bm25_ids.iter().take(10).map(|key| {
         let text = corpus.text_for_key(key).unwrap_or_default();
         json!({ "key": key, "text": text })

@@ -1142,6 +1142,20 @@ impl FusionCorpus {
         content
     }
 
+    /// Map a (path, line_start) pair -- the shape `search()`'s vector rows come
+    /// back in -- to the `ci-<path_hash>-<file_hash>-<idx>` key the fusion
+    /// ranker works in. Without this the vector half cannot contribute to
+    /// fusion at all, since the two stores identify the same chunk differently.
+    pub fn key_for_path_line(&self, path: &str, ls: usize) -> Option<String> {
+        let norm = path.trim_start_matches("./").trim_start_matches('/');
+        self.metas.iter()
+            .find(|m| {
+                let mp = m.path.trim_start_matches("./").trim_start_matches('/');
+                mp == norm && m.ls == ls
+            })
+            .map(|m| m.key.clone())
+    }
+
     pub fn text_for_key(&mut self, key: &str) -> Option<String> {
         let i = self.metas.iter().position(|m| m.key == key)?;
         let (path, name, ls, le) = {
