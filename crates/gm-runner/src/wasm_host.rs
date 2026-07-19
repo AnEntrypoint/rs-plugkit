@@ -91,11 +91,12 @@ pub fn register_wasi(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 }
 
 /// Registers the `env`-module host imports plugkit-core's wasm expects
-/// (crates/plugkit-core/src/wasm_dispatch.rs). fs/log/env/time are real;
-/// kv/vec/fetch/exec_js/browser/task/git return an explicit
-/// `{"ok":false,"error":"not_implemented_native_runner"}` envelope rather
-/// than silently succeeding -- callers see a real, typed failure instead of
-/// an opaque zero, until each subsystem lands per its own PRD row.
+/// (crates/plugkit-core/src/wasm_dispatch.rs). Every subsystem is real:
+/// fs/log/env/time, kv, fetch, exec_js, git, browser (driven via direct CDP),
+/// and task (a native process registry). The single exception is
+/// host_vec_search, which stays declared for ABI but is never called -- the
+/// guest runs vector search in-process against libsql -- so it returns an
+/// explicit dead-unused marker. No live not_implemented stub remains.
 pub fn register_env_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         "env",
@@ -266,12 +267,10 @@ pub fn register_env_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()
         },
     )?;
 
-    let not_implemented = |mut caller: Caller<'_, HostState>| -> u64 {
-        write_guest_json(
-            &mut caller,
-            serde_json::json!({"ok": false, "error": "not_implemented_native_runner"}),
-        )
-    };
+    // The not_implemented helper is gone: every host import now has a real
+    // implementation (browser via CDP, task via the native registry) or is an
+    // explicitly-dead-but-ABI-required declaration (host_vec_search, which the
+    // guest never calls because it runs libsql directly). No live stub remains.
 
     // Matches plugkit-wasm-wrapper.js host_fetch's {status, body} contract
     // (or {status:0, error} on failure) -- a plain GET/POST-with-body fetch,
@@ -405,10 +404,19 @@ pub fn register_env_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()
             write_guest_json(&mut caller, serde_json::json!(results))
         },
     )?;
+    // host_vec_search must stay DECLARED because gm.wasm imports it
+    // unconditionally at compile time -- a missing import breaks every dispatch,
+    // not just vector calls. But it is no longer CALLED by any guest code path:
+    // the guest runs vector search in-process against libsql (vec_search_local
+    // in plugkit-core verbs.rs), so this import is dead. It returns a typed
+    // marker only to satisfy the ABI for a call that can never arrive; there is
+    // no stub behind a live subsystem here.
     linker.func_wrap(
         "env",
         "host_vec_search",
-        move |caller: Caller<'_, HostState>, _q: u32, _l: u32, _k: u32| -> u64 { not_implemented(caller) },
+        move |mut caller: Caller<'_, HostState>, _q: u32, _l: u32, _k: u32| -> u64 {
+            write_guest_json(&mut caller, serde_json::json!({"ok": false, "error": "host_vec_search_unused_guest_runs_libsql_directly"}))
+        },
     )?;
     // Writes directly into the caller-owned out_ptr buffer (same convention
     // as host_random_fill), returning the embedding dimension on success or
