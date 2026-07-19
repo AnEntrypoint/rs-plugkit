@@ -14,6 +14,54 @@ use super::prd;
 use super::recall;
 use crate::pkfs;
 
+/// Staleness markers describe a condition that was true when some watcher
+/// wrote them, and nothing ever rewrites or clears them once that condition
+/// resolves -- so a marker left by a since-retired watcher reports its warning
+/// on every dispatch forever. Live-hit case: a .gm-plugkit-stale.json written
+/// by the old JS watcher kept every instruction response returning
+/// gm_plugkit_stale:true naming versions 2.0.1972/2.0.1976, long after the
+/// native runtime took over and npm had moved to 2.0.2001. Since gm's own rules
+/// require treating staleness as a same-turn deviation, a marker that cannot
+/// expire sends every future session chasing an already-resolved condition.
+/// Drop any marker older than this window; a genuinely current condition is
+/// re-reported by whatever watcher is actually running.
+fn expire_stale_marker(v: serde_json::Value) -> serde_json::Value {
+    const MAX_MARKER_AGE_MS: i64 = 6 * 60 * 60 * 1000;
+    let Some(ts) = v.get("ts") else { return v };
+    let written_ms = match ts {
+        serde_json::Value::Number(n) => n.as_i64(),
+        serde_json::Value::String(s) => iso8601_to_ms(s),
+        _ => None,
+    };
+    let Some(written_ms) = written_ms else { return v };
+    let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
+    if now_ms.saturating_sub(written_ms) > MAX_MARKER_AGE_MS {
+        return serde_json::Value::Null;
+    }
+    v
+}
+
+/// Minimal `YYYY-MM-DDTHH:MM:SS(.sss)Z` -> epoch-ms via the standard
+/// days-from-civil algorithm. Returns None on anything that does not parse, so
+/// an unrecognized timestamp leaves its marker untouched rather than silently
+/// expiring it.
+fn iso8601_to_ms(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' { return None; }
+    let num = |a: usize, z: usize| -> Option<i64> { s.get(a..z)?.parse::<i64>().ok() };
+    let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, mi, sec) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    let ms = if b.len() >= 23 && b[19] == b'.' { num(20, 23).unwrap_or(0) } else { 0 };
+    let y_adj = if mo <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = y_adj - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(((days * 86400 + h * 3600 + mi * 60 + sec) * 1000) + ms)
+}
+
 fn read_spool_json(name: &str) -> serde_json::Value {
     let path = super::gm_dir().join("exec-spool").join(name);
     let ps = path.to_string_lossy().to_string();
@@ -324,9 +372,9 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let running_tasks = super::task::live_running_tasks();
     let open_browser_sessions = super::task::open_browser_sessions();
     let stuck_spool = super::task::stuck_spool();
-    let unsupervised_watcher = read_spool_json(".pre-supervised-watcher.json");
-    let gm_plugkit_stale = read_spool_json(".gm-plugkit-stale.json");
-    let wrapper_stale_in_memory = read_spool_json(".wrapper-stale-in-memory.json");
+    let unsupervised_watcher = expire_stale_marker(read_spool_json(".pre-supervised-watcher.json"));
+    let gm_plugkit_stale = expire_stale_marker(read_spool_json(".gm-plugkit-stale.json"));
+    let wrapper_stale_in_memory = expire_stale_marker(read_spool_json(".wrapper-stale-in-memory.json"));
     let running_tasks_count = match &running_tasks {
         serde_json::Value::Array(a) => a.len(),
         _ => 0,
