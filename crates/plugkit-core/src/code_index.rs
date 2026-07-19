@@ -730,7 +730,15 @@ fn delete_chunk_keys(chunks: &[ChunkRecord]) {
 
 pub fn index(root: &str, max_files: usize) -> Value {
     let db_path = project_db_path(None);
-    let libsql_ok = ensure_schema_at(&db_path).is_ok();
+    // `.is_ok()` discarded the reason, leaving an intermittent libsql failure
+    // visible only as a bare `libsql_ok=false` in the log -- with the digest
+    // silently unwritten and every chunk read back empty as the only symptoms.
+    let libsql_err = ensure_schema_at(&db_path).err().map(|e| e.to_string());
+    let libsql_ok = libsql_err.is_none();
+    if let Some(e) = &libsql_err {
+        let msg = format!("code_index: libsql unavailable at {} -- {} (digest will not persist and chunk reads return empty)", db_path, e);
+        let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+    }
     let kvvec_cleared = clear_codeinsight_if_dim_mismatch();
     if kvvec_cleared {
         let rows = fv_query(MANIFEST_NS, "");
