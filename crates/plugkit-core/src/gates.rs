@@ -183,16 +183,38 @@ fn classify_operation(verb: &str, body: &Value) -> &'static str {
     "verb"
 }
 
+/// True when this item carries `blockedBy: [external, ...]` (or `[out-of-reach]`).
+/// Such a row's gm-side work is done -- only an outside-session factor remains
+/// (another team's repo, a missing credential, a host tool broken upstream), so
+/// the rules require it stay pending-external and NEVER be rubber-stamped
+/// completed. It must therefore not block CONSOLIDATE, or the only way to ever
+/// close a turn with a genuine external blocker would be to falsely resolve it
+/// -- exactly the false-completion the same rules forbid. Live-hit: the
+/// playwriter UV_HANDLE_CLOSING crash on this host left a legitimate
+/// blockedBy:external row that the gate refused to let past, with no honest way
+/// forward.
+fn item_blocked_external(item: &serde_yaml::Value) -> bool {
+    item.get("blockedBy")
+        .and_then(|v| v.as_sequence())
+        .map(|deps| {
+            deps.iter().any(|d| {
+                matches!(d.as_str(), Some("external") | Some("out-of-reach"))
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn prd_has_open_items() -> bool {
     let content = host_read(".gm/prd.yml").unwrap_or_default();
     if content.is_empty() { return false; }
     match serde_yaml::from_str::<serde_yaml::Value>(&content) {
         Ok(serde_yaml::Value::Sequence(items)) => {
             items.iter().any(|item| {
-                item.get("status")
+                let open = item.get("status")
                     .and_then(|s| s.as_str())
                     .map(crate::orchestrator::prd::status_is_open)
-                    .unwrap_or(true)
+                    .unwrap_or(true);
+                open && !item_blocked_external(item)
             })
         }
         Ok(_) => false,
