@@ -10,7 +10,6 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-wasm = []
 # Excludes the embed.rs wasm-side safetensors fallback (the ~133MB
 # include_bytes! payload) from the build. Only valid for consumers that
 # implement host_vec_embed themselves (the native gm-runner does, via

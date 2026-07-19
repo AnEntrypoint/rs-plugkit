@@ -55,13 +55,13 @@ jobs:
         run: bash scripts/fetch-weights.sh
 
       - name: Cargo check (fast)
-        run: cargo check --target wasm32-wasip1 --no-default-features --features wasm --lib
+        run: cargo check --target wasm32-wasip1 --no-default-features --lib
 
       - name: Cargo check (slim variant -- no embedded weights, native-runner-only)
-        run: cargo check --target wasm32-wasip1 --no-default-features --features "wasm,slim" --lib
+        run: cargo check --target wasm32-wasip1 --no-default-features --features slim --lib
 
       - name: Cargo clippy (lint report, no auto-fix)
-        run: cargo clippy --target wasm32-wasip1 --no-default-features --features wasm --lib
+        run: cargo clippy --target wasm32-wasip1 --no-default-features --lib
 
   build:
     if: github.event_name != 'pull_request'
@@ -99,7 +99,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo build --release --target wasm32-wasip1 --no-default-features --features wasm --lib 2>&1 | tee /tmp/wasm-build.log || {
+          cargo build --release --target wasm32-wasip1 --no-default-features --lib 2>&1 | tee /tmp/wasm-build.log || {
             echo "::group::last 80 lines of build output"
             tail -80 /tmp/wasm-build.log
             echo "::endgroup::"
