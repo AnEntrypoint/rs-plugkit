@@ -48,23 +48,17 @@ fn pending_prd_rejection(target: &str) -> Option<(String, String, i32)> {
     if code != 0 { return None; }
     let v = serde_json::from_str::<serde_json::Value>(&body).ok()?;
     let items = v.get("items").and_then(|v| v.as_array())?;
-    // A blockedBy:[external]/[out-of-reach] row is gm-side-done with only an
-    // outside factor left; the rules keep it pending-external and forbid
-    // resolving it as completed, so it must not block the transition either --
-    // otherwise the only way past this check would be the false completion the
-    // rules prohibit. Same exemption the CONSOLIDATE gate's prd_has_open_items
-    // applies; both enforcement sites must agree or a legitimately-blocked turn
-    // gets stuck between them.
-    let blocked_external = |it: &serde_json::Value| -> bool {
-        it.get("blockedBy")
-            .and_then(|v| v.as_array())
-            .map(|deps| deps.iter().any(|d| matches!(d.as_str(), Some("external") | Some("out-of-reach"))))
-            .unwrap_or(false)
-    };
+    // No blockedBy:external exemption: everything is fixable, so an apparent
+    // external blocker is a row to build past, not a resting state that a
+    // transition may skip over. An open row -- external annotation or not --
+    // blocks the transition until it is genuinely resolved with a real fix.
+    // (The former exemption, matched to the CONSOLIDATE gate's, was the escape
+    // hatch that let "external" stand in for a completed row; both sites drop it
+    // together.)
     let pending_prd: Vec<String> = items.iter()
         .filter(|it| {
             let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-            prd::status_is_open(status) && !blocked_external(it)
+            prd::status_is_open(status)
         })
         .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(String::from))
         .collect();

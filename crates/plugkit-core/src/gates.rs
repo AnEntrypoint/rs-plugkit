@@ -183,26 +183,17 @@ fn classify_operation(verb: &str, body: &Value) -> &'static str {
     "verb"
 }
 
-/// True when this item carries `blockedBy: [external, ...]` (or `[out-of-reach]`).
-/// Such a row's gm-side work is done -- only an outside-session factor remains
-/// (another team's repo, a missing credential, a host tool broken upstream), so
-/// the rules require it stay pending-external and NEVER be rubber-stamped
-/// completed. It must therefore not block CONSOLIDATE, or the only way to ever
-/// close a turn with a genuine external blocker would be to falsely resolve it
-/// -- exactly the false-completion the same rules forbid. Live-hit: the
-/// playwriter UV_HANDLE_CLOSING crash on this host left a legitimate
-/// blockedBy:external row that the gate refused to let past, with no honest way
-/// forward.
-fn item_blocked_external(item: &serde_yaml::Value) -> bool {
-    item.get("blockedBy")
-        .and_then(|v| v.as_sequence())
-        .map(|deps| {
-            deps.iter().any(|d| {
-                matches!(d.as_str(), Some("external") | Some("out-of-reach"))
-            })
-        })
-        .unwrap_or(false)
-}
+// A blockedBy:external exemption used to let such rows pass CONSOLIDATE on the
+// premise that "the gm-side work is done, only an outside factor remains." That
+// premise is retired: everything is fixable, so an apparent external blocker is
+// a row to build past (drive the crashing tool's protocol directly, spawn your
+// own instance, open the cross-repo change), not a resting state that closes a
+// turn. The exemption was the escape hatch that let "external" stand in for a
+// completed row; removing it means an open row -- external annotation or not --
+// blocks CONSOLIDATE until it is genuinely resolved with a real witnessed fix.
+// The canonical "external" case (the playwriter browser crash) was itself fixed
+// by driving Chrome's CDP endpoint directly, proving these blockers are
+// reachable, not terminal.
 
 fn prd_has_open_items() -> bool {
     let content = host_read(".gm/prd.yml").unwrap_or_default();
@@ -210,11 +201,10 @@ fn prd_has_open_items() -> bool {
     match serde_yaml::from_str::<serde_yaml::Value>(&content) {
         Ok(serde_yaml::Value::Sequence(items)) => {
             items.iter().any(|item| {
-                let open = item.get("status")
+                item.get("status")
                     .and_then(|s| s.as_str())
                     .map(crate::orchestrator::prd::status_is_open)
-                    .unwrap_or(true);
-                open && !item_blocked_external(item)
+                    .unwrap_or(true)
             })
         }
         Ok(_) => false,

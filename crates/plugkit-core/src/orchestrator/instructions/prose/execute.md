@@ -30,7 +30,7 @@ Witness code on the surface it runs, same turn -- a pass on surface A is not wit
 
 ## Surface -> mutable
 
-State diverging from the PRD's assumed shape = new mutable, not noise: name, witness, resume -- same treatment as a named target. External-blocked, no reachable witness -> `blockedBy: external` on the PRD row.
+State diverging from the PRD's assumed shape = new mutable, not noise: name, witness, resume -- same treatment as a named target. No reachable witness because a tool is broken -> the mutable is to make the tool reachable (fix/replace/drive-directly), then witness; never park it as `blockedBy: external`. Everything is fixable -- a missing witness channel is a build task.
 
 ## Discovery: additive vs reshaping
 
