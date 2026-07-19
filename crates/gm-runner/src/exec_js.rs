@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -171,10 +170,3 @@ fn which(cmd: &str) -> Option<std::path::PathBuf> {
     std::env::split_paths(&path_var).map(|p| p.join(&exe_name)).find(|p| p.exists())
 }
 
-#[allow(dead_code)]
-fn write_script(prefix: &str, content: &str) -> std::io::Result<std::path::PathBuf> {
-    let path = std::env::temp_dir().join(format!("{prefix}-{}.js", std::process::id()));
-    let mut f = std::fs::File::create(&path)?;
-    f.write_all(content.as_bytes())?;
-    Ok(path)
-}

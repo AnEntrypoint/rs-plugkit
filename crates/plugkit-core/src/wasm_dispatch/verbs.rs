@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use super::host_abi::{
-    host_fs_readdir, host_fs_stat, host_fetch, host_kv_get, host_kv_put, host_kv_delete, host_kv_query,
+    host_fs_readdir, host_fetch, host_kv_get, host_kv_put, host_kv_delete, host_kv_query,
     host_vec_search, host_exec_js, host_now_ms, host_env_get, host_browser_exec,
     pack, read_str, unpack_to_string, unpack_to_value,
     git_call, git_call_argv, host_read, plugin_call as call_plugin,
@@ -1393,12 +1393,6 @@ fn git_reset(body: &Value) -> u64 {
     };
     if let Err(e) = run_git_checked(&["reset", mode_flag, refspec], cwd, "git_reset", "reset failed") { return e; }
     ok("git_reset", json!({ "reset_to": refspec, "mode": mode }))
-}
-
-fn push_rejected(out: &str) -> bool {
-    let l = out.to_lowercase();
-    l.contains("rejected") || l.contains("non-fast-forward") || l.contains("fetch first")
-        || l.contains("updates were rejected")
 }
 
 fn rebase_failed(out: &str) -> bool {

@@ -125,29 +125,6 @@ where
     }
 }
 
-pub fn search(query_embedding: &Value, namespaces: &[String], limit: usize) -> Result<Value, String> {
-    let qvec = json_to_f32_vec(query_embedding)
-        .ok_or_else(|| "rssearch_vectors search: invalid query embedding".to_string())?;
-    ensure_schema()?;
-    let qlit = vecns::qlit(&qvec);
-    let pool = BUDGET.pool(limit);
-    let ns_placeholders: Vec<String> = (0..namespaces.len()).map(|i| format!("?{}", i + 3)).collect();
-    let ns_filter = if namespaces.is_empty() {
-        String::new()
-    } else {
-        format!(" AND r.namespace IN ({})", ns_placeholders.join(","))
-    };
-    let sql = format!(
-        "SELECT r.namespace, r.key, r.text, vector_distance_cos(r.embedding, vector(?1)) AS distance \
-         FROM vector_top_k('{}', vector(?2), {}) AS v JOIN {} AS r ON r.rowid = v.id \
-         WHERE r.deleted=0{} ORDER BY distance ASC LIMIT {}",
-        INDEX, pool, TABLE, ns_filter, limit
-    );
-    let mut params: Vec<&str> = vec![&qlit, &qlit];
-    for n in namespaces { params.push(n.as_str()); }
-    recover_and_retry(|| shared_query_params(&sql, &params))
-}
-
 pub fn search_with_recency(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64) -> Result<Value, String> {
     let qvec = json_to_f32_vec(query_embedding)
         .ok_or_else(|| "rssearch_vectors search_with_recency: invalid query embedding".to_string())?;

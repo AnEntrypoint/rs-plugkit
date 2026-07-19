@@ -203,59 +203,6 @@ pub fn delete_memory(ns: &str, key: &str) -> bool {
     }
 }
 
-pub fn list_docs(ns: &str) -> Vec<MemoryDoc> {
-    let dir = match md_dir(ns) {
-        Some(d) => d,
-        None => return Vec::new(),
-    };
-    let entries = match crate::pkfs::readdir(&dir) {
-        Some(Value::Array(a)) => a,
-        _ => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    for e in entries {
-        let name = match e.get("name").and_then(|n| n.as_str()).or_else(|| e.as_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        let name = name.as_str();
-        if !name.ends_with(".md") {
-            continue;
-        }
-        let path = format!("{}/{}", dir, name);
-        let content = match host_read(&path) {
-            Some(c) => c,
-            None => continue,
-        };
-        match parse(&content) {
-            Some(doc) => out.push(doc),
-            None => {
-                crate::wasm_dispatch::emit_event("memory_md_parse_failed", json!({
-                    "path": path,
-                    "namespace": ns,
-                }));
-            }
-        }
-    }
-    out.sort_by(|a, b| a.key.cmp(&b.key));
-    out
-}
-
-pub fn md_file_count(ns: &str) -> usize {
-    let dir = match md_dir(ns) {
-        Some(d) => d,
-        None => return 0,
-    };
-    match crate::pkfs::readdir(&dir) {
-        Some(Value::Array(a)) => a
-            .iter()
-            .filter_map(|e| e.get("name").and_then(|n| n.as_str()).or_else(|| e.as_str()))
-            .filter(|n| n.ends_with(".md"))
-            .count(),
-        _ => 0,
-    }
-}
-
 fn ensure_meta_table() -> Result<(), String> {
     crate::rssearch_vectors::ensure_schema()?;
     crate::shared_db::shared_exec(

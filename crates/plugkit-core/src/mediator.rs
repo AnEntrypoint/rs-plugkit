@@ -36,26 +36,6 @@ impl Subsystem {
     }
 }
 
-pub fn subsystem_for_verb(verb: &str) -> Subsystem {
-    match verb {
-        "fs_read" | "fs_write" | "fs_readdir" | "fs_stat" | "fetch" | "env_get" | "kv_get"
-        | "kv_put" | "kv_query" => Subsystem::Fs,
-        "git_status" | "branch_status" | "git_push" | "git_add" | "git_commit"
-        | "git_finalize" | "git_log" | "git_diff" | "git_show" | "git_fetch" | "git_branch"
-        | "git_checkout" | "git_rm" | "git_revert" | "git_reset" => Subsystem::Git,
-        "sql_open" | "sql_close" | "sql_list_dbs" | "sql_exec" | "sql_query" | "sql_smoke"
-        | "sql_serialize" | "sql_deserialize" => Subsystem::Sql,
-        "memorize" | "memorize-prune" | "memorize_prune" | "recall" | "codeinsight_index"
-        | "codesearch" | "forget" | "discipline" => Subsystem::Memory,
-        "exec_js" | "nodejs" | "javascript" | "node" | "js" | "lang" | "python" | "py"
-        | "bash" | "sh" | "shell" | "zsh" | "powershell" | "ps1" | "ssh" | "go" | "rust"
-        | "c" | "cpp" | "java" | "deno" => Subsystem::Exec,
-        "browser" => Subsystem::Browser,
-        v if crate::orchestrator::is_orchestrator_verb(v) => Subsystem::Orchestrator,
-        _ => Subsystem::Meta,
-    }
-}
-
 /// Enumerates every verb this build actually serves, grouped by subsystem
 /// -- backs the `health` verb's introspection and any future capability
 /// negotiation (e.g. plugkit-partial-availability-gate reporting which
