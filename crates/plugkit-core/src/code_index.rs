@@ -560,11 +560,15 @@ fn sql_quote(s: &str) -> String {
 }
 
 const MANIFEST_NS: &str = "codeinsight-manifest";
-// v4 adds mtime_ms, enabling a stat-only skip before any content read/hash
-// for the common unchanged-file case -- old v3 manifests fail the version
-// check below and are purged (one-time re-index of the whole repo, same
-// cost as any other manifest-schema migration this codebase already does).
-const MANIFEST_VERSION: u64 = 4;
+// v5 adds commit_overview (short sha + subject + shortstat diffstat for the
+// file's most recent touching commit, computed once per content-change via
+// a single `git log -1 --format=... --shortstat -- <path>` call and cached
+// on the manifest so unchanged files never re-pay the git subprocess cost).
+// v4 added mtime_ms, enabling a stat-only skip before any content read/hash
+// for the common unchanged-file case. Manifests failing the version check
+// below are purged (one-time re-index of the whole repo, same cost as any
+// other manifest-schema migration this codebase already does).
+const MANIFEST_VERSION: u64 = 5;
 
 #[derive(Clone)]
 struct ChunkRecord {
@@ -579,10 +583,11 @@ struct ChunkRecord {
 struct FileManifest {
     hash: u32,
     mtime_ms: f64,
+    commit_overview: Option<String>,
     chunks: Vec<ChunkRecord>,
 }
 
-fn manifest_to_json(fp: &str, hash: u32, mtime_ms: f64, chunks: &[ChunkRecord]) -> String {
+fn manifest_to_json(fp: &str, hash: u32, mtime_ms: f64, commit_overview: &Option<String>, chunks: &[ChunkRecord]) -> String {
     let arr: Vec<Value> = chunks.iter().map(|c| json!({
         "key": c.key,
         "kind": c.kind,
@@ -591,7 +596,7 @@ fn manifest_to_json(fp: &str, hash: u32, mtime_ms: f64, chunks: &[ChunkRecord]) 
         "le": c.le,
         "emb": c.emb,
     })).collect();
-    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "mtime_ms": mtime_ms, "chunks": arr }).to_string()
+    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "mtime_ms": mtime_ms, "commit_overview": commit_overview, "chunks": arr }).to_string()
 }
 
 fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
@@ -600,6 +605,7 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     let fp = parsed.get("path").and_then(|p| p.as_str())?.to_string();
     let hash = parsed.get("hash").and_then(|h| h.as_u64())? as u32;
     let mtime_ms = parsed.get("mtime_ms").and_then(|m| m.as_f64()).unwrap_or(0.0);
+    let commit_overview = parsed.get("commit_overview").and_then(|v| v.as_str()).map(String::from);
     let arr = parsed.get("chunks").and_then(|c| c.as_array())?;
     let mut chunks = Vec::with_capacity(arr.len());
     for c in arr {
@@ -611,7 +617,73 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
         let emb = json_to_f32_vec(c.get("emb")?)?;
         chunks.push(ChunkRecord { key, kind, name, ls, le, emb });
     }
-    Some((fp, FileManifest { hash, mtime_ms, chunks }))
+    Some((fp, FileManifest { hash, mtime_ms, commit_overview, chunks }))
+}
+
+/// Computes the tiny per-file "most relevant commit" overview: short sha,
+/// commit subject, and a one-line diffstat (files touched, +N-M lines) for
+/// the file's most recent touching commit. One `git log -1 -- <path>` call,
+/// only paid when the file's content actually changed this pass (the
+/// stat-only fast path and the hash-match reuse path both carry the prior
+/// manifest's cached value forward instead of recomputing) -- cheap within
+/// the existing mtime-gated indexing loop, never a full git-log scan.
+/// `--shortstat` on a single-commit `git log -1` emits one extra blank line
+/// then " N file(s) changed, X insertion(s)(+), Y deletion(s)(-)" (either
+/// insertions or deletions clause can be absent if that count is zero), so
+/// the parse below tolerates both missing clauses.
+fn compute_commit_overview(fp: &str) -> Option<String> {
+    let v = crate::wasm_dispatch::git_call_argv(
+        &["log", "-1", "--format=%h\u{0}%s", "--shortstat", "--", fp],
+        None,
+    );
+    let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
+    let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if !ok || exit_code != 0 { return None; }
+    let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let mut lines = stdout.lines();
+    let header = lines.next()?.trim();
+    if header.is_empty() { return None; }
+    let mut parts = header.splitn(2, '\u{0}');
+    let sha = parts.next()?.to_string();
+    let subject = parts.next().unwrap_or("").trim().to_string();
+    if sha.is_empty() { return None; }
+
+    let mut files_touched: u32 = 1;
+    let mut insertions: u32 = 0;
+    let mut deletions: u32 = 0;
+    for line in lines {
+        let t = line.trim();
+        if t.is_empty() { continue; }
+        if let Some(n) = t.split(',').find_map(|seg| {
+            let seg = seg.trim();
+            seg.strip_suffix("file changed").or_else(|| seg.strip_suffix("files changed"))
+                .map(|s| s.trim())
+                .and_then(|s| s.parse::<u32>().ok())
+        }) { files_touched = n; }
+        if let Some(n) = t.split(',').find_map(|seg| {
+            let seg = seg.trim();
+            seg.strip_suffix("insertion(+)").or_else(|| seg.strip_suffix("insertions(+)"))
+                .map(|s| s.trim())
+                .and_then(|s| s.parse::<u32>().ok())
+        }) { insertions = n; }
+        if let Some(n) = t.split(',').find_map(|seg| {
+            let seg = seg.trim();
+            seg.strip_suffix("deletion(-)").or_else(|| seg.strip_suffix("deletions(-)"))
+                .map(|s| s.trim())
+                .and_then(|s| s.parse::<u32>().ok())
+        }) { deletions = n; }
+    }
+    let subject = if subject.len() > 80 {
+        let mut e = 77.min(subject.len());
+        while e > 0 && !subject.is_char_boundary(e) { e -= 1; }
+        format!("{}...", &subject[..e])
+    } else {
+        subject
+    };
+    Some(format!(
+        "last changed {}: {} (+{}-{}, {} files)",
+        sha, subject, insertions, deletions, files_touched
+    ))
 }
 
 fn purge_stale_manifest_row(row_key: &str, val: &str) {
@@ -952,7 +1024,15 @@ pub fn index(root: &str, max_files: usize) -> Value {
             write_chunk(libsql_ok, &db_path, fp, &rec, &body);
             records.push(rec);
         }
-        fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, file_mtime, &records));
+        // Only paid on a genuine content change (this branch is unreachable
+        // for both the stat-only-skip and hash-match-reuse paths above,
+        // which `continue` before reaching here and keep the prior
+        // manifest's cached commit_overview on disk untouched) -- one git
+        // subprocess call per actually-changed file per pass, never per
+        // unchanged file, staying inside the existing mtime-gated cost
+        // envelope.
+        let commit_overview = compute_commit_overview(fp);
+        fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, file_mtime, &commit_overview, &records));
     }
 
     let mut removed_files = 0;
@@ -1122,6 +1202,7 @@ pub fn overview() -> Value {
 pub struct ChunkMeta {
     pub key: String,
     pub path: String,
+    pub kind: String,
     pub name: String,
     pub ls: usize,
     pub le: usize,
@@ -1130,23 +1211,62 @@ pub struct ChunkMeta {
 pub struct FusionCorpus {
     metas: Vec<ChunkMeta>,
     file_cache: std::collections::HashMap<String, Option<String>>,
+    overview_by_path: std::collections::HashMap<String, String>,
 }
 
 impl FusionCorpus {
     pub fn load() -> Self {
         let mut metas = Vec::new();
+        let mut overview_by_path = std::collections::HashMap::new();
         for (fp, m) in load_manifests() {
+            if let Some(ov) = &m.commit_overview {
+                overview_by_path.insert(fp.clone(), ov.clone());
+            }
             for c in &m.chunks {
                 metas.push(ChunkMeta {
                     key: c.key.clone(),
                     path: fp.clone(),
+                    kind: c.kind.clone(),
                     name: c.name.clone(),
                     ls: c.ls,
                     le: c.le,
                 });
             }
         }
-        FusionCorpus { metas, file_cache: std::collections::HashMap::new() }
+        FusionCorpus { metas, file_cache: std::collections::HashMap::new(), overview_by_path }
+    }
+
+    /// Per-hit git overview line for the file backing `key`, e.g.
+    /// "last changed a1b2c3d: fix parser edge case (+12-3, 2 files)" --
+    /// sourced from the FileManifest's cached commit_overview (computed at
+    /// index time, never a live git call on the codesearch read path).
+    /// None when the file has no manifest-cached overview yet (never
+    /// committed, or indexed before the commit_overview field existed and
+    /// not yet re-touched to populate it).
+    pub fn overview_for_key(&self, key: &str) -> Option<String> {
+        let m = self.metas.iter().find(|m| m.key == key)?;
+        self.overview_by_path.get(&m.path).cloned()
+    }
+
+    /// Structured symbol-location fields for `key` -- path, kind (fn/class/
+    /// etc, whatever the tree-sitter chunker tagged it), name, and the
+    /// 1-indexed [line_start, line_end] span -- as a real JSON object rather
+    /// than baked into an unparseable "path:ls:le name\n<body>" text blob.
+    /// This is the structured-symbol-awareness surface mcp-thorns exposes
+    /// natively (file:line:name(params) locations) that gm's fusion hits
+    /// previously lacked: callers had to regex the `text` field to recover
+    /// path/line/name instead of reading real fields. None when the key is
+    /// not present in the currently loaded manifest set (stale key from a
+    /// prior index generation).
+    pub fn symbol_for_key(&self, key: &str) -> Option<Value> {
+        let m = self.metas.iter().find(|m| m.key == key)?;
+        Some(json!({
+            "path": m.path,
+            "kind": m.kind,
+            "name": m.name,
+            "line_start": m.ls,
+            "line_end": m.le,
+        }))
     }
 
     fn file_content(&mut self, path: &str) -> Option<String> {

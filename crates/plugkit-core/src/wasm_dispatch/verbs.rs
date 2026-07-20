@@ -639,6 +639,27 @@ fn codesearch(body: &Value) -> u64 {
     // 10 most relevant git hashes, ranked by a diff+commit-message embedding
     // DB keyed by hash (git_commit_vectors), not the fused file-hit list.
     let commits = crate::code_index::git_commit_rank(query, 10);
+    // Symbol-awareness + git-overview parity fix (mcp-thorns comparison):
+    // mcp-thorns returns real file:line:name(params) symbol locations on
+    // every hit; gm's fusion previously baked path/name/line_start/line_end
+    // into an unparseable "path:ls:le name\n<body>" text blob and only
+    // attached the git commit-overview line to the fused `hits` array, never
+    // to `bm25_top10`/`vector_top10`. Build every hit through one helper so
+    // all three arrays carry the same structured `symbol` object (path,
+    // kind, name, line_start, line_end) and the same `overview` field,
+    // closing the gap uniformly instead of duplicating three ad-hoc shapes.
+    let build_hit = |corpus: &mut crate::code_index::FusionCorpus, key: &str, score: Option<f64>, fallback_text: Option<&str>| -> Value {
+        let text = corpus.text_for_key(key)
+            .or_else(|| fallback_text.map(String::from))
+            .unwrap_or_default();
+        let mut obj = serde_json::Map::new();
+        obj.insert("key".to_string(), json!(key));
+        obj.insert("text".to_string(), json!(text));
+        if let Some(s) = score { obj.insert("score".to_string(), json!(s)); }
+        if let Some(sym) = corpus.symbol_for_key(key) { obj.insert("symbol".to_string(), sym); }
+        if let Some(ov) = corpus.overview_for_key(key) { obj.insert("overview".to_string(), json!(ov)); }
+        Value::Object(obj)
+    };
     // Separate top-10 vector and top-10 BM25 views so the calling agent can
     // judge each ranking independently, alongside the existing fused `hits`
     // (kept for backward compat -- additive fields, nothing removed).
@@ -651,25 +672,18 @@ fn codesearch(body: &Value) -> u64 {
         .filter(|a| !a.is_empty())
         .map(|a| a.iter().take(10).cloned().collect())
         .or_else(|| vec_hits.as_array().filter(|a| !a.is_empty()).map(|a| a.iter().take(10).cloned().collect()))
-        .unwrap_or_else(|| vec_ids.iter().take(10).map(|key| {
-            json!({ "key": key, "text": corpus.text_for_key(key).unwrap_or_default() })
-        }).collect());
-    let bm25_top10: Vec<Value> = bm25_ids.iter().take(10).map(|key| {
-        let text = corpus.text_for_key(key).unwrap_or_default();
-        json!({ "key": key, "text": text })
-    }).collect();
+        .unwrap_or_else(|| vec_ids.iter().take(10).map(|key| build_hit(&mut corpus, key, None, None)).collect());
+    let bm25_top10: Vec<Value> = bm25_ids.iter().take(10).map(|key| build_hit(&mut corpus, key, None, None)).collect();
     if !vec_ids.is_empty() || !bm25_ids.is_empty() {
         let lists = vec![vec_ids, bm25_ids];
         let weights = [1.0, rs_search::fusion::IDENTIFIER_BOOST];
         let fused = rs_search::fusion::fuse_n(&lists, &weights, query);
         let hits: Vec<Value> = fused.into_iter().take(k as usize).map(|(key, score)| {
-            let text = corpus.text_for_key(&key)
-                .or_else(|| vec_hits.as_array().and_then(|a| {
-                    a.iter().find(|h| h.get("key").and_then(|x| x.as_str()) == Some(key.as_str()))
-                        .and_then(|h| h.get("text").and_then(|t| t.as_str()).map(String::from))
-                }))
-                .unwrap_or_default();
-            json!({ "key": key, "text": text, "score": score })
+            let fallback = vec_hits.as_array().and_then(|a| {
+                a.iter().find(|h| h.get("key").and_then(|x| x.as_str()) == Some(key.as_str()))
+                    .and_then(|h| h.get("text").and_then(|t| t.as_str()))
+            });
+            build_hit(&mut corpus, &key, Some(score), fallback)
         }).collect();
         return ok("codesearch", json!({
             "mode": "fusion", "hits": hits, "commits": commits, "vector_hits": vector_hits,
