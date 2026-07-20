@@ -30,6 +30,7 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/git-block-counter.json",
     ".gm/disciplines/codeinsight/",
     ".gm/disciplines/codeinsight-vec/",
+    ".gm/instructions-source-cache/",
     ".plugkit-browser-profile/",
     ".plugkit-browser-profile-*/",
 ];
