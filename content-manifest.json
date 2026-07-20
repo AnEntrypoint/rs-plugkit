@@ -12,15 +12,15 @@
       "path": "weights/bge-small-en-v1.5.safetensors",
       "sha256": "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad",
       "source_url": "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/model.safetensors",
-      "description": "BERT embedding model weights, served natively by gm-runner's host_vec_embed; also embedded in the browser/wasm-fallback build variant",
-      "consumers": ["gm-runner", "plugkit-wasm (browser fallback build)"]
+      "description": "BERT embedding model weights, served natively by agentplug-runner's host_vec_embed; also embedded in the browser/wasm-fallback build variant",
+      "consumers": ["agentplug-runner", "plugkit-wasm (browser fallback build)"]
     },
     "embed-tokenizer": {
       "kind": "tokenizer",
       "path": "weights/bge-tokenizer.json",
       "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
       "source_url": "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json",
-      "consumers": ["gm-runner", "plugkit-wasm (browser fallback build)"]
+      "consumers": ["agentplug-runner", "plugkit-wasm (browser fallback build)"]
     },
     "grammar-javascript": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-javascript", "version": "0.25.0" },
     "grammar-typescript": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-typescript", "version": "0.23.2" },
@@ -36,7 +36,7 @@
     "grammar-bash": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-bash", "version": "0.25.1" },
     "grammar-md": { "kind": "tree-sitter-grammar", "crate": "tree-sitter-md", "version": "0.5.3" }
   },
-  "note": "RESOLVED (treesitter-grammar-runtime-split): plugkit-core no longer statically links any tree-sitter grammar or the tree-sitter core crate. crates/plugkit-core/Cargo.toml carries zero tree-sitter-* dependencies as of this note; code_index.rs::extract_chunks parses exclusively via call_plugin(\"treesitter\", \"parse\", {lang, source}) over the host_plugin_call wasm-import ABI (see wasm_dispatch/host_abi.rs), the same generic out-of-process-plugin mechanism already proven for libsql/bert. The wasm host (agentplug-runner, both the JS-wrapper loader and the native gm-runner loader) resolves/downloads a standalone treesitter.wasm plugin at ~/.agentplug/plugins/treesitter.wasm and dispatches `parse` for all 18 languages code_index.rs's lang_for_ext maps to (verified live: javascript/typescript/python/rust/go/c/cpp/java/json/html/css/bash/markdown/csharp/haskell/julia/php/powershell/ruby all return {ok:true,nodes:[...]} via `agentplug-runner dispatch treesitter parse`). The entries below now document grammar CONTENT version pins for that external treesitter plugin build (not plugkit-core's own Cargo.toml, which no longer resolves them) -- kept here as the still-useful cross-repo version-pin ledger versus rs-codeinsight's independent 0.24.7-pinned in-process grammar set, updated to reflect the plugin now being the sole consumer on the rs-plugkit side.",
+  "note": "RESOLVED (treesitter-grammar-runtime-split): plugkit-core no longer statically links any tree-sitter grammar or the tree-sitter core crate. crates/plugkit-core/Cargo.toml carries zero tree-sitter-* dependencies as of this note; code_index.rs::extract_chunks parses exclusively via call_plugin(\"treesitter\", \"parse\", {lang, source}) over the host_plugin_call wasm-import ABI (see wasm_dispatch/host_abi.rs), the same generic out-of-process-plugin mechanism already proven for libsql/bert. The wasm host (agentplug-runner as the native loader, or the gm-plugkit JS-wrapper loader) resolves/downloads a standalone treesitter.wasm plugin at ~/.agentplug/plugins/treesitter.wasm and dispatches `parse` for all 18 languages code_index.rs's lang_for_ext maps to (verified live: javascript/typescript/python/rust/go/c/cpp/java/json/html/css/bash/markdown/csharp/haskell/julia/php/powershell/ruby all return {ok:true,nodes:[...]} via `agentplug-runner dispatch treesitter parse`). The entries below now document grammar CONTENT version pins for that external treesitter plugin build (not plugkit-core's own Cargo.toml, which no longer resolves them) -- kept here as the still-useful cross-repo version-pin ledger versus rs-codeinsight's independent 0.24.7-pinned in-process grammar set, updated to reflect the plugin now being the sole consumer on the rs-plugkit side.",
   "tree_sitter_cross_repo_manifest": {
     "purpose": "Tree-sitter GRAMMAR version pin ledger, historically shared between rs-plugkit (crates/plugkit-core, AST-node-boundary extraction for embedding chunks, code_index.rs) and rs-codeinsight (per-language metrics extraction for conventions/depgraph output, analyzer.rs). Since treesitter-grammar-runtime-split, rs-plugkit no longer resolves any tree-sitter-* crate itself -- code_index.rs delegates parsing entirely to the out-of-process `treesitter` agentplug plugin (~/.agentplug/plugins/treesitter.wasm) over host_plugin_call. The `owner: rs-plugkit` fields below now mean 'grammar+version this repo's runtime dispatch expects the treesitter plugin to resolve', not 'pinned in this repo's own Cargo.toml' -- there is no Cargo.toml/Cargo.lock entry on the rs-plugkit side to drift anymore. rs-codeinsight is unaffected: it still links tree-sitter grammars in-process (its own extraction purpose, still genuinely independent, still NOT a candidate for crate merge).",
     "core_pin_intentionally_diverges": {

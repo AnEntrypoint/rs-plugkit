@@ -127,7 +127,7 @@ fn init_ctx() -> Result<EmbedCtx, String> {
         crate::wasm_dispatch::emit_event("embed.slim-build-no-fallback", serde_json::json!({
             "reason": "this is a slim build (feature=slim): no wasm-embedded safetensors fallback exists, and the host_vec_embed probe just failed -- embedding is genuinely unavailable this session, not a bug",
         }));
-        return Err("slim build has no wasm-side embedding fallback -- host_vec_embed must be implemented by the host (e.g. gm-runner's native candle path)".to_string());
+        return Err("slim build has no wasm-side embedding fallback -- host_vec_embed must be implemented by the host (e.g. agentplug-runner's native candle path)".to_string());
     }
 
     #[cfg(not(feature = "slim"))]
@@ -147,7 +147,7 @@ fn init_ctx() -> Result<EmbedCtx, String> {
         // scalar BERT-small matmul at realistic wasm32 throughput). Safe to
         // force-enable unconditionally here: every real host that loads
         // this wasm module (gm-plugkit's JS wrapper via bun/Node's
-        // WebAssembly.Instance, or gm-runner via wasmtime with simd
+        // WebAssembly.Instance, or agentplug-runner via wasmtime with simd
         // support) runs on a wasm engine with simd128 support, which has
         // been a baseline feature of both V8 and wasmtime since ~2021.
         gemm::set_wasm_simd128(true);
