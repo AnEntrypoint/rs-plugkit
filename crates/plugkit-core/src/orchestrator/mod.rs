@@ -1,4 +1,6 @@
 pub mod state;
+pub mod fsm;
+pub mod fsm_vendor;
 pub mod transitions;
 pub mod cas;
 pub mod mutables;
@@ -97,7 +99,7 @@ pub fn is_orchestrator_verb(verb: &str) -> bool {
             | "memorize-fire" | "discipline-note" | "phase-status" | "residual-scan" | "auto-recall"
             | "instruction" | "prd-add" | "prd-resolve" | "prd-list"
             | "task-spawn" | "task-list" | "task-stop" | "task-output"
-            | "memorize-continue"
+            | "memorize-continue" | "fsm-vendor"
     )
 }
 
@@ -134,6 +136,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "task-stop" => task::handle_stop(content),
         "task-output" => task::handle_output(content),
         "memorize-continue" => handle_memorize_continue(content),
+        "fsm-vendor" => fsm_vendor::handle_vendor(content),
         _ => (format!("Unknown orchestrator verb: {}", verb), String::new(), 1),
     }
 }

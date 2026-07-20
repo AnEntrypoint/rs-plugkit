@@ -118,32 +118,59 @@ fn should_residual_scan(prd_pending: usize, running_tasks_count: usize) -> bool 
     prd_pending == 0 && running_tasks_count == 0
 }
 
-pub fn get_instruction(phase: &str) -> String {
-    let (key, default) = match phase.trim().to_ascii_uppercase().as_str() {
-        "ENTRY" | "ORCHESTRATOR" | "" => ("entry", entry::TEXT),
-        "PLAN" => ("plan", plan::TEXT),
-        "EXECUTE" => ("execute", execute::TEXT),
-        "EMIT" => ("emit", emit::TEXT),
-        "VERIFY" => ("verify", verify::TEXT),
-        "CONSOLIDATE" => ("consolidate", consolidate::TEXT),
-        "COMPLETE" => ("update_docs", update_docs::TEXT),
-        "BROWSER" => ("browser", browser::TEXT),
-        _ => ("entry", entry::TEXT),
-    };
-    crate::prose::resolve(key, default)
+/// The compiled-in default TEXT for each of the six built-in prose keys --
+/// used ONLY as prose::resolve's fallback when neither a .gm/ override file
+/// NOR (for a custom phase) any prose_key entry applies. A phase name the
+/// active graph doesn't recognize at all still falls back to entry::TEXT,
+/// matching the old catch-all `_ => ("entry", entry::TEXT)` arm.
+pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
+    match key {
+        "plan" => plan::TEXT,
+        "execute" => execute::TEXT,
+        "emit" => emit::TEXT,
+        "verify" => verify::TEXT,
+        "consolidate" => consolidate::TEXT,
+        "update_docs" => update_docs::TEXT,
+        "browser" => browser::TEXT,
+        _ => entry::TEXT,
+    }
 }
 
-fn next_phase_hint(phase: &str) -> Option<&'static str> {
-    match phase.trim().to_ascii_uppercase().as_str() {
-        "ENTRY" | "ORCHESTRATOR" | "" => Some("PLAN"),
-        "PLAN" => Some("EXECUTE"),
-        "EXECUTE" => Some("EMIT"),
-        "EMIT" => Some("VERIFY"),
-        "VERIFY" => Some("CONSOLIDATE"),
-        "CONSOLIDATE" => Some("COMPLETE"),
-        "COMPLETE" => None,
-        _ => None,
+/// Looks up the current phase's prose_key in the ACTIVE graph (built-in
+/// default, or a project's .gm/instructions/fsm/graph.json override) rather
+/// than a fixed match -- a custom phase name (e.g. a project-defined REVIEW
+/// between EMIT and VERIFY) resolves through its own graph-declared
+/// prose_key, served from .gm/instructions/<prose_key>.md the same way the
+/// six built-ins always have been. ENTRY/ORCHESTRATOR/BROWSER stay as
+/// direct pseudo-phase pass-throughs (not real FSM states a project's graph
+/// declares) exactly as before.
+pub fn get_instruction(phase: &str) -> String {
+    let upper = phase.trim().to_ascii_uppercase();
+    let key = match upper.as_str() {
+        "ENTRY" | "ORCHESTRATOR" | "" => "entry".to_string(),
+        "BROWSER" => "browser".to_string(),
+        _ => super::fsm::graph()
+            .state(&upper)
+            .map(|s| s.prose_key.clone())
+            .unwrap_or_else(|| "entry".to_string()),
+    };
+    let default = compiled_default_for_prose_key(&key);
+    crate::prose::resolve(&key, default)
+}
+
+fn next_phase_hint(phase: &str) -> Option<String> {
+    let upper = phase.trim().to_ascii_uppercase();
+    if upper.is_empty() || upper == "ENTRY" || upper == "ORCHESTRATOR" {
+        return Some("PLAN".to_string());
     }
+    let g = super::fsm::graph();
+    g.default_edge_from(&upper)
+        .map(|e| e.to.clone())
+        // A terminal state's default edge (if the graph declares a
+        // self-loop, matching the built-in default's COMPLETE->COMPLETE)
+        // is not a genuine "next" hint -- suppress it the same way the old
+        // hardcoded COMPLETE => None arm did.
+        .filter(|to| !to.eq_ignore_ascii_case(&upper))
 }
 
 fn prd_items_json() -> Vec<serde_json::Value> {
@@ -290,18 +317,27 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         Some(trimmed.to_string())
     };
 
-    let valid_phases = ["ENTRY", "ORCHESTRATOR", "PLAN", "EXECUTE", "EMIT", "VERIFY", "CONSOLIDATE", "COMPLETE", "BROWSER"];
+    // "Valid" now means "a state in the ACTIVE graph" (plus the two
+    // always-legal pseudo-phases ENTRY/ORCHESTRATOR and the BROWSER prose
+    // pseudo-phase, none of which are real FSM states a project's graph
+    // declares) rather than a fixed compiled list -- a custom-graph
+    // project's own phase names are accepted here without a Rust rebuild.
+    let is_valid_phase = |upper: &str| -> bool {
+        matches!(upper, "ENTRY" | "ORCHESTRATOR" | "BROWSER") || super::fsm::graph().has_state(upper)
+    };
     let phase = match raw_phase_opt.as_deref() {
         None => read_state().phase.as_str().to_string(),
         Some(p) => {
             let upper = p.trim().to_ascii_uppercase();
-            if upper.is_empty() || valid_phases.contains(&upper.as_str()) {
+            if upper.is_empty() || is_valid_phase(&upper) {
                 if upper.is_empty() { read_state().phase.as_str().to_string() } else { upper }
             } else {
+                let known: Vec<String> = super::fsm::graph().states.iter().map(|s| s.key.clone()).collect();
                 ilog(&format!(
-                    "instruction::handle invalid phase '{}' (len={}); falling back to disk state. Valid: PLAN|EXECUTE|EMIT|VERIFY|CONSOLIDATE|COMPLETE|BROWSER",
+                    "instruction::handle invalid phase '{}' (len={}); falling back to disk state. Valid (active graph): {}",
                     &p.chars().take(80).collect::<String>(),
-                    p.len()
+                    p.len(),
+                    known.join("|")
                 ));
                 read_state().phase.as_str().to_string()
             }
@@ -323,7 +359,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     }
 
     let raw_phase_override = raw_phase_opt.as_deref().map(|p| {
-        !p.trim().is_empty() && valid_phases.contains(&p.trim().to_ascii_uppercase().as_str())
+        !p.trim().is_empty() && is_valid_phase(&p.trim().to_ascii_uppercase())
     }).unwrap_or(false);
 
     if fresh_prompt && !raw_phase_override && phase != "PLAN" && phase != "COMPLETE"
@@ -332,7 +368,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         ilog(&format!("instruction::handle fresh prompt on stuck {} chain (no pending PRD) -> reset phase to PLAN", phase));
         phase = "PLAN".to_string();
         let mut st = read_state();
-        st.phase = Phase::Plan;
+        st.phase = Phase::plan();
         let _ = super::state::write_state(&st);
     }
 
@@ -340,7 +376,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         if fresh_prompt {
             phase = "PLAN".to_string();
             let mut st = read_state();
-            st.phase = Phase::Plan;
+            st.phase = Phase::plan();
             let _ = super::state::write_state(&st);
             ilog("instruction::handle fresh prompt on COMPLETE chain -> reset phase to PLAN");
         } else if prd_pending_count(&prd_items_json()) == 0 && session_id_opt.is_some() {
