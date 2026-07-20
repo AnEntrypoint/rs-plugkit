@@ -818,7 +818,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
                         chunked += m.chunks.len() as i32;
                         reused += m.chunks.len() as i32;
                         reused_files += 1;
-                        digest_entries.push((fp.clone(), m.hash));
+                        digest_entries.push((fp.clone(), mtime as u32));
                         continue;
                     }
                 }
@@ -839,7 +839,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
         let file_hash = crc32(&content);
         let path_hash = crc32(fp);
-        digest_entries.push((fp.clone(), file_hash));
+        digest_entries.push((fp.clone(), file_mtime as u32));
 
         if let Some(m) = prior.get(fp) {
             if m.hash == file_hash {
@@ -1033,6 +1033,15 @@ fn digest_from_entries(mut entries: Vec<(String, u32)>) -> String {
 /// the same (path, hash) pairs from its own read loop and feeds them to
 /// digest_from_entries directly, avoiding a second full-repo file-content
 /// read on every stale-digest dispatch.
+/// Tree digest keyed on (path, mtime) via a stat-only walk -- no file content
+/// is ever read here. This is the warm-path "has anything changed?" check
+/// codesearch runs before every index() call, so it must be cheap: the prior
+/// content-hash version read+crc32'd every file on every search, a full-tree
+/// content scan even when nothing changed (the daemon-wedging symptom). The
+/// reference codebasesearch impl detects change by mtime alone; this matches
+/// it. A file's mtime folded to u32 feeds the same digest_from_entries as the
+/// stored side (index() also keys its digest on mtime), so the two match on an
+/// unchanged tree and index() is skipped entirely.
 pub fn current_digest() -> String {
     let files = collect_files(".", DIGEST_MAX_FILES);
     let mut entries: Vec<(String, u32)> = Vec::new();
@@ -1040,12 +1049,17 @@ pub fn current_digest() -> String {
         let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();
         let ext = match canon.rfind('.') { Some(i) => &canon[i..], None => "" };
         if lang_for_ext(ext).is_none() { continue; }
-        let content = match host_read(&canon)
-            .or_else(|| host_read(raw_fp))
-            .or_else(|| host_read(&format!("/{}", canon)))
-        { Some(c) => c, None => continue };
-        if content.len() > 256 * 1024 { continue; }
-        entries.push((canon, crc32(&content)));
+        let stat = match crate::wasm_dispatch::host_stat(&canon)
+            .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
+        { Some(s) => s, None => continue };
+        // Mirror index()'s >256KB content-size exclusion using the stat size
+        // (no content read): index() skips these before pushing to its own
+        // digest_entries, so current_digest() must skip them too or the two
+        // digests carry different file sets and never match -> permanent
+        // rebuild, the opposite of the warm-skip this exists for.
+        if stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0) > 256 * 1024 { continue; }
+        let mtime = match stat.get("mtime_ms").and_then(|v| v.as_f64()) { Some(m) => m, None => continue };
+        entries.push((canon, mtime as u32));
     }
     digest_from_entries(entries)
 }
