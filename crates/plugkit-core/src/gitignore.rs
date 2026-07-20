@@ -18,6 +18,7 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/subagent-*.json",
     ".gm/browser-profile/",
     ".gm/browser-profile-*/",
+    ".gm/browser-profiles/",
     ".gm/build-tool-ignores.md",
     ".gm/last-prompt.txt",
     ".gm/hooks/",
