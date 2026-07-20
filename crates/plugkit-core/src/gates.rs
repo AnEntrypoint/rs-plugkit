@@ -1,16 +1,8 @@
 #![cfg(target_arch = "wasm32")]
 
 use serde_json::{json, Value};
-use crate::wasm_dispatch::{host_read, host_exists, host_log, host_write};
-use serde_yaml;
+use crate::wasm_dispatch::{host_read, host_log, host_write};
 
-pub const TOPLEVEL_DOC_ALLOWLIST: &[&str] = &[
-    "AGENTS.md", "CLAUDE.md", "README.md", "SKILLS.md", "CHANGELOG.md", "LICENSE", "LICENSE.md",
-];
-
-const AWAIT_ALLOWED_VERBS: &[&str] = &["memorize-continue", "instruction", "phase-status", "health"];
-
-const GATE_REPEAT_ESCALATE_THRESHOLD: u64 = 3;
 const GATE_REPEAT_STATE_PATH: &str = ".gm/exec-spool/.gate-deviation-repeats.json";
 
 fn gate_repeat_key(operation: &str, event: &str) -> String {
@@ -106,8 +98,9 @@ fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
     (verb, count, ts)
 }
 
-const LONGGAP_EXEMPT: &[&str] = &["health", "auto-recall", "wait", "sleep"];
-fn is_longgap_exempt(verb: &str) -> bool { LONGGAP_EXEMPT.contains(&verb) }
+fn is_longgap_exempt(verb: &str) -> bool {
+    crate::orchestrator::fsm::graph().policy.longgap_exempt_verbs.iter().any(|v| v == verb)
+}
 
 fn long_gap_should_fire(last_instruction_ms: u64, prev_dispatch_ms: u64, now: u64, threshold: u64) -> bool {
     if last_instruction_ms == 0 { return false; }
@@ -168,6 +161,10 @@ fn body_path_field(body: &Value) -> Option<String> {
     None
 }
 
+fn current_phase_key() -> String {
+    crate::orchestrator::state::read_state().phase.as_str().to_string()
+}
+
 fn classify_operation(verb: &str, body: &Value) -> &'static str {
     if verb == "transition" {
         if let Some(to) = body.get("to").and_then(|v| v.as_str()) {
@@ -195,114 +192,12 @@ fn classify_operation(verb: &str, body: &Value) -> &'static str {
 // by driving Chrome's CDP endpoint directly, proving these blockers are
 // reachable, not terminal.
 
-fn prd_has_open_items() -> bool {
-    let content = host_read(".gm/prd.yml").unwrap_or_default();
-    if content.is_empty() { return false; }
-    match serde_yaml::from_str::<serde_yaml::Value>(&content) {
-        Ok(serde_yaml::Value::Sequence(items)) => {
-            items.iter().any(|item| {
-                item.get("status")
-                    .and_then(|s| s.as_str())
-                    .map(crate::orchestrator::prd::status_is_open)
-                    .unwrap_or(true)
-            })
-        }
-        Ok(_) => false,
-        Err(_) => true,
-    }
-}
-
-fn mutables_unresolved() -> bool {
-    let content = host_read(".gm/mutables.yml").unwrap_or_default();
-    if content.is_empty() { return false; }
-    match serde_yaml::from_str::<serde_yaml::Value>(&content) {
-        Ok(serde_yaml::Value::Sequence(items)) => {
-            items.iter().any(|item| {
-                item.get("status")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s == "unknown")
-                    .unwrap_or(false)
-            })
-        }
-        Ok(_) => false,
-        Err(_) => true,
-    }
-}
-
-fn worktree_dirty() -> bool {
-    !crate::wasm_dispatch::git_porcelain().trim().is_empty()
-}
-
-fn residual_scan_fired() -> bool {
-    !host_read(".gm/residual-check-fired").unwrap_or_default().trim().is_empty()
-}
-
-fn ci_validation_fresh() -> bool {
-    let raw = host_read(".gm/exec-spool/.ci-validated").unwrap_or_default();
-    let trimmed = raw.trim();
-    if trimmed.is_empty() { return false; }
-    let current_head = crate::wasm_dispatch::git_call("rev-parse HEAD", None)
-        .get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-    if current_head.is_empty() { return false; }
-    match serde_json::from_str::<Value>(trimmed) {
-        Ok(v) => {
-            let marker_sha = v.get("head_sha").and_then(|s| s.as_str()).unwrap_or("");
-            !marker_sha.is_empty() && marker_sha == current_head
-        }
-        Err(_) => false,
-    }
-}
-
-fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
-    let edits_path = if cwd.is_empty() {
-        ".gm/exec-spool/.turn-browser-edits.json".to_string()
-    } else {
-        format!("{}/.gm/exec-spool/.turn-browser-edits.json", cwd.trim_end_matches('/').trim_end_matches('\\'))
-    };
-    let edits_raw = host_read(&edits_path).unwrap_or_default();
-    if edits_raw.trim().is_empty() { return vec![]; }
-    let edits: Vec<Value> = match serde_json::from_str::<Value>(&edits_raw) {
-        Ok(Value::Array(arr)) => arr,
-        _ => return vec![],
-    };
-    if edits.is_empty() { return vec![]; }
-    let witness_path = if cwd.is_empty() {
-        ".gm/exec-spool/.turn-browser-witnessed".to_string()
-    } else {
-        format!("{}/.gm/exec-spool/.turn-browser-witnessed", cwd.trim_end_matches('/').trim_end_matches('\\'))
-    };
-    let witness_raw = host_read(&witness_path).unwrap_or_default();
-    let witnessed_hashes: serde_json::Map<String, Value> = if witness_raw.trim().is_empty() {
-        serde_json::Map::new()
-    } else {
-        serde_json::from_str::<Value>(&witness_raw).ok()
-            .and_then(|v| v.get("witnessed_hashes").cloned())
-            .and_then(|v| if let Value::Object(m) = v { Some(m) } else { None })
-            .unwrap_or_default()
-    };
-    let mut unwitnessed: Vec<String> = vec![];
-    for entry in edits.iter() {
-        let file = match entry.get("file").and_then(|v| v.as_str()) {
-            Some(f) if !f.is_empty() => f,
-            _ => continue,
-        };
-        if !crate::browser_witness::is_browser_running_file(file) { continue; }
-        let edit_hash = entry.get("hash").and_then(|v| v.as_str()).unwrap_or("");
-        if edit_hash.is_empty() { continue; }
-        let witness_hash = witnessed_hashes.get(file).and_then(|v| v.as_str()).unwrap_or("");
-        if witness_hash != edit_hash {
-            unwitnessed.push(file.to_string());
-        }
-    }
-    unwitnessed
-}
-
 fn is_unsolicited_toplevel_doc(rel: &str) -> bool {
     let norm = rel.replace('\\', "/");
     if norm.contains('/') { return false; }
     let lower_ext_is_doc = norm.to_lowercase().ends_with(".md") || norm.to_lowercase().ends_with(".txt");
     if !lower_ext_is_doc { return false; }
-    !TOPLEVEL_DOC_ALLOWLIST.iter().any(|a| a.eq_ignore_ascii_case(&norm))
+    !crate::orchestrator::fsm::graph().policy.toplevel_doc_allowlist.iter().any(|a| a.eq_ignore_ascii_case(&norm))
 }
 
 fn extract_substitution_bodies(cmd: &str) -> Vec<String> {
@@ -342,7 +237,7 @@ fn extract_substitution_bodies(cmd: &str) -> Vec<String> {
 
 pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     if let Some(step_id) = read_pending_step() {
-        if !AWAIT_ALLOWED_VERBS.contains(&verb) {
+        if !crate::orchestrator::fsm::graph().policy.await_allowed_verbs.iter().any(|v| v == verb) {
             log_deviation("await-result-violation", &format!("verb={} step={}", verb, step_id));
             let mut v = GateVerdict::deny(format!(
                 "pipeline suspended at step_id={}; only memorize-continue advances state. \
@@ -413,7 +308,8 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         let last = host_read(".gm/last-instruction-ts").unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let now = now_ms();
-        if long_gap_should_fire(last_ms, prev_dispatch_ms, now, 300_000) {
+        let longgap_threshold_ms = crate::orchestrator::fsm::graph().policy.longgap_threshold_ms;
+        if long_gap_should_fire(last_ms, prev_dispatch_ms, now, longgap_threshold_ms) {
             let gap_ms = now - last_ms;
             let retry_state = host_read(".gm/long-gap-retry-state").unwrap_or_default();
             let (last_verb, count, last_denial_ts) = parse_retry_state_v2(&retry_state);
@@ -443,30 +339,27 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
+    // consolidate/complete gate DECISIONS are graph-driven (fsm.rs /
+    // transitions::gate_residuals) per fsm-framework-gate-logic-externalized
+    // -- a project's .gm/instructions/fsm/graph.json edit changes real gate
+    // behavior. This block stays only as the ADAPTER: classify which edge is
+    // being taken, call the graph, and translate its residuals into the
+    // existing GateVerdict shape (repeat-count escalation, log_deviation,
+    // next_dispatch) so every caller-visible behavior (messages, stuck-loop
+    // escalation, deviation events) is unchanged from before this migration.
     let operation = classify_operation(verb, body);
 
-    if operation == "consolidate" {
-        let mut residuals: Vec<String> = vec![];
-        let mut next_recovery: Option<&str> = None;
-        if !residual_scan_fired() {
-            residuals.push("residual-scan not fired in this stop window - dispatch `residual-scan` now, then re-attempt transition to=CONSOLIDATE".into());
-            log_deviation("consolidate-without-residual-scan", "");
-            next_recovery.get_or_insert("residual-scan");
-        }
-        if host_exists(".gm/prd.yml") && prd_has_open_items() {
-            residuals.push("PRD has open items - resolve (prd-resolve with witness_evidence) before CONSOLIDATE".into());
-            next_recovery.get_or_insert("prd-resolve");
-        }
-        if host_exists(".gm/mutables.yml") && mutables_unresolved() {
-            residuals.push("unresolved mutables present - resolve with witness_evidence before CONSOLIDATE".into());
-            next_recovery.get_or_insert("mutable-resolve");
-        }
+    if operation == "consolidate" || operation == "complete" {
+        let from = current_phase_key();
+        let to = if operation == "consolidate" { "CONSOLIDATE" } else { "COMPLETE" };
+        let (residuals, next_recovery) = crate::orchestrator::transitions::gate_residuals(&from, to);
         if !residuals.is_empty() {
-            log_deviation("gate-deny", &format!("consolidate-gate residuals={}", residuals.len()));
-            let repeat_count = record_gate_repeat("consolidate", "gate-deny");
-            let mut reason = format!("consolidate-gate residuals: {}", residuals.join("; "));
-            if repeat_count >= GATE_REPEAT_ESCALATE_THRESHOLD {
-                log_deviation("stuck-loop-escalation", &format!("operation=consolidate repeat_count={}", repeat_count));
+            log_deviation("gate-deny", &format!("{}-gate residuals={}", operation, residuals.len()));
+            let repeat_count = record_gate_repeat(operation, "gate-deny");
+            let label = if operation == "consolidate" { "consolidate-gate" } else { "stop-gate" };
+            let mut reason = format!("{} residuals: {}", label, residuals.join("; "));
+            if repeat_count >= crate::orchestrator::fsm::graph().policy.gate_repeat_escalate_threshold {
+                log_deviation("stuck-loop-escalation", &format!("operation={} repeat_count={}", operation, repeat_count));
                 reason = format!(
                     "{} -- STUCK LOOP DETECTED: this exact gate denial has now fired {} times in a row with no successful transition between attempts. Retrying the bare transition again will repeat the same denial. Stop retrying: (1) `prd-add` a row describing the concrete stuck state (which residual, what you tried, why it did not clear), (2) invoke the wfgy-method skill's BBCR bounded-retry-then-surface discipline to recover instead of blind-retrying, (3) only then re-attempt the transition.",
                     reason, repeat_count
@@ -474,62 +367,10 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             }
             let mut v = GateVerdict::deny(reason);
             v.residuals = residuals;
-            if let Some(n) = next_recovery { v.next_dispatch = Some(n.to_string()); }
+            v.next_dispatch = next_recovery;
             return v;
         }
-        clear_gate_repeats("consolidate");
-    }
-
-    if operation == "complete" {
-        let mut residuals: Vec<String> = vec![];
-        let mut next_recovery: Option<&str> = None;
-        if host_exists(".gm/prd.yml") && prd_has_open_items() {
-            residuals.push("PRD has open items - resolve (prd-resolve with witness_evidence) or name-and-stop before declaring done".into());
-            next_recovery.get_or_insert("prd-resolve");
-        }
-        if host_exists(".gm/mutables.yml") && mutables_unresolved() {
-            residuals.push("unresolved mutables present - resolve with witness_evidence before declaring done".into());
-            next_recovery.get_or_insert("mutable-resolve");
-        }
-        if worktree_dirty() {
-            residuals.push("worktree dirty - commit or revert before declaring done; an unpushed delta is an unwitnessed slice".into());
-            log_deviation("push-dirty", "COMPLETE attempted with dirty worktree");
-            next_recovery.get_or_insert("git_finalize");
-        }
-        if !residual_scan_fired() {
-            residuals.push("residual-scan not fired in this stop window - dispatch residual-scan before COMPLETE".into());
-            log_deviation("complete-without-residual-scan", "");
-            next_recovery.get_or_insert("residual-scan");
-        }
-        if !ci_validation_fresh() {
-            residuals.push("CI/CD validation not witnessed fresh - .gm/exec-spool/.ci-validated missing, stale, or not matching current HEAD sha. Witness the pipeline green for the pushed HEAD (exec_js/fetch: `gh run list`/`gh run watch` or the CI provider API), then fs_write .gm/exec-spool/.ci-validated with {\"head_sha\":\"<git rev-parse HEAD>\"} and re-attempt COMPLETE".into());
-            log_deviation("complete-without-ci-validation", "");
-            next_recovery.get_or_insert("exec_js");
-        }
-        let bw_cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-        let bw_check = check_browser_witness_coverage_for_cwd(bw_cwd);
-        if !bw_check.is_empty() {
-            residuals.push(format!("client-edit-no-witness: {} client-side file(s) edited without browser-witness in this session - dispatch `browser` verb to page.evaluate the invariant each edit establishes, then re-attempt COMPLETE. Files: {}", bw_check.len(), bw_check.join(", ")));
-            log_deviation("client-edit-no-witness", &format!("files={}", bw_check.join(",")));
-            next_recovery.get_or_insert("browser");
-        }
-        if !residuals.is_empty() {
-            log_deviation("gate-deny", &format!("stop-gate residuals={}", residuals.len()));
-            let repeat_count = record_gate_repeat("complete", "gate-deny");
-            let mut reason = format!("stop-gate residuals: {}", residuals.join("; "));
-            if repeat_count >= GATE_REPEAT_ESCALATE_THRESHOLD {
-                log_deviation("stuck-loop-escalation", &format!("operation=complete repeat_count={}", repeat_count));
-                reason = format!(
-                    "{} -- STUCK LOOP DETECTED: this exact gate denial has now fired {} times in a row with no successful transition between attempts. Retrying the bare transition again will repeat the same denial. Stop retrying: (1) `prd-add` a row describing the concrete stuck state (which residual, what you tried, why it did not clear), (2) invoke the wfgy-method skill's BBCR bounded-retry-then-surface discipline to recover instead of blind-retrying, (3) only then re-attempt the transition.",
-                    reason, repeat_count
-                );
-            }
-            let mut v = GateVerdict::deny(reason);
-            v.residuals = residuals;
-            if let Some(n) = next_recovery { v.next_dispatch = Some(n.to_string()); }
-            return v;
-        }
-        clear_gate_repeats("complete");
+        clear_gate_repeats(operation);
     }
 
     if verb == "fs_write" {

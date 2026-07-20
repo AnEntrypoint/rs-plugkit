@@ -47,6 +47,9 @@ pub fn known_predicates() -> Vec<(&'static str, &'static str)> {
         ("residual-scan-fired", "true once `residual-scan` has been dispatched in this stop window (the .gm/residual-check-fired marker exists)"),
         ("prd-all-closed", "true when .gm/prd.yml has zero rows with an open status (pending/in-progress, not completed)"),
         ("mutables-all-resolved", "true when .gm/mutables.yml has zero rows still in unknown/pending status"),
+        ("worktree-clean", "true when `git status --porcelain` is empty -- no uncommitted/unpushed delta"),
+        ("ci-validated-fresh", "true when .gm/exec-spool/.ci-validated exists and its head_sha matches the current `git rev-parse HEAD` -- a witnessed-green CI run for the exact pushed commit"),
+        ("browser-witness-coverage", "true when every client-side file edited this session (per .gm/exec-spool/.turn-browser-edits.json) has a matching entry in .gm/exec-spool/.turn-browser-witnessed with the same content hash"),
     ]
 }
 
@@ -55,6 +58,9 @@ fn predicate_result(name: &str) -> bool {
         "residual-scan-fired" => residual_scan_fired(),
         "prd-all-closed" => !prd_has_open_items(),
         "mutables-all-resolved" => mutables::pending_detailed().is_empty(),
+        "worktree-clean" => !worktree_dirty(),
+        "ci-validated-fresh" => ci_validation_fresh(),
+        "browser-witness-coverage" => check_browser_witness_coverage_for_cwd("").is_empty(),
         // An unrecognized predicate name fails CLOSED (denies), never open
         // -- a typo'd or stale predicate name in a hand-edited graph must
         // never silently skip a real check.
@@ -80,6 +86,79 @@ fn prd_has_open_items() -> bool {
         prd::status_is_open(status)
     })
 }
+
+#[cfg(target_arch = "wasm32")]
+fn worktree_dirty() -> bool {
+    !crate::wasm_dispatch::git_porcelain().trim().is_empty()
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn worktree_dirty() -> bool { false }
+
+#[cfg(target_arch = "wasm32")]
+fn ci_validation_fresh() -> bool {
+    let raw = crate::pkfs::read_to_string(".gm/exec-spool/.ci-validated").unwrap_or_default();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() { return false; }
+    let current_head = crate::wasm_dispatch::git_call("rev-parse HEAD", None)
+        .get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    if current_head.is_empty() { return false; }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(v) => {
+            let marker_sha = v.get("head_sha").and_then(|s| s.as_str()).unwrap_or("");
+            !marker_sha.is_empty() && marker_sha == current_head
+        }
+        Err(_) => false,
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn ci_validation_fresh() -> bool { true }
+
+#[cfg(target_arch = "wasm32")]
+fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
+    let edits_path = if cwd.is_empty() {
+        ".gm/exec-spool/.turn-browser-edits.json".to_string()
+    } else {
+        format!("{}/.gm/exec-spool/.turn-browser-edits.json", cwd.trim_end_matches('/').trim_end_matches('\\'))
+    };
+    let edits_raw = crate::pkfs::read_to_string(&edits_path).unwrap_or_default();
+    if edits_raw.trim().is_empty() { return vec![]; }
+    let edits: Vec<serde_json::Value> = match serde_json::from_str::<serde_json::Value>(&edits_raw) {
+        Ok(serde_json::Value::Array(arr)) => arr,
+        _ => return vec![],
+    };
+    if edits.is_empty() { return vec![]; }
+    let witness_path = if cwd.is_empty() {
+        ".gm/exec-spool/.turn-browser-witnessed".to_string()
+    } else {
+        format!("{}/.gm/exec-spool/.turn-browser-witnessed", cwd.trim_end_matches('/').trim_end_matches('\\'))
+    };
+    let witness_raw = crate::pkfs::read_to_string(&witness_path).unwrap_or_default();
+    let witnessed_hashes: serde_json::Map<String, serde_json::Value> = if witness_raw.trim().is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_str::<serde_json::Value>(&witness_raw).ok()
+            .and_then(|v| v.get("witnessed_hashes").cloned())
+            .and_then(|v| if let serde_json::Value::Object(m) = v { Some(m) } else { None })
+            .unwrap_or_default()
+    };
+    let mut unwitnessed: Vec<String> = vec![];
+    for entry in edits.iter() {
+        let file = match entry.get("file").and_then(|v| v.as_str()) {
+            Some(f) if !f.is_empty() => f,
+            _ => continue,
+        };
+        if !crate::browser_witness::is_browser_running_file(file) { continue; }
+        let edit_hash = entry.get("hash").and_then(|v| v.as_str()).unwrap_or("");
+        if edit_hash.is_empty() { continue; }
+        let witness_hash = witnessed_hashes.get(file).and_then(|v| v.as_str()).unwrap_or("");
+        if witness_hash != edit_hash {
+            unwitnessed.push(file.to_string());
+        }
+    }
+    unwitnessed
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn check_browser_witness_coverage_for_cwd(_cwd: &str) -> Vec<String> { vec![] }
 
 /// Runs a project's jit-hook script for a gate, per fsm-framework-jit-hook-
 /// concreting: exec_js's own host_exec_js with the hook file's contents as
@@ -133,6 +212,40 @@ fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, S
         }
     }
     None
+}
+
+/// Evaluates EVERY gate on the from->to edge (not just the first failure),
+/// for callers (gates.rs::check_dispatch) that need the full residuals list
+/// in one response -- matching the pre-graph hardcoded consolidate/complete
+/// checks' behavior of reporting every unmet condition together rather than
+/// one-at-a-time. `next_dispatch_hint` is the recovery verb named by the
+/// FIRST failing gate's name (residual-scan-fired -> residual-scan,
+/// prd-all-closed -> prd-resolve, mutables-all-resolved -> mutable-resolve,
+/// worktree-clean -> git_finalize, everything else -> exec_js/browser as
+/// appropriate), matching next_recovery's old precedence order.
+pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
+    let graph = fsm::graph();
+    let Some(edge) = graph.edge_between(from, to) else { return (vec![], None) };
+    let mut residuals = Vec::new();
+    let mut next_dispatch: Option<String> = None;
+    for gate_name in &edge.gates {
+        let Some(g) = graph.gate(gate_name) else { continue };
+        if !evaluate_gate(g) {
+            residuals.push(g.message.clone());
+            if next_dispatch.is_none() {
+                next_dispatch = Some(match gate_name.as_str() {
+                    "residual-scan-fired" => "residual-scan",
+                    "prd-all-closed" => "prd-resolve",
+                    "mutables-all-resolved" => "mutable-resolve",
+                    "worktree-clean" => "git_finalize",
+                    "ci-validated-fresh" => "exec_js",
+                    "browser-witness-coverage" => "browser",
+                    _ => "instruction",
+                }.to_string());
+            }
+        }
+    }
+    (residuals, next_dispatch)
 }
 
 pub fn handle(content: &str) -> (String, String, i32) {

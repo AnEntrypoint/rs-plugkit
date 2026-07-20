@@ -65,12 +65,61 @@ pub enum HookMode {
     Both,
 }
 
+/// Project-level policy knobs that were previously hardcoded Rust consts in
+/// gates.rs (TOPLEVEL_DOC_ALLOWLIST, AWAIT_ALLOWED_VERBS, LONGGAP_EXEMPT,
+/// GATE_REPEAT_ESCALATE_THRESHOLD, and the 300_000ms long-gap threshold
+/// literal) -- each is a project-policy decision, not a code invariant, so
+/// it belongs in the vendored/overridable graph, not a rebuild-to-change
+/// const. `#[serde(default = "...")]` on every field means an OLDER vendored
+/// graph.json (written before this field existed) still deserializes fine,
+/// falling back to the same values gates.rs used to hardcode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Policy {
+    #[serde(default = "default_toplevel_doc_allowlist")]
+    pub toplevel_doc_allowlist: Vec<String>,
+    #[serde(default = "default_await_allowed_verbs")]
+    pub await_allowed_verbs: Vec<String>,
+    #[serde(default = "default_longgap_exempt_verbs")]
+    pub longgap_exempt_verbs: Vec<String>,
+    #[serde(default = "default_gate_repeat_escalate_threshold")]
+    pub gate_repeat_escalate_threshold: u64,
+    #[serde(default = "default_longgap_threshold_ms")]
+    pub longgap_threshold_ms: u64,
+}
+
+fn default_toplevel_doc_allowlist() -> Vec<String> {
+    ["AGENTS.md", "CLAUDE.md", "README.md", "SKILLS.md", "CHANGELOG.md", "LICENSE", "LICENSE.md"]
+        .iter().map(|s| s.to_string()).collect()
+}
+fn default_await_allowed_verbs() -> Vec<String> {
+    ["memorize-continue", "instruction", "phase-status", "health"].iter().map(|s| s.to_string()).collect()
+}
+fn default_longgap_exempt_verbs() -> Vec<String> {
+    ["health", "auto-recall", "wait", "sleep"].iter().map(|s| s.to_string()).collect()
+}
+fn default_gate_repeat_escalate_threshold() -> u64 { 3 }
+fn default_longgap_threshold_ms() -> u64 { 300_000 }
+
+impl Default for Policy {
+    fn default() -> Self {
+        Policy {
+            toplevel_doc_allowlist: default_toplevel_doc_allowlist(),
+            await_allowed_verbs: default_await_allowed_verbs(),
+            longgap_exempt_verbs: default_longgap_exempt_verbs(),
+            gate_repeat_escalate_threshold: default_gate_repeat_escalate_threshold(),
+            longgap_threshold_ms: default_longgap_threshold_ms(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Graph {
     pub states: Vec<StateNode>,
     pub edges: Vec<Edge>,
     #[serde(default)]
     pub gates: Vec<GateDef>,
+    #[serde(default)]
+    pub policy: Policy,
 }
 
 impl Graph {
@@ -126,7 +175,7 @@ fn default_graph() -> Graph {
             Edge { from: "EXECUTE".into(), to: "EMIT".into(), gates: vec![] },
             Edge { from: "EMIT".into(), to: "VERIFY".into(), gates: vec![] },
             Edge { from: "VERIFY".into(), to: "CONSOLIDATE".into(), gates: vec!["residual-scan-fired".into(), "prd-all-closed".into(), "mutables-all-resolved".into()] },
-            Edge { from: "CONSOLIDATE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into()] },
+            Edge { from: "CONSOLIDATE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into(), "worktree-clean".into(), "residual-scan-fired".into(), "ci-validated-fresh".into(), "browser-witness-coverage".into()] },
             // COMPLETE has no default forward edge -- matches next_phase's
             // Phase::Complete => Phase::Complete self-loop (terminal, bare
             // `transition` with no target is a no-op there).
@@ -154,7 +203,29 @@ fn default_graph() -> Graph {
                 hook_mode: HookMode::PredicateOnly,
                 message: "transition rejected: mutables still pending -- resolve them with witness_evidence before transitioning.".into(),
             },
+            GateDef {
+                name: "worktree-clean".into(),
+                predicate: Some("worktree-clean".into()),
+                hook: None,
+                hook_mode: HookMode::PredicateOnly,
+                message: "transition rejected: worktree dirty -- commit or revert before declaring done; an unpushed delta is an unwitnessed slice.".into(),
+            },
+            GateDef {
+                name: "ci-validated-fresh".into(),
+                predicate: Some("ci-validated-fresh".into()),
+                hook: None,
+                hook_mode: HookMode::PredicateOnly,
+                message: "transition rejected: CI/CD validation not witnessed fresh -- .gm/exec-spool/.ci-validated missing, stale, or not matching current HEAD sha. Witness the pipeline green for the pushed HEAD, then fs_write .gm/exec-spool/.ci-validated with {\"head_sha\":\"<git rev-parse HEAD>\"} and re-attempt.".into(),
+            },
+            GateDef {
+                name: "browser-witness-coverage".into(),
+                predicate: Some("browser-witness-coverage".into()),
+                hook: None,
+                hook_mode: HookMode::PredicateOnly,
+                message: "transition rejected: client-edit-no-witness -- one or more client-side files edited this session lack a matching browser-witness. Dispatch `browser` to page.evaluate the invariant each edit establishes, then re-attempt.".into(),
+            },
         ],
+        policy: Policy::default(),
     }
 }
 
