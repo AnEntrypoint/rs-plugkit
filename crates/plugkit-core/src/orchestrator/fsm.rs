@@ -36,8 +36,10 @@ pub struct Edge {
 /// orchestrator runs via exec_js instead of (or in addition to, depending on
 /// `hook_mode`) the built-in predicate, per fsm-framework-jit-hook-concreting
 /// -- letting a project "concrete" its own custom condition without a Rust
-/// rebuild. A hook script's last expression/return value is coerced to bool;
-/// non-boolean/throw = gate fails closed (deny), never fails open.
+/// rebuild. A hook script's `return` value (explicit `return`, required --
+/// exec_js wraps every script in an async function body, so a bare trailing
+/// statement is discarded, not an implicit return) is coerced to bool;
+/// non-boolean/missing-return/throw = gate fails closed (deny), never open.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateDef {
     pub name: String,
