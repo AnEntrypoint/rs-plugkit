@@ -177,6 +177,21 @@ fn default_graph() -> Graph {
             Edge { from: "EXECUTE".into(), to: "EMIT".into(), gates: vec![] },
             Edge { from: "EMIT".into(), to: "VERIFY".into(), gates: vec![] },
             Edge { from: "VERIFY".into(), to: "CONSOLIDATE".into(), gates: vec!["residual-scan-fired".into(), "prd-all-closed".into(), "mutables-all-resolved".into()] },
+            // Re-plan edges, gate-free by design -- AGENTS.md/execute.md prose
+            // documents "transition to=PLAN ... always legal from EXECUTE" for
+            // a reshaping discovery (scope/approach/dependency-shape change to
+            // an existing PRD row). The linear chain had no backward edges at
+            // all until this fix, so that documented behavior silently relied
+            // on the gate_rejection/gate_residuals missing-edge bug (fixed
+            // alongside this) treating "no edge" as "no gates" == allow --
+            // once that bug closed, a real to=PLAN dispatch from EXECUTE/EMIT/
+            // VERIFY correctly denied with "no edge in the active FSM graph",
+            // live-witnessed this session (transition-1784613281001.json from
+            // VERIFY). These edges make the documented behavior real instead
+            // of an accidental side effect of a bug.
+            Edge { from: "EXECUTE".into(), to: "PLAN".into(), gates: vec![] },
+            Edge { from: "EMIT".into(), to: "PLAN".into(), gates: vec![] },
+            Edge { from: "VERIFY".into(), to: "PLAN".into(), gates: vec![] },
             Edge { from: "CONSOLIDATE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into(), "worktree-clean".into(), "residual-scan-fired".into(), "ci-validated-fresh".into(), "browser-witness-coverage".into()] },
             // COMPLETE has no default forward edge -- matches next_phase's
             // Phase::Complete => Phase::Complete self-loop (terminal, bare
