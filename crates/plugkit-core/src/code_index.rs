@@ -107,6 +107,21 @@ pub fn clear_codeinsight_full() -> u32 {
             }
         }
     }
+    // Live-found: this function never touched the REAL symbol-storage table
+    // (code_chunks, the SQL table codesearch/overview actually query) --
+    // only the codeinsight/codeinsight-vec/codeinsight-manifest KV
+    // namespaces. So an explicit rebuild:true dispatch cleared the manifest
+    // tracking (prior = load_manifests() came back empty) but left
+    // code_chunks' rows for long-deleted files completely untouched --
+    // and because `prior` was empty, the file-deletion-prune loop in
+    // index() (which iterates `prior`) had nothing to compare against
+    // either, so those stale rows survived every subsequent rebuild
+    // indefinitely. Confirmed live: codeinsight_overview.likely_orphaned
+    // kept returning gm-plugkit/supervisor.js + wrapper/*.js entries
+    // (files git-rm'd in commits b03333811/68d3c1d93, well before this
+    // session) across multiple explicit rebuild:true dispatches.
+    let db_path = project_db_path(None);
+    let _ = libsql_wasm::exec(&db_path, "DELETE FROM code_chunks");
     cleared
 }
 
@@ -824,6 +839,19 @@ pub fn index(root: &str, max_files: usize) -> Value {
     let r = if root.is_empty() { "/" } else { root };
     let limit = max_files.max(50).min(2000);
     let files = collect_files(r, limit);
+    // Live-found: the prune-deleted-files comparison below originally used
+    // this SAME `files` list, which is capped at `limit` (as low as the
+    // caller's max_files, e.g. 500) -- on a repo with more files than the
+    // cap (this repo: ~1500-2000+), a legitimately-live file simply past
+    // the cap's cutoff would be wrongly treated as "not in files" and
+    // pruned, a false-positive deletion. The prune decision needs the FULL
+    // file set regardless of the indexing work-budget cap; only the actual
+    // per-file indexing work stays limit-bounded. PRUNE_ENUMERATION_CAP is
+    // a much higher structural ceiling (not a work budget -- this is a
+    // cheap directory walk, no file reads), just a sanity bound against a
+    // truly pathological tree.
+    const PRUNE_ENUMERATION_CAP: usize = 20000;
+    let full_files = if limit >= PRUNE_ENUMERATION_CAP { files.clone() } else { collect_files(r, PRUNE_ENUMERATION_CAP) };
     {
         let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
@@ -1035,21 +1063,39 @@ pub fn index(root: &str, max_files: usize) -> Value {
         fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, file_mtime, &commit_overview, &records));
     }
 
+    // Live-found: pruning was gated on deferred_files==0 (a fully complete
+    // pass), so on any repo large enough to exceed INDEX_WALL_BUDGET_MS in a
+    // single call (this repo included -- 1500+ files, confirmed via the
+    // codeinsight-index-does-not-prune-deleted-files finding) deferred_files
+    // is essentially ALWAYS > 0, meaning the prune step never ran in
+    // practice: code_chunks accumulated rows for files deleted commits ago
+    // (gm-plugkit/plugkit-wasm-wrapper.js, supervisor.js -- retired and
+    // git-rm'd well before this session, yet still surfaced by
+    // codeinsight_overview.likely_orphaned as if live). Fixed: a file
+    // missing from `seen` is safe to prune UNCONDITIONALLY as long as it is
+    // also absent from the full `files` enumeration (computed up front,
+    // before the wall-budget loop truncates) -- that distinguishes "deferred
+    // this pass, still exists" (present in files, just not yet seen) from
+    // "genuinely gone" (absent from files entirely), so a large repo's
+    // legitimate multi-pass resume behavior is preserved while dead files
+    // are still pruned on the very first pass that notices them, not stuck
+    // behind an unreachable full-completion gate.
+    let files_set: std::collections::HashSet<&str> = full_files.iter().map(|s| s.trim_start_matches("./").trim_start_matches('/')).collect();
     let mut removed_files = 0;
-    if deferred_files == 0 {
-        for (fp, m) in &prior {
-            if !seen.contains(fp) {
-                delete_chunk_keys(&m.chunks);
-                fv_delete(MANIFEST_NS, fp);
-                removed_files += 1;
-            }
+    for (fp, m) in &prior {
+        if !seen.contains(fp) && !files_set.contains(fp.as_str()) {
+            delete_chunk_keys(&m.chunks);
+            fv_delete(MANIFEST_NS, fp);
+            removed_files += 1;
         }
+    }
+    if deferred_files == 0 {
         let digest = digest_from_entries(digest_entries);
         store_digest(&digest);
         let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} removed_files={} skipped_no_embed={} digest={}", indexed, chunked, embedded, reused, reused_files, removed_files, skipped_no_embed, digest);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     } else {
-        let msg = format!("code_index: partial pass (wall budget) files_indexed={} deferred_files={} embedded={} reused={} -- digest withheld, next call resumes", indexed, deferred_files, embedded, reused);
+        let msg = format!("code_index: partial pass (wall budget) files_indexed={} deferred_files={} embedded={} reused={} removed_files={} -- digest withheld, next call resumes", indexed, deferred_files, embedded, reused, removed_files);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
         crate::wasm_dispatch::emit_event("codeinsight_index_partial", json!({
             "files_indexed": indexed,
