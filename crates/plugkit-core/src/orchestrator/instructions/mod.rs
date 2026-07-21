@@ -173,14 +173,40 @@ fn next_phase_hint(phase: &str) -> Option<String> {
         .filter(|to| !to.eq_ignore_ascii_case(&upper))
 }
 
+/// Live-found: a heavy concurrent write burst against .gm/prd.yml (multiple
+/// sessions/subagents dispatching prd-add/prd-resolve at once) can produce a
+/// torn/partial read mid-write -- prd::handle_list's serde_yaml::from_str
+/// then fails to parse, returning code!=0. The OLD code silently converted
+/// ANY non-zero code (read failure, genuine parse failure, or a transient
+/// torn read) into Vec::new() -- indistinguishable from a real empty PRD to
+/// every downstream consumer (prd_pending_count, should_residual_scan, the
+/// instruction response itself), which is how an instruction dispatch was
+/// observed reporting prd_pending_count:0 while the on-disk file genuinely
+/// had 49+ pending rows. A torn read is transient by nature (the concurrent
+/// writer finishes writing within milliseconds), so retry once after a short
+/// sleep before treating the failure as real -- self-corrects the torn-read
+/// case; a GENUINE parse failure (malformed YAML from a real bug, not a
+/// write race) fails the same way twice and is now logged loudly instead of
+/// silently discarded, so it stops masquerading as "PRD is empty."
 fn prd_items_json() -> Vec<serde_json::Value> {
-    let (body, _err, code) = prd::handle_list("");
-    if code != 0 { return Vec::new(); }
-    serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.get("items").cloned())
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
+    for attempt in 0..2 {
+        let (body, err, code) = prd::handle_list("");
+        if code == 0 {
+            if let Some(items) = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("items").cloned())
+                .and_then(|v| v.as_array().cloned())
+            {
+                return items;
+            }
+        }
+        if attempt == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+        ilog(&format!("prd_items_json: read/parse failed twice (torn-read retry exhausted), code={code} err={err} -- treating as UNKNOWN, not empty, this instruction dispatch cannot report a trustworthy PRD count"));
+    }
+    Vec::new()
 }
 
 fn prd_pending_count(items: &[serde_json::Value]) -> usize {
