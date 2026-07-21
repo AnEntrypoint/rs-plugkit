@@ -204,7 +204,25 @@ fn evaluate_gate(g: &GateDef) -> bool {
 /// resolved for VERIFY->CONSOLIDATE). None = every gate on this edge
 /// passed, or the edge has none.
 fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, String, i32)> {
-    let edge = graph.edge_between(from, to)?;
+    let Some(edge) = graph.edge_between(from, to) else {
+        // No declared edge from->to is NOT gate-free -- it is the strictest
+        // possible rejection (no legal path exists at all). An earlier
+        // version used `?` here, which returned None (== "no rejection" ==
+        // allow) on a missing edge -- so `transition {to:"COMPLETE"}` from
+        // ANY phase, including straight out of EXECUTE with 8 PRD rows
+        // still pending, sailed through ungated because no EXECUTE->COMPLETE
+        // edge exists to attach gates to in the first place. Live-witnessed
+        // this exact bypass this session (phase flipped to COMPLETE with
+        // prd_pending_count=8, transition-1784612100001.json).
+        return Some((
+            String::new(),
+            format!(
+                "transition rejected: no edge from `{}` to `{}` in the active FSM graph -- there is no legal direct path between these phases.",
+                from, to
+            ),
+            1,
+        ));
+    };
     for gate_name in &edge.gates {
         let Some(g) = graph.gate(gate_name) else { continue };
         if !evaluate_gate(g) {
@@ -225,7 +243,20 @@ fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, S
 /// appropriate), matching next_recovery's old precedence order.
 pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
     let graph = fsm::graph();
-    let Some(edge) = graph.edge_between(from, to) else { return (vec![], None) };
+    let Some(edge) = graph.edge_between(from, to) else {
+        // Missing edge = no legal path = maximal residual, never an empty
+        // list (empty reads as "nothing blocking" to gates.rs's caller,
+        // which then falls through to ALLOW). Same bypass class as
+        // gate_rejection's fix above: `transition {to:"COMPLETE"}` dispatched
+        // straight from EXECUTE (no EXECUTE->COMPLETE edge exists) hit this
+        // exact path via gates.rs's operation=="complete" branch and reached
+        // real COMPLETE phase with 8 PRD rows still open, live-witnessed
+        // this session (transition-1784612100001.json).
+        return (
+            vec![format!("no edge from `{from}` to `{to}` in the active FSM graph -- no legal direct path between these phases")],
+            Some("instruction".to_string()),
+        );
+    };
     let mut residuals = Vec::new();
     let mut next_dispatch: Option<String> = None;
     for gate_name in &edge.gates {
