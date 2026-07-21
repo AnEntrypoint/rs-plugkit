@@ -19,6 +19,7 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/browser-profile/",
     ".gm/browser-profile-*/",
     ".gm/browser-profiles/",
+    ".gm/browser-chrome-profile-*/",
     ".gm/build-tool-ignores.md",
     ".gm/last-prompt.txt",
     ".gm/hooks/",
