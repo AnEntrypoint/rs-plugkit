@@ -685,8 +685,15 @@ fn codesearch(body: &Value) -> u64 {
             });
             build_hit(&mut corpus, &key, Some(score), fallback)
         }).collect();
+        // vector_hits (the RESPONSE field, distinct from the vector_hits
+        // LOCAL VAR above which is the raw rssearch_vectors "codeinsight"
+        // namespace lookup) inherited the same empty-namespace problem
+        // vector_top10 was already fixed for: report what fusion actually
+        // consumed (vector_top10, already computed with its own fallback
+        // chain) rather than the raw, always-empty namespace query.
+        let vector_hits_response = vector_top10.clone();
         return ok("codesearch", json!({
-            "mode": "fusion", "hits": hits, "commits": commits, "vector_hits": vector_hits,
+            "mode": "fusion", "hits": hits, "commits": commits, "vector_hits": vector_hits_response,
             "vector_top10": vector_top10, "bm25_top10": bm25_top10,
         }));
     }
@@ -703,7 +710,7 @@ fn codesearch(body: &Value) -> u64 {
         return codesearch(&retry);
     }
     ok("codesearch", json!({
-        "mode": "fallback_kv", "hits": hits, "commits": commits, "vector_hits": vector_hits,
+        "mode": "fallback_kv", "hits": hits, "commits": commits, "vector_hits": vector_top10.clone(),
         "vector_top10": vector_top10, "bm25_top10": bm25_top10,
     }))
 }
