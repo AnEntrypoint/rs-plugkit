@@ -1196,7 +1196,58 @@ pub fn overview() -> Value {
         "by_kind": by_kind,
         "largest_files": largest_files,
         "digest": stored_digest(),
+        "likely_orphaned": likely_orphaned_symbols(&db_path, 20),
     })
+}
+
+/// Cheap, text-occurrence-based "likely orphaned" heuristic -- ported from
+/// the mcp-thorns comparison (codesearch-vs-mcp-thorns-parity): a named
+/// symbol (function/method) whose name never appears in any OTHER chunk's
+/// body text anywhere in the indexed corpus is a candidate for dead code.
+/// This is NOT real cross-file static analysis (no import/call-graph
+/// resolution, no scope awareness) -- same class of heuristic mcp-thorns
+/// itself uses (a plain text-occurrence check, not a resolved reference
+/// graph), so false positives exist (a name reused as a common word, a
+/// symbol only referenced via a re-export alias, dynamic dispatch). It is
+/// a fast, cheap SIGNAL for a human/agent to verify with a real codesearch
+/// dispatch before deleting anything -- never an automated deletion trigger.
+fn likely_orphaned_symbols(db_path: &str, limit: usize) -> Value {
+    let candidates = libsql_wasm::query_params(
+        db_path,
+        "SELECT id, path, kind, name, line_start FROM code_chunks \
+         WHERE kind IN ('function_item','function_declaration','method_definition') \
+         AND name != '' AND LENGTH(name) > 3 LIMIT 2000",
+        &[],
+    )
+    .ok()
+    .and_then(|v| v.as_array().cloned())
+    .unwrap_or_default();
+
+    let mut orphaned = Vec::new();
+    for c in &candidates {
+        if orphaned.len() >= limit { break; }
+        let Some(name) = c.get("name").and_then(|v| v.as_str()) else { continue };
+        let Some(id) = c.get("id").and_then(|v| v.as_u64()) else { continue };
+        let id_s = id.to_string();
+        let pat_s = format!("%{}%", name);
+        let count = libsql_wasm::query_params(
+            db_path,
+            "SELECT COUNT(*) AS c FROM code_chunks WHERE id != ?1 AND body LIKE ?2",
+            &[id_s.as_str(), pat_s.as_str()],
+        )
+        .ok()
+        .and_then(|rows| rows.as_array().and_then(|a| a.first().cloned()))
+        .and_then(|row| row.get("c").and_then(|v| v.as_u64()))
+        .unwrap_or(1);
+        if count == 0 {
+            orphaned.push(json!({
+                "path": c.get("path"),
+                "name": name,
+                "line": c.get("line_start"),
+            }));
+        }
+    }
+    Value::Array(orphaned)
 }
 
 pub struct ChunkMeta {
