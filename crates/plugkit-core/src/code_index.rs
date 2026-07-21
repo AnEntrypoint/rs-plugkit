@@ -646,7 +646,36 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
 /// then " N file(s) changed, X insertion(s)(+), Y deletion(s)(-)" (either
 /// insertions or deletions clause can be absent if that count is zero), so
 /// the parse below tolerates both missing clauses.
+// Submodule directory names this repo actually wires (.gitmodules) -- a
+// path under one of these has no history in the PARENT repo's git log
+// (the parent only tracks the submodule's commit-pointer gitlink, not
+// per-file history inside it), so a plain `git log -- <submodule>/<file>`
+// from the parent root always returns empty, silently producing no
+// overview for every indexed file inside a submodule. Live-confirmed: a
+// codesearch hit for agentplug/crates/.../exec_js.rs carried no overview
+// field despite compute_commit_overview running unconditionally on every
+// changed file. Resolving this properly (running git with cwd set to the
+// submodule's own root, path relative to it) needs correct cwd-join
+// semantics host_git does not currently have (passing an explicit cwd
+// bypasses the per-project root join entirely) -- out of this row's scope
+// ("tiny quick overview" for the common case). Skip submodule paths
+// explicitly rather than silently returning a wrong/misleading answer;
+// gm's OWN tracked files (the common case codesearch serves) still get a
+// real overview.
+const SUBMODULE_DIRS: &[&str] = &[
+    "rs-plugkit", "rs-codeinsight", "rs-search",
+    "agentplug", "agentplug-bert", "agentplug-libsql", "agentplug-treesitter",
+];
+
+fn is_submodule_path(fp: &str) -> bool {
+    let first_seg = fp.split('/').next().unwrap_or(fp);
+    SUBMODULE_DIRS.contains(&first_seg)
+}
+
 fn compute_commit_overview(fp: &str) -> Option<String> {
+    if is_submodule_path(fp) {
+        return None;
+    }
     let v = crate::wasm_dispatch::git_call_argv(
         &["log", "-1", "--format=%h\u{0}%s", "--shortstat", "--", fp],
         None,
