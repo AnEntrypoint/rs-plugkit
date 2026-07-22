@@ -21,6 +21,22 @@ pub fn resolve(key: &str, default: &str) -> String {
     default.to_string()
 }
 
+/// Same three-tier resolution as `resolve`, plus a `.gm/exec-spool/.last-gate-fired.json`
+/// marker write -- gate denials and residual messages have no live-readable "which fired
+/// most recently" signal otherwise (unlike phase prose, which next-step.md already tracks
+/// on every `instruction` dispatch). Scoped to `gates/<key>`/`residual/<key>` call sites
+/// only; ordinary phase-prose keys keep calling bare `resolve` since next-step.md already
+/// covers them. Best-effort write (never fails the caller on a write error).
+pub fn resolve_and_mark(key: &str, default: &str) -> String {
+    let text = resolve(key, default);
+    let marker = serde_json::json!({ "key": key, "ts": crate::orchestrator::state::now_ms() });
+    let _ = pkfs::write(
+        ".gm/exec-spool/.last-gate-fired.json",
+        &serde_json::to_string(&marker).unwrap_or_default(),
+    );
+    text
+}
+
 fn read_clean(path: &str) -> Option<String> {
     let raw = pkfs::read_to_string(path)?;
     let text = raw.trim_start_matches('\u{feff}').replace("\r\n", "\n");
