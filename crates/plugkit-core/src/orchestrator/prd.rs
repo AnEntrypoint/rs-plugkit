@@ -82,7 +82,8 @@ pub fn drain_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)>
 }
 
 pub fn status_is_open(status: &str) -> bool {
-    !matches!(status.trim().to_ascii_lowercase().as_str(), "done" | "complete" | "completed")
+    let normalized = status.trim().to_ascii_lowercase();
+    !super::fsm::graph().policy.prd_closed_statuses.iter().any(|s| s.eq_ignore_ascii_case(&normalized))
 }
 
 fn subject_from_fields(item_map: &serde_yaml::Mapping) -> &str {
@@ -405,8 +406,9 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         return (String::new(), "missing PRD item id".to_string(), 1);
     }
     let (id_target, witness, commit_comment) = parse_resolve_target(trimmed);
+    let policy = super::fsm::graph().policy;
     let has_witness = witness.as_ref().map(|w| !w.trim().is_empty()).unwrap_or(false);
-    if !has_witness {
+    if policy.require_witness_evidence && !has_witness {
         let body = serde_json::json!({
             "error": format!("prd-resolve refused: no witness_evidence for {}", id_target),
             "deviation_kind": "prd-resolve-no-witness",
@@ -421,6 +423,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         return (String::new(), format!("{} does not exist", path.display()), 1);
     }
 
+    if policy.reject_duplicate_witness {
     if let Some(w) = witness.as_ref() {
         let trimmed_w = w.trim();
         if trimmed_w.len() >= 24 {
@@ -448,6 +451,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 }
             }
         }
+    }
     }
 
     let outcome = cas::cas_retry_write(&path_s, 5, "prd-resolve", |mut doc: Value| {

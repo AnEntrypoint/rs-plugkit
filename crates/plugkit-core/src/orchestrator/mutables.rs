@@ -125,10 +125,11 @@ pub fn pending_detailed() -> Vec<serde_json::Value> {
         Err(_) => return Vec::new(),
     };
     let mut out = Vec::new();
+    let resolved_statuses = super::fsm::graph().policy.mutables_resolved_statuses;
     if let Some(seq) = doc.as_sequence() {
         for item in seq {
             let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-            if status != "witnessed" && status != "resolved" {
+            if !resolved_statuses.iter().any(|s| s == status) {
                 if let Some(m) = item.as_mapping() {
                     let mut obj = serde_json::Map::new();
                     for (k, v) in m {

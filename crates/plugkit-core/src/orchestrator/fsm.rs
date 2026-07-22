@@ -87,6 +87,14 @@ pub struct Policy {
     pub gate_repeat_escalate_threshold: u64,
     #[serde(default = "default_longgap_threshold_ms")]
     pub longgap_threshold_ms: u64,
+    #[serde(default = "default_require_witness_evidence")]
+    pub require_witness_evidence: bool,
+    #[serde(default = "default_prd_closed_statuses")]
+    pub prd_closed_statuses: Vec<String>,
+    #[serde(default = "default_mutables_resolved_statuses")]
+    pub mutables_resolved_statuses: Vec<String>,
+    #[serde(default = "default_reject_duplicate_witness")]
+    pub reject_duplicate_witness: bool,
 }
 
 fn default_toplevel_doc_allowlist() -> Vec<String> {
@@ -101,6 +109,14 @@ fn default_longgap_exempt_verbs() -> Vec<String> {
 }
 fn default_gate_repeat_escalate_threshold() -> u64 { 3 }
 fn default_longgap_threshold_ms() -> u64 { 300_000 }
+fn default_require_witness_evidence() -> bool { true }
+fn default_prd_closed_statuses() -> Vec<String> {
+    ["done", "complete", "completed"].iter().map(|s| s.to_string()).collect()
+}
+fn default_mutables_resolved_statuses() -> Vec<String> {
+    ["witnessed", "resolved"].iter().map(|s| s.to_string()).collect()
+}
+fn default_reject_duplicate_witness() -> bool { true }
 
 impl Default for Policy {
     fn default() -> Self {
@@ -110,6 +126,10 @@ impl Default for Policy {
             longgap_exempt_verbs: default_longgap_exempt_verbs(),
             gate_repeat_escalate_threshold: default_gate_repeat_escalate_threshold(),
             longgap_threshold_ms: default_longgap_threshold_ms(),
+            require_witness_evidence: default_require_witness_evidence(),
+            prd_closed_statuses: default_prd_closed_statuses(),
+            mutables_resolved_statuses: default_mutables_resolved_statuses(),
+            reject_duplicate_witness: default_reject_duplicate_witness(),
         }
     }
 }
