@@ -71,6 +71,8 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         return (out, err, rc);
     }
     invalidate_residual_marker();
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm_dispatch::emit_event("mutable.added", serde_json::json!({ "id": id }));
     (serde_json::json!({ "added": id }).to_string(), String::new(), 0)
 }
 
@@ -262,6 +264,8 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     );
     let memo_path = memorize::fire(&memo).unwrap_or_default();
 
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm_dispatch::emit_event("mutable.resolved", serde_json::json!({ "id": resolved_id }));
     let payload = serde_json::json!({
         "resolved": resolved_id,
         "memorize_spool": memo_path,

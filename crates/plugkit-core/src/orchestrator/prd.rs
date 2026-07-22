@@ -265,6 +265,8 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     };
     invalidate_residual_marker();
     let key = if upserted { "rescoped" } else { "added" };
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm_dispatch::emit_event("prd.added", serde_json::json!({ "id": id, "rescoped": upserted }));
     (serde_json::json!({ key: id }).to_string(), String::new(), 0)
 }
 
@@ -493,7 +495,11 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         cas::CasOutcome::Write(doc, ())
     });
     match outcome {
-        Ok(()) => (serde_json::json!({ "resolved": id_target, "commit_comment_attached": commit_comment.is_some() }).to_string(), String::new(), 0),
+        Ok(()) => {
+            #[cfg(target_arch = "wasm32")]
+            crate::wasm_dispatch::emit_event("prd.resolved", serde_json::json!({ "id": id_target }));
+            (serde_json::json!({ "resolved": id_target, "commit_comment_attached": commit_comment.is_some() }).to_string(), String::new(), 0)
+        }
         Err((out, err, rc)) => (out, err, rc),
     }
 }

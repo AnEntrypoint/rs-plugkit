@@ -534,5 +534,11 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     });
     let s = payload.to_string();
     ilog(&format!("instruction::handle done out_len={}", s.len()));
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm_dispatch::emit_event("instruction.served", serde_json::json!({
+        "phase": phase,
+        "prd_pending_count": prd_pending,
+        "mutables_pending_count": mutables_pending_count,
+    }));
     (s, String::new(), 0)
 }

@@ -333,6 +333,8 @@ pub fn handle(content: &str) -> (String, String, i32) {
     let skill = next_skill(&target);
     match set_phase_with_session(target.clone(), Some(skill.clone()), session_id) {
         Ok(s) => {
+            #[cfg(target_arch = "wasm32")]
+            crate::wasm_dispatch::emit_event("phase.transitioned", serde_json::json!({ "from": cur_phase.as_str(), "phase": s.phase.as_str() }));
             let query = {
                 let (body, _err, code) = prd::handle_list("");
                 if code == 0 {
