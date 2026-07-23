@@ -9,16 +9,7 @@ use crate::wasm_dispatch::plugin_call;
 
 const TABLE: &str = "git_commit_vectors";
 const INDEX: &str = "git_commit_vectors_vec";
-// A single unaccelerated wasm32 bert embed of subject+diff routinely exceeds
-// 2000ms on its own, so the pre-embed elapsed check below admitted exactly ONE
-// commit per pass and deferred the rest -- live-witnessed as back-to-back
-// `git_commit_vectors_synced deferred=499 embedded=1` then `deferred=498
-// embedded=1` events, a backlog needing ~500 passes to drain while pegging a
-// core. The budget has to exceed the cost of the embeds it means to admit.
 const EMBED_BUDGET_MS: u64 = 30000;
-// Floor on real work per pass, independent of the wall clock: a budget that
-// expires mid-embed must never leave a pass having embedded nothing, or the
-// backlog cannot shrink at all.
 const MIN_EMBEDS_PER_PASS: u32 = 8;
 const DIFF_CHAR_CAP: usize = 4000;
 const LOG_WINDOW: usize = 500;
@@ -29,10 +20,6 @@ fn shared_db_path() -> String {
     crate::code_index::project_db_path(None)
 }
 
-/// Resolved fresh every call (never a `const`) -- the plugin is stateless
-/// and process-wide shared, so `db_name` must be THIS dispatch's real
-/// absolute path (host_cwd_string() underneath), not a value baked in at
-/// compile time. `table`/`index` stay static string literals.
 fn spec(path: &str) -> VecTableSpec<'_> {
     VecTableSpec { db_name: path, table: TABLE, index: INDEX }
 }
@@ -61,7 +48,6 @@ fn read_watermark() -> Option<String> {
 }
 
 fn parse_log_entries(stdout: &str) -> Vec<(String, String)> {
-    // Format: %x00%H%x00%s%x1e  (NUL-separated hash/subject, RS-separated commits)
     let mut out = Vec::new();
     for rec in stdout.split('\u{1e}') {
         let rec = rec.trim_matches(|c| c == '\u{0}' || c == '\n' || c == '\r');
@@ -95,11 +81,6 @@ fn commit_diff_text(hash: &str) -> String {
     }
 }
 
-/// Incrementally embed new commits since the stored watermark, bounded by
-/// EMBED_BUDGET_MS wall-clock so a large backlog defers rather than blocking
-/// the calling dispatch -- mirrors code_index.rs's partial-pass file-indexing
-/// pattern. Also reconciles rows whose hash no longer appears in `git log`
-/// (history rewrite: rebase/squash/force-push) by marking them deleted.
 pub fn sync_incremental() -> Result<Value, String> {
     ensure_schema()?;
     let db_path = shared_db_path();
@@ -111,8 +92,6 @@ pub fn sync_incremental() -> Result<Value, String> {
     let ok = log.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
     let exit_code = log.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     if !ok || exit_code != 0 {
-        // Not a git repo, or git unavailable this cwd -- not an error condition
-        // for the caller, just nothing to index.
         return Ok(json!({ "synced": false, "reason": "git-log-unavailable" }));
     }
     let stdout = log.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
@@ -121,9 +100,6 @@ pub fn sync_incremental() -> Result<Value, String> {
         return Ok(json!({ "synced": true, "embedded": 0, "reason": "empty-history" }));
     }
 
-    // Reconcile: mark rows deleted whose hash is absent from the current log window's hash set.
-    // Bounded to the same window we just fetched -- a rewrite older than LOG_WINDOW commits back
-    // is not reconciled by this pass (acceptable: those hashes are also unlikely to be re-queried).
     let live_hashes: std::collections::HashSet<&str> = entries.iter().map(|(h, _)| h.as_str()).collect();
     if let Ok(rows) = shared_query_params(&format!("SELECT hash FROM {} WHERE deleted=0", TABLE), &[]) {
         if let Some(arr) = rows.as_array() {
@@ -185,12 +161,6 @@ pub fn sync_incremental() -> Result<Value, String> {
         }
         let embedding_sql = format!("vector('{}')", vecns::qlit(&vec));
         let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
-        // Same shadow-index UPDATE hazard as rssearch_vectors::write (libsql's
-        // libsql_vector_idx does not reliably support ON CONFLICT DO UPDATE for
-        // a row with an existing vector-index entry) -- delete first so this is
-        // always a fresh insert. The `present` check above makes this a no-op
-        // in the common case, but a concurrent writer racing between the
-        // present-check and this insert would otherwise hit the same failure.
         let delete_sql = format!("DELETE FROM {} WHERE hash=?1", TABLE);
         let _ = spec(&db_path).exec_params(&delete_sql, &[hash]);
         let sql = format!(
@@ -212,9 +182,6 @@ pub fn sync_incremental() -> Result<Value, String> {
     Ok(json!({ "synced": true, "embedded": embedded, "deferred": deferred, "skipped": skipped }))
 }
 
-/// Top-k commit hashes ranked by cosine similarity of (subject + capped diff)
-/// embedding against the query embedding. Callers must have a fresh
-/// query embedding already (crate::embed::embed_text_json_query).
 pub fn search(query_embedding: &Value, limit: usize) -> Result<Vec<(String, String, f64)>, String> {
     let qvec = query_embedding.as_array()
         .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect::<Vec<f32>>())

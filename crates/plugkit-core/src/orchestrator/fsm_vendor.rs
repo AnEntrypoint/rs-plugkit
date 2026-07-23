@@ -34,33 +34,12 @@ fn write_if_absent_or_forced(path: &str, content: &str, force: bool) -> (bool, &
     (ok, if ok { "written" } else { "write-failed" })
 }
 
-/// Vendors the ENTIRE FSM setup into .gm/instructions/ -- every phase's
-/// prose (the six built-ins), the graph schema (states/edges/gates),
-/// a reference listing of every compiled predicate available to a gate
-/// (generated from transitions::known_predicates(), never hand-duplicated),
-/// and a worked example hook script -- so an agent can understand and
-/// modify the whole FSM from these vendored files alone, without reading
-/// rs-plugkit source. Idempotent: an existing file is left untouched unless
-/// `force:true` is in the request body, so re-running this verb on a
-/// project that has already customized its graph never clobbers that
-/// customization by accident.
 pub fn handle_vendor(content: &str) -> (String, String, i32) {
     let body: Value = serde_json::from_str(content.trim()).unwrap_or(Value::Null);
     let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let mut results: Vec<Value> = Vec::new();
 
-    // Prose keys to vendor come from the ACTIVE graph's own states (each
-    // StateNode carries its prose_key), never a hand-listed array here --
-    // a hardcoded list would silently miss any custom phase a project's
-    // graph already defines, and would drift the moment a new built-in
-    // phase's prose_key changes. "entry" and "browser" are the two
-    // pseudo-phases instructions::get_instruction serves outside the FSM's
-    // own state set BY DESIGN (ENTRY is the pre-PLAN boot prose, BROWSER is
-    // the client-edit-witness prose) -- not real graph nodes, so they are
-    // never IN fsm::graph().states, and are named here as the two fixed
-    // exceptions rather than invented as fake graph nodes just to avoid
-    // this one explicit mention.
     let graph = fsm::graph();
     let mut prose_keys: Vec<String> = graph.states.iter().map(|s| s.prose_key.clone()).collect();
     prose_keys.push("entry".to_string());

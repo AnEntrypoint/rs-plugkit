@@ -5,16 +5,6 @@ use serde_json::{json, Value};
 use crate::orchestrator::yaml_util::{base64_decode, base64_encode};
 use crate::wasm_dispatch::{host_cwd_string, plugin_call};
 
-/// agentplug-libsql is now stateless and shared as ONE process-wide instance
-/// across every concurrently active project -- every call opens the db
-/// fresh, does its one operation, and closes it before returning (see that
-/// plugin's src/db.rs `handle()` doc comment). `open`/`close`/`begin`/
-/// `commit`/`rollback`/`finalize` are accepted-but-inert no-ops on the
-/// plugin side now; there is no persistent connection to remember, so a
-/// bare `name` (formerly a lookup key into a name->connection map) means
-/// nothing anymore. Every call below takes a real, absolute `path` and
-/// forwards it in the JSON body's `path` field -- the plugin defaults to
-/// `:memory:` (silently throwaway) when `path` is absent, so never omit it.
 fn plugin_ok_err(resp: &Value) -> Result<(), String> {
     let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if ok {
@@ -33,15 +23,6 @@ fn plugin_ok_rows(resp: &Value) -> Result<Value, String> {
     }
 }
 
-/// Resolves `<host_cwd>/.gm/<filename>` fresh on every call -- host_cwd is
-/// asked of the host per-dispatch (never cached wasm-side, see
-/// host_cwd_string's own doc comment), since the same wasm instance may be
-/// serving a different project's dispatch on the very next call. Returns
-/// `filename` unchanged if host_cwd is unavailable (e.g. a loader that
-/// hasn't wired the import yet, or `:memory:`/an already-absolute path
-/// passed straight through) rather than fabricating a bad path -- callers
-/// needing a guaranteed-absolute path should check the host_cwd_string()
-/// Option themselves if that distinction matters.
 pub fn absolute_db_path(filename: &str) -> String {
     if filename.is_empty() || filename == ":memory:" || filename.starts_with('/') || (filename.len() > 1 && filename.as_bytes()[1] == b':') {
         return filename.to_string();
@@ -85,13 +66,6 @@ pub fn query_params(path: &str, sql: &str, params: &[&str]) -> Result<Value, Str
     plugin_ok_rows(&resp)
 }
 
-/// begin/commit/rollback are accepted-but-inert on the now-stateless plugin
-/// side (every exec/query call is already its own atomic open-operate-close
-/// cycle) -- kept as no-op-forwarding calls rather than removed outright so
-/// existing call sites (code_index::index()'s batch loop) don't need every
-/// transaction-boundary call site ripped out in the same change; each row
-/// in a batch now commits independently regardless of whether begin/commit
-/// wrap it.
 pub fn begin(path: &str) -> Result<(), String> {
     let resp = plugin_call("libsql", "begin", &json!({ "path": path }));
     plugin_ok_err(&resp)
@@ -105,18 +79,6 @@ pub fn rollback(path: &str) -> Result<(), String> {
     plugin_ok_err(&resp)
 }
 
-/// Prepare/execute_bound/finalize as a cross-call handle sequence no longer
-/// exists plugin-side (a prepared statement handle is inherently
-/// incompatible with per-call open-operate-close statelessness) -- the
-/// plugin collapsed it into a single `prepare_execute` verb that prepares,
-/// binds, steps, and finalizes atomically within one call, same shape as
-/// exec_params. This one-shot wrapper replaces the old two-step
-/// prepare()->PreparedStmt::execute_bound() API; callers doing a
-/// prepare-once/execute-many bulk-insert loop (code_index::index()) now
-/// call this once per row instead of once per loop, paying one
-/// open+prepare+bind+step+finalize per row rather than amortizing prepare
-/// across the loop -- a real, deliberate cost accepted in exchange for zero
-/// persistent state (see agentplug-libsql's src/db.rs handle() doc comment).
 pub fn prepare_execute(path: &str, sql: &str, params: &[&str]) -> Result<(), String> {
     let resp = plugin_call("libsql", "prepare_execute", &json!({ "path": path, "sql": sql, "params": params }));
     plugin_ok_err(&resp)
