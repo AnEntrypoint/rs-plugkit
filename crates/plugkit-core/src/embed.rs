@@ -136,30 +136,7 @@ fn init_ctx() -> Result<EmbedCtx, String> {
             "reason": "host_vec_embed probe failed; loading wasm-side bert model",
         }));
 
-        // gemm's wasm32 SIMD dispatch (gemm_common::get_wasm_simd128()) is
-        // gated by a runtime AtomicBool that defaults FALSE regardless of
-        // whether this binary was compiled with -C target-feature=+simd128
-        // -- the compile flag only makes the simd128 microkernels buildable,
-        // it does not select them at runtime. Without this call every
-        // matmul in candle's BertModel::forward silently falls back to
-        // gemm's scalar path, live-witnessed this session as a ~10-14
-        // second single-chunk embed floor (consistent with the FLOP cost of
-        // scalar BERT-small matmul at realistic wasm32 throughput). Safe to
-        // force-enable unconditionally here: every real host that loads
-        // this wasm module (gm-plugkit's JS wrapper via bun/Node's
-        // WebAssembly.Instance, or agentplug-runner via wasmtime with simd
-        // support) runs on a wasm engine with simd128 support, which has
-        // been a baseline feature of both V8 and wasmtime since ~2021.
         gemm::set_wasm_simd128(true);
-        // Diagnostic: prove the write actually took effect in THIS runtime,
-        // rather than assuming from the fact that the call compiled and
-        // didn't panic -- live-witnessed this session that setting the flag
-        // did not produce the expected embed-speed improvement (still
-        // ~10-27s/chunk post-fix, same order of magnitude as pre-fix), so
-        // the next elimination step is confirming whether the flag itself
-        // reads back true (ruling out a silently-no-op call) before
-        // investigating further upstream (whether gemm's own simd128
-        // microkernel path is reachable at all on this exact wasm engine).
         crate::wasm_dispatch::emit_event("gemm_simd128_flag_check", serde_json::json!({
             "set_to": true,
             "read_back": gemm::get_wasm_simd128(),
@@ -378,27 +355,12 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
     Some(out)
 }
 
-/// Batched sibling of embed_text: tokenizes and forwards every input in
-/// `texts` through the BERT model in ONE model.forward call (batch dimension
-/// = texts.len()) instead of one forward pass per text -- the same tensor
-/// math, just amortized over a real batch, which is where candle's
-/// vectorized matmul actually pays off. Falls back item-by-item (via the
-/// existing embed_text, including its plain-text cache) whenever the batch
-/// path isn't usable: host-delegated mode (no wasm model loaded at all),
-/// model/tokenizer missing, or any tokenize/tensor-build step failing for
-/// the whole batch. Returns None only when the caller should fall back to
-/// its own per-item embed_text loop entirely (mirrors embed_text's None
-/// contract); returns Some(vec) with per-item None entries preserved when
-/// the batch mostly succeeded but individual items were empty/failed.
 pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
     if texts.is_empty() { return Some(Vec::new()); }
     if texts.len() == 1 {
         return Some(vec![embed_text(&texts[0])]);
     }
 
-    // Cache-hit short circuit: if EVERY item is already cached, skip the
-    // model entirely. Partial-cache-hit is handled per-item below via the
-    // uncached-only sub-batch so warm entries never re-run the model.
     let mut out: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
     let mut uncached_idx: Vec<usize> = Vec::new();
     for (i, t) in texts.iter().enumerate() {
@@ -413,10 +375,6 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
     }
     if uncached_idx.is_empty() { return Some(out); }
 
-    // try_host_embed is per-item only (host_vec_embed has no batch entry
-    // point, see mut-host-vec-embed-batch-capability) -- if the host path is
-    // live, use it per-item for the uncached set rather than falling through
-    // to the wasm model, matching embed_text_uncached's own priority order.
     let mut still_uncached: Vec<usize> = Vec::new();
     for &i in &uncached_idx {
         if let Some(v) = try_host_embed(&texts[i]) {
@@ -437,9 +395,6 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
         }
     };
     if c.host_delegated {
-        // host_vec_embed was probed live at init but returned non-EMBED_DIM
-        // for these specific items (already tried above); no wasm model was
-        // loaded in this ctx so there is no batch fallback available either.
         return Some(out);
     }
     let (tokenizer, model) = match (c.tokenizer.as_ref(), c.model.as_ref()) {
@@ -470,15 +425,8 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
         per_item_mask.push(mask);
     }
 
-    // BERT's attention matrix is O(batch_n * heads * max_len^2) per layer --
-    // padding every item in an unbounded-size batch to the batch's own
-    // longest sequence caused a real OOM crash live-witnessed this session
-    // (a ~1.8GB single allocation) once batch_n and max_len were both large
-    // at once. Cap sub-batches by BOTH item count and total padded elements
-    // (batch_n * max_len) so no single model.forward call can allocate past
-    // a bounded ceiling, regardless of how many/how long a file's chunks are.
     const MAX_SUBBATCH_ITEMS: usize = 32;
-    const MAX_SUBBATCH_PADDED_ELEMENTS: usize = 32 * 512; // items * max_len budget
+    const MAX_SUBBATCH_ITEMS_TIMES_MAX_LEN_BUDGET: usize = 32 * 512;
 
     let n = per_item_ids.len();
     let mut start = 0usize;
@@ -488,7 +436,7 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
         while end < n && (end - start) < MAX_SUBBATCH_ITEMS {
             let candidate_max_len = sub_max_len.max(per_item_ids[end].len().max(1));
             let candidate_items = end - start + 1;
-            if candidate_items * candidate_max_len > MAX_SUBBATCH_PADDED_ELEMENTS && candidate_items > 1 {
+            if candidate_items * candidate_max_len > MAX_SUBBATCH_ITEMS_TIMES_MAX_LEN_BUDGET && candidate_items > 1 {
                 break;
             }
             sub_max_len = candidate_max_len;
