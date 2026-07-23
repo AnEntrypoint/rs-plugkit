@@ -76,18 +76,13 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             if let Some(rest) = tok.strip_prefix('@') {
                 let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
                 if !name.is_empty() {
-                    // A plain fire-once latch would permanently silence this event
-                    // after the first hit for the lifetime of the shared gm.wasm
-                    // instance (a single process-wide store serving every
-                    // concurrently-active project) -- a cooldown timestamp instead
-                    // re-arms the event periodically so a recurring condition keeps
-                    // surfacing rather than going permanently dark for every project.
-                    const SIGIL_COOLDOWN_MS: i64 = 5 * 60 * 1000;
-                    static LAST_FIRED_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+                    const SIGIL_IGNORED_EVENT_REARM_COOLDOWN_MS: i64 = 5 * 60 * 1000;
+                    static SIGIL_IGNORED_EVENT_LAST_FIRED_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
                     let now = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
-                    let prev = LAST_FIRED_MS.load(std::sync::atomic::Ordering::Relaxed);
-                    if now.saturating_sub(prev) >= SIGIL_COOLDOWN_MS
-                        && LAST_FIRED_MS.compare_exchange(prev, now, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok()
+                    let prev_fired_ms = SIGIL_IGNORED_EVENT_LAST_FIRED_MS.load(std::sync::atomic::Ordering::Relaxed);
+                    let cooldown_elapsed = now.saturating_sub(prev_fired_ms) >= SIGIL_IGNORED_EVENT_REARM_COOLDOWN_MS;
+                    if cooldown_elapsed
+                        && SIGIL_IGNORED_EVENT_LAST_FIRED_MS.compare_exchange(prev_fired_ms, now, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok()
                     {
                         crate::wasm_dispatch::emit_event("discipline_sigil_ignored", serde_json::json!({
                             "sigil": format!("@{}", name),
@@ -184,18 +179,6 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     (payload.to_string(), String::new(), 0)
 }
 
-// Real back-pressure, not just advisory text: tracks AGENTS.md's byte count
-// across memorize-fire calls THIS session (persisted per-project so it
-// survives across dispatches on the shared gm.wasm instance, never an
-// in-memory static that would bleed across concurrently-active projects)
-// and flags when a session has fired memorize-fire repeatedly without the
-// file ever shrinking -- the exact slow-bloat drift the bidirectional-
-// migration rule names but had no enforced back-pressure for. Warns, never
-// hard-refuses: a session with genuinely nothing eligible to drain this run
-// (no detail-heavy/single-crate entries left to compress) is real, not a
-// violation, so this reports "flat_streak" for visibility rather than
-// denying the memorize-fire dispatch outright -- a hard refuse would block
-// legitimate memorize calls that have nothing to do with AGENTS.md at all.
 const AGENTS_DRAIN_STATE_FILE: &str = ".gm/exec-spool/.agents-drain-state.json";
 const FLAT_STREAK_WARN_THRESHOLD: u32 = 3;
 

@@ -16,22 +16,6 @@ fn plugin_error(resp: &Value, fallback: &str) -> String {
     resp.get("error").and_then(|v| v.as_str()).unwrap_or(fallback).to_string()
 }
 
-/// Three distinct failures used to collapse into the same bare `Value::Null`:
-/// an empty query, a failed bert plugin call, and a response carrying no
-/// `embedding` field. Downstream, `search_with_recency` reports any Null as
-/// "invalid query embedding", which misattributes a failed EMBED to a
-/// malformed QUERY -- the observed `rssearch_vector_hits_failed` event named
-/// the query even though the query was fine and bert was the thing that
-/// failed. Still returns Null (callers treat it as "no vector half available"
-/// and fall back to BM25), but now says which of the three actually happened.
-/// Native replacement for the host_vec_search import, which was a
-/// not_implemented stub in every runtime. Runs the identical libsql
-/// vector_top_k query rssearch_vector_hits already uses successfully, so a
-/// vector search returns real scored hits in-guest instead of round-tripping
-/// to an unimplemented host function. The stub is eliminated at its root: no
-/// host import is needed for vector search at all, since the guest owns the
-/// libsql path. Returns the scored hit array (or an empty array), matching the
-/// shape callers previously unpacked from host_vec_search.
 pub fn vec_search_local(embedding: &Value, namespace: &str, k: u32) -> Value {
     let (hits, _) = rssearch_vector_hits(embedding, namespace, k, false);
     hits
@@ -409,14 +393,6 @@ fn recall(body: &Value) -> u64 {
     }))
 }
 
-// A plain fire-once AtomicBool latch permanently silences the event after the
-// FIRST occurrence for the lifetime of the shared gm.wasm instance -- since
-// this instance is a single process-wide store serving every concurrently-
-// active project (see agentplug-host's is_stateless_shared_plugin), that
-// silences the signal for every project after the first hit, forever, until
-// the daemon process itself restarts. Cooldown timestamps re-arm the event
-// after DIAGNOSTIC_EVENT_COOLDOWN_MS so a genuinely recurring condition keeps
-// surfacing periodically instead of going permanently dark.
 const DIAGNOSTIC_EVENT_COOLDOWN_MS: i64 = 5 * 60 * 1000;
 static RECALL_SCORE_UNAVAILABLE_LAST_FIRED_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 static SIGIL_IGNORED_LAST_FIRED_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
@@ -575,10 +551,6 @@ fn memorize_prune(body: &Value) -> u64 {
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
     let embedding = embed_query(query);
     let (vector_candidates, _) = rssearch_vector_hits(&embedding, namespace, k, true);
-    // Vector search runs the real libsql vector_top_k directly (vec_search_local),
-    // never the former host_vec_search stub, so candidates is always real scored
-    // hits. vector_candidates is the same libsql result, kept as a distinct field
-    // for callers that want it separately.
     let candidates = vec_search_local(&embedding, namespace, k);
     ok("memorize-prune", json!({
         "namespace": namespace,
@@ -629,14 +601,6 @@ fn codesearch(body: &Value) -> u64 {
         a.iter().filter_map(|h| h.get("key").and_then(|x| x.as_str()).map(String::from)).collect()
     }).unwrap_or_default();
     let mut corpus = crate::code_index::FusionCorpus::load();
-    // Code chunk embeddings live in the `code_chunks` table with their own
-    // `code_chunks_vec` index -- they are NEVER mirrored into rssearch_vectors,
-    // whose "codeinsight" namespace the lookup above searches. Measured live:
-    // code_chunks=305 rows while rssearch_vectors WHERE namespace='codeinsight'
-    // =0, so the vector half contributed nothing and every codesearch silently
-    // degraded to BM25-only despite a fully populated vector index. Fall back to
-    // the store that actually holds the chunks, mapping its (path, line_start)
-    // rows onto the fusion ranker's ci-<hash>-<idx> key space.
     let vec_ids: Vec<String> = if vec_ids.is_empty() {
         let vres = crate::code_index::search(query, cand_k as usize, Some(&embedding));
         vres.get("rows")
@@ -655,18 +619,7 @@ fn codesearch(body: &Value) -> u64 {
         vec_ids
     };
     let bm25_ids = corpus.bm25_rank(query, cand_k as usize);
-    // 10 most relevant git hashes, ranked by a diff+commit-message embedding
-    // DB keyed by hash (git_commit_vectors), not the fused file-hit list.
     let commits = crate::code_index::git_commit_rank(query, 10);
-    // Symbol-awareness + git-overview parity fix (mcp-thorns comparison):
-    // mcp-thorns returns real file:line:name(params) symbol locations on
-    // every hit; gm's fusion previously baked path/name/line_start/line_end
-    // into an unparseable "path:ls:le name\n<body>" text blob and only
-    // attached the git commit-overview line to the fused `hits` array, never
-    // to `bm25_top10`/`vector_top10`. Build every hit through one helper so
-    // all three arrays carry the same structured `symbol` object (path,
-    // kind, name, line_start, line_end) and the same `overview` field,
-    // closing the gap uniformly instead of duplicating three ad-hoc shapes.
     let build_hit = |corpus: &mut crate::code_index::FusionCorpus, key: &str, score: Option<f64>, fallback_text: Option<&str>| -> Value {
         let text = corpus.text_for_key(key)
             .or_else(|| fallback_text.map(String::from))
@@ -679,14 +632,6 @@ fn codesearch(body: &Value) -> u64 {
         if let Some(ov) = corpus.overview_for_key(key) { obj.insert("overview".to_string(), json!(ov)); }
         Value::Object(obj)
     };
-    // Separate top-10 vector and top-10 BM25 views so the calling agent can
-    // judge each ranking independently, alongside the existing fused `hits`
-    // (kept for backward compat -- additive fields, nothing removed).
-    // Both `vector_hits` and `vec_hits` come from the rssearch_vectors
-    // "codeinsight" namespace, which holds no code chunks -- so this field
-    // reported an empty vector half even once the code_chunks_vec fallback
-    // above started feeding real ids into fusion. Report what fusion actually
-    // consumed, falling back to the namespace views only when they have rows.
     let vector_top10: Vec<Value> = vector_hits.as_array()
         .filter(|a| !a.is_empty())
         .map(|a| a.iter().take(10).cloned().collect())
@@ -704,12 +649,6 @@ fn codesearch(body: &Value) -> u64 {
             });
             build_hit(&mut corpus, &key, Some(score), fallback)
         }).collect();
-        // vector_hits (the RESPONSE field, distinct from the vector_hits
-        // LOCAL VAR above which is the raw rssearch_vectors "codeinsight"
-        // namespace lookup) inherited the same empty-namespace problem
-        // vector_top10 was already fixed for: report what fusion actually
-        // consumed (vector_top10, already computed with its own fallback
-        // chain) rather than the raw, always-empty namespace query.
         let vector_hits_response = vector_top10.clone();
         return ok("codesearch", json!({
             "mode": "fusion", "hits": hits, "commits": commits, "vector_hits": vector_hits_response,
@@ -734,17 +673,6 @@ fn codesearch(body: &Value) -> u64 {
     }))
 }
 
-// The gm-log outage (dead for two-plus weeks per the 2026-07-22 changelog
-// entry) was invisible because nothing watched the watcher -- gmsniff
-// --watchers works but is pull-only, requiring someone to think to run it.
-// This makes a dead lifecycle-event pipe a same-session `health` finding
-// instead of a fortnight-long silent gap: read the LAST `evt: {json}` line
-// this project's own .gm/exec-spool/.watcher.log holds (the exact format
-// emit_event/host_log write), parse its `ts`, and report how many ms old it
-// is. A missing/unparseable log or a stale last-event age (past a generous
-// threshold, since a genuinely idle project between real dispatches is not
-// itself evidence of a broken pipe) both surface here rather than requiring
-// a separate pull.
 const LIFECYCLE_STALE_WARN_MS: u64 = 30 * 60 * 1000;
 
 fn lifecycle_liveness() -> Value {
@@ -777,11 +705,6 @@ fn health(_body: &Value) -> u64 {
         .into_iter()
         .map(|(sub, verbs)| json!({ "subsystem": sub.as_str(), "verbs": verbs }))
         .collect();
-    // Read from the project's own gm.json rather than ~/.agentplug/plugins/
-    // gm.version: the latter is the authoritative installed tag but lives
-    // outside the wasm sandbox root, so it is not reliably readable here, while
-    // gm.json is in reach and is what the cascade auto-bumps in lockstep with
-    // the published release.
     fn installed_release_tag() -> Value {
         match crate::wasm_dispatch::host_read("gm.json")
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -792,13 +715,6 @@ fn health(_body: &Value) -> u64 {
         }
     }
 
-    // `version` alone was env!("CARGO_PKG_VERSION") -- the plugkit-core CRATE
-    // version -- while gm.version / gm.json plugkitVersion track the RELEASE
-    // TAG that CI auto-bumps. Two different numbers in the same format invite a
-    // false comparison: a health reading of 0.1.923 against an installed 0.1.925
-    // reads as a stale deployment when the wasm is in fact current. Report both,
-    // named for what each actually is, so a "did my fix ship" check compares
-    // like with like.
     ok("health", json!({
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
@@ -937,22 +853,6 @@ fn db_name_from(body: &Value) -> String {
     body.get("db_name").or_else(|| body.get("db")).and_then(|v| v.as_str()).unwrap_or("main").to_string()
 }
 
-/// agentplug-libsql is now stateless and process-wide shared across every
-/// concurrently active project -- open/close are accepted-but-inert
-/// no-ops plugin-side, and every exec/query/serialize/deserialize call is
-/// keyed PURELY off the JSON body's `path` field (defaulting to
-/// `:memory:`, silently throwaway, if absent); the plugin never looks at
-/// `db`. There is no remembered connection to carry a path forward from an
-/// earlier sql_open call to a later sql_exec/sql_query -- every sql_* verb
-/// below now requires (or defaults) an explicit `path` on EVERY call, not
-/// just sql_open. Falls back to this dispatch's own default project db
-/// (crate::code_index::project_db_path(None)) when the caller's body omits
-/// `path` entirely, so an old caller that only ever called sql_open with a
-/// path and expected later calls to inherit it silently gets routed to the
-/// default project db instead of a throwaway :memory: -- a real behavior
-/// change forced by the plugin's statelessness (the old remembered-path
-/// behavior is gone), but strictly safer than the alternative silent
-/// :memory: default.
 fn db_path_from(body: &Value) -> String {
     match body.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
@@ -1020,22 +920,6 @@ fn sql_query(body: &Value) -> u64 {
 }
 
 fn sql_smoke() -> u64 {
-    // libsql is stateless now -- every exec/query is its own open-operate-close
-    // cycle, `open` is an inert no-op, and the plugin reads ONLY `path`
-    // (ignoring the legacy `db` handle entirely). This probe still passed
-    // `{"db": n}` with no path on every call after the first, so each step
-    // silently defaulted to `:memory:` and got a FRESH EMPTY database --
-    // which is why create_table reported success and the very next statement
-    // returned "no such table: memos". Under stateless semantics `:memory:`
-    // can never persist across calls, so the probe needs a real file path
-    // threaded through every step.
-    // The path must be ABSOLUTE. libsql's only WASI preopen is the drive root
-    // mapped to "/" (there is no "." preopen and WASI has no cwd), so a
-    // relative path is rooted at the filesystem root instead of the project --
-    // `.gm/x.db` becomes `C:\.gm\x.db`, which does not exist, and every
-    // statement fails `sqlite3_open_v2 rc=14 unable to open database file`
-    // while the identical statement on an absolute path succeeds. Resolving it
-    // here is exactly what code_index does via libsql_wasm::absolute_db_path.
     let owned_path = crate::libsql_wasm::absolute_db_path(".sql-smoke.db");
     let path = owned_path.as_str();
     let mut log: Vec<Value> = Vec::new();
@@ -1054,11 +938,6 @@ fn sql_smoke() -> u64 {
     let _ = call_plugin("libsql", "close", &json!({ "path": path }));
     let version_resp = call_plugin("libsql", "version", &json!({}));
     let libsql_version = version_resp.get("version").cloned().unwrap_or(Value::Null);
-    // `ok` was hardcoded true, so the designated health probe for the whole sql
-    // subsystem could never fail -- it reported ok:true while its own steps
-    // returned "exec rc=1 msg=no such table: memos", which read as "libsql is
-    // broken" and cost a full investigation to disprove against a database that
-    // was in fact healthy. A probe that always passes is worse than no probe.
     let failures: Vec<Value> = log.iter()
         .filter(|s| s.get("result").map(|r| !r.is_null()).unwrap_or(false))
         .cloned()
@@ -1114,16 +993,11 @@ fn codeinsight_index(body: &Value) -> u64 {
     pack(crate::code_index::index(root, max_files).to_string())
 }
 
-/// Extract the working directory for a git verb: `cwd` if present, else `repo`.
-/// Every git handler accepts either key interchangeably.
 fn body_cwd(body: &Value) -> Option<&str> {
     body.get("cwd").and_then(|v| v.as_str())
         .or_else(|| body.get("repo").and_then(|v| v.as_str()))
 }
 
-/// Run `git <argv>` in `cwd`, and on non-zero exit return the packed `err(verb, stderr)`;
-/// on success return `Ok(result_value)` so the caller can shape its own ok-payload.
-/// `fallback` is the error message used when git wrote nothing to stderr.
 fn run_git_checked(argv: &[&str], cwd: Option<&str>, verb: &str, fallback: &str) -> Result<Value, u64> {
     let r = git_call_argv(argv, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -1193,20 +1067,6 @@ fn git_push(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let explicit_branch = body.get("branch").and_then(|v| v.as_str()).map(String::from);
     let current_branch = exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD").trim().to_string();
-    // `git rev-parse --abbrev-ref HEAD` literally returns the string "HEAD"
-    // when the checkout is in detached-HEAD state -- the normal, default
-    // state for every git submodule (this repo's own agentplug/rs-plugkit/
-    // rs-codeinsight/rs-search/agentplug-bert/agentplug-libsql/
-    // agentplug-treesitter submodules all live detached-at-pin). Falling
-    // back to that literal "HEAD" string as the push target (rather than
-    // resolving it to the real intended branch) previously produced a real
-    // git error -- "not a full refname" -- on every no-explicit-branch
-    // git_push/git_finalize dispatch against a detached submodule,
-    // live-reproduced this session. The guard below already correctly
-    // exempted "HEAD" from the wrong-branch denial (detached is not a
-    // mistake), it just never resolved the fallback -- this repo's own
-    // direct-push-to-main-always discipline (AGENTS.md) makes "main" the
-    // correct default resolution for exactly this case.
     let branch = explicit_branch.clone().unwrap_or_else(|| {
         if current_branch == "HEAD" { "main".to_string() } else { current_branch.clone() }
     });
@@ -1290,10 +1150,6 @@ fn git_push(body: &Value) -> u64 {
             "next_dispatch": "instruction",
         }).to_string());
     }
-    // Belt-and-suspenders: exit_code==0 already confirms success, but verify
-    // the push actually landed the commit HEAD pointed at before this call
-    // -- the exact false-positive class this fix closes never reoccurs even
-    // if some future git wrapper again returns a misleading exit_code.
     ok("git_push", json!({
         "branch": branch,
         "repo": repo,
@@ -1608,15 +1464,6 @@ fn git_porcelain_in(repo: Option<&str>) -> String {
     super::host_abi::porcelain_or_dirty(git_call("status --porcelain", repo))
 }
 
-/// Returns (combined stdout+stderr text, whether the push actually
-/// succeeded per exit_code). A prior version of this function discarded
-/// exit_code entirely and let push_rejected()'s substring match on the
-/// combined text be the ONLY success signal -- any git push failure whose
-/// wording didn't match one of the four known-rejection phrases (a network
-/// blip, auth timeout, or any git version's differently-worded rejection)
-/// was silently reported as success with the commit never having reached
-/// origin. exit_code is the actual, unambiguous signal; string matching is
-/// now only used to decide whether a rejection is rebase-retryable.
 fn exec_git_push_in(repo: Option<&str>, branch: &str) -> (String, bool) {
     let v = git_call(&format!("push origin HEAD:{}", branch), repo);
     let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("");

@@ -2,19 +2,6 @@ use serde::{Deserialize, Serialize};
 use super::gm_dir;
 use crate::pkfs;
 
-/// A phase name is a dynamic identifier, not a fixed Rust enum -- a project's
-/// .gm/instructions/fsm/states.yml graph (see orchestrator::fsm) can define
-/// phases beyond the six built-in ones (PLAN/EXECUTE/EMIT/VERIFY/CONSOLIDATE/
-/// COMPLETE), e.g. inserting a custom REVIEW phase between EMIT and VERIFY,
-/// with no Rust rebuild. Always stored/compared uppercase (parse() enforces
-/// this at every construction site) so "plan"/"Plan"/"PLAN" from a caller's
-/// JSON body are all the same phase. The six built-ins stay as associated
-/// fn constructors (Phase::plan(), not a match arm) purely so existing call
-/// sites read the same as before migrating off the old enum variants -- they
-/// produce ordinary Phase values, not a distinguished case the type system
-/// tracks specially. Whether a given phase name is actually LEGAL (has a
-/// registered node in the active graph) is the fsm module's job, checked at
-/// transition time against the loaded graph, never encoded in this type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Phase(String);
@@ -31,12 +18,6 @@ impl Phase {
         &self.0
     }
 
-    /// Always succeeds (unlike the old enum's Option-returning parse) --
-    /// any non-empty string is a syntactically valid phase name now; a
-    /// custom-graph project can name a phase anything. Empty/whitespace-only
-    /// input still returns None since it can never be a meaningful phase
-    /// identifier. Whether the resulting name has a corresponding node in
-    /// the ACTIVE graph is a separate, later check (fsm::graph().has_state).
     pub fn parse(s: &str) -> Option<Phase> {
         let trimmed = s.trim();
         if trimmed.is_empty() {

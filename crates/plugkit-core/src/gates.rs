@@ -180,18 +180,6 @@ fn classify_operation(verb: &str, body: &Value) -> &'static str {
     "verb"
 }
 
-// A blockedBy:external exemption used to let such rows pass CONSOLIDATE on the
-// premise that "the gm-side work is done, only an outside factor remains." That
-// premise is retired: everything is fixable, so an apparent external blocker is
-// a row to build past (drive the crashing tool's protocol directly, spawn your
-// own instance, open the cross-repo change), not a resting state that closes a
-// turn. The exemption was the escape hatch that let "external" stand in for a
-// completed row; removing it means an open row -- external annotation or not --
-// blocks CONSOLIDATE until it is genuinely resolved with a real witnessed fix.
-// The canonical "external" case (the playwriter browser crash) was itself fixed
-// by driving Chrome's CDP endpoint directly, proving these blockers are
-// reachable, not terminal.
-
 fn is_unsolicited_toplevel_doc(rel: &str) -> bool {
     let norm = rel.replace('\\', "/");
     if norm.contains('/') { return false; }
@@ -339,14 +327,6 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    // consolidate/complete gate DECISIONS are graph-driven (fsm.rs /
-    // transitions::gate_residuals) per fsm-framework-gate-logic-externalized
-    // -- a project's .gm/instructions/fsm/graph.json edit changes real gate
-    // behavior. This block stays only as the ADAPTER: classify which edge is
-    // being taken, call the graph, and translate its residuals into the
-    // existing GateVerdict shape (repeat-count escalation, log_deviation,
-    // next_dispatch) so every caller-visible behavior (messages, stuck-loop
-    // escalation, deviation events) is unchanged from before this migration.
     let operation = classify_operation(verb, body);
 
     if operation == "consolidate" || operation == "complete" {

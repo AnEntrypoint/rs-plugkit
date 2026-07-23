@@ -79,17 +79,6 @@ fn resolve_project_root_with_retry() -> PathBuf {
     );
 }
 
-/// Resolved fresh on EVERY call, never cached -- a cached OnceLock made one
-/// gm.wasm instance permanently bound to whichever project root it first
-/// resolved, which is fine for one instance per project but breaks the
-/// moment a single shared instance serves multiple projects (a real
-/// architecture this repo now runs: agentplug-runner's daemon shares one
-/// bert/treesitter/libsql instance process-wide, and gm.wasm is a planned
-/// future addition to that shared set). The `git rev-parse` call itself
-/// routes through `host_git` (see git_common_dir_project_root_once above),
-/// which the host resolves against `caller.data().cwd` -- correct for
-/// whichever project's Store this specific dispatch is running under,
-/// however many projects share the underlying wasm Instance.
 pub fn gm_dir() -> PathBuf {
     resolve_project_root_with_retry().join(".gm")
 }

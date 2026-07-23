@@ -15,14 +15,7 @@ extern "C" {
     fn host_plugin_call(plugin_ptr: *const u8, plugin_len: u32, verb_ptr: *const u8, verb_len: u32, body_ptr: *const u8, body_len: u32) -> u64;
 }
 
-/// Dispatches one call to an out-of-process plugin (libsql/bert/treesitter)
-/// via the host_plugin_call import, returning the raw JSON response --
-/// {"ok":true,...} or {"ok":false,"error":"..."}. Every libsql_wasm::*,
-/// crate::embed::*, and tree_sitter::* call this file used to make
-/// in-process now routes through here instead; callers below unwrap this
-/// into the same Result<T, String>/Option<T> shapes the old direct calls
-/// returned, so nothing outside this file needs to change.
-fn call_plugin(plugin: &str, verb: &str, body: &Value) -> Value {
+fn call_out_of_process_plugin(plugin: &str, verb: &str, body: &Value) -> Value {
     let body_s = body.to_string();
     let packed = unsafe {
         host_plugin_call(
@@ -38,14 +31,6 @@ fn plugin_ok(resp: &Value) -> bool {
     resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
-// This file used to define its OWN private `mod libsql_wasm { ... }` here,
-// a second, independent, drifted-stale copy of crate::libsql_wasm (the real
-// crate-level module in libsql_wasm.rs) -- it shadowed the crate module
-// since this file never `use crate::libsql_wasm;`'d, so every bare
-// `libsql_wasm::` call below resolved to this local copy, not the shared
-// one pipeline.rs used. Deleted in favor of `use crate::libsql_wasm;`
-// (below) so there is exactly one implementation of the now-stateless,
-// absolute-path-based libsql wrapper, matching pipeline.rs.
 use crate::libsql_wasm;
 
 fn fv_put(ns: &str, key: &str, val: &str) -> bool {
@@ -107,19 +92,6 @@ pub fn clear_codeinsight_full() -> u32 {
             }
         }
     }
-    // Live-found: this function never touched the REAL symbol-storage table
-    // (code_chunks, the SQL table codesearch/overview actually query) --
-    // only the codeinsight/codeinsight-vec/codeinsight-manifest KV
-    // namespaces. So an explicit rebuild:true dispatch cleared the manifest
-    // tracking (prior = load_manifests() came back empty) but left
-    // code_chunks' rows for long-deleted files completely untouched --
-    // and because `prior` was empty, the file-deletion-prune loop in
-    // index() (which iterates `prior`) had nothing to compare against
-    // either, so those stale rows survived every subsequent rebuild
-    // indefinitely. Confirmed live: codeinsight_overview.likely_orphaned
-    // kept returning gm-plugkit/supervisor.js + wrapper/*.js entries
-    // (files git-rm'd in commits b03333811/68d3c1d93, well before this
-    // session) across multiple explicit rebuild:true dispatches.
     let db_path = project_db_path(None);
     let _ = libsql_wasm::exec(&db_path, "DELETE FROM code_chunks");
     cleared
@@ -194,105 +166,63 @@ const CHUNK_NODE_TYPES: &[&str] = &[
     "section",
 ];
 
-// Directory-name ignore list -- checked by exact path-segment match, applied
-// BEFORE descending (walk_posix) or BEFORE the flat-list filter
-// (collect_files), so an ignored directory's contents are never even listed
-// via host_fs_readdir, not merely filtered out after the fact. Modeled on
-// mcp-thorns' .thornsignore breadth (c:\dev\mcp-thorns) -- every major
-// language/framework/tool/IDE/cache ecosystem gets its build-artifact and
-// dependency directories skipped, since a codesearch index has zero value
-// from indexing vendored/generated/cached content and every directory
-// skipped here is a host_fs_readdir call (and everything under it) never
-// made.
 const SKIP_DIRS: &[&str] = &[
-    // VCS
     ".git", ".svn", ".hg", ".bzr", "CVS", ".gm",
-    // Node / JS / TS
     "node_modules", ".npm", ".yarn", ".pnp", ".next", ".nuxt", "dist", "out",
     "build", ".cache", ".parcel-cache", ".vite", ".turbo", ".nx", ".rush",
     ".lerna", ".pnpm-store", ".docusaurus", ".vuepress",
-    // Python
     "__pycache__", ".pytest_cache", ".mypy_cache", ".hypothesis", ".pyre",
     ".pytype", "env", "venv", "ENV", ".venv", ".tox", "htmlcov", "site-packages",
-    // Rust
     "target",
-    // Go
     "vendor",
-    // Java / JVM
     ".gradle", ".mvn", "bin", "obj",
-    // Ruby
     ".bundle",
-    // Swift / Xcode
     "Pods", "DerivedData",
-    // Cloud / infra
     ".terraform", ".serverless",
-    // Docker
     ".docker",
-    // Caches / AI-agent tool state
     ".llamaindex", ".chroma", ".vectorstore", ".embeddings", ".langchain",
     "embeddings", "vector-db", "faiss-index", "chromadb",
     ".claude", ".wfgy", ".kilo", ".agents", ".code-search",
     ".plugkit-browser-profile-default", ".plugkit-agent-worktree",
     ".test-chrome-profile",
-    // Editors / IDEs
     ".vscode", ".idea", ".vs", ".sublime-text", ".cursor", ".windsurf",
     ".zed", ".helix",
-    // Test artifacts
     "coverage", ".nyc_output", "test-results", "playwright-report",
     ".plugkit-browser-profile",
-    // Build/doc output that mirrors source, not source itself
     "_site", "public", "static", "site", "output", "builds", "artifacts",
     "compiled", "generated", "gen",
-    // Mobile
     "Carthage", "fastlane",
-    // ML experiment tracking / model weight+vocab dumps
     "mlruns", "wandb", "weights",
-    // User-home tool caches (relevant when a repo root sits under $HOME)
     ".cargo", ".rustup", ".rbenv", ".rvm", ".nvm", ".pyenv", ".conda",
     ".m2", ".sbt", ".ivy2", ".gem",
 ];
 
-// Filename SUFFIX ignore list -- files whose name ends with one of these are
-// skipped regardless of directory, checked before host_read (the expensive
-// step) ever fires. Lock files and minified/generated bundles carry zero
-// codesearch value and are often large enough to meaningfully slow a walk.
 const SKIP_FILE_SUFFIXES: &[&str] = &[
     ".min.js", ".min.css", ".bundle.js", ".chunk.js", ".map",
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
     "bun.lock", "Cargo.lock", "composer.lock", "Gemfile.lock", "poetry.lock",
     "Pipfile.lock", "go.sum", "uv.lock",
-    // AI-agent-tool generated state files (not source)
     ".codeinsight", ".codeinsight.digest", ".perf-baseline.json",
     ".rs-exec.lock",
-    // 3D models / game-engine assets (binary, not source)
     ".glb", ".gltf", ".vrm", ".fbx", ".blend", ".blend1", ".usdz", ".hf",
     ".uasset", ".umap",
-    // Compiled binaries
     ".wasm", ".exe", ".dll", ".dylib", ".so", ".o", ".obj", ".a", ".lib",
     ".pdb", ".class", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa",
     ".hex", ".elf", ".uf2", ".dfu",
-    // Images / media / fonts / archives / office docs (binary, not source)
     ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp", ".tiff",
     ".pdf", ".mov", ".mp4", ".avi", ".flv", ".mkv", ".webm", ".mp3",
     ".m4a", ".wav", ".flac", ".ogg", ".woff", ".woff2", ".ttf", ".otf",
     ".eot", ".zip", ".tar", ".tar.gz", ".tgz", ".rar", ".7z", ".iso",
     ".bz2", ".xz", ".lz4", ".zst", ".cab", ".deb", ".rpm", ".dmg", ".msi",
     ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-    // Design tool binaries
     ".psd", ".ai", ".sketch", ".aep",
-    // Data science / ML
     ".pkl", ".pickle", ".h5", ".hdf5", ".parquet", ".npy", ".npz",
     ".safetensors", ".ckpt", ".pt", ".pth", ".onnx", ".gguf",
-    // ML tokenizer/vocab dumps -- large data files, not source, even though
-    // they're JSON/text and would otherwise pass a binary-content check
     "tokenizer.json", "vocab.json", "vocab.txt", "merges.txt",
     "-tokenizer.json", "-vocab.json",
-    // Crash/debug dumps
     ".stackdump", ".dmp", ".core",
-    // Secrets / certificates (leak-prevention, independent of relevance)
     ".key", ".pem", ".p12", ".pfx", ".p8", ".crt", ".cer", ".der",
     "credentials.json", "secrets.yaml", "secrets.yml",
-    // Database
     ".db", ".sqlite", ".sqlite3",
 ];
 
@@ -314,15 +244,6 @@ pub fn ensure_schema_at(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Bare filename only, NOT what gets passed to the plugin -- the plugin is
-/// now a stateless process-wide instance shared across every concurrently
-/// active project, so a bare relative filename ("gm.db") is no longer a
-/// safe identifier: two different projects both resolving to "gm.db" would
-/// silently collide/share the SAME file if the plugin ever resolved
-/// relative paths against its own process cwd rather than the calling
-/// project's. `project_db_path` (below) is what callers actually use --
-/// it resolves this filename against the CURRENT dispatch's project root
-/// via host_cwd_string(), fresh every call.
 fn project_db_filename(project_path: Option<&str>) -> String {
     match project_path {
         Some(p) if !p.is_empty() => format!("ext-{:x}.db", crc32(p)),
@@ -330,14 +251,6 @@ fn project_db_filename(project_path: Option<&str>) -> String {
     }
 }
 
-/// Absolute `<host_cwd>/.gm/<filename>` path -- the only thing the
-/// now-stateless shared libsql plugin actually uses to identify a db.
-/// project_path=None resolves against THIS call's own project root
-/// (host_cwd_string(), fresh every dispatch); Some(p) namespaces an
-/// "external" project's db by a crc32-hash filename but still resolves the
-/// directory against the CURRENT host_cwd, matching pre-existing
-/// project_db_name's "gm_ext_<hash>" naming intent for a project-scoped
-/// but locally-rooted extra db.
 pub(crate) fn project_db_path(project_path: Option<&str>) -> String {
     libsql_wasm::absolute_db_path(&project_db_filename(project_path))
 }
@@ -406,11 +319,6 @@ fn gitignore_excludes(gi: &Option<ignore::gitignore::Gitignore>, rel_path: &str,
     }
 }
 
-// Any path segment starting with "." is tool/editor/VCS/CI/agent-tooling
-// metadata by convention, never indexable source -- unconditional, same rule
-// as gitoutput's blanket ".*" default. Applied alongside the named SKIP_DIRS
-// list (which stays, since it also matches non-dot-prefixed junk dirs like
-// "node_modules"/"build"/"vendor").
 fn is_hidden_segment(seg: &str) -> bool {
     seg.starts_with('.') && seg != "." && seg != ".."
 }
@@ -457,17 +365,8 @@ fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option
     }
 }
 
-/// Parses `source` via the treesitter plugin's `parse` verb, which walks its
-/// own in-process tree_sitter::Tree (a live Tree/Node can't cross the
-/// wasm-to-wasm boundary) and returns a flat JSON node list -- kind,
-/// start_byte/end_byte, start_row/end_row, and a "name" field already
-/// resolved server-side via child_by_field_name("name") (also something only
-/// reachable while the tree is still live on the plugin side). code_index.rs
-/// keeps the CHUNK_NODE_TYPES filter as its own application-level policy,
-/// same as the old in-process walk did, just applied to the returned list
-/// instead of to a live Node stack.
 fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String, String, usize, usize, String)> {
-    let resp = call_plugin("treesitter", "parse", &json!({ "lang": lang_name, "source": source }));
+    let resp = call_out_of_process_plugin("treesitter", "parse", &json!({ "lang": lang_name, "source": source }));
     if !plugin_ok(&resp) { return Vec::new(); }
     let nodes = match resp.get("nodes").and_then(|v| v.as_array()) {
         Some(n) => n,
@@ -490,18 +389,6 @@ fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String, St
     out
 }
 
-// A single tree-sitter AST node (function/class/etc) whose body exceeds
-// truncate_body's 8192-char storage cap previously had its tail silently
-// dropped -- the embedding, the stored body, and the search-result snippet
-// all only ever saw the first 8192 chars, so a long function's tail was
-// never searchable and never shown, unlike codebasesearch's documented
-// "Smart chunking: Files >1000 lines auto-split into overlapping chunks
-// (200-line overlap)" behavior for large content. Split an oversized node's
-// body into overlapping sub-chunks here (BEFORE truncate_body ever runs, so
-// each sub-chunk individually stays under the cap) rather than at the
-// per-file overlap point codebasesearch uses -- a single pathological
-// function is exactly the case a whole-file split wouldn't catch, since
-// most of the file's other AST nodes are already comfortably small.
 const OVERSIZED_CHUNK_SPLIT_THRESHOLD: usize = 8192;
 const OVERSIZED_CHUNK_OVERLAP: usize = 800;
 
@@ -539,20 +426,11 @@ fn split_oversized_chunk(
 }
 
 fn embed_text(text: &str) -> Option<Vec<f32>> {
-    let resp = call_plugin("bert", "embed", &json!({ "text": text }));
+    let resp = call_out_of_process_plugin("bert", "embed", &json!({ "text": text }));
     if !plugin_ok(&resp) { return None; }
     resp.get("embedding").and_then(json_to_f32_vec)
 }
 
-// BGE's query-prefix convention -- asymmetric embedding models score
-// higher when the query side of a query/passage pair carries this prefix
-// and the passage side doesn't. This is plugkit-side pre-processing around
-// the plain "bert: embed" verb, not something the bert plugin itself needs
-// to know about. The constant itself is shared with crate::embed's own
-// query-embedding path (single source of truth for the BGE prefix
-// convention); this file's own embed_text_json_query wrapper stays local
-// since it targets a different embed_text (this file's out-of-process
-// call_plugin("bert", "embed", ...) vs embed.rs's in-process candle call).
 use crate::embed::BGE_QUERY_PREFIX;
 
 fn embed_text_json_query(query_text: &str) -> Option<Value> {
@@ -575,14 +453,6 @@ fn json_to_f32_vec(v: &Value) -> Option<Vec<f32>> {
 }
 
 const MANIFEST_NS: &str = "codeinsight-manifest";
-// v5 adds commit_overview (short sha + subject + shortstat diffstat for the
-// file's most recent touching commit, computed once per content-change via
-// a single `git log -1 --format=... --shortstat -- <path>` call and cached
-// on the manifest so unchanged files never re-pay the git subprocess cost).
-// v4 added mtime_ms, enabling a stat-only skip before any content read/hash
-// for the common unchanged-file case. Manifests failing the version check
-// below are purged (one-time re-index of the whole repo, same cost as any
-// other manifest-schema migration this codebase already does).
 const MANIFEST_VERSION: u64 = 5;
 
 #[derive(Clone)]
@@ -635,33 +505,6 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     Some((fp, FileManifest { hash, mtime_ms, commit_overview, chunks }))
 }
 
-/// Computes the tiny per-file "most relevant commit" overview: short sha,
-/// commit subject, and a one-line diffstat (files touched, +N-M lines) for
-/// the file's most recent touching commit. One `git log -1 -- <path>` call,
-/// only paid when the file's content actually changed this pass (the
-/// stat-only fast path and the hash-match reuse path both carry the prior
-/// manifest's cached value forward instead of recomputing) -- cheap within
-/// the existing mtime-gated indexing loop, never a full git-log scan.
-/// `--shortstat` on a single-commit `git log -1` emits one extra blank line
-/// then " N file(s) changed, X insertion(s)(+), Y deletion(s)(-)" (either
-/// insertions or deletions clause can be absent if that count is zero), so
-/// the parse below tolerates both missing clauses.
-// Submodule directory names this repo actually wires (.gitmodules) -- a
-// path under one of these has no history in the PARENT repo's git log
-// (the parent only tracks the submodule's commit-pointer gitlink, not
-// per-file history inside it), so a plain `git log -- <submodule>/<file>`
-// from the parent root always returns empty, silently producing no
-// overview for every indexed file inside a submodule. Live-confirmed: a
-// codesearch hit for agentplug/crates/.../exec_js.rs carried no overview
-// field despite compute_commit_overview running unconditionally on every
-// changed file. Resolving this properly (running git with cwd set to the
-// submodule's own root, path relative to it) needs correct cwd-join
-// semantics host_git does not currently have (passing an explicit cwd
-// bypasses the per-project root join entirely) -- out of this row's scope
-// ("tiny quick overview" for the common case). Skip submodule paths
-// explicitly rather than silently returning a wrong/misleading answer;
-// gm's OWN tracked files (the common case codesearch serves) still get a
-// real overview.
 const SUBMODULE_DIRS: &[&str] = &[
     "rs-plugkit", "rs-codeinsight", "rs-search",
     "agentplug", "agentplug-bert", "agentplug-libsql", "agentplug-treesitter",
@@ -784,37 +627,12 @@ fn truncate_body(body: &str) -> &str {
     &body[..e]
 }
 
-// Embed input gets its OWN, much smaller cap than the DB-stored body
-// snippet (truncate_body's 8192 chars is sized for human-readable search
-// result context, not for embedding cost). Live-witnessed this session via
-// embed_text_step_timing instrumentation: an 8192-char/512-token chunk
-// costs ~7.2s in model.forward ALONE (tokenize/tensor_build near-zero),
-// confirmed NOT a cold-start artifact -- BERT's attention cost is
-// genuinely dominant at the full MAX_TOKENS ceiling regardless of SIMD
-// or warm-model state. ~1200 chars keeps most real code/prose chunks
-// around 200-300 wordpiece tokens (roughly 4-6 chars/token for dense
-// code, English prose runs closer to 4-5), comfortably under the
-// quadratic-cost region of self-attention while still capturing a
-// function's essential signature+body opening for semantic matching --
-// full body content remains searchable via BM25 (which reads the
-// UNtruncated DB body column) and remains fully visible in search
-// result snippets (write_chunk still uses the original 8192-char
-// truncate_body for storage), so this only affects what the embedding
-// vector itself is computed over, not what a human/BM25 sees.
 fn truncate_for_embed(body: &str) -> &str {
     let mut e = body.len().min(1200);
     while e > 0 && !body.is_char_boundary(e) { e -= 1; }
     &body[..e]
 }
 
-/// Writes one chunk row via exec_params -- the now-stateless libsql plugin
-/// does its own open-prepare-bind-step-finalize-close cycle per call
-/// regardless (see agentplug-libsql's src/db.rs handle() doc comment: the
-/// old prepare-once/execute_bound-many handle sequence no longer exists
-/// plugin-side), so there is no batching benefit left to a separate
-/// prepared-statement path -- every row pays the same per-call cost either
-/// way. `db_path` is the absolute path resolved once by the caller
-/// (index()'s own db_path local), forwarded on every row.
 fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: &str) {
     if libsql_ok {
         let embedding_lit = vec_to_json_literal(&c.emb);
@@ -824,15 +642,6 @@ fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: 
         let params: [&str; 7] = [fp, &c.kind, &c.name, &ls, &le, body_trunc, &embedding_lit];
         let _ = libsql_wasm::exec_params(db_path, INSERT_CHUNK_SQL, &params);
     }
-    // Namespace "codeinsight" (NOT "codeinsight-vec") -- host_vec_search's
-    // fusion candidate lookup in codesearch() queries exactly this namespace
-    // (wasm_dispatch.rs q_json.namespace="codeinsight"); writing to
-    // "codeinsight-vec" left that fusion input structurally always empty,
-    // silently dropping the KV-vector-search signal from every fused
-    // codesearch result (see fix-codeinsight-vec-namespace-mismatch-bug).
-    // clear_codeinsight()/delete_chunk_keys already scrub both namespace
-    // names defensively, so this write-side rename is safe against stale
-    // "codeinsight-vec" rows left by a pre-fix index.
     let emb_json = serde_json::json!({ "embedding": c.emb }).to_string();
     fv_put("codeinsight", &c.key, &emb_json);
 }
@@ -846,9 +655,6 @@ fn delete_chunk_keys(chunks: &[ChunkRecord]) {
 
 pub fn index(root: &str, max_files: usize) -> Value {
     let db_path = project_db_path(None);
-    // `.is_ok()` discarded the reason, leaving an intermittent libsql failure
-    // visible only as a bare `libsql_ok=false` in the log -- with the digest
-    // silently unwritten and every chunk read back empty as the only symptoms.
     let libsql_err = ensure_schema_at(&db_path).err().map(|e| e.to_string());
     let libsql_ok = libsql_err.is_none();
     if let Some(e) = &libsql_err {
@@ -868,32 +674,12 @@ pub fn index(root: &str, max_files: usize) -> Value {
     let r = if root.is_empty() { "/" } else { root };
     let limit = max_files.max(50).min(2000);
     let files = collect_files(r, limit);
-    // Live-found: the prune-deleted-files comparison below originally used
-    // this SAME `files` list, which is capped at `limit` (as low as the
-    // caller's max_files, e.g. 500) -- on a repo with more files than the
-    // cap (this repo: ~1500-2000+), a legitimately-live file simply past
-    // the cap's cutoff would be wrongly treated as "not in files" and
-    // pruned, a false-positive deletion. The prune decision needs the FULL
-    // file set regardless of the indexing work-budget cap; only the actual
-    // per-file indexing work stays limit-bounded. PRUNE_ENUMERATION_CAP is
-    // a much higher structural ceiling (not a work budget -- this is a
-    // cheap directory walk, no file reads), just a sanity bound against a
-    // truly pathological tree.
     const PRUNE_ENUMERATION_CAP: usize = 20000;
     let full_files = if limit >= PRUNE_ENUMERATION_CAP { files.clone() } else { collect_files(r, PRUNE_ENUMERATION_CAP) };
     {
         let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     }
-    // Per-file batched embedding (see embed::embed_texts_batch) still cuts
-    // per-file forward-pass cost the way it always did; the write side no
-    // longer batches across a single begin/commit transaction or a reused
-    // prepared statement -- the now-stateless shared libsql plugin opens,
-    // operates, and closes on every single exec_params call regardless (see
-    // agentplug-libsql's src/db.rs handle() doc comment), so there is no
-    // txn/prepare amortization left to perform wasm-side. The wall budget
-    // below still exists to bound a pathological repo (huge files, cold
-    // model load), unrelated to the write-batching change.
     const INDEX_WALL_BUDGET_MS: u64 = 45000;
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut indexed = 0;
@@ -905,10 +691,6 @@ pub fn index(root: &str, max_files: usize) -> Value {
     let mut deferred_files = 0u32;
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Digest entries accumulated from the same file reads this loop already
-    // does, so a full completion never needs a second collect_files+host_read
-    // pass just to compute current_digest() (see current_digest's own
-    // doc comment for the still-separate pre-check use at the call site).
     let mut digest_entries: Vec<(String, u32)> = Vec::with_capacity(files.len());
 
     for raw_fp in &files {
@@ -923,17 +705,6 @@ pub fn index(root: &str, max_files: usize) -> Value {
         let ext = match dot { Some(i) => &fp[i..], None => "" };
         let lang_name = match lang_for_ext(ext) { Some(x) => x, None => continue };
 
-        // Stat-only fast path: if this file's mtime exactly matches the
-        // prior manifest's recorded mtime AND the DB still has the expected
-        // chunk-row count, skip host_read + crc32 entirely -- the single
-        // biggest remaining per-file cost for the common "nothing changed"
-        // case, since a full content read was previously unconditional on
-        // every pass regardless of whether the file had touched since the
-        // last index. Falls through to the normal read+hash path (which
-        // itself still short-circuits on hash match) for any file with no
-        // stat, no prior manifest, or a changed mtime -- never silently
-        // skips a genuinely-changed file, since mtime is a strict
-        // prerequisite check, not a substitute for the hash comparison.
         if let Some(m) = prior.get(fp) {
             if let Some(stat) = crate::wasm_dispatch::host_stat(fp)
                 .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
@@ -1011,28 +782,6 @@ pub fn index(root: &str, max_files: usize) -> Value {
                 .collect();
         }
 
-        // A single file's chunk set can itself blow past the wall budget --
-        // the outer per-file elapsed() check only fires BETWEEN files, so a
-        // pathological file (many/long chunks, slow unaccelerated wasm32
-        // BERT inference) previously ran to completion regardless of how
-        // long it took, live-witnessed this session as a single dispatch
-        // taking 328s against a 45s intended budget. Cap embedding to
-        // MAX_CHUNKS_PER_FILE_PER_PASS chunks per file per pass; any file
-        // whose chunk count exceeds that gets its embedding work (and thus
-        // its manifest write) deferred entirely to the next pass, same
-        // treatment as a deferred file -- never marked `seen`, so it's
-        // retried fresh rather than left in a partially-indexed state.
-        // Deferring an oversized file ENTIRELY (never marking it `seen`, so
-        // it retries fresh next pass) livelocks: it hits the identical cap
-        // every pass, so deferred_files can never reach 0, the digest is
-        // never stored, and every codesearch re-indexes the whole tree from
-        // scratch -- live-witnessed as a missing .codeinsight-digest with
-        // private memory climbing 397MB -> 2438MB across repeated passes on
-        // a tree holding a 2MB prd.yml and several 300-700KB files. Cap the
-        // work instead of discarding it: index the first
-        // MAX_CHUNKS_PER_FILE_PER_PASS chunks, mark the file seen, and write
-        // its manifest, so the pass still converges and the per-pass bound
-        // that the cap exists to enforce still holds.
         const MAX_CHUNKS_PER_FILE_PER_PASS: usize = 64;
         let oversized = chunks.len() > MAX_CHUNKS_PER_FILE_PER_PASS;
         if oversized {
@@ -1042,11 +791,6 @@ pub fn index(root: &str, max_files: usize) -> Value {
             let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
         }
 
-        // Batch every chunk's embed input for this file into one
-        // embed_texts_batch call (one candle model.forward over the whole
-        // batch dimension) instead of one forward pass per chunk.
-        // truncate_for_embed (not truncate_body) caps this specific input --
-        // see that function's doc comment for the live-measured rationale.
         let embed_inputs: Vec<String> = chunks.iter()
             .map(|(_, name, _, _, body)| format!("{} {}", name, truncate_for_embed(body)))
             .collect();
@@ -1081,34 +825,10 @@ pub fn index(root: &str, max_files: usize) -> Value {
             write_chunk(libsql_ok, &db_path, fp, &rec, &body);
             records.push(rec);
         }
-        // Only paid on a genuine content change (this branch is unreachable
-        // for both the stat-only-skip and hash-match-reuse paths above,
-        // which `continue` before reaching here and keep the prior
-        // manifest's cached commit_overview on disk untouched) -- one git
-        // subprocess call per actually-changed file per pass, never per
-        // unchanged file, staying inside the existing mtime-gated cost
-        // envelope.
         let commit_overview = compute_commit_overview(fp);
         fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, file_mtime, &commit_overview, &records));
     }
 
-    // Live-found: pruning was gated on deferred_files==0 (a fully complete
-    // pass), so on any repo large enough to exceed INDEX_WALL_BUDGET_MS in a
-    // single call (this repo included -- 1500+ files, confirmed via the
-    // codeinsight-index-does-not-prune-deleted-files finding) deferred_files
-    // is essentially ALWAYS > 0, meaning the prune step never ran in
-    // practice: code_chunks accumulated rows for files deleted commits ago
-    // (gm-plugkit/plugkit-wasm-wrapper.js, supervisor.js -- retired and
-    // git-rm'd well before this session, yet still surfaced by
-    // codeinsight_overview.likely_orphaned as if live). Fixed: a file
-    // missing from `seen` is safe to prune UNCONDITIONALLY as long as it is
-    // also absent from the full `files` enumeration (computed up front,
-    // before the wall-budget loop truncates) -- that distinguishes "deferred
-    // this pass, still exists" (present in files, just not yet seen) from
-    // "genuinely gone" (absent from files entirely), so a large repo's
-    // legitimate multi-pass resume behavior is preserved while dead files
-    // are still pruned on the very first pass that notices them, not stuck
-    // behind an unreachable full-completion gate.
     let files_set: std::collections::HashSet<&str> = full_files.iter().map(|s| s.trim_start_matches("./").trim_start_matches('/')).collect();
     let mut removed_files = 0;
     for (fp, m) in &prior {
@@ -1154,7 +874,7 @@ fn embed_text_batch_fallback(inputs: &[String]) -> Vec<Option<Vec<f32>>> {
 
 fn embed_texts_batch(inputs: &[String]) -> Vec<Option<Vec<f32>>> {
     if inputs.is_empty() { return Vec::new(); }
-    let resp = call_plugin("bert", "embed_batch", &json!({ "texts": inputs }));
+    let resp = call_out_of_process_plugin("bert", "embed_batch", &json!({ "texts": inputs }));
     if !plugin_ok(&resp) { return embed_text_batch_fallback(inputs); }
     match resp.get("embeddings").and_then(|v| v.as_array()) {
         Some(arr) if arr.len() == inputs.len() => {
@@ -1180,23 +900,6 @@ fn digest_from_entries(mut entries: Vec<(String, u32)>) -> String {
     format!("v2:{:016x}:files={}", crate::pipeline::fnv1a64(acc.as_bytes()), entries.len())
 }
 
-/// Standalone digest computation, used by callers that need to know whether
-/// the index is stale BEFORE deciding to run index() at all (wasm_dispatch's
-/// codesearch stale-digest check) -- necessarily a separate file-read pass
-/// from index()'s own loop, since at this call site it isn't yet known
-/// whether index() will run. index() itself never calls this: it accumulates
-/// the same (path, hash) pairs from its own read loop and feeds them to
-/// digest_from_entries directly, avoiding a second full-repo file-content
-/// read on every stale-digest dispatch.
-/// Tree digest keyed on (path, mtime) via a stat-only walk -- no file content
-/// is ever read here. This is the warm-path "has anything changed?" check
-/// codesearch runs before every index() call, so it must be cheap: the prior
-/// content-hash version read+crc32'd every file on every search, a full-tree
-/// content scan even when nothing changed (the daemon-wedging symptom). The
-/// reference codebasesearch impl detects change by mtime alone; this matches
-/// it. A file's mtime folded to u32 feeds the same digest_from_entries as the
-/// stored side (index() also keys its digest on mtime), so the two match on an
-/// unchanged tree and index() is skipped entirely.
 pub fn current_digest() -> String {
     let files = collect_files(".", DIGEST_MAX_FILES);
     let mut entries: Vec<(String, u32)> = Vec::new();
@@ -1207,11 +910,6 @@ pub fn current_digest() -> String {
         let stat = match crate::wasm_dispatch::host_stat(&canon)
             .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
         { Some(s) => s, None => continue };
-        // Mirror index()'s >256KB content-size exclusion using the stat size
-        // (no content read): index() skips these before pushing to its own
-        // digest_entries, so current_digest() must skip them too or the two
-        // digests carry different file sets and never match -> permanent
-        // rebuild, the opposite of the warm-skip this exists for.
         if stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0) > 256 * 1024 { continue; }
         let mtime = match stat.get("mtime_ms").and_then(|v| v.as_f64()) { Some(m) => m, None => continue };
         entries.push((canon, mtime as u32));
@@ -1230,14 +928,6 @@ pub fn store_digest(digest: &str) {
     fv_delete("codeinsight", "__digest__");
 }
 
-/// A cheap, read-only summary of the ALREADY-indexed code_chunks table --
-/// file count, per-kind symbol counts, and the largest files by chunk
-/// count. Never triggers a scan/parse/embed pass (that only happens via
-/// the codesearch verb's own index() call); this is purely a query over
-/// whatever is already in the shared db, so it's safe to attach to every
-/// turn-entry instruction dispatch without adding real per-dispatch cost.
-/// Returns null if no index exists yet (stored_digest() is None) rather
-/// than an empty-but-misleading summary.
 pub fn overview() -> Value {
     if stored_digest().is_none() {
         return Value::Null;
@@ -1275,17 +965,6 @@ pub fn overview() -> Value {
     })
 }
 
-/// Cheap, text-occurrence-based "likely orphaned" heuristic -- ported from
-/// the mcp-thorns comparison (codesearch-vs-mcp-thorns-parity): a named
-/// symbol (function/method) whose name never appears in any OTHER chunk's
-/// body text anywhere in the indexed corpus is a candidate for dead code.
-/// This is NOT real cross-file static analysis (no import/call-graph
-/// resolution, no scope awareness) -- same class of heuristic mcp-thorns
-/// itself uses (a plain text-occurrence check, not a resolved reference
-/// graph), so false positives exist (a name reused as a common word, a
-/// symbol only referenced via a re-export alias, dynamic dispatch). It is
-/// a fast, cheap SIGNAL for a human/agent to verify with a real codesearch
-/// dispatch before deleting anything -- never an automated deletion trigger.
 fn likely_orphaned_symbols(db_path: &str, limit: usize) -> Value {
     let candidates = libsql_wasm::query_params(
         db_path,
@@ -1362,28 +1041,11 @@ impl FusionCorpus {
         FusionCorpus { metas, file_cache: std::collections::HashMap::new(), overview_by_path }
     }
 
-    /// Per-hit git overview line for the file backing `key`, e.g.
-    /// "last changed a1b2c3d: fix parser edge case (+12-3, 2 files)" --
-    /// sourced from the FileManifest's cached commit_overview (computed at
-    /// index time, never a live git call on the codesearch read path).
-    /// None when the file has no manifest-cached overview yet (never
-    /// committed, or indexed before the commit_overview field existed and
-    /// not yet re-touched to populate it).
     pub fn overview_for_key(&self, key: &str) -> Option<String> {
         let m = self.metas.iter().find(|m| m.key == key)?;
         self.overview_by_path.get(&m.path).cloned()
     }
 
-    /// Structured symbol-location fields for `key` -- path, kind (fn/class/
-    /// etc, whatever the tree-sitter chunker tagged it), name, and the
-    /// 1-indexed [line_start, line_end] span -- as a real JSON object rather
-    /// than baked into an unparseable "path:ls:le name\n<body>" text blob.
-    /// This is the structured-symbol-awareness surface mcp-thorns exposes
-    /// natively (file:line:name(params) locations) that gm's fusion hits
-    /// previously lacked: callers had to regex the `text` field to recover
-    /// path/line/name instead of reading real fields. None when the key is
-    /// not present in the currently loaded manifest set (stale key from a
-    /// prior index generation).
     pub fn symbol_for_key(&self, key: &str) -> Option<Value> {
         let m = self.metas.iter().find(|m| m.key == key)?;
         Some(json!({
@@ -1402,10 +1064,6 @@ impl FusionCorpus {
         content
     }
 
-    /// Map a (path, line_start) pair -- the shape `search()`'s vector rows come
-    /// back in -- to the `ci-<path_hash>-<file_hash>-<idx>` key the fusion
-    /// ranker works in. Without this the vector half cannot contribute to
-    /// fusion at all, since the two stores identify the same chunk differently.
     pub fn key_for_path_line(&self, path: &str, ls: usize) -> Option<String> {
         let norm = path.trim_start_matches("./").trim_start_matches('/');
         self.metas.iter()
@@ -1486,9 +1144,6 @@ fn term_freqs(text: &str) -> std::collections::HashMap<String, u32> {
     out
 }
 
-/// Filename-token-overlap fallback, used only when embedding is unavailable
-/// (embed model failed to load, or the git_commit_vectors table has zero
-/// usable rows for this query) -- never the primary ranking path.
 fn git_commit_rank_fallback(query: &str, k: usize) -> Vec<String> {
     let q_tokens = rs_search::tokenize::tokenize(query);
     if q_tokens.is_empty() { return Vec::new(); }
@@ -1519,11 +1174,6 @@ fn git_commit_rank_fallback(query: &str, k: usize) -> Vec<String> {
     commits.into_iter().take(k).map(|(h, _)| h).collect()
 }
 
-/// Top-k commit hashes ranked by cosine similarity of a diff+message
-/// embedding against the query embedding -- the git_commit_vectors table is
-/// synced incrementally (wall-budgeted) on each call so a large backlog never
-/// blocks a single dispatch. Falls back to plain filename-token overlap if
-/// the embed model is unavailable or the table has nothing usable yet.
 pub fn git_commit_rank(query: &str, k: usize) -> Vec<String> {
     let _ = crate::git_commit_vectors::sync_incremental();
     let embedding = embed_text_json_query(query);

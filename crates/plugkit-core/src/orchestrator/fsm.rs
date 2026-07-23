@@ -1,12 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::pkfs;
 
-/// One FSM node. `key` is the canonical uppercase phase identifier
-/// (matches Phase::as_str()); `prose_key` is what instructions::get_instruction
-/// passes to prose::resolve (today's compiled-in phase prose files keep their
-/// existing lowercase keys -- plan/execute/emit/verify/consolidate/
-/// update_docs/browser -- for backward compat with the shipped .md files, so
-/// a project's custom phase names its own prose_key freely).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateNode {
     pub key: String,
@@ -15,11 +9,6 @@ pub struct StateNode {
     pub skill: Option<String>,
 }
 
-/// One directed edge. `gates` names zero or more Gate.name entries (see
-/// GateDef below) that must ALL pass before this edge may be taken; order
-/// matters -- gates evaluate in list order and the first failure's message
-/// is what the caller sees, matching today's hardcoded gates.rs sequencing
-/// (residual-scan-fired checked before prd-open, etc).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Edge {
     pub from: String,
@@ -28,18 +17,6 @@ pub struct Edge {
     pub gates: Vec<String>,
 }
 
-/// A named, independently-evaluable gate condition. `predicate` is the
-/// REGISTERED Rust predicate name (see predicate::evaluate) -- the actual
-/// boolean check stays compiled, only WHICH predicates gate WHICH edge (and
-/// in what order, with what message) is data. `hook` is an optional path to
-/// a jit-executor script (relative to .gm/instructions/hooks/) that the
-/// orchestrator runs via exec_js instead of (or in addition to, depending on
-/// `hook_mode`) the built-in predicate, per fsm-framework-jit-hook-concreting
-/// -- letting a project "concrete" its own custom condition without a Rust
-/// rebuild. A hook script's `return` value (explicit `return`, required --
-/// exec_js wraps every script in an async function body, so a bare trailing
-/// statement is discarded, not an implicit return) is coerced to bool;
-/// non-boolean/missing-return/throw = gate fails closed (deny), never open.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateDef {
     pub name: String,
@@ -55,26 +32,12 @@ pub struct GateDef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum HookMode {
-    /// No hook, or hook present but predicate is authoritative (hook result
-    /// ignored) -- the default, byte-identical to a project with no hooks.
     #[default]
     PredicateOnly,
-    /// Hook REPLACES the compiled predicate entirely.
     HookOnly,
-    /// Both must pass (compiled predicate AND hook) -- lets a project add a
-    /// stricter custom condition on top of a built-in one without losing
-    /// the built-in's own safety check.
     Both,
 }
 
-/// Project-level policy knobs that were previously hardcoded Rust consts in
-/// gates.rs (TOPLEVEL_DOC_ALLOWLIST, AWAIT_ALLOWED_VERBS, LONGGAP_EXEMPT,
-/// GATE_REPEAT_ESCALATE_THRESHOLD, and the 300_000ms long-gap threshold
-/// literal) -- each is a project-policy decision, not a code invariant, so
-/// it belongs in the vendored/overridable graph, not a rebuild-to-change
-/// const. `#[serde(default = "...")]` on every field means an OLDER vendored
-/// graph.json (written before this field existed) still deserializes fine,
-/// falling back to the same values gates.rs used to hardcode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
     #[serde(default = "default_toplevel_doc_allowlist")]
@@ -95,16 +58,6 @@ pub struct Policy {
     pub mutables_resolved_statuses: Vec<String>,
     #[serde(default = "default_reject_duplicate_witness")]
     pub reject_duplicate_witness: bool,
-    // The fresh-prompt-reset-to-initial-phase logic in instructions/mod.rs
-    // (handle_instruction) previously compared the live phase against the
-    // literal strings "PLAN"/"COMPLETE" directly, bypassing the graph
-    // entirely for a project that names its initial/terminal phases
-    // something else via a custom .gm/instructions/fsm/graph.json override
-    // -- the exact "hardcoded path silently pre-empts the graph" bug class
-    // the 2026-07-21 CONSOLIDATE/COMPLETE gate-bypass entry already hit once
-    // for a different check. Making these two names graph-policy-overridable
-    // closes that class here too, additively (old overrides without these
-    // fields still default to the pre-existing literal behavior).
     #[serde(default = "default_initial_phase")]
     pub initial_phase: String,
     #[serde(default = "default_terminal_phase")]
@@ -171,15 +124,6 @@ impl Graph {
         self.state(key).is_some()
     }
 
-    /// The single outbound edge for a phase under today's linear-chain
-    /// semantics (next_phase/next_skill both assume exactly one "forward"
-    /// edge per phase, no branching) -- a project's custom graph CAN define
-    /// multiple outbound edges from one state (branching), but the bare
-    /// `transition` (no explicit `to`) call always takes the FIRST edge
-    /// listed for the current phase, matching next_phase's old
-    /// deterministic single-successor behavior. An explicit `transition
-    /// {to:"X"}` bypasses this entirely and is validated against
-    /// edge_between instead.
     pub fn default_edge_from(&self, from: &str) -> Option<&Edge> {
         self.edges.iter().find(|e| e.from.eq_ignore_ascii_case(from))
     }
@@ -193,13 +137,6 @@ impl Graph {
     }
 }
 
-/// The default graph, hand-transcribed from the pre-existing hardcoded
-/// transitions.rs::next_phase/next_skill and gates.rs's CONSOLIDATE/COMPLETE
-/// gate checks, so a project with no .gm/instructions/fsm/ override behaves
-/// byte-identically to the pre-dynamic-phase behavior. Prose keys match the
-/// EXISTING compiled-in .md files (instructions::get_instruction's key
-/// column) -- update_docs is COMPLETE's prose key, matching that pre-existing
-/// (not-a-typo) naming.
 fn default_graph() -> Graph {
     Graph {
         states: vec![
@@ -215,25 +152,10 @@ fn default_graph() -> Graph {
             Edge { from: "EXECUTE".into(), to: "EMIT".into(), gates: vec![] },
             Edge { from: "EMIT".into(), to: "VERIFY".into(), gates: vec![] },
             Edge { from: "VERIFY".into(), to: "CONSOLIDATE".into(), gates: vec!["residual-scan-fired".into(), "prd-all-closed".into(), "mutables-all-resolved".into(), "claim-audit-clean".into(), "submodules-clean".into()] },
-            // Re-plan edges, gate-free by design -- AGENTS.md/execute.md prose
-            // documents "transition to=PLAN ... always legal from EXECUTE" for
-            // a reshaping discovery (scope/approach/dependency-shape change to
-            // an existing PRD row). The linear chain had no backward edges at
-            // all until this fix, so that documented behavior silently relied
-            // on the gate_rejection/gate_residuals missing-edge bug (fixed
-            // alongside this) treating "no edge" as "no gates" == allow --
-            // once that bug closed, a real to=PLAN dispatch from EXECUTE/EMIT/
-            // VERIFY correctly denied with "no edge in the active FSM graph",
-            // live-witnessed this session (transition-1784613281001.json from
-            // VERIFY). These edges make the documented behavior real instead
-            // of an accidental side effect of a bug.
             Edge { from: "EXECUTE".into(), to: "PLAN".into(), gates: vec![] },
             Edge { from: "EMIT".into(), to: "PLAN".into(), gates: vec![] },
             Edge { from: "VERIFY".into(), to: "PLAN".into(), gates: vec![] },
             Edge { from: "CONSOLIDATE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into(), "worktree-clean".into(), "residual-scan-fired".into(), "ci-validated-fresh".into(), "browser-witness-coverage".into(), "submodules-clean".into()] },
-            // COMPLETE has no default forward edge -- matches next_phase's
-            // Phase::Complete => Phase::Complete self-loop (terminal, bare
-            // `transition` with no target is a no-op there).
             Edge { from: "COMPLETE".into(), to: "COMPLETE".into(), gates: vec![] },
         ],
         gates: vec![
@@ -300,17 +222,6 @@ fn default_graph() -> Graph {
 
 const GRAPH_OVERRIDE_PATH: &str = ".gm/instructions/fsm/graph.json";
 
-/// The active graph: a project's .gm/instructions/fsm/graph.json REPLACES
-/// the built-in wholesale if present (not a per-field merge -- edges and
-/// gates are interdependent, so a partial override risks referencing a gate
-/// name or state that doesn't exist elsewhere in a half-overridden graph;
-/// the scaffold verb's own default output is the safe starting point for
-/// customization, not a diff against the compiled-in one). Falls back to
-/// default_graph() when absent, unreadable, or fails to parse (a malformed
-/// override graph is treated as no-override rather than a hard error, since
-/// gm's own FSM dispatch loop must keep functioning even if a project's
-/// customization attempt has a typo -- the malformed-graph condition itself
-/// is worth surfacing, so a parse failure emits a deviation event).
 pub fn graph() -> Graph {
     match pkfs::read_to_string(GRAPH_OVERRIDE_PATH) {
         Some(raw) => match serde_json::from_str::<Graph>(&raw) {
@@ -329,8 +240,6 @@ pub fn graph() -> Graph {
     }
 }
 
-/// The default graph serialized, for the scaffold verb to write out
-/// byte-identically to what graph() would fall back to.
 pub fn default_graph_json_pretty() -> String {
     serde_json::to_string_pretty(&default_graph()).unwrap_or_default()
 }
