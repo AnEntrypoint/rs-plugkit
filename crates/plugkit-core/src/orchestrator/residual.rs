@@ -1,6 +1,12 @@
 use super::gm_dir;
 use crate::pkfs;
 
+pub const RESIDUAL_PRD_OPEN_DEFAULT: &str = "PRD still has items; complete or remove them before residual scan.";
+pub const RESIDUAL_BROWSER_OPEN_DEFAULT: &str = "browser sessions still open -- dispatch `browser` with `session list` body to enumerate open ids, then `session close <id>` for each before retrying residual-scan";
+pub const RESIDUAL_TASKS_RUNNING_DEFAULT: &str = "background tasks still running -- wait for completion or kill them via the host_exec_js interface before retrying residual-scan";
+pub const RESIDUAL_DIRTY_TREE_DEFAULT: &str = "worktree dirty -- modified={modified} untracked={untracked} -- commit or revert before residual scan; a push from a dirty tree orphans the unstaged delta";
+pub const RESIDUAL_IMPERATIVE_DEFAULT: &str = "Residual scan. Worktree clean, remote pushed, PRD empty, mutables witnessed -- the four checks. Anything reachable and in-spirit expands the PRD and runs. Out-of-reach is credentials, down service, product decision.";
+
 #[cfg(target_arch = "wasm32")]
 fn porcelain_output() -> String {
     crate::wasm_dispatch::git_porcelain()
@@ -115,7 +121,7 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     if !prd_empty_or_missing() {
         let payload = serde_json::json!({
             "scan": "skipped",
-            "reason": crate::prose::resolve_and_mark("residual/prd-open", "PRD still has items; complete or remove them before residual scan."),
+            "reason": crate::prose::resolve_and_mark("residual/prd-open", RESIDUAL_PRD_OPEN_DEFAULT),
             "deviation_kind": "residual-premature",
             "next_dispatch": "prd-list"
         });
@@ -125,7 +131,7 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     if browser_sessions_open() {
         let payload = serde_json::json!({
             "scan": "skipped",
-            "reason": crate::prose::resolve_and_mark("residual/browser-open", "browser sessions still open -- dispatch `browser` with `session list` body to enumerate open ids, then `session close <id>` for each before retrying residual-scan"),
+            "reason": crate::prose::resolve_and_mark("residual/browser-open", RESIDUAL_BROWSER_OPEN_DEFAULT),
             "next_dispatch": "browser"
         });
         return (payload.to_string(), String::new(), 0);
@@ -134,7 +140,7 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     if running_tasks_exist() {
         let payload = serde_json::json!({
             "scan": "skipped",
-            "reason": crate::prose::resolve_and_mark("residual/tasks-running", "background tasks still running -- wait for completion or kill them via the host_exec_js interface before retrying residual-scan"),
+            "reason": crate::prose::resolve_and_mark("residual/tasks-running", RESIDUAL_TASKS_RUNNING_DEFAULT),
             "next_dispatch": "phase-status"
         });
         return (payload.to_string(), String::new(), 0);
@@ -145,7 +151,7 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
         let (modified, untracked) = count_modified_untracked(&porcelain);
         let reason = crate::prose::resolve_and_mark(
             "residual/dirty-tree",
-            "worktree dirty -- modified={modified} untracked={untracked} -- commit or revert before residual scan; a push from a dirty tree orphans the unstaged delta",
+            RESIDUAL_DIRTY_TREE_DEFAULT,
         )
         .replace("{modified}", &modified.to_string())
         .replace("{untracked}", &untracked.to_string());
@@ -162,7 +168,7 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     let marker_s = marker.to_string_lossy().to_string();
     let _ = pkfs::write(&marker_s, "fired");
 
-    let message = crate::prose::resolve_and_mark("residual/imperative", "Residual scan. Worktree clean, remote pushed, PRD empty, mutables witnessed -- the four checks. Anything reachable and in-spirit expands the PRD and runs. Out-of-reach is credentials, down service, product decision.");
+    let message = crate::prose::resolve_and_mark("residual/imperative", RESIDUAL_IMPERATIVE_DEFAULT);
     let payload = serde_json::json!({
         "scan": "fired",
         "marker": marker.display().to_string(),

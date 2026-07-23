@@ -56,7 +56,8 @@ pub fn drain_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)>
         return Vec::new();
     }
     let mut drained: Vec<(String, String)> = Vec::new();
-    let _ = cas::cas_retry_write(&path_s, 5, "prd-drain-commit-comments", |mut doc: Value| {
+    let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
+    let _ = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-drain-commit-comments", |mut doc: Value| {
         drained.clear();
         if let Some(seq) = doc.as_sequence_mut() {
             seq.retain(|item| {
@@ -236,8 +237,9 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .unwrap_or_else(|| format!("item-{}", crate::orchestrator::state::now_ms()));
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
+    let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
 
-    let outcome = cas::cas_retry_write(&path_s, 5, "prd-add", |mut doc: Value| {
+    let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-add", |mut doc: Value| {
         let mut upserted = false;
         if let Some(seq) = doc.as_sequence_mut() {
             let mut new_with_id = item_map.clone();
@@ -430,7 +432,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     }
     }
 
-    let outcome = cas::cas_retry_write(&path_s, 5, "prd-resolve", |mut doc: Value| {
+    let outcome = cas::cas_retry_write(&path_s, policy.cas_max_attempts, "prd-resolve", |mut doc: Value| {
         let mut found = false;
         if let Some(seq) = doc.as_sequence_mut() {
             for item in seq.iter_mut() {

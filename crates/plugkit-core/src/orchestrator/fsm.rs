@@ -62,6 +62,14 @@ pub struct Policy {
     pub initial_phase: String,
     #[serde(default = "default_terminal_phase")]
     pub terminal_phase: String,
+    #[serde(default = "default_mutables_default_status")]
+    pub mutables_default_status: String,
+    #[serde(default = "default_mutables_witness_status")]
+    pub mutables_witness_status: String,
+    #[serde(default = "default_mutables_require_witness_evidence")]
+    pub mutables_require_witness_evidence: bool,
+    #[serde(default = "default_cas_max_attempts")]
+    pub cas_max_attempts: u32,
 }
 
 fn default_toplevel_doc_allowlist() -> Vec<String> {
@@ -86,6 +94,10 @@ fn default_mutables_resolved_statuses() -> Vec<String> {
 fn default_reject_duplicate_witness() -> bool { true }
 fn default_initial_phase() -> String { "PLAN".to_string() }
 fn default_terminal_phase() -> String { "COMPLETE".to_string() }
+fn default_mutables_default_status() -> String { "unknown".to_string() }
+fn default_mutables_witness_status() -> String { "witnessed".to_string() }
+fn default_mutables_require_witness_evidence() -> bool { true }
+fn default_cas_max_attempts() -> u32 { 5 }
 
 impl Default for Policy {
     fn default() -> Self {
@@ -101,6 +113,10 @@ impl Default for Policy {
             reject_duplicate_witness: default_reject_duplicate_witness(),
             initial_phase: default_initial_phase(),
             terminal_phase: default_terminal_phase(),
+            mutables_default_status: default_mutables_default_status(),
+            mutables_witness_status: default_mutables_witness_status(),
+            mutables_require_witness_evidence: default_mutables_require_witness_evidence(),
+            cas_max_attempts: default_cas_max_attempts(),
         }
     }
 }

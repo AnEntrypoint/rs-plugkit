@@ -3,6 +3,8 @@
 use serde_json::{json, Value};
 use crate::wasm_dispatch::{host_read, host_log, host_write};
 
+pub const GATE_LONG_GAP_NO_INSTRUCTION_DEFAULT: &str = "long-gap-no-instruction: {gap_ms}ms since last `instruction` dispatch (threshold 300000ms). Idle mid-chain is a deviation. Dispatch `instruction` for recovery prose before any other verb.";
+
 const GATE_REPEAT_STATE_PATH: &str = ".gm/exec-spool/.gate-deviation-repeats.json";
 
 fn gate_repeat_key(operation: &str, event: &str) -> String {
@@ -320,7 +322,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             return GateVerdict::deny(
                 crate::prose::resolve_and_mark(
                     "gates/long-gap-no-instruction",
-                    "long-gap-no-instruction: {gap_ms}ms since last `instruction` dispatch (threshold 300000ms). Idle mid-chain is a deviation. Dispatch `instruction` for recovery prose before any other verb.",
+                    GATE_LONG_GAP_NO_INSTRUCTION_DEFAULT,
                 )
                 .replace("{gap_ms}", &gap_ms.to_string()),
             );

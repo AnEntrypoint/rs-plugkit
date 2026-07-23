@@ -33,13 +33,14 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .unwrap_or_else(|| format!("mut-{}", crate::orchestrator::state::now_ms()));
     let path = mutables_path();
     let path_s = path.to_string_lossy().to_string();
+    let policy = super::fsm::graph().policy;
 
-    let outcome = cas::cas_retry_write(&path_s, 5, "mutable-add", |mut doc: Value| {
+    let outcome = cas::cas_retry_write(&path_s, policy.cas_max_attempts, "mutable-add", |mut doc: Value| {
         if let Some(seq) = doc.as_sequence_mut() {
             let mut new_with_id = map.clone();
             new_with_id.insert(Value::String("id".to_string()), Value::String(id.clone()));
             if !new_with_id.contains_key(&Value::String("status".to_string())) {
-                new_with_id.insert(Value::String("status".to_string()), Value::String("unknown".to_string()));
+                new_with_id.insert(Value::String("status".to_string()), Value::String(policy.mutables_default_status.clone()));
             }
             seq.push(Value::Mapping(new_with_id));
         } else {
@@ -97,10 +98,11 @@ pub fn pending_detailed() -> Vec<serde_json::Value> {
         Err(_) => return Vec::new(),
     };
     let mut out = Vec::new();
-    let resolved_statuses = super::fsm::graph().policy.mutables_resolved_statuses;
+    let policy = super::fsm::graph().policy;
+    let resolved_statuses = policy.mutables_resolved_statuses;
     if let Some(seq) = doc.as_sequence() {
         for item in seq {
-            let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let status = item.get("status").and_then(|v| v.as_str()).unwrap_or(&policy.mutables_default_status);
             if !resolved_statuses.iter().any(|s| s == status) {
                 if let Some(m) = item.as_mapping() {
                     let mut obj = serde_json::Map::new();
@@ -147,8 +149,9 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     if !pkfs::exists(&path_s) {
         return (String::new(), format!("{} does not exist", path.display()), 1);
     }
+    let policy = super::fsm::graph().policy;
 
-    let outcome = cas::cas_retry_write(&path_s, 5, "mutable-resolve", |mut doc: Value| {
+    let outcome = cas::cas_retry_write(&path_s, policy.cas_max_attempts, "mutable-resolve", |mut doc: Value| {
         let mut found_id = false;
         let mut resolved_id: Option<String> = None;
         let mut resolved_evidence: Option<String> = None;
@@ -174,14 +177,14 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                             .filter(|s| !s.trim().is_empty());
                         let row_had_evidence = row_evidence.is_some();
                         let evidence = row_evidence.or_else(|| inline_evidence.clone()).unwrap_or_default();
-                        if evidence.trim().is_empty() {
+                        if policy.mutables_require_witness_evidence && evidence.trim().is_empty() {
                             let msg = format!(
                                 "Refused: mutable {} cannot be witnessed without evidence. Pass {{\"mutable_id\":\"{}\",\"witness_evidence\":\"<concrete proof>\"}} in the body, or add evidence to the .gm/mutables.yml row first.",
                                 trimmed, trimmed
                             );
                             return cas::CasOutcome::Abort(String::new(), msg, 1);
                         }
-                        if !row_had_evidence {
+                        if !row_had_evidence && !evidence.trim().is_empty() {
                             map.insert(
                                 Value::String("witness_evidence".to_string()),
                                 Value::String(evidence.clone()),
@@ -189,7 +192,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                         }
                         map.insert(
                             Value::String("status".to_string()),
-                            Value::String("witnessed".to_string()),
+                            Value::String(policy.mutables_witness_status.clone()),
                         );
                         resolved_id = Some(trimmed.to_string());
                         resolved_evidence = Some(evidence);
