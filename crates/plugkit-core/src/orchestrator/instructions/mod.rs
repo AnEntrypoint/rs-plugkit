@@ -14,17 +14,6 @@ use super::prd;
 use super::recall;
 use crate::pkfs;
 
-/// Staleness markers describe a condition that was true when some watcher
-/// wrote them, and nothing ever rewrites or clears them once that condition
-/// resolves -- so a marker left by a since-retired watcher reports its warning
-/// on every dispatch forever. Live-hit case: a .gm-plugkit-stale.json written
-/// by the old JS watcher kept every instruction response returning
-/// gm_plugkit_stale:true naming versions 2.0.1972/2.0.1976, long after the
-/// native runtime took over and npm had moved to 2.0.2001. Since gm's own rules
-/// require treating staleness as a same-turn deviation, a marker that cannot
-/// expire sends every future session chasing an already-resolved condition.
-/// Drop any marker older than this window; a genuinely current condition is
-/// re-reported by whatever watcher is actually running.
 fn expire_stale_marker(v: serde_json::Value) -> serde_json::Value {
     const MAX_MARKER_AGE_MS: i64 = 6 * 60 * 60 * 1000;
     let Some(ts) = v.get("ts") else { return v };
@@ -41,10 +30,6 @@ fn expire_stale_marker(v: serde_json::Value) -> serde_json::Value {
     v
 }
 
-/// Minimal `YYYY-MM-DDTHH:MM:SS(.sss)Z` -> epoch-ms via the standard
-/// days-from-civil algorithm. Returns None on anything that does not parse, so
-/// an unrecognized timestamp leaves its marker untouched rather than silently
-/// expiring it.
 fn iso8601_to_ms(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' { return None; }
@@ -62,16 +47,6 @@ fn iso8601_to_ms(s: &str) -> Option<i64> {
     Some(((days * 86400 + h * 3600 + mi * 60 + sec) * 1000) + ms)
 }
 
-/// `.turn-summary.json` is what SKILL.md's documented boot probe reads at the
-/// start of every session, branching on its phase / prd_pending /
-/// last_instruction_age_ms. It was written ONLY by the JS wrapper's
-/// runSpoolWatcher, so once the native runtime took over nothing rewrote it and
-/// it froze -- live-hit as a file still reporting phase=VERIFY prd_pending=14
-/// from a retired watcher (version 0.1.905) while a real dispatch returned
-/// phase=PLAN prd_pending=0. Every session was starting from fabricated state
-/// and only recovering because the first instruction dispatch overrode it.
-/// Write it here, from the same authoritative values this response carries, so
-/// it cannot drift from what the orchestrator actually believes.
 fn write_turn_summary(phase: &str, prd_pending: usize, mutables_pending: usize) {
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
     let last_instruction_ts = pkfs::read_to_string(
@@ -118,11 +93,6 @@ fn should_residual_scan(prd_pending: usize, running_tasks_count: usize) -> bool 
     prd_pending == 0 && running_tasks_count == 0
 }
 
-/// The compiled-in default TEXT for each of the six built-in prose keys --
-/// used ONLY as prose::resolve's fallback when neither a .gm/ override file
-/// NOR (for a custom phase) any prose_key entry applies. A phase name the
-/// active graph doesn't recognize at all still falls back to entry::TEXT,
-/// matching the old catch-all `_ => ("entry", entry::TEXT)` arm.
 pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
     match key {
         "plan" => plan::TEXT,
@@ -136,14 +106,6 @@ pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
     }
 }
 
-/// Looks up the current phase's prose_key in the ACTIVE graph (built-in
-/// default, or a project's .gm/instructions/fsm/graph.json override) rather
-/// than a fixed match -- a custom phase name (e.g. a project-defined REVIEW
-/// between EMIT and VERIFY) resolves through its own graph-declared
-/// prose_key, served from .gm/instructions/<prose_key>.md the same way the
-/// six built-ins always have been. ENTRY/ORCHESTRATOR/BROWSER stay as
-/// direct pseudo-phase pass-throughs (not real FSM states a project's graph
-/// declares) exactly as before.
 pub fn get_instruction(phase: &str) -> String {
     let upper = phase.trim().to_ascii_uppercase();
     let key = match upper.as_str() {
@@ -166,28 +128,9 @@ fn next_phase_hint(phase: &str) -> Option<String> {
     let g = super::fsm::graph();
     g.default_edge_from(&upper)
         .map(|e| e.to.clone())
-        // A terminal state's default edge (if the graph declares a
-        // self-loop, matching the built-in default's COMPLETE->COMPLETE)
-        // is not a genuine "next" hint -- suppress it the same way the old
-        // hardcoded COMPLETE => None arm did.
         .filter(|to| !to.eq_ignore_ascii_case(&upper))
 }
 
-/// Live-found: a heavy concurrent write burst against .gm/prd.yml (multiple
-/// sessions/subagents dispatching prd-add/prd-resolve at once) can produce a
-/// torn/partial read mid-write -- prd::handle_list's serde_yaml::from_str
-/// then fails to parse, returning code!=0. The OLD code silently converted
-/// ANY non-zero code (read failure, genuine parse failure, or a transient
-/// torn read) into Vec::new() -- indistinguishable from a real empty PRD to
-/// every downstream consumer (prd_pending_count, should_residual_scan, the
-/// instruction response itself), which is how an instruction dispatch was
-/// observed reporting prd_pending_count:0 while the on-disk file genuinely
-/// had 49+ pending rows. A torn read is transient by nature (the concurrent
-/// writer finishes writing within milliseconds), so retry once after a short
-/// sleep before treating the failure as real -- self-corrects the torn-read
-/// case; a GENUINE parse failure (malformed YAML from a real bug, not a
-/// write race) fails the same way twice and is now logged loudly instead of
-/// silently discarded, so it stops masquerading as "PRD is empty."
 fn prd_items_json() -> Vec<serde_json::Value> {
     for attempt in 0..2 {
         let (body, err, code) = prd::handle_list("");
@@ -343,11 +286,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         Some(trimmed.to_string())
     };
 
-    // "Valid" now means "a state in the ACTIVE graph" (plus the two
-    // always-legal pseudo-phases ENTRY/ORCHESTRATOR and the BROWSER prose
-    // pseudo-phase, none of which are real FSM states a project's graph
-    // declares) rather than a fixed compiled list -- a custom-graph
-    // project's own phase names are accepted here without a Rust rebuild.
     let is_valid_phase = |upper: &str| -> bool {
         matches!(upper, "ENTRY" | "ORCHESTRATOR" | "BROWSER") || super::fsm::graph().has_state(upper)
     };
@@ -388,11 +326,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         !p.trim().is_empty() && is_valid_phase(&p.trim().to_ascii_uppercase())
     }).unwrap_or(false);
 
-    // Graph-policy-driven, not hardcoded literals -- a project overriding
-    // .gm/instructions/fsm/graph.json's policy.initial_phase/terminal_phase
-    // gets correct fresh-prompt-reset behavior for its own custom phase
-    // names; an unconfigured project sees byte-identical PLAN/COMPLETE
-    // behavior via the policy defaults.
     let policy = super::fsm::graph().policy;
     let initial_phase = policy.initial_phase.clone();
     let terminal_phase = policy.terminal_phase.clone();
@@ -498,14 +431,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     #[cfg(not(target_arch = "wasm32"))]
     let route_hint = serde_json::Value::Null;
 
-    // Proactive delivery: attach the already-indexed codeinsight overview
-    // (file/symbol counts, top kinds, largest files) to every instruction
-    // response instead of requiring a separate codesearch dispatch just to
-    // learn "what's in this codebase" -- a one-shot overview the agent
-    // would otherwise have to explicitly ask for. Purely a query over the
-    // EXISTING index (never triggers a scan/parse/embed pass), so this is
-    // cheap on every dispatch; null when no index exists yet (first-ever
-    // session in a fresh repo, before any codesearch has run).
     #[cfg(target_arch = "wasm32")]
     let codeinsight_overview = crate::code_index::overview();
     #[cfg(not(target_arch = "wasm32"))]

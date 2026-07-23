@@ -4,11 +4,6 @@ use super::prd;
 use super::recall;
 use super::mutables;
 
-/// Default forward skill for a phase, from the active graph's state node --
-/// falls back to the phase name itself (lowercased-with-gm- prefix pattern)
-/// only if the graph is somehow missing a node for an otherwise-legal
-/// current phase, which should not happen for any graph produced by the
-/// scaffold verb or the compiled-in default.
 pub fn next_skill(current: &Phase) -> String {
     let g = fsm::graph();
     g.state(current.as_str())
@@ -16,11 +11,6 @@ pub fn next_skill(current: &Phase) -> String {
         .unwrap_or_else(|| format!("gm-{}", current.as_str().to_ascii_lowercase()))
 }
 
-/// The phase reached by a bare `transition` (no explicit `to`) -- the
-/// active graph's first-listed outbound edge from the current phase, or the
-/// SAME phase if none exists (terminal state self-loop, matching the old
-/// Phase::Complete => Phase::Complete behavior for any phase a custom graph
-/// declares terminal by omitting its own outbound edge).
 pub fn next_phase(current: &Phase) -> Phase {
     let g = fsm::graph();
     match g.default_edge_from(current.as_str()) {
@@ -29,19 +19,6 @@ pub fn next_phase(current: &Phase) -> Phase {
     }
 }
 
-/// Runs a graph-registered predicate by name. This is the compiled side of
-/// GateDef.predicate -- the ONLY thing a project's .gm/instructions/fsm/
-/// graph.json can do is choose WHICH of these fire on WHICH edge, in what
-/// order; it cannot invent an entirely new compiled predicate (that needs a
-/// hook script instead, see hook_result below). Adding a new predicate here
-/// is still a Rust change, same as adding a new gate class always has been
-/// -- what's now data-driven is the wiring, not the primitive set.
-/// (name, one-line description) for every predicate predicate_result
-/// recognizes -- kept as the single source fsm-vendor's reference file
-/// generates from, so the vendored doc can never silently drift out of
-/// sync with what actually exists (the alternative, a hand-written
-/// duplicate list in the vendor-verb code, is exactly the kind of doc that
-/// goes stale the next time a predicate is added here and forgotten there).
 pub fn known_predicates() -> Vec<(&'static str, &'static str)> {
     vec![
         ("residual-scan-fired", "true once `residual-scan` has been dispatched in this stop window (the .gm/residual-check-fired marker exists)"),
@@ -63,9 +40,6 @@ fn predicate_result(name: &str) -> bool {
         "browser-witness-coverage" => check_browser_witness_coverage_for_cwd("").is_empty(),
         "claim-audit-clean" => super::claim_audit::claim_audit_clean(),
         "submodules-clean" => super::submodule_drift::submodules_clean(),
-        // An unrecognized predicate name fails CLOSED (denies), never open
-        // -- a typo'd or stale predicate name in a hand-edited graph must
-        // never silently skip a real check.
         _ => false,
     }
 }
@@ -162,14 +136,6 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
 #[cfg(not(target_arch = "wasm32"))]
 fn check_browser_witness_coverage_for_cwd(_cwd: &str) -> Vec<String> { vec![] }
 
-/// Runs a project's jit-hook script for a gate, per fsm-framework-jit-hook-
-/// concreting: exec_js's own host_exec_js with the hook file's contents as
-/// the script body. The hook's final expression value is coerced to bool --
-/// anything that isn't exactly JSON `true` (a thrown error, a non-boolean
-/// return, a missing/unreadable file) is treated as FALSE (gate denies),
-/// matching predicate_result's fail-closed default for the same reason: an
-/// ambiguous or broken custom condition must never silently pass a gate it
-/// was configured to guard.
 #[cfg(target_arch = "wasm32")]
 fn hook_result(hook_path: &str) -> bool {
     let full = format!(".gm/instructions/hooks/{}", hook_path);
@@ -200,22 +166,8 @@ fn evaluate_gate(g: &GateDef) -> bool {
     }
 }
 
-/// Evaluates every gate named on the edge being taken, in list order,
-/// returning the first failure's message (matching the old hardcoded
-/// ordering: residual-scan-fired before prd-all-closed before mutables-all-
-/// resolved for VERIFY->CONSOLIDATE). None = every gate on this edge
-/// passed, or the edge has none.
 fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, String, i32)> {
     let Some(edge) = graph.edge_between(from, to) else {
-        // No declared edge from->to is NOT gate-free -- it is the strictest
-        // possible rejection (no legal path exists at all). An earlier
-        // version used `?` here, which returned None (== "no rejection" ==
-        // allow) on a missing edge -- so `transition {to:"COMPLETE"}` from
-        // ANY phase, including straight out of EXECUTE with 8 PRD rows
-        // still pending, sailed through ungated because no EXECUTE->COMPLETE
-        // edge exists to attach gates to in the first place. Live-witnessed
-        // this exact bypass this session (phase flipped to COMPLETE with
-        // prd_pending_count=8, transition-1784612100001.json).
         return Some((
             String::new(),
             format!(
@@ -234,26 +186,9 @@ fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, S
     None
 }
 
-/// Evaluates EVERY gate on the from->to edge (not just the first failure),
-/// for callers (gates.rs::check_dispatch) that need the full residuals list
-/// in one response -- matching the pre-graph hardcoded consolidate/complete
-/// checks' behavior of reporting every unmet condition together rather than
-/// one-at-a-time. `next_dispatch_hint` is the recovery verb named by the
-/// FIRST failing gate's name (residual-scan-fired -> residual-scan,
-/// prd-all-closed -> prd-resolve, mutables-all-resolved -> mutable-resolve,
-/// worktree-clean -> git_finalize, everything else -> exec_js/browser as
-/// appropriate), matching next_recovery's old precedence order.
 pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
     let graph = fsm::graph();
     let Some(edge) = graph.edge_between(from, to) else {
-        // Missing edge = no legal path = maximal residual, never an empty
-        // list (empty reads as "nothing blocking" to gates.rs's caller,
-        // which then falls through to ALLOW). Same bypass class as
-        // gate_rejection's fix above: `transition {to:"COMPLETE"}` dispatched
-        // straight from EXECUTE (no EXECUTE->COMPLETE edge exists) hit this
-        // exact path via gates.rs's operation=="complete" branch and reached
-        // real COMPLETE phase with 8 PRD rows still open, live-witnessed
-        // this session (transition-1784612100001.json).
         return (
             vec![format!("no edge from `{from}` to `{to}` in the active FSM graph -- no legal direct path between these phases")],
             Some("instruction".to_string()),
@@ -313,11 +248,6 @@ pub fn handle(content: &str) -> (String, String, i32) {
 
     let graph = fsm::graph();
 
-    // A target phase absent from the active graph entirely is always
-    // illegal, regardless of gates -- this is the dynamic-phase-set
-    // equivalent of the old Phase::parse's Option::None for an unrecognized
-    // enum variant, now checked against the LIVE graph instead of a
-    // compile-time-fixed list.
     if !graph.has_state(target.as_str()) {
         return (
             String::new(),
