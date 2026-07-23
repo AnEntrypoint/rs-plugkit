@@ -231,7 +231,7 @@ fn default_graph() -> Graph {
                 predicate: Some("prd-all-closed".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
-                message: "transition rejected: PRD items still pending -- execute or remove them before transitioning.".into(),
+                message: "transition rejected: REACHABLE PRD items still pending -- execute or remove them before transitioning (rows marked blockedBy: [external]/[out-of-reach] do not block).".into(),
             },
             GateDef {
                 name: "mutables-all-resolved".into(),
