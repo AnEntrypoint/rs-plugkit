@@ -61,6 +61,8 @@ fn predicate_result(name: &str) -> bool {
         "worktree-clean" => !worktree_dirty(),
         "ci-validated-fresh" => ci_validation_fresh(),
         "browser-witness-coverage" => check_browser_witness_coverage_for_cwd("").is_empty(),
+        "claim-audit-clean" => super::claim_audit::claim_audit_clean(),
+        "submodules-clean" => super::submodule_drift::submodules_clean(),
         // An unrecognized predicate name fails CLOSED (denies), never open
         // -- a typo'd or stale predicate name in a hand-edited graph must
         // never silently skip a real check.
@@ -271,6 +273,8 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
                     "worktree-clean" => "git_finalize",
                     "ci-validated-fresh" => "exec_js",
                     "browser-witness-coverage" => "browser",
+                    "claim-audit-clean" => "claim-audit",
+                    "submodules-clean" => "git_add",
                     _ => "instruction",
                 }.to_string());
             }

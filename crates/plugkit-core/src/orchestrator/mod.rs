@@ -12,6 +12,8 @@ pub mod instructions;
 pub mod yaml_util;
 pub mod prd;
 pub mod task;
+pub mod claim_audit;
+pub mod submodule_drift;
 
 use std::path::PathBuf;
 
@@ -99,7 +101,7 @@ pub fn is_orchestrator_verb(verb: &str) -> bool {
             | "memorize-fire" | "discipline-note" | "phase-status" | "residual-scan" | "auto-recall"
             | "instruction" | "prd-add" | "prd-resolve" | "prd-list"
             | "task-spawn" | "task-list" | "task-stop" | "task-output"
-            | "memorize-continue" | "fsm-vendor"
+            | "memorize-continue" | "fsm-vendor" | "claim-audit" | "submodule-check"
     )
 }
 
@@ -126,6 +128,8 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "discipline-note" => discipline_note::handle(content),
         "phase-status" => state::handle_status(),
         "residual-scan" => residual::handle_scan(content),
+        "claim-audit" => claim_audit::handle_audit(content),
+        "submodule-check" => submodule_drift::handle_check(content),
         "auto-recall" => recall::handle_auto_recall(content),
         "instruction" => instructions::handle_instruction(content),
         "prd-add" => prd::handle_add(content),

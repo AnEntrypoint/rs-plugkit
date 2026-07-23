@@ -95,6 +95,20 @@ pub struct Policy {
     pub mutables_resolved_statuses: Vec<String>,
     #[serde(default = "default_reject_duplicate_witness")]
     pub reject_duplicate_witness: bool,
+    // The fresh-prompt-reset-to-initial-phase logic in instructions/mod.rs
+    // (handle_instruction) previously compared the live phase against the
+    // literal strings "PLAN"/"COMPLETE" directly, bypassing the graph
+    // entirely for a project that names its initial/terminal phases
+    // something else via a custom .gm/instructions/fsm/graph.json override
+    // -- the exact "hardcoded path silently pre-empts the graph" bug class
+    // the 2026-07-21 CONSOLIDATE/COMPLETE gate-bypass entry already hit once
+    // for a different check. Making these two names graph-policy-overridable
+    // closes that class here too, additively (old overrides without these
+    // fields still default to the pre-existing literal behavior).
+    #[serde(default = "default_initial_phase")]
+    pub initial_phase: String,
+    #[serde(default = "default_terminal_phase")]
+    pub terminal_phase: String,
 }
 
 fn default_toplevel_doc_allowlist() -> Vec<String> {
@@ -117,6 +131,8 @@ fn default_mutables_resolved_statuses() -> Vec<String> {
     ["witnessed", "resolved"].iter().map(|s| s.to_string()).collect()
 }
 fn default_reject_duplicate_witness() -> bool { true }
+fn default_initial_phase() -> String { "PLAN".to_string() }
+fn default_terminal_phase() -> String { "COMPLETE".to_string() }
 
 impl Default for Policy {
     fn default() -> Self {
@@ -130,6 +146,8 @@ impl Default for Policy {
             prd_closed_statuses: default_prd_closed_statuses(),
             mutables_resolved_statuses: default_mutables_resolved_statuses(),
             reject_duplicate_witness: default_reject_duplicate_witness(),
+            initial_phase: default_initial_phase(),
+            terminal_phase: default_terminal_phase(),
         }
     }
 }
@@ -196,7 +214,7 @@ fn default_graph() -> Graph {
             Edge { from: "PLAN".into(), to: "EXECUTE".into(), gates: vec![] },
             Edge { from: "EXECUTE".into(), to: "EMIT".into(), gates: vec![] },
             Edge { from: "EMIT".into(), to: "VERIFY".into(), gates: vec![] },
-            Edge { from: "VERIFY".into(), to: "CONSOLIDATE".into(), gates: vec!["residual-scan-fired".into(), "prd-all-closed".into(), "mutables-all-resolved".into()] },
+            Edge { from: "VERIFY".into(), to: "CONSOLIDATE".into(), gates: vec!["residual-scan-fired".into(), "prd-all-closed".into(), "mutables-all-resolved".into(), "claim-audit-clean".into(), "submodules-clean".into()] },
             // Re-plan edges, gate-free by design -- AGENTS.md/execute.md prose
             // documents "transition to=PLAN ... always legal from EXECUTE" for
             // a reshaping discovery (scope/approach/dependency-shape change to
@@ -212,7 +230,7 @@ fn default_graph() -> Graph {
             Edge { from: "EXECUTE".into(), to: "PLAN".into(), gates: vec![] },
             Edge { from: "EMIT".into(), to: "PLAN".into(), gates: vec![] },
             Edge { from: "VERIFY".into(), to: "PLAN".into(), gates: vec![] },
-            Edge { from: "CONSOLIDATE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into(), "worktree-clean".into(), "residual-scan-fired".into(), "ci-validated-fresh".into(), "browser-witness-coverage".into()] },
+            Edge { from: "CONSOLIDATE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into(), "worktree-clean".into(), "residual-scan-fired".into(), "ci-validated-fresh".into(), "browser-witness-coverage".into(), "submodules-clean".into()] },
             // COMPLETE has no default forward edge -- matches next_phase's
             // Phase::Complete => Phase::Complete self-loop (terminal, bare
             // `transition` with no target is a no-op there).
@@ -260,6 +278,20 @@ fn default_graph() -> Graph {
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
                 message: "transition rejected: client-edit-no-witness -- one or more client-side files edited this session lack a matching browser-witness. Dispatch `browser` to page.evaluate the invariant each edit establishes, then re-attempt.".into(),
+            },
+            GateDef {
+                name: "claim-audit-clean".into(),
+                predicate: Some("claim-audit-clean".into()),
+                hook: None,
+                hook_mode: HookMode::PredicateOnly,
+                message: "transition to CONSOLIDATE rejected: claim-audit not fired in this stop window, or a prior fire found a stale claim -- dispatch `claim-audit` to scan AGENTS.md for shipped/validated/fixed claims referencing a commit hash and verify each hash actually exists in this repo's git log; resolve any stale finding before re-attempting.".into(),
+            },
+            GateDef {
+                name: "submodules-clean".into(),
+                predicate: Some("submodules-clean".into()),
+                hook: None,
+                hook_mode: HookMode::PredicateOnly,
+                message: "transition rejected: submodule pointer drift -- one or more of gm's tracked submodule gitlinks (agentplug, rs-plugkit, rs-codeinsight, rs-search, agentplug-bert, agentplug-libsql, agentplug-treesitter) no longer match that submodule's own real HEAD. `git add <drifted-path>` for each, then git_commit/git_finalize to update gm's own pointer before re-attempting.".into(),
             },
         ],
         policy: Policy::default(),

@@ -76,8 +76,19 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             if let Some(rest) = tok.strip_prefix('@') {
                 let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
                 if !name.is_empty() {
-                    static FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                    if !FIRED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    // A plain fire-once latch would permanently silence this event
+                    // after the first hit for the lifetime of the shared gm.wasm
+                    // instance (a single process-wide store serving every
+                    // concurrently-active project) -- a cooldown timestamp instead
+                    // re-arms the event periodically so a recurring condition keeps
+                    // surfacing rather than going permanently dark for every project.
+                    const SIGIL_COOLDOWN_MS: i64 = 5 * 60 * 1000;
+                    static LAST_FIRED_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+                    let now = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
+                    let prev = LAST_FIRED_MS.load(std::sync::atomic::Ordering::Relaxed);
+                    if now.saturating_sub(prev) >= SIGIL_COOLDOWN_MS
+                        && LAST_FIRED_MS.compare_exchange(prev, now, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok()
+                    {
                         crate::wasm_dispatch::emit_event("discipline_sigil_ignored", serde_json::json!({
                             "sigil": format!("@{}", name),
                             "fallback_namespace": "default",
@@ -173,6 +184,21 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     (payload.to_string(), String::new(), 0)
 }
 
+// Real back-pressure, not just advisory text: tracks AGENTS.md's byte count
+// across memorize-fire calls THIS session (persisted per-project so it
+// survives across dispatches on the shared gm.wasm instance, never an
+// in-memory static that would bleed across concurrently-active projects)
+// and flags when a session has fired memorize-fire repeatedly without the
+// file ever shrinking -- the exact slow-bloat drift the bidirectional-
+// migration rule names but had no enforced back-pressure for. Warns, never
+// hard-refuses: a session with genuinely nothing eligible to drain this run
+// (no detail-heavy/single-crate entries left to compress) is real, not a
+// violation, so this reports "flat_streak" for visibility rather than
+// denying the memorize-fire dispatch outright -- a hard refuse would block
+// legitimate memorize calls that have nothing to do with AGENTS.md at all.
+const AGENTS_DRAIN_STATE_FILE: &str = ".gm/exec-spool/.agents-drain-state.json";
+const FLAT_STREAK_WARN_THRESHOLD: u32 = 3;
+
 #[cfg(target_arch = "wasm32")]
 fn agents_drain_obligation() -> serde_json::Value {
     let text = match crate::wasm_dispatch::host_read("AGENTS.md") {
@@ -181,9 +207,33 @@ fn agents_drain_obligation() -> serde_json::Value {
     };
     let bytes = text.len();
     let lines = text.lines().count();
+
+    let prior = crate::wasm_dispatch::host_read(AGENTS_DRAIN_STATE_FILE)
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let prior_bytes = prior.as_ref().and_then(|v| v.get("agents_bytes")).and_then(|v| v.as_u64());
+    let prior_streak = prior.as_ref().and_then(|v| v.get("flat_streak")).and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let dropped = prior_bytes.map(|p| (bytes as u64) < p).unwrap_or(false);
+    let flat_streak: u64 = if dropped { 0 } else { prior_streak + 1 };
+
+    let new_state = serde_json::json!({ "agents_bytes": bytes as u64, "flat_streak": flat_streak });
+    let _ = crate::wasm_dispatch::host_write(AGENTS_DRAIN_STATE_FILE, &new_state.to_string());
+
+    let back_pressure_warning = if flat_streak >= FLAT_STREAK_WARN_THRESHOLD as u64 {
+        Some(format!(
+            "AGENTS.md byte count has not dropped across the last {} memorize-fire calls this session (currently {} bytes) -- the drain obligation has been skipped repeatedly, not merely absent this one turn. If genuinely nothing is eligible to drain, that is fine; if something detail-heavy/single-crate/single-platform is sitting in AGENTS.md, drain it THIS turn.",
+            flat_streak, bytes
+        ))
+    } else {
+        None
+    };
+
     serde_json::json!({
         "agents_bytes": bytes,
         "agents_lines": lines,
+        "dropped_since_last_fire": dropped,
+        "flat_streak": flat_streak,
+        "back_pressure_warning": back_pressure_warning,
         "instruction": "AGENTS.md is a staging ground; every memorize run drains it. THIS turn, pick a few existing AGENTS.md entries that are detail-heavy, single-crate, or single-platform (the material that belongs in rs-learn), memorize-fire their substance to the default namespace, then compress each drained paragraph to a one-line pointer in the SAME commit. Witness: this store gained the fact (recallable next turn) AND the AGENTS.md byte count dropped. A few entries per run, never a wholesale rewrite; top-level cross-cutting rules stay. Skipping the drain is the slow-bloat drift this back-pressure exists to prevent.",
     })
 }

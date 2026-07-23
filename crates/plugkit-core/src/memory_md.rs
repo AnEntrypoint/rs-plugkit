@@ -727,7 +727,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
     json!({ "converged": converged, "report": report })
 }
 
-fn flat_kv_entries(ns: &str) -> Vec<(String, String)> {
+pub fn flat_kv_entries(ns: &str) -> Vec<(String, String)> {
     let packed = unsafe {
         crate::wasm_dispatch::host_kv_query(ns.as_ptr(), ns.len() as u32, "".as_ptr(), 0)
     };

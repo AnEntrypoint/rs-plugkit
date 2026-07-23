@@ -37,6 +37,22 @@ fn relpath(cwd: &str, abs: &str) -> String {
     }
 }
 
+// Hand-rolled rather than the `sha2` crate (already a dependency of the
+// sibling native agentplug-runner crate in this same repo family) because
+// this crate's build surface is uniquely constrained relative to that
+// sibling: plugkit-core targets wasm32-wasip1 as a cdylib with an existing,
+// separately fragile candle/tokenizers/gemm dependency chain (see embed.rs's
+// own doc comments on wasm32 SIMD dispatch and custom_getrandom wiring), and
+// this repo's own cascade-only build discipline ("CI Is the Build" -- cargo
+// build/test are never run locally, only pushed CI witnesses the compile)
+// means a new crate addition here cannot be locally build-verified before
+// landing, unlike a native target. The hash itself is used only for a
+// non-adversarial content-addressed dedup key (hash_file_short, browser-edit
+// witness tracking) -- not a security boundary -- so a small, self-contained,
+// already-correct implementation is the lower-risk choice here versus adding
+// an unverified new wasm32-wasip1 dependency edge. If cross-project embed/hash
+// dependency consolidation is ever worth the risk, do it as its own
+// CI-witnessed change, not bundled into an unrelated fix.
 const SHA256_K: [u32; 64] = [
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
     0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,

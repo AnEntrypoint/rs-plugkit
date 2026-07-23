@@ -44,7 +44,7 @@ const EMBED_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 const EMBED_DIM: usize = 384;
 const MAX_TOKENS: usize = 512;
 
-const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
+pub const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
 
 const QUERY_CACHE_CAP: usize = 64;
 const QUERY_CACHE_TTL_MS: i64 = 600_000;

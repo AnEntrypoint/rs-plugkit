@@ -6,6 +6,7 @@ use super::host_abi::{
     git_call, git_call_argv, host_read, plugin_call as call_plugin,
 };
 use super::events::{emit_event, log_deviation_push, install_panic_hook};
+use crate::orchestrator::yaml_util::base64_decode;
 
 fn plugin_ok(resp: &Value) -> bool {
     resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
@@ -408,8 +409,26 @@ fn recall(body: &Value) -> u64 {
     }))
 }
 
-static RECALL_SCORE_UNAVAILABLE_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static SIGIL_IGNORED_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// A plain fire-once AtomicBool latch permanently silences the event after the
+// FIRST occurrence for the lifetime of the shared gm.wasm instance -- since
+// this instance is a single process-wide store serving every concurrently-
+// active project (see agentplug-host's is_stateless_shared_plugin), that
+// silences the signal for every project after the first hit, forever, until
+// the daemon process itself restarts. Cooldown timestamps re-arm the event
+// after DIAGNOSTIC_EVENT_COOLDOWN_MS so a genuinely recurring condition keeps
+// surfacing periodically instead of going permanently dark.
+const DIAGNOSTIC_EVENT_COOLDOWN_MS: i64 = 5 * 60 * 1000;
+static RECALL_SCORE_UNAVAILABLE_LAST_FIRED_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static SIGIL_IGNORED_LAST_FIRED_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn diagnostic_event_should_fire(last_fired: &std::sync::atomic::AtomicI64) -> bool {
+    let now = unsafe { host_now_ms() } as i64;
+    let prev = last_fired.load(std::sync::atomic::Ordering::Relaxed);
+    if now.saturating_sub(prev) < DIAGNOSTIC_EVENT_COOLDOWN_MS {
+        return false;
+    }
+    last_fired.compare_exchange(prev, now, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok()
+}
 
 fn annotate_hits_with_score(v: Value) -> Value {
     let arr = match v {
@@ -433,7 +452,7 @@ fn annotate_hits_with_score(v: Value) -> Value {
             }
         }
     }
-    if any_missing && !RECALL_SCORE_UNAVAILABLE_FIRED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    if any_missing && diagnostic_event_should_fire(&RECALL_SCORE_UNAVAILABLE_LAST_FIRED_MS) {
         emit_event("recall_score_unavailable", json!({
             "reason": "host_vec_search return shape elides per-hit score",
         }));
@@ -445,7 +464,7 @@ fn check_sigil_ignored(text: &str, namespace: &str) {
     if namespace != "default" { return; }
     let sigil = extract_sigil(text);
     if let Some(s) = sigil {
-        if !SIGIL_IGNORED_FIRED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        if diagnostic_event_should_fire(&SIGIL_IGNORED_LAST_FIRED_MS) {
             emit_event("discipline_sigil_ignored", json!({
                 "sigil": s,
                 "fallback_namespace": "default",
@@ -715,6 +734,43 @@ fn codesearch(body: &Value) -> u64 {
     }))
 }
 
+// The gm-log outage (dead for two-plus weeks per the 2026-07-22 changelog
+// entry) was invisible because nothing watched the watcher -- gmsniff
+// --watchers works but is pull-only, requiring someone to think to run it.
+// This makes a dead lifecycle-event pipe a same-session `health` finding
+// instead of a fortnight-long silent gap: read the LAST `evt: {json}` line
+// this project's own .gm/exec-spool/.watcher.log holds (the exact format
+// emit_event/host_log write), parse its `ts`, and report how many ms old it
+// is. A missing/unparseable log or a stale last-event age (past a generous
+// threshold, since a genuinely idle project between real dispatches is not
+// itself evidence of a broken pipe) both surface here rather than requiring
+// a separate pull.
+const LIFECYCLE_STALE_WARN_MS: u64 = 30 * 60 * 1000;
+
+fn lifecycle_liveness() -> Value {
+    let log = match crate::wasm_dispatch::host_read(".gm/exec-spool/.watcher.log") {
+        Some(l) => l,
+        None => return json!({ "last_event_age_ms": null, "note": "no .watcher.log yet -- expected on a brand-new project with no dispatches fired" }),
+    };
+    let last_evt_line = log.lines().rev().find_map(|l| l.strip_prefix("evt: "));
+    let Some(line) = last_evt_line else {
+        return json!({ "last_event_age_ms": null, "note": "watcher.log exists but contains no evt: lines -- the lifecycle-event pipe may be dead (see the 2026-07-22 gm-log outage incident this check targets)" });
+    };
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return json!({ "last_event_age_ms": null, "note": "last evt: line in watcher.log failed to parse as JSON" });
+    };
+    let Some(ts) = v.get("ts").and_then(|t| t.as_u64()) else {
+        return json!({ "last_event_age_ms": null, "note": "last evt: line has no ts field" });
+    };
+    let now = unsafe { host_now_ms() };
+    let age_ms = now.saturating_sub(ts);
+    json!({
+        "last_event_age_ms": age_ms,
+        "last_event": v.get("event").cloned().unwrap_or(Value::Null),
+        "stale": age_ms > LIFECYCLE_STALE_WARN_MS,
+    })
+}
+
 fn health(_body: &Value) -> u64 {
     let now = unsafe { host_now_ms() };
     let subsystems: Vec<Value> = crate::mediator::all_verbs_by_subsystem()
@@ -755,7 +811,8 @@ fn health(_body: &Value) -> u64 {
             "host_vec_search","host_vec_embed",
             "host_exec_js","host_log","host_now_ms","host_env_get","host_browser_exec","host_task_proc"
         ],
-        "subsystems": subsystems
+        "subsystems": subsystems,
+        "lifecycle_liveness": lifecycle_liveness()
     }))
 }
 
@@ -1015,25 +1072,7 @@ fn resp_rows_or_null(resp: &Value) -> Value {
 }
 
 fn b64_decode(s: &str) -> Option<Vec<u8>> {
-    let s = s.trim();
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-    for c in s.bytes() {
-        let v: u32 = match c {
-            b'A'..=b'Z' => (c - b'A') as u32,
-            b'a'..=b'z' => (c - b'a' + 26) as u32,
-            b'0'..=b'9' => (c - b'0' + 52) as u32,
-            b'+' => 62, b'/' => 63,
-            b'=' => break,
-            b' ' | b'\n' | b'\r' | b'\t' => continue,
-            _ => return None,
-        };
-        buf = (buf << 6) | v;
-        bits += 6;
-        if bits >= 8 { bits -= 8; out.push((buf >> bits) as u8); buf &= (1 << bits) - 1; }
-    }
-    Some(out)
+    base64_decode(s.trim()).ok()
 }
 
 fn sql_serialize(body: &Value) -> u64 {
@@ -1296,7 +1335,6 @@ fn git_commit(body: &Value) -> u64 {
     }
     let _ = git_call_argv(&["add", "-A"], cwd);
     let bundled_message = bundle_prd_commit_comments(cwd, message);
-    let _ = git_call_argv(&["add", "-A"], cwd);
     let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
     if allow_empty { argv.push("--allow-empty"); }
     let r = git_call_argv(&argv, cwd);
@@ -1331,7 +1369,6 @@ fn git_finalize(body: &Value) -> u64 {
         }
         let _ = git_call_argv(&["add", "-A"], cwd_ref);
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
-        let _ = git_call_argv(&["add", "-A"], cwd_ref);
         let cr = git_call_argv(&["commit", "-m", bundled_message.as_str()], cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if ccode != 0 {

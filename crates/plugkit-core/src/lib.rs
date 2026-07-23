@@ -122,7 +122,7 @@ mod wasm_hooks {
         let phase = serde_json::from_str::<Value>(&ts).ok()
             .and_then(|v| v.get("phase").and_then(|p| p.as_str()).map(|p| p.to_string()))
             .unwrap_or_default();
-        if phase.is_empty() || phase == "COMPLETE" { return; }
+        if phase.is_empty() || phase == crate::orchestrator::fsm::graph().policy.terminal_phase { return; }
         let evt = json!({
             "event": "deviation.platform-search-drift",
             "sub": "hook",

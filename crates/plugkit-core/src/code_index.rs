@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use crate::wasm_dispatch::{host_read, unpack_to_value_pub};
+use crate::wasm_dispatch::{host_read, host_stat, unpack_to_value_pub};
 use crate::vecstore::{drop_if_dim_mismatch_at as drop_if_dim_mismatch, vec_to_json_literal, EXPECTED_EMBED_DIM};
 
 #[link(wasm_import_module = "env")]
@@ -445,7 +445,9 @@ fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option
         if is_hidden_segment(&entry) { continue; }
         if is_skipped_filename(&entry) { continue; }
         let next = if root.ends_with('/') { format!("{}{}", root, entry) } else { format!("{}/{}", root, entry) };
-        let is_dir_entry = !entry.contains('.');
+        let is_dir_entry = host_stat(&next)
+            .and_then(|v| v.get("isDirectory").and_then(|b| b.as_bool()))
+            .unwrap_or_else(|| !entry.contains('.'));
         if gitignore_excludes(gi, &next, is_dir_entry) { continue; }
         if !is_dir_entry {
             files.push(next);
@@ -546,10 +548,12 @@ fn embed_text(text: &str) -> Option<Vec<f32>> {
 // higher when the query side of a query/passage pair carries this prefix
 // and the passage side doesn't. This is plugkit-side pre-processing around
 // the plain "bert: embed" verb, not something the bert plugin itself needs
-// to know about (mirrors crate::embed::embed_text_json_query's old
-// in-process behavior, kept local to this file's own query-embedding call
-// site rather than moved into the plugin).
-const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
+// to know about. The constant itself is shared with crate::embed's own
+// query-embedding path (single source of truth for the BGE prefix
+// convention); this file's own embed_text_json_query wrapper stays local
+// since it targets a different embed_text (this file's out-of-process
+// call_plugin("bert", "embed", ...) vs embed.rs's in-process candle call).
+use crate::embed::BGE_QUERY_PREFIX;
 
 fn embed_text_json_query(query_text: &str) -> Option<Value> {
     let trimmed = query_text.trim();
@@ -568,10 +572,6 @@ fn json_to_f32_vec(v: &Value) -> Option<Vec<f32>> {
         if !out.is_empty() { return Some(out); }
     }
     None
-}
-
-fn sql_quote(s: &str) -> String {
-    s.replace('\'', "''")
 }
 
 const MANIFEST_NS: &str = "codeinsight-manifest";
@@ -1567,9 +1567,9 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
             }
         }
         Err(e) => {
-            let like = format!("%{}%", sql_quote(query));
-            let sql2 = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM code_chunks WHERE body LIKE '{}' OR name LIKE '{}' LIMIT {}", like, like, k);
-            match libsql_wasm::query(&db_path, &sql2) {
+            let like = format!("%{}%", query);
+            let sql2 = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM code_chunks WHERE body LIKE ?1 OR name LIKE ?1 LIMIT {}", k);
+            match libsql_wasm::query_params(&db_path, &sql2, &[&like]) {
                 Ok(rows) => json!({ "ok": true, "mode": "fallback_like_after_vec_err", "vec_err": e, "rows": rows }),
                 Err(e2) => json!({ "ok": false, "vec_err": e, "fallback_err": e2 }),
             }

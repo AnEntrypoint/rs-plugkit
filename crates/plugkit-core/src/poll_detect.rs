@@ -67,7 +67,7 @@ fn strip_heredocs_and_string_literals(command: &str) -> String {
 
 fn strip_heredoc(s: &str, single_quote: bool) -> String {
     let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
+    let mut out: Vec<u8> = Vec::with_capacity(s.len());
     let mut i = 0usize;
     while i < bytes.len() {
         if i + 2 < bytes.len() && bytes[i] == b'<' && bytes[i+1] == b'<' {
@@ -82,25 +82,25 @@ fn strip_heredoc(s: &str, single_quote: bool) -> String {
                 j += 1;
             }
             let tag_end = j;
-            if tag_end == tag_start { out.push(bytes[i] as char); i += 1; continue; }
+            if tag_end == tag_start { out.push(bytes[i]); i += 1; continue; }
             if saw_quote {
-                if j >= bytes.len() || bytes[j] != need_open { out.push(bytes[i] as char); i += 1; continue; }
+                if j >= bytes.len() || bytes[j] != need_open { out.push(bytes[i]); i += 1; continue; }
                 j += 1;
             } else if single_quote {
-                out.push(bytes[i] as char); i += 1; continue;
+                out.push(bytes[i]); i += 1; continue;
             }
             let tag = &s[tag_start..tag_end];
             if let Some(end_idx) = find_terminator(&s[j..], tag) {
                 i = j + end_idx + tag.len();
                 continue;
             } else {
-                return out;
+                return String::from_utf8_lossy(&out).into_owned();
             }
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn find_terminator(s: &str, tag: &str) -> Option<usize> {

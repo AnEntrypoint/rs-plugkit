@@ -1,7 +1,7 @@
 use serde_yaml::Value;
 use super::cas;
 use super::gm_dir;
-use super::yaml_util::yaml_to_json;
+use super::yaml_util::{invalidate_residual_marker, levenshtein, yaml_to_json};
 use crate::pkfs;
 
 pub fn prd_path() -> std::path::PathBuf {
@@ -271,14 +271,6 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     (serde_json::json!({ key: id }).to_string(), String::new(), 0)
 }
 
-fn invalidate_residual_marker() {
-    let marker = gm_dir().join("residual-check-fired");
-    let marker_s = marker.to_string_lossy().to_string();
-    if pkfs::exists(&marker_s) {
-        let _ = pkfs::write(&marker_s, "");
-    }
-}
-
 fn parse_resolve_target(trimmed: &str) -> (String, Option<String>, Option<String>) {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         let id = v.get("id")
@@ -364,22 +356,6 @@ fn recover_truncated_envelope(s: &str) -> Option<(String, Option<String>)> {
         .or_else(|| extract("item_id")).or_else(|| extract("slug")).or_else(|| extract("key"))?;
     let wit = extract("witness_evidence").or_else(|| extract("witness")).or_else(|| extract("evidence"));
     Some((id, wit))
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut cur = vec![0usize; b.len() + 1];
-    for i in 1..=a.len() {
-        cur[0] = i;
-        for j in 1..=b.len() {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[b.len()]
 }
 
 fn nearest_known_id(target: &str, known: &[String]) -> Option<String> {

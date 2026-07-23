@@ -388,8 +388,8 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 if let Some(items) = v.get("items").and_then(|v| v.as_array()) {
                     for it in items {
                         let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                        if !crate::orchestrator::prd::status_is_open(status) { continue; }
-                        let witness = it.get("witness_evidence").and_then(|v| v.as_str()).unwrap_or("");
+                        if crate::orchestrator::prd::status_is_open(status) { continue; }
+                        let witness = it.get("witness_evidence").or_else(|| it.get("witness")).and_then(|v| v.as_str()).unwrap_or("");
                         if witness.trim().is_empty() {
                             let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                             log_deviation("prd-anti-shape", &format!("id={} status={} no witness_evidence on closing transition", id, status));

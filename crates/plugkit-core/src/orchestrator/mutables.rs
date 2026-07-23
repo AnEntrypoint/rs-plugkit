@@ -2,31 +2,11 @@ use serde_yaml::Value;
 use super::cas;
 use super::gm_dir;
 use super::memorize;
-use super::yaml_util::yaml_to_json;
+use super::yaml_util::{invalidate_residual_marker, levenshtein, yaml_to_json};
 use crate::pkfs;
 
 pub fn mutables_path() -> std::path::PathBuf {
     gm_dir().join("mutables.yml")
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let av: Vec<char> = a.chars().collect();
-    let bv: Vec<char> = b.chars().collect();
-    let m = av.len();
-    let n = bv.len();
-    if m == 0 { return n; }
-    if n == 0 { return m; }
-    let mut prev: Vec<usize> = (0..=n).collect();
-    let mut cur: Vec<usize> = vec![0; n + 1];
-    for i in 1..=m {
-        cur[0] = i;
-        for j in 1..=n {
-            let cost = if av[i - 1] == bv[j - 1] { 0 } else { 1 };
-            cur[j] = (cur[j - 1] + 1).min(prev[j] + 1).min(prev[j - 1] + cost);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[n]
 }
 
 pub fn handle_add(content: &str) -> (String, String, i32) {
@@ -74,14 +54,6 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     #[cfg(target_arch = "wasm32")]
     crate::wasm_dispatch::emit_event("mutable.added", serde_json::json!({ "id": id }));
     (serde_json::json!({ "added": id }).to_string(), String::new(), 0)
-}
-
-fn invalidate_residual_marker() {
-    let marker = gm_dir().join("residual-check-fired");
-    let marker_s = marker.to_string_lossy().to_string();
-    if pkfs::exists(&marker_s) {
-        let _ = pkfs::write(&marker_s, "");
-    }
 }
 
 pub fn handle_list(_content: &str) -> (String, String, i32) {

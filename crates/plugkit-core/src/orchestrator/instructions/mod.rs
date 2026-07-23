@@ -388,23 +388,32 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         !p.trim().is_empty() && is_valid_phase(&p.trim().to_ascii_uppercase())
     }).unwrap_or(false);
 
-    if fresh_prompt && !raw_phase_override && phase != "PLAN" && phase != "COMPLETE"
+    // Graph-policy-driven, not hardcoded literals -- a project overriding
+    // .gm/instructions/fsm/graph.json's policy.initial_phase/terminal_phase
+    // gets correct fresh-prompt-reset behavior for its own custom phase
+    // names; an unconfigured project sees byte-identical PLAN/COMPLETE
+    // behavior via the policy defaults.
+    let policy = super::fsm::graph().policy;
+    let initial_phase = policy.initial_phase.clone();
+    let terminal_phase = policy.terminal_phase.clone();
+
+    if fresh_prompt && !raw_phase_override && phase != initial_phase && phase != terminal_phase
         && prd_pending_count(&prd_items_json()) == 0
     {
-        ilog(&format!("instruction::handle fresh prompt on stuck {} chain (no pending PRD) -> reset phase to PLAN", phase));
-        phase = "PLAN".to_string();
+        ilog(&format!("instruction::handle fresh prompt on stuck {} chain (no pending PRD) -> reset phase to {}", phase, initial_phase));
+        phase = initial_phase.clone();
         let mut st = read_state();
-        st.phase = Phase::plan();
+        st.phase = Phase::parse(&initial_phase).unwrap_or_else(Phase::plan);
         let _ = super::state::write_state(&st);
     }
 
-    if phase == "COMPLETE" && !raw_phase_override {
+    if phase == terminal_phase && !raw_phase_override {
         if fresh_prompt {
-            phase = "PLAN".to_string();
+            phase = initial_phase.clone();
             let mut st = read_state();
-            st.phase = Phase::plan();
+            st.phase = Phase::parse(&initial_phase).unwrap_or_else(Phase::plan);
             let _ = super::state::write_state(&st);
-            ilog("instruction::handle fresh prompt on COMPLETE chain -> reset phase to PLAN");
+            ilog(&format!("instruction::handle fresh prompt on {} chain -> reset phase to {}", terminal_phase, initial_phase));
         } else if prd_pending_count(&prd_items_json()) == 0 && session_id_opt.is_some() {
             idev(
                 "complete-chain-poll",

@@ -2,6 +2,7 @@
 
 use serde_json::{json, Value};
 
+use crate::orchestrator::yaml_util::{base64_decode, base64_encode};
 use crate::wasm_dispatch::{host_cwd_string, plugin_call};
 
 /// agentplug-libsql is now stateless and shared as ONE process-wide instance
@@ -150,48 +151,3 @@ pub fn smoke() -> Value {
     json!({ "ok": true, "smoke": log, "libsql_version": "delegated" })
 }
 
-const B64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-fn base64_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = *chunk.get(1).unwrap_or(&0);
-        let b2 = *chunk.get(2).unwrap_or(&0);
-        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
-        out.push(B64_CHARS[((n >> 18) & 0x3f) as usize] as char);
-        out.push(B64_CHARS[((n >> 12) & 0x3f) as usize] as char);
-        out.push(if chunk.len() > 1 { B64_CHARS[((n >> 6) & 0x3f) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { B64_CHARS[(n & 0x3f) as usize] as char } else { '=' });
-    }
-    out
-}
-
-fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
-    fn val(c: u8) -> Option<u32> {
-        match c {
-            b'A'..=b'Z' => Some((c - b'A') as u32),
-            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
-            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let clean: Vec<u8> = s.bytes().filter(|&c| c != b'=' && !c.is_ascii_whitespace()).collect();
-    let mut out = Vec::with_capacity(clean.len() / 4 * 3 + 3);
-    for chunk in clean.chunks(4) {
-        let mut n: u32 = 0;
-        let mut bits = 0u32;
-        for &c in chunk {
-            let v = val(c).ok_or_else(|| "invalid base64 char".to_string())?;
-            n = (n << 6) | v;
-            bits += 6;
-        }
-        n <<= 24u32.saturating_sub(bits);
-        let nbytes = (bits / 8) as usize;
-        let b = n.to_be_bytes();
-        out.extend_from_slice(&b[..nbytes]);
-    }
-    Ok(out)
-}
