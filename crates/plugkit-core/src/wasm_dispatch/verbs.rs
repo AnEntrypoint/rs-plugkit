@@ -1193,7 +1193,23 @@ fn git_push(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let explicit_branch = body.get("branch").and_then(|v| v.as_str()).map(String::from);
     let current_branch = exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD").trim().to_string();
-    let branch = explicit_branch.clone().unwrap_or_else(|| current_branch.clone());
+    // `git rev-parse --abbrev-ref HEAD` literally returns the string "HEAD"
+    // when the checkout is in detached-HEAD state -- the normal, default
+    // state for every git submodule (this repo's own agentplug/rs-plugkit/
+    // rs-codeinsight/rs-search/agentplug-bert/agentplug-libsql/
+    // agentplug-treesitter submodules all live detached-at-pin). Falling
+    // back to that literal "HEAD" string as the push target (rather than
+    // resolving it to the real intended branch) previously produced a real
+    // git error -- "not a full refname" -- on every no-explicit-branch
+    // git_push/git_finalize dispatch against a detached submodule,
+    // live-reproduced this session. The guard below already correctly
+    // exempted "HEAD" from the wrong-branch denial (detached is not a
+    // mistake), it just never resolved the fallback -- this repo's own
+    // direct-push-to-main-always discipline (AGENTS.md) makes "main" the
+    // correct default resolution for exactly this case.
+    let branch = explicit_branch.clone().unwrap_or_else(|| {
+        if current_branch == "HEAD" { "main".to_string() } else { current_branch.clone() }
+    });
     if branch.is_empty() {
         return err("git_push", "unable to determine branch");
     }
