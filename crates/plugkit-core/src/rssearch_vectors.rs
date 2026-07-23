@@ -18,10 +18,6 @@ fn shared_db_path() -> String {
     crate::code_index::project_db_path(None)
 }
 
-/// Resolved fresh every call (never a `const`) -- the plugin is stateless
-/// and process-wide shared, so `db_name` must be THIS dispatch's real
-/// absolute path (host_cwd_string() underneath), not a value baked in at
-/// compile time.
 fn spec(path: &str) -> VecTableSpec<'_> {
     VecTableSpec { db_name: path, table: TABLE, index: INDEX }
 }

@@ -16,7 +16,7 @@ extern "C" {
     ) -> u64;
 }
 
-fn call_plugin(plugin: &str, verb: &str, body: Value) -> Value {
+fn call_libsql_plugin(plugin: &str, verb: &str, body: Value) -> Value {
     let body_str = body.to_string();
     let packed = unsafe {
         host_plugin_call(
@@ -55,32 +55,17 @@ fn plugin_rows(resp: Value) -> Result<Value, String> {
     }
 }
 
-/// agentplug-libsql is now stateless and process-wide shared across every
-/// concurrently active project -- open/close are accepted-but-inert no-ops
-/// plugin-side (every exec/query call already does its own atomic
-/// open-operate-close cycle), and the plugin keys EVERY call purely off the
-/// JSON body's `path` field (defaulting to `:memory:`, silently throwaway,
-/// if absent) -- it never looks at `db`. `SHARED_DB` ("gm") is kept only as
-/// a label for logging/doc-comment continuity; it is never sufficient on
-/// its own to identify a db anymore. shared_ensure_open/shared_exec/
-/// shared_query/shared_exec_params/shared_query_params below all resolve
-/// and forward the CURRENT dispatch's real absolute path
-/// (crate::code_index::project_db_path(None), fresh via host_cwd_string()
-/// every call) rather than relying on a remembered path from an earlier
-/// open() call -- callers no longer need to pre-open at all, though
-/// shared_ensure_open is kept for callers that still call it explicitly
-/// (now itself just a resolve+no-op-forward).
 fn shared_db_path() -> String {
     crate::code_index::project_db_path(None)
 }
 
 pub fn shared_ensure_open(path: &str) -> Result<(), String> {
-    let resp = call_plugin("libsql", "open", json!({ "db": SHARED_DB, "path": path }));
+    let resp = call_libsql_plugin("libsql", "open", json!({ "db": SHARED_DB, "path": path }));
     plugin_ok(&resp)
 }
 
 pub fn recreate_shared_db(path: &str) -> Result<(), String> {
-    let _ = call_plugin("libsql", "close", json!({ "db": SHARED_DB, "path": path }));
+    let _ = call_libsql_plugin("libsql", "close", json!({ "db": SHARED_DB, "path": path }));
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let _ = std::fs::remove_file(format!("{}{}", path, suffix));
     }
@@ -106,19 +91,19 @@ pub fn recover_malformed_shared_db() -> bool {
 
 pub fn shared_exec(sql: &str) -> Result<(), String> {
     let path = shared_db_path();
-    let resp = call_plugin("libsql", "exec", json!({ "db": SHARED_DB, "path": path, "sql": sql }));
+    let resp = call_libsql_plugin("libsql", "exec", json!({ "db": SHARED_DB, "path": path, "sql": sql }));
     plugin_ok(&resp)
 }
 
 pub fn shared_query(sql: &str) -> Result<Value, String> {
     let path = shared_db_path();
-    let resp = call_plugin("libsql", "query", json!({ "db": SHARED_DB, "path": path, "sql": sql }));
+    let resp = call_libsql_plugin("libsql", "query", json!({ "db": SHARED_DB, "path": path, "sql": sql }));
     plugin_rows(resp)
 }
 
 pub fn shared_exec_params(sql: &str, params: &[&str]) -> Result<(), String> {
     let path = shared_db_path();
-    let resp = call_plugin(
+    let resp = call_libsql_plugin(
         "libsql",
         "exec_params",
         json!({ "db": SHARED_DB, "path": path, "sql": sql, "params": params }),
@@ -128,7 +113,7 @@ pub fn shared_exec_params(sql: &str, params: &[&str]) -> Result<(), String> {
 
 pub fn shared_query_params(sql: &str, params: &[&str]) -> Result<Value, String> {
     let path = shared_db_path();
-    let resp = call_plugin(
+    let resp = call_libsql_plugin(
         "libsql",
         "query_params",
         json!({ "db": SHARED_DB, "path": path, "sql": sql, "params": params }),

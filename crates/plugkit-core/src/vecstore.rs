@@ -6,11 +6,6 @@ use crate::wasm_dispatch::plugin_call;
 
 pub const EXPECTED_EMBED_DIM: usize = 384;
 
-/// `db_name` here is always a real absolute path by the time it reaches
-/// this function (project_db_path/VecTableSpec.db_name at every real call
-/// site) -- the agentplug-libsql plugin is stateless and process-wide
-/// shared now, and reads ONLY the JSON body's `path` field (defaulting to
-/// `:memory:`, silently throwaway, if absent); it never looks at `db`.
 fn libsql_query(db_name: &str, sql: &str) -> Result<Value, String> {
     let resp = plugin_call("libsql", "query", &json!({ "path": db_name, "sql": sql }));
     if resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {

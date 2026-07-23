@@ -13,18 +13,6 @@ extern "C" {
     fn host_env_get(key_ptr: *const u8, key_len: u32) -> u64;
 }
 
-/// pipeline_state always lives in the CURRENT dispatch's own default
-/// project db (crate::code_index::project_db_path(None)) -- never the
-/// project_path-scoped "external" db a memorize_at call might target. This
-/// matches pre-existing behavior (pipeline.rs's old bare GM_DB="gm" const
-/// and code_index.rs's old GM_DB label always resolved to the SAME literal
-/// string, so both modules were always already reading/writing the same
-/// db); build_pending_step still records the caller's `project_path`
-/// inside the persisted JSON payload for later replay, it just never used
-/// it to choose WHICH db to write pipeline_state into. Resolved fresh
-/// every call (never a `const`), matching the now-stateless
-/// process-wide-shared libsql plugin's requirement for a real absolute
-/// path on every call.
 fn pipeline_db_path() -> String {
     crate::code_index::project_db_path(None)
 }
