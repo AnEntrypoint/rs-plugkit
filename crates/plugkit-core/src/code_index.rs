@@ -739,7 +739,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
         let file_hash = crc32(&content);
         let path_hash = crc32(fp);
-        digest_entries.push((fp.clone(), file_mtime as u32));
+        digest_entries.push((fp.clone(), crate::pipeline::fnv1a64(content.as_bytes()) as u32));
 
         if let Some(m) = prior.get(fp) {
             if m.hash == file_hash {
@@ -897,7 +897,7 @@ fn digest_from_entries(mut entries: Vec<(String, u32)>) -> String {
         acc.push_str(&format!("{:08x}", hash));
         acc.push('\n');
     }
-    format!("v2:{:016x}:files={}", crate::pipeline::fnv1a64(acc.as_bytes()), entries.len())
+    format!("v3:{:016x}:files={}", crate::pipeline::fnv1a64(acc.as_bytes()), entries.len())
 }
 
 pub fn current_digest() -> String {
@@ -911,8 +911,11 @@ pub fn current_digest() -> String {
             .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
         { Some(s) => s, None => continue };
         if stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0) > 256 * 1024 { continue; }
-        let mtime = match stat.get("mtime_ms").and_then(|v| v.as_f64()) { Some(m) => m, None => continue };
-        entries.push((canon, mtime as u32));
+        let content = match host_read(&canon)
+            .or_else(|| host_read(raw_fp))
+        { Some(c) => c, None => continue };
+        let content_hash = crate::pipeline::fnv1a64(content.as_bytes()) as u32;
+        entries.push((canon, content_hash));
     }
     digest_from_entries(entries)
 }
