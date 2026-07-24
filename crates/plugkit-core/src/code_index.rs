@@ -680,7 +680,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
         let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     }
-    const INDEX_WALL_BUDGET_MS: u64 = 45000;
+    const INDEX_WALL_BUDGET_MS: u64 = 30000;
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut indexed = 0;
     let mut chunked = 0;
