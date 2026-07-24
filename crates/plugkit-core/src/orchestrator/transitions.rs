@@ -22,7 +22,7 @@ pub fn next_phase(current: &Phase) -> Phase {
 pub fn known_predicates() -> Vec<(&'static str, &'static str)> {
     vec![
         ("residual-scan-fired", "true once `residual-scan` has been dispatched in this stop window (the .gm/residual-check-fired marker exists)"),
-        ("prd-all-closed", "true when .gm/prd.yml has zero rows with an open status (pending/in-progress, not completed)"),
+        ("prd-all-closed", "true when .gm/prd.yml has zero REACHABLE rows with an open status (pending/in-progress, not completed); rows marked blockedBy: [external]/[out-of-reach] are the prose-sanctioned resting state for outside-session blockers and do not block"),
         ("mutables-all-resolved", "true when .gm/mutables.yml has zero rows still in unknown/pending status"),
         ("worktree-clean", "true when `git status --porcelain` is empty -- no uncommitted/unpushed delta"),
         ("ci-validated-fresh", "true when .gm/exec-spool/.ci-validated exists and its head_sha matches the current `git rev-parse HEAD` -- a witnessed-green CI run for the exact pushed commit"),
@@ -59,7 +59,29 @@ fn prd_has_open_items() -> bool {
     let Some(items) = v.get("items").and_then(|v| v.as_array()) else { return false };
     items.iter().any(|it| {
         let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-        prd::status_is_open(status)
+        if !prd::status_is_open(status) {
+            return false;
+        }
+        // Rows carrying `blockedBy: [external, ...]` / `[out-of-reach, ...]`
+        // are the served PLAN/VERIFY prose's OWN sanctioned resting state for
+        // genuinely-outside-session blockers (user-only billing/payment
+        // actions, upstream bugs) — the false-completion rule FORBIDS
+        // resolving them, so counting them here wedged real sessions in an
+        // unresolvable CONSOLIDATE/COMPLETE gate loop (live-witnessed: the
+        // same denial fired 11+ times across two sessions with every
+        // in-reach row resolved, tree clean+pushed, externals re-verified
+        // each pass). An open row is blocking ONLY when it is reachable.
+        let externally_blocked = it
+            .get("blockedBy")
+            .and_then(|b| b.as_array())
+            .map(|arr| {
+                arr.iter().any(|t| {
+                    let t = t.as_str().unwrap_or("");
+                    t.eq_ignore_ascii_case("external") || t.eq_ignore_ascii_case("out-of-reach")
+                })
+            })
+            .unwrap_or(false);
+        !externally_blocked
     })
 }
 
