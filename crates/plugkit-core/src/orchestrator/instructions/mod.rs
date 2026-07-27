@@ -478,6 +478,14 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "should_residual_scan": should_scan,
         "route_hint": route_hint,
         "discipline_policies": super::discipline_note::active_policies(),
+        // Config changes recorded since this session last looked. Delivered
+        // HERE, on the instruction response, because that is the surface an
+        // agent already reads every turn -- config_notify was recording changes
+        // that nothing ever surfaced, so a running agent could never learn its
+        // configuration had moved. Draining (rather than reading) gives
+        // delivery-once: a change is announced on the next dispatch and not
+        // repeated forever afterward.
+        "config_changed": super::config_notify::drain_for_session(notify_session.as_deref()),
     });
     let s = payload.to_string();
     ilog(&format!("instruction::handle done out_len={}", s.len()));
