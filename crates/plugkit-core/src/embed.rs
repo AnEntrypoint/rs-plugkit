@@ -597,7 +597,25 @@ fn now_ms() -> i64 {
     unsafe { crate::wasm_dispatch::host_now_ms() as i64 }
 }
 
+/// Prefix a cache key with the project it belongs to.
+///
+/// These caches are process-global `static`s, and the plugin instance is shared
+/// across concurrently-active projects, so a key of bare text meant project A's
+/// embedding could be served to project B. That is harmless only while every
+/// project embeds identically -- the moment the model, its query prefix, or the
+/// embedding dimension becomes configurable, the same text legitimately has
+/// different vectors per project and the cache silently returns the wrong one.
+///
+/// Scoped here rather than at each call site so no caller can forget it, and
+/// the entry-count cap is unchanged: the cap bounds total entries, and a
+/// second active project simply shares that budget.
+fn scoped_key(key: &str) -> String {
+    let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    format!("{root}\u{1f}{key}")
+}
+
 fn cache_get(cache: &Mutex<Vec<CacheEntry>>, key: &str) -> Option<Vec<f32>> {
+    let key = scoped_key(key);
     let mut guard = cache.lock().ok()?;
     let now = now_ms();
     guard.retain(|e| now - e.ts_ms < QUERY_CACHE_TTL_MS);
@@ -609,11 +627,12 @@ fn cache_get(cache: &Mutex<Vec<CacheEntry>>, key: &str) -> Option<Vec<f32>> {
 }
 
 fn cache_put(cache: &Mutex<Vec<CacheEntry>>, key: &str, embedding: &[f32]) {
+    let key = scoped_key(key);
     let mut guard = match cache.lock() { Ok(g) => g, Err(_) => return };
     let now = now_ms();
     guard.retain(|e| now - e.ts_ms < QUERY_CACHE_TTL_MS && e.key != key);
     while guard.len() >= QUERY_CACHE_CAP { guard.remove(0); }
-    guard.push(CacheEntry { key: key.to_string(), embedding: embedding.to_vec(), ts_ms: now });
+    guard.push(CacheEntry { key, embedding: embedding.to_vec(), ts_ms: now });
 }
 
 fn query_cache_get(key: &str) -> Option<Vec<f32>> {
