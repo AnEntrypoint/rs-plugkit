@@ -27,6 +27,19 @@ pub fn known_predicates() -> Vec<(&'static str, &'static str)> {
         ("worktree-clean", "true when `git status --porcelain` is empty -- no uncommitted/unpushed delta"),
         ("ci-validated-fresh", "true when .gm/exec-spool/.ci-validated exists and its head_sha matches the current `git rev-parse HEAD` -- a witnessed-green CI run for the exact pushed commit"),
         ("browser-witness-coverage", "true when every client-side file edited this session (per .gm/exec-spool/.turn-browser-edits.json) has a matching entry in .gm/exec-spool/.turn-browser-witnessed with the same content hash"),
+        // These two were dispatched by predicate_result but MISSING from this
+        // list, which is the one thing this list must never be: incomplete.
+        // fsm_vendor generates .gm/instructions/fsm/predicates.md from here and
+        // documents it as the complete set a graph's `gates.predicate` may
+        // name -- while the DEFAULT graph it writes alongside uses both of
+        // these. So the generated reference contradicted the generated graph,
+        // and an author trusting the reference would conclude two live gates
+        // were invalid. Worse, the unknown-name arm falls through to `false`,
+        // so a typo'd or genuinely-unknown predicate produces a gate that is
+        // permanently unsatisfiable rather than an error -- silent, and exactly
+        // the failure mode a gate must never have.
+        ("claim-audit-clean", "true when the claim audit finds no unwitnessed completion claims -- see orchestrator::claim_audit"),
+        ("submodules-clean", "true when no submodule has drifted from its recorded commit -- see orchestrator::submodule_drift"),
     ]
 }
 
@@ -40,7 +53,20 @@ fn predicate_result(name: &str) -> bool {
         "browser-witness-coverage" => check_browser_witness_coverage_for_cwd("").is_empty(),
         "claim-audit-clean" => super::claim_audit::claim_audit_clean(),
         "submodules-clean" => super::submodule_drift::submodules_clean(),
-        _ => false,
+        // An unrecognised predicate stays `false` -- a gate must fail CLOSED,
+        // never open, or a typo in a vendored graph would wave work straight
+        // through the check it was supposed to face. But failing closed
+        // silently is its own trap: the gate then blocks forever with a denial
+        // reason that describes a condition nobody can satisfy, and nothing
+        // ever says the name was simply wrong. Emit so the cause is visible,
+        // while keeping the safe verdict.
+        other => {
+            crate::wasm_dispatch::emit_event("fsm_unknown_predicate", serde_json::json!({
+                "predicate": other,
+                "reason": "not in transitions::known_predicates(); this gate can never be satisfied. Fix the name in .gm/instructions/fsm/graph.json (see fsm/predicates.md for the valid set) or use a jit hook for a condition that has no compiled predicate.",
+            }));
+            false
+        }
     }
 }
 
