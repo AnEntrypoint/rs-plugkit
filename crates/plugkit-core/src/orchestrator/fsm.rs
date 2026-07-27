@@ -46,6 +46,15 @@ pub struct Policy {
     pub await_allowed_verbs: Vec<String>,
     #[serde(default = "default_longgap_exempt_verbs")]
     pub longgap_exempt_verbs: Vec<String>,
+    /// Verbs whose dispatch RESETS the long-gap clock (`.gm/last-instruction-ts`).
+    ///
+    /// The third member of the same family as the two above, and the only one
+    /// that was not configurable: exempt verbs are not PENALISED by the clock,
+    /// whereas these actively REFRESH it. A project that renames or adds an
+    /// orienting verb has to be able to say so here, or that verb dispatches
+    /// forever without ever clearing the long-gap denial it keeps triggering.
+    #[serde(default = "default_longgap_refresh_verbs")]
+    pub longgap_refresh_verbs: Vec<String>,
     /// Verbs treated as "a shell" for the shell-bypass check, and the tool that
     /// bypass is steering people toward.
     ///
@@ -97,6 +106,11 @@ fn default_await_allowed_verbs() -> Vec<String> {
 fn default_longgap_exempt_verbs() -> Vec<String> {
     ["health", "auto-recall", "wait", "sleep"].iter().map(|s| s.to_string()).collect()
 }
+fn default_longgap_refresh_verbs() -> Vec<String> {
+    ["instruction", "transition", "phase-status", "prd-add", "prd-resolve", "prd-list",
+     "mutable-add", "mutable-resolve", "mutable-list"]
+        .iter().map(|s| s.to_string()).collect()
+}
 fn default_shell_verbs() -> Vec<String> {
     // Superset of the previously-hardcoded list -- narrowing it would silently
     // drop protection on a shell this gate already covered.
@@ -126,6 +140,7 @@ impl Default for Policy {
             toplevel_doc_allowlist: default_toplevel_doc_allowlist(),
             await_allowed_verbs: default_await_allowed_verbs(),
             longgap_exempt_verbs: default_longgap_exempt_verbs(),
+            longgap_refresh_verbs: default_longgap_refresh_verbs(),
             shell_verbs: default_shell_verbs(),
             deny_shell_git: default_deny_shell_git(),
             gate_repeat_escalate_threshold: default_gate_repeat_escalate_threshold(),
@@ -199,7 +214,7 @@ impl Graph {
     /// compatibility, and this system needs both. A warning gets the typo
     /// signal without the outage.
     const KNOWN_POLICY_KEYS: &'static [&'static str] = &[
-        "toplevel_doc_allowlist", "await_allowed_verbs", "longgap_exempt_verbs",
+        "toplevel_doc_allowlist", "await_allowed_verbs", "longgap_exempt_verbs", "longgap_refresh_verbs",
         "shell_verbs", "deny_shell_git", "gate_repeat_escalate_threshold",
         "longgap_threshold_ms", "require_witness_evidence", "prd_closed_statuses",
         "mutables_resolved_statuses", "reject_duplicate_witness", "initial_phase",
