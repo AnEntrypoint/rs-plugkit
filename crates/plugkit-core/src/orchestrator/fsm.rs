@@ -451,73 +451,7 @@ fn default_graph() -> Graph {
 
 const GRAPH_OVERRIDE_PATH: &str = ".gm/instructions/fsm/graph.json";
 
-#[cfg(target_arch = "wasm32")]
-mod graph_memo {
-    use super::Graph;
-    use std::cell::RefCell;
-
-    thread_local! {
-        static MEMO: RefCell<Option<(String, String, Graph)>> = const { RefCell::new(None) };
-    }
-
-    pub fn get(root: &str, raw_hash: &str) -> Option<Graph> {
-        MEMO.with(|m| {
-            m.borrow()
-                .as_ref()
-                .filter(|(r, h, _)| r == root && h == raw_hash)
-                .map(|(_, _, g)| g.clone())
-        })
-    }
-
-    pub fn put(root: &str, raw_hash: &str, g: &Graph) {
-        MEMO.with(|m| {
-            *m.borrow_mut() = Some((root.to_string(), raw_hash.to_string(), g.clone()));
-        });
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn memo_key_parts() -> (String, String) {
-    let root = super::gm_dir().to_string_lossy().to_string();
-    let raw = pkfs::read_to_string(GRAPH_OVERRIDE_PATH).unwrap_or_default();
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in raw.as_bytes() {
-        hash ^= *b as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    (root, format!("{hash:016x}"))
-}
-
-/// The active FSM graph.
-///
-/// Memoised on `(project root, content hash of graph.json)`. Resolving it means
-/// a file read, TWO independent parses of the same bytes, and a `validate()`
-/// that itself re-reads one prose file per declared state -- and it is called
-/// around thirty times across a single dispatch, eight of those inside
-/// `check_dispatch` alone, plus once per PRD row via `status_is_open`.
-///
-/// Keyed on the project root because the plugin instance is process-wide and
-/// shared across concurrently-active projects, so a bare global would serve
-/// project A's workflow to project B. Keyed on the content hash as well, so an
-/// edit to `graph.json` takes effect on the very next call rather than
-/// requiring a dispatch boundary to invalidate it -- the hash read is one file
-/// read against the parse-and-validate it replaces.
 pub fn graph() -> Graph {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let (root, raw_hash) = memo_key_parts();
-        if let Some(g) = graph_memo::get(&root, &raw_hash) {
-            return g;
-        }
-        let g = graph_uncached();
-        graph_memo::put(&root, &raw_hash, &g);
-        return g;
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    graph_uncached()
-}
-
-fn graph_uncached() -> Graph {
     match pkfs::read_to_string(GRAPH_OVERRIDE_PATH) {
         Some(raw) => match serde_json::from_str::<Graph>(&raw) {
             Ok(g) => {
