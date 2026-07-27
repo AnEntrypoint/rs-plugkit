@@ -845,6 +845,14 @@ fn health(_body: &Value) -> u64 {
         .into_iter()
         .map(|(sub, verbs)| json!({ "subsystem": sub.as_str(), "verbs": verbs }))
         .collect();
+    let aliases: Vec<Value> = crate::mediator::alias_table()
+        .into_iter()
+        .map(|(alias, canonical, lang_preserved)| json!({
+            "alias": alias,
+            "canonical": canonical,
+            "lang_preserved": lang_preserved,
+        }))
+        .collect();
     fn installed_release_tag() -> Value {
         match crate::wasm_dispatch::host_read("gm.json")
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -861,13 +869,17 @@ fn health(_body: &Value) -> u64 {
         "crate_version": env!("CARGO_PKG_VERSION"),
         "serving_release_tag": installed_release_tag(),
         "now": now,
-        "imports": [
-            "host_fs_read","host_fs_write","host_fs_readdir","host_fs_stat",
-            "host_fetch","host_kv_get","host_kv_put","host_kv_query",
-            "host_vec_search","host_vec_embed",
-            "host_exec_js","host_log","host_now_ms","host_env_get","host_browser_exec","host_task_proc"
-        ],
+        "imports": super::host_abi::HOST_IMPORTS,
         "subsystems": subsystems,
+        "verb_aliases": aliases,
+        "error_codes": [
+            ERR_CODE_FAILED, ERR_CODE_RETIRED_VERB, ERR_CODE_UNSUPPORTED,
+            ERR_CODE_UNKNOWN_VERB, ERR_CODE_INVALID_ARGS, ERR_CODE_PANIC, ERR_CODE_GATE_DENIED,
+        ],
+        "plugin_failure_codes": [
+            PLUGIN_FAIL_UNKNOWN_PLUGIN, PLUGIN_FAIL_NOT_LOADED, PLUGIN_FAIL_DEADLINE,
+            PLUGIN_FAIL_MALFORMED, PLUGIN_FAIL_HOST_EMPTY, PLUGIN_FAIL_PLUGIN_ERROR,
+        ],
         "lifecycle_liveness": lifecycle_liveness()
     }))
 }
