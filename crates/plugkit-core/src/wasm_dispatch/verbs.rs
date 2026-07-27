@@ -384,8 +384,47 @@ fn recall(body: &Value) -> u64 {
     let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, query.as_ptr(), query.len() as u32) };
     let kv_hits = unpack_to_value(packed);
     let annotated = annotate_hits_with_score(kv_hits);
+
+    // Distinguish "the store genuinely has nothing for this query" from "the
+    // embedder is dead so semantic retrieval never ran". Both previously
+    // returned ok:true / mode:fallback_like / hits:[], which is the worst
+    // possible shape -- a caller cannot tell an empty knowledgebase from a
+    // broken one, and this was live-witnessed mid-session (recall returned 8
+    // real hits earlier, then 0 with vector_hits.error "invalid query
+    // embedding" while still reporting ok:true).
+    let embed_failed = embedding.as_array().map(|a| a.is_empty()).unwrap_or(true);
+    let vec_err = vector_hits
+        .get("error")
+        .and_then(|e| e.as_str())
+        .map(|s| s.to_string());
+    let degraded = embed_failed || vec_err.is_some();
+    let empty = annotated.as_array().map(|a| a.is_empty()).unwrap_or(true);
+
+    if degraded {
+        emit_event("recall_degraded", json!({
+            "namespace": namespace,
+            "embed_failed": embed_failed,
+            "vec_err": vec_err,
+            "kv_hits": annotated.as_array().map(|a| a.len()).unwrap_or(0),
+        }));
+    }
+
+    // A degraded lookup that also found nothing is a FAILURE, not an answer.
+    // (A degraded lookup that still returned kv matches is reported as a
+    // success carrying the degraded flag -- the caller got real rows.)
+    if degraded && empty {
+        return err(
+            "recall",
+            &format!(
+                "semantic retrieval unavailable (embedder failed{}) and the keyword fallback matched nothing -- this is NOT an empty-knowledgebase result",
+                vec_err.map(|e| format!(": {}", e)).unwrap_or_default()
+            ),
+        );
+    }
+
     ok("recall", json!({
         "mode": "fallback_like",
+        "degraded": degraded,
         "namespace": namespace,
         "derived_query": derived_query,
         "hits": annotated,

@@ -467,12 +467,26 @@ struct ChunkRecord {
 
 struct FileManifest {
     hash: u32,
+    /// The value this file contributes to the WHOLE-TREE digest.
+    ///
+    /// Deliberately separate from `hash`: `hash` is crc32 (change detection
+    /// within this module), while `current_digest()` folds an fnv1a64-derived
+    /// u32 per file. Storing it here lets the stat-only fast path contribute
+    /// the correct digest value WITHOUT re-reading the file -- previously that
+    /// branch pushed the mtime instead, which `current_digest()` could never
+    /// reproduce, so the stored digest structurally never matched and every
+    /// dispatch re-indexed the entire tree.
+    ///
+    /// Optional because manifests written before this field existed still
+    /// parse; a missing value simply forces that one file down the full path
+    /// once, which repopulates it.
+    digest_hash: Option<u32>,
     mtime_ms: f64,
     commit_overview: Option<String>,
     chunks: Vec<ChunkRecord>,
 }
 
-fn manifest_to_json(fp: &str, hash: u32, mtime_ms: f64, commit_overview: &Option<String>, chunks: &[ChunkRecord]) -> String {
+fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, commit_overview: &Option<String>, chunks: &[ChunkRecord]) -> String {
     let arr: Vec<Value> = chunks.iter().map(|c| json!({
         "key": c.key,
         "kind": c.kind,
@@ -481,7 +495,7 @@ fn manifest_to_json(fp: &str, hash: u32, mtime_ms: f64, commit_overview: &Option
         "le": c.le,
         "emb": c.emb,
     })).collect();
-    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "mtime_ms": mtime_ms, "commit_overview": commit_overview, "chunks": arr }).to_string()
+    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "digest_hash": digest_hash, "mtime_ms": mtime_ms, "commit_overview": commit_overview, "chunks": arr }).to_string()
 }
 
 fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
@@ -489,6 +503,7 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     if parsed.get("v").and_then(|v| v.as_u64()) != Some(MANIFEST_VERSION) { return None; }
     let fp = parsed.get("path").and_then(|p| p.as_str())?.to_string();
     let hash = parsed.get("hash").and_then(|h| h.as_u64())? as u32;
+    let digest_hash = parsed.get("digest_hash").and_then(|h| h.as_u64()).map(|h| h as u32);
     let mtime_ms = parsed.get("mtime_ms").and_then(|m| m.as_f64()).unwrap_or(0.0);
     let commit_overview = parsed.get("commit_overview").and_then(|v| v.as_str()).map(String::from);
     let arr = parsed.get("chunks").and_then(|c| c.as_array())?;
@@ -502,7 +517,7 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
         let emb = json_to_f32_vec(c.get("emb")?)?;
         chunks.push(ChunkRecord { key, kind, name, ls, le, emb });
     }
-    Some((fp, FileManifest { hash, mtime_ms, commit_overview, chunks }))
+    Some((fp, FileManifest { hash, digest_hash, mtime_ms, commit_overview, chunks }))
 }
 
 const SUBMODULE_DIRS: &[&str] = &[
@@ -611,12 +626,37 @@ fn slice_lines(content: &str, ls: usize, le: usize) -> String {
     content.lines().skip(ls - 1).take(le - ls + 1).collect::<Vec<_>>().join("\n")
 }
 
-fn chunk_rows_for_path(db_path: &str, fp: &str) -> usize {
-    libsql_wasm::query_params(db_path, "SELECT COUNT(*) AS c FROM code_chunks WHERE path=?1", &[fp])
-        .ok()
-        .and_then(|rows| rows.as_array().and_then(|a| a.first().cloned()))
-        .and_then(|row| row.get("c").and_then(|v| v.as_u64()).or_else(|| row.get("c").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())))
-        .unwrap_or(0) as usize
+/// Every path's chunk-row count in ONE query.
+///
+/// This replaces a per-file `SELECT COUNT(*) ... WHERE path=?1` that was called
+/// from inside the indexing loop -- including on the stat-only "nothing
+/// changed" fast path -- and the
+/// shared libsql plugin opens, operates and closes the database on EVERY
+/// exec_params call (no connection is retained across calls), so a warm pass
+/// over an N-file tree paid N full open/close cycles purely to re-learn counts
+/// that one GROUP BY answers. That is pure unnecessary waiting on the path
+/// whose entire purpose is to be cheap.
+///
+/// Returns an empty map on failure, which makes every lookup read 0 and simply
+/// routes files down the full path -- correct, just not fast, so a db hiccup
+/// degrades to slow rather than to wrong.
+fn chunk_rows_by_path(db_path: &str) -> std::collections::HashMap<String, usize> {
+    let mut out = std::collections::HashMap::new();
+    let rows = match libsql_wasm::query(db_path, "SELECT path, COUNT(*) AS c FROM code_chunks GROUP BY path") {
+        Ok(r) => r,
+        Err(_) => return out,
+    };
+    if let Some(arr) = rows.as_array() {
+        for row in arr {
+            let path = match row.get("path").and_then(|v| v.as_str()) { Some(p) => p, None => continue };
+            let c = row
+                .get("c")
+                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .unwrap_or(0) as usize;
+            out.insert(path.to_string(), c);
+        }
+    }
+    out
 }
 
 const INSERT_CHUNK_SQL: &str = "INSERT INTO code_chunks(path, kind, name, line_start, line_end, body, embedding) VALUES(?1,?2,?3,?4,?5,?6,vector(?7))";
@@ -671,6 +711,14 @@ pub fn index(root: &str, max_files: usize) -> Value {
         }
     }
     let prior = load_manifests();
+    // Hoisted out of the per-file loop: one GROUP BY instead of one full
+    // open/query/close per file (see chunk_rows_by_path).
+    let chunk_counts = if libsql_ok {
+        chunk_rows_by_path(&db_path)
+    } else {
+        std::collections::HashMap::new()
+    };
+    let chunk_rows = |fp: &str| -> usize { chunk_counts.get(fp).copied().unwrap_or(0) };
     let r = if root.is_empty() { "/" } else { root };
     let limit = max_files.max(50).min(2000);
     let files = collect_files(r, limit);
@@ -710,15 +758,26 @@ pub fn index(root: &str, max_files: usize) -> Value {
                 .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
             {
                 let stat_mtime = stat.get("mtime_ms").and_then(|v| v.as_f64());
-                if let Some(mtime) = stat_mtime {
-                    if mtime == m.mtime_ms && libsql_ok && chunk_rows_for_path(&db_path, fp) == m.chunks.len() {
+                // Only take the stat-only fast path when the manifest can supply
+                // this file's digest contribution; without it we cannot produce a
+                // digest that current_digest() will reproduce, and skipping the
+                // read would poison the whole-tree digest (see digest_hash docs).
+                if let (Some(mtime), Some(dh)) = (stat_mtime, m.digest_hash) {
+                    if mtime == m.mtime_ms && libsql_ok && chunk_rows(fp) == m.chunks.len() {
                         seen.insert(fp.clone());
                         indexed += 1;
                         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
                         chunked += m.chunks.len() as i32;
                         reused += m.chunks.len() as i32;
                         reused_files += 1;
-                        digest_entries.push((fp.clone(), mtime as u32));
+                        // The digest MUST be the same content-derived value on
+                        // every branch. current_digest() (what this is compared
+                        // against next dispatch) folds fnv1a64(content), so
+                        // pushing mtime here made the stored digest structurally
+                        // unable to ever match -- every dispatch saw
+                        // "digest-mismatch" and re-indexed the whole tree, which
+                        // is exactly the cost this fast path exists to avoid.
+                        digest_entries.push((fp.clone(), dh));
                         continue;
                     }
                 }
@@ -739,11 +798,16 @@ pub fn index(root: &str, max_files: usize) -> Value {
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
         let file_hash = crc32(&content);
         let path_hash = crc32(fp);
-        digest_entries.push((fp.clone(), crate::pipeline::fnv1a64(content.as_bytes()) as u32));
+        // Computed once and BOTH pushed into this pass's digest and persisted in
+        // the manifest, so a later stat-only fast path can contribute the exact
+        // same value without re-reading the file. Must stay identical to
+        // current_digest()'s own per-file hash or the digest never matches.
+        let file_digest_hash = crate::pipeline::fnv1a64(content.as_bytes()) as u32;
+        digest_entries.push((fp.clone(), file_digest_hash));
 
         if let Some(m) = prior.get(fp) {
             if m.hash == file_hash {
-                if libsql_ok && chunk_rows_for_path(&db_path, fp) == m.chunks.len() {
+                if libsql_ok && chunk_rows(fp) == m.chunks.len() {
                     chunked += m.chunks.len() as i32;
                     reused += m.chunks.len() as i32;
                     reused_files += 1;
@@ -865,7 +929,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
             records.push(rec);
         }
         let commit_overview = compute_commit_overview(fp);
-        fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, file_mtime, &commit_overview, &records));
+        fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, &commit_overview, &records));
     }
 
     let files_set: std::collections::HashSet<&str> = full_files.iter().map(|s| s.trim_start_matches("./").trim_start_matches('/')).collect();
