@@ -953,7 +953,7 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
         // what actually stalls the index. Live-witnessed: a 153KB AGENTS.md
         // produced 49 chunks -- comfortably UNDER the 64 cap, so it was never
         // truncated -- yet its single embed_texts_batch call took 39981ms,
-        // blowing both index_wall_budget_ms (45s, and the outer check at the
+        // blowing both index_wall_budget_ms (30s by default, and the outer check at the
         // top of this loop only fires BETWEEN files) and the supervisor's own
         // 30s heartbeat-stale limit, which then killed the watcher mid-pass
         // and left the index frozen at deferred_files=499 with the embedder
