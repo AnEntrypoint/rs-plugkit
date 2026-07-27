@@ -100,12 +100,12 @@ fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
     (verb, count, ts)
 }
 
-fn is_longgap_exempt(verb: &str) -> bool {
-    crate::orchestrator::fsm::graph().policy.longgap_exempt_verbs.iter().any(|v| v == verb)
+fn is_longgap_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
+    policy.longgap_exempt_verbs.iter().any(|v| v == verb)
 }
 
-fn is_longgap_refresh(verb: &str) -> bool {
-    crate::orchestrator::fsm::graph().policy.longgap_refresh_verbs.iter().any(|v| v == verb)
+fn is_longgap_refresh(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
+    policy.longgap_refresh_verbs.iter().any(|v| v == verb)
 }
 
 fn long_gap_should_fire(last_instruction_ms: u64, prev_dispatch_ms: u64, now: u64, threshold: u64) -> bool {
@@ -230,8 +230,9 @@ fn extract_substitution_bodies(cmd: &str) -> Vec<String> {
 }
 
 pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
+    let policy = crate::orchestrator::fsm::graph().policy;
     if let Some(step_id) = read_pending_step() {
-        if !crate::orchestrator::fsm::graph().policy.await_allowed_verbs.iter().any(|v| v == verb) {
+        if !policy.await_allowed_verbs.iter().any(|v| v == verb) {
             log_deviation("await-result-violation", &format!("verb={} step={}", verb, step_id));
             let mut v = GateVerdict::deny(format!(
                 "pipeline suspended at step_id={}; only memorize-continue advances state. \
@@ -253,7 +254,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     // are policy rather than compile-time facts: a workflow whose shell verb has
     // a different name got no protection from the hardcoded list, and one that
     // legitimately wants shell git had no way to say so.
-    let shell_policy = crate::orchestrator::fsm::graph().policy;
+    let shell_policy = policy.clone();
     if shell_policy.deny_shell_git && shell_policy.shell_verbs.iter().any(|v| v == verb) {
         let cmd = body.get("command").and_then(|v| v.as_str())
             .or_else(|| body.get("code").and_then(|v| v.as_str()))
@@ -291,21 +292,21 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    let prev_dispatch_ms: u64 = if !is_longgap_exempt(verb) {
+    let prev_dispatch_ms: u64 = if !is_longgap_exempt(verb, &policy) {
         let p = host_read(".gm/last-dispatch-ts").unwrap_or_default().trim().parse().unwrap_or(0);
         let _ = crate::wasm_dispatch::host_write(".gm/last-dispatch-ts", &now_ms().to_string());
         p
     } else { 0 };
 
-    if is_longgap_refresh(verb) {
+    if is_longgap_refresh(verb, &policy) {
         let now = now_ms();
         let _ = crate::wasm_dispatch::host_write(".gm/last-instruction-ts", &now.to_string());
         let _ = crate::wasm_dispatch::host_write(".gm/long-gap-retry-state", "");
-    } else if !is_longgap_exempt(verb) {
+    } else if !is_longgap_exempt(verb, &policy) {
         let last = host_read(".gm/last-instruction-ts").unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let now = now_ms();
-        let longgap_threshold_ms = crate::orchestrator::fsm::graph().policy.longgap_threshold_ms;
+        let longgap_threshold_ms = policy.longgap_threshold_ms;
         if long_gap_should_fire(last_ms, prev_dispatch_ms, now, longgap_threshold_ms) {
             let gap_ms = now - last_ms;
             let retry_state = host_read(".gm/long-gap-retry-state").unwrap_or_default();
@@ -353,7 +354,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             .map(|s| {
                 // "stop" is a historical alias for the terminal phase.
                 if s.eq_ignore_ascii_case("stop") {
-                    crate::orchestrator::fsm::graph().policy.terminal_phase.clone()
+                    policy.terminal_phase.clone()
                 } else {
                     s.to_ascii_uppercase()
                 }
@@ -381,7 +382,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 other => format!("{}-gate", other.to_ascii_lowercase()),
             };
             let mut reason = format!("{} residuals: {}", label, residuals.join("; "));
-            if repeat_count >= crate::orchestrator::fsm::graph().policy.gate_repeat_escalate_threshold {
+            if repeat_count >= policy.gate_repeat_escalate_threshold {
                 log_deviation("stuck-loop-escalation", &format!("gate={} repeat_count={}", gate_key, repeat_count));
                 reason = format!(
                     "{} -- STUCK LOOP DETECTED: this exact gate denial has now fired {} times in a row with no successful transition between attempts. Retrying the bare transition again will repeat the same denial. Stop retrying: (1) `prd-add` a row describing the concrete stuck state (which residual, what you tried, why it did not clear), (2) invoke the wfgy-method skill's BBCR bounded-retry-then-surface discipline to recover instead of blind-retrying, (3) only then re-attempt the transition.",
