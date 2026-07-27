@@ -1,11 +1,6 @@
 use super::gm_dir;
 use crate::pkfs;
 
-const KNOWN_SUBMODULES: &[&str] = &[
-    "agentplug", "rs-plugkit", "rs-codeinsight", "rs-search",
-    "agentplug-bert", "agentplug-libsql", "agentplug-treesitter",
-];
-
 fn looks_like_commit_hash(token: &str) -> bool {
     let trimmed = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
     (7..=40).contains(&trimmed.len()) && trimmed.chars().all(|c| c.is_ascii_hexdigit())
@@ -29,9 +24,25 @@ fn line_asserts_shipped_claim_cfg(line: &str, cfg: &crate::ragconfig::ClaimAudit
         .any(|marker| lower.contains(&marker.to_ascii_lowercase()))
 }
 
-fn named_submodule_in_line(line: &str) -> Option<&'static str> {
+/// Which submodule, if any, a claim line is talking about.
+///
+/// Derived from the same `.gitmodules`-backed source `submodule_drift` uses,
+/// rather than a second hardcoded copy of the list. The two copies were
+/// byte-identical and had to stay that way: a name added to one and not the
+/// other sends a hash to the WRONG repo to be verified, which reports a
+/// perfectly valid claim as stale.
+///
+/// Matched on the final path component, since a claim line names a repo
+/// ("landed in rs-plugkit abc1234"), not a checkout path.
+fn named_submodule_in_line(line: &str) -> Option<String> {
     let lower = line.to_ascii_lowercase();
-    KNOWN_SUBMODULES.iter().find(|name| lower.contains(&name.to_ascii_lowercase())).copied()
+    super::submodule_drift::submodule_paths()
+        .into_iter()
+        .find(|path| {
+            let name = path.rsplit('/').next().unwrap_or(path.as_str());
+            !name.is_empty() && lower.contains(&name.to_ascii_lowercase())
+        })
+        .map(|path| path.rsplit('/').next().unwrap_or(path.as_str()).to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -59,9 +70,9 @@ fn scan_text_for_hash_claims(text: &str, source_label: &str, findings: &mut Vec<
         if hashes.is_empty() { continue; }
         let submodule = named_submodule_in_line(line);
         for hash in hashes {
-            let hash_resolved_in_repo_history = commit_hash_exists_in_repo_history(&hash, submodule);
+            let hash_resolved_in_repo_history = commit_hash_exists_in_repo_history(&hash, submodule.as_deref());
             let line_excerpt: String = format!("[{}] {}", source_label, line.trim()).chars().take(180).collect();
-            let checked_in_repo = submodule.unwrap_or("gm (this repo)").to_string();
+            let checked_in_repo = submodule.clone().unwrap_or_else(|| "gm (this repo)".to_string());
             findings.push(HashClaimFinding { line_excerpt, hash, hash_resolved_in_repo_history, checked_in_repo });
         }
     }
@@ -73,9 +84,6 @@ pub fn handle_audit(_content: &str) -> (String, String, i32) {
 
     let audit_cfg = crate::ragconfig::ClaimAuditConfig::default();
 
-    // A configured path that does not exist is SKIPPED rather than reported:
-    // a project without one of these files has nothing to audit there, which
-    // is not the same thing as an audit failure.
     for scan_path in &audit_cfg.scan_paths {
         let full = std::path::Path::new(".").join(scan_path).to_string_lossy().to_string();
         if let Some(text) = pkfs::read_to_string(&full) {
