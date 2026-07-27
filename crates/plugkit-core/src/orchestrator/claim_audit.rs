@@ -114,10 +114,18 @@ pub fn claim_audit_fired() -> bool {
     pkfs::exists(&marker_path)
 }
 
+/// Whether the last claim audit found nothing stale.
+///
+/// Requires the literal `clean`. Testing `!= "stale"` made every unexpected
+/// body -- empty, truncated by a partial write, or any other content -- read as
+/// a passing audit, so a gate on both guarded edges could be satisfied by a
+/// marker no audit ever wrote. A gate must fail CLOSED on anything it does not
+/// positively recognise, which is the same rule `predicate_result` applies to an
+/// unknown predicate name.
 pub fn claim_audit_clean() -> bool {
     let marker_path = gm_dir().join("claim-audit-fired").to_string_lossy().to_string();
     match pkfs::read_to_string(&marker_path) {
-        Some(marker_body) => marker_body.trim() != "stale",
+        Some(marker_body) => marker_body.trim() == "clean",
         None => false,
     }
 }

@@ -222,6 +222,7 @@ mod wasm_hooks {
         let policy = "=== gm response policy (always active) ===\n\nTerse. Technical substance stays. Fluff dies. Drop articles/filler/pleasantries/hedging. Fragments OK. Pattern: [thing] [action] [reason]. [next step].\n\nDispatch the gm-skill instruction verb (write .gm/exec-spool/in/instruction/<N>.txt, read the response) as the first action after every user message. A turn that ends without a tool call is a stop; never summarize until the instruction surface returns phase=COMPLETE. This gate is spool-only, identical on every agent.";
         clear_marker("gm-fired-this-turn");
         clear_marker("residual-check-fired");
+        clear_marker("claim-audit-fired");
         write_marker("needs-gm");
         let _ = crate::gitignore::ensure_managed_gitignore("");
         // Reap state left behind by subsystems this codebase has since
@@ -239,6 +240,7 @@ mod wasm_hooks {
     pub fn session_end(_input: &Value) -> Value {
         clear_marker("gm-fired-this-turn");
         clear_marker("residual-check-fired");
+        clear_marker("claim-audit-fired");
         clear_marker("needs-gm");
         let _ = host_write(&path_for("turn-state.json"), "{}");
         json!({ "continue": true })
@@ -247,6 +249,7 @@ mod wasm_hooks {
     pub fn prompt_submit(input: &Value) -> Value {
         clear_marker("gm-fired-this-turn");
         clear_marker("residual-check-fired");
+        clear_marker("claim-audit-fired");
         write_marker("needs-gm");
         let prompt = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
         if !prompt.is_empty() {
