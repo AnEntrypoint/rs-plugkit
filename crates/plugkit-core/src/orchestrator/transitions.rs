@@ -20,39 +20,61 @@ pub fn next_phase(current: &Phase) -> Phase {
 }
 
 pub fn known_predicates() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("residual-scan-fired", "true once `residual-scan` has been dispatched in this stop window (the .gm/residual-check-fired marker exists)"),
-        ("prd-all-closed", "true when .gm/prd.yml has zero rows with an open status (pending/in-progress, not completed)"),
-        ("mutables-all-resolved", "true when .gm/mutables.yml has zero rows still in unknown/pending status"),
-        ("worktree-clean", "true when `git status --porcelain` is empty -- no uncommitted/unpushed delta"),
-        ("ci-validated-fresh", "true when .gm/exec-spool/.ci-validated exists and its head_sha matches the current `git rev-parse HEAD` -- a witnessed-green CI run for the exact pushed commit"),
-        ("browser-witness-coverage", "true when every client-side file edited this session (per .gm/exec-spool/.turn-browser-edits.json) has a matching entry in .gm/exec-spool/.turn-browser-witnessed with the same content hash"),
-        // These two were dispatched by predicate_result but MISSING from this
-        // list, which is the one thing this list must never be: incomplete.
-        // fsm_vendor generates .gm/instructions/fsm/predicates.md from here and
-        // documents it as the complete set a graph's `gates.predicate` may
-        // name -- while the DEFAULT graph it writes alongside uses both of
-        // these. So the generated reference contradicted the generated graph,
-        // and an author trusting the reference would conclude two live gates
-        // were invalid. Worse, the unknown-name arm falls through to `false`,
-        // so a typo'd or genuinely-unknown predicate produces a gate that is
-        // permanently unsatisfiable rather than an error -- silent, and exactly
-        // the failure mode a gate must never have.
-        ("claim-audit-clean", "true when the claim audit finds no unwitnessed completion claims -- see orchestrator::claim_audit"),
-        ("submodules-clean", "true when no submodule has drifted from its recorded commit -- see orchestrator::submodule_drift"),
+    // DERIVED from predicate_table(), never maintained alongside it.
+    //
+    // This list is what fsm_vendor generates .gm/instructions/fsm/predicates.md
+    // from, and that file tells a graph author which names `gates.predicate` may
+    // use. While it was a second hand-written list it drifted out of sync with
+    // the dispatcher -- publishing 6 names while 8 were live -- so the generated
+    // reference contradicted the default graph generated beside it. Deriving it
+    // means the reference can no longer describe a predicate set the code does
+    // not actually implement.
+    predicate_table().iter().map(|(name, desc, _)| (*name, *desc)).collect()
+}
+
+/// The ONE table: name, human description, and evaluator declared together.
+///
+/// These used to be two independent lists -- `known_predicates()` for the
+/// generated reference and a `match` in `predicate_result` for the behaviour --
+/// and they drifted: the match dispatched 8 predicates while the list published
+/// 6, so `fsm_vendor` generated a `predicates.md` that contradicted the default
+/// `graph.json` it generated beside it, while asserting in its own text that it
+/// could not drift. Declaring all three facets in one place makes that class of
+/// bug unrepresentable: you cannot add an evaluator without also supplying the
+/// name and description the reference is generated from.
+///
+/// The evaluator is a fn pointer rather than a closure so this stays a plain
+/// const-shaped table with no allocation or lazy init.
+type PredicateFn = fn() -> bool;
+
+fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
+    &[
+        ("residual-scan-fired", "true once `residual-scan` has been dispatched in this stop window (the .gm/residual-check-fired marker exists)", residual_scan_fired as PredicateFn),
+        ("prd-all-closed", "true when .gm/prd.yml has zero rows with an open status (pending/in-progress, not completed)", pred_prd_all_closed),
+        ("mutables-all-resolved", "true when .gm/mutables.yml has zero rows still in unknown/pending status", pred_mutables_all_resolved),
+        ("worktree-clean", "true when `git status --porcelain` is empty -- no uncommitted/unpushed delta", pred_worktree_clean),
+        ("ci-validated-fresh", "true when .gm/exec-spool/.ci-validated exists and its head_sha matches the current `git rev-parse HEAD` -- a witnessed-green CI run for the exact pushed commit", ci_validation_fresh as PredicateFn),
+        ("browser-witness-coverage", "true when every client-side file edited this session (per .gm/exec-spool/.turn-browser-edits.json) has a matching entry in .gm/exec-spool/.turn-browser-witnessed with the same content hash", pred_browser_witness_coverage),
+        ("claim-audit-clean", "true when the claim audit finds no unwitnessed completion claims -- see orchestrator::claim_audit", pred_claim_audit_clean),
+        ("submodules-clean", "true when no submodule has drifted from its recorded commit -- see orchestrator::submodule_drift", pred_submodules_clean),
     ]
 }
 
+// Thin adapters so every entry above is a plain fn pointer. Each wraps the one
+// real check it names; keeping them adjacent to the table makes an added
+// predicate a single-site edit.
+fn pred_prd_all_closed() -> bool { !prd_has_open_items() }
+fn pred_mutables_all_resolved() -> bool { mutables::pending_detailed().is_empty() }
+fn pred_worktree_clean() -> bool { !worktree_dirty() }
+fn pred_browser_witness_coverage() -> bool { check_browser_witness_coverage_for_cwd("").is_empty() }
+fn pred_claim_audit_clean() -> bool { super::claim_audit::claim_audit_clean() }
+fn pred_submodules_clean() -> bool { super::submodule_drift::submodules_clean() }
+
 fn predicate_result(name: &str) -> bool {
+    if let Some((_, _, f)) = predicate_table().iter().find(|(n, _, _)| *n == name) {
+        return f();
+    }
     match name {
-        "residual-scan-fired" => residual_scan_fired(),
-        "prd-all-closed" => !prd_has_open_items(),
-        "mutables-all-resolved" => mutables::pending_detailed().is_empty(),
-        "worktree-clean" => !worktree_dirty(),
-        "ci-validated-fresh" => ci_validation_fresh(),
-        "browser-witness-coverage" => check_browser_witness_coverage_for_cwd("").is_empty(),
-        "claim-audit-clean" => super::claim_audit::claim_audit_clean(),
-        "submodules-clean" => super::submodule_drift::submodules_clean(),
         // An unrecognised predicate stays `false` -- a gate must fail CLOSED,
         // never open, or a typo in a vendored graph would wave work straight
         // through the check it was supposed to face. But failing closed
