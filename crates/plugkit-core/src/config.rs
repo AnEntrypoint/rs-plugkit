@@ -69,6 +69,22 @@ use crate::pkfs;
 /// we recognize would apply a config nobody wrote.
 pub const SCHEMA_VERSION: u64 = 1;
 
+/// Oldest schema version this build can still read.
+///
+/// A RANGE, not an equality, for the same reason `Policy` takes serde defaults
+/// instead of `deny_unknown_fields`: in an auto-updating config system the
+/// config repo legitimately leads the binary. An exact-match gate meant the
+/// moment a shared config bumped its version, every not-yet-updated client in
+/// the fleet dropped to the compiled defaults at once -- a fleet-wide outage
+/// triggered by a routine publish.
+///
+/// A config NEWER than this build is now accepted with a reported warning
+/// rather than rejected: every field carries a default, unknown keys are
+/// surfaced rather than fatal, so applying the recognised subset is strictly
+/// closer to the author's intent than silently ignoring the whole file.
+/// Genuinely breaking changes raise this floor.
+pub const MIN_READABLE_SCHEMA_VERSION: u64 = 1;
+
 /// Filename of a real, vendored config (tier 1). Project-relative.
 pub const PROJECT_CONFIG_REL: &str = ".gm/gm.config.json";
 
@@ -285,13 +301,18 @@ fn check_version(v: &Value, origin: &str) -> Result<u64, String> {
         ));
     };
     if n > SCHEMA_VERSION {
-        return Err(format!(
-            "{origin}: config declares version {n} but this build understands at most {SCHEMA_VERSION}. Refusing to apply a config written against a newer schema -- upgrade the plugin, or pin the config to version {SCHEMA_VERSION}."
-        ));
+        #[cfg(target_arch = "wasm32")]
+        crate::wasm_dispatch::emit_event("config_version_ahead_of_build", serde_json::json!({
+            "origin": origin,
+            "config_version": n,
+            "build_schema_version": SCHEMA_VERSION,
+            "reason": "config was written against a newer schema than this build knows. Applying the keys this build recognises, since every field carries a serde default and an unknown key is reported rather than fatal. Upgrade the plugin to pick up the newer semantics.",
+        }));
+        return Ok(n);
     }
-    if n < SCHEMA_VERSION {
+    if n < MIN_READABLE_SCHEMA_VERSION {
         return Err(format!(
-            "{origin}: config declares version {n}, which this build no longer understands (current schema is {SCHEMA_VERSION}). Migrate the config rather than have it silently reinterpreted under new semantics."
+            "{origin}: config declares version {n}, below the oldest schema this build can read ({MIN_READABLE_SCHEMA_VERSION}). Migrate the config rather than have it silently reinterpreted under new semantics."
         ));
     }
     Ok(n)
