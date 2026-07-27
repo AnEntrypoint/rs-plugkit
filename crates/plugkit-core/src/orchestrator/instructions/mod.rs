@@ -471,6 +471,10 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
 
     let payload = json!({
         "phase": phase,
+        // Present ONLY when a vendored graph.json was rejected and the built-in
+        // default is silently serving in its place. Null the rest of the time,
+        // so it costs nothing but is impossible to miss when it matters.
+        "fsm_graph_rejected": super::fsm::graph_rejection(),
         "sub_phase": if await_result.is_some() { "AWAIT-RESULT" } else { "" },
         "await_result": await_result,
         "instruction": instruction,

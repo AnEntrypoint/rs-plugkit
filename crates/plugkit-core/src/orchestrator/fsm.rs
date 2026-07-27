@@ -464,6 +464,7 @@ pub fn graph() -> Graph {
                 }
                 let problems = g.validate();
                 if problems.is_empty() {
+                    clear_graph_rejection();
                     g
                 } else {
                     #[cfg(target_arch = "wasm32")]
@@ -472,6 +473,7 @@ pub fn graph() -> Graph {
                         "problems": problems,
                         "reason": "graph parsed but failed referential-integrity validation; falling back to the built-in default this dispatch",
                     }));
+                    record_graph_rejection("invalid", &problems.join("; "));
                     default_graph()
                 }
             }
@@ -482,11 +484,58 @@ pub fn graph() -> Graph {
                     "error": e.to_string(),
                     "reason": "falling back to the built-in default graph this dispatch",
                 }));
+                record_graph_rejection("malformed", &e.to_string());
                 default_graph()
             }
         },
-        None => default_graph(),
+        None => {
+            clear_graph_rejection();
+            default_graph()
+        }
     }
+}
+
+/// Where a graph rejection is recorded so it OUTLIVES the dispatch that hit it.
+pub const GRAPH_REJECTION_PATH: &str = ".gm/fsm-graph-rejected.json";
+
+/// Persist the fact that a vendored graph was rejected and the default is
+/// serving in its place.
+///
+/// Until now the only signal was an emitted event, which is invisible on
+/// native (the emit is cfg-gated to wasm32) and easy to miss even on wasm.
+/// The operator's experience was gm behaving perfectly normally while their
+/// entire config was ignored -- the worst shape a config failure can take,
+/// because nothing about the running system looks wrong. A file on disk can
+/// be read by the instruction payload, by a human, or by CI, long after the
+/// dispatch that produced it.
+fn record_graph_rejection(kind: &str, detail: &str) {
+    let payload = serde_json::json!({
+        "path": GRAPH_OVERRIDE_PATH,
+        "kind": kind,
+        "detail": detail,
+        "effect": "the built-in default graph is serving; every customisation in this file is being IGNORED",
+    });
+    let _ = crate::pkfs::write(GRAPH_REJECTION_PATH, &payload.to_string());
+}
+
+/// Drop a stale rejection once the graph loads cleanly (or is removed), so the
+/// marker always reflects the CURRENT state rather than the worst state ever
+/// seen. A rejection notice that outlives the problem it describes trains
+/// people to ignore it.
+/// Truncated rather than deleted: pkfs exposes no remove, and lib.rs's own
+/// clear_marker uses the same empty-write convention. `graph_rejection()`
+/// treats empty as absent.
+fn clear_graph_rejection() {
+    if crate::pkfs::exists(GRAPH_REJECTION_PATH) {
+        let _ = crate::pkfs::write(GRAPH_REJECTION_PATH, "");
+    }
+}
+
+/// The active graph rejection, if any -- for the instruction payload.
+pub fn graph_rejection() -> Option<serde_json::Value> {
+    let raw = crate::pkfs::read_to_string(GRAPH_REJECTION_PATH)?;
+    if raw.trim().is_empty() { return None; }
+    serde_json::from_str(&raw).ok()
 }
 
 pub fn default_graph_json_pretty() -> String {
