@@ -378,6 +378,12 @@ fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcom
 /// not supply one -- the single case where `config.rs` must reject the tier
 /// instead of resolving against a stale-but-real config.
 pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome, String> {
+    // Re-checked here even though `config::parse_source_spec` already validated
+    // it, because `RepoSource` is a public struct any caller can construct: the
+    // validation must sit at the boundary where the string actually reaches
+    // git, not only at the one path that happens to build it today.
+    crate::config_path::validate_repo_url(&src.repo)?;
+
     let mut st = read_state(src);
     let now = now_ms();
     let have_local = local_sha(src);

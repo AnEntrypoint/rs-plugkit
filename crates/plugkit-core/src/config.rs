@@ -420,18 +420,18 @@ fn parse_source_spec(text: &str, origin: &str, cache_dir: String, tier_label: &s
             "{origin}: source spec requires a non-empty `repo` field naming the config repository"
         ));
     }
+    crate::config_path::validate_repo_url(&repo).map_err(|e| format!("{origin}: {e}"))?;
     let reference = ["ref", "reference", "branch"]
         .iter()
         .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let path = obj
-        .get("path")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .trim()
-        .trim_matches('/')
-        .to_string();
+    if let Some(r) = reference.as_deref() {
+        validate_git_ref(r).map_err(|e| format!("{origin}: {e}"))?;
+    }
+    let raw_path = obj.get("path").and_then(|x| x.as_str()).unwrap_or("");
+    crate::config_path::validate_source_path(raw_path).map_err(|e| format!("{origin}: {e}"))?;
+    let path = raw_path.trim().trim_matches('/').to_string();
     Ok(Some(RepoSource {
         repo,
         reference,
@@ -439,6 +439,47 @@ fn parse_source_spec(text: &str, origin: &str, cache_dir: String, tier_label: &s
         cache_dir,
         tier_label: tier_label.to_string(),
     }))
+}
+
+/// Validate a branch/tag/sha before it reaches a `git fetch`/`clone --branch`
+/// argv.
+///
+/// A ref is as attacker-controlled as the URL beside it, and lands in the same
+/// argv. The leading-`-` check is the load-bearing one: `--upload-pack=<cmd>`
+/// in a ref position is git's other documented arbitrary-command vector, and an
+/// argv array does not prevent it because the string is still parsed as an
+/// option once git sees the dash.
+///
+/// The remaining rules are git's own `check-ref-format` restrictions, applied
+/// here rather than discovered as an opaque git failure three calls later.
+fn validate_git_ref(reference: &str) -> Result<(), String> {
+    let r = reference.trim();
+    if r.is_empty() {
+        return Err("`ref` is empty".to_string());
+    }
+    if r.len() > 255 {
+        return Err("`ref` exceeds 255 bytes".to_string());
+    }
+    if r.starts_with('-') {
+        return Err(format!(
+            "`ref` {r:?} starts with '-' and would be parsed by git as an option, not a ref"
+        ));
+    }
+    if r.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(format!("`ref` {r:?} contains whitespace or a control character"));
+    }
+    for bad in ["..", "@{", "//", "\\"] {
+        if r.contains(bad) {
+            return Err(format!("`ref` {r:?} contains {bad:?}, which git rejects"));
+        }
+    }
+    if r.ends_with('.') || r.ends_with(".lock") || r.starts_with('/') || r.ends_with('/') {
+        return Err(format!("`ref` {r:?} is not a well-formed git ref"));
+    }
+    if r.chars().any(|c| matches!(c, '~' | '^' | ':' | '?' | '*' | '[')) {
+        return Err(format!("`ref` {r:?} contains a character git reserves for revision syntax"));
+    }
+    Ok(())
 }
 
 /// Join a base directory and a project/home-relative path. Kept in one place

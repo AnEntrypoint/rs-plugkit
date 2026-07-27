@@ -68,7 +68,10 @@ impl GateVerdict {
             "verb": verb,
             "gate_denied": true,
             "reason": reason_with_hint,
+            "error": reason_with_hint,
+            "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
             "next_dispatch": next,
+            "next_dispatch_hint": next,
         });
         if self.await_result {
             obj["await_result"] = json!(true);

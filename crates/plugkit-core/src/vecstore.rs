@@ -43,10 +43,6 @@ pub fn vec_to_json_literal(v: &[f32]) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string())
 }
 
-pub fn embedding_col_dim(table: &str) -> Option<usize> {
-    embedding_col_dim_at(crate::shared_db::SHARED_DB, table)
-}
-
 pub fn embedding_col_dim_at(db_name: &str, table: &str) -> Option<usize> {
     let sql = format!("SELECT type FROM pragma_table_info('{}') WHERE name = 'embedding'", table);
     let rows = libsql_query(db_name, &sql).ok()?;
@@ -57,40 +53,6 @@ pub fn embedding_col_dim_at(db_name: &str, table: &str) -> Option<usize> {
     let end = ty.find(')')?;
     if end < start { return None; }
     ty[start..end].parse::<usize>().ok()
-}
-
-pub fn drop_if_dim_mismatch(table: &str, index: &str) -> bool {
-    drop_if_dim_mismatch_cfg(table, index, &EmbedDimConfig::default())
-}
-
-/// Config-driven form of the mismatch guard.
-///
-/// A config-supplied `dim` change is the single most destructive setting in
-/// the RAG layer, so it is routed through here rather than being applied at
-/// the schema-creation site: `EmbedDimConfig::should_drop` owns the decision
-/// (and always emits the diagnostic), and only then do we drop. Skipping this
-/// path -- e.g. by CREATE-ing at the new width against a store already holding
-/// old-width rows -- would leave `vector_top_k` querying an index built for a
-/// different vector length, which is corruption, not a schema no-op.
-pub fn drop_if_dim_mismatch_cfg(table: &str, index: &str, cfg: &EmbedDimConfig) -> bool {
-    match embedding_col_dim(table) {
-        Some(found) => {
-            if !cfg.should_drop(table, found) {
-                return false;
-            }
-            let _ = crate::shared_db::shared_exec(&format!("DROP INDEX IF EXISTS {}", index));
-            let _ = crate::shared_db::shared_exec(&format!("DROP TABLE IF EXISTS {}", table));
-            crate::wasm_dispatch::emit_event("table_dropped", json!({
-                "table": table,
-                "old_dim": found,
-                "new_dim": cfg.dim,
-            }));
-            true
-        }
-        // No `embedding` column means no table yet -- the CREATE that follows
-        // will build it at the configured width, nothing to reconcile.
-        None => false,
-    }
 }
 
 pub fn drop_if_dim_mismatch_at(db_name: &str, table: &str) -> Result<bool, String> {

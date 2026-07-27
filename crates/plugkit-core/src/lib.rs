@@ -72,6 +72,11 @@ pub mod cache;
 pub mod plugin_abi;
 
 pub mod pkfs;
+/// Allowlist validation for every untrusted string the config chain
+/// interpolates into a path or hands to `git` (prose keys, source-spec
+/// `path` fields, repo URLs). Declared ahead of `prose`/`config`/`config_sync`
+/// so each resolves through one shared set of rules.
+pub mod config_path;
 pub mod prose;
 /// 4-tier config resolution (project-vendored -> in-project repo spec ->
 /// user-wide repo spec -> builtin defaults). Generalizes prose.rs's 3-tier

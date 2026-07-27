@@ -51,7 +51,25 @@ fn iso8601_to_ms(s: &str) -> Option<i64> {
     Some(((days * 86400 + h * 3600 + mi * 60 + sec) * 1000) + ms)
 }
 
-fn write_turn_summary(phase: &str, prd_pending: usize, mutables_pending: usize) {
+/// Mirror the turn-relevant markers into `.turn-summary.json`.
+///
+/// `update_available` and `config_changed_count` are passed in rather than
+/// re-read here: the caller has already read the marker and already DRAINED the
+/// config-change store for this session, and re-reading would either duplicate
+/// the read or -- for the drain -- consume the same records a second time and
+/// mark them delivered to a session that never saw them.
+///
+/// The summary is a snapshot for an agent reading it at turn start, so
+/// `config_changed_count` is a count rather than the records themselves: the
+/// records ride the instruction response body, and duplicating them here would
+/// invite an agent to act on a notification twice.
+fn write_turn_summary(
+    phase: &str,
+    prd_pending: usize,
+    mutables_pending: usize,
+    update_available: &serde_json::Value,
+    config_changed_count: usize,
+) {
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
     let last_instruction_ts = pkfs::read_to_string(
         &super::gm_dir().join("last-instruction-ts").to_string_lossy().to_string(),
@@ -68,7 +86,8 @@ fn write_turn_summary(phase: &str, prd_pending: usize, mutables_pending: usize) 
         "last_instruction_ts": last_instruction_ts,
         "last_instruction_age_ms": last_instruction_ts.map(|t| now_ms.saturating_sub(t)),
         "long_gap_threshold_ms": super::fsm::graph().policy.longgap_threshold_ms,
-        "update_available": serde_json::Value::Null,
+        "update_available": update_available.clone(),
+        "config_changed_count": config_changed_count,
     });
     let path = super::gm_dir().join("exec-spool").join(".turn-summary.json");
     let _ = pkfs::write(&path.to_string_lossy().to_string(), &summary.to_string());
@@ -466,7 +485,13 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     #[cfg(not(target_arch = "wasm32"))]
     let codeinsight_overview = serde_json::Value::Null;
 
-    write_turn_summary(&phase, prd_pending, mutables_pending_count);
+    write_turn_summary(
+        &phase,
+        prd_pending,
+        mutables_pending_count,
+        &update_available,
+        config_changed.as_array().map(|a| a.len()).unwrap_or(0),
+    );
 
     let payload = json!({
         "phase": phase,

@@ -12,8 +12,70 @@ fn plugin_ok(resp: &Value) -> bool {
     resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
+pub const PLUGIN_FAIL_UNKNOWN_PLUGIN: &str = "unknown_plugin";
+pub const PLUGIN_FAIL_NOT_LOADED: &str = "plugin_not_loaded_yet";
+pub const PLUGIN_FAIL_DEADLINE: &str = "deadline_exceeded";
+pub const PLUGIN_FAIL_MALFORMED: &str = "malformed_response";
+pub const PLUGIN_FAIL_HOST_EMPTY: &str = "host_returned_empty";
+pub const PLUGIN_FAIL_PLUGIN_ERROR: &str = "plugin_error";
+
+/// Classifies a `host_plugin_call` response into a stable machine-readable
+/// failure code so a host-side deadline abort, an unknown/unloaded plugin, a
+/// non-JSON host reply and the plugin's own returned error stop collapsing
+/// into one indistinguishable branch at every call site.
+pub fn plugin_failure_code(resp: &Value) -> &'static str {
+    if resp.is_null() { return PLUGIN_FAIL_HOST_EMPTY; }
+    if let Value::String(raw) = resp {
+        let low = raw.to_ascii_lowercase();
+        if low.contains("deadline") && low.contains("exceed") { return PLUGIN_FAIL_DEADLINE; }
+        if low.contains("unknown plugin") || low.contains("not registered") { return PLUGIN_FAIL_UNKNOWN_PLUGIN; }
+        return PLUGIN_FAIL_MALFORMED;
+    }
+    let raw_err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    let low = raw_err.to_ascii_lowercase();
+    if low == PLUGIN_FAIL_UNKNOWN_PLUGIN || low.contains("unknown plugin") || low.contains("not registered") {
+        return PLUGIN_FAIL_UNKNOWN_PLUGIN;
+    }
+    if low == PLUGIN_FAIL_NOT_LOADED || low.contains("not loaded") { return PLUGIN_FAIL_NOT_LOADED; }
+    if low.contains("deadline") && low.contains("exceed") { return PLUGIN_FAIL_DEADLINE; }
+    if low.contains(" exceeded ") && low.contains("executing verb") { return PLUGIN_FAIL_DEADLINE; }
+    PLUGIN_FAIL_PLUGIN_ERROR
+}
+
+/// A response whose ok flag is absent AND which carries no error field is not
+/// a plugin-reported failure -- it is a shape the guest cannot interpret. This
+/// is the `unpack_to_value` bare-string fallback path where `.get("ok")`
+/// returns None and the real host message would otherwise be discarded.
+fn plugin_error_detail(resp: &Value, fallback: &str) -> Value {
+    let code = plugin_failure_code(resp);
+    let message = match resp {
+        Value::String(raw) => raw.clone(),
+        Value::Null => "host_plugin_call returned no bytes".to_string(),
+        _ => resp.get("error").and_then(|v| v.as_str()).unwrap_or(fallback).to_string(),
+    };
+    let mut detail = json!({
+        "error": message,
+        "plugin_failure": code,
+        "retryable": code == PLUGIN_FAIL_NOT_LOADED || code == PLUGIN_FAIL_DEADLINE,
+    });
+    if let Some(p) = resp.get("plugin").and_then(|v| v.as_str()) {
+        detail["plugin"] = json!(p);
+    }
+    detail
+}
+
 fn plugin_error(resp: &Value, fallback: &str) -> String {
-    resp.get("error").and_then(|v| v.as_str()).unwrap_or(fallback).to_string()
+    let code = plugin_failure_code(resp);
+    let message = match resp {
+        Value::String(raw) => raw.clone(),
+        Value::Null => "host_plugin_call returned no bytes".to_string(),
+        _ => resp.get("error").and_then(|v| v.as_str()).unwrap_or(fallback).to_string(),
+    };
+    format!("[{}] {}", code, message)
+}
+
+fn err_plugin(verb: &str, resp: &Value, fallback: &str) -> u64 {
+    err_json(verb, plugin_error_detail(resp, fallback))
 }
 
 pub fn vec_search_local(embedding: &Value, namespace: &str, k: u32) -> Value {
@@ -32,6 +94,7 @@ fn embed_query(query: &str) -> Value {
         emit_event("embed_query_failed", json!({
             "reason": "bert plugin call failed",
             "error": plugin_error(&resp, "no error field on bert response"),
+            "plugin_failure": plugin_failure_code(&resp),
             "query_len": query.len(),
         }));
         return Value::Null;
@@ -50,20 +113,63 @@ fn embed_query(query: &str) -> Value {
 
 fn embed_passage(text: &str) -> Option<Value> {
     let resp = call_plugin("bert", "embed", &json!({ "text": text, "kind": "passage" }));
-    if !plugin_ok(&resp) { return None; }
-    resp.get("embedding").cloned().filter(|v| !v.is_null())
+    if !plugin_ok(&resp) {
+        emit_event("embed_passage_failed", json!({
+            "reason": "bert plugin call failed",
+            "error": plugin_error(&resp, "no error field on bert response"),
+            "plugin_failure": plugin_failure_code(&resp),
+            "text_len": text.len(),
+        }));
+        return None;
+    }
+    match resp.get("embedding") {
+        Some(v) if !v.is_null() => Some(v.clone()),
+        _ => {
+            emit_event("embed_passage_failed", json!({
+                "reason": "bert responded ok but carried no embedding field",
+                "plugin_failure": PLUGIN_FAIL_MALFORMED,
+                "text_len": text.len(),
+            }));
+            None
+        }
+    }
 }
+
+pub const BROWSER_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
+pub const ERR_CODE_FAILED: &str = "failed";
+pub const ERR_CODE_RETIRED_VERB: &str = "retired_verb";
+pub const ERR_CODE_UNSUPPORTED: &str = "unsupported_by_design";
+pub const ERR_CODE_UNKNOWN_VERB: &str = "unknown_verb";
+pub const ERR_CODE_INVALID_ARGS: &str = "invalid_args";
+pub const ERR_CODE_PANIC: &str = "panic";
+pub const ERR_CODE_GATE_DENIED: &str = "gate_denied";
 
 fn next_dispatch_hint_for(verb: &str) -> Value {
     if verb == "instruction" { Value::Null } else { json!("instruction") }
 }
 
 fn err(verb: &str, reason: &str) -> u64 {
-    pack(json!({ "ok": false, "verb": verb, "error": reason, "next_dispatch_hint": next_dispatch_hint_for(verb) }).to_string())
+    err_coded(verb, ERR_CODE_FAILED, reason)
+}
+
+fn err_coded(verb: &str, code: &str, reason: &str) -> u64 {
+    pack(json!({
+        "ok": false,
+        "verb": verb,
+        "error": reason,
+        "error_code": code,
+        "next_dispatch_hint": next_dispatch_hint_for(verb),
+    }).to_string())
 }
 
 fn err_json(verb: &str, detail: Value) -> u64 {
-    let mut obj = json!({ "ok": false, "verb": verb, "next_dispatch_hint": next_dispatch_hint_for(verb) });
+    let mut obj = json!({
+        "ok": false,
+        "verb": verb,
+        "error_code": ERR_CODE_FAILED,
+        "next_dispatch_hint": next_dispatch_hint_for(verb),
+    });
     if let Some(map) = detail.as_object() {
         for (k, v) in map {
             obj[k] = v.clone();
@@ -869,8 +975,19 @@ fn browser(body: &Value, body_s: &str) -> u64 {
     } else {
         explicit_sid
     };
+    let timeout_ms = match body.get("timeoutMs").and_then(|v| v.as_u64()) {
+        None => BROWSER_DEFAULT_TIMEOUT_MS,
+        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
+        Some(n) => return err_json("browser", json!({
+            "error": "timeoutMs below floor",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "min": crate::validation::MIN_TIMEOUT_MS,
+            "received": n,
+        })),
+    };
+    let envelope = json!({ "body": code, "timeoutMs": timeout_ms }).to_string();
     let packed = unsafe { host_browser_exec(
-        code.as_ptr(), code.len() as u32,
+        envelope.as_ptr(), envelope.len() as u32,
         cwd.as_ptr(), cwd.len() as u32,
         session_id.as_ptr(), session_id.len() as u32,
     ) };
@@ -886,7 +1003,13 @@ fn browser(body: &Value, body_s: &str) -> u64 {
             }
             ok("browser", v)
         }
-        None => err("browser", "host_browser_exec returned empty"),
+        None => err_json("browser", json!({
+            "error": "host_browser_exec returned empty -- the browser host produced no bytes at all, which is the daemon-flake symptom, NOT a script that returned undefined",
+            "error_code": ERR_CODE_FAILED,
+            "timeout_ms": timeout_ms,
+            "session_id": session_id,
+            "retryable": true,
+        })),
     }
 }
 
@@ -908,7 +1031,7 @@ fn sql_open(body: &Value) -> u64 {
     if plugin_ok(&resp) {
         ok("sql_open", json!({ "path": path, "db_name": name }))
     } else {
-        err("sql_open", &plugin_error(&resp, "open failed"))
+        err_plugin("sql_open", &resp, "open failed")
     }
 }
 
@@ -919,7 +1042,7 @@ fn sql_close(body: &Value) -> u64 {
     if plugin_ok(&resp) {
         ok("sql_close", json!({ "db_name": name }))
     } else {
-        err("sql_close", &plugin_error(&resp, "close failed"))
+        err_plugin("sql_close", &resp, "close failed")
     }
 }
 
@@ -940,7 +1063,7 @@ fn sql_exec(body: &Value) -> u64 {
     if plugin_ok(&resp) {
         ok("sql_exec", json!({}))
     } else {
-        err("sql_exec", &plugin_error(&resp, "exec failed"))
+        err_plugin("sql_exec", &resp, "exec failed")
     }
 }
 
@@ -956,7 +1079,7 @@ fn sql_query(body: &Value) -> u64 {
         let rows = resp.get("rows").cloned().unwrap_or_else(|| json!([]));
         ok("sql_query", json!({ "rows": rows }))
     } else {
-        err("sql_query", &plugin_error(&resp, "query failed"))
+        err_plugin("sql_query", &resp, "query failed")
     }
 }
 
@@ -1161,7 +1284,7 @@ fn sql_serialize(body: &Value) -> u64 {
     let path = db_path_from(body);
     let resp = call_plugin("libsql", "serialize", &json!({ "db": name, "path": path }));
     if !plugin_ok(&resp) {
-        return err("sql_serialize", &plugin_error(&resp, "serialize failed"));
+        return err_plugin("sql_serialize", &resp, "serialize failed");
     }
     let bytes_b64 = match resp.get("bytes_b64").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
@@ -1185,7 +1308,7 @@ fn sql_deserialize(body: &Value) -> u64 {
     if plugin_ok(&resp) {
         ok("sql_deserialize", json!({ "restored": size, "db_name": name }))
     } else {
-        err("sql_deserialize", &plugin_error(&resp, "deserialize failed"))
+        err_plugin("sql_deserialize", &resp, "deserialize failed")
     }
 }
 
@@ -1685,6 +1808,9 @@ fn filter(body: &Value, raw: &str) -> u64 {
 #[no_mangle]
 pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
     install_panic_hook();
+    let dispatched_verb = read_str(verb_ptr as *const u8, verb_len);
+    #[cfg(target_arch = "wasm32")]
+    let panic_start_ms = unsafe { host_now_ms() };
     let result = std::panic::catch_unwind(|| {
         dispatch_verb_inner(verb_ptr, verb_len, body_ptr, body_len)
     });
@@ -1694,7 +1820,23 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
             let msg = payload.downcast_ref::<&str>().map(|s| s.to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "panic during dispatch".to_string());
-            err("dispatch_verb", &msg)
+            let attributed = if dispatched_verb.is_empty() { "dispatch_verb" } else { dispatched_verb.as_str() };
+            #[cfg(target_arch = "wasm32")]
+            {
+                let ms = unsafe { host_now_ms() }.saturating_sub(panic_start_ms);
+                emit_event("dispatch.end", serde_json::json!({
+                    "verb": attributed,
+                    "ms": ms,
+                    "panicked": true,
+                    "error_code": ERR_CODE_PANIC,
+                }));
+            }
+            err_json(attributed, json!({
+                "error": msg,
+                "error_code": ERR_CODE_PANIC,
+                "panicked": true,
+                "boundary": "dispatch_verb catch_unwind",
+            }))
         }
     }
 }
@@ -1764,7 +1906,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "ssh" => shell_exec(&body, &body_s, "ssh"),
         "go" | "rust" | "c" | "cpp" | "java" | "deno" => shell_exec(&body, &body_s, &verb),
         "status" => status(&body),
-        "wait" | "sleep" => err(&verb, "verb not supported: wasm has no real timer/async-sleep primitive here; use exec:sleep (bash `sleep N`, JS setTimeout via exec_js, or PowerShell Start-Sleep) for an actual wait"),
+        "wait" | "sleep" => err_coded(&verb, ERR_CODE_UNSUPPORTED, "verb not supported: wasm has no real timer/async-sleep primitive here; use exec:sleep (bash `sleep N`, JS setTimeout via exec_js, or PowerShell Start-Sleep) for an actual wait"),
         "close" => close(&body),
         "filter" => filter(&body, &body_s),
         "git_status" => git_status(&body),
@@ -1783,10 +1925,10 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "git_revert" => git_revert(&body),
         "git_reset" => git_reset(&body),
         "forget" => forget(&body),
-        "learn" => err("learn", "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index)"),
+        "learn" => err_coded("learn", ERR_CODE_RETIRED_VERB, "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index)"),
         "discipline" => discipline(&body),
-        "" => err("", "verb required"),
-        _ => err(&verb, "unknown verb"),
+        "" => err_coded("", ERR_CODE_INVALID_ARGS, "verb required"),
+        _ => err_coded(&verb, ERR_CODE_UNKNOWN_VERB, "unknown verb"),
     };
     #[cfg(target_arch = "wasm32")]
     {

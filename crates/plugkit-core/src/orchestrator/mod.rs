@@ -84,15 +84,20 @@ pub fn gm_dir() -> PathBuf {
     resolve_project_root_with_retry().join(".gm")
 }
 
+/// The single source of truth for which verbs `dispatch_verb_inner` routes to
+/// the orchestrator. `is_orchestrator_verb` and the mediator's advertised
+/// subsystem map both read this slice, so the advertised surface cannot drift
+/// away from the dispatched one.
+pub const ORCHESTRATOR_VERBS: &[&str] = &[
+    "transition", "mutable-resolve", "mutable-add", "mutable-list",
+    "memorize-fire", "discipline-note", "phase-status", "residual-scan", "auto-recall",
+    "instruction", "prd-add", "prd-resolve", "prd-list",
+    "task-spawn", "task-list", "task-stop", "task-output",
+    "memorize-continue", "fsm-vendor", "fsm-validate", "claim-audit", "submodule-check",
+];
+
 pub fn is_orchestrator_verb(verb: &str) -> bool {
-    matches!(
-        verb,
-        "transition" | "mutable-resolve" | "mutable-add" | "mutable-list"
-            | "memorize-fire" | "discipline-note" | "phase-status" | "residual-scan" | "auto-recall"
-            | "instruction" | "prd-add" | "prd-resolve" | "prd-list"
-            | "task-spawn" | "task-list" | "task-stop" | "task-output"
-            | "memorize-continue" | "fsm-vendor" | "fsm-validate" | "claim-audit" | "submodule-check"
-    )
+    ORCHESTRATOR_VERBS.contains(&verb)
 }
 
 #[cfg(target_arch = "wasm32")]
