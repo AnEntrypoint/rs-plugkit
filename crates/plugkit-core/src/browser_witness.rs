@@ -161,3 +161,83 @@ pub fn record_from_body(cwd: &str, body: &Value) {
         }
     }
 }
+
+/// Mark every edited client-side file as witnessed, after a browser dispatch
+/// has actually loaded the page.
+///
+/// A `browser` dispatch that ran real script against the live page IS the
+/// witness the gate is asking about, so this is where the witness record
+/// belongs. Re-hashing at this moment (rather than copying the edit's stored
+/// hash) is what makes the record honest: a file edited again after this point
+/// gets a new edit hash that no longer matches, and correctly reads as
+/// unwitnessed on the next check.
+pub fn witness_all_pending_edits(cwd: &str) -> usize {
+    let edits_path = if cwd.is_empty() {
+        ".gm/exec-spool/.turn-browser-edits.json".to_string()
+    } else {
+        format!("{}/.gm/exec-spool/.turn-browser-edits.json", cwd.trim_end_matches('/').trim_end_matches('\\'))
+    };
+    let raw = host_read(&edits_path).unwrap_or_default();
+    if raw.trim().is_empty() {
+        return 0;
+    }
+    let list = match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Array(a)) => a,
+        _ => return 0,
+    };
+    let mut marked = 0;
+    for entry in list {
+        let Some(file) = entry.get("file").and_then(|f| f.as_str()) else { continue };
+        if file.is_empty() {
+            continue;
+        }
+        if record_witness(cwd, file).unwrap_or(false) {
+            marked += 1;
+        }
+    }
+    marked
+}
+
+/// Record that `file_path` was witnessed live in the browser this session.
+///
+/// The counterpart to [`record_edit`], and it did not exist: nothing in either
+/// repo wrote `.turn-browser-witnessed`, while `browser-witness-coverage` read
+/// it on every `CONSOLIDATE -> COMPLETE` attempt. A missing file parses as an
+/// empty map, so every recorded edit compared its hash against `""` and the
+/// gate could never be satisfied once any client-side file had been touched --
+/// a permanent block with no way to clear it.
+///
+/// Stored as a `file -> hash` object because that is the shape the gate reads,
+/// and hashed at witness time from the file's CURRENT bytes, so editing a file
+/// after witnessing it correctly invalidates the witness rather than carrying a
+/// stale pass forward.
+pub fn record_witness(cwd: &str, file_path: &str) -> Result<bool, String> {
+    let rel = if cwd.is_empty() { file_path.to_string() } else { relpath(cwd, file_path) };
+    let rel_slash = rel.replace('\\', "/");
+    if !is_browser_running_file(&rel_slash) { return Ok(false); }
+
+    let witnessed_path = if cwd.is_empty() {
+        ".gm/exec-spool/.turn-browser-witnessed".to_string()
+    } else {
+        format!("{}/.gm/exec-spool/.turn-browser-witnessed", cwd.trim_end_matches('/').trim_end_matches('\\'))
+    };
+
+    let existing = host_read(&witnessed_path).unwrap_or_default();
+    let mut map = serde_json::from_str::<Value>(&existing)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+
+    let hash = hash_file_short(&rel_slash);
+    if hash.is_empty() {
+        return Err(format!("browser_witness: cannot hash {rel_slash} -- refusing to record a witness with no content behind it"));
+    }
+    map.insert(rel_slash, Value::String(hash));
+
+    let serialized = Value::Object(map).to_string();
+    if !host_write(&witnessed_path, &serialized) {
+        log_warn(&format!("browser_witness: write failed for {}", witnessed_path));
+        return Err(format!("host_fs_write failed for {}", witnessed_path));
+    }
+    Ok(true)
+}

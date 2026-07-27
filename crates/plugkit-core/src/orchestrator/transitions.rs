@@ -178,7 +178,10 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
         };
         if !crate::browser_witness::is_browser_running_file(file) { continue; }
         let edit_hash = entry.get("hash").and_then(|v| v.as_str()).unwrap_or("");
-        if edit_hash.is_empty() { continue; }
+        if edit_hash.is_empty() {
+            unwitnessed.push(format!("{file} (edit recorded with no readable content hash)"));
+            continue;
+        }
         let witness_hash = witnessed_hashes.get(file).and_then(|v| v.as_str()).unwrap_or("");
         if witness_hash != edit_hash {
             unwitnessed.push(file.to_string());

@@ -877,6 +877,13 @@ fn browser(body: &Value, body_s: &str) -> u64 {
     match unpack_to_string(packed) {
         Some(s) => {
             let v: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
+            let witnessed = crate::browser_witness::witness_all_pending_edits(&cwd);
+            let mut v = v;
+            if witnessed > 0 {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("witness_marked".to_string(), json!(witnessed));
+                }
+            }
             ok("browser", v)
         }
         None => err("browser", "host_browser_exec returned empty"),
