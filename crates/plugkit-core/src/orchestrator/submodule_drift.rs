@@ -39,14 +39,60 @@ fn gm_tracked_gitlink_sha(_path: &str) -> Option<String> { None }
 #[cfg(not(target_arch = "wasm32"))]
 fn submodule_head_sha(_path: &str) -> Option<String> { None }
 
+/// Submodule paths to check, read from `.gitmodules` where it exists.
+///
+/// The list was hardcoded to seven names belonging to THIS repo, which made
+/// `submodules-clean` -- a gate on both guarded edges -- pass vacuously for
+/// every other project: it iterated a set none of their paths appeared in and
+/// reported clean having checked nothing. `.gitmodules` is git's own record of
+/// what a repo's submodules are, so deriving from it makes the gate correct
+/// wherever it runs, and correct automatically when a submodule is added.
+///
+/// The compiled list stays as a fallback for a repo whose `.gitmodules` is
+/// absent or unreadable, so behaviour here is unchanged.
+pub fn submodule_paths() -> Vec<String> {
+    let parsed = crate::pkfs::read_to_string(".gitmodules")
+        .map(|raw| parse_gitmodules_paths(&raw))
+        .unwrap_or_default();
+    if parsed.is_empty() {
+        return KNOWN_SUBMODULES.iter().map(|s| s.to_string()).collect();
+    }
+    parsed
+}
+
+/// Pull `path = <p>` entries out of a `.gitmodules` file.
+///
+/// Deliberately a line scan rather than a full INI parse: the only key that
+/// matters is `path`, git writes it one-per-line, and a partial parse that
+/// silently dropped a submodule would reintroduce exactly the vacuous-pass
+/// this function exists to remove.
+fn parse_gitmodules_paths(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else { continue };
+        if key.trim() != "path" {
+            continue;
+        }
+        let path = value.trim().trim_matches('"').trim_end_matches('/');
+        if !path.is_empty() && !out.iter().any(|p| p == path) {
+            out.push(path.to_string());
+        }
+    }
+    out
+}
+
 pub fn drifted_submodules() -> Vec<DriftedSubmodule> {
     let mut drifted = Vec::new();
-    for path in KNOWN_SUBMODULES {
-        let Some(gm_tracked_sha) = gm_tracked_gitlink_sha(path) else { continue };
-        let Some(submodule_head_sha) = submodule_head_sha(path) else { continue };
+    for path in submodule_paths() {
+        let Some(gm_tracked_sha) = gm_tracked_gitlink_sha(&path) else { continue };
+        let Some(submodule_head_sha) = submodule_head_sha(&path) else { continue };
         if gm_tracked_sha != submodule_head_sha {
             drifted.push(DriftedSubmodule {
-                path: path.to_string(),
+                path,
                 gm_tracked_sha,
                 submodule_head_sha,
             });
