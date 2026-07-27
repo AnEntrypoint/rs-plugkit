@@ -252,6 +252,31 @@ impl Default for IndexConfig {
     }
 }
 
+/// Size caps on discipline notes.
+///
+/// The two length caps HARD-REFUSE a note that exceeds them, so they are not
+/// merely cosmetic: a project whose policy names are longer than 64 chars
+/// cannot record them at all. `active_policies_limit` truncates the list fed
+/// into every instruction payload, so it trades context budget against how
+/// many standing policies the agent can actually see.
+///
+/// Defaults reproduce the previous literals exactly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisciplineNoteConfig {
+    /// Longest accepted note name (was 64). Exceeding it is refused, not truncated.
+    pub max_name_len: usize,
+    /// Longest accepted note body (was 200). Exceeding it is refused, not truncated.
+    pub max_text_len: usize,
+    /// Active policies surfaced in the instruction payload (was 50).
+    pub active_policies_limit: usize,
+}
+
+impl Default for DisciplineNoteConfig {
+    fn default() -> Self {
+        DisciplineNoteConfig { max_name_len: 64, max_text_len: 200, active_policies_limit: 50 }
+    }
+}
+
 /// Which edited files count as "runs in a browser", and therefore owe a
 /// browser witness before COMPLETE.
 ///
@@ -441,6 +466,8 @@ pub struct RagConfig {
     pub instruction_payload: InstructionPayloadConfig,
     /// Which edited files owe a browser witness.
     pub browser_witness: BrowserWitnessConfig,
+    /// Size caps on discipline notes.
+    pub discipline_note: DisciplineNoteConfig,
 }
 
 impl Default for RagConfig {
@@ -459,6 +486,7 @@ impl Default for RagConfig {
             pipeline: PipelineConfig::default(),
             instruction_payload: InstructionPayloadConfig::default(),
             browser_witness: BrowserWitnessConfig::default(),
+            discipline_note: DisciplineNoteConfig::default(),
         }
     }
 }

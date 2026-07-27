@@ -1,8 +1,9 @@
 use super::gm_dir;
 use crate::pkfs;
 
-const MAX_NAME_LEN: usize = 64;
-const MAX_TEXT_LEN: usize = 200;
+fn note_cfg() -> crate::ragconfig::DisciplineNoteConfig {
+    crate::ragconfig::DisciplineNoteConfig::default()
+}
 
 fn valid_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
@@ -25,12 +26,12 @@ pub fn handle(content: &str) -> (String, String, i32) {
     if discipline.is_empty() {
         return (String::new(), "discipline-note refused: discipline name required".to_string(), 1);
     }
-    if discipline.len() > MAX_NAME_LEN {
+    if discipline.len() > note_cfg().max_name_len {
         return (
             String::new(),
             format!(
                 "discipline-note refused: discipline name exceeds {} char cap (got {} chars)",
-                MAX_NAME_LEN,
+                note_cfg().max_name_len,
                 discipline.len()
             ),
             1,
@@ -54,12 +55,12 @@ pub fn handle(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    if text.chars().count() > MAX_TEXT_LEN {
+    if text.chars().count() > note_cfg().max_text_len {
         return (
             String::new(),
             format!(
                 "discipline-note refused: text exceeds {} char terseness ceiling (got {} chars) -- compress and retry",
-                MAX_TEXT_LEN,
+                note_cfg().max_text_len,
                 text.chars().count()
             ),
             1,
@@ -124,7 +125,7 @@ pub fn active_policies() -> serde_json::Value {
             let capped: String = text
                 .lines()
                 .rev()
-                .take(50)
+                .take(note_cfg().active_policies_limit)
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
