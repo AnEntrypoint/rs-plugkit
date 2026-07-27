@@ -789,6 +789,13 @@ fn delete_chunk_keys(chunks: &[ChunkRecord]) {
 }
 
 pub fn index(root: &str, max_files: usize) -> Value {
+    index_cfg(root, max_files, &crate::ragconfig::RagConfig::default())
+}
+
+/// Same as [`index`], with the knowledgebase config supplied explicitly --
+/// matching the `_cfg` convention every other config-aware entry point in this
+/// module already follows.
+pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig) -> Value {
     let db_path = project_db_path(None);
     let libsql_err = ensure_schema_at(&db_path).err().map(|e| e.to_string());
     let libsql_ok = libsql_err.is_none();
@@ -823,7 +830,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
         let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     }
-    const INDEX_WALL_BUDGET_MS: u64 = 30000;
+    let index_wall_budget_ms: u64 = cfg.index.wall_budget_ms;
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut indexed = 0;
     let mut chunked = 0;
@@ -838,7 +845,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
 
     for raw_fp in &files {
         let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        if elapsed > INDEX_WALL_BUDGET_MS {
+        if elapsed > index_wall_budget_ms {
             deferred_files += 1;
             continue;
         }
@@ -883,7 +890,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
             .or_else(|| host_read(raw_fp))
             .or_else(|| host_read(&format!("/{}", fp)))
         { Some(c) => c, None => continue };
-        if content.len() > 256 * 1024 { continue; }
+        if content.len() > cfg.index.max_file_bytes { continue; }
         let file_mtime = crate::wasm_dispatch::host_stat(fp)
             .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
             .and_then(|s| s.get("mtime_ms").and_then(|v| v.as_f64()))
@@ -946,7 +953,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
         // what actually stalls the index. Live-witnessed: a 153KB AGENTS.md
         // produced 49 chunks -- comfortably UNDER the 64 cap, so it was never
         // truncated -- yet its single embed_texts_batch call took 39981ms,
-        // blowing both INDEX_WALL_BUDGET_MS (45s, and the outer check at the
+        // blowing both index_wall_budget_ms (45s, and the outer check at the
         // top of this loop only fires BETWEEN files) and the supervisor's own
         // 30s heartbeat-stale limit, which then killed the watcher mid-pass
         // and left the index frozen at deferred_files=499 with the embedder
@@ -956,13 +963,13 @@ pub fn index(root: &str, max_files: usize) -> Value {
         //
         // Bound the batch by the budget actually remaining for this pass:
         // scale the per-file chunk allowance down as the pass approaches
-        // INDEX_WALL_BUDGET_MS. A file arriving with little budget left
+        // index_wall_budget_ms. A file arriving with little budget left
         // embeds only a small prefix now and finishes on a later pass, which
         // still converges (the file is marked seen and its manifest written,
         // exactly as the count-cap path already does -- see the livelock
         // rationale above for why deferring the file ENTIRELY is wrong).
         let elapsed_now = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        let remaining_ms = INDEX_WALL_BUDGET_MS.saturating_sub(elapsed_now);
+        let remaining_ms = index_wall_budget_ms.saturating_sub(elapsed_now);
         // Derived from the same live measurement: 39981ms / 49 chunks is
         // ~816ms per prose chunk on unaccelerated wasm32 BERT. Budget against
         // a deliberately pessimistic per-chunk estimate so the bound holds on
@@ -1120,6 +1127,14 @@ fn digest_from_entries(mut entries: Vec<(String, u32)>) -> String {
 }
 
 pub fn current_digest() -> String {
+    current_digest_cfg(&crate::ragconfig::RagConfig::default())
+}
+
+/// Same as [`current_digest`] with explicit config. The file-size cap MUST match
+/// the indexer own, or the digest counts files the index skips and the two can
+/// never agree -- the same class of mismatch that made the stored digest
+/// permanently unequal to the computed one.
+pub fn current_digest_cfg(cfg: &crate::ragconfig::RagConfig) -> String {
     let files = collect_files(".", DIGEST_MAX_FILES);
     let mut entries: Vec<(String, u32)> = Vec::new();
     for raw_fp in &files {
@@ -1129,7 +1144,7 @@ pub fn current_digest() -> String {
         let stat = match crate::wasm_dispatch::host_stat(&canon)
             .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
         { Some(s) => s, None => continue };
-        if stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0) > 256 * 1024 { continue; }
+        if stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0) > cfg.index.max_file_bytes as u64 { continue; }
         let content = match host_read(&canon)
             .or_else(|| host_read(raw_fp))
         { Some(c) => c, None => continue };

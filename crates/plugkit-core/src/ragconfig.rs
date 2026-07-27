@@ -211,6 +211,47 @@ impl EmbedDimConfig {
     }
 }
 
+/// Code-index chunking and pass budgets.
+///
+/// Every value here was a bare literal in `code_index.rs`, which made the
+/// indexing cost profile un-tunable per project -- and these are exactly the
+/// knobs that matter when a corpus does not resemble the one they were chosen
+/// against. A prose-heavy tree wants a different chunk split than a code tree;
+/// a slow machine wants a different wall budget than a fast one.
+///
+/// Per this module's own invariant, the defaults reproduce the historical
+/// literals EXACTLY, so adopting the config is a no-op until a value is
+/// deliberately edited.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexConfig {
+    /// Split a chunk whose body exceeds this many bytes (was 8192).
+    pub oversized_chunk_split_threshold: usize,
+    /// Ceiling on chunks embedded per file per pass (was 64). A COUNT bound
+    /// only -- the real protection is `wall_budget_ms`, because per-chunk
+    /// embed cost is highly non-uniform: a 49-chunk prose file took 39981ms
+    /// while sitting comfortably under this cap.
+    pub max_chunks_per_file_per_pass: usize,
+    /// Wall-clock budget for one indexing pass (was 30000ms). A pass that
+    /// exceeds it defers the remaining files rather than running to
+    /// completion, so one large tree cannot starve the supervisor heartbeat.
+    pub wall_budget_ms: u64,
+    /// Skip any file larger than this (was 256 * 1024). A file that size is
+    /// nearly always generated or vendored, and embedding it costs far more
+    /// than it returns.
+    pub max_file_bytes: usize,
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        IndexConfig {
+            oversized_chunk_split_threshold: 8192,
+            max_chunks_per_file_per_pass: 64,
+            wall_budget_ms: 30_000,
+            max_file_bytes: 256 * 1024,
+        }
+    }
+}
+
 /// A whole knowledgebase's retrieval settings.
 ///
 /// Threaded by reference into the vector modules. Constructed with
@@ -222,6 +263,8 @@ pub struct RagConfig {
     pub namespaces: NamespaceConfig,
     pub scoring: ScoringConfig,
     pub budget: QueryBudgetConfig,
+    /// Chunking and pass budgets for the code indexer.
+    pub index: IndexConfig,
     /// The namespace-keyed memory/RAG table (default `rssearch_vectors`).
     pub rssearch: VecTableNames,
     /// Commit-message/diff vectors (default `git_commit_vectors`).
@@ -236,6 +279,7 @@ impl Default for RagConfig {
     fn default() -> Self {
         RagConfig {
             embed: EmbedDimConfig::default(),
+            index: IndexConfig::default(),
             namespaces: NamespaceConfig::default(),
             scoring: ScoringConfig::default(),
             budget: QueryBudgetConfig::default(),
