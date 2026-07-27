@@ -252,6 +252,40 @@ impl Default for IndexConfig {
     }
 }
 
+/// What the claim audit looks for, and where.
+///
+/// Both halves were hardcoded: an English marker vocabulary and `AGENTS.md`
+/// as the only scanned file. Neither generalises -- another project keeps its
+/// running log under a different filename, and a project whose notes are
+/// written in another language (or simply with a different house vocabulary,
+/// e.g. "deployed"/"verified") gets a silently useless audit rather than an
+/// obviously broken one.
+///
+/// Defaults reproduce the previous literals exactly, so an unset config is a
+/// guaranteed no-op.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClaimAuditConfig {
+    /// Phrases that mark a line as ASSERTING something shipped, and therefore
+    /// as owing a commit hash. Matched case-insensitively as substrings.
+    pub markers: Vec<String>,
+    /// Files scanned for unbacked claims, relative to the project root.
+    /// A path that does not exist is skipped, not an error -- a project
+    /// without one of these files simply has nothing to audit there.
+    pub scan_paths: Vec<String>,
+}
+
+impl Default for ClaimAuditConfig {
+    fn default() -> Self {
+        ClaimAuditConfig {
+            markers: ["shipped", "validated", "confirmed live", "landed in", "fixed in", "live-witnessed"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            scan_paths: vec!["AGENTS.md".to_string()],
+        }
+    }
+}
+
 /// A whole knowledgebase's retrieval settings.
 ///
 /// Threaded by reference into the vector modules. Constructed with
@@ -273,6 +307,8 @@ pub struct RagConfig {
     pub code_chunks: VecTableNames,
     /// Legacy flat memory table kept alongside `code_chunks` in the project db.
     pub memories: VecTableNames,
+    /// Claim-audit marker vocabulary and scanned files.
+    pub claim_audit: ClaimAuditConfig,
 }
 
 impl Default for RagConfig {
@@ -287,6 +323,7 @@ impl Default for RagConfig {
             git_commits: VecTableNames::derived("git_commit_vectors"),
             code_chunks: VecTableNames::derived("code_chunks"),
             memories: VecTableNames::derived("memories"),
+            claim_audit: ClaimAuditConfig::default(),
         }
     }
 }

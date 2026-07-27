@@ -1,8 +1,6 @@
 use super::gm_dir;
 use crate::pkfs;
 
-const CLAIM_MARKERS: &[&str] = &["shipped", "validated", "confirmed live", "landed in", "fixed in", "live-witnessed"];
-
 const KNOWN_SUBMODULES: &[&str] = &[
     "agentplug", "rs-plugkit", "rs-codeinsight", "rs-search",
     "agentplug-bert", "agentplug-libsql", "agentplug-treesitter",
@@ -21,8 +19,14 @@ fn extract_commit_hash_tokens(line: &str) -> Vec<String> {
 }
 
 fn line_asserts_shipped_claim(line: &str) -> bool {
+    line_asserts_shipped_claim_cfg(line, &crate::ragconfig::ClaimAuditConfig::default())
+}
+
+fn line_asserts_shipped_claim_cfg(line: &str, cfg: &crate::ragconfig::ClaimAuditConfig) -> bool {
     let lower = line.to_ascii_lowercase();
-    CLAIM_MARKERS.iter().any(|marker| lower.contains(marker))
+    cfg.markers
+        .iter()
+        .any(|marker| lower.contains(&marker.to_ascii_lowercase()))
 }
 
 fn named_submodule_in_line(line: &str) -> Option<&'static str> {
@@ -47,10 +51,10 @@ fn commit_hash_exists_in_repo_history(hash: &str, submodule: Option<&str>) -> bo
 #[cfg(not(target_arch = "wasm32"))]
 fn commit_hash_exists_in_repo_history(_hash: &str, _submodule: Option<&str>) -> bool { true }
 
-fn scan_text_for_hash_claims(text: &str, source_label: &str, findings: &mut Vec<HashClaimFinding>, scanned_line_count: &mut usize) {
+fn scan_text_for_hash_claims(text: &str, source_label: &str, findings: &mut Vec<HashClaimFinding>, scanned_line_count: &mut usize, cfg: &crate::ragconfig::ClaimAuditConfig) {
     for line in text.lines() {
         *scanned_line_count += 1;
-        if !line_asserts_shipped_claim(line) { continue; }
+        if !line_asserts_shipped_claim_cfg(line, cfg) { continue; }
         let hashes = extract_commit_hash_tokens(line);
         if hashes.is_empty() { continue; }
         let submodule = named_submodule_in_line(line);
@@ -67,14 +71,21 @@ pub fn handle_audit(_content: &str) -> (String, String, i32) {
     let mut findings: Vec<HashClaimFinding> = Vec::new();
     let mut scanned_line_count = 0usize;
 
-    let agents_md_path = std::path::Path::new(".").join("AGENTS.md").to_string_lossy().to_string();
-    if let Some(agents_md_text) = pkfs::read_to_string(&agents_md_path) {
-        scan_text_for_hash_claims(&agents_md_text, "AGENTS.md", &mut findings, &mut scanned_line_count);
+    let audit_cfg = crate::ragconfig::ClaimAuditConfig::default();
+
+    // A configured path that does not exist is SKIPPED rather than reported:
+    // a project without one of these files has nothing to audit there, which
+    // is not the same thing as an audit failure.
+    for scan_path in &audit_cfg.scan_paths {
+        let full = std::path::Path::new(".").join(scan_path).to_string_lossy().to_string();
+        if let Some(text) = pkfs::read_to_string(&full) {
+            scan_text_for_hash_claims(&text, scan_path, &mut findings, &mut scanned_line_count, &audit_cfg);
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
     for (memory_key, memory_text) in crate::memory_md::flat_kv_entries("default") {
-        scan_text_for_hash_claims(&memory_text, &memory_key, &mut findings, &mut scanned_line_count);
+        scan_text_for_hash_claims(&memory_text, &memory_key, &mut findings, &mut scanned_line_count, &audit_cfg);
     }
 
     let stale_claim_count = findings.iter().filter(|finding| !finding.hash_resolved_in_repo_history).count();
