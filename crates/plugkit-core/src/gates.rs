@@ -245,7 +245,12 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    if matches!(verb, "bash" | "sh" | "shell" | "zsh" | "powershell" | "ps1") {
+    // Which verbs count as a shell, and whether shell git is denied at all,
+    // are policy rather than compile-time facts: a workflow whose shell verb has
+    // a different name got no protection from the hardcoded list, and one that
+    // legitimately wants shell git had no way to say so.
+    let shell_policy = crate::orchestrator::fsm::graph().policy;
+    if shell_policy.deny_shell_git && shell_policy.shell_verbs.iter().any(|v| v == verb) {
         let cmd = body.get("command").and_then(|v| v.as_str())
             .or_else(|| body.get("code").and_then(|v| v.as_str()))
             .or_else(|| body.get("script").and_then(|v| v.as_str()))

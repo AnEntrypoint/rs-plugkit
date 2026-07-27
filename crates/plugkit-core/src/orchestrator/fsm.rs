@@ -46,6 +46,21 @@ pub struct Policy {
     pub await_allowed_verbs: Vec<String>,
     #[serde(default = "default_longgap_exempt_verbs")]
     pub longgap_exempt_verbs: Vec<String>,
+    /// Verbs treated as "a shell" for the shell-bypass check, and the tool that
+    /// bypass is steering people toward.
+    ///
+    /// Hardcoding these made the rule un-vendorable: a workflow whose shell verb
+    /// is named something else got no protection at all, and one that
+    /// legitimately wants shell git had no way to say so. Kept as policy rather
+    /// than a compile-time constant precisely because "which verb is a shell" is
+    /// a property of the workflow, not of the engine.
+    #[serde(default = "default_shell_verbs")]
+    pub shell_verbs: Vec<String>,
+    /// Set false to allow shell git. Defaults to true: the shell path bypasses
+    /// the porcelain gate and the witness ledger, so it stays denied unless a
+    /// workflow deliberately opts out.
+    #[serde(default = "default_deny_shell_git")]
+    pub deny_shell_git: bool,
     #[serde(default = "default_gate_repeat_escalate_threshold")]
     pub gate_repeat_escalate_threshold: u64,
     #[serde(default = "default_longgap_threshold_ms")]
@@ -82,6 +97,12 @@ fn default_await_allowed_verbs() -> Vec<String> {
 fn default_longgap_exempt_verbs() -> Vec<String> {
     ["health", "auto-recall", "wait", "sleep"].iter().map(|s| s.to_string()).collect()
 }
+fn default_shell_verbs() -> Vec<String> {
+    // Superset of the previously-hardcoded list -- narrowing it would silently
+    // drop protection on a shell this gate already covered.
+    ["bash", "sh", "shell", "zsh", "powershell", "ps1", "pwsh", "cmd"].iter().map(|s| s.to_string()).collect()
+}
+fn default_deny_shell_git() -> bool { true }
 fn default_gate_repeat_escalate_threshold() -> u64 { 3 }
 fn default_longgap_threshold_ms() -> u64 { 300_000 }
 fn default_require_witness_evidence() -> bool { true }
@@ -105,6 +126,8 @@ impl Default for Policy {
             toplevel_doc_allowlist: default_toplevel_doc_allowlist(),
             await_allowed_verbs: default_await_allowed_verbs(),
             longgap_exempt_verbs: default_longgap_exempt_verbs(),
+            shell_verbs: default_shell_verbs(),
+            deny_shell_git: default_deny_shell_git(),
             gate_repeat_escalate_threshold: default_gate_repeat_escalate_threshold(),
             longgap_threshold_ms: default_longgap_threshold_ms(),
             require_witness_evidence: default_require_witness_evidence(),
