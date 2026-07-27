@@ -3,8 +3,6 @@
 use serde_json::{json, Value};
 use crate::wasm_dispatch::{host_read, host_write, host_log};
 
-const BROWSER_DIR_PREFIXES: &[&str] = &["public/", "site/", "app/", "pages/", "components/", "client/", "web/", "src/frontend/", "packages/web-app/", "frontend/", "webapp/"];
-
 fn lower_ends_with(s: &str, ext: &str) -> bool {
     let ll = s.len();
     let el = ext.len();
@@ -13,16 +11,19 @@ fn lower_ends_with(s: &str, ext: &str) -> bool {
 }
 
 pub fn is_browser_running_file(rel: &str) -> bool {
+    is_browser_running_file_cfg(rel, &crate::ragconfig::BrowserWitnessConfig::default())
+}
+
+pub fn is_browser_running_file_cfg(rel: &str, cfg: &crate::ragconfig::BrowserWitnessConfig) -> bool {
     if rel.is_empty() { return false; }
     let norm = rel.replace('\\', "/");
-    for ext in &[".html", ".htm", ".tsx", ".jsx", ".vue", ".svelte"] {
+    for ext in &cfg.always_browser_extensions {
         if lower_ends_with(&norm, ext) { return true; }
     }
-    let is_codey = [".mjs", ".cjs", ".js", ".ts", ".css", ".scss", ".sass"]
-        .iter().any(|e| lower_ends_with(&norm, e));
+    let is_codey = cfg.conditional_extensions.iter().any(|e| lower_ends_with(&norm, e));
     if !is_codey { return false; }
     let lower = norm.to_lowercase();
-    BROWSER_DIR_PREFIXES.iter().any(|p| lower.starts_with(p))
+    cfg.browser_dir_prefixes.iter().any(|p| lower.starts_with(&p.to_lowercase()))
 }
 
 fn relpath(cwd: &str, abs: &str) -> String {

@@ -252,6 +252,46 @@ impl Default for IndexConfig {
     }
 }
 
+/// Which edited files count as "runs in a browser", and therefore owe a
+/// browser witness before COMPLETE.
+///
+/// This one is a real guarantee hole rather than an inconvenience. The
+/// browser-witness-coverage gate only demands a witness for files this
+/// classifier claims, so a project whose client lives in a directory outside
+/// the hardcoded prefix list (`ui/`, `renderer/`, `apps/web/`, ...) had every
+/// one of its client edits classified as non-browser -- and the gate then
+/// passed with zero coverage, reporting a guarantee it had never checked.
+/// Silent false-negatives in a gate are worse than a loud failure.
+///
+/// Defaults reproduce the previous literals exactly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrowserWitnessConfig {
+    /// Extensions that are browser-running wherever they live, because the
+    /// file type itself implies a rendered surface.
+    pub always_browser_extensions: Vec<String>,
+    /// Extensions that are browser-running ONLY under one of
+    /// `browser_dir_prefixes` -- a `.js` file can equally be server code.
+    pub conditional_extensions: Vec<String>,
+    /// Path prefixes (normalised to `/`, matched lowercase) that mark a
+    /// conditional extension as client-side.
+    pub browser_dir_prefixes: Vec<String>,
+}
+
+impl Default for BrowserWitnessConfig {
+    fn default() -> Self {
+        BrowserWitnessConfig {
+            always_browser_extensions: [".html", ".htm", ".tsx", ".jsx", ".vue", ".svelte"]
+                .iter().map(|s| s.to_string()).collect(),
+            conditional_extensions: [".mjs", ".cjs", ".js", ".ts", ".css", ".scss", ".sass"]
+                .iter().map(|s| s.to_string()).collect(),
+            browser_dir_prefixes: [
+                "public/", "site/", "app/", "pages/", "components/", "client/", "web/",
+                "src/frontend/", "packages/web-app/", "frontend/", "webapp/",
+            ].iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
 /// How much, and what, the instruction payload puts in front of the agent
 /// every dispatch.
 ///
@@ -399,6 +439,8 @@ pub struct RagConfig {
     pub pipeline: PipelineConfig,
     /// What the instruction payload puts in front of the agent each dispatch.
     pub instruction_payload: InstructionPayloadConfig,
+    /// Which edited files owe a browser witness.
+    pub browser_witness: BrowserWitnessConfig,
 }
 
 impl Default for RagConfig {
@@ -416,6 +458,7 @@ impl Default for RagConfig {
             claim_audit: ClaimAuditConfig::default(),
             pipeline: PipelineConfig::default(),
             instruction_payload: InstructionPayloadConfig::default(),
+            browser_witness: BrowserWitnessConfig::default(),
         }
     }
 }
