@@ -93,6 +93,28 @@ fn predicate_result(name: &str) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
+/// ONE global marker, deliberately -- not per-edge, and not per-phase.
+///
+/// Two edges gate on this today (VERIFY -> CONSOLIDATE and CONSOLIDATE ->
+/// COMPLETE), so a single scan satisfies both. That looks like a hole worth
+/// scoping per-edge, and is not: this is a STOP-WINDOW marker. Residual-scan
+/// asks "is there loose work left in this window" -- a question whose answer
+/// cannot differ between two edges of one continuous VERIFY -> CONSOLIDATE ->
+/// COMPLETE walk inside the same window. Scoping it per-edge would force a
+/// redundant second scan of state nothing has touched since the first, which
+/// reads as diligence but is pure ceremony.
+///
+/// CAVEAT, and it is the real weakness here: the window boundary is enforced
+/// ENTIRELY by `clear_marker("residual-check-fired")` in lib.rs's
+/// session_start/session_end/prompt_submit hooks. Where those hooks do not
+/// run, nothing ever clears this file, and the predicate then reports a scan
+/// from an arbitrarily old session as if it had just fired -- observed live
+/// with a marker ten days stale (its `gm-fired-this-turn` sibling, cleared by
+/// the same hooks, was months stale). So the freshness guarantee is exactly
+/// as good as hook delivery, and fails OPEN when that is absent. A mtime-vs-
+/// session-start comparison here would degrade gracefully instead; not done
+/// in this pass because the marker carries no timestamp to compare against
+/// and adding one is a wire-format change, not a comment fix.
 fn residual_scan_fired() -> bool {
     let residual_marker = super::gm_dir().join("residual-check-fired");
     crate::pkfs::exists(&residual_marker.to_string_lossy().to_string())
