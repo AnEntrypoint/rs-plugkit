@@ -106,6 +106,27 @@ pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
     }
 }
 
+/// Whether `key` has a REAL compiled default, as opposed to landing on the
+/// `_ => entry::TEXT` fallthrough above.
+///
+/// The fallthrough exists so an unrecognised key always serves *something*
+/// rather than failing a dispatch -- but it makes an unknown key indistinguishable
+/// from `entry` at the call site. A custom phase declaring `prose_key: "triage"`
+/// silently serves ENTRY prose, which reads as a working config while being
+/// completely wrong. Callers that need to TELL THE DIFFERENCE (graph validation,
+/// and the vendor scaffolder, which would otherwise write a file full of ENTRY
+/// text under a `triage.md` filename) ask here first.
+///
+/// Kept deliberately adjacent to the match above so the two cannot drift: adding
+/// a compiled default without adding it here would make validation warn about a
+/// key that actually resolves fine.
+pub fn has_compiled_default_for_prose_key(key: &str) -> bool {
+    matches!(
+        key,
+        "plan" | "execute" | "emit" | "verify" | "consolidate" | "update_docs" | "browser" | "entry"
+    )
+}
+
 pub fn get_instruction(phase: &str) -> String {
     let upper = phase.trim().to_ascii_uppercase();
     let key = match upper.as_str() {

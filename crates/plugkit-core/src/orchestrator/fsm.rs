@@ -265,8 +265,78 @@ impl Graph {
             }
         }
 
+        // A state with no compiled prose default AND no vendored .md silently serves
+        // ENTRY prose (see instructions::compiled_default_for_prose_key's `_` arm).
+        // That is a config typo that looks like a working phase, so it is worth naming
+        // -- but it is NOT fatal, because the vendored file may legitimately be added
+        // later, and serving entry prose is a degraded-but-working state, not a broken one.
+        for s in &self.states {
+            if crate::orchestrator::instructions::has_compiled_default_for_prose_key(&s.prose_key) {
+                continue;
+            }
+            if prose_file_exists(&s.prose_key) {
+                continue;
+            }
+            problems.push(format!(
+                "state `{}` declares prose_key `{}`, which has neither a vendored .gm/instructions/{}.md nor a compiled default -- it will silently serve ENTRY prose",
+                s.key, s.prose_key, s.prose_key
+            ));
+        }
+
+        // Reachability: a state no edge leads to can never be entered (the initial
+        // phase excepted, which is entered by definition rather than by an edge).
+        for s in &self.states {
+            if s.key == self.policy.initial_phase {
+                continue;
+            }
+            if !self.edges.iter().any(|e| e.to == s.key) {
+                problems.push(format!(
+                    "state `{}` is unreachable -- no edge leads to it",
+                    s.key
+                ));
+            }
+        }
+
+        // Liveness: every state must be able to reach the terminal phase, or a chain
+        // entering it can never legally finish. Walked as a reverse BFS from terminal
+        // over the edge set, so a multi-hop path counts as reachable.
+        if self.has_state(&self.policy.terminal_phase) {
+            let mut can_reach: Vec<&str> = vec![self.policy.terminal_phase.as_str()];
+            loop {
+                let before = can_reach.len();
+                for e in &self.edges {
+                    if can_reach.iter().any(|k| *k == e.to.as_str())
+                        && !can_reach.iter().any(|k| *k == e.from.as_str())
+                    {
+                        can_reach.push(e.from.as_str());
+                    }
+                }
+                if can_reach.len() == before {
+                    break;
+                }
+            }
+            for s in &self.states {
+                if !can_reach.iter().any(|k| *k == s.key.as_str()) {
+                    problems.push(format!(
+                        "state `{}` has no path to terminal phase `{}` -- a chain entering it could never reach COMPLETE",
+                        s.key, self.policy.terminal_phase
+                    ));
+                }
+            }
+        }
+
         problems
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn prose_file_exists(prose_key: &str) -> bool {
+    crate::pkfs::read_to_string(&format!(".gm/instructions/{}.md", prose_key)).is_some()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn prose_file_exists(prose_key: &str) -> bool {
+    std::path::Path::new(&format!(".gm/instructions/{}.md", prose_key)).exists()
 }
 
 fn default_graph() -> Graph {

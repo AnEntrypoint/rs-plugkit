@@ -91,7 +91,7 @@ pub fn is_orchestrator_verb(verb: &str) -> bool {
             | "memorize-fire" | "discipline-note" | "phase-status" | "residual-scan" | "auto-recall"
             | "instruction" | "prd-add" | "prd-resolve" | "prd-list"
             | "task-spawn" | "task-list" | "task-stop" | "task-output"
-            | "memorize-continue" | "fsm-vendor" | "claim-audit" | "submodule-check"
+            | "memorize-continue" | "fsm-vendor" | "fsm-validate" | "claim-audit" | "submodule-check"
     )
 }
 
@@ -131,6 +131,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "task-output" => task::handle_output(content),
         "memorize-continue" => handle_memorize_continue(content),
         "fsm-vendor" => fsm_vendor::handle_vendor(content),
+        "fsm-validate" => fsm_vendor::handle_validate(content),
         _ => (format!("Unknown orchestrator verb: {}", verb), String::new(), 1),
     }
 }

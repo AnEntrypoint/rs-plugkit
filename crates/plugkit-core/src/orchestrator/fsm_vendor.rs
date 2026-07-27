@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use crate::pkfs;
-use super::instructions::compiled_default_for_prose_key;
+use super::instructions::{compiled_default_for_prose_key, has_compiled_default_for_prose_key};
 use super::residual::{
     RESIDUAL_PRD_OPEN_DEFAULT, RESIDUAL_BROWSER_OPEN_DEFAULT, RESIDUAL_TASKS_RUNNING_DEFAULT,
     RESIDUAL_DIRTY_TREE_DEFAULT, RESIDUAL_IMPERATIVE_DEFAULT,
@@ -79,7 +79,22 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
     prose_keys.dedup();
     for key in &prose_keys {
         let path = format!(".gm/instructions/{}.md", key);
-        let text = compiled_default_for_prose_key(key);
+        // A key with no compiled default hits compiled_default_for_prose_key's `_` arm
+        // and would be scaffolded as a file full of ENTRY prose under (say) triage.md --
+        // which reads as real content and is far worse than an obviously-empty stub,
+        // because nothing about the resulting file signals that it needs writing.
+        let placeholder;
+        let text = if has_compiled_default_for_prose_key(key) {
+            compiled_default_for_prose_key(key)
+        } else {
+            placeholder = format!(
+                "# {key}\n\nTODO: write the instruction prose for the `{key}` phase.\n\n\
+                 This file was scaffolded as a PLACEHOLDER because `{key}` is declared as a\n\
+                 state's `prose_key` in .gm/instructions/fsm/graph.json but has no compiled\n\
+                 default in this build. Until it is written, that phase serves ENTRY prose.\n"
+            );
+            placeholder.as_str()
+        };
         let (ok, status) = write_if_absent_or_forced(&path, text, force);
         results.push(json!({ "path": path, "ok": ok, "status": status }));
     }
@@ -128,10 +143,45 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
     let (ok, status) = write_if_absent_or_forced(daemon_project_config_path, DAEMON_PROJECT_CONFIG_EXAMPLE, force);
     results.push(json!({ "path": daemon_project_config_path, "ok": ok, "status": status }));
 
+    let validation = fsm::graph().validate();
+
     let payload = json!({
         "ok": true,
         "vendored": results,
+        "validation": validation,
         "note": "instruction/transition now serve from these files wherever present (per-key fallback to the compiled default for any prose file, wholesale-replace for the graph). gates/<key>.md and residual/<key>.md override the matching gate-denial/residual-scan message text via the same prose::resolve chain. browser-config.json and daemon-project-config.json are example defaults matching every field BrowserConfig/ProjectDaemonConfig actually reads -- edit values, remove fields to fall back to compiled defaults. The machine-wide ~/.agentplug/daemon-config.json is out of this per-project verb's reach (gm.wasm's fs sandbox is rooted at the project cwd); agentplug-runner itself scaffolds that file with the same example-defaults shape on first daemon boot if absent. Edit .gm/instructions/fsm/graph.json to add a custom phase, rewire an edge, or change which gates guard which transition -- no rebuild needed. Re-run this verb with {\"force\":true} to reset any of these back to the compiled defaults.",
+    });
+    (payload.to_string(), String::new(), 0)
+}
+
+/// On-demand referential-integrity check of the CURRENTLY-LOADED graph.
+///
+/// `Graph::validate()` already runs at load time, but its findings only reach
+/// an emitted event, and only on the path where an override was parsed -- so a
+/// project running the compiled default graph, or anyone wanting to check a
+/// graph edit BEFORE relying on it, had no way to ask. This verb is that ask.
+///
+/// It reports rather than mutates: a graph that fails validation at load already
+/// falls back to the built-in default (see fsm.rs's `fsm_graph_override_invalid`),
+/// so the useful thing here is naming exactly which problems would trigger that,
+/// including the fail-OPEN case where an edge names a gate that does not exist
+/// and is therefore silently unguarded.
+pub fn handle_validate(_content: &str) -> (String, String, i32) {
+    let graph = fsm::graph();
+    let problems = graph.validate();
+    let ok = problems.is_empty();
+
+    let payload = json!({
+        "ok": ok,
+        "problems": problems,
+        "states": graph.states.len(),
+        "edges": graph.edges.len(),
+        "gates": graph.gates.len(),
+        "note": if ok {
+            "graph passes referential-integrity validation: every edge's endpoints and gates resolve, every gate has a predicate or hook, every state is reachable and has a path to the terminal phase, and every declared prose_key resolves to real prose."
+        } else {
+            "graph has referential-integrity problems. An edge naming a gate that does not exist is the most dangerous of these: the gate is SKIPPED, so the edge appears guarded while being unguarded (fails OPEN). If these problems are in a vendored .gm/instructions/fsm/graph.json, that file is being REJECTED at load and the built-in default graph is serving instead."
+        },
     });
     (payload.to_string(), String::new(), 0)
 }
