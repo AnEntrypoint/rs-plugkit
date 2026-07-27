@@ -247,9 +247,96 @@ impl Default for RagConfig {
     }
 }
 
+/// Accept only `[A-Za-z_][A-Za-z0-9_]*`.
+///
+/// Deliberately stricter than SQLite's own identifier rules (no quoting, no
+/// dots, no unicode): these names reach SQL through `format!`, never a bind
+/// parameter, so the whitelist is the entire defence. Rejecting a legal-but-
+/// exotic name is a far better failure than accepting one carrying a quote.
+fn valid_sql_ident(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let ok = match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+            chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "ragconfig: {:?} is not a valid SQL identifier -- table/index names are interpolated \
+             directly into SQL, so only [A-Za-z_][A-Za-z0-9_]* is accepted",
+            name
+        ))
+    }
+}
+
 impl RagConfig {
     /// Convenience for the many call sites that only need the dimension.
     pub fn dim(&self) -> usize {
         self.embed.dim
+    }
+
+    /// Reject a config whose settings would destroy or permanently break a
+    /// store, BEFORE any schema call acts on it.
+    ///
+    /// A resolution layer reads config off disk, so unlike the compile-time
+    /// assertion in `embed.rs` these values are not known until runtime -- and
+    /// the failure mode is silent and total: a `dim` the compiled embedder
+    /// cannot emit makes every `ensure_schema_*` drop its table (width
+    /// mismatch), then every write fails its own width check, leaving a
+    /// permanently empty knowledgebase that reports no errors at the verb
+    /// layer. Callers should refuse a config that fails this rather than fall
+    /// back to defaults, since silently ignoring an operator's stated dim is
+    /// how a store gets rebuilt at a width nobody asked for.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.embed.dim == 0 {
+            return Err("ragconfig: embed.dim must be non-zero".to_string());
+        }
+        if self.embed.dim != crate::vecstore::EXPECTED_EMBED_DIM {
+            return Err(format!(
+                "ragconfig: embed.dim {} does not match this binary's compiled embedder width {} -- \
+                 every table would be dropped as mismatched and then never repopulate, because the \
+                 embedder cannot produce vectors of the configured width. Swap the model weights \
+                 (embed.rs) together with this setting, or leave it at the default.",
+                self.embed.dim, crate::vecstore::EXPECTED_EMBED_DIM
+            ));
+        }
+        // A cosine floor above 1.0 rejects every possible hit (cos is bounded
+        // by 1 for the normalized vectors embed.rs produces), which reads as
+        // "the knowledgebase is empty" at the verb layer.
+        if !(0.0..=1.0).contains(&self.scoring.cos_floor) {
+            return Err(format!(
+                "ragconfig: scoring.cos_floor {} outside [0,1]; embeddings are L2-normalized so \
+                 cosine similarity cannot exceed 1 -- a higher floor silently matches nothing",
+                self.scoring.cos_floor
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.scoring.recency_floor) {
+            return Err(format!(
+                "ragconfig: scoring.recency_floor {} outside [0,1]; it is the multiplier an \
+                 infinitely-old hit decays to, so a value above 1 would boost stale hits over fresh ones",
+                self.scoring.recency_floor
+            ));
+        }
+        if self.scoring.half_life_ms <= 0.0 {
+            return Err("ragconfig: scoring.half_life_ms must be positive (it divides an age)".to_string());
+        }
+        if self.budget.pool_multiplier == 0 {
+            return Err("ragconfig: budget.pool_multiplier must be non-zero; a zero pool retrieves nothing".to_string());
+        }
+        // Table/index names are string-interpolated into SQL (libsql has no
+        // bind parameter for an identifier), which was safe while they were
+        // `const &str` literals but is an injection surface the moment they
+        // come from a config file. Constrain them to bare identifiers.
+        for names in [&self.rssearch, &self.git_commits, &self.code_chunks, &self.memories] {
+            valid_sql_ident(&names.table)?;
+            valid_sql_ident(&names.index)?;
+        }
+        if self.namespaces.code.is_empty() || self.namespaces.default.is_empty() {
+            return Err("ragconfig: namespaces.code and namespaces.default must be non-empty".to_string());
+        }
+        Ok(())
     }
 }

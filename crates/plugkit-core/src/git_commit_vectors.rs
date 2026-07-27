@@ -159,14 +159,32 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
         } else {
             format!("{}\n\n{}", subject, diff)
         };
-        let embed_resp = plugin_call("bert", "embed", &json!({ "text": text }));
-        let vec: Vec<f32> = if embed_resp.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
-            embed_resp.get("embedding")
+        // Routed through the versioned plugin ABI rather than a raw
+        // plugin_call, so the distinct failure modes stay distinguishable.
+        // The previous shape collapsed every one of them into an empty vec:
+        // the bert plugin not being registered at all, the plugin crashing
+        // mid-embed, and a genuine empty result were literally the same value,
+        // so a dead embedder was silently counted as "skipped" forever. That
+        // is the same silent-degradation class that made `recall` return
+        // ok:true with zero hits while the embedder was crashed.
+        let vec: Vec<f32> = match crate::plugin_abi::call("bert", "embed", &json!({ "text": text })) {
+            Ok(data) => data
+                .get("embedding")
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect::<Vec<f32>>())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
+                .unwrap_or_default(),
+            Err(e) => {
+                // Surface WHICH failure this was. Emitted once per failing
+                // commit rather than aggregated, because the kind is the
+                // actionable part: PluginNotFound means the embedder was never
+                // loaded (a deployment problem), while a plugin error means it
+                // loaded and then failed on this input.
+                crate::wasm_dispatch::emit_event("git_commit_embed_failed", json!({
+                    "kind": e.kind.as_str(),
+                    "detail": e.message,
+                }));
+                Vec::new()
+            }
         };
         if vec.is_empty() {
             skipped += 1;
