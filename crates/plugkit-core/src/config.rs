@@ -153,6 +153,31 @@ impl Config {
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.value.get(key)
     }
+
+    /// Top-level keys this build does not recognise.
+    ///
+    /// The complement of the version range: that gate lets a NEWER config
+    /// through, and this reports which of its keys are being ignored. Without
+    /// it a typo (`memoryy`) is indistinguishable from a key from a future
+    /// schema -- both silently do nothing, which is the failure mode the whole
+    /// resolution chain exists to avoid.
+    ///
+    /// Reported, never fatal, for the same reason unknown POLICY keys are
+    /// warned about rather than rejected: in an auto-updating system an
+    /// unrecognised key is usually a newer spec, not corruption.
+    ///
+    /// `_`-prefixed keys are skipped. The reference config repo documents
+    /// itself with `_comment` entries, and flagging its own house style as
+    /// suspicious would train people to ignore this report.
+    pub fn unknown_top_level_keys(&self) -> Vec<String> {
+        const KNOWN: &[&str] = &["version", "instructions", "index", "memory", "cache", "sync", "fsm", "messages", "rag"];
+        let Some(obj) = self.value.as_object() else { return Vec::new() };
+        obj.keys()
+            .filter(|k| !k.starts_with('_'))
+            .filter(|k| !KNOWN.contains(&k.as_str()))
+            .cloned()
+            .collect()
+    }
 }
 
 /// Outcome of loading ONE tier. A total parser: every load lands in exactly
@@ -596,6 +621,17 @@ pub fn resolve_and_report(project_root: &str, fetcher: &dyn RepoFetcher) -> Reso
         crate::wasm_dispatch::emit_event(
             "config_tier_rejected",
             json!({ "tier": r.tier.as_str(), "rejected": r.rejected }),
+        );
+    }
+    let unknown = r.config.unknown_top_level_keys();
+    if !unknown.is_empty() {
+        crate::wasm_dispatch::emit_event(
+            "config_unknown_keys",
+            json!({
+                "tier": r.tier.as_str(),
+                "keys": unknown,
+                "reason": "these top-level keys are not recognised by this build and are being IGNORED -- a typo looks exactly like this. If they come from a newer schema, this is expected and harmless.",
+            }),
         );
     }
     crate::wasm_dispatch::emit_event(

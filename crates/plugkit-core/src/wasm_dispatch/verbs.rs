@@ -1053,6 +1053,7 @@ fn config_resolve(_body: &Value) -> u64 {
     let mut payload = r.to_json();
 
     if let Some(obj) = payload.as_object_mut() {
+        obj.insert("unknown_keys".to_string(), json!(r.config.unknown_top_level_keys()));
         match crate::ragconfig::RagConfig::from_value(&r.config.value) {
             Ok(rag) => {
                 obj.insert("rag_effective".to_string(), json!({
