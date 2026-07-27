@@ -174,6 +174,68 @@ impl Graph {
     pub fn gate(&self, name: &str) -> Option<&GateDef> {
         self.gates.iter().find(|g| g.name.eq_ignore_ascii_case(name))
     }
+
+    /// Referential integrity of a loaded graph, checked BEFORE it is trusted.
+    ///
+    /// A vendored graph is remote-authored input, and every one of these
+    /// mistakes fails silently at runtime rather than at load: an edge naming a
+    /// state that does not exist is simply never traversable; an edge naming a
+    /// gate that does not exist drops that gate's protection while the graph
+    /// still reads as guarded; a `gates.predicate` outside the compiled
+    /// registry produces a gate that can never be satisfied. Each is worse than
+    /// a parse error because the config looks correct.
+    ///
+    /// Returns every problem rather than the first, so an author fixing a
+    /// hand-written graph sees the whole list instead of peeling them off one
+    /// dispatch at a time.
+    pub fn validate(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+
+        if !self.has_state(&self.policy.initial_phase) {
+            problems.push(format!("policy.initial_phase `{}` is not a declared state", self.policy.initial_phase));
+        }
+        if !self.has_state(&self.policy.terminal_phase) {
+            problems.push(format!("policy.terminal_phase `{}` is not a declared state", self.policy.terminal_phase));
+        }
+
+        for e in &self.edges {
+            if !self.has_state(&e.from) {
+                problems.push(format!("edge `{} -> {}` starts at undeclared state `{}`", e.from, e.to, e.from));
+            }
+            if !self.has_state(&e.to) {
+                problems.push(format!("edge `{} -> {}` ends at undeclared state `{}`", e.from, e.to, e.to));
+            }
+            for gate_name in &e.gates {
+                if self.gate(gate_name).is_none() {
+                    problems.push(format!(
+                        "edge `{} -> {}` names gate `{}`, which is not defined in `gates` -- that edge would appear guarded while being unguarded",
+                        e.from, e.to, gate_name
+                    ));
+                }
+            }
+        }
+
+        for g in &self.gates {
+            // A gate with neither a predicate nor a hook can never evaluate,
+            // and per hook_mode's own semantics would deny forever.
+            if g.predicate.is_none() && g.hook.is_none() {
+                problems.push(format!("gate `{}` declares neither `predicate` nor `hook`, so it can never be satisfied", g.name));
+            }
+            if let Some(p) = &g.predicate {
+                let known = crate::orchestrator::transitions::known_predicates();
+                if !known.iter().any(|(n, _)| n == p) {
+                    problems.push(format!(
+                        "gate `{}` names predicate `{}`, which is not in the compiled registry ({}) -- this gate could never be satisfied",
+                        g.name,
+                        p,
+                        known.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+                    ));
+                }
+            }
+        }
+
+        problems
+    }
 }
 
 fn default_graph() -> Graph {
@@ -264,7 +326,26 @@ const GRAPH_OVERRIDE_PATH: &str = ".gm/instructions/fsm/graph.json";
 pub fn graph() -> Graph {
     match pkfs::read_to_string(GRAPH_OVERRIDE_PATH) {
         Some(raw) => match serde_json::from_str::<Graph>(&raw) {
-            Ok(g) => g,
+            Ok(g) => {
+                // Parsing proves the SHAPE is right; it says nothing about
+                // whether the graph refers to things that exist. Reject a
+                // referentially-broken override the same way a malformed one is
+                // rejected -- falling back to the compiled default -- because
+                // running it would mean traversing edges to nowhere or trusting
+                // gates that silently do not apply.
+                let problems = g.validate();
+                if problems.is_empty() {
+                    g
+                } else {
+                    #[cfg(target_arch = "wasm32")]
+                    crate::wasm_dispatch::emit_event("fsm_graph_override_invalid", serde_json::json!({
+                        "path": GRAPH_OVERRIDE_PATH,
+                        "problems": problems,
+                        "reason": "graph parsed but failed referential-integrity validation; falling back to the built-in default this dispatch",
+                    }));
+                    default_graph()
+                }
+            }
             Err(e) => {
                 #[cfg(target_arch = "wasm32")]
                 crate::wasm_dispatch::emit_event("fsm_graph_override_malformed", serde_json::json!({
