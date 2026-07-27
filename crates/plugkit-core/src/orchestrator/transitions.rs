@@ -20,15 +20,6 @@ pub fn next_phase(current: &Phase) -> Phase {
 }
 
 pub fn known_predicates() -> Vec<(&'static str, &'static str)> {
-    // DERIVED from predicate_table(), never maintained alongside it.
-    //
-    // This list is what fsm_vendor generates .gm/instructions/fsm/predicates.md
-    // from, and that file tells a graph author which names `gates.predicate` may
-    // use. While it was a second hand-written list it drifted out of sync with
-    // the dispatcher -- publishing 6 names while 8 were live -- so the generated
-    // reference contradicted the default graph generated beside it. Deriving it
-    // means the reference can no longer describe a predicate set the code does
-    // not actually implement.
     predicate_table().iter().map(|(name, desc, _)| (*name, *desc)).collect()
 }
 
@@ -60,9 +51,6 @@ fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
     ]
 }
 
-// Thin adapters so every entry above is a plain fn pointer. Each wraps the one
-// real check it names; keeping them adjacent to the table makes an added
-// predicate a single-site edit.
 fn pred_prd_all_closed() -> bool { !prd_has_open_items() }
 fn pred_mutables_all_resolved() -> bool { mutables::pending_detailed().is_empty() }
 fn pred_worktree_clean() -> bool { !worktree_dirty() }
@@ -75,13 +63,6 @@ fn predicate_result(name: &str) -> bool {
         return f();
     }
     match name {
-        // An unrecognised predicate stays `false` -- a gate must fail CLOSED,
-        // never open, or a typo in a vendored graph would wave work straight
-        // through the check it was supposed to face. But failing closed
-        // silently is its own trap: the gate then blocks forever with a denial
-        // reason that describes a condition nobody can satisfy, and nothing
-        // ever says the name was simply wrong. Emit so the cause is visible,
-        // while keeping the safe verdict.
         other => {
             crate::wasm_dispatch::emit_event("fsm_unknown_predicate", serde_json::json!({
                 "predicate": other,
@@ -117,13 +98,6 @@ fn predicate_result(name: &str) -> bool {
 /// and adding one is a wire-format change, not a comment fix.
 fn residual_scan_fired() -> bool {
     let residual_marker = super::gm_dir().join("residual-check-fired");
-    // NON-EMPTY, not merely present. The marker is INVALIDATED by truncation --
-    // yaml_util::invalidate_residual_marker and lib.rs's clear_marker both write
-    // "" rather than deleting, since pkfs exposes no remove. Testing `exists`
-    // therefore made every invalidation a no-op: `prd-add` and `mutable-add`
-    // call invalidate precisely to force a fresh scan, and the gate kept passing
-    // on the zero-byte file they left behind. lib.rs's own read_marker already
-    // uses this !is_empty() form; the gate was the odd one out.
     crate::pkfs::read_to_string(&residual_marker.to_string_lossy().to_string())
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false)
@@ -312,10 +286,6 @@ fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, S
     for gate_name in &edge.gates {
         let Some(g) = graph.gate(gate_name) else { continue };
         if !evaluate_gate(g) {
-            // A hook-backed gate previously denied with only its own static
-            // message, which cannot distinguish "your hook file is missing"
-            // from "your hook said no" -- a broken config and the system
-            // working correctly, reported identically.
             let detail = hook_failure_detail(g);
             let message = match detail {
                 Some(d) => format!("{} -- {}", g.message, d),

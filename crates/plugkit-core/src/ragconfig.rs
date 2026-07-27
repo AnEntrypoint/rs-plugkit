@@ -74,7 +74,6 @@ pub struct ScoringConfig {
 impl Default for ScoringConfig {
     fn default() -> Self {
         ScoringConfig {
-            // 30 days, as `rssearch_vectors::HALF_LIFE_MS` spelled it out.
             half_life_ms: 30.0 * 24.0 * 60.0 * 60.0 * 1000.0,
             recency_floor: 0.4,
             cos_floor: 0.0,
@@ -182,11 +181,6 @@ pub struct EmbedDimConfig {
 
 impl Default for EmbedDimConfig {
     fn default() -> Self {
-        // 384 = BAAI/bge-small-en-v1.5's hidden size, the model `embed.rs`
-        // embeds as safetensors AND the width the host's `host_vec_embed`
-        // delegation probe is validated against. Changing this alone is not
-        // enough: `embed.rs`'s EMBED_DIM and its bert Config must move with
-        // it, or every embed call fails its own dim check and returns None.
         EmbedDimConfig { dim: 384, drop_on_mismatch: true }
     }
 }
@@ -602,9 +596,6 @@ impl RagConfig {
                 self.embed.dim, crate::vecstore::EXPECTED_EMBED_DIM
             ));
         }
-        // A cosine floor above 1.0 rejects every possible hit (cos is bounded
-        // by 1 for the normalized vectors embed.rs produces), which reads as
-        // "the knowledgebase is empty" at the verb layer.
         if !(0.0..=1.0).contains(&self.scoring.cos_floor) {
             return Err(format!(
                 "ragconfig: scoring.cos_floor {} outside [0,1]; embeddings are L2-normalized so \
@@ -625,10 +616,6 @@ impl RagConfig {
         if self.budget.pool_multiplier == 0 {
             return Err("ragconfig: budget.pool_multiplier must be non-zero; a zero pool retrieves nothing".to_string());
         }
-        // Table/index names are string-interpolated into SQL (libsql has no
-        // bind parameter for an identifier), which was safe while they were
-        // `const &str` literals but is an injection surface the moment they
-        // come from a config file. Constrain them to bare identifiers.
         for names in [&self.rssearch, &self.git_commits, &self.code_chunks, &self.memories] {
             valid_sql_ident(&names.table)?;
             valid_sql_ident(&names.index)?;

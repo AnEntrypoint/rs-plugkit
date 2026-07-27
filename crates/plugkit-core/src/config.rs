@@ -329,8 +329,6 @@ pub fn parse_config(text: &str, origin: &str) -> Load {
         Ok(n) => n,
         Err(reason) => return Load::Rejected { reason },
     };
-    // Merge happens here, after the version gate, so an unknown-schema config
-    // can never contribute keys to a resolved config.
     let merged = deep_merge(&Config::builtin_default().value, &parsed);
     Load::Accepted(Config {
         version,
@@ -376,19 +374,11 @@ fn parse_source_spec(text: &str, origin: &str, cache_dir: String, tier_label: &s
             "{origin}: source spec requires a non-empty `repo` field naming the config repository"
         ));
     }
-    // Three names for one field were live at once: this parser read `ref`, the
-    // gm-config README documented `reference`, and agentplug's own instruction-
-    // source config read `branch`. A spec written from the README therefore
-    // parsed to None and silently probed HEAD instead of the pinned ref -- the
-    // worst shape for a pin, since it looks configured and is not. All three
-    // are accepted; first match in this order wins.
     let reference = ["ref", "reference", "branch"]
         .iter()
         .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    // Trim slashes so `"path": "/sub/"` and `"path": "sub"` cannot produce two
-    // different on-disk paths for the same intent.
     let path = obj
         .get("path")
         .and_then(|x| x.as_str())
@@ -471,10 +461,6 @@ fn load_repo_tier(
         };
     };
     match parse_config(&text, &cfg_path) {
-        // An empty config file inside a repo the user explicitly pointed at is
-        // an authoring error, unlike an empty LOCAL file (which is how a local
-        // tier is disabled) -- the user cannot have meant "fetch this repo in
-        // order to disable it".
         Load::Absent => Load::Rejected {
             reason: format!("{cfg_path}: config file is empty"),
         },
@@ -513,7 +499,6 @@ pub fn resolve() -> Resolution {
 pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution {
     let mut rejected: Vec<String> = Vec::new();
 
-    // Tier 1: a real config vendored into the project.
     let p1 = join(project_root, PROJECT_CONFIG_REL);
     match pkfs::read_to_string(&p1) {
         Some(text) => match parse_config(&text, &p1) {
@@ -531,7 +516,6 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
         None => {}
     }
 
-    // Tier 2: an in-project spec pointing at a config repo.
     let p2 = join(project_root, SOURCE_SPEC_REL);
     match load_repo_tier(&p2, join(project_root, SOURCE_CACHE_REL), fetcher, Tier::ProjectRepoSpec.as_str()) {
         Load::Accepted(config) => {
@@ -546,10 +530,6 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
         Load::Absent => {}
     }
 
-    // Tier 3: a user-wide spec pointing at a config repo. Its cache lives
-    // under the user's home, not the project, so N projects share one
-    // checkout -- which is why RepoFetcher implementors must handle the
-    // concurrent-refresh case called out on that trait.
     if let Some(home) = home_dir() {
         let p3 = join(&home, SOURCE_SPEC_REL);
         match load_repo_tier(&p3, join(&home, SOURCE_CACHE_REL), fetcher, Tier::UserRepoSpec.as_str()) {
@@ -566,7 +546,6 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
         }
     }
 
-    // Tier 4: compiled-in defaults. Infallible, so resolution is total.
     let why = if rejected.is_empty() {
         "no config found in any tier; using builtin defaults".to_string()
     } else {

@@ -304,9 +304,6 @@ fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do
     let cfg = crate::ragconfig::RagConfig::default();
     let mut memory_namespaces: Vec<String> = Vec::new();
     for ns in &namespaces {
-        // The code namespace's embeddings live in the flat-JSON kv store and
-        // are migrated into the vector table; every other namespace is backed
-        // by markdown memory files and syncs instead.
         if cfg.namespaces.is_code(ns) {
             if let Err(e) = crate::rssearch_vectors::migrate_namespace_from_flat_json_cfg(ns, now_ms, &cfg) {
                 emit_event("rssearch_vectors_migration_failed", json!({ "namespace": ns, "error": e }));
@@ -391,13 +388,6 @@ fn recall(body: &Value) -> u64 {
     let kv_hits = unpack_to_value(packed);
     let annotated = annotate_hits_with_score(kv_hits);
 
-    // Distinguish "the store genuinely has nothing for this query" from "the
-    // embedder is dead so semantic retrieval never ran". Both previously
-    // returned ok:true / mode:fallback_like / hits:[], which is the worst
-    // possible shape -- a caller cannot tell an empty knowledgebase from a
-    // broken one, and this was live-witnessed mid-session (recall returned 8
-    // real hits earlier, then 0 with vector_hits.error "invalid query
-    // embedding" while still reporting ok:true).
     let embed_failed = embedding.as_array().map(|a| a.is_empty()).unwrap_or(true);
     let vec_err = vector_hits
         .get("error")
@@ -415,9 +405,6 @@ fn recall(body: &Value) -> u64 {
         }));
     }
 
-    // A degraded lookup that also found nothing is a FAILURE, not an answer.
-    // (A degraded lookup that still returned kv matches is reported as a
-    // success carrying the degraded flag -- the caller got real rows.)
     if degraded && empty {
         return err(
             "recall",
@@ -639,10 +626,6 @@ fn codesearch(body: &Value) -> u64 {
             return codesearch(&retry);
         }
     }
-    // Fusion re-ranks vector and BM25 lists against each other, so each list
-    // must be deeper than k or a hit that only fusion would surface can never
-    // enter the candidate pool. Same reason the ANN pool overshoots in
-    // rssearch_vectors; the multiplier/floor are the shared budget knobs.
     let cand_k = cfg.budget.pool(k as usize).max(50) as u32;
     let embedding = embed_query(query);
     let code_ns = cfg.namespaces.code.as_str();
@@ -1020,9 +1003,6 @@ fn cache_put(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
     let value = match body.get("value") {
-        // A non-string value is serialized rather than rejected, so a caller can
-        // cache a JSON object directly; the stored hash then covers exactly the
-        // bytes that come back out of cache_get.
         Some(Value::String(s)) => s.clone(),
         Some(v) if !v.is_null() => v.to_string(),
         _ => return err("cache_put", "value required"),
@@ -1038,8 +1018,6 @@ fn cache_put(body: &Value) -> u64 {
 fn cache_invalidate(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
     let cfg = cache_cfg_from(body);
-    // No key means the whole namespace. Both report how much was live
-    // beforehand so the caller can tell a real invalidation from a no-op.
     match body.get("key").and_then(|v| v.as_str()).filter(|k| !k.is_empty()) {
         Some(key) => match crate::cache::invalidate(&cfg, ns, key) {
             Ok(existed) => ok("cache_invalidate", json!({ "removed": existed })),
@@ -1067,10 +1045,6 @@ fn config_resolve(_body: &Value) -> u64 {
     let r = crate::config::resolve();
     let mut payload = r.to_json();
 
-    // Report what the resolved config ACTUALLY produces, not just which tier
-    // won. Reporting the winning tier while every knob still came from
-    // `Default` is exactly how this chain stayed inert and observable at the
-    // same time -- the verb said "tier 1 won" and nothing behaved differently.
     if let Some(obj) = payload.as_object_mut() {
         match crate::ragconfig::RagConfig::from_value(&r.config.value) {
             Ok(rag) => {

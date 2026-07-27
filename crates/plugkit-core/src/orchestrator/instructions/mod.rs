@@ -89,8 +89,6 @@ fn read_spool_json(name: &str) -> serde_json::Value {
 fn residual_check_fired_recently() -> bool {
     let marker = super::gm_dir().join("residual-check-fired");
     let ms = marker.to_string_lossy().to_string();
-    // Non-empty, matching the gate predicate: the marker is invalidated by
-    // truncation, so `exists` reads a deliberately-cleared marker as still fired.
     pkfs::read_to_string(&ms).map(|s| !s.trim().is_empty()).unwrap_or(false)
 }
 
@@ -145,15 +143,6 @@ pub fn get_instruction(phase: &str) -> String {
     };
     let phase_prose = crate::prose::resolve(&key, compiled_default_for_prose_key(&key));
 
-    // `entry` is the cross-phase doctrine key -- the one every phase is supposed
-    // to see. It was reachable ONLY via a literal "ENTRY"/"ORCHESTRATOR"/""
-    // phase or as the unknown-key fallthrough, and the default graph's six
-    // states map to plan/execute/emit/verify/consolidate/update_docs, so a
-    // normal PLAN -> COMPLETE walk never served it. Everything filed under its
-    // `## Constraints` was dead text: written, overridable, and never read.
-    //
-    // Prepending it makes the documented contract true. Skipped when the phase
-    // already resolves to `entry`, so it is never served twice.
     if key == "entry" {
         return phase_prose;
     }
@@ -391,10 +380,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         }
     }
 
-    // Captured before session_id_opt is consumed below. Config-change delivery-once is keyed
-    // per session, so it needs the id this dispatch actually carried; falling back to the id
-    // persisted in turn-state keeps a session that only sent its id on an earlier dispatch
-    // from being re-notified of the same change on every later one.
     let notify_session = session_id_opt
         .clone()
         .or_else(|| read_state().session_id);
@@ -450,9 +435,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     ilog("instruction::handle post-recall");
 
     let update_available = read_spool_json(".update-available.json");
-    // Drained (not merely read) here: collecting marks these changes delivered to this
-    // session, so an agent sees a given config change on exactly one dispatch instead of
-    // on every dispatch for the rest of the chain.
     let config_changed = super::config_notify::drain_for_session(notify_session.as_deref());
     let running_tasks = super::task::live_running_tasks();
     let open_browser_sessions = super::task::open_browser_sessions();
@@ -488,14 +470,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
 
     let payload = json!({
         "phase": phase,
-        // Present ONLY when a vendored graph.json was rejected and the built-in
-        // default is silently serving in its place. Null the rest of the time,
-        // so it costs nothing but is impossible to miss when it matters.
         "fsm_graph_rejected": super::fsm::graph_rejection(),
-        // Edges a vendored graph guards more weakly than the built-in default.
-        // Empty for anyone on the default graph, so it costs nothing there --
-        // but a vendored project silently frozen out of a gate added after it
-        // vendored should not have to run a verb to find out.
         "fsm_gates_weaker_than_default": super::fsm::gates_missing_vs_default(&super::fsm::graph())
             .into_iter()
             .map(|(from, to, missing)| json!({ "from": from, "to": to, "missing_gates": missing }))
@@ -516,19 +491,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "codeinsight_overview": codeinsight_overview,
         "ready_wave": wave,
         "update_available": update_available,
-        // Config changes recorded since this session last looked. Delivered
-        // HERE, on the instruction response, because that is the surface an
-        // agent already reads every turn -- config_notify was recording changes
-        // that nothing ever surfaced, so a running agent could never learn its
-        // configuration had moved. Draining (rather than reading) gives
-        // delivery-once: a change is announced on the next dispatch and not
-        // repeated forever afterward.
-        //
-        // Drained ONCE, above, into `config_changed`. This key previously
-        // appeared twice in this object with two separate drains; json! keeps
-        // the LAST occurrence, so the first drain marked every record delivered
-        // and the surviving second drain returned empty -- the payload always
-        // shipped `[]` and no config change was ever announced.
         "config_changed": config_changed,
         "gm_plugkit_stale": gm_plugkit_stale,
         "wrapper_stale_in_memory": wrapper_stale_in_memory,

@@ -126,8 +126,6 @@ fn default_longgap_refresh_verbs() -> Vec<String> {
         .iter().map(|s| s.to_string()).collect()
 }
 fn default_shell_verbs() -> Vec<String> {
-    // Superset of the previously-hardcoded list -- narrowing it would silently
-    // drop protection on a shell this gate already covered.
     ["bash", "sh", "shell", "zsh", "powershell", "ps1", "pwsh", "cmd"].iter().map(|s| s.to_string()).collect()
 }
 fn default_deny_shell_git() -> bool { true }
@@ -252,11 +250,6 @@ impl Graph {
     pub fn validate(&self) -> Vec<String> {
         let mut problems = Vec::new();
 
-        // An empty closed-status list makes every row permanently open: nothing
-        // a resolve could write would satisfy `status_is_open`, so the
-        // `prd-all-closed` gate could never pass and the chain would deadlock at
-        // VERIFY with no cause named. Same for mutables. Caught here, at load,
-        // rather than as a mysterious stall much later.
         if self.policy.prd_closed_statuses.is_empty() {
             problems.push(
                 "policy.prd_closed_statuses is empty -- no status could ever count as closed, so `prd-all-closed` could never pass".to_string(),
@@ -293,8 +286,6 @@ impl Graph {
         }
 
         for g in &self.gates {
-            // A gate with neither a predicate nor a hook can never evaluate,
-            // and per hook_mode's own semantics would deny forever.
             if g.predicate.is_none() && g.hook.is_none() {
                 problems.push(format!("gate `{}` declares neither `predicate` nor `hook`, so it can never be satisfied", g.name));
             }
@@ -311,11 +302,6 @@ impl Graph {
             }
         }
 
-        // A state with no compiled prose default AND no vendored .md silently serves
-        // ENTRY prose (see instructions::compiled_default_for_prose_key's `_` arm).
-        // That is a config typo that looks like a working phase, so it is worth naming
-        // -- but it is NOT fatal, because the vendored file may legitimately be added
-        // later, and serving entry prose is a degraded-but-working state, not a broken one.
         for s in &self.states {
             if crate::orchestrator::instructions::has_compiled_default_for_prose_key(&s.prose_key) {
                 continue;
@@ -329,8 +315,6 @@ impl Graph {
             ));
         }
 
-        // Reachability: a state no edge leads to can never be entered (the initial
-        // phase excepted, which is entered by definition rather than by an edge).
         for s in &self.states {
             if s.key == self.policy.initial_phase {
                 continue;
@@ -343,9 +327,6 @@ impl Graph {
             }
         }
 
-        // Liveness: every state must be able to reach the terminal phase, or a chain
-        // entering it can never legally finish. Walked as a reverse BFS from terminal
-        // over the edge set, so a multi-hop path counts as reachable.
         if self.has_state(&self.policy.terminal_phase) {
             let mut can_reach: Vec<&str> = vec![self.policy.terminal_phase.as_str()];
             loop {
@@ -474,16 +455,6 @@ pub fn graph() -> Graph {
     match pkfs::read_to_string(GRAPH_OVERRIDE_PATH) {
         Some(raw) => match serde_json::from_str::<Graph>(&raw) {
             Ok(g) => {
-                // Parsing proves the SHAPE is right; it says nothing about
-                // whether the graph refers to things that exist. Reject a
-                // referentially-broken override the same way a malformed one is
-                // rejected -- falling back to the compiled default -- because
-                // running it would mean traversing edges to nowhere or trusting
-                // gates that silently do not apply.
-                // Non-fatal: an unrecognised policy key is far more likely a
-                // typo (silently ignored, so the author thinks it took effect)
-                // than a genuine forward-compat field -- but it can be either,
-                // so it warns rather than rejects.
                 let unknown = Graph::unknown_policy_keys(&raw);
                 if !unknown.is_empty() {
                     #[cfg(target_arch = "wasm32")]

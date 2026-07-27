@@ -432,18 +432,6 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     }
     }
 
-    // The status written on resolve MUST be one `status_is_open` reads as closed.
-    // This was the literal "completed" while `status_is_open` tests against the
-    // configurable `prd_closed_statuses` -- so a project setting that list to
-    // e.g. ["done"] wrote every resolved row as "completed", a status its own
-    // policy calls OPEN. Rows never closed, `prd-all-closed` never passed, and
-    // the chain deadlocked at VERIFY with nothing naming the cause.
-    //
-    // Keep writing "completed" whenever the configured list still accepts it,
-    // and only fall back to the list's first entry when it does not. Taking
-    // `.first()` unconditionally would have been a silent behaviour change on
-    // the DEFAULT config, whose list is ["done", "complete", "completed"] --
-    // every project would have started writing "done" instead.
     let resolved_status = if policy
         .prd_closed_statuses
         .iter()

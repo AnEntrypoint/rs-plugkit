@@ -118,9 +118,6 @@ impl SyncState {
     fn parse(raw: &str) -> SyncState {
         let v: Value = match serde_json::from_str(raw) {
             Ok(v) => v,
-            // A corrupt state file must not be fatal: the worst case of
-            // treating it as absent is one extra probe, whereas propagating a
-            // parse error would break config resolution over a cache artifact.
             Err(_) => return SyncState::default(),
         };
         SyncState {
@@ -150,9 +147,6 @@ impl SyncState {
         if self.consecutive_failures == 0 {
             return debounce_ms;
         }
-        // Saturating shift: a large failure count must not wrap the delay back
-        // to zero and turn backoff into a hot loop. Cap the exponent well
-        // below u64's bit width, then clamp.
         let exp = self.consecutive_failures.min(20);
         let backoff = BACKOFF_BASE_MS.saturating_mul(1u64 << exp).min(BACKOFF_MAX_MS);
         backoff.max(debounce_ms)
@@ -175,9 +169,6 @@ fn source_key(src: &RepoSource) -> String {
 }
 
 fn state_path(src: &RepoSource) -> String {
-    // Sibling of the cache dir, not inside it: a `git clean` or a re-clone that
-    // wipes the checkout would otherwise take the debounce record with it and
-    // reset the backoff a dead remote just earned.
     format!("{}.{}.sync.json", src.cache_dir, source_key(src))
 }
 
@@ -204,9 +195,6 @@ fn write_state(src: &RepoSource, st: &SyncState) {
         return;
     }
     if !rename(&tmp, &path) {
-        // Leaving a stray temp file behind would accumulate one per failed
-        // publish, so drop it; losing the state update only costs an extra
-        // probe next call.
         let _ = crate::wasm_dispatch::host_remove(&tmp);
     }
 }
@@ -276,9 +264,6 @@ fn unlock(src: &RepoSource) {
 
 fn git(argv: &[&str], cwd: Option<&str>) -> Result<String, String> {
     let v = crate::wasm_dispatch::git_call_argv(argv, cwd);
-    // `ok` absent defaults true and `exit_code` absent defaults 0, matching
-    // how code_index.rs and verbs.rs read this same envelope -- a host that
-    // omits the fields on success must not be read as a failure.
     let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
     let code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -308,16 +293,11 @@ fn local_sha(src: &RepoSource) -> Option<String> {
 fn probe_remote_sha(src: &RepoSource) -> Result<String, String> {
     let reference = src.reference.as_deref().unwrap_or("HEAD");
     let out = git(&["ls-remote", "--", &src.repo, reference], None)?;
-    // Output is "<sha>\t<refname>" per line. A ref matching nothing yields
-    // empty output with exit 0, so emptiness is a real error, not a success.
     if let Some(sha) = out.split_whitespace().next() {
         if !sha.is_empty() {
             return Ok(sha.to_string());
         }
     }
-    // A sha passed as `ref` is not advertised by ls-remote (only refs are), so
-    // an exact-40-hex spec legitimately probes empty. Treat it as its own
-    // answer rather than an error, since the sha IS the target.
     if is_sha_like(reference) {
         return Ok(reference.to_string());
     }
@@ -330,9 +310,6 @@ fn is_sha_like(s: &str) -> bool {
 
 /// Shallow-clone a source that has no usable local checkout.
 fn clone_shallow(src: &RepoSource) -> Result<(), String> {
-    // A previous attempt may have left a partial directory that would make
-    // `git clone` refuse ("destination path already exists"); clear it first so
-    // recovery does not need manual intervention.
     if let Ok(p) = serde_json::to_string(&src.cache_dir) {
         let code = format!(
             "const fs=require('fs');try{{fs.rmSync({p},{{recursive:true,force:true}});}}catch(e){{}}process.stdout.write('done');"
@@ -340,8 +317,6 @@ fn clone_shallow(src: &RepoSource) -> Result<(), String> {
         let _ = exec_js_stdout(&code, 30000);
     }
     let mut argv: Vec<&str> = vec!["clone", "--depth", "1"];
-    // `--branch` accepts a branch or tag but NOT a raw sha, so a sha-pinned
-    // spec clones the default branch and is moved onto its commit below.
     let reference = src.reference.as_deref().unwrap_or("");
     let use_branch = !reference.is_empty() && !is_sha_like(reference);
     if use_branch {
@@ -362,9 +337,6 @@ fn clone_shallow(src: &RepoSource) -> Result<(), String> {
 fn fetch_and_checkout_sha(src: &RepoSource, sha: &str) -> Result<(), String> {
     let cwd = Some(src.cache_dir.as_str());
     git(&["fetch", "--depth", "1", "origin", sha], cwd)?;
-    // FETCH_HEAD rather than the sha: fetching a sha into a shallow repo does
-    // not always create a local ref for it, but FETCH_HEAD always names what
-    // was just fetched.
     git(&["checkout", "--force", "FETCH_HEAD"], cwd)?;
     Ok(())
 }
@@ -374,8 +346,6 @@ fn fetch_to(src: &RepoSource, target_sha: &str) -> Result<(), String> {
     let cwd = Some(src.cache_dir.as_str());
     let reference = src.reference.as_deref().unwrap_or("");
     if !reference.is_empty() && !is_sha_like(reference) {
-        // Named ref: fetch it by name so the shallow history stays anchored to
-        // the branch the spec asked for.
         git(&["fetch", "--depth", "1", "origin", reference], cwd)?;
         git(&["checkout", "--force", "FETCH_HEAD"], cwd)?;
         return Ok(());
@@ -412,15 +382,9 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
     let now = now_ms();
     let have_local = local_sha(src);
 
-    // Debounce: a recent check plus a usable checkout means there is nothing
-    // worth spending a round-trip on. Skipped entirely when the cache is cold,
-    // since no debounce interval justifies serving a config that does not exist.
     if have_local.is_some() {
         let elapsed = now.saturating_sub(st.last_checked_ms);
         let required = st.next_probe_delay_ms(debounce_ms);
-        // `last_checked_ms` in the future means the clock moved backwards
-        // (NTP correction, a VM restore); treat it as due rather than
-        // trusting a timestamp that would suppress probes for a long time.
         let clock_sane = st.last_checked_ms <= now;
         if clock_sane && elapsed < required {
             return Ok(SyncOutcome {
@@ -436,9 +400,6 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
         }
     }
 
-    // Only one refresh per source at a time. A loser serves the existing
-    // checkout -- the holder is already doing the work, so waiting would only
-    // add latency to a config read.
     if !try_lock(src) {
         return match have_local {
             Some(sha) => Ok(SyncOutcome {
@@ -468,9 +429,6 @@ fn refresh_locked(
     now: u64,
     have_local: Option<String>,
 ) -> Result<SyncOutcome, String> {
-    // Re-read the checkout now that the lock is held: another process may have
-    // completed a clone between our first look and acquiring the lock, in which
-    // case there is nothing left to do.
     let have_local = have_local.or_else(|| local_sha(src));
 
     let remote = match probe_remote_sha(src) {
@@ -479,14 +437,11 @@ fn refresh_locked(
             st.last_checked_ms = now;
             st.consecutive_failures = st.consecutive_failures.saturating_add(1);
             return match have_local {
-                // Offline with a usable copy: proceed, loudly.
                 Some(sha) => Ok(degraded(
                     Some(sha),
                     format!("remote probe failed ({e}); serving last good checkout"),
                     src,
                 )),
-                // Offline with nothing cached: the tier genuinely cannot
-                // resolve, so report it rather than pretend.
                 None => Err(format!("{e}; no local checkout to fall back to")),
             };
         }
@@ -494,7 +449,6 @@ fn refresh_locked(
 
     st.last_checked_ms = now;
 
-    // The whole point of the probe: an unchanged remote costs nothing further.
     if have_local.as_deref() == Some(remote.as_str()) {
         st.consecutive_failures = 0;
         st.last_sha = remote.clone();
@@ -513,8 +467,6 @@ fn refresh_locked(
 
     if let Err(e) = outcome {
         st.consecutive_failures = st.consecutive_failures.saturating_add(1);
-        // Re-read rather than reusing the pre-fetch value: a failed fetch may
-        // still have moved HEAD, and the sha we report must be the one on disk.
         return match local_sha(src) {
             Some(sha) => Ok(degraded(
                 Some(sha),
@@ -529,11 +481,6 @@ fn refresh_locked(
     let live = local_sha(src);
     st.last_sha = live.clone().unwrap_or_else(|| remote.clone());
 
-    // The ONLY place both shas exist at once, and therefore the only place a
-    // change notification can be produced. config_notify::record_change had no
-    // caller at all before this: changes were recorded nowhere, so the drain on
-    // the instruction payload could only ever return empty and a running agent
-    // could never learn its configuration had moved.
     crate::orchestrator::config_notify::record_change(
         &src.tier_label,
         have_local.as_deref().unwrap_or(""),
@@ -585,10 +532,6 @@ impl Default for GitRepoFetcher {
 
 impl RepoFetcher for GitRepoFetcher {
     fn refresh(&self, src: &RepoSource) -> Result<(), String> {
-        // Discards the outcome detail because the trait's contract is only
-        // "config_path() is readable if the repo has it". The degraded case
-        // already emitted its own event, so nothing is lost here; callers
-        // wanting sha/changed call `ensure_current` directly.
         ensure_current(src, self.debounce_ms).map(|_| ())
     }
 }
