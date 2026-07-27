@@ -252,6 +252,42 @@ impl Default for IndexConfig {
     }
 }
 
+/// Step-pipeline lifetime, size, and retry budgets.
+///
+/// These were four literals in pipeline.rs, two of them written twice --
+/// `max_result_bytes` at the point it is ADVERTISED to the caller and again
+/// at the point it is ENFORCED, and the attempt budget likewise. Two
+/// independent literals meant to be one value is a latent divergence bug:
+/// change one and the pipeline promises a limit it does not apply, or
+/// applies one it never announced.
+///
+/// Defaults reproduce the previous literals exactly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PipelineConfig {
+    /// How long a pipeline state row stays valid (was 120_000ms).
+    pub ttl_ms: u64,
+    /// Result payloads above this are summarised rather than returned whole
+    /// (was 2048 bytes).
+    pub summarize_threshold: usize,
+    /// Hard ceiling on a single step's serialized result (was 4096 bytes).
+    /// Advertised to the caller AND enforced on validation -- one field now,
+    /// so the two cannot disagree.
+    pub max_result_bytes: usize,
+    /// Total attempts a step gets before it is failed out (was 2).
+    pub max_attempts: u64,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        PipelineConfig {
+            ttl_ms: 120_000,
+            summarize_threshold: 2048,
+            max_result_bytes: 4096,
+            max_attempts: 2,
+        }
+    }
+}
+
 /// What the claim audit looks for, and where.
 ///
 /// Both halves were hardcoded: an English marker vocabulary and `AGENTS.md`
@@ -309,6 +345,8 @@ pub struct RagConfig {
     pub memories: VecTableNames,
     /// Claim-audit marker vocabulary and scanned files.
     pub claim_audit: ClaimAuditConfig,
+    /// Step-pipeline lifetime, size, and retry budgets.
+    pub pipeline: PipelineConfig,
 }
 
 impl Default for RagConfig {
@@ -324,6 +362,7 @@ impl Default for RagConfig {
             code_chunks: VecTableNames::derived("code_chunks"),
             memories: VecTableNames::derived("memories"),
             claim_audit: ClaimAuditConfig::default(),
+            pipeline: PipelineConfig::default(),
         }
     }
 }

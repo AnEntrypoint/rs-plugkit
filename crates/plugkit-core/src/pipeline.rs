@@ -5,8 +5,14 @@ use serde_json::{json, Value};
 use crate::libsql_wasm;
 use crate::wasm_dispatch::host_now_ms;
 
-const TTL_MS: u64 = 120_000;
-const SUMMARIZE_THRESHOLD: usize = 2048;
+// Was four literals here, two of them written TWICE: max_result_bytes and the
+// attempt budget each appeared both where they are ADVERTISED to the caller and
+// where they are ENFORCED. Two independent literals meant to be one value is a
+// latent divergence bug -- change one and the pipeline promises a limit it does
+// not apply. One config now, so the two sites cannot disagree.
+fn pipeline_cfg() -> crate::ragconfig::PipelineConfig {
+    crate::ragconfig::PipelineConfig::default()
+}
 
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -120,14 +126,14 @@ pub fn evict_expired() {
 }
 
 pub fn needs_summarize(text: &str) -> bool {
-    text.len() > SUMMARIZE_THRESHOLD
+    text.len() > pipeline_cfg().summarize_threshold
 }
 
 pub fn build_pending_step(text: &str, namespace: &str, project_path: Option<&str>) -> Value {
     let step_id = mint_step_id();
     let flow_id = mint_flow_id();
     let now = unsafe { host_now_ms() } as u64;
-    let deadline_ms = now + TTL_MS;
+    let deadline_ms = now + pipeline_cfg().ttl_ms;
     let kv_key = format!("rs-learn/pipeline/{}", step_id);
     let bounded_input: String = text.chars().take(8192).collect();
     let payload = json!({
@@ -185,7 +191,7 @@ pub fn build_pending_step(text: &str, namespace: &str, project_path: Option<&str
             "id": step_id,
             "payload": payload,
             "prompt_template": prompt_template,
-            "max_result_bytes": 4096,
+            "max_result_bytes": pipeline_cfg().max_result_bytes,
             "result_schema": result_schema
         },
         "token": token,
@@ -295,9 +301,9 @@ pub fn handle_continue(body: &Value) -> Value {
     }
 
     let schema = state.get("result_schema").cloned().unwrap_or(json!({}));
-    if let Err(e) = validate_result(result, &schema, 4096) {
+    if let Err(e) = validate_result(result, &schema, pipeline_cfg().max_result_bytes) {
         let attempts_used = state.get("attempts_used").and_then(|v| v.as_u64()).unwrap_or(0);
-        let attempts_remaining = 2u64.saturating_sub(attempts_used + 1);
+        let attempts_remaining = pipeline_cfg().max_attempts.saturating_sub(attempts_used + 1);
         if attempts_remaining == 0 {
             delete_state(step_id);
             clear_turn_pending();
