@@ -357,7 +357,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
                 } else { String::new() }
             };
             let combined = if query.is_empty() { s.phase.as_str().to_string() } else { format!("{} {}", s.phase.as_str(), query) };
-            let hits = recall::recall_hits(&combined, 3);
+            let hits = recall::recall_hits(&combined, crate::ragconfig::InstructionPayloadConfig::default().transition_recall_hits);
             let payload = serde_json::json!({
                 "phase": s.phase.as_str(),
                 "nextSkill": skill,

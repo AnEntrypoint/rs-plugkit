@@ -14,8 +14,12 @@ use super::prd;
 use super::recall;
 use crate::pkfs;
 
+fn payload_cfg() -> crate::ragconfig::InstructionPayloadConfig {
+    crate::ragconfig::InstructionPayloadConfig::default()
+}
+
 fn expire_stale_marker(v: serde_json::Value) -> serde_json::Value {
-    const MAX_MARKER_AGE_MS: i64 = 6 * 60 * 60 * 1000;
+    let max_marker_age_ms = payload_cfg().max_marker_age_ms;
     let Some(ts) = v.get("ts") else { return v };
     let written_ms = match ts {
         serde_json::Value::Number(n) => n.as_i64(),
@@ -24,7 +28,7 @@ fn expire_stale_marker(v: serde_json::Value) -> serde_json::Value {
     };
     let Some(written_ms) = written_ms else { return v };
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
-    if now_ms.saturating_sub(written_ms) > MAX_MARKER_AGE_MS {
+    if now_ms.saturating_sub(written_ms) > max_marker_age_ms {
         return serde_json::Value::Null;
     }
     v
@@ -200,31 +204,25 @@ fn ready_wave(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
                 }))
                 .unwrap_or(true)
         })
-        .take(3)
+        .take(payload_cfg().ready_wave_limit)
         .cloned()
         .collect()
 }
 
 fn orient_nouns(prompt: &str) -> Vec<String> {
-    let stop: &[&str] = &[
-        "the","a","an","to","of","in","on","for","and","or","is","are","was","were",
-        "be","been","being","do","does","did","have","has","had","i","you","we","they",
-        "it","this","that","these","those","with","from","as","at","by","but","if",
-        "then","so","can","could","would","should","will","shall","may","might",
-        "please","me","my","our","your","their","his","her",
-    ];
+    let cfg = payload_cfg();
     let mut words: Vec<String> = prompt
         .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
         .filter(|w| w.len() > 2)
         .filter(|w| {
             let lower = w.to_lowercase();
-            !stop.contains(&lower.as_str())
+            !cfg.orient_stopwords.iter().any(|sw| sw.to_lowercase() == lower)
         })
         .map(|s| s.to_string())
         .collect();
     words.sort();
     words.dedup();
-    words.truncate(5);
+    words.truncate(cfg.orient_noun_limit);
     words
 }
 
@@ -419,7 +417,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
 
     let prompt_query = {
         let p = read_last_prompt();
-        if p.is_empty() { String::new() } else { p.chars().take(400).collect() }
+        if p.is_empty() { String::new() } else { p.chars().take(payload_cfg().prompt_excerpt_chars).collect() }
     };
     let prd_subject_query = prd_items.iter()
         .find(|it| item_is_open(it))
@@ -430,7 +428,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let recall_hits = if query.is_empty() {
         serde_json::Value::Array(Vec::new())
     } else {
-        recall::recall_hits(&query, 5)
+        recall::recall_hits(&query, payload_cfg().instruction_recall_hits)
     };
     ilog("instruction::handle post-recall");
 

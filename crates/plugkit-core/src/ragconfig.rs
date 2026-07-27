@@ -252,6 +252,56 @@ impl Default for IndexConfig {
     }
 }
 
+/// How much, and what, the instruction payload puts in front of the agent
+/// every dispatch.
+///
+/// These shape what the agent actually SEES, which makes them the most
+/// consequential numbers in the orchestrator and the least defensible as
+/// literals. The stopword list in particular is English-only: a project
+/// working in another language gets orient-noun extraction that filters
+/// nothing, silently degrading recall quality rather than failing.
+///
+/// Defaults reproduce the previous literals exactly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InstructionPayloadConfig {
+    /// Ready-wave PRD rows surfaced per dispatch (was 3).
+    pub ready_wave_limit: usize,
+    /// Recall hits fetched for the instruction payload (was 5).
+    /// `u32` to match `recall_hits`' own signature -- no cast at the call site.
+    pub instruction_recall_hits: u32,
+    /// Recall hits fetched on a transition (was 3).
+    pub transition_recall_hits: u32,
+    /// Prompt echo truncation, in chars (was 400).
+    pub prompt_excerpt_chars: usize,
+    /// Age past which a turn marker is treated as stale (was 6h).
+    pub max_marker_age_ms: i64,
+    /// Orient-noun keywords kept from a prompt (was 5).
+    pub orient_noun_limit: usize,
+    /// Words filtered out of orient-noun extraction. Lowercased on both
+    /// sides at compare time, so casing here does not matter.
+    pub orient_stopwords: Vec<String>,
+}
+
+impl Default for InstructionPayloadConfig {
+    fn default() -> Self {
+        InstructionPayloadConfig {
+            ready_wave_limit: 3,
+            instruction_recall_hits: 5,
+            transition_recall_hits: 3,
+            prompt_excerpt_chars: 400,
+            max_marker_age_ms: 6 * 60 * 60 * 1000,
+            orient_noun_limit: 5,
+            orient_stopwords: [
+                "the","a","an","to","of","in","on","for","and","or","is","are","was","were",
+                "be","been","being","do","does","did","have","has","had","i","you","we","they",
+                "it","this","that","these","those","with","from","as","at","by","but","if",
+                "then","so","can","could","would","should","will","shall","may","might",
+                "please","me","my","our","your","their","his","her",
+            ].iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
 /// Step-pipeline lifetime, size, and retry budgets.
 ///
 /// These were four literals in pipeline.rs, two of them written twice --
@@ -347,6 +397,8 @@ pub struct RagConfig {
     pub claim_audit: ClaimAuditConfig,
     /// Step-pipeline lifetime, size, and retry budgets.
     pub pipeline: PipelineConfig,
+    /// What the instruction payload puts in front of the agent each dispatch.
+    pub instruction_payload: InstructionPayloadConfig,
 }
 
 impl Default for RagConfig {
@@ -363,6 +415,7 @@ impl Default for RagConfig {
             memories: VecTableNames::derived("memories"),
             claim_audit: ClaimAuditConfig::default(),
             pipeline: PipelineConfig::default(),
+            instruction_payload: InstructionPayloadConfig::default(),
         }
     }
 }
