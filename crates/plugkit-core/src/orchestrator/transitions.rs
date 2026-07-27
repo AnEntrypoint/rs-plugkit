@@ -239,7 +239,7 @@ impl HookOutcome {
 fn hook_outcome(hook_path: &str) -> HookOutcome {
     let full = format!(".gm/instructions/hooks/{}", hook_path);
     let Some(script) = crate::pkfs::read_to_string(&full) else { return HookOutcome::Missing };
-    let opts = serde_json::json!({ "timeoutMs": 15000 }).to_string();
+    let opts = serde_json::json!({ "timeoutMs": fsm::graph().policy.hook_timeout_ms }).to_string();
     let packed = unsafe {
         crate::wasm_dispatch::host_exec_js(
             script.as_ptr(), script.len() as u32,

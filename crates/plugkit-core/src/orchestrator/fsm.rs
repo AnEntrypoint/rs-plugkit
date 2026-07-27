@@ -85,6 +85,15 @@ pub struct Policy {
     pub deny_shell_git: bool,
     #[serde(default = "default_gate_repeat_escalate_threshold")]
     pub gate_repeat_escalate_threshold: u64,
+    /// Wall-clock budget for one gate hook, in ms.
+    ///
+    /// A hook is arbitrary project-supplied JS run at gate evaluation, so its
+    /// runtime is a property of the workflow rather than of the engine: a hook
+    /// that shells out to a linter or waits on a network check legitimately
+    /// needs longer than one that stats a file. Exceeding the budget fails the
+    /// gate CLOSED, which makes an under-set value a denial nobody can clear.
+    #[serde(default = "default_hook_timeout_ms")]
+    pub hook_timeout_ms: u64,
     #[serde(default = "default_longgap_threshold_ms")]
     pub longgap_threshold_ms: u64,
     #[serde(default = "default_require_witness_evidence")]
@@ -130,6 +139,7 @@ fn default_shell_verbs() -> Vec<String> {
 }
 fn default_deny_shell_git() -> bool { true }
 fn default_gate_repeat_escalate_threshold() -> u64 { 3 }
+fn default_hook_timeout_ms() -> u64 { 15_000 }
 fn default_longgap_threshold_ms() -> u64 { 300_000 }
 fn default_require_witness_evidence() -> bool { true }
 fn default_prd_closed_statuses() -> Vec<String> {
@@ -157,6 +167,7 @@ impl Default for Policy {
             shell_verbs: default_shell_verbs(),
             deny_shell_git: default_deny_shell_git(),
             gate_repeat_escalate_threshold: default_gate_repeat_escalate_threshold(),
+            hook_timeout_ms: default_hook_timeout_ms(),
             longgap_threshold_ms: default_longgap_threshold_ms(),
             require_witness_evidence: default_require_witness_evidence(),
             prd_closed_statuses: default_prd_closed_statuses(),
@@ -228,7 +239,7 @@ impl Graph {
     /// signal without the outage.
     const KNOWN_POLICY_KEYS: &'static [&'static str] = &[
         "toplevel_doc_allowlist", "await_allowed_verbs", "longgap_exempt_verbs", "longgap_refresh_verbs", "fresh_prompt_resets_phase",
-        "shell_verbs", "deny_shell_git", "gate_repeat_escalate_threshold",
+        "shell_verbs", "deny_shell_git", "gate_repeat_escalate_threshold", "hook_timeout_ms",
         "longgap_threshold_ms", "require_witness_evidence", "prd_closed_statuses",
         "mutables_resolved_statuses", "reject_duplicate_witness", "initial_phase",
         "terminal_phase", "mutables_default_status", "mutables_witness_status",
@@ -302,6 +313,25 @@ impl Graph {
             }
         }
 
+        for g in &self.gates {
+            if matches!(g.hook_mode, HookMode::PredicateOnly) {
+                continue;
+            }
+            let Some(hook) = g.hook.as_deref() else {
+                problems.push(format!(
+                    "gate `{}` declares hook_mode `{:?}` but names no hook -- hooks fail CLOSED, so this gate could never be satisfied",
+                    g.name, g.hook_mode
+                ));
+                continue;
+            };
+            if !hook_file_exists(hook) {
+                problems.push(format!(
+                    "gate `{}` names hook `{}`, which does not exist at .gm/instructions/hooks/{} -- a missing hook fails CLOSED, so this gate would deny forever",
+                    g.name, hook, hook
+                ));
+            }
+        }
+
         for s in &self.states {
             if crate::orchestrator::instructions::has_compiled_default_for_prose_key(&s.prose_key) {
                 continue;
@@ -364,6 +394,16 @@ fn prose_file_exists(prose_key: &str) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 fn prose_file_exists(prose_key: &str) -> bool {
     std::path::Path::new(&format!(".gm/instructions/{}.md", prose_key)).exists()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn hook_file_exists(hook: &str) -> bool {
+    crate::pkfs::read_to_string(&format!(".gm/instructions/hooks/{}", hook)).is_some()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn hook_file_exists(hook: &str) -> bool {
+    std::path::Path::new(&format!(".gm/instructions/hooks/{}", hook)).exists()
 }
 
 fn default_graph() -> Graph {
