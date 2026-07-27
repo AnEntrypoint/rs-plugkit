@@ -145,6 +145,11 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
     let mut embedded = 0u32;
     let mut deferred = 0u32;
     let mut skipped = 0u32;
+    /// A run this long means the embedder is down, not that one commit is odd.
+    /// Small on purpose: the whole cost of being wrong is one extra pass, while
+    /// the cost of continuing through a dead embedder is a wedged daemon.
+    const MAX_CONSECUTIVE_EMBED_FAILURES: u32 = 5;
+    let mut consecutive_embed_failures: u32 = 0;
     for (hash, subject) in &entries {
         if present.contains(hash) { continue; }
         if Some(hash.as_str()) == watermark.as_deref() { continue; }
@@ -168,21 +173,39 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
         // is the same silent-degradation class that made `recall` return
         // ok:true with zero hits while the embedder was crashed.
         let vec: Vec<f32> = match crate::plugin_abi::call("bert", "embed", &json!({ "text": text })) {
-            Ok(data) => data
-                .get("embedding")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect::<Vec<f32>>())
-                .unwrap_or_default(),
+            Ok(data) => {
+                // Reset on success so only a genuine RUN trips the breaker --
+                // scattered failures across a long history are normal and must
+                // not accumulate into a false trip.
+                consecutive_embed_failures = 0;
+                data.get("embedding")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect::<Vec<f32>>())
+                    .unwrap_or_default()
+            }
             Err(e) => {
-                // Surface WHICH failure this was. Emitted once per failing
-                // commit rather than aggregated, because the kind is the
-                // actionable part: PluginNotFound means the embedder was never
-                // loaded (a deployment problem), while a plugin error means it
-                // loaded and then failed on this input.
+                // N failures IN A ROW is a different condition from one failure:
+                // one bad commit is skippable, but a run of them means the
+                // embedder itself is down and every remaining call will trap the
+                // same way. Continuing burns real time and memory per commit --
+                // live-witnessed as 167 failures ~90ms apart during a
+                // many-commit session, with the shared daemon reaching 1.3GB RSS
+                // and its heartbeat frozen (no busy_until), un-revivable by
+                // re-registration. Stop the pass instead; the next one retries
+                // from the same cursor, so nothing is lost.
+                consecutive_embed_failures += 1;
                 crate::wasm_dispatch::emit_event("git_commit_embed_failed", json!({
                     "kind": e.kind.as_str(),
                     "detail": e.message,
+                    "consecutive": consecutive_embed_failures,
                 }));
+                if consecutive_embed_failures >= MAX_CONSECUTIVE_EMBED_FAILURES {
+                    crate::wasm_dispatch::emit_event("git_commit_embed_circuit_open", json!({
+                        "consecutive": consecutive_embed_failures,
+                        "reason": "the embedder failed on every one of the last N commits, so it is down rather than tripping on one input; abandoning this sync pass. The next pass resumes from the same cursor.",
+                    }));
+                    break;
+                }
                 Vec::new()
             }
         };
