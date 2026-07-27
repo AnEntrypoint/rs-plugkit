@@ -171,9 +171,19 @@ pub fn handle_validate(_content: &str) -> (String, String, i32) {
     let problems = graph.validate();
     let ok = problems.is_empty();
 
+    // Not a "problem" -- the graph is internally consistent -- but a real
+    // guarantee difference against the built-in default, which is exactly what
+    // someone running a validation pass wants to know about.
+    let weaker: Vec<Value> = fsm::gates_missing_vs_default(&graph)
+        .into_iter()
+        .map(|(from, to, missing)| json!({ "from": from, "to": to, "missing_gates": missing }))
+        .collect();
+
     let payload = json!({
         "ok": ok,
         "problems": problems,
+        "weaker_than_default": weaker,
+        "weaker_than_default_note": "Edges the ACTIVE graph guards with fewer gates than the built-in default. A vendored graph.json REPLACES the default wholesale (there is no merge), so a project that vendored before a gate existed never receives it and its edges stay permanently weaker with nothing saying so. Reported, never merged: silently adding gates would change a hand-written FSM's meaning, and a gate may have been dropped deliberately. Empty means the active graph is at least as strict as the default everywhere they overlap.",
         "states": graph.states.len(),
         "edges": graph.edges.len(),
         "gates": graph.gates.len(),

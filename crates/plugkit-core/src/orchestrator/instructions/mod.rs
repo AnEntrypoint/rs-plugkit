@@ -475,6 +475,14 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         // default is silently serving in its place. Null the rest of the time,
         // so it costs nothing but is impossible to miss when it matters.
         "fsm_graph_rejected": super::fsm::graph_rejection(),
+        // Edges a vendored graph guards more weakly than the built-in default.
+        // Empty for anyone on the default graph, so it costs nothing there --
+        // but a vendored project silently frozen out of a gate added after it
+        // vendored should not have to run a verb to find out.
+        "fsm_gates_weaker_than_default": super::fsm::gates_missing_vs_default(&super::fsm::graph())
+            .into_iter()
+            .map(|(from, to, missing)| json!({ "from": from, "to": to, "missing_gates": missing }))
+            .collect::<Vec<_>>(),
         "sub_phase": if await_result.is_some() { "AWAIT-RESULT" } else { "" },
         "await_result": await_result,
         "instruction": instruction,

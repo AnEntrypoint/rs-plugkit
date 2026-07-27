@@ -531,6 +531,40 @@ fn clear_graph_rejection() {
     }
 }
 
+/// Gates the BUILT-IN default enforces on an edge that the ACTIVE graph does
+/// not, per edge.
+///
+/// A vendored graph.json replaces the default wholesale -- there is no merge --
+/// so a project that vendored before a gate was added never receives it, and
+/// its edges stay permanently weaker than the built-in with nothing saying so.
+/// `claim-audit-clean` and `submodules-clean` are exactly this case today.
+///
+/// Deliberately REPORTS rather than merges. Silently adding gates to a graph
+/// someone wrote by hand would change their FSM's meaning under them, which is
+/// its own failure; and a project may have dropped a gate on purpose. Naming
+/// the difference lets that be a decision instead of an accident.
+///
+/// Returns `(from, to, missing_gates)` for each edge that is weaker than its
+/// default counterpart. An edge the default does not have at all is not
+/// reported: it is a genuinely new edge, not a weakened one.
+pub fn gates_missing_vs_default(active: &Graph) -> Vec<(String, String, Vec<String>)> {
+    let default = default_graph();
+    let mut out = Vec::new();
+    for de in &default.edges {
+        let Some(ae) = active.edge_between(&de.from, &de.to) else { continue };
+        let missing: Vec<String> = de
+            .gates
+            .iter()
+            .filter(|g| !ae.gates.contains(g))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            out.push((de.from.clone(), de.to.clone(), missing));
+        }
+    }
+    out
+}
+
 /// The active graph rejection, if any -- for the instruction payload.
 pub fn graph_rejection() -> Option<serde_json::Value> {
     let raw = crate::pkfs::read_to_string(GRAPH_REJECTION_PATH)?;
