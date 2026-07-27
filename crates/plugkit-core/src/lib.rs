@@ -19,6 +19,11 @@ pub mod pipeline;
 #[cfg(target_arch = "wasm32")]
 pub mod gitignore;
 
+/// Self-healing removal of retired state artifacts (see module docs): a
+/// subsystem retired upstream still leaves its db/state behind in every
+/// project that ever ran it, so the tooling reaps its own leftovers.
+pub mod legacy_reaper;
+
 #[cfg(target_arch = "wasm32")]
 pub mod gates;
 
@@ -188,6 +193,10 @@ mod wasm_hooks {
         clear_marker("residual-check-fired");
         write_marker("needs-gm");
         let _ = crate::gitignore::ensure_managed_gitignore("");
+        // Reap state left behind by subsystems this codebase has since
+        // retired (see legacy_reaper): marker-gated, so this is a no-op on
+        // every boot after the first successful pass in a given project.
+        crate::legacy_reaper::reap_retired_artifacts();
         json!({
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",

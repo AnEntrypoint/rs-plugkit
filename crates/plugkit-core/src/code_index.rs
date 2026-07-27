@@ -783,12 +783,51 @@ pub fn index(root: &str, max_files: usize) -> Value {
         }
 
         const MAX_CHUNKS_PER_FILE_PER_PASS: usize = 64;
-        let oversized = chunks.len() > MAX_CHUNKS_PER_FILE_PER_PASS;
+        // The count cap alone does NOT bound wall-clock cost, and that gap is
+        // what actually stalls the index. Live-witnessed: a 153KB AGENTS.md
+        // produced 49 chunks -- comfortably UNDER the 64 cap, so it was never
+        // truncated -- yet its single embed_texts_batch call took 39981ms,
+        // blowing both INDEX_WALL_BUDGET_MS (45s, and the outer check at the
+        // top of this loop only fires BETWEEN files) and the supervisor's own
+        // 30s heartbeat-stale limit, which then killed the watcher mid-pass
+        // and left the index frozen at deferred_files=499 with the embedder
+        // crashed. Per-chunk cost is highly non-uniform (a chunk of prose
+        // embeds far slower than a short function body), so a count cap can
+        // never stand in for a time bound.
+        //
+        // Bound the batch by the budget actually remaining for this pass:
+        // scale the per-file chunk allowance down as the pass approaches
+        // INDEX_WALL_BUDGET_MS. A file arriving with little budget left
+        // embeds only a small prefix now and finishes on a later pass, which
+        // still converges (the file is marked seen and its manifest written,
+        // exactly as the count-cap path already does -- see the livelock
+        // rationale above for why deferring the file ENTIRELY is wrong).
+        let elapsed_now = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+        let remaining_ms = INDEX_WALL_BUDGET_MS.saturating_sub(elapsed_now);
+        // Derived from the same live measurement: 39981ms / 49 chunks is
+        // ~816ms per prose chunk on unaccelerated wasm32 BERT. Budget against
+        // a deliberately pessimistic per-chunk estimate so the bound holds on
+        // the slow (prose) case rather than the fast (short-code) case.
+        const PESSIMISTIC_MS_PER_CHUNK: u64 = 800;
+        let budget_chunks = (remaining_ms / PESSIMISTIC_MS_PER_CHUNK).max(1) as usize;
+        let cap = MAX_CHUNKS_PER_FILE_PER_PASS.min(budget_chunks);
+        let oversized = chunks.len() > cap;
         if oversized {
             let full = chunks.len();
-            chunks.truncate(MAX_CHUNKS_PER_FILE_PER_PASS);
-            let msg = format!("code_index: capping {} chunks={} -> {} (per-pass cap; file still indexed and marked seen)", fp, full, MAX_CHUNKS_PER_FILE_PER_PASS);
+            chunks.truncate(cap);
+            let msg = format!(
+                "code_index: capping {} chunks={} -> {} (count_cap={} budget_chunks={} remaining_ms={}; file still indexed and marked seen)",
+                fp, full, cap, MAX_CHUNKS_PER_FILE_PER_PASS, budget_chunks, remaining_ms
+            );
             let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+            crate::wasm_dispatch::emit_event("code_index_chunk_cap", json!({
+                "path": fp,
+                "chunks_total": full,
+                "chunks_indexed": cap,
+                "count_cap": MAX_CHUNKS_PER_FILE_PER_PASS,
+                "budget_chunks": budget_chunks,
+                "remaining_ms": remaining_ms,
+            }));
         }
 
         let embed_inputs: Vec<String> = chunks.iter()
