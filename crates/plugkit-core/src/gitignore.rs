@@ -11,6 +11,7 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/turn-state.json.corrupted-*",
     ".gm/residual-check-fired",
     ".gm/claim-audit-fired",
+    ".gm/fsm-graph-rejected.json",
     ".gm/bootstrap-status.json",
     ".gm/bootstrap-error.json",
     ".gm/trajectory-drafts/",

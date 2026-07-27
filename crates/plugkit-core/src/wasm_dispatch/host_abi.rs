@@ -5,6 +5,7 @@ extern "C" {
     pub fn host_cwd() -> u64;
     pub fn host_fs_read(path_ptr: *const u8, path_len: u32) -> u64;
     pub fn host_fs_write(path_ptr: *const u8, path_len: u32, data_ptr: *const u8, data_len: u32) -> u32;
+    pub fn host_fs_remove(path_ptr: *const u8, path_len: u32) -> u32;
     pub fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
     pub fn host_fs_stat(path_ptr: *const u8, path_len: u32) -> u64;
     pub fn host_fetch(url_ptr: *const u8, url_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
@@ -23,6 +24,34 @@ extern "C" {
     pub fn host_git(args_ptr: *const u8, args_len: u32, cwd_ptr: *const u8, cwd_len: u32) -> u64;
     pub fn host_plugin_call(plugin_ptr: *const u8, plugin_len: u32, verb_ptr: *const u8, verb_len: u32, body_ptr: *const u8, body_len: u32) -> u64;
 }
+
+/// Every name in the `extern "C"` block above, in declaration order. `health`
+/// advertises this instead of its own hand-maintained copy, which had drifted
+/// to 16 of the 20 -- omitting host_cwd, host_git, host_kv_delete and
+/// host_plugin_call, so health did not even advertise that inter-plugin
+/// calling exists.
+pub const HOST_IMPORTS: &[&str] = &[
+    "host_cwd",
+    "host_fs_read",
+    "host_fs_write",
+    "host_fs_readdir",
+    "host_fs_stat",
+    "host_fetch",
+    "host_kv_get",
+    "host_kv_put",
+    "host_kv_delete",
+    "host_kv_query",
+    "host_vec_search",
+    "host_vec_embed",
+    "host_exec_js",
+    "host_log",
+    "host_now_ms",
+    "host_env_get",
+    "host_browser_exec",
+    "host_task_proc",
+    "host_git",
+    "host_plugin_call",
+];
 
 pub fn plugin_call(plugin: &str, verb: &str, body: &Value) -> Value {
     let body_s = body.to_string();
@@ -124,20 +153,21 @@ pub fn host_exists(path: &str) -> bool {
     host_stat(path).map(|v| !v.is_null()).unwrap_or(false)
 }
 
+/// Delete a file, via the host's own filesystem import.
+///
+/// Previously this spawned a node subprocess through `host_exec_js` to run
+/// `fs.unlinkSync`, then decided the outcome by string-matching `"removed"` in
+/// its stdout -- a process launch, a 15s timeout, a JSON round-trip, and a
+/// stringly-typed result, all to delete one file. The host has implemented
+/// `host_fs_remove` natively the whole time; it simply was not declared in the
+/// extern block above, so the guest could not see it.
+///
+/// The host refuses directories and reports 0 for both "was a directory" and
+/// "failed", which is the same collapsed outcome the old shim produced, so
+/// this is a straight substitution with no behavioural change to callers.
 pub fn host_remove(path: &str) -> bool {
-    let path_js = match serde_json::to_string(path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let code = format!(
-        "const fs=require('fs');try{{fs.unlinkSync({});process.stdout.write('removed');}}catch(e){{process.stdout.write('miss');}}",
-        path_js
-    );
-    let opts = "{\"timeoutMs\":15000}";
-    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
-    let out = unpack_to_string(packed).unwrap_or_default();
-    let parsed: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
-    parsed.get("stdout").and_then(|v| v.as_str()).map(|s| s.contains("removed")).unwrap_or(false)
+    let rc = unsafe { host_fs_remove(path.as_ptr(), path.len() as u32) };
+    rc != 0
 }
 
 pub fn host_kv_read(namespace: &str, key: &str) -> Option<String> {
