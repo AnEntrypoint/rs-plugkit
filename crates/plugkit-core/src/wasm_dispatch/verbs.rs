@@ -1065,7 +1065,30 @@ fn cache_invalidate(body: &Value) -> u64 {
 /// reason.
 fn config_resolve(_body: &Value) -> u64 {
     let r = crate::config::resolve();
-    ok("config_resolve", r.to_json())
+    let mut payload = r.to_json();
+
+    // Report what the resolved config ACTUALLY produces, not just which tier
+    // won. Reporting the winning tier while every knob still came from
+    // `Default` is exactly how this chain stayed inert and observable at the
+    // same time -- the verb said "tier 1 won" and nothing behaved differently.
+    if let Some(obj) = payload.as_object_mut() {
+        match crate::ragconfig::RagConfig::from_value(&r.config.value) {
+            Ok(rag) => {
+                obj.insert("rag_effective".to_string(), json!({
+                    "embed_dim": rag.embed.dim,
+                    "default_namespace": rag.namespaces.default,
+                    "recall_default_limit": rag.budget.default_limit,
+                    "index_wall_budget_ms": rag.index.wall_budget_ms,
+                    "index_max_file_bytes": rag.index.max_file_bytes,
+                }));
+            }
+            Err(reason) => {
+                obj.insert("rag_effective".to_string(), Value::Null);
+                obj.insert("rag_rejected".to_string(), Value::String(reason));
+            }
+        }
+    }
+    ok("config_resolve", payload)
 }
 
 fn cache_stats(body: &Value) -> u64 {

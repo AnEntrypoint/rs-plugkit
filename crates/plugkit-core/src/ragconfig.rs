@@ -534,6 +534,61 @@ impl RagConfig {
     /// layer. Callers should refuse a config that fails this rather than fall
     /// back to defaults, since silently ignoring an operator's stated dim is
     /// how a store gets rebuilt at a width nobody asked for.
+    /// Build from a resolved config value, defaulting every absent field.
+    ///
+    /// This is the bridge that was missing: `config.rs` resolved a full 4-tier
+    /// chain and `RagConfig` was a complete value type, but nothing joined
+    /// them -- `config::resolve()`'s only caller was its own reporting verb, so
+    /// every knob here came from `Default` no matter what a project vendored.
+    /// The whole configuration surface was therefore observable and inert.
+    ///
+    /// Absent keys default rather than erroring, because `config.rs` deep-merges
+    /// a partial tier over the builtin: a config legitimately ships only the
+    /// keys it wants to change. An unparseable key is a different matter and is
+    /// reported, since silently ignoring a value someone wrote is the failure
+    /// this whole chain exists to avoid.
+    ///
+    /// Validation runs before returning, so a config that would produce an
+    /// unusable store is refused here rather than at the first query.
+    pub fn from_value(v: &serde_json::Value) -> Result<RagConfig, String> {
+        let mut cfg = RagConfig::default();
+        let mut problems: Vec<String> = Vec::new();
+
+        let num = |parent: &str, key: &str, out: &mut usize, problems: &mut Vec<String>| {
+            if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
+                match found.as_u64() {
+                    Some(n) => *out = n as usize,
+                    None => problems.push(format!("{parent}.{key} must be a non-negative integer, got {found}")),
+                }
+            }
+        };
+        let num64 = |parent: &str, key: &str, out: &mut u64, problems: &mut Vec<String>| {
+            if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
+                match found.as_u64() {
+                    Some(n) => *out = n,
+                    None => problems.push(format!("{parent}.{key} must be a non-negative integer, got {found}")),
+                }
+            }
+        };
+
+        num64("index", "wall_budget_ms", &mut cfg.index.wall_budget_ms, &mut problems);
+        num("index", "max_file_bytes", &mut cfg.index.max_file_bytes, &mut problems);
+        num("index", "max_chunks_per_file_per_pass", &mut cfg.index.max_chunks_per_file_per_pass, &mut problems);
+        num("index", "oversized_chunk_split_threshold", &mut cfg.index.oversized_chunk_split_threshold, &mut problems);
+        num("memory", "embed_dim", &mut cfg.embed.dim, &mut problems);
+        num("memory", "recall_limit", &mut cfg.budget.default_limit, &mut problems);
+
+        if let Some(ns) = v.get("memory").and_then(|m| m.get("namespace")).and_then(|n| n.as_str()) {
+            cfg.namespaces.default = ns.to_string();
+        }
+
+        if !problems.is_empty() {
+            return Err(format!("ragconfig: {}", problems.join("; ")));
+        }
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.embed.dim == 0 {
             return Err("ragconfig: embed.dim must be non-zero".to_string());
