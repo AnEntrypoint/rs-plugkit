@@ -967,8 +967,39 @@ fn sql_query(body: &Value) -> u64 {
 /// cached in a process-global would leak one project's budgets into another's
 /// cache operations. Anything absent falls back to `cache::DEFAULTS`, which is
 /// the single place the defaults live.
+/// Cache budgets for one dispatch: compiled defaults, then vendored config,
+/// then this call's own body.
+///
+/// The config layer was the missing rung. `CacheConfig`'s own doc calls these
+/// budgets configuration rather than constants, but the only way to set them
+/// was to restate all four on every single dispatch -- so in practice every
+/// caller got `DEFAULTS`, and a project could not express a cache policy at
+/// all. Reading the resolved config here is what makes "this step uses the
+/// cache, with these budgets" expressible as vendored data instead of as
+/// argument-passing discipline at each call site.
+///
+/// The body still wins, so a caller with a genuinely unusual payload can
+/// override a project-wide budget for one call without changing the project's
+/// policy.
 fn cache_cfg_from(body: &Value) -> crate::cache::CacheConfig {
     let mut cfg = crate::cache::DEFAULTS;
+
+    let resolved = crate::config::resolve().config.value;
+    if let Some(c) = resolved.get("cache") {
+        if let Some(n) = c.get("max_entries_per_namespace").and_then(|v| v.as_u64()) {
+            cfg.max_entries_per_namespace = n as usize;
+        }
+        if let Some(n) = c.get("max_bytes_per_namespace").and_then(|v| v.as_u64()) {
+            cfg.max_bytes_per_namespace = n as usize;
+        }
+        if let Some(n) = c.get("max_value_bytes").and_then(|v| v.as_u64()) {
+            cfg.max_value_bytes = n as usize;
+        }
+        if let Some(n) = c.get("default_ttl_ms").and_then(|v| v.as_i64()) {
+            cfg.default_ttl_ms = Some(n);
+        }
+    }
+
     if let Some(n) = body.get("max_entries_per_namespace").and_then(|v| v.as_u64()) {
         cfg.max_entries_per_namespace = n as usize;
     }
