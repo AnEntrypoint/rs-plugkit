@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 use crate::wasm_dispatch::{host_read, host_stat, unpack_to_value_pub};
-use crate::vecstore::{drop_if_dim_mismatch_at as drop_if_dim_mismatch, vec_to_json_literal, EXPECTED_EMBED_DIM};
+use crate::vecstore::{drop_if_dim_mismatch_at_cfg as drop_if_dim_mismatch_cfg, vec_to_json_literal};
 
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -61,21 +61,27 @@ fn entry_embed_dim(entry_value: &str) -> Option<usize> {
 }
 
 pub fn clear_codeinsight() -> u32 {
+    clear_codeinsight_cfg(&crate::ragconfig::RagConfig::default())
+}
+
+pub fn clear_codeinsight_cfg(cfg: &crate::ragconfig::RagConfig) -> u32 {
+    let code_ns = &cfg.namespaces.code;
+    let vec_ns = cfg.namespaces.vec_namespace(code_ns);
     let mut cleared = 0u32;
-    let data_rows = fv_query("codeinsight", "");
+    let data_rows = fv_query(code_ns, "");
     if let Some(arr) = data_rows.as_array() {
         for row in arr {
             if let Some(key) = row.get("key").and_then(|k| k.as_str()) {
-                fv_delete("codeinsight", key);
+                fv_delete(code_ns, key);
                 cleared += 1;
             }
         }
     }
-    let vec_rows = fv_query("codeinsight-vec", "");
+    let vec_rows = fv_query(&vec_ns, "");
     if let Some(arr) = vec_rows.as_array() {
         for row in arr {
             if let Some(key) = row.get("key").and_then(|k| k.as_str()) {
-                fv_delete("codeinsight-vec", key);
+                fv_delete(&vec_ns, key);
             }
         }
     }
@@ -83,22 +89,43 @@ pub fn clear_codeinsight() -> u32 {
 }
 
 pub fn clear_codeinsight_full() -> u32 {
-    let cleared = clear_codeinsight();
-    let rows = fv_query("codeinsight-manifest", "");
+    clear_codeinsight_full_cfg(&crate::ragconfig::RagConfig::default())
+}
+
+pub fn clear_codeinsight_full_cfg(cfg: &crate::ragconfig::RagConfig) -> u32 {
+    let cleared = clear_codeinsight_cfg(cfg);
+    let manifest_ns = cfg.namespaces.manifest_namespace();
+    let rows = fv_query(&manifest_ns, "");
     if let Some(arr) = rows.as_array() {
         for row in arr {
             if let Some(key) = row.get("key").and_then(|k| k.as_str()) {
-                fv_delete("codeinsight-manifest", key);
+                fv_delete(&manifest_ns, key);
             }
         }
     }
     let db_path = project_db_path(None);
-    let _ = libsql_wasm::exec(&db_path, "DELETE FROM code_chunks");
+    // Clears rows, not the table: the schema (and its ANN index) is correct at
+    // the configured width here -- only a DIM change warrants a DROP, which
+    // ensure_schema_at_cfg's guard owns.
+    let _ = libsql_wasm::exec(&db_path, &format!("DELETE FROM {}", cfg.code_chunks.table));
     cleared
 }
 
 fn clear_codeinsight_if_dim_mismatch() -> bool {
-    let vec_rows = fv_query("codeinsight-vec", "");
+    clear_codeinsight_if_dim_mismatch_cfg(&crate::ragconfig::RagConfig::default())
+}
+
+/// Flat-JSON sibling of the libsql-table dim guard.
+///
+/// The `<code>-vec` kv namespace stores embeddings as JSON arrays, so there is
+/// no `F32_BLOB(n)` column type to inspect -- the width has to be read off an
+/// actual stored entry. The DECISION is still `EmbedDimConfig::should_drop`,
+/// so an operator who set `drop_on_mismatch=false` gets the same
+/// diagnose-don't-destroy behaviour on both storage shapes rather than having
+/// one of them quietly wipe the namespace anyway.
+fn clear_codeinsight_if_dim_mismatch_cfg(cfg: &crate::ragconfig::RagConfig) -> bool {
+    let vec_ns = cfg.namespaces.vec_namespace(&cfg.namespaces.code);
+    let vec_rows = fv_query(&vec_ns, "");
     let rows = match vec_rows.as_array() {
         Some(r) if !r.is_empty() => r,
         _ => return false,
@@ -113,17 +140,22 @@ fn clear_codeinsight_if_dim_mismatch() -> bool {
         }
     }
     let old_dim = match existing_dim {
-        Some(d) if d != EXPECTED_EMBED_DIM => d,
-        _ => return false,
+        Some(d) => d,
+        // Every entry failed to parse a width; nothing trustworthy to compare
+        // against, so leave the namespace alone rather than clearing on a guess.
+        None => return false,
     };
-    let cleared = clear_codeinsight();
+    if !cfg.embed.should_drop(&vec_ns, old_dim) {
+        return false;
+    }
+    let cleared = clear_codeinsight_cfg(cfg);
     crate::wasm_dispatch::emit_event("codeinsight_namespace_cleared", serde_json::json!({
         "reason": "embed_dim_mismatch",
         "old_dim": old_dim,
-        "new_dim": EXPECTED_EMBED_DIM,
+        "new_dim": cfg.dim(),
         "keys_cleared": cleared,
     }));
-    let msg = format!("code_index: codeinsight namespace cleared on dim mismatch old={} new={} keys={}", old_dim, EXPECTED_EMBED_DIM, cleared);
+    let msg = format!("code_index: {} namespace cleared on dim mismatch old={} new={} keys={}", cfg.namespaces.code, old_dim, cfg.dim(), cleared);
     let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     true
 }
@@ -231,16 +263,33 @@ fn is_skipped_filename(name: &str) -> bool {
 }
 
 pub fn ensure_schema_at(path: &str) -> Result<(), String> {
+    ensure_schema_at_cfg(path, &crate::ragconfig::RagConfig::default())
+}
+
+pub fn ensure_schema_at_cfg(path: &str, cfg: &crate::ragconfig::RagConfig) -> Result<(), String> {
     if let Some(parent) = std::path::Path::new(path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     libsql_wasm::open(path)?;
-    let _ = drop_if_dim_mismatch(path, "code_chunks");
-    let _ = drop_if_dim_mismatch(path, "memories");
-    libsql_wasm::exec(path, "CREATE TABLE IF NOT EXISTS code_chunks (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, body TEXT, embedding F32_BLOB(384))")?;
-    libsql_wasm::exec(path, "CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, namespace TEXT, text TEXT, ts INTEGER, embedding F32_BLOB(384))")?;
-    crate::vecns::VecTableSpec { db_name: path, table: "code_chunks", index: "code_chunks_vec" }.ensure_index();
-    crate::vecns::VecTableSpec { db_name: path, table: "memories", index: "memories_vec" }.ensure_index();
+    // Both CREATEs previously spelled the width as a literal 384 while the
+    // guards above them compared against EXPECTED_EMBED_DIM -- two independent
+    // sources of truth for the same number, one of which nothing would have
+    // updated on a dim change. Both now read `cfg.dim()`, and the guard runs
+    // first so a changed dim actually drops the old-width table (a
+    // `CREATE TABLE IF NOT EXISTS` at the new width against a surviving table
+    // is a silent no-op, leaving the store queryable only at the old width).
+    let _ = drop_if_dim_mismatch_cfg(path, &cfg.code_chunks.table, &cfg.embed);
+    let _ = drop_if_dim_mismatch_cfg(path, &cfg.memories.table, &cfg.embed);
+    libsql_wasm::exec(path, &format!(
+        "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, body TEXT, embedding F32_BLOB({}))",
+        cfg.code_chunks.table, cfg.dim()
+    ))?;
+    libsql_wasm::exec(path, &format!(
+        "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, namespace TEXT, text TEXT, ts INTEGER, embedding F32_BLOB({}))",
+        cfg.memories.table, cfg.dim()
+    ))?;
+    crate::vecns::VecTableSpec::from_names(path, &cfg.code_chunks).ensure_index();
+    crate::vecns::VecTableSpec::from_names(path, &cfg.memories).ensure_index();
     Ok(())
 }
 
@@ -452,7 +501,32 @@ fn json_to_f32_vec(v: &Value) -> Option<Vec<f32>> {
     None
 }
 
-const MANIFEST_NS: &str = "codeinsight-manifest";
+// The indexing pipeline below threads no config: it is a deep call chain
+// (walk -> chunk -> embed -> persist) whose every level would need a
+// `&RagConfig` parameter to reach these three namespace names. Rather than
+// leave them as free-floating literals that a config change would silently
+// desync from, they are resolved ONCE here from the same
+// `NamespaceConfig::default()` the rest of the RAG layer defaults to.
+// Threading real config down this chain is the remaining step; until then a
+// non-default `namespaces.code` would only take effect on the query side, so
+// these deliberately resolve from defaults rather than pretending otherwise.
+fn code_ns_default() -> crate::ragconfig::NamespaceConfig {
+    crate::ragconfig::NamespaceConfig::default()
+}
+
+fn manifest_ns() -> String {
+    code_ns_default().manifest_namespace()
+}
+
+fn code_ns() -> String {
+    code_ns_default().code
+}
+
+fn code_vec_ns() -> String {
+    let ns = code_ns_default();
+    ns.vec_namespace(&ns.code)
+}
+
 const MANIFEST_VERSION: u64 = 5;
 
 #[derive(Clone)]
@@ -500,7 +574,28 @@ fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, commit
 
 fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     let parsed: Value = serde_json::from_str(val).ok()?;
-    if parsed.get("v").and_then(|v| v.as_u64()) != Some(MANIFEST_VERSION) { return None; }
+    // Accept any manifest version we know how to read forward, rather than
+    // rejecting everything that is not the current version.
+    //
+    // Rejecting on `v != MANIFEST_VERSION` looks conservative but is actively
+    // destructive here: load_manifests routes a parse failure to
+    // purge_stale_manifest_row, which fv_deletes the file's chunk keys AND its
+    // manifest row. So bumping MANIFEST_VERSION did not merely invalidate the
+    // cache -- it made every pass DELETE the entire cache and rebuild it from
+    // zero, forever, because the rewritten rows are only ever written for files
+    // that survive a pass. Live-witnessed: all 230 manifest rows on disk were
+    // v4 while the code demanded v5.
+    //
+    // Every field added since v4 is optional-with-a-sane-default on read
+    // (commit_overview: Option, digest_hash: Option), so an older row is
+    // readable as-is and is silently upgraded the next time its file is
+    // genuinely re-indexed. A row OLDER than the readable floor still returns
+    // None and is purged, which is correct -- we cannot interpret it.
+    const MIN_READABLE_MANIFEST_VERSION: u64 = 4;
+    match parsed.get("v").and_then(|v| v.as_u64()) {
+        Some(v) if v >= MIN_READABLE_MANIFEST_VERSION && v <= MANIFEST_VERSION => {}
+        _ => return None,
+    }
     let fp = parsed.get("path").and_then(|p| p.as_str())?.to_string();
     let hash = parsed.get("hash").and_then(|h| h.as_u64())? as u32;
     let digest_hash = parsed.get("digest_hash").and_then(|h| h.as_u64()).map(|h| h as u32);
@@ -593,18 +688,18 @@ fn purge_stale_manifest_row(row_key: &str, val: &str) {
         if let Some(arr) = parsed.get("chunks").and_then(|c| c.as_array()) {
             for c in arr {
                 if let Some(k) = c.get("key").and_then(|x| x.as_str()) {
-                    fv_delete("codeinsight", k);
-                    fv_delete("codeinsight-vec", k);
+                    fv_delete(&code_ns(), k);
+                    fv_delete(&code_vec_ns(), k);
                 }
             }
         }
     }
-    fv_delete(MANIFEST_NS, row_key);
+    fv_delete(&manifest_ns(), row_key);
 }
 
 fn load_manifests() -> std::collections::HashMap<String, FileManifest> {
     let mut out = std::collections::HashMap::new();
-    let rows = fv_query(MANIFEST_NS, "");
+    let rows = fv_query(&manifest_ns(), "");
     if let Some(arr) = rows.as_array() {
         for row in arr {
             let val = match row.get("value").and_then(|v| v.as_str()) { Some(v) => v, None => continue };
@@ -683,13 +778,13 @@ fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: 
         let _ = libsql_wasm::exec_params(db_path, INSERT_CHUNK_SQL, &params);
     }
     let emb_json = serde_json::json!({ "embedding": c.emb }).to_string();
-    fv_put("codeinsight", &c.key, &emb_json);
+    fv_put(&code_ns(), &c.key, &emb_json);
 }
 
 fn delete_chunk_keys(chunks: &[ChunkRecord]) {
     for c in chunks {
-        fv_delete("codeinsight", &c.key);
-        fv_delete("codeinsight-vec", &c.key);
+        fv_delete(&code_ns(), &c.key);
+        fv_delete(&code_vec_ns(), &c.key);
     }
 }
 
@@ -703,10 +798,10 @@ pub fn index(root: &str, max_files: usize) -> Value {
     }
     let kvvec_cleared = clear_codeinsight_if_dim_mismatch();
     if kvvec_cleared {
-        let rows = fv_query(MANIFEST_NS, "");
+        let rows = fv_query(&manifest_ns(), "");
         if let Some(arr) = rows.as_array() {
             for row in arr {
-                if let Some(k) = row.get("key").and_then(|k| k.as_str()) { fv_delete(MANIFEST_NS, k); }
+                if let Some(k) = row.get("key").and_then(|k| k.as_str()) { fv_delete(&manifest_ns(), k); }
             }
         }
     }
@@ -929,7 +1024,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
             records.push(rec);
         }
         let commit_overview = compute_commit_overview(fp);
-        fv_put(MANIFEST_NS, fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, &commit_overview, &records));
+        fv_put(&manifest_ns(), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, &commit_overview, &records));
     }
 
     let files_set: std::collections::HashSet<&str> = full_files.iter().map(|s| s.trim_start_matches("./").trim_start_matches('/')).collect();
@@ -937,17 +1032,38 @@ pub fn index(root: &str, max_files: usize) -> Value {
     for (fp, m) in &prior {
         if !seen.contains(fp) && !files_set.contains(fp.as_str()) {
             delete_chunk_keys(&m.chunks);
-            fv_delete(MANIFEST_NS, fp);
+            fv_delete(&manifest_ns(), fp);
             removed_files += 1;
         }
     }
+    // A partial pass MUST still persist what it converged, or the digest is
+    // never written at all on any tree big enough to exceed the wall budget --
+    // and a missing digest is treated as stale, so the very next dispatch
+    // re-indexes everything, which guarantees the next pass is also partial.
+    // That is a self-sustaining loop: live-witnessed as a permanently absent
+    // .codeinsight-digest alongside 230 manifest rows, with only 10 distinct
+    // paths ever reaching code_chunks.
+    //
+    // The digest is only a CHANGE DETECTOR, so a partial digest is still sound:
+    // it is computed from the files this pass actually accounted for, and the
+    // deferred ones simply keep their prior entries absent, which reads as
+    // "changed" next pass -- exactly the resume behaviour wanted. Marking it
+    // partial keeps the distinction visible rather than pretending convergence.
     if deferred_files == 0 {
         let digest = digest_from_entries(digest_entries);
         store_digest(&digest);
         let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} removed_files={} skipped_no_embed={} digest={}", indexed, chunked, embedded, reused, reused_files, removed_files, skipped_no_embed, digest);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     } else {
-        let msg = format!("code_index: partial pass (wall budget) files_indexed={} deferred_files={} embedded={} reused={} removed_files={} -- digest withheld, next call resumes", indexed, deferred_files, embedded, reused, removed_files);
+        // Persist the converged subset (see the rationale above). Tagged
+        // ":partial=N" so it can never be mistaken for a complete-tree digest:
+        // current_digest() always produces the untagged full-tree form, so a
+        // partial digest still compares as "changed" next pass and the resume
+        // continues -- but the file now EXISTS, which stops the
+        // never-stored/always-reindex loop that starved this cache entirely.
+        let partial_digest = format!("{}:partial={}", digest_from_entries(digest_entries), deferred_files);
+        store_digest(&partial_digest);
+        let msg = format!("code_index: partial pass (wall budget) files_indexed={} deferred_files={} embedded={} reused={} removed_files={} -- partial digest stored, next call resumes", indexed, deferred_files, embedded, reused, removed_files);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
         crate::wasm_dispatch::emit_event("codeinsight_index_partial", json!({
             "files_indexed": indexed,
@@ -1031,7 +1147,7 @@ pub fn stored_digest() -> Option<String> {
 
 pub fn store_digest(digest: &str) {
     let _ = crate::wasm_dispatch::host_write(DIGEST_PATH, digest);
-    fv_delete("codeinsight", "__digest__");
+    fv_delete(&code_ns(), "__digest__");
 }
 
 pub fn overview() -> Value {

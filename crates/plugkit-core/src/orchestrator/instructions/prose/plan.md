@@ -46,6 +46,11 @@ Unknowns -> `.gm/mutables.yml` via `mutable-add`, `status: unknown`, witness = `
 
 ## Constraints
 
+**Every PLAN pass also asks: what architectural change makes this practical and low-maintenance going forward, not just correct right now?** For each row, before accepting the literal ask as the whole scope: is there a structural change -- removing an obsolete mechanism, consolidating duplicated logic, replacing a bespoke reimplementation with a maintained one, fixing a wrong abstraction at its root instead of patching around it -- that would make this and every future instance of this work cheaper, not just this one? If yes, that is its own row alongside the literal ask, never silently skipped as "out of scope" or "nice to have." A plan that satisfies the literal request while leaving an obvious maintenance burden standing under-covers by exactly the same standard as a plan that misses a corner case.
+
+**No task is bounded; "out of scope" naming a real, reachable piece of work must never occur.** A task's actual scope is whatever its closure requires, not whatever fits an assumed limit. When a row turns out bigger, harder, or more multi-part than first estimated, fit the bound to the task -- more rows, more turns, more sessions if genuinely needed -- never the task to the bound by declaring part of it "future work" or "not yet implemented." A design doc describing what a reachable piece of work would look like, standing in place of doing that work, is documenting-instead-of-implementing wearing a scoping costume: if it is reachable this session, it is in scope by definition.
+
+**Rows are cut so that a correct implementation is the only remaining degree of freedom.** A row whose statement still admits several materially different shapes has not been planned, only named -- push the representation decision (what the data looks like, which invariant the type makes unrepresentable, where the boundary sits) into the row itself, at PLAN, where re-cutting is still cheap. Deferring that choice to EXECUTE is how a row silently becomes a redesign mid-transform.
 
 ## Dispatch
 

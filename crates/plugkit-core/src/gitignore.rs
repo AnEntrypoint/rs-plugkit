@@ -32,6 +32,13 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/disciplines/codeinsight/",
     ".gm/disciplines/codeinsight-vec/",
     ".gm/instructions-source-cache/",
+    // Materialized config repo plus config_sync.rs's per-source debounce/
+    // backoff state and lock dirs (siblings of the cache dir, hence the glob).
+    // All three are derived from the remote and are re-created on demand;
+    // committing them would put one machine's probe timestamps and a
+    // transient lock into every other checkout.
+    ".gm/config-source-cache/",
+    ".gm/config-source-cache.*",
     ".plugkit-browser-profile/",
     ".plugkit-browser-profile-*/",
 ];

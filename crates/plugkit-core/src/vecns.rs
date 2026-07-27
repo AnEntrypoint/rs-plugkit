@@ -2,7 +2,8 @@
 
 use serde_json::{json, Value};
 
-use crate::vecstore::{drop_if_dim_mismatch_at, vec_to_json_literal};
+use crate::ragconfig::{EmbedDimConfig, QueryBudgetConfig, ScoringConfig, VecTableNames};
+use crate::vecstore::{drop_if_dim_mismatch_at, drop_if_dim_mismatch_at_cfg, vec_to_json_literal};
 use crate::wasm_dispatch::unpack_to_value_pub;
 
 #[link(wasm_import_module = "env")]
@@ -62,6 +63,16 @@ pub struct VecTableSpec<'a> {
 }
 
 impl<'a> VecTableSpec<'a> {
+    /// Build a spec from configured names plus a call-time db path.
+    ///
+    /// The lifetime is tied to `names`, not to the spec, so the caller must
+    /// keep the `VecTableNames` alive for the duration -- config is owned by
+    /// the caller and passed down, never stashed in a process-global (the
+    /// plugin instance is shared across concurrently-active projects).
+    pub fn from_names(db_name: &'a str, names: &'a VecTableNames) -> VecTableSpec<'a> {
+        VecTableSpec { db_name, table: &names.table, index: &names.index }
+    }
+
     pub fn rebuild_index(&self) -> Result<(), String> {
         let _ = libsql_exec(self.db_name, &format!("DROP INDEX IF EXISTS {}", self.index));
         libsql_exec(self.db_name, &format!(
@@ -79,6 +90,15 @@ impl<'a> VecTableSpec<'a> {
 
     pub fn drop_if_dim_mismatch(&self) -> bool {
         drop_if_dim_mismatch_at(self.db_name, self.table).unwrap_or(false)
+    }
+
+    /// Config-driven mismatch guard. Every schema-ensuring path must call this
+    /// (or its default-config sibling above) BEFORE its CREATE TABLE, because
+    /// `CREATE TABLE IF NOT EXISTS` is a silent no-op against a surviving
+    /// old-width table -- the width in the CREATE would be ignored and the
+    /// store would keep answering queries with the wrong vector length.
+    pub fn drop_if_dim_mismatch_cfg(&self, cfg: &EmbedDimConfig) -> bool {
+        drop_if_dim_mismatch_at_cfg(self.db_name, self.table, cfg).unwrap_or(false)
     }
 
     pub fn exec(&self, sql: &str) -> Result<(), String> {
@@ -131,6 +151,17 @@ pub struct RecencyParams {
     pub recency_floor: f64,
 }
 
+impl RecencyParams {
+    /// Project a `ScoringConfig` onto the recency-only view `recency_score`
+    /// needs. Kept as a projection rather than replacing `RecencyParams`
+    /// outright so scoring stays a pure function of two numbers -- the cosine
+    /// floor and dedup threshold are *filtering* decisions made by the caller
+    /// before/after scoring, not inputs to the decay curve.
+    pub fn from_scoring(cfg: &ScoringConfig) -> RecencyParams {
+        RecencyParams { half_life_ms: cfg.half_life_ms, recency_floor: cfg.recency_floor }
+    }
+}
+
 pub fn recency_score(cos: f64, updated_at_ms: i64, now_ms: i64, p: &RecencyParams) -> (f64, f64) {
     let age_ms = (now_ms - updated_at_ms).max(0) as f64;
     let recency = p.recency_floor + (1.0 - p.recency_floor) * (-age_ms / p.half_life_ms).exp();
@@ -151,6 +182,15 @@ impl QueryBudget {
 impl Default for QueryBudget {
     fn default() -> Self {
         QueryBudget { pool_multiplier: 5, pool_floor: 20 }
+    }
+}
+
+impl QueryBudget {
+    /// Project a `QueryBudgetConfig` onto the pool-sizing view. The default
+    /// limit/k fields stay behind in config because they belong to the verb
+    /// layer (what a caller asked for), not to ANN retrieval sizing.
+    pub fn from_config(cfg: &QueryBudgetConfig) -> QueryBudget {
+        QueryBudget { pool_multiplier: cfg.pool_multiplier, pool_floor: cfg.pool_floor }
     }
 }
 

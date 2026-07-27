@@ -41,7 +41,31 @@ static MODEL_SAFETENSORS: &[u8] = include_bytes!("../../../weights/bge-small-en-
 static TOKENIZER_JSON: &[u8] = include_bytes!("../../../weights/bge-tokenizer.json");
 
 const EMBED_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
+
+/// The model's output width. NOT config-driven, and deliberately so: this is a
+/// property of the safetensors blob compiled into this binary (and of the
+/// host's `host_vec_embed` implementation), not a preference. Changing
+/// `ragconfig`'s `embed.dim` alone cannot make this model emit a different
+/// width -- it would only make every store expect a width the embedder never
+/// produces, and `embed_text_uncached`'s own `flat.len() != EMBED_DIM` check
+/// would then reject every vector it computed.
+///
+/// The assertion below is the tripwire: a config default that no longer
+/// matches the compiled model fails the build here, rather than shipping a
+/// binary whose stores drop-and-rebuild on every boot and never repopulate.
+/// Genuinely swapping the embedding model means replacing the weights, this
+/// constant, `bge_small_config()`'s `hidden_size`, and the ragconfig default
+/// together.
 const EMBED_DIM: usize = 384;
+
+const _: () = {
+    assert!(
+        EMBED_DIM == crate::vecstore::EXPECTED_EMBED_DIM,
+        "embed.rs's compiled model width and the vector store's expected width have diverged; \
+         a store created at one width cannot hold vectors of the other"
+    );
+};
+
 const MAX_TOKENS: usize = 512;
 
 pub const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";

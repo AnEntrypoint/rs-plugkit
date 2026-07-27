@@ -230,7 +230,9 @@ pub fn has_stored_digest(namespaces: &[String]) -> bool {
         return false;
     }
     for ns in namespaces {
-        if ns == "codeinsight" {
+        // The code namespace is fed by the tree-sitter indexer, not by
+        // markdown memory files, so it has no corpus/digest to sync here.
+        if crate::ragconfig::NamespaceConfig::default().is_code(ns) {
             continue;
         }
         if meta_digest(ns).is_none() {
@@ -314,11 +316,16 @@ fn extract_embedding(v: &Value) -> Option<Value> {
 }
 
 fn flat_vec_embedding(ns: &str, key: &str) -> Option<Value> {
-    let vec_ns = format!("{}-vec", ns);
+    let cfg = crate::ragconfig::RagConfig::default();
+    let vec_ns = cfg.namespaces.vec_namespace(ns);
     let raw = crate::wasm_dispatch::host_kv_read(&vec_ns, key)?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;
     let emb = extract_embedding(&parsed)?;
-    if emb.as_array().map(|a| a.len()).unwrap_or(0) == 384 { Some(emb) } else { None }
+    // Reject a stale-width embedding rather than handing it to a writer that
+    // would fail at the F32_BLOB column. This was a bare `== 384` literal,
+    // independent of every other place the dimension is spelled -- a config
+    // dim change would have left it silently rejecting every valid embedding.
+    if emb.as_array().map(|a| a.len()).unwrap_or(0) == cfg.dim() { Some(emb) } else { None }
 }
 
 fn remove_chunk(paths: &[String]) -> usize {
@@ -453,7 +460,9 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
     let mut converged = true;
     let mut report = Vec::new();
     'ns: for ns in namespaces {
-        if ns == "codeinsight" {
+        // The code namespace is fed by the tree-sitter indexer, not by
+        // markdown memory files, so it has no corpus/digest to sync here.
+        if crate::ragconfig::NamespaceConfig::default().is_code(ns) {
             continue;
         }
         let (digest, files) = match scan_manifest(ns) {
@@ -703,6 +712,31 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                 }
             }
             store_meta_digest(ns, &digest);
+        } else if deferred > 0 && failed == 0 && rekeyed == 0 {
+            // Record progress on a merely-DEFERRED pass (wall budget hit, but
+            // nothing failed and nothing was rekeyed), tagged so it can never
+            // be mistaken for a converged digest.
+            //
+            // Without this the digest is never stored on any corpus large
+            // enough to defer, so has_stored_digest() stays false forever and
+            // the md-index recall backend is permanently disabled -- live-
+            // witnessed as memories_md_meta holding 0 rows against 168 real
+            // memories_md_files entries, with memory_md_sync_partial
+            // (deferred=415) recurring every boot.
+            //
+            // Deliberately NOT stored when failed>0 or rekeyed>0, and the
+            // orphan-prune above stays gated on full convergence: pruning
+            // decides what to mark_deleted by diffing against the manifest, so
+            // acting on an incomplete view would delete live entries. Progress
+            // is safe to record; deletion authority is not.
+            store_meta_digest(ns, &format!("{}:partial={}", digest, deferred));
+            crate::wasm_dispatch::emit_event("memory_md_sync_partial", json!({
+                "namespace": ns,
+                "deferred": deferred,
+                "rekeyed": rekeyed,
+                "upserted": upserted,
+                "note": "partial digest stored; orphan prune withheld until a fully converged pass",
+            }));
         } else if deferred > 0 || rekeyed > 0 {
             crate::wasm_dispatch::emit_event("memory_md_sync_partial", json!({
                 "namespace": ns,

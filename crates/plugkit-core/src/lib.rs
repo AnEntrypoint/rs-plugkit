@@ -33,6 +33,12 @@ pub mod browser_witness;
 #[cfg(target_arch = "wasm32")]
 pub mod poll_detect;
 
+/// Config surface for the RAG/vector layer (namespaces, table names, embed
+/// dimension, scoring, limits). Declared ahead of its consumers so they can
+/// take `&RagConfig` rather than reading scattered consts.
+#[cfg(target_arch = "wasm32")]
+pub mod ragconfig;
+
 #[cfg(target_arch = "wasm32")]
 pub mod vecstore;
 
@@ -51,8 +57,33 @@ pub mod memory_md;
 #[cfg(target_arch = "wasm32")]
 pub mod mediator;
 
+/// The generalized cache abstraction (see module docs): namespaced get/put/
+/// invalidate over the shared libsql store, with explicit TTL staleness, a
+/// per-namespace budget, and a miss that a caller can always tell apart from a
+/// store failure. Other caches in this tree should route through it, and other
+/// plugins can reach it over host_plugin_call via the cache_* verbs.
+#[cfg(target_arch = "wasm32")]
+pub mod cache;
+
+/// Versioned inter-plugin call envelope + error taxonomy (see module docs).
+/// The frozen contract essential plugins are cast against; strictly additive
+/// over the unmodified `wasm_dispatch::plugin_call`.
+#[cfg(target_arch = "wasm32")]
+pub mod plugin_abi;
+
 pub mod pkfs;
 pub mod prose;
+/// 4-tier config resolution (project-vendored -> in-project repo spec ->
+/// user-wide repo spec -> builtin defaults). Generalizes prose.rs's 3-tier
+/// instruction-override chain; see the module docs for merge semantics.
+pub mod config;
+/// Git-backed materialization of the repo-sourced config tiers: the
+/// `config::RepoFetcher` implementation config.rs declares as a seam. Probes
+/// with `ls-remote` and fetches only on a real sha change, debounced and
+/// backed off per source; see the module docs for the offline/concurrency
+/// contract it owes the shared plugin instance.
+#[cfg(target_arch = "wasm32")]
+pub mod config_sync;
 pub mod orchestrator;
 pub mod filter;
 pub mod validation;

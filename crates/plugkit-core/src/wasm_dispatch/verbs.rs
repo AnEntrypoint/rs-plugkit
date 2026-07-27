@@ -301,10 +301,14 @@ fn discipline_fanout_namespaces(base: &str) -> Vec<String> {
 fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do_sync: bool) -> (Value, Option<Vec<String>>) {
     let namespaces = discipline_fanout_namespaces(namespace);
     let now_ms = unsafe { host_now_ms() } as i64;
+    let cfg = crate::ragconfig::RagConfig::default();
     let mut memory_namespaces: Vec<String> = Vec::new();
     for ns in &namespaces {
-        if ns == "codeinsight" {
-            if let Err(e) = crate::rssearch_vectors::migrate_namespace_from_flat_json(ns, now_ms) {
+        // The code namespace's embeddings live in the flat-JSON kv store and
+        // are migrated into the vector table; every other namespace is backed
+        // by markdown memory files and syncs instead.
+        if cfg.namespaces.is_code(ns) {
+            if let Err(e) = crate::rssearch_vectors::migrate_namespace_from_flat_json_cfg(ns, now_ms, &cfg) {
                 emit_event("rssearch_vectors_migration_failed", json!({ "namespace": ns, "error": e }));
             }
         } else {
@@ -322,7 +326,7 @@ fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do
     } else {
         crate::memory_md::has_stored_digest(&memory_namespaces)
     };
-    let hits = match crate::rssearch_vectors::search_with_recency(query_embedding, &namespaces, limit as usize, now_ms) {
+    let hits = match crate::rssearch_vectors::search_with_recency_cfg(query_embedding, &namespaces, limit as usize, now_ms, &cfg) {
         Ok(hits) => hits,
         Err(e) => {
             emit_event("rssearch_vector_hits_failed", json!({
@@ -342,15 +346,17 @@ pub fn memory_recall_backend(query_embedding: &Value, namespace: &str, limit: u3
     let (_, mem_ns) = rssearch_vector_hits(query_embedding, namespace, limit, true);
     let mem_ns = mem_ns?;
     let now_ms = unsafe { host_now_ms() } as i64;
-    crate::rssearch_vectors::search_memory_hits(query_embedding, &mem_ns, limit as usize, now_ms, 0.0)
+    let cfg = crate::ragconfig::RagConfig::default();
+    crate::rssearch_vectors::search_memory_hits_cfg(query_embedding, &mem_ns, limit as usize, now_ms, &cfg)
         .ok()
         .filter(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
 }
 
 fn recall(body: &Value) -> u64 {
+    let cfg = crate::ragconfig::RagConfig::default();
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
-    let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(8) as u32;
-    let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_limit as u64) as u32;
+    let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or(&cfg.namespaces.default);
     if query.is_empty() { return err("recall", "query required"); }
     check_sigil_ignored(query, namespace);
     let derived_query = query.to_string();
@@ -358,7 +364,7 @@ fn recall(body: &Value) -> u64 {
     let (vector_hits, mem_ns) = rssearch_vector_hits(&embedding, namespace, limit, false);
     if let Some(mem_ns) = &mem_ns {
         let now_ms = unsafe { host_now_ms() } as i64;
-        if let Ok(md_hits) = crate::rssearch_vectors::search_memory_hits(&embedding, mem_ns, limit as usize, now_ms, 0.0) {
+        if let Ok(md_hits) = crate::rssearch_vectors::search_memory_hits_cfg(&embedding, mem_ns, limit as usize, now_ms, &cfg) {
             if md_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
                 return ok("recall", json!({
                     "mode": "vector_top_k",
@@ -601,12 +607,13 @@ fn memorize_prune(body: &Value) -> u64 {
 }
 
 fn codesearch(body: &Value) -> u64 {
+    let cfg = crate::ragconfig::RagConfig::default();
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
-    let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
+    let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_k as u64) as u32;
     if query.is_empty() { return err("codesearch", "query required"); }
     if body.get("rebuild").and_then(|v| v.as_bool()).unwrap_or(false)
         && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let cleared = crate::code_index::clear_codeinsight_full();
+        let cleared = crate::code_index::clear_codeinsight_full_cfg(&cfg);
         emit_event("codeinsight_rebuild", json!({ "reason": "explicit-rebuild", "keys_cleared": cleared }));
         let _ = crate::code_index::index(".", 500);
         let mut retry = body.clone();
@@ -632,10 +639,15 @@ fn codesearch(body: &Value) -> u64 {
             return codesearch(&retry);
         }
     }
-    let cand_k = k.saturating_mul(5).max(50);
+    // Fusion re-ranks vector and BM25 lists against each other, so each list
+    // must be deeper than k or a hit that only fusion would surface can never
+    // enter the candidate pool. Same reason the ANN pool overshoots in
+    // rssearch_vectors; the multiplier/floor are the shared budget knobs.
+    let cand_k = cfg.budget.pool(k as usize).max(50) as u32;
     let embedding = embed_query(query);
-    let (vector_hits, _) = rssearch_vector_hits(&embedding, "codeinsight", k, false);
-    let vec_hits = vec_search_local(&embedding, "codeinsight", cand_k);
+    let code_ns = cfg.namespaces.code.as_str();
+    let (vector_hits, _) = rssearch_vector_hits(&embedding, code_ns, k, false);
+    let vec_hits = vec_search_local(&embedding, code_ns, cand_k);
     let vec_ids: Vec<String> = vec_hits.as_array().map(|a| {
         a.iter().filter_map(|h| h.get("key").and_then(|x| x.as_str()).map(String::from)).collect()
     }).unwrap_or_default();
@@ -694,7 +706,7 @@ fn codesearch(body: &Value) -> u64 {
             "vector_top10": vector_top10, "bm25_top10": bm25_top10,
         }));
     }
-    let ns = "codeinsight";
+    let ns = cfg.namespaces.code.as_str();
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, query.as_ptr(), query.len() as u32) };
     let hits = unpack_to_value(packed);
     let kv_empty = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
@@ -955,6 +967,105 @@ fn sql_query(body: &Value) -> u64 {
         ok("sql_query", json!({ "rows": rows }))
     } else {
         err("sql_query", &plugin_error(&resp, "query failed"))
+    }
+}
+
+/// Cache config for a verb call.
+///
+/// Overrides arrive per-call rather than from a stored profile because the
+/// plugin instance is shared across concurrently-active projects: a config
+/// cached in a process-global would leak one project's budgets into another's
+/// cache operations. Anything absent falls back to `cache::DEFAULTS`, which is
+/// the single place the defaults live.
+fn cache_cfg_from(body: &Value) -> crate::cache::CacheConfig {
+    let mut cfg = crate::cache::DEFAULTS;
+    if let Some(n) = body.get("max_entries_per_namespace").and_then(|v| v.as_u64()) {
+        cfg.max_entries_per_namespace = n as usize;
+    }
+    if let Some(n) = body.get("max_bytes_per_namespace").and_then(|v| v.as_u64()) {
+        cfg.max_bytes_per_namespace = n as usize;
+    }
+    if let Some(n) = body.get("max_value_bytes").and_then(|v| v.as_u64()) {
+        cfg.max_value_bytes = n as usize;
+    }
+    if let Some(n) = body.get("default_ttl_ms").and_then(|v| v.as_i64()) {
+        cfg.default_ttl_ms = Some(n);
+    }
+    cfg
+}
+
+/// Surface a cache failure with its machine-readable class attached, so a
+/// caller reaching this over host_plugin_call can branch on `error_kind`
+/// without parsing the message.
+fn cache_err(verb: &str, e: crate::cache::CacheError) -> u64 {
+    err_json(verb, json!({ "error": e.message(), "error_kind": e.kind() }))
+}
+
+/// A miss reports `ok:true, hit:false`; a store failure reports `ok:false`.
+/// Keeping those distinct across the verb boundary is the whole point of the
+/// cache contract -- collapsing them here would reintroduce, at the wire level,
+/// exactly the ambiguity the recall fix removed from the in-process path.
+fn cache_get(body: &Value) -> u64 {
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let cfg = cache_cfg_from(body);
+    match crate::cache::get(&cfg, ns, key) {
+        Ok(Some(entry)) => ok("cache_get", json!({ "hit": true, "entry": entry.to_json() })),
+        Ok(None) => ok("cache_get", json!({ "hit": false, "namespace": ns, "key": key })),
+        Err(e) => cache_err("cache_get", e),
+    }
+}
+
+fn cache_put(body: &Value) -> u64 {
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let value = match body.get("value") {
+        // A non-string value is serialized rather than rejected, so a caller can
+        // cache a JSON object directly; the stored hash then covers exactly the
+        // bytes that come back out of cache_get.
+        Some(Value::String(s)) => s.clone(),
+        Some(v) if !v.is_null() => v.to_string(),
+        _ => return err("cache_put", "value required"),
+    };
+    let ttl = body.get("ttl_ms").and_then(|v| v.as_i64());
+    let cfg = cache_cfg_from(body);
+    match crate::cache::put(&cfg, ns, key, &value, ttl) {
+        Ok(hash) => ok("cache_put", json!({ "content_hash": hash, "bytes": value.len() })),
+        Err(e) => cache_err("cache_put", e),
+    }
+}
+
+fn cache_invalidate(body: &Value) -> u64 {
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+    let cfg = cache_cfg_from(body);
+    // No key means the whole namespace. Both report how much was live
+    // beforehand so the caller can tell a real invalidation from a no-op.
+    match body.get("key").and_then(|v| v.as_str()).filter(|k| !k.is_empty()) {
+        Some(key) => match crate::cache::invalidate(&cfg, ns, key) {
+            Ok(existed) => ok("cache_invalidate", json!({ "removed": existed })),
+            Err(e) => cache_err("cache_invalidate", e),
+        },
+        None => match crate::cache::invalidate_namespace(&cfg, ns) {
+            Ok(n) => ok("cache_invalidate", json!({ "removed": n, "namespace": ns })),
+            Err(e) => cache_err("cache_invalidate", e),
+        },
+    }
+}
+
+fn cache_stats(body: &Value) -> u64 {
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+    let cfg = cache_cfg_from(body);
+    match crate::cache::stats(&cfg, ns) {
+        Ok((entries, bytes)) => ok("cache_stats", json!({
+            "namespace": ns,
+            "entries": entries,
+            "bytes": bytes,
+            "max_entries_per_namespace": cfg.max_entries_per_namespace,
+            "max_bytes_per_namespace": cfg.max_bytes_per_namespace,
+            "max_value_bytes": cfg.max_value_bytes,
+            "default_ttl_ms": cfg.default_ttl_ms,
+        })),
+        Err(e) => cache_err("cache_stats", e),
     }
 }
 
@@ -1585,6 +1696,10 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "sql_smoke" => sql_smoke(),
         "sql_serialize" => sql_serialize(&body),
         "sql_deserialize" => sql_deserialize(&body),
+        "cache_get" => cache_get(&body),
+        "cache_put" => cache_put(&body),
+        "cache_invalidate" => cache_invalidate(&body),
+        "cache_stats" => cache_stats(&body),
         "codeinsight_index" => codeinsight_index(&body),
         "codesearch" => codesearch(&body),
         "memorize" => memorize_with_raw(&body, &body_s),

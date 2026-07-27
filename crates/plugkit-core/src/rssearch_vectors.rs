@@ -2,28 +2,33 @@
 
 use serde_json::{json, Value};
 
+use crate::ragconfig::RagConfig;
 use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
 use crate::vecns::{self, QueryBudget, RecencyParams, VecTableSpec};
-use crate::vecstore::EXPECTED_EMBED_DIM;
 
-const TABLE: &str = "rssearch_vectors";
-const INDEX: &str = "rssearch_vectors_vec";
-const HALF_LIFE_MS: f64 = 30.0 * 24.0 * 60.0 * 60.0 * 1000.0;
-const RECENCY_FLOOR: f64 = 0.4;
-
-const RECENCY: RecencyParams = RecencyParams { half_life_ms: HALF_LIFE_MS, recency_floor: RECENCY_FLOOR };
-const BUDGET: QueryBudget = QueryBudget { pool_multiplier: 5, pool_floor: 20 };
+/// Ambient config for the existing non-`_cfg` entry points.
+///
+/// Every public function here has a `_cfg` twin taking `&RagConfig`; the
+/// original name keeps its signature and forwards through this so the ~10
+/// call sites in `verbs.rs`/`memory_md.rs` need not change until a resolution
+/// layer actually has something to hand them. Constructed per call rather than
+/// cached in a `static`, because the plugin instance is process-wide and
+/// shared across concurrently-active projects -- a cached config would let one
+/// project's knowledgebase settings answer another project's query.
+fn default_cfg() -> RagConfig {
+    RagConfig::default()
+}
 
 fn shared_db_path() -> String {
     crate::code_index::project_db_path(None)
 }
 
-fn spec(path: &str) -> VecTableSpec<'_> {
-    VecTableSpec { db_name: path, table: TABLE, index: INDEX }
+fn spec<'a>(path: &'a str, cfg: &'a RagConfig) -> VecTableSpec<'a> {
+    VecTableSpec::from_names(path, &cfg.rssearch)
 }
 
-fn has_deleted_column(path: &str) -> bool {
-    let sql = format!("SELECT name FROM pragma_table_info('{}') WHERE name = 'deleted'", TABLE);
+fn has_deleted_column(path: &str, cfg: &RagConfig) -> bool {
+    let sql = format!("SELECT name FROM pragma_table_info('{}') WHERE name = 'deleted'", cfg.rssearch.table);
     let resp = crate::wasm_dispatch::plugin_call("libsql", "query", &json!({ "db": SHARED_DB, "path": path, "sql": sql }));
     if resp.get("ok").and_then(Value::as_bool) != Some(true) {
         return false;
@@ -32,20 +37,28 @@ fn has_deleted_column(path: &str) -> bool {
 }
 
 pub fn ensure_schema() -> Result<(), String> {
+    ensure_schema_cfg(&default_cfg())
+}
+
+pub fn ensure_schema_cfg(cfg: &RagConfig) -> Result<(), String> {
     let path = shared_db_path();
     shared_ensure_open(&path)?;
-    let _ = spec(&path).drop_if_dim_mismatch();
+    // ORDER IS LOAD-BEARING: the mismatch guard runs before the CREATE, so a
+    // config-driven `embed.dim` change destroys the old-width table first.
+    // Reversing this makes the CREATE a no-op against the surviving table and
+    // leaves the store answering queries at the previous vector width.
+    let _ = spec(&path, cfg).drop_if_dim_mismatch_cfg(&cfg.embed);
     shared_exec(&format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, namespace TEXT NOT NULL, key TEXT NOT NULL, text TEXT, embedding F32_BLOB({}), updated_at INTEGER, deleted INTEGER NOT NULL DEFAULT 0, UNIQUE(namespace, key))",
-        TABLE, EXPECTED_EMBED_DIM
+        cfg.rssearch.table, cfg.dim()
     ))?;
-    if !has_deleted_column(&path) {
+    if !has_deleted_column(&path, cfg) {
         shared_exec(&format!(
             "ALTER TABLE {} ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
-            TABLE
+            cfg.rssearch.table
         ))?;
     }
-    spec(&path).ensure_index();
+    spec(&path, cfg).ensure_index();
     Ok(())
 }
 
@@ -54,23 +67,37 @@ fn json_to_f32_vec(v: &Value) -> Option<Vec<f32>> {
 }
 
 pub fn write(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: i64) -> Result<(), String> {
+    write_cfg(namespace, key, text, embedding, now_ms, &default_cfg())
+}
+
+pub fn write_cfg(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: i64, cfg: &RagConfig) -> Result<(), String> {
     let vec = match json_to_f32_vec(embedding) {
         Some(v) if !v.is_empty() => v,
         _ => return Err("rssearch_vectors: empty or non-array embedding; refusing NULL-embedding row".to_string()),
     };
-    if let Err(e) = ensure_schema() {
+    // A row whose width disagrees with the column would be rejected by libsql
+    // at INSERT with an opaque error; reject it here instead, naming both
+    // widths, so a half-migrated embedder is diagnosable rather than just
+    // "insert failed".
+    if vec.len() != cfg.dim() {
+        return Err(format!(
+            "rssearch_vectors: embedding dim {} does not match configured dim {}; refusing to write a row the F32_BLOB column cannot hold",
+            vec.len(), cfg.dim()
+        ));
+    }
+    if let Err(e) = ensure_schema_cfg(cfg) {
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
     }
-    let delete_sql = format!("DELETE FROM {} WHERE namespace=?1 AND key=?2", TABLE);
+    let delete_sql = format!("DELETE FROM {} WHERE namespace=?1 AND key=?2", cfg.rssearch.table);
     let embedding_sql = format!("vector('{}')", vecns::qlit(&vec));
     let sql = format!(
         "INSERT INTO {}(namespace, key, text, embedding, updated_at, deleted) VALUES(?1,?2,?3,{},?4,0)",
-        TABLE, embedding_sql
+        cfg.rssearch.table, embedding_sql
     );
     let now_s = now_ms.to_string();
     let path = shared_db_path();
     vecns::delete_then_insert_with_recovery(
-        &spec(&path),
+        &spec(&path, cfg),
         |s| s.exec_params(&delete_sql, &[namespace, key]),
         &sql, &[namespace, key, text, &now_s],
         |e| {
@@ -82,25 +109,37 @@ pub fn write(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: 
 }
 
 pub fn mark_deleted(namespace: &str, key: &str) -> Result<(), String> {
-    if let Err(e) = ensure_schema() {
+    mark_deleted_cfg(namespace, key, &default_cfg())
+}
+
+pub fn mark_deleted_cfg(namespace: &str, key: &str, cfg: &RagConfig) -> Result<(), String> {
+    if let Err(e) = ensure_schema_cfg(cfg) {
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
     }
-    let sql = format!("UPDATE {} SET deleted=1 WHERE namespace=?1 AND key=?2", TABLE);
+    let sql = format!("UPDATE {} SET deleted=1 WHERE namespace=?1 AND key=?2", cfg.rssearch.table);
     shared_exec_params(&sql, &[namespace, key])
 }
 
 pub fn undelete(namespace: &str, key: &str, updated_at_ms: i64) -> Result<(), String> {
-    if let Err(e) = ensure_schema() {
+    undelete_cfg(namespace, key, updated_at_ms, &default_cfg())
+}
+
+pub fn undelete_cfg(namespace: &str, key: &str, updated_at_ms: i64, cfg: &RagConfig) -> Result<(), String> {
+    if let Err(e) = ensure_schema_cfg(cfg) {
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
     }
     let upd = updated_at_ms.to_string();
-    let sql = format!("UPDATE {} SET deleted=0, updated_at=?1 WHERE namespace=?2 AND key=?3", TABLE);
+    let sql = format!("UPDATE {} SET deleted=0, updated_at=?1 WHERE namespace=?2 AND key=?3", cfg.rssearch.table);
     shared_exec_params(&sql, &[&upd, namespace, key])
 }
 
 pub fn row_count(namespace: &str) -> Option<i64> {
-    ensure_schema().ok()?;
-    let sql = format!("SELECT COUNT(*) AS n FROM {} WHERE namespace=?1", TABLE);
+    row_count_cfg(namespace, &default_cfg())
+}
+
+pub fn row_count_cfg(namespace: &str, cfg: &RagConfig) -> Option<i64> {
+    ensure_schema_cfg(cfg).ok()?;
+    let sql = format!("SELECT COUNT(*) AS n FROM {} WHERE namespace=?1", cfg.rssearch.table);
     let rows = shared_query_params(&sql, &[namespace]).ok()?;
     rows.as_array()?.first()?.get("n")?.as_i64()
 }
@@ -121,24 +160,44 @@ where
     }
 }
 
-pub fn search_with_recency(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64) -> Result<Value, String> {
-    let qvec = json_to_f32_vec(query_embedding)
-        .ok_or_else(|| "rssearch_vectors search_with_recency: invalid query embedding".to_string())?;
-    ensure_schema()?;
-    let qlit = vecns::qlit(&qvec);
-    let pool = BUDGET.pool(limit);
+/// Build the ANN-retrieval SQL shared by both search entry points.
+///
+/// The `pool` (not `limit`) is used for BOTH `vector_top_k`'s k and the outer
+/// LIMIT: recency reweighting and dedup happen after retrieval, so a hit that
+/// wins on final score can sit outside the top-`limit` by raw cosine. Cutting
+/// to `limit` here would make the reranker structurally unable to change the
+/// result set.
+fn ann_query_sql(namespaces: &[String], pool: usize, cfg: &RagConfig) -> String {
+    // Namespace placeholders start at ?3 because ?1/?2 are both the query
+    // vector literal (once for the distance projection, once for the index
+    // probe).
     let ns_placeholders: Vec<String> = (0..namespaces.len()).map(|i| format!("?{}", i + 3)).collect();
     let ns_filter = if namespaces.is_empty() {
         String::new()
     } else {
         format!(" AND r.namespace IN ({})", ns_placeholders.join(","))
     };
-    let sql = format!(
+    format!(
         "SELECT r.namespace, r.key, r.text, r.updated_at, vector_distance_cos(r.embedding, vector(?1)) AS distance \
          FROM vector_top_k('{}', vector(?2), {}) AS v JOIN {} AS r ON r.rowid = v.id \
          WHERE r.deleted=0{} ORDER BY distance ASC LIMIT {}",
-        INDEX, pool, TABLE, ns_filter, pool
-    );
+        cfg.rssearch.index, pool, cfg.rssearch.table, ns_filter, pool
+    )
+}
+
+pub fn search_with_recency(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64) -> Result<Value, String> {
+    search_with_recency_cfg(query_embedding, namespaces, limit, now_ms, &default_cfg())
+}
+
+pub fn search_with_recency_cfg(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64, cfg: &RagConfig) -> Result<Value, String> {
+    let qvec = json_to_f32_vec(query_embedding)
+        .ok_or_else(|| "rssearch_vectors search_with_recency: invalid query embedding".to_string())?;
+    ensure_schema_cfg(cfg)?;
+    let recency_params = RecencyParams::from_scoring(&cfg.scoring);
+    let budget = QueryBudget::from_config(&cfg.budget);
+    let qlit = vecns::qlit(&qvec);
+    let pool = budget.pool(limit);
+    let sql = ann_query_sql(namespaces, pool, cfg);
     let mut params: Vec<&str> = vec![&qlit, &qlit];
     for n in namespaces { params.push(n.as_str()); }
     let rows = recover_and_retry(|| shared_query_params(&sql, &params))?;
@@ -147,8 +206,15 @@ pub fn search_with_recency(query_embedding: &Value, namespaces: &[String], limit
     for row in arr {
         let distance = row.get("distance").and_then(|d| d.as_f64()).unwrap_or(2.0);
         let cos = 1.0 - distance;
+        // This path historically applied NO cosine floor, and still does not
+        // by default (ScoringConfig::cos_floor is 0.0). Honouring it here too
+        // means an operator who raises the floor gets it on BOTH search
+        // surfaces rather than only on the memory-hits one.
+        if cos < cfg.scoring.cos_floor {
+            continue;
+        }
         let updated_at = row.get("updated_at").and_then(|u| u.as_i64()).unwrap_or(now_ms);
-        let (recency, score) = vecns::recency_score(cos, updated_at, now_ms, &RECENCY);
+        let (recency, score) = vecns::recency_score(cos, updated_at, now_ms, &recency_params);
         let mut obj = row.as_object().cloned().unwrap_or_default();
         obj.insert("cos".to_string(), json!(cos));
         obj.insert("recency".to_string(), json!(recency));
@@ -178,24 +244,28 @@ fn jaccard_overlap(a: &str, b: &str) -> f64 {
 }
 
 pub fn search_memory_hits(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64, cos_floor: f64) -> Result<Value, String> {
-    const DEDUP_JACCARD: f64 = 0.7;
+    // The explicit `cos_floor` argument WINS over config here. Both live call
+    // sites in verbs.rs pass 0.0, and the wrapper's per-namespace floor (the
+    // codeinsight COS_FLOOR) arrives through this argument -- so treating
+    // config as an override would silently discard a caller's deliberate,
+    // narrower choice.
+    let mut cfg = default_cfg();
+    cfg.scoring.cos_floor = cos_floor;
+    search_memory_hits_cfg(query_embedding, namespaces, limit, now_ms, &cfg)
+}
+
+/// Config-driven form. `cfg.scoring.cos_floor` is the floor -- there is no
+/// separate argument, so a knowledgebase's configured floor cannot be
+/// accidentally bypassed by a call site that forgets to pass it.
+pub fn search_memory_hits_cfg(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64, cfg: &RagConfig) -> Result<Value, String> {
     let qvec = json_to_f32_vec(query_embedding)
         .ok_or_else(|| "rssearch_vectors search_memory_hits: invalid query embedding".to_string())?;
-    ensure_schema()?;
+    ensure_schema_cfg(cfg)?;
+    let recency_params = RecencyParams::from_scoring(&cfg.scoring);
+    let budget = QueryBudget::from_config(&cfg.budget);
     let qlit = vecns::qlit(&qvec);
-    let pool = BUDGET.pool(limit);
-    let ns_placeholders: Vec<String> = (0..namespaces.len()).map(|i| format!("?{}", i + 3)).collect();
-    let ns_filter = if namespaces.is_empty() {
-        String::new()
-    } else {
-        format!(" AND r.namespace IN ({})", ns_placeholders.join(","))
-    };
-    let sql = format!(
-        "SELECT r.namespace, r.key, r.text, r.updated_at, vector_distance_cos(r.embedding, vector(?1)) AS distance \
-         FROM vector_top_k('{}', vector(?2), {}) AS v JOIN {} AS r ON r.rowid = v.id \
-         WHERE r.deleted=0{} ORDER BY distance ASC LIMIT {}",
-        INDEX, pool, TABLE, ns_filter, pool
-    );
+    let pool = budget.pool(limit);
+    let sql = ann_query_sql(namespaces, pool, cfg);
     let mut params: Vec<&str> = vec![&qlit, &qlit];
     for n in namespaces { params.push(n.as_str()); }
     let rows = recover_and_retry(|| shared_query_params(&sql, &params))?;
@@ -204,11 +274,11 @@ pub fn search_memory_hits(query_embedding: &Value, namespaces: &[String], limit:
     for row in arr {
         let distance = row.get("distance").and_then(|d| d.as_f64()).unwrap_or(2.0);
         let cos = 1.0 - distance;
-        if cos < cos_floor {
+        if cos < cfg.scoring.cos_floor {
             continue;
         }
         let updated_at = row.get("updated_at").and_then(|u| u.as_i64()).unwrap_or(now_ms);
-        let (recency, score) = vecns::recency_score(cos, updated_at, now_ms, &RECENCY);
+        let (recency, score) = vecns::recency_score(cos, updated_at, now_ms, &recency_params);
         let hit = json!({
             "key": row.get("key").cloned().unwrap_or(Value::Null),
             "namespace": row.get("namespace").cloned().unwrap_or(Value::Null),
@@ -224,7 +294,7 @@ pub fn search_memory_hits(query_embedding: &Value, namespaces: &[String], limit:
     for (_, hit) in scored {
         let text = hit.get("text").and_then(|t| t.as_str()).unwrap_or("");
         let dup = out.iter().any(|kept| {
-            jaccard_overlap(text, kept.get("text").and_then(|t| t.as_str()).unwrap_or("")) >= DEDUP_JACCARD
+            jaccard_overlap(text, kept.get("text").and_then(|t| t.as_str()).unwrap_or("")) >= cfg.scoring.dedup_jaccard
         });
         if !dup {
             out.push(hit);
@@ -260,24 +330,28 @@ fn host_kv_query_raw(namespace: &str, query: &str) -> Value {
 const MIGRATE_BUDGET_MS: u64 = 2000;
 
 pub fn migrate_namespace_from_flat_json(namespace: &str, now_ms: i64) -> Result<Value, String> {
+    migrate_namespace_from_flat_json_cfg(namespace, now_ms, &default_cfg())
+}
+
+pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &RagConfig) -> Result<Value, String> {
     if namespace.is_empty() {
         return Err("migrate_namespace_from_flat_json: namespace required".to_string());
     }
-    ensure_schema()?;
-    let vec_ns = format!("{}-vec", namespace);
+    ensure_schema_cfg(cfg)?;
+    let vec_ns = cfg.namespaces.vec_namespace(namespace);
     let vec_entries = host_kv_query_raw(&vec_ns, "");
     let entries = match vec_entries.as_array() {
         Some(a) if !a.is_empty() => a.clone(),
         _ => return Ok(json!({ "migrated": false, "reason": "no-flat-json-entries", "namespace": namespace })),
     };
     let flat_total = entries.iter().filter(|e| e.get("key").and_then(|k| k.as_str()).map(|k| k != "__digest__").unwrap_or(false)).count() as i64;
-    let existing = row_count(namespace).unwrap_or(0);
+    let existing = row_count_cfg(namespace, cfg).unwrap_or(0);
     if existing >= flat_total {
         return Ok(json!({ "migrated": false, "reason": "already-populated", "existing_rows": existing }));
     }
     let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(rows) = shared_query_params(
-        &format!("SELECT key FROM {} WHERE namespace=?1", TABLE),
+        &format!("SELECT key FROM {} WHERE namespace=?1", cfg.rssearch.table),
         &[namespace],
     ) {
         if let Some(arr) = rows.as_array() {
@@ -297,8 +371,10 @@ pub fn migrate_namespace_from_flat_json(namespace: &str, now_ms: i64) -> Result<
             }
         }
     }
-    let is_codeinsight = namespace == "codeinsight";
-    let mut corpus = if is_codeinsight { Some(crate::code_index::FusionCorpus::load()) } else { None };
+    // Only the code namespace has a tree-sitter corpus to recover chunk text
+    // from; every other namespace's text lives in the flat kv store.
+    let is_code_ns = cfg.namespaces.is_code(namespace);
+    let mut corpus = if is_code_ns { Some(crate::code_index::FusionCorpus::load()) } else { None };
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut migrated = 0u32;
     let mut skipped = 0u32;
@@ -318,7 +394,7 @@ pub fn migrate_namespace_from_flat_json(namespace: &str, now_ms: i64) -> Result<
         let text = text_by_key.get(key).cloned()
             .or_else(|| corpus.as_mut().and_then(|c| c.text_for_key(key)))
             .unwrap_or_default();
-        match write(namespace, key, &text, &embedding, now_ms) {
+        match write_cfg(namespace, key, &text, &embedding, now_ms, cfg) {
             Ok(()) => migrated += 1,
             Err(e) => {
                 if skipped == 0 {

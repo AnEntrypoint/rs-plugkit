@@ -2,43 +2,52 @@
 
 use serde_json::{json, Value};
 
+use crate::ragconfig::RagConfig;
 use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
 use crate::vecns::{self, QueryBudget, VecTableSpec};
-use crate::vecstore::EXPECTED_EMBED_DIM;
 use crate::wasm_dispatch::plugin_call;
 
-const TABLE: &str = "git_commit_vectors";
-const INDEX: &str = "git_commit_vectors_vec";
 const EMBED_BUDGET_MS: u64 = 30000;
 const MIN_EMBEDS_PER_PASS: u32 = 8;
 const DIFF_CHAR_CAP: usize = 4000;
 const LOG_WINDOW: usize = 500;
 
-const BUDGET: QueryBudget = QueryBudget { pool_multiplier: 5, pool_floor: 20 };
+/// See `rssearch_vectors::default_cfg` -- constructed per call, never cached,
+/// because the plugin instance is shared across concurrently-active projects.
+fn default_cfg() -> RagConfig {
+    RagConfig::default()
+}
 
 fn shared_db_path() -> String {
     crate::code_index::project_db_path(None)
 }
 
-fn spec(path: &str) -> VecTableSpec<'_> {
-    VecTableSpec { db_name: path, table: TABLE, index: INDEX }
+fn spec<'a>(path: &'a str, cfg: &'a RagConfig) -> VecTableSpec<'a> {
+    VecTableSpec::from_names(path, &cfg.git_commits)
 }
 
 pub fn ensure_schema() -> Result<(), String> {
+    ensure_schema_cfg(&default_cfg())
+}
+
+pub fn ensure_schema_cfg(cfg: &RagConfig) -> Result<(), String> {
     let path = shared_db_path();
     shared_ensure_open(&path)?;
-    let _ = spec(&path).drop_if_dim_mismatch();
+    // Mismatch guard BEFORE the CREATE -- see the identical ordering note in
+    // rssearch_vectors::ensure_schema_cfg. `CREATE TABLE IF NOT EXISTS` will
+    // not widen a surviving column.
+    let _ = spec(&path, cfg).drop_if_dim_mismatch_cfg(&cfg.embed);
     shared_exec(&format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE, message TEXT, embedding F32_BLOB({}), updated_at INTEGER, deleted INTEGER NOT NULL DEFAULT 0)",
-        TABLE, EXPECTED_EMBED_DIM
+        cfg.git_commits.table, cfg.dim()
     ))?;
-    spec(&path).ensure_index();
+    spec(&path, cfg).ensure_index();
     Ok(())
 }
 
-fn read_watermark() -> Option<String> {
+fn read_watermark(cfg: &RagConfig) -> Option<String> {
     let path = shared_db_path();
-    let sql = format!("SELECT hash FROM {} ORDER BY id DESC LIMIT 1", TABLE);
+    let sql = format!("SELECT hash FROM {} ORDER BY id DESC LIMIT 1", cfg.git_commits.table);
     let resp = plugin_call("libsql", "query", &json!({ "db": SHARED_DB, "path": path, "sql": sql, "params": [] }));
     if !resp.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
         return None;
@@ -82,7 +91,11 @@ fn commit_diff_text(hash: &str) -> String {
 }
 
 pub fn sync_incremental() -> Result<Value, String> {
-    ensure_schema()?;
+    sync_incremental_cfg(&default_cfg())
+}
+
+pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
+    ensure_schema_cfg(cfg)?;
     let db_path = shared_db_path();
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let log = crate::wasm_dispatch::git_call(
@@ -101,13 +114,13 @@ pub fn sync_incremental() -> Result<Value, String> {
     }
 
     let live_hashes: std::collections::HashSet<&str> = entries.iter().map(|(h, _)| h.as_str()).collect();
-    if let Ok(rows) = shared_query_params(&format!("SELECT hash FROM {} WHERE deleted=0", TABLE), &[]) {
+    if let Ok(rows) = shared_query_params(&format!("SELECT hash FROM {} WHERE deleted=0", cfg.git_commits.table), &[]) {
         if let Some(arr) = rows.as_array() {
             for row in arr {
                 if let Some(h) = row.get("hash").and_then(|v| v.as_str()) {
                     if !live_hashes.contains(h) {
                         let _ = shared_exec_params(
-                            &format!("UPDATE {} SET deleted=1 WHERE hash=?1", TABLE),
+                            &format!("UPDATE {} SET deleted=1 WHERE hash=?1", cfg.git_commits.table),
                             &[h],
                         );
                         crate::wasm_dispatch::emit_event("git_commit_vector_reconciled_deleted", json!({ "hash": h }));
@@ -117,9 +130,9 @@ pub fn sync_incremental() -> Result<Value, String> {
         }
     }
 
-    let watermark = read_watermark();
+    let watermark = read_watermark(cfg);
     let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Ok(rows) = shared_query_params(&format!("SELECT hash FROM {}", TABLE), &[]) {
+    if let Ok(rows) = shared_query_params(&format!("SELECT hash FROM {}", cfg.git_commits.table), &[]) {
         if let Some(arr) = rows.as_array() {
             for row in arr {
                 if let Some(h) = row.get("hash").and_then(|v| v.as_str()) {
@@ -159,16 +172,29 @@ pub fn sync_incremental() -> Result<Value, String> {
             skipped += 1;
             continue;
         }
+        // The bert plugin is a separate wasm module with its own model, so its
+        // output width is not guaranteed to track this store's configured dim.
+        // Skipping here keeps a half-migrated embedder from spraying INSERTs
+        // that libsql rejects one at a time with an opaque blob-size error.
+        if vec.len() != cfg.dim() {
+            skipped += 1;
+            crate::wasm_dispatch::emit_event("git_commit_vector_dim_mismatch", json!({
+                "hash": hash,
+                "embed_dim": vec.len(),
+                "configured_dim": cfg.dim(),
+            }));
+            continue;
+        }
         let embedding_sql = format!("vector('{}')", vecns::qlit(&vec));
         let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
-        let delete_sql = format!("DELETE FROM {} WHERE hash=?1", TABLE);
-        let _ = spec(&db_path).exec_params(&delete_sql, &[hash]);
+        let delete_sql = format!("DELETE FROM {} WHERE hash=?1", cfg.git_commits.table);
+        let _ = spec(&db_path, cfg).exec_params(&delete_sql, &[hash]);
         let sql = format!(
             "INSERT INTO {}(hash, message, embedding, updated_at, deleted) VALUES(?1,?2,{},?3,0)",
-            TABLE, embedding_sql
+            cfg.git_commits.table, embedding_sql
         );
         let now_s = now_ms.to_string();
-        match spec(&db_path).exec_params(&sql, &[hash, subject, &now_s]) {
+        match spec(&db_path, cfg).exec_params(&sql, &[hash, subject, &now_s]) {
             Ok(()) => embedded += 1,
             Err(_) => skipped += 1,
         }
@@ -183,20 +209,28 @@ pub fn sync_incremental() -> Result<Value, String> {
 }
 
 pub fn search(query_embedding: &Value, limit: usize) -> Result<Vec<(String, String, f64)>, String> {
+    search_cfg(query_embedding, limit, &default_cfg())
+}
+
+pub fn search_cfg(query_embedding: &Value, limit: usize, cfg: &RagConfig) -> Result<Vec<(String, String, f64)>, String> {
     let qvec = query_embedding.as_array()
         .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect::<Vec<f32>>())
         .ok_or_else(|| "git_commit_vectors search: invalid query embedding".to_string())?;
     if qvec.is_empty() {
         return Err("git_commit_vectors search: empty query embedding".to_string());
     }
-    ensure_schema()?;
+    ensure_schema_cfg(cfg)?;
+    let budget = QueryBudget::from_config(&cfg.budget);
     let qlit = vecns::qlit(&qvec);
-    let pool = BUDGET.pool(limit);
+    let pool = budget.pool(limit);
+    // Unlike the rssearch paths, this one truncates to `limit` in SQL: commit
+    // hits are returned in raw cosine order with no recency reweight or dedup
+    // pass, so nothing downstream can promote a row out of the ANN tail.
     let sql = format!(
         "SELECT r.hash, r.message, vector_distance_cos(r.embedding, vector(?1)) AS distance \
          FROM vector_top_k('{}', vector(?2), {}) AS v JOIN {} AS r ON r.rowid = v.id \
          WHERE r.deleted=0 ORDER BY distance ASC LIMIT {}",
-        INDEX, pool, TABLE, limit
+        cfg.git_commits.index, pool, cfg.git_commits.table, limit
     );
     let rows = shared_query_params(&sql, &[&qlit, &qlit])?;
     let arr = rows.as_array().cloned().unwrap_or_default();

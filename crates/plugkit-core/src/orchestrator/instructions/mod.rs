@@ -355,6 +355,14 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         }
     }
 
+    // Captured before session_id_opt is consumed below. Config-change delivery-once is keyed
+    // per session, so it needs the id this dispatch actually carried; falling back to the id
+    // persisted in turn-state keeps a session that only sent its id on an earlier dispatch
+    // from being re-notified of the same change on every later one.
+    let notify_session = session_id_opt
+        .clone()
+        .or_else(|| read_state().session_id);
+
     if let Some(sid) = session_id_opt {
         let mut st = read_state();
         st.session_id = Some(sid);
@@ -406,6 +414,10 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     ilog("instruction::handle post-recall");
 
     let update_available = read_spool_json(".update-available.json");
+    // Drained (not merely read) here: collecting marks these changes delivered to this
+    // session, so an agent sees a given config change on exactly one dispatch instead of
+    // on every dispatch for the rest of the chain.
+    let config_changed = super::config_notify::drain_for_session(notify_session.as_deref());
     let running_tasks = super::task::live_running_tasks();
     let open_browser_sessions = super::task::open_browser_sessions();
     let stuck_spool = super::task::stuck_spool();
@@ -456,6 +468,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "codeinsight_overview": codeinsight_overview,
         "ready_wave": wave,
         "update_available": update_available,
+        "config_changed": config_changed,
         "gm_plugkit_stale": gm_plugkit_stale,
         "wrapper_stale_in_memory": wrapper_stale_in_memory,
         "running_tasks": running_tasks,
