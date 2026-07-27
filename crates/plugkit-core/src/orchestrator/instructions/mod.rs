@@ -67,7 +67,7 @@ fn write_turn_summary(phase: &str, prd_pending: usize, mutables_pending: usize) 
         "mutables_pending_count": mutables_pending,
         "last_instruction_ts": last_instruction_ts,
         "last_instruction_age_ms": last_instruction_ts.map(|t| now_ms.saturating_sub(t)),
-        "long_gap_threshold_ms": 300000,
+        "long_gap_threshold_ms": super::fsm::graph().policy.longgap_threshold_ms,
         "update_available": serde_json::Value::Null,
     });
     let path = super::gm_dir().join("exec-spool").join(".turn-summary.json");
