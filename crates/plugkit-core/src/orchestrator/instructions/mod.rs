@@ -349,7 +349,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let initial_phase = policy.initial_phase.clone();
     let terminal_phase = policy.terminal_phase.clone();
 
-    if fresh_prompt && !raw_phase_override && phase != initial_phase && phase != terminal_phase
+    if policy.fresh_prompt_resets_phase
+        && fresh_prompt && !raw_phase_override && phase != initial_phase && phase != terminal_phase
         && prd_pending_count(&prd_items_json()) == 0
     {
         ilog(&format!("instruction::handle fresh prompt on stuck {} chain (no pending PRD) -> reset phase to {}", phase, initial_phase));
@@ -360,7 +361,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     }
 
     if phase == terminal_phase && !raw_phase_override {
-        if fresh_prompt {
+        if fresh_prompt && policy.fresh_prompt_resets_phase {
             phase = initial_phase.clone();
             let mut st = read_state();
             st.phase = Phase::parse(&initial_phase).unwrap_or_else(Phase::plan);

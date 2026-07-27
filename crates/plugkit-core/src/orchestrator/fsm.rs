@@ -55,6 +55,19 @@ pub struct Policy {
     /// forever without ever clearing the long-gap denial it keeps triggering.
     #[serde(default = "default_longgap_refresh_verbs")]
     pub longgap_refresh_verbs: Vec<String>,
+    /// Whether a fresh user prompt RESETS a stuck or finished chain back to
+    /// the initial phase.
+    ///
+    /// Two heuristics, both in `instruction`: a fresh prompt on a non-initial,
+    /// non-terminal phase with zero pending PRD rows is read as a stalled
+    /// chain and reset; and a fresh prompt on the terminal phase starts over.
+    /// Both are right for gm, where a new prompt means new work -- but they
+    /// are the only place a READ-shaped verb WRITES turn state, and a spec
+    /// whose phases model something longer-lived than one prompt (a release
+    /// train, an approval queue) would find its phase silently rewound by a
+    /// question. Default `true` preserves today's behaviour exactly.
+    #[serde(default = "default_true")]
+    pub fresh_prompt_resets_phase: bool,
     /// Verbs treated as "a shell" for the shell-bypass check, and the tool that
     /// bypass is steering people toward.
     ///
@@ -106,6 +119,7 @@ fn default_await_allowed_verbs() -> Vec<String> {
 fn default_longgap_exempt_verbs() -> Vec<String> {
     ["health", "auto-recall", "wait", "sleep"].iter().map(|s| s.to_string()).collect()
 }
+fn default_true() -> bool { true }
 fn default_longgap_refresh_verbs() -> Vec<String> {
     ["instruction", "transition", "phase-status", "prd-add", "prd-resolve", "prd-list",
      "mutable-add", "mutable-resolve", "mutable-list"]
@@ -141,6 +155,7 @@ impl Default for Policy {
             await_allowed_verbs: default_await_allowed_verbs(),
             longgap_exempt_verbs: default_longgap_exempt_verbs(),
             longgap_refresh_verbs: default_longgap_refresh_verbs(),
+            fresh_prompt_resets_phase: true,
             shell_verbs: default_shell_verbs(),
             deny_shell_git: default_deny_shell_git(),
             gate_repeat_escalate_threshold: default_gate_repeat_escalate_threshold(),
@@ -214,7 +229,7 @@ impl Graph {
     /// compatibility, and this system needs both. A warning gets the typo
     /// signal without the outage.
     const KNOWN_POLICY_KEYS: &'static [&'static str] = &[
-        "toplevel_doc_allowlist", "await_allowed_verbs", "longgap_exempt_verbs", "longgap_refresh_verbs",
+        "toplevel_doc_allowlist", "await_allowed_verbs", "longgap_exempt_verbs", "longgap_refresh_verbs", "fresh_prompt_resets_phase",
         "shell_verbs", "deny_shell_git", "gate_repeat_escalate_threshold",
         "longgap_threshold_ms", "require_witness_evidence", "prd_closed_statuses",
         "mutables_resolved_statuses", "reject_duplicate_witness", "initial_phase",
