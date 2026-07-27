@@ -25,6 +25,11 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/hooks/",
     ".gm/no-memorize-this-turn",
     ".gm/prd.paused.yml",
+    // Retired: the rs-learn crate is removed and legacy_reaper.rs now deletes
+    // these outright. Kept as ignore entries only so a project that has not yet
+    // booted a reaping build does not surface them as residuals in the
+    // meantime; they can be dropped once no live checkout predates the reaper.
+    ".gm/rs-learn.db",
     ".gm/rs-learn.db-shm",
     ".gm/rs-learn.db-wal",
     ".gm/learning-state.md",
@@ -44,12 +49,22 @@ pub const MANAGED_ENTRIES: &[&str] = &[
 ];
 
 pub const MUST_STAY_TRACKED: &[&str] = &[
-    ".gm/rs-learn.db",
     ".gm/code-search/",
     ".gm/disciplines/",
     ".gm/prd.yml",
     ".gm/mutables.yml",
-    "gm-data/rs-learn.db",
+    // The config SPEC files must travel with the repo -- they are the project's
+    // deliberate choice of which workflow it runs, and a teammate cloning
+    // without them silently falls back to a different tier. Only the
+    // MATERIALIZED cache is ignored (see the ignore list above): the spec is
+    // authored, the cache is derived.
+    //
+    // Load-bearing because projects commonly carry a blanket `*` in
+    // .gm/.gitignore -- live-witnessed here, where it made
+    // .gm/config.source.json uncommittable, so a project could never share the
+    // config repo it had chosen.
+    ".gm/gm.config.json",
+    ".gm/config.source.json",
     "gm-data/code-search/",
     "gm-data/disciplines/",
 ];
@@ -94,7 +109,72 @@ fn strip_block(content: &str, start: &str, end: &str) -> String {
     }
 }
 
+/// Re-include the must-stay-tracked files from INSIDE `.gm/.gitignore`.
+///
+/// Git applies the DEEPEST .gitignore last, so a negation written into the
+/// repo-root .gitignore cannot override a blanket `*` living in a nested
+/// `.gm/.gitignore` -- the nested file has the final say for paths beneath it.
+/// Live-witnessed with real `git check-ignore`: root-level negations left
+/// `.gm/config.source.json` ignored, which meant a project could never commit
+/// (and so never share) its own choice of config repo.
+///
+/// So the negations have to be written into the nested file itself. Only the
+/// authored spec/state files are re-included; derived caches stay ignored.
+/// A missing or `*`-free `.gm/.gitignore` is left completely alone -- this is a
+/// targeted antidote to a hostile blanket, not a file this code wants to own.
+fn ensure_gm_dir_negations() {
+    let path = ".gm/.gitignore";
+    let original = match host_read(path) {
+        Some(s) => s,
+        None => return,
+    };
+    // Only intervene when a blanket pattern is actually present; anything
+    // narrower cannot be silently swallowing the spec files.
+    let has_blanket = original
+        .lines()
+        .map(|l| l.trim())
+        .any(|l| l == "*" || l == "**" || l == "*.*");
+    if !has_blanket {
+        return;
+    }
+
+    let stripped = strip_block(&original, START_MARKER, END_MARKER);
+    let mut block = String::new();
+    block.push_str(START_MARKER);
+    block.push('\n');
+    block.push_str("# A blanket ignore above would otherwise make these uncommittable.\n");
+    block.push_str("# They are AUTHORED project state (the workflow this project runs, its\n");
+    block.push_str("# open work) -- derived caches are deliberately not re-included here.\n");
+    for entry in MUST_STAY_TRACKED {
+        // These paths are written repo-root-relative; inside .gm/ they need the
+        // leading ".gm/" dropped, and anything outside .gm/ does not belong here.
+        let rel = match entry.strip_prefix(".gm/") {
+            Some(r) => r,
+            None => continue,
+        };
+        let bare = rel.trim_end_matches('/');
+        block.push_str(&format!("!{}\n", bare));
+        if rel.ends_with('/') {
+            block.push_str(&format!("!{}/**\n", bare));
+        }
+    }
+    block.push_str(END_MARKER);
+
+    let mut next = stripped.trim_end_matches(['\n', '\r']).to_string();
+    if next.is_empty() {
+        next = block;
+    } else {
+        next.push_str("\n\n");
+        next.push_str(&block);
+    }
+    next.push('\n');
+    if next != original {
+        let _ = crate::wasm_dispatch::host_write(path, &next);
+    }
+}
+
 pub fn ensure_managed_gitignore(cwd: &str) -> Result<bool, String> {
+    ensure_gm_dir_negations();
     let path = if cwd.is_empty() {
         ".gitignore".to_string()
     } else if cwd.ends_with('/') || cwd.ends_with('\\') {
