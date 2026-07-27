@@ -206,10 +206,53 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
 #[cfg(not(target_arch = "wasm32"))]
 fn check_browser_witness_coverage_for_cwd(_cwd: &str) -> Vec<String> { vec![] }
 
+/// Why a hook did not pass.
+///
+/// Every one of these previously collapsed to a bare `false`, so an operator
+/// staring at a denial could not tell a MISSING hook file from a hook that ran
+/// and legitimately said no -- one is a broken config, the other is the system
+/// working. They demand opposite responses and looked identical.
+pub enum HookOutcome {
+    Passed,
+    /// The hook file does not exist at `.gm/instructions/hooks/<path>`.
+    Missing,
+    /// exec_js itself failed (threw, timed out, unreadable result).
+    ExecFailed,
+    /// The hook ran fine and returned something other than `true`.
+    ReturnedFalse,
+    /// Hooks are not available on this build (native).
+    Unsupported,
+}
+
+impl HookOutcome {
+    pub fn passed(&self) -> bool {
+        matches!(self, HookOutcome::Passed)
+    }
+
+    /// Operator-facing explanation, appended to the gate's own message.
+    pub fn reason(&self, hook_path: &str) -> Option<String> {
+        match self {
+            HookOutcome::Passed => None,
+            HookOutcome::Missing => Some(format!(
+                "hook `{hook_path}` is MISSING at .gm/instructions/hooks/{hook_path} -- gates fail CLOSED, so a hook that is not there denies forever. Create it, or clear the gate's `hook` field."
+            )),
+            HookOutcome::ExecFailed => Some(format!(
+                "hook `{hook_path}` FAILED TO RUN (threw, timed out, or returned an unreadable result) -- this is a broken hook, not a legitimate denial."
+            )),
+            HookOutcome::ReturnedFalse => Some(format!(
+                "hook `{hook_path}` ran and returned something other than `true` -- this is the hook denying on purpose. Note a hook body needs an explicit `return`; a bare trailing expression is discarded and reads as a denial."
+            )),
+            HookOutcome::Unsupported => Some(format!(
+                "hook `{hook_path}` cannot run on this build (no exec_js host) -- gates fail CLOSED."
+            )),
+        }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
-fn hook_result(hook_path: &str) -> bool {
+fn hook_outcome(hook_path: &str) -> HookOutcome {
     let full = format!(".gm/instructions/hooks/{}", hook_path);
-    let Some(script) = crate::pkfs::read_to_string(&full) else { return false };
+    let Some(script) = crate::pkfs::read_to_string(&full) else { return HookOutcome::Missing };
     let opts = serde_json::json!({ "timeoutMs": 15000 }).to_string();
     let packed = unsafe {
         crate::wasm_dispatch::host_exec_js(
@@ -218,11 +261,21 @@ fn hook_result(hook_path: &str) -> bool {
         )
     };
     let v = crate::wasm_dispatch::unpack_to_value_pub(packed);
-    v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
-        && v.get("result").and_then(|r| r.as_bool()).unwrap_or(false)
+    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return HookOutcome::ExecFailed;
+    }
+    if v.get("result").and_then(|r| r.as_bool()).unwrap_or(false) {
+        HookOutcome::Passed
+    } else {
+        HookOutcome::ReturnedFalse
+    }
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn hook_result(_hook_path: &str) -> bool { false }
+fn hook_outcome(_hook_path: &str) -> HookOutcome { HookOutcome::Unsupported }
+
+fn hook_result(hook_path: &str) -> bool {
+    hook_outcome(hook_path).passed()
+}
 
 fn evaluate_gate(g: &GateDef) -> bool {
     match g.hook_mode {
@@ -250,10 +303,33 @@ fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, S
     for gate_name in &edge.gates {
         let Some(g) = graph.gate(gate_name) else { continue };
         if !evaluate_gate(g) {
-            return Some((String::new(), g.message.clone(), 1));
+            // A hook-backed gate previously denied with only its own static
+            // message, which cannot distinguish "your hook file is missing"
+            // from "your hook said no" -- a broken config and the system
+            // working correctly, reported identically.
+            let detail = hook_failure_detail(g);
+            let message = match detail {
+                Some(d) => format!("{} -- {}", g.message, d),
+                None => g.message.clone(),
+            };
+            return Some((String::new(), message, 1));
         }
     }
     None
+}
+
+/// The hook-specific reason a gate denied, when a hook is what denied it.
+///
+/// `None` when the gate has no hook, when the hook is not consulted in this
+/// mode, or when the hook passed and a compiled predicate is what failed --
+/// in that last case the predicate is the real cause and a hook note would
+/// misdirect.
+fn hook_failure_detail(g: &GateDef) -> Option<String> {
+    if matches!(g.hook_mode, HookMode::PredicateOnly) {
+        return None;
+    }
+    let hook_path = g.hook.as_deref()?;
+    hook_outcome(hook_path).reason(hook_path)
 }
 
 pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
@@ -269,7 +345,10 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
     for gate_name in &edge.gates {
         let Some(g) = graph.gate(gate_name) else { continue };
         if !evaluate_gate(g) {
-            residuals.push(g.message.clone());
+            residuals.push(match hook_failure_detail(g) {
+                Some(d) => format!("{} -- {}", g.message, d),
+                None => g.message.clone(),
+            });
             if next_dispatch.is_none() {
                 next_dispatch = Some(match gate_name.as_str() {
                     "residual-scan-fired" => "residual-scan",
