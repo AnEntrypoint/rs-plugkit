@@ -157,11 +157,8 @@ pub fn build_pending_step(text: &str, namespace: &str, project_path: Option<&str
             "project_path": project_path,
         },
         "pipeline": [
-            { "step": "summarize", "status": "pending", "id": step_id },
-            { "step": "embed", "status": "queued" },
-            { "step": "persist", "status": "queued" }
+            { "step": "summarize", "status": "pending", "id": step_id }
         ],
-        "cursor": 0,
         "results_so_far": {},
         "created_ms": now,
         "deadline_ms": deadline_ms,

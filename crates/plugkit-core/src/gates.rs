@@ -241,7 +241,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 "pipeline suspended at step_id={}; only memorize-continue advances state. \
                  The full pending_step recovery payload is embedded in this response as `pending_step_full` \
                  (no need to re-dispatch `instruction` first). Compute the step inline using \
-                 `pending_step_full.state.pipeline[cursor].payload` and the prompt_template, then dispatch \
+                 `pending_step_full.state.original_body` and the prompt_template, then dispatch \
                  memorize-continue with body {{token, step_id, result}}. No other verb is valid until \
                  this completes.",
                 step_id
