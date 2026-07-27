@@ -141,8 +141,22 @@ pub fn get_instruction(phase: &str) -> String {
             .map(|s| s.prose_key.clone())
             .unwrap_or_else(|| "entry".to_string()),
     };
-    let default = compiled_default_for_prose_key(&key);
-    crate::prose::resolve(&key, default)
+    let phase_prose = crate::prose::resolve(&key, compiled_default_for_prose_key(&key));
+
+    // `entry` is the cross-phase doctrine key -- the one every phase is supposed
+    // to see. It was reachable ONLY via a literal "ENTRY"/"ORCHESTRATOR"/""
+    // phase or as the unknown-key fallthrough, and the default graph's six
+    // states map to plan/execute/emit/verify/consolidate/update_docs, so a
+    // normal PLAN -> COMPLETE walk never served it. Everything filed under its
+    // `## Constraints` was dead text: written, overridable, and never read.
+    //
+    // Prepending it makes the documented contract true. Skipped when the phase
+    // already resolves to `entry`, so it is never served twice.
+    if key == "entry" {
+        return phase_prose;
+    }
+    let entry_prose = crate::prose::resolve("entry", entry::TEXT);
+    format!("{}\n\n{}", entry_prose, phase_prose)
 }
 
 fn next_phase_hint(phase: &str) -> Option<String> {
@@ -500,6 +514,19 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "codeinsight_overview": codeinsight_overview,
         "ready_wave": wave,
         "update_available": update_available,
+        // Config changes recorded since this session last looked. Delivered
+        // HERE, on the instruction response, because that is the surface an
+        // agent already reads every turn -- config_notify was recording changes
+        // that nothing ever surfaced, so a running agent could never learn its
+        // configuration had moved. Draining (rather than reading) gives
+        // delivery-once: a change is announced on the next dispatch and not
+        // repeated forever afterward.
+        //
+        // Drained ONCE, above, into `config_changed`. This key previously
+        // appeared twice in this object with two separate drains; json! keeps
+        // the LAST occurrence, so the first drain marked every record delivered
+        // and the surviving second drain returned empty -- the payload always
+        // shipped `[]` and no config change was ever announced.
         "config_changed": config_changed,
         "gm_plugkit_stale": gm_plugkit_stale,
         "wrapper_stale_in_memory": wrapper_stale_in_memory,
@@ -510,14 +537,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "should_residual_scan": should_scan,
         "route_hint": route_hint,
         "discipline_policies": super::discipline_note::active_policies(),
-        // Config changes recorded since this session last looked. Delivered
-        // HERE, on the instruction response, because that is the surface an
-        // agent already reads every turn -- config_notify was recording changes
-        // that nothing ever surfaced, so a running agent could never learn its
-        // configuration had moved. Draining (rather than reading) gives
-        // delivery-once: a change is announced on the next dispatch and not
-        // repeated forever afterward.
-        "config_changed": super::config_notify::drain_for_session(notify_session.as_deref()),
     });
     let s = payload.to_string();
     ilog(&format!("instruction::handle done out_len={}", s.len()));

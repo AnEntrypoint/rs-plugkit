@@ -528,12 +528,35 @@ fn refresh_locked(
     st.consecutive_failures = 0;
     let live = local_sha(src);
     st.last_sha = live.clone().unwrap_or_else(|| remote.clone());
+
+    // The ONLY place both shas exist at once, and therefore the only place a
+    // change notification can be produced. config_notify::record_change had no
+    // caller at all before this: changes were recorded nowhere, so the drain on
+    // the instruction payload could only ever return empty and a running agent
+    // could never learn its configuration had moved.
+    crate::orchestrator::config_notify::record_change(
+        &src.tier_label,
+        have_local.as_deref().unwrap_or(""),
+        live.as_deref().unwrap_or(&remote),
+        &changed_config_paths(src),
+    );
+
     Ok(SyncOutcome {
         sha: live,
         changed: true,
         degraded: false,
         detail: format!("updated to {remote}"),
     })
+}
+
+/// Config-relevant files this source supplies, for the change roster.
+///
+/// Deliberately the SPEC's own view (which config file this source resolves to)
+/// rather than a full `git diff --name-only`: the roster exists to tell an agent
+/// WHICH config moved, and a diff of an entire config repo would bury that in
+/// unrelated files. A key-level old->new diff is a separate, finer row.
+fn changed_config_paths(src: &RepoSource) -> Vec<String> {
+    vec![src.config_path()]
 }
 
 /// The [`RepoFetcher`] `config.rs` resolves through.

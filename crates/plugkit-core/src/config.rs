@@ -171,6 +171,10 @@ pub struct RepoSource {
     /// by this module (never read from the spec) so a spec file can never
     /// redirect writes to an arbitrary location on disk.
     pub cache_dir: String,
+    /// Which tier produced this source, carried so a change notification can
+    /// say WHERE a config moved rather than only that something did. Two tiers
+    /// can name the same repo, so the repo url alone does not identify it.
+    pub tier_label: String,
 }
 
 impl RepoSource {
@@ -348,7 +352,7 @@ fn type_name_of(v: &Value) -> &'static str {
 /// Parse a repo-source SPEC (tiers 2 and 3). Separate from [`parse_config`]
 /// because a spec is a pointer with an entirely different required shape --
 /// conflating them would let a config-shaped file satisfy a spec read.
-fn parse_source_spec(text: &str, origin: &str, cache_dir: String) -> Result<Option<RepoSource>, String> {
+fn parse_source_spec(text: &str, origin: &str, cache_dir: String, tier_label: &str) -> Result<Option<RepoSource>, String> {
     let cleaned = text.trim_start_matches('\u{feff}');
     if cleaned.trim().is_empty() {
         return Ok(None);
@@ -372,9 +376,15 @@ fn parse_source_spec(text: &str, origin: &str, cache_dir: String) -> Result<Opti
             "{origin}: source spec requires a non-empty `repo` field naming the config repository"
         ));
     }
-    let reference = obj
-        .get("ref")
-        .and_then(|x| x.as_str())
+    // Three names for one field were live at once: this parser read `ref`, the
+    // gm-config README documented `reference`, and agentplug's own instruction-
+    // source config read `branch`. A spec written from the README therefore
+    // parsed to None and silently probed HEAD instead of the pinned ref -- the
+    // worst shape for a pin, since it looks configured and is not. All three
+    // are accepted; first match in this order wins.
+    let reference = ["ref", "reference", "branch"]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     // Trim slashes so `"path": "/sub/"` and `"path": "sub"` cannot produce two
@@ -391,6 +401,7 @@ fn parse_source_spec(text: &str, origin: &str, cache_dir: String) -> Result<Opti
         reference,
         path,
         cache_dir,
+        tier_label: tier_label.to_string(),
     }))
 }
 
@@ -432,11 +443,12 @@ fn load_repo_tier(
     spec_path: &str,
     cache_dir: String,
     fetcher: &dyn RepoFetcher,
+    tier_label: &str,
 ) -> Load {
     let Some(raw) = pkfs::read_to_string(spec_path) else {
         return Load::Absent;
     };
-    let src = match parse_source_spec(&raw, spec_path, cache_dir) {
+    let src = match parse_source_spec(&raw, spec_path, cache_dir, tier_label) {
         Ok(Some(s)) => s,
         Ok(None) => return Load::Absent,
         Err(reason) => return Load::Rejected { reason },
@@ -521,7 +533,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
 
     // Tier 2: an in-project spec pointing at a config repo.
     let p2 = join(project_root, SOURCE_SPEC_REL);
-    match load_repo_tier(&p2, join(project_root, SOURCE_CACHE_REL), fetcher) {
+    match load_repo_tier(&p2, join(project_root, SOURCE_CACHE_REL), fetcher, Tier::ProjectRepoSpec.as_str()) {
         Load::Accepted(config) => {
             return Resolution {
                 config,
@@ -540,7 +552,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
     // concurrent-refresh case called out on that trait.
     if let Some(home) = home_dir() {
         let p3 = join(&home, SOURCE_SPEC_REL);
-        match load_repo_tier(&p3, join(&home, SOURCE_CACHE_REL), fetcher) {
+        match load_repo_tier(&p3, join(&home, SOURCE_CACHE_REL), fetcher, Tier::UserRepoSpec.as_str()) {
             Load::Accepted(config) => {
                 return Resolution {
                     config,
