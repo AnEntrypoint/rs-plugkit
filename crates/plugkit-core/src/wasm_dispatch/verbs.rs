@@ -1052,6 +1052,22 @@ fn cache_invalidate(body: &Value) -> u64 {
     }
 }
 
+/// Resolve the 4-tier config chain and report WHICH tier won and why.
+///
+/// Without a verb the chain is unreachable from the spool, which is how it
+/// shipped inert: `config::resolve()` existed and compiled, but nothing could
+/// invoke it, so no project could observe (or debug) its own configuration.
+///
+/// Deliberately reports `rejected` alongside the winning tier. A tier that
+/// exists but is malformed does NOT fall through silently -- an author who
+/// wrote a broken config must see that it was rejected, rather than watch gm
+/// quietly run defaults and conclude their file was ignored for some other
+/// reason.
+fn config_resolve(_body: &Value) -> u64 {
+    let r = crate::config::resolve();
+    ok("config_resolve", r.to_json())
+}
+
 fn cache_stats(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
     let cfg = cache_cfg_from(body);
@@ -1688,6 +1704,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         "lang" => lang(&body),
         "browser" => browser(&body, &body_s),
         "health" => health(&body),
+        "config_resolve" => config_resolve(&body),
         "sql_open" => sql_open(&body),
         "sql_close" => sql_close(&body),
         "sql_list_dbs" => sql_list_dbs(&body),
