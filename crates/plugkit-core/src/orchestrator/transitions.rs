@@ -49,7 +49,7 @@ type PredicateFn = fn() -> bool;
 
 fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
     &[
-        ("residual-scan-fired", "true once `residual-scan` has been dispatched in this stop window (the .gm/residual-check-fired marker exists)", residual_scan_fired as PredicateFn),
+        ("residual-scan-fired", "true once `residual-scan` has been dispatched in this stop window (the .gm/residual-check-fired marker is present AND non-empty -- it is invalidated by truncation)", residual_scan_fired as PredicateFn),
         ("prd-all-closed", "true when .gm/prd.yml has zero rows with an open status (pending/in-progress, not completed)", pred_prd_all_closed),
         ("mutables-all-resolved", "true when .gm/mutables.yml has zero rows still in unknown/pending status", pred_mutables_all_resolved),
         ("worktree-clean", "true when `git status --porcelain` is empty -- no uncommitted/unpushed delta", pred_worktree_clean),
@@ -117,7 +117,16 @@ fn predicate_result(name: &str) -> bool {
 /// and adding one is a wire-format change, not a comment fix.
 fn residual_scan_fired() -> bool {
     let residual_marker = super::gm_dir().join("residual-check-fired");
-    crate::pkfs::exists(&residual_marker.to_string_lossy().to_string())
+    // NON-EMPTY, not merely present. The marker is INVALIDATED by truncation --
+    // yaml_util::invalidate_residual_marker and lib.rs's clear_marker both write
+    // "" rather than deleting, since pkfs exposes no remove. Testing `exists`
+    // therefore made every invalidation a no-op: `prd-add` and `mutable-add`
+    // call invalidate precisely to force a fresh scan, and the gate kept passing
+    // on the zero-byte file they left behind. lib.rs's own read_marker already
+    // uses this !is_empty() form; the gate was the odd one out.
+    crate::pkfs::read_to_string(&residual_marker.to_string_lossy().to_string())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
 }
 #[cfg(not(target_arch = "wasm32"))]
 fn residual_scan_fired() -> bool { true }

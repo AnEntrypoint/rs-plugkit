@@ -432,13 +432,39 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     }
     }
 
+    // The status written on resolve MUST be one `status_is_open` reads as closed.
+    // This was the literal "completed" while `status_is_open` tests against the
+    // configurable `prd_closed_statuses` -- so a project setting that list to
+    // e.g. ["done"] wrote every resolved row as "completed", a status its own
+    // policy calls OPEN. Rows never closed, `prd-all-closed` never passed, and
+    // the chain deadlocked at VERIFY with nothing naming the cause.
+    //
+    // Keep writing "completed" whenever the configured list still accepts it,
+    // and only fall back to the list's first entry when it does not. Taking
+    // `.first()` unconditionally would have been a silent behaviour change on
+    // the DEFAULT config, whose list is ["done", "complete", "completed"] --
+    // every project would have started writing "done" instead.
+    let resolved_status = if policy
+        .prd_closed_statuses
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("completed"))
+    {
+        "completed".to_string()
+    } else {
+        policy
+            .prd_closed_statuses
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "completed".to_string())
+    };
+
     let outcome = cas::cas_retry_write(&path_s, policy.cas_max_attempts, "prd-resolve", |mut doc: Value| {
         let mut found = false;
         if let Some(seq) = doc.as_sequence_mut() {
             for item in seq.iter_mut() {
                 if let Some(map) = item.as_mapping_mut() {
                     if map.get(&Value::String("id".to_string())).and_then(|v| v.as_str()) == Some(&id_target) {
-                        map.insert(Value::String("status".to_string()), Value::String("completed".to_string()));
+                        map.insert(Value::String("status".to_string()), Value::String(resolved_status.clone()));
                         if let Some(w) = witness.as_ref() {
                             map.insert(Value::String("witness".to_string()), Value::String(w.clone()));
                         }

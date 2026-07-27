@@ -89,7 +89,9 @@ fn read_spool_json(name: &str) -> serde_json::Value {
 fn residual_check_fired_recently() -> bool {
     let marker = super::gm_dir().join("residual-check-fired");
     let ms = marker.to_string_lossy().to_string();
-    pkfs::exists(&ms)
+    // Non-empty, matching the gate predicate: the marker is invalidated by
+    // truncation, so `exists` reads a deliberately-cleared marker as still fired.
+    pkfs::read_to_string(&ms).map(|s| !s.trim().is_empty()).unwrap_or(false)
 }
 
 fn should_residual_scan(prd_pending: usize, running_tasks_count: usize) -> bool {

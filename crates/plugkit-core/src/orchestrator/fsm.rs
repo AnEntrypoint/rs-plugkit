@@ -252,6 +252,22 @@ impl Graph {
     pub fn validate(&self) -> Vec<String> {
         let mut problems = Vec::new();
 
+        // An empty closed-status list makes every row permanently open: nothing
+        // a resolve could write would satisfy `status_is_open`, so the
+        // `prd-all-closed` gate could never pass and the chain would deadlock at
+        // VERIFY with no cause named. Same for mutables. Caught here, at load,
+        // rather than as a mysterious stall much later.
+        if self.policy.prd_closed_statuses.is_empty() {
+            problems.push(
+                "policy.prd_closed_statuses is empty -- no status could ever count as closed, so `prd-all-closed` could never pass".to_string(),
+            );
+        }
+        if self.policy.mutables_resolved_statuses.is_empty() {
+            problems.push(
+                "policy.mutables_resolved_statuses is empty -- no status could ever count as resolved, so `mutables-all-resolved` could never pass".to_string(),
+            );
+        }
+
         if !self.has_state(&self.policy.initial_phase) {
             problems.push(format!("policy.initial_phase `{}` is not a declared state", self.policy.initial_phase));
         }
