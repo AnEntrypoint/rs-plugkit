@@ -173,7 +173,7 @@ impl Default for Policy {
             await_allowed_verbs: default_await_allowed_verbs(),
             longgap_exempt_verbs: default_longgap_exempt_verbs(),
             longgap_refresh_verbs: default_longgap_refresh_verbs(),
-            fresh_prompt_resets_phase: true,
+            fresh_prompt_resets_phase: default_true(),
             shell_verbs: default_shell_verbs(),
             deny_shell_git: default_deny_shell_git(),
             gate_repeat_escalate_threshold: default_gate_repeat_escalate_threshold(),
@@ -262,6 +262,62 @@ impl Graph {
 
     /// Report policy keys this build does not recognise, so a typo is visible
     /// rather than silently ignored. Never fatal -- see KNOWN_POLICY_KEYS.
+    pub fn policy_default_drift() -> Vec<String> {
+        let mut problems = Vec::new();
+        let defaulted = Policy::default();
+        let Ok(from_impl) = serde_json::to_value(&defaulted) else {
+            problems.push("policy: Default impl does not serialize".to_string());
+            return problems;
+        };
+        let Some(obj) = from_impl.as_object() else {
+            problems.push("policy: serialized Default is not an object".to_string());
+            return problems;
+        };
+        for key in obj.keys() {
+            if !Self::KNOWN_POLICY_KEYS.contains(&key.as_str()) {
+                problems.push(format!(
+                    "policy key `{key}` exists on the struct but is absent from KNOWN_POLICY_KEYS -- \
+                     a project setting it would be reported as unknown and its vendored value would \
+                     still apply, so the warning would be wrong in both directions"
+                ));
+            }
+        }
+        for key in Self::KNOWN_POLICY_KEYS {
+            if !obj.contains_key(*key) {
+                problems.push(format!(
+                    "policy key `{key}` is listed in KNOWN_POLICY_KEYS but no longer exists on the \
+                     struct -- a project setting it gets silence instead of an unknown-key warning"
+                ));
+            }
+        }
+        let from_serde: Result<Policy, _> = serde_json::from_str("{}");
+        match from_serde {
+            Ok(empty) => {
+                if let Ok(serde_value) = serde_json::to_value(&empty) {
+                    if serde_value != from_impl {
+                        let mut differing: Vec<String> = Vec::new();
+                        if let Some(a) = serde_value.as_object() {
+                            for (k, v) in obj {
+                                if a.get(k) != Some(v) {
+                                    differing.push(k.clone());
+                                }
+                            }
+                        }
+                        problems.push(format!(
+                            "policy: Default::default() and the serde default path disagree on {} -- \
+                             a project that omits these fields gets different values than one that \
+                             vendors the baseline, which is a silent behaviour change riding along \
+                             with a supposedly no-op extraction",
+                            if differing.is_empty() { "at least one field".to_string() } else { differing.join(", ") }
+                        ));
+                    }
+                }
+            }
+            Err(e) => problems.push(format!("policy: an empty object does not deserialize: {e}")),
+        }
+        problems
+    }
+
     pub fn unknown_policy_keys(raw: &str) -> Vec<String> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { return Vec::new() };
         let Some(policy) = v.get("policy").and_then(|p| p.as_object()) else { return Vec::new() };
