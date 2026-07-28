@@ -248,14 +248,20 @@ const SYNC_REKEY_ROWS_DEADLINE_MS: u64 = 3500;
 const SYNC_SHADOW_ABORT_THRESHOLD: u32 = 5;
 const REKEY_BATCH_MAX: usize = 25;
 
-fn scan_corpus(ns: &str) -> (String, Vec<MemoryDoc>) {
-    let dir = match md_dir(ns) {
-        Some(d) => d,
-        None => return ("invalid".to_string(), Vec::new()),
+fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>), String> {
+    let Some(dir) = md_dir(ns) else {
+        crate::wasm_dispatch::emit_event("memory_md_namespace_invalid", json!({
+            "namespace": ns,
+            "reason": "namespace failed valid_component; it has no memories directory",
+        }));
+        return Err(format!(
+            "namespace {:?} is not a valid path component (non-empty, <=200 chars, no \"..\", ASCII alphanumeric plus . _ -)",
+            ns
+        ));
     };
     let entries = match crate::pkfs::readdir(&dir) {
         Some(Value::Array(a)) => a,
-        _ => return ("empty".to_string(), Vec::new()),
+        _ => return Ok(("empty".to_string(), Vec::new())),
     };
     let mut names: Vec<String> = entries
         .iter()
@@ -265,7 +271,7 @@ fn scan_corpus(ns: &str) -> (String, Vec<MemoryDoc>) {
         .collect();
     names.sort();
     if names.is_empty() {
-        return ("empty".to_string(), Vec::new());
+        return Ok(("empty".to_string(), Vec::new()));
     }
     let mut acc = String::new();
     let mut docs = Vec::new();
@@ -287,7 +293,7 @@ fn scan_corpus(ns: &str) -> (String, Vec<MemoryDoc>) {
         }
     }
     docs.sort_by(|a, b| a.key.cmp(&b.key));
-    (format!("{:016x}", crate::pipeline::fnv1a64(acc.as_bytes())), docs)
+    Ok((format!("{:016x}", crate::pipeline::fnv1a64(acc.as_bytes())), docs))
 }
 
 fn is_malformed(err: &str) -> bool {
@@ -467,10 +473,17 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
         }
         let (digest, files) = match scan_manifest(ns) {
             Some(v) => v,
-            None => {
-                let (d, docs) = scan_corpus(ns);
-                (d.clone(), docs.iter().map(|doc| (format!("{}.md", doc.key), d.clone())).collect())
-            }
+            None => match scan_corpus(ns) {
+                Ok((d, docs)) => (
+                    d.clone(),
+                    docs.iter().map(|doc| (format!("{}.md", doc.key), d.clone())).collect(),
+                ),
+                Err(e) => {
+                    converged = false;
+                    report.push(json!({ "namespace": ns, "error": e }));
+                    continue;
+                }
+            },
         };
         if meta_digest(ns).as_deref() == Some(digest.as_str()) {
             continue;

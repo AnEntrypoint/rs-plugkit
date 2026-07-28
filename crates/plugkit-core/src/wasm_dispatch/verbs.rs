@@ -438,7 +438,30 @@ fn discipline_fanout_namespaces(base: &str) -> Vec<String> {
     out
 }
 
+pub const EMBED_UNAVAILABLE: &str = "query embedding unavailable -- the bert embedder failed, so no vector search was attempted";
+
+/// True when `embed_query` produced nothing usable for a vector search.
+///
+/// `embed_query` returns `Value::Null` on all three of its failure paths, and a
+/// successful call can still yield an empty array. Neither can be searched
+/// against, and every caller must reach the same verdict from the same test --
+/// this is the predicate that guarantees it.
+pub fn query_embedding_unusable(query_embedding: &Value) -> bool {
+    match query_embedding {
+        Value::Null => true,
+        Value::Array(a) => a.is_empty(),
+        _ => true,
+    }
+}
+
 fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do_sync: bool) -> (Value, Option<Vec<String>>) {
+    if query_embedding_unusable(query_embedding) {
+        emit_event("rssearch_vector_hits_skipped", json!({
+            "namespace": namespace,
+            "reason": EMBED_UNAVAILABLE,
+        }));
+        return (json!({ "error": EMBED_UNAVAILABLE }), None);
+    }
     let namespaces = discipline_fanout_namespaces(namespace);
     let now_ms = unsafe { host_now_ms() } as i64;
     let cfg = crate::ragconfig::RagConfig::default();
@@ -477,7 +500,7 @@ fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do
 }
 
 pub fn memory_recall_backend(query_embedding: &Value, namespace: &str, limit: u32) -> Option<Value> {
-    if query_embedding.is_null() {
+    if query_embedding_unusable(query_embedding) {
         return None;
     }
     let (_, mem_ns) = rssearch_vector_hits(query_embedding, namespace, limit, true);
@@ -528,7 +551,7 @@ fn recall(body: &Value) -> u64 {
     let kv_hits = unpack_to_value(packed);
     let annotated = annotate_hits_with_score(kv_hits);
 
-    let embed_failed = embedding.as_array().map(|a| a.is_empty()).unwrap_or(true);
+    let embed_failed = query_embedding_unusable(&embedding);
     let vec_err = vector_hits
         .get("error")
         .and_then(|e| e.as_str())
@@ -722,6 +745,16 @@ fn memorize_prune(body: &Value) -> u64 {
     }
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
     let embedding = embed_query(query);
+    if query_embedding_unusable(&embedding) {
+        emit_event("memorize_prune_degraded", json!({
+            "namespace": namespace,
+            "reason": EMBED_UNAVAILABLE,
+        }));
+        return err(
+            "memorize-prune",
+            "semantic retrieval unavailable (the embedder failed) so no prune candidates could be ranked -- this is NOT an empty-namespace result, and deleting on the strength of it would prune memories that were never searched",
+        );
+    }
     let (vector_candidates, _) = rssearch_vector_hits(&embedding, namespace, k, true);
     let candidates = vec_search_local(&embedding, namespace, k);
     ok("memorize-prune", json!({

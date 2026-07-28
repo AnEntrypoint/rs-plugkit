@@ -483,13 +483,10 @@ fn embed_text(text: &str) -> Option<Vec<f32>> {
     resp.get("embedding").and_then(json_to_f32_vec)
 }
 
-use crate::embed::BGE_QUERY_PREFIX;
-
 fn embed_text_json_query(query_text: &str) -> Option<Value> {
     let trimmed = query_text.trim();
     if trimmed.is_empty() { return None; }
-    let prefixed = format!("{}{}", BGE_QUERY_PREFIX, trimmed);
-    let v = embed_text(&prefixed)?;
+    let v = embed_text(&crate::embed::condition_query(trimmed))?;
     Some(Value::Array(v.into_iter().map(|f| {
         serde_json::Number::from_f64(f as f64).map(Value::Number).unwrap_or(Value::Null)
     }).collect()))

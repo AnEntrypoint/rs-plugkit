@@ -68,7 +68,21 @@ const _: () = {
 
 const MAX_TOKENS: usize = 512;
 
-pub const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
+const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
+
+/// Condition a raw query string for the currently-compiled embedding model.
+///
+/// BGE is asymmetric: a query must carry an instruction prefix that a passage
+/// must not, or the two are embedded into differently-conditioned subspaces and
+/// their cosine similarity is meaningless. That asymmetry is a property of the
+/// model, so it is expressed once, here, next to `EMBED_DIM` and the weights it
+/// belongs to. Every query-side call site -- in-wasm (`embed_text_json_query`)
+/// and out-of-process (`code_index`'s bert-plugin path) -- routes through this
+/// function, so swapping to a model with a different prefix, or none at all,
+/// cannot leave one site conditioning its queries and the other not.
+pub fn condition_query(query_text: &str) -> String {
+    format!("{}{}", BGE_QUERY_PREFIX, query_text)
+}
 
 const QUERY_CACHE_CAP: usize = 64;
 const QUERY_CACHE_TTL_MS: i64 = 600_000;
@@ -562,8 +576,7 @@ pub fn embed_text_json_query(query_text: &str) -> Option<serde_json::Value> {
         return Some(vec_to_json(cached));
     }
 
-    let prefixed = format!("{}{}", BGE_QUERY_PREFIX, trimmed);
-    let v = embed_text(&prefixed)?;
+    let v = embed_text(&condition_query(trimmed))?;
     query_cache_put(trimmed, &v);
     Some(vec_to_json(v))
 }
@@ -578,6 +591,8 @@ fn vec_to_json(v: Vec<f32>) -> serde_json::Value {
     )
 }
 
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 struct CacheEntry {
@@ -586,8 +601,40 @@ struct CacheEntry {
     ts_ms: i64,
 }
 
-static QUERY_CACHE: Mutex<Vec<CacheEntry>> = Mutex::new(Vec::new());
-static PLAIN_CACHE: Mutex<Vec<CacheEntry>> = Mutex::new(Vec::new());
+/// Hash-keyed embedding cache with a bounded insertion-order recency ring.
+///
+/// The keys are up to `PLAIN_CACHE_MAX_TEXT` bytes of source text, so the
+/// previous `Vec<CacheEntry>` shape paid a full-vector `retain` plus a
+/// `position()` scan of whole-string comparisons on every get, and a second
+/// `retain` plus repeated `remove(0)` memmoves on every put. Keying on
+/// `fnv1a64` of the project-scoped key makes lookup a single 8-byte hash
+/// probe, and `order` bounds eviction to the one entry actually being
+/// displaced rather than a rescan of everything.
+///
+/// `key` is still stored in full and compared on hit: a 64-bit collision would
+/// otherwise serve one text's embedding for a different text, which is exactly
+/// the silent-wrong-vector failure the project scoping exists to prevent. TTL
+/// expiry is checked lazily per entry rather than by sweeping the whole map,
+/// so an expired entry costs its own removal and nothing else.
+///
+/// `BTreeMap` rather than `HashMap` because these are `static` caches and only
+/// the former is const-constructible; against a `QUERY_CACHE_CAP`-bounded map
+/// its lookup is a handful of 8-byte integer comparisons, which is the point
+/// -- the cost being removed here is comparing multi-kilobyte strings, not the
+/// difference between a tree probe and a hash probe.
+struct EmbedCache {
+    entries: BTreeMap<u64, CacheEntry>,
+    order: VecDeque<u64>,
+}
+
+impl EmbedCache {
+    const fn new() -> Self {
+        Self { entries: BTreeMap::new(), order: VecDeque::new() }
+    }
+}
+
+static QUERY_CACHE: Mutex<EmbedCache> = Mutex::new(EmbedCache::new());
+static PLAIN_CACHE: Mutex<EmbedCache> = Mutex::new(EmbedCache::new());
 
 const PLAIN_CACHE_MAX_TEXT: usize = 4096;
 
@@ -612,25 +659,41 @@ fn scoped_key(key: &str) -> String {
     format!("{root}\u{1f}{key}")
 }
 
-fn cache_get(cache: &Mutex<Vec<CacheEntry>>, key: &str) -> Option<Vec<f32>> {
-    let key = scoped_key(key);
-    let mut guard = cache.lock().ok()?;
-    let now = now_ms();
-    guard.retain(|e| now - e.ts_ms < QUERY_CACHE_TTL_MS);
-    let idx = guard.iter().position(|e| e.key == key)?;
-    let entry = guard.remove(idx);
-    let emb = entry.embedding.clone();
-    guard.push(entry);
-    Some(emb)
+fn cache_slot(key: &str) -> u64 {
+    crate::pipeline::fnv1a64(key.as_bytes())
 }
 
-fn cache_put(cache: &Mutex<Vec<CacheEntry>>, key: &str, embedding: &[f32]) {
+fn cache_get(cache: &Mutex<EmbedCache>, key: &str) -> Option<Vec<f32>> {
     let key = scoped_key(key);
+    let slot = cache_slot(&key);
+    let mut guard = cache.lock().ok()?;
+    let now = now_ms();
+    let hit = match guard.entries.get(&slot) {
+        Some(e) if e.key == key && now - e.ts_ms < QUERY_CACHE_TTL_MS => Some(e.embedding.clone()),
+        Some(_) => None,
+        None => return None,
+    };
+    if hit.is_none() {
+        guard.entries.remove(&slot);
+        guard.order.retain(|s| *s != slot);
+    }
+    hit
+}
+
+fn cache_put(cache: &Mutex<EmbedCache>, key: &str, embedding: &[f32]) {
+    let key = scoped_key(key);
+    let slot = cache_slot(&key);
     let mut guard = match cache.lock() { Ok(g) => g, Err(_) => return };
     let now = now_ms();
-    guard.retain(|e| now - e.ts_ms < QUERY_CACHE_TTL_MS && e.key != key);
-    while guard.len() >= QUERY_CACHE_CAP { guard.remove(0); }
-    guard.push(CacheEntry { key, embedding: embedding.to_vec(), ts_ms: now });
+    let entry = CacheEntry { key, embedding: embedding.to_vec(), ts_ms: now };
+    if guard.entries.insert(slot, entry).is_none() {
+        guard.order.push_back(slot);
+    }
+    while guard.order.len() > QUERY_CACHE_CAP {
+        if let Some(evicted) = guard.order.pop_front() {
+            guard.entries.remove(&evicted);
+        }
+    }
 }
 
 fn query_cache_get(key: &str) -> Option<Vec<f32>> {
