@@ -363,8 +363,20 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
             );
             placeholder.as_str()
         };
+        let shadowed = crate::prose::config_repo_text(key).filter(|repo_text| repo_text.trim() != text.trim());
         let (ok, status) = write_if_absent_or_forced(&path, text, force);
-        results.push(json!({ "path": path, "ok": ok, "status": status }));
+        let mut row = json!({ "path": path, "ok": ok, "status": status });
+        if let (Some(repo_text), true) = (shadowed, ok) {
+            row["shadows_config_repo"] = json!(true);
+            row["shadowed_note"] = json!(format!(
+                "this project's config repo supplies a DIFFERENT `{key}` ({} bytes vs the {} just written). \
+                 The vendored file wins, so the project now runs the compiled default while believing it follows \
+                 the config repo. Delete this file to fall back to the repo, or keep it as a deliberate override.",
+                repo_text.len(),
+                text.len()
+            ));
+        }
+        results.push(row);
     }
 
     let pre_vendor_graph_raw = fsm::vendored_graph_raw();

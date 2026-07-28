@@ -179,6 +179,13 @@ enum SourceRead {
 /// The layout comes from the repo's own `gm.config.json`, whose `instructions`
 /// block declares `dir` (default `prose`) alongside the key inventory, so the
 /// repo describes its own shape rather than this module assuming one.
+pub fn config_repo_text(key: &str) -> Option<String> {
+    match read_from_config_repo(key) {
+        SourceRead::Hit(text) => Some(text),
+        _ => None,
+    }
+}
+
 fn read_from_config_repo(key: &str) -> SourceRead {
     let cache = crate::config::SOURCE_CACHE_REL;
     let dir = pkfs::read_to_string(&format!("{cache}/gm.config.json"))
