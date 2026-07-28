@@ -11,24 +11,34 @@ pub fn anchor(path: &str) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
+struct RootEntryScopedToOneCwdNeverGlobal {
+    cwd: String,
+    root: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+static ROOT_CACHE: std::sync::Mutex<Option<RootEntryScopedToOneCwdNeverGlobal>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(target_arch = "wasm32")]
 fn project_root() -> Option<String> {
-    use std::cell::RefCell;
-    thread_local! {
-        static CACHE: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
-    }
     let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let cwd = cwd.trim_end_matches(['/', '\\']).to_string();
-    if let Some(hit) = CACHE.with(|c| {
-        c.borrow().as_ref().filter(|(k, _)| *k == cwd).map(|(_, v)| v.clone())
-    }) {
-        return Some(hit);
+    if let Ok(cache) = ROOT_CACHE.lock() {
+        if let Some(entry) = cache.as_ref() {
+            if entry.cwd == cwd {
+                return Some(entry.root.clone());
+            }
+        }
     }
     let root = match git_toplevel() {
         Some(r) => r,
         None if cwd.is_empty() => return None,
         None => cwd.clone(),
     };
-    CACHE.with(|c| *c.borrow_mut() = Some((cwd, root.clone())));
+    if let Ok(mut cache) = ROOT_CACHE.lock() {
+        *cache = Some(RootEntryScopedToOneCwdNeverGlobal { cwd, root: root.clone() });
+    }
     Some(root)
 }
 
