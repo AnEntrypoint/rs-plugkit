@@ -170,7 +170,7 @@ impl Config {
     /// itself with `_comment` entries, and flagging its own house style as
     /// suspicious would train people to ignore this report.
     pub fn unknown_top_level_keys(&self) -> Vec<String> {
-        const KNOWN: &[&str] = &["version", "instructions", "index", "memory", "cache", "sync", "fsm", "messages", "rag"];
+        const KNOWN: &[&str] = &["version", "instructions", "index", "memory", "cache", "sync", "fsm", "messages", "rag", "scoring"];
         let Some(obj) = self.value.as_object() else { return Vec::new() };
         obj.keys()
             .filter(|k| !k.starts_with('_'))

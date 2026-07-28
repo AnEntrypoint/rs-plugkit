@@ -814,7 +814,7 @@ fn codesearch(body: &Value) -> u64 {
     } else {
         vec_ids
     };
-    let bm25_ids = corpus.bm25_rank(query, cand_k as usize);
+    let bm25_ids = corpus.bm25_rank_cfg(query, cand_k as usize, &cfg.scoring);
     let commits = crate::code_index::git_commit_rank(query, 10);
     let build_hit = |corpus: &mut crate::code_index::FusionCorpus, key: &str, score: Option<f64>, fallback_text: Option<&str>| -> Value {
         let text = corpus.text_for_key(key)
@@ -1266,6 +1266,13 @@ fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u6
                     "recall_default_limit": rag.budget.default_limit,
                     "index_wall_budget_ms": rag.index.wall_budget_ms,
                     "index_max_file_bytes": rag.index.max_file_bytes,
+                    "index_max_chunks_per_file_per_pass": rag.index.max_chunks_embedded_per_file_per_pass_count_bound_only,
+                    "index_pessimistic_ms_per_chunk": rag.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound,
+                    "index_extra_skip_dirs": rag.index.extra_skip_dirs_appended_to_builtins_never_replacing,
+                    "index_extra_skip_file_suffixes": rag.index.extra_skip_file_suffixes_appended_to_builtins_never_replacing,
+                    "index_force_include_path_substrings": rag.index.force_include_path_substrings_overriding_every_skip,
+                    "scoring_bm25_k1": rag.scoring.bm25_k1_term_frequency_saturation,
+                    "scoring_bm25_b": rag.scoring.bm25_b_document_length_normalization,
                 }));
             }
             Err(reason) => {

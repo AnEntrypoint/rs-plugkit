@@ -233,8 +233,12 @@ const SKIP_FILE_SUFFIXES: &[&str] = &[
     ".db", ".sqlite", ".sqlite3",
 ];
 
-fn is_skipped_filename(name: &str) -> bool {
-    SKIP_FILE_SUFFIXES.iter().any(|suf| name.ends_with(suf))
+fn is_skipped_filename(name: &str, cfg: &crate::ragconfig::IndexConfig) -> bool {
+    cfg.skips_filename(name, SKIP_FILE_SUFFIXES)
+}
+
+fn is_skipped_dir_segment(seg: &str, cfg: &crate::ragconfig::IndexConfig) -> bool {
+    cfg.skips_dir_segment(seg, SKIP_DIRS)
 }
 
 pub fn ensure_schema_at(path: &str) -> Result<(), String> {
@@ -265,6 +269,7 @@ pub fn ensure_schema_at_cfg(path: &str, cfg: &crate::ragconfig::RagConfig) -> Re
     ))?;
     crate::vecns::VecTableSpec::from_names(path, &cfg.code_chunks).ensure_index();
     crate::vecns::VecTableSpec::from_names(path, &cfg.legacy_memories_alongside_code_chunks).ensure_index();
+    crate::embed_marker::record_embed_generation();
     Ok(())
 }
 
@@ -347,44 +352,51 @@ fn is_hidden_segment(seg: &str) -> bool {
     seg.starts_with('.') && seg != "." && seg != ".."
 }
 
-fn collect_files(root: &str, max_files: usize) -> Vec<String> {
+fn collect_files(root: &str, max_files: usize, cfg: &crate::ragconfig::IndexConfig) -> Vec<String> {
     let gi = load_repo_gitignore(root);
     let entries = list_dir(root);
     if entries.is_empty() { return Vec::new(); }
     let has_slashes = entries.iter().any(|e| e.contains('/'));
     if has_slashes {
         return entries.into_iter()
-            .filter(|p| !p.split('/').any(is_hidden_segment))
-            .filter(|p| !SKIP_DIRS.iter().any(|d| p.split('/').any(|seg| seg == *d)))
             .filter(|p| {
+                if cfg.is_force_included(p) { return true; }
+                if p.split('/').any(is_hidden_segment) { return false; }
+                if p.split('/').any(|seg| is_skipped_dir_segment(seg, cfg)) { return false; }
                 let name = p.rsplit('/').next().unwrap_or(p.as_str());
-                !is_skipped_filename(name)
+                if is_skipped_filename(name, cfg) { return false; }
+                !gitignore_excludes(&gi, p, false)
             })
-            .filter(|p| !gitignore_excludes(&gi, p, false))
             .take(max_files)
             .collect();
     }
     let mut files = Vec::new();
-    walk_posix(root, max_files, &mut files, &gi);
+    walk_posix(root, max_files, &mut files, &gi, cfg);
     files
 }
 
-fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option<ignore::gitignore::Gitignore>) {
+fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option<ignore::gitignore::Gitignore>, cfg: &crate::ragconfig::IndexConfig) {
     if files.len() >= max_files { return; }
-    if SKIP_DIRS.iter().any(|d| root.ends_with(d) || root.contains(&format!("/{}/", d))) { return; }
+    let root_force_included = cfg.is_force_included(root);
+    if !root_force_included
+        && root.split('/').any(|seg| is_skipped_dir_segment(seg, cfg))
+    { return; }
     for entry in list_dir(root) {
         if files.len() >= max_files { return; }
-        if is_hidden_segment(&entry) { continue; }
-        if is_skipped_filename(&entry) { continue; }
         let next = if root.ends_with('/') { format!("{}{}", root, entry) } else { format!("{}/{}", root, entry) };
+        let force_included = root_force_included || cfg.is_force_included(&next);
+        if !force_included {
+            if is_hidden_segment(&entry) { continue; }
+            if is_skipped_filename(&entry, cfg) { continue; }
+        }
         let is_dir_entry = host_stat(&next)
             .and_then(|v| v.get("isDirectory").and_then(|b| b.as_bool()))
             .unwrap_or_else(|| !entry.contains('.'));
-        if gitignore_excludes(gi, &next, is_dir_entry) { continue; }
+        if !force_included && gitignore_excludes(gi, &next, is_dir_entry) { continue; }
         if !is_dir_entry {
             files.push(next);
         } else {
-            walk_posix(&next, max_files, files, gi);
+            walk_posix(&next, max_files, files, gi, cfg);
         }
     }
 }
@@ -828,9 +840,9 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
     let chunk_rows = |fp: &str| -> usize { chunk_counts.get(fp).copied().unwrap_or(0) };
     let r = if root.is_empty() { "." } else { root };
     let limit = max_files.max(50).min(2000);
-    let files = collect_files(r, limit);
+    let files = collect_files(r, limit, &cfg.index);
     const PRUNE_ENUMERATION_CAP: usize = 20000;
-    let full_files = if limit >= PRUNE_ENUMERATION_CAP { files.clone() } else { collect_files(r, PRUNE_ENUMERATION_CAP) };
+    let full_files = if limit >= PRUNE_ENUMERATION_CAP { files.clone() } else { collect_files(r, PRUNE_ENUMERATION_CAP, &cfg.index) };
     {
         let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
@@ -980,51 +992,29 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
                 .collect();
         }
 
-        const MAX_CHUNKS_PER_FILE_PER_PASS: usize = 64;
-        // The count cap alone does NOT bound wall-clock cost, and that gap is
-        // what actually stalls the index. Live-witnessed: a 153KB AGENTS.md
-        // produced 49 chunks -- comfortably UNDER the 64 cap, so it was never
-        // truncated -- yet its single embed_texts_batch call took 39981ms,
-        // blowing both index_wall_budget_ms (30s by default, and the outer check at the
-        // top of this loop only fires BETWEEN files) and the supervisor's own
-        // 30s heartbeat-stale limit, which then killed the watcher mid-pass
-        // and left the index frozen at deferred_files=499 with the embedder
-        // crashed. Per-chunk cost is highly non-uniform (a chunk of prose
-        // embeds far slower than a short function body), so a count cap can
-        // never stand in for a time bound.
-        //
-        // Bound the batch by the budget actually remaining for this pass:
-        // scale the per-file chunk allowance down as the pass approaches
-        // index_wall_budget_ms. A file arriving with little budget left
-        // embeds only a small prefix now and finishes on a later pass, which
-        // still converges (the file is marked seen and its manifest written,
-        // exactly as the count-cap path already does -- see the livelock
-        // rationale above for why deferring the file ENTIRELY is wrong).
+        let max_chunks_per_file_per_pass = cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only;
         let elapsed_now = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
         let remaining_ms = index_wall_budget_ms.saturating_sub(elapsed_now);
-        // Derived from the same live measurement: 39981ms / 49 chunks is
-        // ~816ms per prose chunk on unaccelerated wasm32 BERT. Budget against
-        // a deliberately pessimistic per-chunk estimate so the bound holds on
-        // the slow (prose) case rather than the fast (short-code) case.
-        const PESSIMISTIC_MS_PER_CHUNK: u64 = 800;
-        let budget_chunks = (remaining_ms / PESSIMISTIC_MS_PER_CHUNK).max(1) as usize;
-        let cap = MAX_CHUNKS_PER_FILE_PER_PASS.min(budget_chunks);
+        let pessimistic_ms_per_chunk = cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound.max(1);
+        let budget_chunks = (remaining_ms / pessimistic_ms_per_chunk).max(1) as usize;
+        let cap = max_chunks_per_file_per_pass.min(budget_chunks);
         let oversized = chunks.len() > cap;
         if oversized {
             let full = chunks.len();
             chunks.truncate(cap);
             let msg = format!(
                 "code_index: capping {} chunks={} -> {} (count_cap={} budget_chunks={} remaining_ms={}; file still indexed and marked seen)",
-                fp, full, cap, MAX_CHUNKS_PER_FILE_PER_PASS, budget_chunks, remaining_ms
+                fp, full, cap, max_chunks_per_file_per_pass, budget_chunks, remaining_ms
             );
             let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
             crate::wasm_dispatch::emit_event("code_index_chunk_cap", json!({
                 "path": fp,
                 "chunks_total": full,
                 "chunks_indexed": cap,
-                "count_cap": MAX_CHUNKS_PER_FILE_PER_PASS,
+                "count_cap": max_chunks_per_file_per_pass,
                 "budget_chunks": budget_chunks,
                 "remaining_ms": remaining_ms,
+                "pessimistic_ms_per_chunk": pessimistic_ms_per_chunk,
             }));
         }
 
@@ -1173,7 +1163,7 @@ pub fn current_digest() -> String {
 /// never agree -- the same class of mismatch that made the stored digest
 /// permanently unequal to the computed one.
 pub fn current_digest_cfg(cfg: &crate::ragconfig::RagConfig) -> String {
-    let files = collect_files(".", DIGEST_MAX_FILES);
+    let files = collect_files(".", DIGEST_MAX_FILES, &cfg.index);
     let mut entries: Vec<(String, u32)> = Vec::new();
     for raw_fp in &files {
         let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();
@@ -1366,8 +1356,12 @@ impl FusionCorpus {
     }
 
     pub fn bm25_rank(&mut self, query: &str, k: usize) -> Vec<String> {
-        const K1: f64 = 1.2;
-        const B: f64 = 0.75;
+        self.bm25_rank_cfg(query, k, &crate::ragconfig::RagConfig::resolved().scoring)
+    }
+
+    pub fn bm25_rank_cfg(&mut self, query: &str, k: usize, scoring: &crate::ragconfig::ScoringConfig) -> Vec<String> {
+        let k1 = scoring.bm25_k1_term_frequency_saturation;
+        let b = scoring.bm25_b_document_length_normalization;
         let q_tokens = rs_search::tokenize::tokenize(query);
         if q_tokens.is_empty() || self.metas.is_empty() { return Vec::new(); }
         let mut doc_tfs: Vec<(usize, std::collections::HashMap<String, u32>, f64)> = Vec::new();
@@ -1399,7 +1393,7 @@ impl FusionCorpus {
                 if f == 0.0 { continue; }
                 let d = *df.get(t.as_str()).unwrap_or(&0) as f64;
                 let idf = (1.0 + (n - d + 0.5) / (d + 0.5)).ln();
-                score += idf * (f * (K1 + 1.0)) / (f + K1 * (1.0 - B + B * dl / avgdl));
+                score += idf * (f * (k1 + 1.0)) / (f + k1 * (1.0 - b + b * dl / avgdl));
             }
             if score > 0.0 { scored.push((*i, score)); }
         }

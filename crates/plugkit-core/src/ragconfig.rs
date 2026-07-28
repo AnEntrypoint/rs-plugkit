@@ -35,6 +35,8 @@ pub struct ScoringConfig {
     pub recency_floor: f64,
     pub cos_floor_applied_before_recency_rescue: f64,
     pub dedup_jaccard_near_duplicate_threshold: f64,
+    pub bm25_k1_term_frequency_saturation: f64,
+    pub bm25_b_document_length_normalization: f64,
 }
 
 impl Default for ScoringConfig {
@@ -44,6 +46,8 @@ impl Default for ScoringConfig {
             recency_floor: 0.4,
             cos_floor_applied_before_recency_rescue: 0.0,
             dedup_jaccard_near_duplicate_threshold: 0.7,
+            bm25_k1_term_frequency_saturation: 1.2,
+            bm25_b_document_length_normalization: 0.75,
         }
     }
 }
@@ -133,8 +137,12 @@ impl EmbedDimConfig {
 pub struct IndexConfig {
     pub split_chunk_above_bytes: usize,
     pub max_chunks_embedded_per_file_per_pass_count_bound_only: usize,
+    pub pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound: u64,
     pub wall_budget_ms: u64,
     pub max_file_bytes: usize,
+    pub extra_skip_dirs_appended_to_builtins_never_replacing: Vec<String>,
+    pub extra_skip_file_suffixes_appended_to_builtins_never_replacing: Vec<String>,
+    pub force_include_path_substrings_overriding_every_skip: Vec<String>,
 }
 
 impl Default for IndexConfig {
@@ -142,9 +150,33 @@ impl Default for IndexConfig {
         IndexConfig {
             split_chunk_above_bytes: 8192,
             max_chunks_embedded_per_file_per_pass_count_bound_only: 64,
+            pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound: 800,
             wall_budget_ms: 30_000,
             max_file_bytes: 256 * 1024,
+            extra_skip_dirs_appended_to_builtins_never_replacing: Vec::new(),
+            extra_skip_file_suffixes_appended_to_builtins_never_replacing: Vec::new(),
+            force_include_path_substrings_overriding_every_skip: Vec::new(),
         }
+    }
+}
+
+impl IndexConfig {
+    pub fn is_force_included(&self, path: &str) -> bool {
+        self.force_include_path_substrings_overriding_every_skip
+            .iter()
+            .any(|needle| !needle.is_empty() && path.contains(needle.as_str()))
+    }
+
+    pub fn skips_dir_segment(&self, seg: &str, builtins: &[&str]) -> bool {
+        builtins.iter().any(|d| seg == *d)
+            || self.extra_skip_dirs_appended_to_builtins_never_replacing.iter().any(|d| seg == d.as_str())
+    }
+
+    pub fn skips_filename(&self, name: &str, builtins: &[&str]) -> bool {
+        builtins.iter().any(|suf| name.ends_with(suf))
+            || self.extra_skip_file_suffixes_appended_to_builtins_never_replacing
+                .iter()
+                .any(|suf| !suf.is_empty() && name.ends_with(suf.as_str()))
     }
 }
 
@@ -339,10 +371,42 @@ impl RagConfig {
             }
         };
 
+        let overwrite_present_f64_or_record_problem = |parent: &str, key: &str, out: &mut f64, problems: &mut Vec<String>| {
+            if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
+                match found.as_f64() {
+                    Some(n) => *out = n,
+                    None => problems.push(format!("{parent}.{key} must be a number, got {found}")),
+                }
+            }
+        };
+        let append_present_strings_or_record_problem = |parent: &str, key: &str, out: &mut Vec<String>, problems: &mut Vec<String>| {
+            let found = match v.get(parent).and_then(|p| p.get(key)) {
+                Some(f) => f,
+                None => return,
+            };
+            match found.as_array() {
+                Some(items) => {
+                    for item in items {
+                        match item.as_str() {
+                            Some(s) => out.push(s.to_string()),
+                            None => problems.push(format!("{parent}.{key} entries must be strings, got {item}")),
+                        }
+                    }
+                }
+                None => problems.push(format!("{parent}.{key} must be an array of strings, got {found}")),
+            }
+        };
+
         overwrite_present_u64_or_record_problem("index", "wall_budget_ms", &mut cfg.index.wall_budget_ms, &mut problems);
         overwrite_present_usize_or_record_problem("index", "max_file_bytes", &mut cfg.index.max_file_bytes, &mut problems);
         overwrite_present_usize_or_record_problem("index", "max_chunks_per_file_per_pass", &mut cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only, &mut problems);
+        overwrite_present_u64_or_record_problem("index", "pessimistic_ms_per_chunk", &mut cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound, &mut problems);
         overwrite_present_usize_or_record_problem("index", "oversized_chunk_split_threshold", &mut cfg.index.split_chunk_above_bytes, &mut problems);
+        append_present_strings_or_record_problem("index", "extra_skip_dirs", &mut cfg.index.extra_skip_dirs_appended_to_builtins_never_replacing, &mut problems);
+        append_present_strings_or_record_problem("index", "extra_skip_file_suffixes", &mut cfg.index.extra_skip_file_suffixes_appended_to_builtins_never_replacing, &mut problems);
+        append_present_strings_or_record_problem("index", "force_include_path_substrings", &mut cfg.index.force_include_path_substrings_overriding_every_skip, &mut problems);
+        overwrite_present_f64_or_record_problem("scoring", "bm25_k1", &mut cfg.scoring.bm25_k1_term_frequency_saturation, &mut problems);
+        overwrite_present_f64_or_record_problem("scoring", "bm25_b", &mut cfg.scoring.bm25_b_document_length_normalization, &mut problems);
         overwrite_present_usize_or_record_problem("memory", "embed_dim", &mut cfg.embed.dim, &mut problems);
         overwrite_present_usize_or_record_problem("memory", "recall_limit", &mut cfg.budget.default_limit, &mut problems);
 
@@ -408,6 +472,24 @@ impl RagConfig {
         }
         if self.scoring.half_life_ms <= 0.0 {
             return Err("ragconfig: scoring.half_life_ms must be positive (it divides an age)".to_string());
+        }
+        if self.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound == 0 {
+            return Err("ragconfig: index.pessimistic_ms_per_chunk must be non-zero; it divides the remaining wall budget to derive a per-file chunk allowance".to_string());
+        }
+        if self.index.max_chunks_embedded_per_file_per_pass_count_bound_only == 0 {
+            return Err("ragconfig: index.max_chunks_per_file_per_pass must be non-zero; a zero cap truncates every file to no chunks and the index never populates".to_string());
+        }
+        if !(self.scoring.bm25_k1_term_frequency_saturation >= 0.0) {
+            return Err(format!(
+                "ragconfig: scoring.bm25_k1 {} must be finite and non-negative; it is the term-frequency saturation parameter and a negative value inverts the ranking",
+                self.scoring.bm25_k1_term_frequency_saturation
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.scoring.bm25_b_document_length_normalization) {
+            return Err(format!(
+                "ragconfig: scoring.bm25_b {} outside [0,1]; it interpolates between no length normalization (0) and full (1), and outside that range the denominator can go negative and flip score signs",
+                self.scoring.bm25_b_document_length_normalization
+            ));
         }
         if self.budget.pool_multiplier == 0 {
             return Err("ragconfig: budget.pool_multiplier must be non-zero; a zero pool retrieves nothing".to_string());
