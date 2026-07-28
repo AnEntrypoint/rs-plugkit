@@ -143,7 +143,7 @@ mod wasm_hooks {
     use crate::wasm_dispatch::{host_read, host_write, host_exists};
 
     fn path_for(name: &str) -> String {
-        format!(".gm/{}", name)
+        crate::pkfs::anchor(&format!(".gm/{}", name))
     }
 
     pub fn read_marker(name: &str) -> bool {

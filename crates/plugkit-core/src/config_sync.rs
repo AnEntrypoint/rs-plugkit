@@ -1,27 +1,21 @@
 //! Git-backed materialization of repo-sourced config: the [`RepoFetcher`]
 //! implementation `config.rs` declares as a seam and deliberately leaves empty.
-//!
 //! [`config::load_repo_tier`] calls `refresh` on the resolution path, which
 //! means this code runs on config reads -- potentially many per session, across
 //! every project sharing the process-wide plugin instance. Everything below is
 //! shaped by that one fact: the common case must cost approximately nothing,
 //! and no failure here may take the session down with it.
-//!
 //! # Why a remote probe instead of a fetch
-//!
 //! `git fetch` transfers objects. `git ls-remote` transfers one line per ref
 //! and never writes to the object store, so it is the cheap way to answer the
 //! only question a refresh actually asks: "did the remote sha move?" We fetch
 //! ONLY when the answer is yes. On an unchanged remote -- overwhelmingly the
 //! common case, since config repos change rarely and refresh is called often --
 //! the cost is one ref advertisement, not a pack negotiation.
-//!
 //! The clone/fetch we do issue is `--depth 1`: config resolution reads a
 //! worktree at one commit and never inspects history, so downloading it would
 //! be pure waste.
-//!
 //! # Failure is never fatal, but never silent either
-//!
 //! A probe needs the network, and the network is not available in a plane, a
 //! CI sandbox, or a coffee shop. A refresh that failed but has a usable prior
 //! checkout returns `Ok` -- resolution proceeds against the last good copy --
@@ -30,9 +24,7 @@
 //! a failure with NO local copy at all returns `Err`, because at that point
 //! there is genuinely nothing to resolve and `config.rs` must reject the tier
 //! rather than fall through to a lower one (see its `load_repo_tier` docs).
-//!
 //! # Backoff
-//!
 //! Debounce alone does not protect a dead remote: a 15-minute debounce still
 //! probes a permanently-unreachable host every 15 minutes forever, and each of
 //! those probes blocks a config read for however long the host's git takes to
@@ -40,14 +32,11 @@
 //! exponentially ([`BACKOFF_BASE_MS`] doubling up to [`BACKOFF_MAX_MS`]), and
 //! any success resets it. A transient outage costs one slow probe; a dead
 //! remote decays to roughly hourly.
-//!
 //! # Concurrency
-//!
 //! The plugin instance is shared across concurrently-active projects, and
 //! `config.rs` points every project's USER tier at one shared cache dir under
 //! `$HOME` -- so two projects can genuinely refresh the same source at the same
 //! moment. Two mechanisms cover it:
-//!
 //! - **State** is published by write-to-temp + atomic rename, so a concurrent
 //!   reader sees either the old state or the new one, never a half-written
 //!   file. (A plain overwrite can be observed torn, which would look like
@@ -57,8 +46,6 @@
 //!   with the existing checkout, which is exactly the degraded-but-usable path
 //!   the offline case already takes. A lock older than [`LOCK_STALE_MS`] is
 //!   broken, since a process killed mid-refresh would otherwise wedge the
-//!   source permanently.
-//!
 //! In-process statics are deliberately NOT used for any of this: they would be
 //! shared across projects that must not share debounce state, and would be
 //! invisible to the separate host processes that can also run this code.
@@ -167,12 +154,16 @@ fn source_key(src: &RepoSource) -> String {
     format!("{:016x}", crate::pipeline::fnv1a64(ident.as_bytes()))
 }
 
+fn cache_root(src: &RepoSource) -> String {
+    crate::pkfs::anchor(&src.cache_dir)
+}
+
 fn state_path(src: &RepoSource) -> String {
-    format!("{}.{}.sync.json", src.cache_dir, source_key(src))
+    format!("{}.{}.sync.json", cache_root(src), source_key(src))
 }
 
 fn lock_path(src: &RepoSource) -> String {
-    format!("{}.{}.lock", src.cache_dir, source_key(src))
+    format!("{}.{}.lock", cache_root(src), source_key(src))
 }
 
 fn read_state(src: &RepoSource) -> SyncState {
@@ -238,11 +229,15 @@ fn try_lock(src: &RepoSource) -> bool {
     };
     let code = format!(
         "const fs=require('fs');const p={p};const staleMs={LOCK_STALE_MS};\
-         try{{fs.mkdirSync(p);process.stdout.write('acquired');}}catch(e){{\
-         try{{const st=fs.statSync(p);\
-         if(Date.now()-st.mtimeMs>staleMs){{fs.rmSync(p,{{recursive:true,force:true}});\
-         fs.mkdirSync(p);process.stdout.write('acquired');}}\
-         else{{process.stdout.write('busy');}}}}catch(e2){{process.stdout.write('busy');}}}}"
+         process.stdout.write((function(){{\
+         try{{fs.mkdirSync(p);return 'acquired';}}catch(e){{}}\
+         let st=null;try{{st=fs.statSync(p);}}catch(e2){{return 'busy';}}\
+         if(Date.now()-st.mtimeMs<=staleMs){{return 'busy';}}\
+         const aside=p+'.stale-'+process.pid+'-'+Date.now();\
+         try{{fs.renameSync(p,aside);}}catch(e3){{return 'busy';}}\
+         try{{fs.rmSync(aside,{{recursive:true,force:true}});}}catch(e4){{}}\
+         try{{fs.mkdirSync(p);return 'acquired';}}catch(e5){{return 'busy';}}\
+         }})());"
     );
     exec_js_stdout(&code, 15000).map(|s| s.contains("acquired")).unwrap_or(false)
 }
@@ -276,7 +271,7 @@ fn git(argv: &[&str], cwd: Option<&str>) -> Result<String, String> {
 /// half-written by an interrupted clone exists but has no HEAD, and serving it
 /// as "the last good copy" would surface an empty config as if it were real.
 fn local_sha(src: &RepoSource) -> Option<String> {
-    let out = git(&["rev-parse", "HEAD"], Some(&src.cache_dir)).ok()?;
+    let out = git(&["rev-parse", "HEAD"], Some(&cache_root(src))).ok()?;
     let s = out.trim().to_string();
     if s.is_empty() { None } else { Some(s) }
 }
@@ -303,11 +298,11 @@ fn is_sha_like(s: &str) -> bool {
 }
 
 fn staging_dir(src: &RepoSource) -> String {
-    format!("{}.{}.staging", src.cache_dir, source_key(src))
+    format!("{}.{}.staging", cache_root(src), source_key(src))
 }
 
 fn retired_dir(src: &RepoSource) -> String {
-    format!("{}.{}.retired", src.cache_dir, source_key(src))
+    format!("{}.{}.retired", cache_root(src), source_key(src))
 }
 
 fn remove_tree(path: &str) -> bool {

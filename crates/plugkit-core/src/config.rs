@@ -516,6 +516,27 @@ fn home_dir() -> Option<String> {
 /// Every failure after the spec PARSES is a rejection, not a fallthrough --
 /// once a user has declared "my config lives in that repo", quietly running
 /// someone else's config because the fetch failed is worse than stopping.
+const PUBLISH_SWAP_READ_ATTEMPTS: u32 = 5;
+
+const PUBLISH_SWAP_RETRY_MS: u64 = 3;
+
+fn spin_ms(ms: u64) {
+    let deadline = crate::orchestrator::state::now_ms() as u64 + ms;
+    while (crate::orchestrator::state::now_ms() as u64) < deadline {}
+}
+
+fn read_across_publish(path: &str) -> Option<String> {
+    for attempt in 0..PUBLISH_SWAP_READ_ATTEMPTS {
+        if let Some(text) = pkfs::read_to_string(path) {
+            return Some(text);
+        }
+        if attempt + 1 < PUBLISH_SWAP_READ_ATTEMPTS {
+            spin_ms(PUBLISH_SWAP_RETRY_MS);
+        }
+    }
+    None
+}
+
 fn load_repo_tier(
     spec_path: &str,
     cache_dir: String,
@@ -539,7 +560,7 @@ fn load_repo_tier(
         };
     }
     let cfg_path = src.config_path();
-    let Some(text) = pkfs::read_to_string(&cfg_path) else {
+    let Some(text) = read_across_publish(&cfg_path) else {
         return Load::Rejected {
             reason: format!(
                 "{spec_path}: config repo {} refreshed, but no config file at {cfg_path}",
