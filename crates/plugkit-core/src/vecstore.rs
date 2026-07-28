@@ -59,16 +59,10 @@ pub fn drop_if_dim_mismatch_at(db_name: &str, table: &str) -> Result<bool, Strin
     drop_if_dim_mismatch_at_cfg(db_name, table, &EmbedDimConfig::default())
 }
 
-/// As `drop_if_dim_mismatch_cfg`, against an explicitly-named db.
-///
-/// The index name is derived (`<table>_vec`) rather than passed, matching the
-/// convention `VecTableNames::derived` encodes; a config that names an index
-/// off-convention must drop it itself before reaching here, or the orphaned
-/// index survives its table.
 pub fn drop_if_dim_mismatch_at_cfg(db_name: &str, table: &str, cfg: &EmbedDimConfig) -> Result<bool, String> {
     match embedding_col_dim_at(db_name, table) {
         Some(found) => {
-            if !cfg.should_drop(table, found) {
+            if !cfg.should_drop_table_for_dim_mismatch(table, found) {
                 return Ok(false);
             }
             let _ = libsql_exec(db_name, &format!("DROP INDEX IF EXISTS {}_vec", table));

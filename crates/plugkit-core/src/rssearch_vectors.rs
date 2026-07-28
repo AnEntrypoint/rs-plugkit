@@ -206,11 +206,7 @@ pub fn search_with_recency_cfg(query_embedding: &Value, namespaces: &[String], l
     for row in arr {
         let distance = row.get("distance").and_then(|d| d.as_f64()).unwrap_or(2.0);
         let cos = 1.0 - distance;
-        // This path historically applied NO cosine floor, and still does not
-        // by default (ScoringConfig::cos_floor is 0.0). Honouring it here too
-        // means an operator who raises the floor gets it on BOTH search
-        // surfaces rather than only on the memory-hits one.
-        if cos < cfg.scoring.cos_floor {
+        if cos < cfg.scoring.cos_floor_applied_before_recency_rescue {
             continue;
         }
         let updated_at = row.get("updated_at").and_then(|u| u.as_i64()).unwrap_or(now_ms);
@@ -250,13 +246,10 @@ pub fn search_memory_hits(query_embedding: &Value, namespaces: &[String], limit:
     // config as an override would silently discard a caller's deliberate,
     // narrower choice.
     let mut cfg = default_cfg();
-    cfg.scoring.cos_floor = cos_floor;
+    cfg.scoring.cos_floor_applied_before_recency_rescue = cos_floor;
     search_memory_hits_cfg(query_embedding, namespaces, limit, now_ms, &cfg)
 }
 
-/// Config-driven form. `cfg.scoring.cos_floor` is the floor -- there is no
-/// separate argument, so a knowledgebase's configured floor cannot be
-/// accidentally bypassed by a call site that forgets to pass it.
 pub fn search_memory_hits_cfg(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64, cfg: &RagConfig) -> Result<Value, String> {
     let qvec = json_to_f32_vec(query_embedding)
         .ok_or_else(|| "rssearch_vectors search_memory_hits: invalid query embedding".to_string())?;
@@ -274,7 +267,7 @@ pub fn search_memory_hits_cfg(query_embedding: &Value, namespaces: &[String], li
     for row in arr {
         let distance = row.get("distance").and_then(|d| d.as_f64()).unwrap_or(2.0);
         let cos = 1.0 - distance;
-        if cos < cfg.scoring.cos_floor {
+        if cos < cfg.scoring.cos_floor_applied_before_recency_rescue {
             continue;
         }
         let updated_at = row.get("updated_at").and_then(|u| u.as_i64()).unwrap_or(now_ms);
@@ -294,7 +287,7 @@ pub fn search_memory_hits_cfg(query_embedding: &Value, namespaces: &[String], li
     for (_, hit) in scored {
         let text = hit.get("text").and_then(|t| t.as_str()).unwrap_or("");
         let dup = out.iter().any(|kept| {
-            jaccard_overlap(text, kept.get("text").and_then(|t| t.as_str()).unwrap_or("")) >= cfg.scoring.dedup_jaccard
+            jaccard_overlap(text, kept.get("text").and_then(|t| t.as_str()).unwrap_or("")) >= cfg.scoring.dedup_jaccard_near_duplicate_threshold
         });
         if !dup {
             out.push(hit);

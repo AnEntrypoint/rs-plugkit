@@ -1965,9 +1965,30 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
     }
 }
 
+fn request_fingerprint(verb: &str, body_s: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    verb.hash(&mut hasher);
+    body_s.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn stamp_request_identity(packed: u64, fingerprint: &str, body_parse_failed: bool) -> u64 {
+    let mut value = super::host_abi::unpack_to_value(packed);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("request_fingerprint".to_string(), json!(fingerprint));
+        if body_parse_failed {
+            obj.insert("body_parse_error".to_string(), json!(true));
+        }
+    }
+    pack(value.to_string())
+}
+
 fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
     let verb = read_str(verb_ptr as *const u8, verb_len);
     let body_s = read_str(body_ptr as *const u8, body_len);
+    let fingerprint = request_fingerprint(&verb, &body_s);
+    let body_parse_failed = !body_s.is_empty() && serde_json::from_str::<Value>(&body_s).is_err();
     let body: Value = if body_s.is_empty() { Value::Null } else {
         serde_json::from_str(&body_s).unwrap_or(Value::Null)
     };
@@ -1978,7 +1999,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     super::events::set_dispatch_session_id(dispatch_session_id);
     let result_packed = dispatch_gated_verb(&verb, &body, &body_s);
     super::events::set_dispatch_session_id(None);
-    result_packed
+    stamp_request_identity(result_packed, &fingerprint, body_parse_failed)
 }
 
 fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {

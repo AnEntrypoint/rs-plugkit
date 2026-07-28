@@ -98,14 +98,6 @@ fn clear_codeinsight_if_dim_mismatch() -> bool {
     clear_codeinsight_if_dim_mismatch_cfg(&crate::ragconfig::RagConfig::default())
 }
 
-/// Flat-JSON sibling of the libsql-table dim guard.
-///
-/// The `<code>-vec` kv namespace stores embeddings as JSON arrays, so there is
-/// no `F32_BLOB(n)` column type to inspect -- the width has to be read off an
-/// actual stored entry. The DECISION is still `EmbedDimConfig::should_drop`,
-/// so an operator who set `drop_on_mismatch=false` gets the same
-/// diagnose-don't-destroy behaviour on both storage shapes rather than having
-/// one of them quietly wipe the namespace anyway.
 fn clear_codeinsight_if_dim_mismatch_cfg(cfg: &crate::ragconfig::RagConfig) -> bool {
     let vec_ns = cfg.namespaces.vec_namespace(&cfg.namespaces.code);
     let vec_rows = fv_query(&vec_ns, "");
@@ -128,7 +120,7 @@ fn clear_codeinsight_if_dim_mismatch_cfg(cfg: &crate::ragconfig::RagConfig) -> b
         // against, so leave the namespace alone rather than clearing on a guess.
         None => return false,
     };
-    if !cfg.embed.should_drop(&vec_ns, old_dim) {
+    if !cfg.embed.should_drop_table_for_dim_mismatch(&vec_ns, old_dim) {
         return false;
     }
     let cleared = clear_codeinsight_cfg(cfg);
