@@ -1129,6 +1129,18 @@ fn db_path_from(body: &Value) -> String {
     }
 }
 
+/// Open a database by PATH. The `db` field is vestigial.
+///
+/// Two guest modules appeared to disagree about what identifies a database --
+/// this one sends `{db, path}` while `libsql_wasm` sends `{path}` alone across
+/// twelve calls. Reading the plugin settles it: `agentplug-libsql` reads only
+/// `path` and never reads `db` at all, and its own comment explains why --
+/// one plugin instance now serves every project, so a bare `name` is no longer
+/// a meaningful identifier and there is no persistent name-to-connection map.
+///
+/// `db` is kept on the wire because it costs nothing and reads as a label in
+/// dispatch logs, but it must not be treated as identity: two calls carrying
+/// different `db` values and the same `path` address the same database.
 fn sql_open(body: &Value) -> u64 {
     let path = db_path_from(body);
     let name = db_name_from(body);
