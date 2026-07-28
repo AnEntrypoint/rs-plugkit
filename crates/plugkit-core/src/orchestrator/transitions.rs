@@ -48,8 +48,11 @@ fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
         ("browser-witness-coverage", "true when every client-side file edited this session (per .gm/exec-spool/.turn-browser-edits.json) has a matching entry in .gm/exec-spool/.turn-browser-witnessed with the same content hash", pred_browser_witness_coverage),
         ("claim-audit-clean", "true when the claim audit finds no unwitnessed completion claims -- see orchestrator::claim_audit", pred_claim_audit_clean),
         ("submodules-clean", "true when no submodule has drifted from its recorded commit -- see orchestrator::submodule_drift", pred_submodules_clean),
+        ("remote-hook-refused", "always false. Substituted by fsm::graph() for a gate whose ONLY condition was a hook supplied by a non-local tier: hooks execute only from the project-vendored graph, so the author's condition is genuinely not being evaluated and the edge it guards must not be waved through. Vendor the graph (and its hook) locally to restore the gate.", pred_remote_hook_refused),
     ]
 }
+
+fn pred_remote_hook_refused() -> bool { false }
 
 fn pred_prd_all_closed() -> bool { !prd_has_open_items() }
 fn pred_mutables_all_resolved() -> bool { mutables::pending_detailed().is_empty() }

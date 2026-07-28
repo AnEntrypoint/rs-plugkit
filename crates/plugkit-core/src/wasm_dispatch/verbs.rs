@@ -841,8 +841,26 @@ fn codesearch(body: &Value) -> u64 {
         }
         return codesearch(&retry);
     }
+    let vec_unavailable = vector_top10.is_empty();
+    let kv_empty_now = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
+
+    if vec_unavailable {
+        emit_event("codesearch_degraded", json!({
+            "namespace": cfg.namespaces.code,
+            "kv_hits": hits.as_array().map(|a| a.len()).unwrap_or(0),
+        }));
+    }
+
+    if vec_unavailable && kv_empty_now {
+        return err(
+            "codesearch",
+            "semantic retrieval unavailable (no vector hits and the embedder produced nothing) and the keyword fallback matched nothing -- this is NOT an empty-index result",
+        );
+    }
+
     ok("codesearch", json!({
-        "mode": "fallback_kv", "hits": hits, "commits": commits, "vector_hits": vector_top10.clone(),
+        "mode": "fallback_kv", "degraded": vec_unavailable,
+        "hits": hits, "commits": commits, "vector_hits": vector_top10.clone(),
         "vector_top10": vector_top10, "bm25_top10": bm25_top10,
     }))
 }

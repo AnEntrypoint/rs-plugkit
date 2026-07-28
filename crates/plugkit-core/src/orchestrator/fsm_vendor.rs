@@ -167,7 +167,7 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
 /// including the fail-OPEN case where an edge names a gate that does not exist
 /// and is therefore silently unguarded.
 pub fn handle_validate(_content: &str) -> (String, String, i32) {
-    let graph = fsm::graph();
+    let (graph, tier, source_path) = fsm::graph_detailed();
     let problems = graph.validate();
     let ok = problems.is_empty();
 
@@ -181,6 +181,10 @@ pub fn handle_validate(_content: &str) -> (String, String, i32) {
 
     let payload = json!({
         "ok": ok,
+        "tier": tier.as_str(),
+        "source_path": source_path,
+        "tier_note": "Which tier supplied the ACTIVE graph: `local_override` = .gm/instructions/fsm/graph.json, `source_repo` = the config repo's cached fsm.graph, `compiled_default` = built in. Gate hooks execute ONLY from local_override; a hook arriving from source_repo is refused and its gate falls back to predicate-only (or to the always-false `remote-hook-refused` predicate if the hook was its only condition).",
+        "rejection": fsm::graph_rejection(),
         "problems": problems,
         "weaker_than_default": weaker,
         "weaker_than_default_note": "Edges the ACTIVE graph guards with fewer gates than the built-in default. A vendored graph.json REPLACES the default wholesale (there is no merge), so a project that vendored before a gate existed never receives it and its edges stay permanently weaker with nothing saying so. Reported, never merged: silently adding gates would change a hand-written FSM's meaning, and a gate may have been dropped deliberately. Empty means the active graph is at least as strict as the default everywhere they overlap.",

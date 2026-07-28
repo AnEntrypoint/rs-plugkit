@@ -491,51 +491,271 @@ fn default_graph() -> Graph {
 
 const GRAPH_OVERRIDE_PATH: &str = ".gm/instructions/fsm/graph.json";
 
+/// Where a candidate graph's bytes came from.
+///
+/// Attribution is not cosmetic here. Before the cache tier existed there was
+/// exactly one source, so every error could name `GRAPH_OVERRIDE_PATH` and be
+/// right by construction. With a second source that same message sends an
+/// operator to edit a LOCAL file that is correct -- or absent -- while the real
+/// defect sits in a repo they have to be told about to even look at.
+///
+/// It is also the security boundary. `GateDef.hook` is arbitrary JS run at gate
+/// evaluation, so "which tier authored this graph" decides whether a hook is
+/// code the project reviewed or code an upstream repo can change under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphTier {
+    /// `.gm/instructions/fsm/graph.json`, vendored into the project and
+    /// reviewable in its git history. The only tier permitted to carry hooks.
+    LocalOverride,
+    /// The config repo's cached checkout, materialized by `config_sync`.
+    SourceRepo,
+    /// [`default_graph`], compiled in. Cannot fail, which keeps `graph()` total.
+    CompiledDefault,
+}
+
+impl GraphTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GraphTier::LocalOverride => "local_override",
+            GraphTier::SourceRepo => "source_repo",
+            GraphTier::CompiledDefault => "compiled_default",
+        }
+    }
+
+    /// Whether a graph from this tier may carry executable gate hooks.
+    ///
+    /// A hook is `exec_js` on the developer's machine at every gate evaluation.
+    /// The local tier is a file in the project's own git history, so a hook
+    /// there went through whatever review the project applies to its own code.
+    /// A remote tier is a repo that can change without any local commit, and
+    /// tier 3 applies to EVERY project the user runs -- so a hook arriving that
+    /// way is remote code execution triggered by a routine upstream push.
+    fn may_execute_hooks(self) -> bool {
+        matches!(self, GraphTier::LocalOverride)
+    }
+}
+
+/// Path within the config-source cache holding a repo-supplied graph, if the
+/// resolved config points at one.
+///
+/// The pointer is read from the resolved config's `fsm.graph` key -- the key
+/// `gm.config.json` has always declared and nothing has ever read. Resolution
+/// goes through `config::resolve()` so the graph rides the same 4-tier chain,
+/// the same debounced fetcher, and the same rejection reporting as everything
+/// else, rather than growing a second parallel notion of "where config lives".
+#[cfg(target_arch = "wasm32")]
+fn source_repo_graph_path() -> Option<String> {
+    let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let resolved = crate::config::resolve();
+    let rel = resolved
+        .config
+        .value
+        .get("fsm")
+        .and_then(|f| f.get("graph"))
+        .and_then(|g| g.as_str())?;
+    let rel = rel.trim().trim_matches('/');
+    if rel.is_empty() {
+        return None;
+    }
+    if let Err(reason) = crate::config_path::validate_source_path(rel) {
+        crate::wasm_dispatch::emit_event("fsm_graph_source_path_rejected", serde_json::json!({
+            "path": rel,
+            "reason": reason,
+            "detail": "the resolved config's `fsm.graph` pointer is not a safe relative path, so the repo-supplied graph was not read. A pointer that escapes the cache directory is refused rather than normalised.",
+        }));
+        return None;
+    }
+    let base = if root.trim().is_empty() {
+        crate::config::SOURCE_CACHE_REL.to_string()
+    } else {
+        format!("{}/{}", root.trim_end_matches(['/', '\\']), crate::config::SOURCE_CACHE_REL)
+    };
+    Some(format!("{base}/{rel}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn source_repo_graph_path() -> Option<String> {
+    None
+}
+
+/// Resolve the active FSM graph across all three tiers.
+///
+/// Order, first usable wins: project-vendored `.gm/instructions/fsm/graph.json`,
+/// then the config repo's cached `fsm.graph`, then [`default_graph`]. This is
+/// deliberately the same shape `prose::resolve` already runs for instruction
+/// text -- the graph was the one surface a config repo could not supply, which
+/// meant a remote repo could restyle the prose of a workflow but never change
+/// its states, edges, gates or policy: the central claim of the feature, unmet.
+///
+/// A tier that PARSES but fails validation does not fall through to the next
+/// tier silently -- it is recorded via [`record_graph_rejection`] and the
+/// compiled default serves, so a broken graph is never quietly replaced by a
+/// different author's working one.
 pub fn graph() -> Graph {
-    match pkfs::read_to_string(GRAPH_OVERRIDE_PATH) {
-        Some(raw) => match serde_json::from_str::<Graph>(&raw) {
-            Ok(g) => {
-                let unknown = Graph::unknown_policy_keys(&raw);
-                if !unknown.is_empty() {
-                    #[cfg(target_arch = "wasm32")]
-                    crate::wasm_dispatch::emit_event("fsm_graph_unknown_policy_keys", serde_json::json!({
-                        "path": GRAPH_OVERRIDE_PATH,
-                        "keys": unknown,
-                        "reason": "these policy keys are not recognised by this build and are being IGNORED -- a typo would look exactly like this. If they are from a newer build, this is expected and harmless.",
-                    }));
-                }
-                let problems = g.validate();
-                if problems.is_empty() {
-                    clear_graph_rejection();
-                    g
-                } else {
-                    #[cfg(target_arch = "wasm32")]
-                    crate::wasm_dispatch::emit_event("fsm_graph_override_invalid", serde_json::json!({
-                        "path": GRAPH_OVERRIDE_PATH,
-                        "problems": problems,
-                        "reason": "graph parsed but failed referential-integrity validation; falling back to the built-in default this dispatch",
-                    }));
-                    record_graph_rejection("invalid", &problems.join("; "));
-                    default_graph()
-                }
-            }
-            Err(e) => {
+    graph_detailed().0
+}
+
+/// Resolve the graph and report which tier answered and from what path.
+///
+/// `graph()` alone made the resolution unobservable: an operator pointing a
+/// project at a config repo had no way to confirm the graph came from there
+/// rather than from a local file they forgot about or from the compiled
+/// default. Reporting the tier is what turns "a repo can supply an FSM" from a
+/// claim into something checkable, which is the whole point of the tier.
+pub fn graph_detailed() -> (Graph, GraphTier, String) {
+    if let Some(raw) = pkfs::read_to_string(GRAPH_OVERRIDE_PATH) {
+        return match load_tier(&raw, GRAPH_OVERRIDE_PATH, GraphTier::LocalOverride) {
+            Some(g) => (g, GraphTier::LocalOverride, GRAPH_OVERRIDE_PATH.to_string()),
+            None => (default_graph(), GraphTier::CompiledDefault, COMPILED_PATH.to_string()),
+        };
+    }
+
+    if let Some(path) = source_repo_graph_path() {
+        if let Some(raw) = pkfs::read_to_string(&path) {
+            return match load_tier(&raw, &path, GraphTier::SourceRepo) {
+                Some(g) => (g, GraphTier::SourceRepo, path),
+                None => (default_graph(), GraphTier::CompiledDefault, COMPILED_PATH.to_string()),
+            };
+        }
+    }
+
+    clear_graph_rejection();
+    (default_graph(), GraphTier::CompiledDefault, COMPILED_PATH.to_string())
+}
+
+/// Stand-in path for the compiled tier, which has no file.
+const COMPILED_PATH: &str = "<compiled default>";
+
+/// Parse, sanitize and validate one tier's bytes, attributing every failure to
+/// the file it actually came from.
+///
+/// `None` means this tier was rejected and the caller must serve the compiled
+/// default. Returning the default from HERE would have made the served tier
+/// unreportable, which is precisely the confusion the attribution work exists
+/// to remove.
+fn load_tier(raw: &str, path: &str, tier: GraphTier) -> Option<Graph> {
+    match serde_json::from_str::<Graph>(raw) {
+        Ok(mut g) => {
+            let unknown = Graph::unknown_policy_keys(raw);
+            if !unknown.is_empty() {
                 #[cfg(target_arch = "wasm32")]
-                crate::wasm_dispatch::emit_event("fsm_graph_override_malformed", serde_json::json!({
-                    "path": GRAPH_OVERRIDE_PATH,
-                    "error": e.to_string(),
-                    "reason": "falling back to the built-in default graph this dispatch",
+                crate::wasm_dispatch::emit_event("fsm_graph_unknown_policy_keys", serde_json::json!({
+                    "path": path,
+                    "tier": tier.as_str(),
+                    "keys": unknown,
+                    "reason": "these policy keys are not recognised by this build and are being IGNORED -- a typo would look exactly like this. If they are from a newer build, this is expected and harmless.",
                 }));
-                record_graph_rejection("malformed", &e.to_string());
-                default_graph()
             }
-        },
-        None => {
-            clear_graph_rejection();
-            default_graph()
+
+            let refused = strip_untrusted_hooks(&mut g, tier);
+            if !refused.is_empty() {
+                #[cfg(target_arch = "wasm32")]
+                crate::wasm_dispatch::emit_event("fsm_graph_remote_hook_refused", serde_json::json!({
+                    "path": path,
+                    "tier": tier.as_str(),
+                    "gates": refused,
+                    "reason": "a gate hook is arbitrary JS executed on this machine at every gate evaluation. Hooks run ONLY from the project-vendored .gm/instructions/fsm/graph.json, which is in this project's own git history and reviewable; a hook arriving from a config repo is refused, because that repo can change without any local commit and a user-wide spec applies to every project. The gates keep their compiled predicates and are evaluated predicate-only.",
+                }));
+                record_graph_rejection_at(
+                    path,
+                    tier,
+                    REFUSED_HOOK_KIND,
+                    &format!(
+                        "graph from tier `{}` at {} declared hooks on gate(s) {} -- hooks execute only from the project-vendored tier, so they were refused and those gates now evaluate predicate-only",
+                        tier.as_str(),
+                        path,
+                        refused.join(", ")
+                    ),
+                );
+            }
+
+            let problems = g.validate();
+            if problems.is_empty() {
+                if refused.is_empty() {
+                    clear_graph_rejection();
+                }
+                Some(g)
+            } else {
+                #[cfg(target_arch = "wasm32")]
+                crate::wasm_dispatch::emit_event("fsm_graph_override_invalid", serde_json::json!({
+                    "path": path,
+                    "tier": tier.as_str(),
+                    "problems": problems,
+                    "reason": "graph parsed but failed referential-integrity validation; falling back to the built-in default this dispatch",
+                }));
+                record_graph_rejection_at(path, tier, "invalid", &problems.join("; "));
+                None
+            }
+        }
+        Err(e) => {
+            #[cfg(target_arch = "wasm32")]
+            crate::wasm_dispatch::emit_event("fsm_graph_override_malformed", serde_json::json!({
+                "path": path,
+                "tier": tier.as_str(),
+                "error": e.to_string(),
+                "reason": "falling back to the built-in default graph this dispatch",
+            }));
+            record_graph_rejection_at(path, tier, "malformed", &e.to_string());
+            None
         }
     }
 }
+
+/// Remove hooks a tier is not trusted to execute, returning the gate names that
+/// were stripped.
+///
+/// Refused LOUDLY rather than ignored, and rather than rejecting the whole
+/// graph. Rejecting outright would let any upstream push disable a downstream
+/// project's entire workflow; ignoring silently would leave an operator reading
+/// a graph whose gates say `hook_mode: both` while only the predicate runs.
+/// Stripping plus a named denial keeps the workflow running and states exactly
+/// which guarantee was withdrawn.
+///
+/// `hook_mode` is downgraded alongside the hook, because a `HookOnly` gate whose
+/// hook is gone evaluates to `false` forever -- refusing the hook would
+/// otherwise wedge the transition it guards, turning a security refusal into an
+/// unclearable denial.
+fn strip_untrusted_hooks(g: &mut Graph, tier: GraphTier) -> Vec<String> {
+    if tier.may_execute_hooks() {
+        return Vec::new();
+    }
+    let mut refused = Vec::new();
+    for gate in &mut g.gates {
+        if gate.hook.is_none() && matches!(gate.hook_mode, HookMode::PredicateOnly) {
+            continue;
+        }
+        if gate.hook.is_none() {
+            gate.hook_mode = HookMode::PredicateOnly;
+            continue;
+        }
+        refused.push(gate.name.clone());
+        gate.hook = None;
+        gate.hook_mode = HookMode::PredicateOnly;
+        if gate.predicate.is_none() {
+            gate.predicate = Some(REFUSED_HOOK_PREDICATE.to_string());
+        }
+    }
+    refused
+}
+
+/// Predicate substituted for a gate whose only condition was a refused remote
+/// hook.
+///
+/// Such a gate has no way left to be satisfied, and `validate()` rejects a gate
+/// with neither predicate nor hook -- which would take the whole graph down
+/// over the refusal. Pointing it at a compiled predicate that always denies
+/// keeps the graph loadable while making the gate impossible to pass, which is
+/// the honest outcome: the condition the author wrote is genuinely not being
+/// evaluated, so the transition it guards must not be waved through.
+const REFUSED_HOOK_PREDICATE: &str = "remote-hook-refused";
+
+/// Rejection `kind` for a refused hook.
+///
+/// Named rather than inlined because it is written at the call site and matched
+/// on when composing the operator-facing `effect`: a hook refusal is the one
+/// rejection where the graph KEEPS serving, so a drifted spelling would
+/// silently restore the wrong "the default is serving" text.
+const REFUSED_HOOK_KIND: &str = "remote-hook-refused";
 
 /// Where a graph rejection is recorded so it OUTLIVES the dispatch that hit it.
 pub const GRAPH_REJECTION_PATH: &str = ".gm/fsm-graph-rejected.json";
@@ -551,11 +771,29 @@ pub const GRAPH_REJECTION_PATH: &str = ".gm/fsm-graph-rejected.json";
 /// be read by the instruction payload, by a human, or by CI, long after the
 /// dispatch that produced it.
 fn record_graph_rejection(kind: &str, detail: &str) {
+    record_graph_rejection_at(GRAPH_OVERRIDE_PATH, GraphTier::LocalOverride, kind, detail);
+}
+
+/// Record a rejection against the file that actually produced it.
+///
+/// The un-attributed form was correct only while the local override was the
+/// sole possible source. With a repo tier, naming `GRAPH_OVERRIDE_PATH`
+/// unconditionally would tell an operator to fix a local file that may be
+/// perfectly valid, or not exist at all, while the real defect sits in a config
+/// repo -- a rejection notice that misdirects is worse than none, because it is
+/// acted on.
+fn record_graph_rejection_at(path: &str, tier: GraphTier, kind: &str, detail: &str) {
+    let effect = match (kind, tier) {
+        (REFUSED_HOOK_KIND, _) => "the graph itself IS serving -- only its hooks were refused. The affected gates now evaluate predicate-only, and any gate whose hook was its ONLY condition can no longer pass at all. Vendor the graph and its hook into .gm/instructions/fsm/graph.json to restore them.",
+        (_, GraphTier::SourceRepo) => "the built-in default graph is serving; every customisation in the config repo's graph is being IGNORED. This file is a fetched cache artifact -- fix it in the config REPO, not here, or a refresh will overwrite the edit.",
+        _ => "the built-in default graph is serving; every customisation in this file is being IGNORED",
+    };
     let payload = serde_json::json!({
-        "path": GRAPH_OVERRIDE_PATH,
+        "path": path,
+        "tier": tier.as_str(),
         "kind": kind,
         "detail": detail,
-        "effect": "the built-in default graph is serving; every customisation in this file is being IGNORED",
+        "effect": effect,
     });
     let _ = crate::pkfs::write(GRAPH_REJECTION_PATH, &payload.to_string());
 }
