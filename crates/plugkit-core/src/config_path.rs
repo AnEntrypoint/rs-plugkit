@@ -34,7 +34,6 @@
 //! failure the whole tiered chain exists to make impossible.
 
 /// Longest accepted prose key or path component.
-///
 /// Not a security boundary on its own -- the character allowlist is -- but a
 /// path a filesystem cannot represent produces an IO error indistinguishable
 /// from "absent", so bounding the length keeps a nonsense key reporting as a
@@ -45,12 +44,10 @@ const MAX_COMPONENT_LEN: usize = 128;
 const MAX_PATH_LEN: usize = 512;
 
 /// Git transports a config repo may name.
-///
 /// `https`/`http` fetch over a URL and cannot name a local executable.
 /// `ssh://` and `git@host:path` are the shapes real private config repos use,
 /// and neither carries a command payload -- the command a git-over-ssh session
 /// runs is chosen by the server, not the URL.
-///
 /// Deliberately ABSENT, each for a concrete reason:
 /// - `ext::` -- documented by git as running an arbitrary command. A config
 ///   file naming a repo would become a config file naming a program to run.
@@ -64,7 +61,6 @@ const ALLOWED_URL_SCHEMES: &[&str] = &["https://", "http://", "ssh://", "git://"
 
 /// Reject any component that is empty, a traversal step, a Windows drive/UNC
 /// artifact, or contains a separator or control character.
-///
 /// `.` and `..` are refused rather than normalized away: a caller asking for
 /// `..` wants a different directory, and quietly serving it the current one
 /// hides the request instead of answering it.
@@ -96,12 +92,10 @@ fn check_component(component: &str, what: &str) -> Result<(), String> {
 }
 
 /// Validate a prose key for interpolation into `<base>/<key>.md`.
-///
 /// Keys are legitimately hierarchical -- `residual/prd-open`, `gates/dirty-tree`
 /// -- so `/` is a permitted SEPARATOR while being forbidden inside any
 /// component. That distinction is the whole point: it keeps the nesting real
 /// call sites depend on while making `../` unrepresentable.
-///
 /// Backslash is refused outright rather than treated as a separator. On Windows
 /// the OS accepts it as one, so allowing it would create a second syntax for
 /// the same traversal that a `/`-oriented check would miss; every in-tree key
@@ -137,7 +131,6 @@ pub fn validate_prose_key(key: &str) -> Result<(), String> {
 
 /// Validate the `path` field of a repo-source spec: the subdirectory WITHIN a
 /// materialized config/instructions repo that holds the artifacts.
-///
 /// Accepts the empty string (meaning "the repo root"), which is how a spec that
 /// omits the field is already read. Everything else must be a relative path of
 /// safe components -- the same rule as a prose key, because both are joined
@@ -166,8 +159,44 @@ pub fn validate_source_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn normalize_lexically(path: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in path.replace('\\', "/").split('/') {
+        match raw {
+            "" | "." => {}
+            ".." => match out.last().map(String::as_str) {
+                Some("..") | None => out.push("..".to_string()),
+                _ => {
+                    out.pop();
+                }
+            },
+            other => out.push(other.to_string()),
+        }
+    }
+    out
+}
+
+pub fn path_contained_within(root: &str, candidate: &str) -> bool {
+    let c = candidate.replace('\\', "/");
+    if c.starts_with('/') || c.starts_with("//") {
+        return false;
+    }
+    if c.chars().nth(1) == Some(':') {
+        return false;
+    }
+    let root_parts = normalize_lexically(root);
+    let cand_parts = normalize_lexically(candidate);
+    if cand_parts.iter().any(|p| p == "..") {
+        return false;
+    }
+    cand_parts.len() >= root_parts.len()
+        && root_parts
+            .iter()
+            .zip(cand_parts.iter())
+            .all(|(r, c)| r == c)
+}
+
 /// Validate a git remote URL before any argv carrying it reaches the host.
-///
 /// Two accepted shapes: a scheme from [`ALLOWED_URL_SCHEMES`], or git's
 /// `user@host:path` scp-like syntax. A leading `-` is refused separately from
 /// both, because git would read it as an OPTION rather than a URL -- the
@@ -215,12 +244,10 @@ pub fn validate_repo_url(url: &str) -> Result<(), String> {
 }
 
 /// Transports the `fetch` verb may name.
-///
 /// Narrower than [`ALLOWED_URL_SCHEMES`] on purpose. That list serves `git`,
 /// which legitimately speaks `ssh://` and `git://`; `host_fetch` is an HTTP
 /// client and can do nothing with either, so admitting them would widen the
 /// accepted surface without enabling a single real call.
-///
 /// Deliberately ABSENT, each for a concrete reason:
 /// - `file://` -- the host's fetch implementation would read local disk through
 ///   a verb whose whole contract is "reach the network", bypassing the
@@ -236,12 +263,10 @@ const ALLOWED_FETCH_SCHEMES: &[&str] = &["https://", "http://"];
 const MAX_FETCH_URL_LEN: usize = 2048;
 
 /// Validate a URL before it reaches `host_fetch`.
-///
 /// The scheme allowlist is the substantive check; the control-character,
 /// whitespace and length rules exist because `host_fetch` hands the string to a
 /// URL parser and then to an HTTP client, and a newline inside a URL is the
 /// classic request-splitting primitive.
-///
 /// A host is required to be present and non-empty so that `https://` alone, or
 /// `https:///etc/passwd` (empty authority, which several parsers read as a
 /// local path), is refused rather than passed to the host to interpret.
@@ -288,7 +313,6 @@ pub fn validate_fetch_url(url: &str) -> Result<(), String> {
 }
 
 /// Recognise git's scp-like `[user@]host:path` remote syntax.
-///
 /// Requires a `:` that is not part of a scheme (no `//` follows it) and a
 /// non-empty host and path. A Windows drive letter (`C:\repo`) is excluded by
 /// the single-character-host check, so a local path cannot masquerade as an

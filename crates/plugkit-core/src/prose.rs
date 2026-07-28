@@ -93,6 +93,14 @@ pub fn resolve_detailed(key: &str, default: &str) -> (String, Outcome) {
     }
 
     let local_path = format!("{LOCAL_BASE}/{key}.md");
+    if !crate::config_path::path_contained_within(LOCAL_BASE, &local_path) {
+        return (
+            default.to_string(),
+            Outcome::Degraded {
+                reason: format!("prose key resolves to {local_path}, which escapes {LOCAL_BASE}"),
+            },
+        );
+    }
     if let Some(text) = read_clean(&local_path) {
         return (text, Outcome::LocalOverride);
     }
@@ -186,6 +194,11 @@ fn read_from_config_repo(key: &str) -> SourceRead {
     } else {
         format!("{cache}/{trimmed}/{key}.md")
     };
+    if !crate::config_path::path_contained_within(cache, &full) {
+        return SourceRead::Broken(format!(
+            "{cache}/gm.config.json: instructions.dir resolves to {full}, which escapes {cache}"
+        ));
+    }
     match read_clean(&full) {
         Some(text) => SourceRead::Hit(text),
         None => SourceRead::Miss,
@@ -220,6 +233,11 @@ fn read_from_source_repo(key: &str) -> SourceRead {
     } else {
         format!("{SOURCE_CACHE_BASE}/{sub_path}/{key}.md")
     };
+    if !crate::config_path::path_contained_within(SOURCE_CACHE_BASE, &full) {
+        return SourceRead::Broken(format!(
+            "{SOURCE_SPEC_PATH}: `path` resolves to {full}, which escapes {SOURCE_CACHE_BASE}"
+        ));
+    }
     match read_clean(&full) {
         Some(text) => SourceRead::Hit(text),
         None => SourceRead::Miss,
