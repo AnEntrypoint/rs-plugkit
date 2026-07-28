@@ -116,9 +116,9 @@ pub unsafe extern "C" fn plugkit_free(ptr: *mut u8, len: usize) {
 
 #[cfg(target_arch = "wasm32")]
 fn pack_result(s: String) -> u64 {
-    let bytes = s.into_bytes();
-    let len = bytes.len() as u64;
-    let mut v = bytes;
+    let mut v = s.into_bytes();
+    v.shrink_to_fit();
+    let len = v.len() as u64;
     let ptr = v.as_mut_ptr() as u64;
     std::mem::forget(v);
     (ptr & 0xffff_ffff) | (len << 32)
@@ -158,27 +158,43 @@ mod wasm_hooks {
         host_read(&path_for(name)).unwrap_or_default()
     }
 
-    fn signal_platform_search_drift(tool_name: &str) {
+    fn signal_platform_search_drift(tool_name: &str) -> bool {
         let ts = read_file("turn-state.json");
         let phase = serde_json::from_str::<Value>(&ts).ok()
             .and_then(|v| v.get("phase").and_then(|p| p.as_str()).map(|p| p.to_string()))
             .unwrap_or_default();
-        if phase.is_empty() || phase == crate::orchestrator::fsm::graph().policy.terminal_phase { return; }
+        if phase.is_empty() || phase == crate::orchestrator::fsm::graph().policy.terminal_phase { return false; }
+        let kind = "platform-search-drift";
         let evt = json!({
-            "event": "deviation.platform-search-drift",
+            "event": format!("deviation.{}", kind),
             "sub": "hook",
             "detail": format!("tool={} during in-flight chain (phase={}); codesearch/recall are the discovery surfaces, platform Grep/Glob is exploration outside the spool", tool_name, phase),
+            "kind": kind,
+            "severity": crate::orchestrator::deviations::effective_severity(kind).as_str(),
             "ts": crate::orchestrator::state::now_ms() as u64,
             "source": "rs-plugkit/hooks",
         });
         let line = format!("evt: {}", evt);
         unsafe { crate::wasm_dispatch::host_log(1, line.as_ptr(), line.len() as u32); }
+        true
     }
 
     pub fn pre_tool_use(input: &Value) -> Value {
         let tool_name = input.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
         if tool_name == "Grep" || tool_name == "Glob" {
-            signal_platform_search_drift(tool_name);
+            let fired = signal_platform_search_drift(tool_name);
+            let promoted = crate::orchestrator::deviations::effective_severity("platform-search-drift")
+                == crate::orchestrator::deviations::Severity::Deny;
+            if fired && promoted {
+                return json!({
+                    "continue": true,
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": format!("platform-search-drift: `{}` during an in-flight chain, and this project's policy.deviation_severity promotes this kind to deny. codesearch/recall are the discovery surfaces; platform search is exploration outside the spool.", tool_name)
+                    }
+                });
+            }
         }
         let needs_gm = read_marker("needs-gm");
         let gm_fired = read_marker("gm-fired-this-turn");

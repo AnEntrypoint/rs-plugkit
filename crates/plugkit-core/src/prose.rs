@@ -160,9 +160,41 @@ enum SourceRead {
     Broken(String),
 }
 
+/// Read one prose key from the config repo the CONFIG chain already fetches.
+///
+/// This tier was dead on a directory-name disagreement, not a missing feature:
+/// `config_sync` clones into `.gm/config-source-cache` while this module read
+/// `.gm/instructions-source-cache`, a path nothing has ever written. So a
+/// project could point at a config repo, have it cloned and serving for the
+/// config chain, and still receive compiled prose forever.
+///
+/// The layout comes from the repo's own `gm.config.json`, whose `instructions`
+/// block declares `dir` (default `prose`) alongside the key inventory, so the
+/// repo describes its own shape rather than this module assuming one.
+fn read_from_config_repo(key: &str) -> SourceRead {
+    let cache = crate::config::SOURCE_CACHE_REL;
+    let dir = pkfs::read_to_string(&format!("{cache}/gm.config.json"))
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')).ok())
+        .and_then(|v| v.get("instructions").and_then(|i| i.get("dir")).and_then(|d| d.as_str()).map(|s| s.to_string()))
+        .unwrap_or_else(|| "prose".to_string());
+    if validate_source_path(&dir).is_err() {
+        return SourceRead::Broken(format!("{cache}/gm.config.json: instructions.dir is not a safe relative path"));
+    }
+    let trimmed = dir.trim().trim_matches('/');
+    let full = if trimmed.is_empty() {
+        format!("{cache}/{key}.md")
+    } else {
+        format!("{cache}/{trimmed}/{key}.md")
+    };
+    match read_clean(&full) {
+        Some(text) => SourceRead::Hit(text),
+        None => SourceRead::Miss,
+    }
+}
+
 fn read_from_source_repo(key: &str) -> SourceRead {
     let Some(cfg_raw) = pkfs::read_to_string(SOURCE_SPEC_PATH) else {
-        return SourceRead::NotConfigured;
+        return read_from_config_repo(key);
     };
     if cfg_raw.trim_start_matches('\u{feff}').trim().is_empty() {
         return SourceRead::NotConfigured;

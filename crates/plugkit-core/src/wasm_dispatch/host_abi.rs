@@ -91,10 +91,19 @@ pub fn git_call_argv(argv: &[&str], cwd: Option<&str>) -> Value {
     git_call(&json, cwd)
 }
 
+/// Hand a string to the host as a packed `(ptr, len)` pair.
+///
+/// `shrink_to_fit` is load-bearing, not tidiness. `String::into_bytes` keeps
+/// the string's CAPACITY, which routinely exceeds its length, while the
+/// matching `plugkit_free` reconstructs the Vec with `len` as both length and
+/// capacity. Handing the allocator a different layout than it issued is
+/// undefined behaviour, and it was reachable on every packed response whose
+/// backing string had spare capacity -- which is most of them, since they are
+/// built by `format!` and `to_string`.
 pub(crate) fn pack(s: String) -> u64 {
-    let bytes = s.into_bytes();
-    let len = bytes.len() as u64;
-    let mut v = bytes;
+    let mut v = s.into_bytes();
+    v.shrink_to_fit();
+    let len = v.len() as u64;
     let ptr = v.as_mut_ptr() as u64;
     std::mem::forget(v);
     (ptr & 0xffff_ffff) | (len << 32)
