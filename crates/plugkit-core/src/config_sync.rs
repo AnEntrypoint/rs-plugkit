@@ -158,7 +158,6 @@ fn now_ms() -> u64 {
 }
 
 /// Stable identity for a source, used to name its state file.
-///
 /// Hashed rather than derived from the URL text because a repo URL contains
 /// characters that are illegal or meaningful in a path (`:`, `/`, `@`), and
 /// because two specs differing only in `ref` must not share state -- a probe
@@ -184,7 +183,6 @@ fn read_state(src: &RepoSource) -> SyncState {
 }
 
 /// Publish state by atomic rename.
-///
 /// Two projects can write this concurrently; rename makes each write
 /// all-or-nothing, so the loser's state is simply overwritten by the winner
 /// rather than interleaved into unparseable bytes.
@@ -200,7 +198,6 @@ fn write_state(src: &RepoSource, st: &SyncState) {
 }
 
 /// `fs.renameSync` via the host's JS escape hatch.
-///
 /// There is no rename in the host ABI (`host_fs_write` overwrites in place,
 /// which is exactly the torn-write this must avoid), so this mirrors the
 /// approach `memory_md.rs::rename_batch` already uses for the same reason.
@@ -230,7 +227,6 @@ fn exec_js_stdout(code: &str, timeout_ms: u32) -> Option<String> {
 }
 
 /// Acquire the per-source lock, breaking it if abandoned.
-///
 /// `mkdir` (non-recursive) is the primitive: it fails if the directory exists,
 /// which makes creation an atomic test-and-set across processes. `fs.writeFile`
 /// would not work here -- it succeeds unconditionally and would hand the lock
@@ -276,7 +272,6 @@ fn git(argv: &[&str], cwd: Option<&str>) -> Result<String, String> {
 }
 
 /// Whether the cache dir holds a git checkout we can serve.
-///
 /// Checked via `rev-parse` rather than a bare directory-exists test: a dir left
 /// half-written by an interrupted clone exists but has no HEAD, and serving it
 /// as "the last good copy" would surface an empty config as if it were real.
@@ -287,7 +282,6 @@ fn local_sha(src: &RepoSource) -> Option<String> {
 }
 
 /// Ask the remote for one ref's sha without transferring objects.
-///
 /// The ref defaults to `HEAD` (the remote's default branch) when the spec
 /// names none, which matches `RepoSource::reference`'s documented meaning.
 fn probe_remote_sha(src: &RepoSource) -> Result<String, String> {
@@ -308,16 +302,65 @@ fn is_sha_like(s: &str) -> bool {
     s.len() >= 7 && s.len() <= 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Shallow-clone a source that has no usable local checkout.
-fn clone_shallow(src: &RepoSource) -> Result<(), String> {
-    if let Ok(p) = serde_json::to_string(&src.cache_dir) {
-        let code = format!(
-            "const fs=require('fs');try{{fs.rmSync({p},{{recursive:true,force:true}});}}catch(e){{}}process.stdout.write('done');"
-        );
-        let _ = exec_js_stdout(&code, 30000);
+fn staging_dir(src: &RepoSource) -> String {
+    format!("{}.{}.staging", src.cache_dir, source_key(src))
+}
+
+fn retired_dir(src: &RepoSource) -> String {
+    format!("{}.{}.retired", src.cache_dir, source_key(src))
+}
+
+fn remove_tree(path: &str) -> bool {
+    let Ok(p) = serde_json::to_string(path) else {
+        return false;
+    };
+    let code = format!(
+        "const fs=require('fs');try{{fs.rmSync({p},{{recursive:true,force:true}});process.stdout.write('ok');}}catch(e){{process.stdout.write('fail');}}"
+    );
+    exec_js_stdout(&code, 30000).map(|s| s.contains("ok")).unwrap_or(false)
+}
+
+fn recover_stranded(src: &RepoSource) {
+    let retired = retired_dir(src);
+    if crate::pkfs::exists(&retired) {
+        if crate::pkfs::exists(&src.cache_dir) {
+            remove_tree(&retired);
+        } else {
+            rename(&retired, &src.cache_dir);
+        }
     }
+    let staging = staging_dir(src);
+    if crate::pkfs::exists(&staging) {
+        remove_tree(&staging);
+    }
+}
+
+fn publish_staged(src: &RepoSource) -> Result<(), String> {
+    let staging = staging_dir(src);
+    let retired = retired_dir(src);
+    remove_tree(&retired);
+
+    let had_live = crate::pkfs::exists(&src.cache_dir);
+    if had_live && !rename(&src.cache_dir, &retired) {
+        remove_tree(&staging);
+        return Err(format!("could not move {} aside to publish a new checkout", src.cache_dir));
+    }
+    if !rename(&staging, &src.cache_dir) {
+        if had_live {
+            rename(&retired, &src.cache_dir);
+        }
+        remove_tree(&staging);
+        return Err(format!("could not move staged checkout into {}", src.cache_dir));
+    }
+    remove_tree(&retired);
+    Ok(())
+}
+
+fn materialize(src: &RepoSource, reference: &str) -> Result<(), String> {
+    let staging = staging_dir(src);
+    remove_tree(&staging);
+
     let mut argv: Vec<&str> = vec!["clone", "--depth", "1"];
-    let reference = src.reference.as_deref().unwrap_or("");
     let use_branch = !reference.is_empty() && !is_sha_like(reference);
     if use_branch {
         argv.push("--branch");
@@ -325,32 +368,31 @@ fn clone_shallow(src: &RepoSource) -> Result<(), String> {
     }
     argv.push("--");
     argv.push(&src.repo);
-    argv.push(&src.cache_dir);
-    git(&argv, None)?;
-    if !reference.is_empty() && !use_branch {
-        fetch_and_checkout_sha(src, reference)?;
+    argv.push(&staging);
+    if let Err(e) = git(&argv, None) {
+        remove_tree(&staging);
+        return Err(e);
     }
-    Ok(())
+
+    if !reference.is_empty() && !use_branch {
+        let cwd = Some(staging.as_str());
+        let staged = git(&["fetch", "--depth", "1", "origin", reference], cwd)
+            .and_then(|_| git(&["checkout", "--force", "FETCH_HEAD"], cwd));
+        if let Err(e) = staged {
+            remove_tree(&staging);
+            return Err(e);
+        }
+    }
+
+    publish_staged(src)
 }
 
-/// Fetch one commit shallowly and move the worktree onto it.
-fn fetch_and_checkout_sha(src: &RepoSource, sha: &str) -> Result<(), String> {
-    let cwd = Some(src.cache_dir.as_str());
-    git(&["fetch", "--depth", "1", "origin", sha], cwd)?;
-    git(&["checkout", "--force", "FETCH_HEAD"], cwd)?;
-    Ok(())
-}
-
-/// Update an existing checkout to `target_sha`, staying shallow.
 fn fetch_to(src: &RepoSource, target_sha: &str) -> Result<(), String> {
-    let cwd = Some(src.cache_dir.as_str());
     let reference = src.reference.as_deref().unwrap_or("");
     if !reference.is_empty() && !is_sha_like(reference) {
-        git(&["fetch", "--depth", "1", "origin", reference], cwd)?;
-        git(&["checkout", "--force", "FETCH_HEAD"], cwd)?;
-        return Ok(());
+        return materialize(src, reference);
     }
-    fetch_and_checkout_sha(src, target_sha)
+    materialize(src, target_sha)
 }
 
 fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcome {
@@ -369,11 +411,9 @@ fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcom
 
 /// Ensure `src.cache_dir` holds an up-to-date checkout, reporting the live sha
 /// and whether this call changed it.
-///
 /// This is the function the config resolver calls. It is safe to call on every
 /// resolution: the debounce and backoff mean the overwhelming majority of calls
 /// do no network work at all.
-///
 /// Returns `Err` ONLY when there is no usable local copy AND the remote could
 /// not supply one -- the single case where `config.rs` must reject the tier
 /// instead of resolving against a stale-but-real config.
@@ -435,7 +475,8 @@ fn refresh_locked(
     now: u64,
     have_local: Option<String>,
 ) -> Result<SyncOutcome, String> {
-    let have_local = have_local.or_else(|| local_sha(src));
+    recover_stranded(src);
+    let have_local = local_sha(src).or(have_local);
 
     let remote = match probe_remote_sha(src) {
         Ok(sha) => sha,
@@ -466,10 +507,7 @@ fn refresh_locked(
         });
     }
 
-    let outcome = match have_local {
-        Some(_) => fetch_to(src, &remote),
-        None => clone_shallow(src),
-    };
+    let outcome = fetch_to(src, &remote);
 
     if let Err(e) = outcome {
         st.consecutive_failures = st.consecutive_failures.saturating_add(1);
@@ -503,7 +541,6 @@ fn refresh_locked(
 }
 
 /// Config-relevant files this source supplies, for the change roster.
-///
 /// Deliberately the SPEC's own view (which config file this source resolves to)
 /// rather than a full `git diff --name-only`: the roster exists to tell an agent
 /// WHICH config moved, and a diff of an entire config repo would bury that in
@@ -513,7 +550,6 @@ fn changed_config_paths(src: &RepoSource) -> Vec<String> {
 }
 
 /// The [`RepoFetcher`] `config.rs` resolves through.
-///
 /// Holds the debounce interval so a caller can tighten it (a config-editing
 /// workflow may want near-immediate pickup) without touching resolution.
 pub struct GitRepoFetcher {
