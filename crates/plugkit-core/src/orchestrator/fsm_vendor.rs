@@ -57,6 +57,274 @@ const fs = require('fs');
 return fs.existsSync('.gm/ship-approved');
 "#;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MergePolicy {
+    PerKeyWholeFile,
+    Wholesale,
+    PerFieldParseGated,
+    NoMergeStandalone,
+    GeneratedNotRead,
+}
+
+impl MergePolicy {
+    fn id(self) -> &'static str {
+        match self {
+            MergePolicy::PerKeyWholeFile => "per-key-whole-file",
+            MergePolicy::Wholesale => "wholesale-replace",
+            MergePolicy::PerFieldParseGated => "per-field-parse-gated",
+            MergePolicy::NoMergeStandalone => "no-merge-standalone",
+            MergePolicy::GeneratedNotRead => "generated-not-read",
+        }
+    }
+
+    fn unit(self) -> &'static str {
+        match self {
+            MergePolicy::PerKeyWholeFile => "one file (the whole key)",
+            MergePolicy::Wholesale => "the entire file",
+            MergePolicy::PerFieldParseGated => "one JSON field, if the file parses",
+            MergePolicy::NoMergeStandalone => "the whole file, loaded only when something names it",
+            MergePolicy::GeneratedNotRead => "nothing -- this file is an output, not an input",
+        }
+    }
+
+    fn rule(self) -> &'static str {
+        match self {
+            MergePolicy::PerKeyWholeFile => "prose::resolve serves this file INSTEAD OF the compiled default whenever it is present and not whitespace-only. There is no merge WITHIN a file: a partial override loses every paragraph it omits. Delete the file to fall back; blanking it also falls back, because read_clean treats whitespace-only as absent.",
+            MergePolicy::Wholesale => "fsm::graph_detailed serves this file INSTEAD OF the compiled default graph entirely -- states, edges, gates and policy together. Nothing is merged in, so a state or gate added to a later build never reaches a project that vendored earlier; `fsm-validate` reports the delta as `staleness` and `weaker_than_default` rather than folding it in. A file that fails to parse or fails validation is rejected and the compiled default serves whole.",
+            MergePolicy::PerFieldParseGated => "TWO policies, selected by whether the file parses. Parses -> every field is an Option, so an OMITTED field falls back to the compiled default individually (per-field merge). Fails to parse -> serde returns None and the ENTIRE file is discarded, so every field silently reverts to compiled defaults at once. The failure mode is silent: there is no diagnostic distinguishing 'no config' from 'malformed config'.",
+            MergePolicy::NoMergeStandalone => "Loaded by path only when another artifact names it, and never merged with a default. There is no compiled fallback to merge against: a named-but-MISSING hook fails CLOSED (its gate denies forever) rather than degrading to a default, which is the opposite of every prose artifact's behaviour.",
+            MergePolicy::GeneratedNotRead => "Not an override at all -- an OUTPUT of the vendor pass, regenerated from live code and read back by nothing. Editing it changes documentation only, configures nothing, and the edit is discarded by the next `fsm-vendor` with force. It is listed here because it sits in the same vendored tree as the real overrides and is otherwise easy to mistake for one.",
+        }
+    }
+}
+
+fn placeholders_in(text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let bytes: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == '{' {
+            let mut j = i + 1;
+            let mut name = String::new();
+            while j < bytes.len() && (bytes[j].is_ascii_lowercase() || bytes[j] == '_') {
+                name.push(bytes[j]);
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == '}' && !name.is_empty() {
+                let tok = format!("{{{}}}", name);
+                if !found.contains(&tok) {
+                    found.push(tok);
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    found
+}
+
+struct PolicyRow {
+    path: String,
+    class: &'static str,
+    policy: MergePolicy,
+    reader: &'static str,
+    placeholders: Vec<String>,
+    derived: &'static str,
+    note: Option<String>,
+}
+
+fn merge_policy_rows() -> Vec<PolicyRow> {
+    let mut rows: Vec<PolicyRow> = Vec::new();
+
+    let graph = fsm::graph();
+    let mut prose_keys: Vec<String> = graph.states.iter().map(|s| s.prose_key.clone()).collect();
+    prose_keys.push("entry".to_string());
+    prose_keys.push("browser".to_string());
+    prose_keys.sort();
+    prose_keys.dedup();
+    for key in &prose_keys {
+        let compiled = has_compiled_default_for_prose_key(key);
+        rows.push(PolicyRow {
+            path: format!(".gm/instructions/{}.md", key),
+            class: "phase prose",
+            policy: MergePolicy::PerKeyWholeFile,
+            reader: "crate::prose::resolve via instructions::get_instruction",
+            placeholders: Vec::new(),
+            derived: "iterated from fsm::graph().states[].prose_key plus the two non-state keys the vendor pass appends",
+            note: if compiled {
+                None
+            } else {
+                Some(format!(
+                    "`{key}` has NO compiled default, so its fallback is ENTRY prose, not prose for this phase. Deleting this file does not restore a correct default -- it serves the wrong one."
+                ))
+            },
+        });
+    }
+    if let Some(entry_row) = rows.iter_mut().find(|r| r.path == ".gm/instructions/entry.md") {
+        entry_row.class = "phase prose (also prepended to every other phase)";
+        entry_row.reader = "crate::prose::resolve, served for ENTRY and concatenated AHEAD of every non-entry phase's prose";
+        entry_row.note = Some("Overriding this replaces the orchestrator preamble served with EVERY phase, not just ENTRY.".to_string());
+    }
+
+    rows.push(PolicyRow {
+        path: ".gm/instructions/fsm/graph.json".to_string(),
+        class: "FSM graph",
+        policy: MergePolicy::Wholesale,
+        reader: "fsm::graph_detailed",
+        placeholders: Vec::new(),
+        derived: "the single GRAPH_OVERRIDE_PATH fsm.rs reads",
+        note: None,
+    });
+
+    for generated in [
+        (".gm/instructions/fsm/predicates.md", "transitions::known_predicates()"),
+        (".gm/instructions/fsm/deviations.md", "deviations::DEVIATION_TABLE"),
+        (".gm/instructions/fsm/invariants.md", "the live fsm::graph().policy"),
+        (".gm/instructions/fsm/configurable.md", "the live graph plus KNOWN_POLICY_KEYS and the predicate/deviation registries"),
+        (".gm/instructions/fsm/merge-policy.md", "merge_policy_rows(), which walks the same registries the vendor pass writes from"),
+    ] {
+        rows.push(PolicyRow {
+            path: generated.0.to_string(),
+            class: "generated reference",
+            policy: MergePolicy::GeneratedNotRead,
+            reader: "nothing -- written for a human, never read back by this build",
+            placeholders: Vec::new(),
+            derived: "written unconditionally by the vendor pass",
+            note: Some(format!(
+                "Regenerated from {} on every `fsm-vendor` with force. Editing it changes documentation only; it configures nothing, and the edit is discarded on the next forced vendor.",
+                generated.1
+            )),
+        });
+    }
+
+    rows.push(PolicyRow {
+        path: ".gm/instructions/hooks/example.js".to_string(),
+        class: "gate hook",
+        policy: MergePolicy::NoMergeStandalone,
+        reader: "fsm::evaluate_gate, only when a GateDef names it in `hook`",
+        placeholders: Vec::new(),
+        derived: "the single hook path the vendor pass scaffolds",
+        note: Some("Hooks execute ONLY from the project-vendored graph tier; a hook named by a graph arriving from a config repo is refused and its gate falls back to predicate-only.".to_string()),
+    });
+
+    for (key, default_text) in GATE_DEFAULTS {
+        rows.push(PolicyRow {
+            path: format!(".gm/instructions/gates/{}.md", key),
+            class: "gate denial message",
+            policy: MergePolicy::PerKeyWholeFile,
+            reader: "crate::prose::resolve_and_mark from gates.rs",
+            placeholders: placeholders_in(default_text),
+            derived: "iterated from fsm_vendor::GATE_DEFAULTS, the same table the vendor pass writes from",
+            note: None,
+        });
+    }
+
+    for (key, default_text) in RESIDUAL_DEFAULTS {
+        rows.push(PolicyRow {
+            path: format!(".gm/instructions/residual/{}.md", key),
+            class: "residual-scan message",
+            policy: MergePolicy::PerKeyWholeFile,
+            reader: "crate::prose::resolve_and_mark from residual.rs",
+            placeholders: placeholders_in(default_text),
+            derived: "iterated from fsm_vendor::RESIDUAL_DEFAULTS, the same table the vendor pass writes from",
+            note: None,
+        });
+    }
+
+    rows.push(PolicyRow {
+        path: ".gm/browser-config.json".to_string(),
+        class: "host JSON config",
+        policy: MergePolicy::PerFieldParseGated,
+        reader: "agentplug-host BrowserConfig::load -- a DIFFERENT crate, not this build",
+        placeholders: Vec::new(),
+        derived: "NOT derived from code: no reader for this path exists in plugkit, so the field list and per-field defaults below are transcribed from agentplug-host and can drift without this build noticing",
+        note: Some("The scaffolded example sets `headless: false`, while the host's own compiled fallback is `headless: true`. Removing the field therefore does NOT reproduce the vendored example's behaviour -- it inverts it.".to_string()),
+    });
+
+    rows.push(PolicyRow {
+        path: ".gm/daemon-project-config.json".to_string(),
+        class: "host JSON config",
+        policy: MergePolicy::PerFieldParseGated,
+        reader: "agentplug-host ProjectDaemonConfig::load -- a DIFFERENT crate, not this build",
+        placeholders: Vec::new(),
+        derived: "NOT derived from code: no reader for this path exists in plugkit, so this row is transcribed from agentplug-host and can drift without this build noticing",
+        note: Some("`gm_concurrency_limit` falls back to UNLIMITED when omitted or when the value is 0, not to the example's 4.".to_string()),
+    });
+
+    rows
+}
+
+fn merge_policy_doc() -> String {
+    let rows = merge_policy_rows();
+    let mut lines = vec![
+        "# Vendored artifact merge policy".to_string(),
+        String::new(),
+        "Every artifact `fsm-vendor` writes, and what happens to the compiled default when that artifact is present. Generated by `fsm-vendor` by walking the SAME registries the vendor pass writes from (`fsm::graph().states[].prose_key`, `GATE_DEFAULTS`, `RESIDUAL_DEFAULTS`), so the artifact list here cannot drift from the artifact list actually written.".to_string(),
+        String::new(),
+        "There is no single merge rule and there cannot be one. These artifacts are consumed by different mechanisms with genuinely different units of override -- a whole file, a whole graph, one JSON field, or nothing at all -- so any single global rule would be wrong for most of this table.".to_string(),
+        String::new(),
+        "## Policies".to_string(),
+        String::new(),
+    ];
+    for p in [
+        MergePolicy::PerKeyWholeFile,
+        MergePolicy::Wholesale,
+        MergePolicy::PerFieldParseGated,
+        MergePolicy::NoMergeStandalone,
+        MergePolicy::GeneratedNotRead,
+    ] {
+        lines.push(format!("### `{}`", p.id()));
+        lines.push(String::new());
+        lines.push(format!("Unit of override: {}.", p.unit()));
+        lines.push(String::new());
+        lines.push(p.rule().to_string());
+        lines.push(String::new());
+    }
+
+    lines.push("## Placeholders".to_string());
+    lines.push(String::new());
+    lines.push("Some overridable messages have their `{token}` substrings substituted by the caller AFTER prose::resolve returns. Substitution is a blind `str::replace`, so an override that omits a token simply never receives that value -- the message renders without it and nothing reports the loss. Tokens are detected here by scanning each compiled default, so this column tracks the real defaults rather than a hand-kept list.".to_string());
+    lines.push(String::new());
+
+    lines.push("## Artifacts".to_string());
+    lines.push(String::new());
+    lines.push("| path | class | policy | placeholders | reader |".to_string());
+    lines.push("| --- | --- | --- | --- | --- |".to_string());
+    for r in &rows {
+        let ph = if r.placeholders.is_empty() {
+            "--".to_string()
+        } else {
+            r.placeholders.iter().map(|p| format!("`{}`", p)).collect::<Vec<_>>().join(" ")
+        };
+        lines.push(format!(
+            "| `{}` | {} | `{}` | {} | {} |",
+            r.path, r.class, r.policy.id(), ph, r.reader
+        ));
+    }
+    lines.push(String::new());
+
+    let notes: Vec<&PolicyRow> = rows.iter().filter(|r| r.note.is_some()).collect();
+    if !notes.is_empty() {
+        lines.push("## Per-artifact caveats".to_string());
+        lines.push(String::new());
+        for r in notes {
+            lines.push(format!("- `{}` -- {}", r.path, r.note.as_deref().unwrap_or("")));
+        }
+        lines.push(String::new());
+    }
+
+    lines.push("## Derivation provenance".to_string());
+    lines.push(String::new());
+    lines.push("Where each row's policy came from. A row marked NOT derived is transcribed from another crate and is the drift risk in this table.".to_string());
+    lines.push(String::new());
+    for r in &rows {
+        lines.push(format!("- `{}` -- {}", r.path, r.derived));
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
 fn write_if_absent_or_forced(path: &str, content: &str, force: bool) -> (bool, &'static str) {
     if !force && pkfs::exists(path) {
         return (false, "skipped-existing");
@@ -173,9 +441,52 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
         lines.push(String::new());
         lines.join("\n")
     };
+    let config_map_ref = {
+        let g = fsm::graph();
+        let mut lines = vec![
+            "# What is configurable, and what needs Rust".to_string(),
+            String::new(),
+            "Which parts of the FSM a project can change by vendoring, and which require a code change. Generated by `fsm-vendor` from the live graph and registries, so the counts and names below describe THIS build rather than a remembered one.".to_string(),
+            String::new(),
+            "## Configurable by vendoring".to_string(),
+            String::new(),
+            format!("- **States** ({}): `states[]` in fsm/graph.json. Each carries `key`, `prose_key` and an optional `skill`. A state whose `prose_key` has no compiled default serves ENTRY prose until its .md is written, and `fsm-vendor` scaffolds an obvious placeholder rather than a plausible-looking wrong file.", g.states.len()),
+            format!("- **Edges** ({}): `edges[]`. Each names `from`, `to`, and the `gates` that must pass. Removing a gate from an edge is how a project deliberately weakens it; `fsm-validate` reports every edge weaker than the compiled default rather than merging the gate back.", g.edges.len()),
+            format!("- **Gate wiring** ({} defined): `gates[]`. A gate binds a `name` and `message` to either a compiled `predicate`, a jit `hook`, or both via `hook_mode`.", g.gates.len()),
+            format!("- **Policy** ({} keys): the `policy` object. Full list in this build: {}.", crate::orchestrator::fsm::Graph::KNOWN_POLICY_KEYS.len(), crate::orchestrator::fsm::Graph::KNOWN_POLICY_KEYS.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")),
+            format!("- **Deviation severity** ({} kinds): `policy.deviation_severity`, keyed by kind, valued `deny` or `log`. See fsm/deviations.md.", crate::orchestrator::deviations::known_deviations().len()),
+            "- **Instruction prose**: every `.gm/instructions/<prose_key>.md`, plus the gate and residual message files. Resolved per key, so overriding one leaves the rest on the compiled default.".to_string(),
+            "- **Jit hooks**: `.gm/instructions/hooks/*.js`, referenced by a gate's `hook`. This is the escape hatch for a condition with no compiled predicate -- it runs real JS at gate evaluation and fails CLOSED.".to_string(),
+            "- **Browser and daemon knobs**: browser-config.json and daemon-project-config.json, per field.".to_string(),
+            String::new(),
+            "## Requires a Rust change".to_string(),
+            String::new(),
+            format!("- **The predicate set** ({} compiled): a graph's `gates[].predicate` can only name one of these. A name outside the set emits `fsm_unknown_predicate` and denies that gate permanently, so a genuinely new CONDITION needs either a jit hook or a new compiled predicate. Full list in fsm/predicates.md.", transitions::known_predicates().len()),
+            "- **The deviation kind registry**: a project can re-weight a kind's severity, but the set of kinds a build can emit is compiled. A kind not in the table is emitted by no code path.".to_string(),
+            "- **Hook lifecycle**: hooks fire at gate evaluation only. On-enter, on-exit and on-deviation points do not exist and are not reachable by configuration -- see fsm/invariants.md for why that boundary is deliberate.".to_string(),
+            "- **Step progression shape**: single-slot by specification, not by omission. See fsm/invariants.md.".to_string(),
+            "- **Verb dispatch and the spool ABI**: which verbs exist, what they accept, and the in/out file protocol.".to_string(),
+            "- **Table names and embedding width**: `from_value` parses no key that reaches them, and a mismatched `memory.embed_dim` is rejected before it can reach a live store. This is deliberate: those two would drop or orphan real data.".to_string(),
+            String::new(),
+            "## The boundary worth remembering".to_string(),
+            String::new(),
+            "Configuration changes WHICH conditions are checked, in what order, and what a denial says. It does not change WHAT a condition can inspect -- that is the predicate set, and a jit hook is the sanctioned way past it without a build.".to_string(),
+            String::new(),
+        ];
+        lines.push(String::new());
+        lines.join("\n")
+    };
+    let config_map_path = ".gm/instructions/fsm/configurable.md";
+    let (ok, status) = write_if_absent_or_forced(config_map_path, &config_map_ref, force);
+    results.push(json!({ "path": config_map_path, "ok": ok, "status": status }));
+
     let invariants_path = ".gm/instructions/fsm/invariants.md";
     let (ok, status) = write_if_absent_or_forced(invariants_path, &invariants_ref, force);
     results.push(json!({ "path": invariants_path, "ok": ok, "status": status }));
+
+    let merge_policy_path = ".gm/instructions/fsm/merge-policy.md";
+    let (ok, status) = write_if_absent_or_forced(merge_policy_path, &merge_policy_doc(), force);
+    results.push(json!({ "path": merge_policy_path, "ok": ok, "status": status }));
 
     let hook_path = ".gm/instructions/hooks/example.js";
     let (ok, status) = write_if_absent_or_forced(hook_path, EXAMPLE_HOOK, force);
@@ -228,7 +539,18 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
         "schema_version": fsm::GRAPH_SCHEMA_VERSION,
         "staleness": staleness,
         "staleness_note": "Null means the vendored graph.json is level with this build. Otherwise it names exactly which states, edges, gates, guarded-edge gates, policy keys and predicates the vendored file lacks relative to the compiled default -- reported, never merged, because silently folding them in would change a hand-written FSM's meaning under its author, and hard-failing would discard every unrelated customisation over a version integer.",
-        "note": "instruction/transition now serve from these files wherever present (per-key fallback to the compiled default for any prose file, wholesale-replace for the graph). gates/<key>.md and residual/<key>.md override the matching gate-denial/residual-scan message text via the same prose::resolve chain. browser-config.json and daemon-project-config.json are example defaults matching every field BrowserConfig/ProjectDaemonConfig actually reads -- edit values, remove fields to fall back to compiled defaults. The machine-wide ~/.agentplug/daemon-config.json is out of this per-project verb's reach (gm.wasm's fs sandbox is rooted at the project cwd); agentplug-runner itself scaffolds that file with the same example-defaults shape on first daemon boot if absent. Edit .gm/instructions/fsm/graph.json to add a custom phase, rewire an edge, or change which gates guard which transition -- no rebuild needed. Re-run this verb with {\"force\":true} to reset any of these back to the compiled defaults.",
+        "merge_policy": merge_policy_rows().iter().map(|r| json!({
+            "path": r.path,
+            "class": r.class,
+            "policy": r.policy.id(),
+            "unit": r.policy.unit(),
+            "reader": r.reader,
+            "placeholders": r.placeholders,
+            "derived_from": r.derived,
+            "caveat": r.note,
+        })).collect::<Vec<Value>>(),
+        "merge_policy_note": "Per-artifact precedence semantics, derived by walking the same registries the vendor pass writes from. There is deliberately no single global merge rule: `per-key-whole-file` prose falls back a FILE at a time with no merge inside it, the graph is `wholesale-replace`, and the two host JSON configs are `per-field-parse-gated` -- per-field while the file PARSES, whole-file-discarded the moment it does not. The same table is written to .gm/instructions/fsm/merge-policy.md. Rows whose `derived_from` begins NOT derived are transcribed from agentplug-host, which this build cannot see, and are the drift risk.",
+        "note": "instruction/transition now serve from these files wherever present (per-key fallback to the compiled default for any prose file, wholesale-replace for the graph). gates/<key>.md and residual/<key>.md override the matching gate-denial/residual-scan message text via the same prose::resolve chain, and some of those defaults carry {token} placeholders the caller substitutes AFTER resolution -- an override that drops a token silently renders without that value (see merge_policy[].placeholders). browser-config.json and daemon-project-config.json are example defaults for the fields BrowserConfig/ProjectDaemonConfig actually read -- removing a field falls back to that field's compiled default INDIVIDUALLY, but a file that fails to parse is discarded WHOLE and silently, reverting every field at once with no diagnostic. Note the example's `headless: false` is not the host's own fallback, which is `true`, so deleting that field inverts the vendored behaviour rather than preserving it. The machine-wide ~/.agentplug/daemon-config.json is out of this per-project verb's reach (gm.wasm's fs sandbox is rooted at the project cwd); agentplug-runner itself scaffolds that file with the same example-defaults shape on first daemon boot if absent. Edit .gm/instructions/fsm/graph.json to add a custom phase, rewire an edge, or change which gates guard which transition -- no rebuild needed. Re-run this verb with {\"force\":true} to reset any of these back to the compiled defaults.",
     });
     (payload.to_string(), String::new(), 0)
 }
