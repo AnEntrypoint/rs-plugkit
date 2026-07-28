@@ -2,7 +2,7 @@ use super::gm_dir;
 use crate::pkfs;
 
 fn note_cfg() -> crate::ragconfig::DisciplineNoteConfig {
-    crate::ragconfig::DisciplineNoteConfig::default()
+    crate::ragconfig::RagConfig::resolved().discipline_note
 }
 
 fn valid_name_char(c: char) -> bool {

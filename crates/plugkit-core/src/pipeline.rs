@@ -11,7 +11,7 @@ use crate::wasm_dispatch::host_now_ms;
 // latent divergence bug -- change one and the pipeline promises a limit it does
 // not apply. One config now, so the two sites cannot disagree.
 fn pipeline_cfg() -> crate::ragconfig::PipelineConfig {
-    crate::ragconfig::PipelineConfig::default()
+    crate::ragconfig::RagConfig::resolved().pipeline
 }
 
 #[link(wasm_import_module = "env")]

@@ -325,7 +325,7 @@ fn extract_embedding(v: &Value) -> Option<Value> {
 }
 
 fn flat_vec_embedding(ns: &str, key: &str) -> Option<Value> {
-    let cfg = crate::ragconfig::RagConfig::default();
+    let cfg = crate::ragconfig::RagConfig::resolved();
     let vec_ns = cfg.namespaces.vec_namespace(ns);
     let raw = crate::wasm_dispatch::host_kv_read(&vec_ns, key)?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;

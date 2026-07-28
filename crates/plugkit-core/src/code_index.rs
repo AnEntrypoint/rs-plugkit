@@ -802,7 +802,7 @@ fn delete_chunk_keys(chunks: &[ChunkRecord]) {
 }
 
 pub fn index(root: &str, max_files: usize) -> Value {
-    index_cfg(root, max_files, &crate::ragconfig::RagConfig::default())
+    index_cfg(root, max_files, &crate::ragconfig::RagConfig::resolved())
 }
 
 /// Same as [`index`], with the knowledgebase config supplied explicitly --
@@ -1146,7 +1146,7 @@ fn digest_from_entries(mut entries: Vec<(String, u32)>) -> String {
 }
 
 pub fn current_digest() -> String {
-    current_digest_cfg(&crate::ragconfig::RagConfig::default())
+    current_digest_cfg(&crate::ragconfig::RagConfig::resolved())
 }
 
 /// Same as [`current_digest`] with explicit config. The file-size cap MUST match

@@ -15,7 +15,7 @@ use super::recall;
 use crate::pkfs;
 
 fn payload_cfg() -> crate::ragconfig::InstructionPayloadConfig {
-    crate::ragconfig::InstructionPayloadConfig::default()
+    crate::ragconfig::RagConfig::resolved().instruction_payload
 }
 
 fn expire_stale_marker(v: serde_json::Value) -> serde_json::Value {

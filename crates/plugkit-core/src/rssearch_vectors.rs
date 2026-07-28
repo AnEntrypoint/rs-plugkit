@@ -16,7 +16,7 @@ use crate::vecns::{self, QueryBudget, RecencyParams, VecTableSpec};
 /// shared across concurrently-active projects -- a cached config would let one
 /// project's knowledgebase settings answer another project's query.
 fn default_cfg() -> RagConfig {
-    RagConfig::default()
+    RagConfig::resolved()
 }
 
 fn shared_db_path() -> String {

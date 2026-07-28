@@ -15,7 +15,7 @@ const LOG_WINDOW: usize = 500;
 /// See `rssearch_vectors::default_cfg` -- constructed per call, never cached,
 /// because the plugin instance is shared across concurrently-active projects.
 fn default_cfg() -> RagConfig {
-    RagConfig::default()
+    RagConfig::resolved()
 }
 
 fn shared_db_path() -> String {

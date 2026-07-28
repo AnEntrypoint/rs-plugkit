@@ -19,15 +19,26 @@
 //! boot of every existing project.
 //!
 //! CONCURRENCY: the plugin instance is process-wide and shared across
-//! concurrently-active projects, so nothing here is cached in a `static`.
-//! Config is passed by reference into each call, constructed per-dispatch by
-//! the caller. A process-global "current config" would let project A's
-//! knowledgebase settings leak into project B's index pass.
+//! concurrently-active projects, so a process-global "current config" would
+//! let project A's knowledgebase settings leak into project B's index pass.
+//! `resolved()` is therefore memoised on the project root, not globally, on
+//! the same precedent as `embed.rs`'s `scoped_key`; every other value here is
+//! passed by reference into each call, constructed per-dispatch by the caller.
 
 use serde_json::json;
+use std::sync::Mutex;
+
+const RESOLVED_CACHE_TTL_MS: u64 = 5_000;
+
+struct ResolvedEntry {
+    root: String,
+    ts_ms: u64,
+    config: RagConfig,
+}
+
+static RESOLVED_CACHE: Mutex<Option<ResolvedEntry>> = Mutex::new(None);
 
 /// Physical location of one vector table + its libsql ANN index.
-///
 /// Kept separate from `VecTableSpec` (which additionally carries the resolved
 /// `db_name` for a specific call) because table/index NAMES are configuration
 /// while the db path is resolved per-project at call time.
@@ -53,7 +64,6 @@ impl VecTableNames {
 }
 
 /// How a raw cosine distance becomes a ranked score.
-///
 /// `half_life_ms`/`recency_floor` are the exponential-decay recency multiplier
 /// applied on top of cosine similarity; `cos_floor` drops hits below a
 /// similarity bar BEFORE recency can rescue them (a stale-but-relevant hit is
@@ -83,7 +93,6 @@ impl Default for ScoringConfig {
 }
 
 /// How many rows to pull out of the ANN index relative to the caller's limit.
-///
 /// The ANN pool must overshoot the requested limit because recency reweighting
 /// and dedup both happen AFTER retrieval: a hit that wins on final score can
 /// sit outside the top-`limit` by raw cosine distance, so retrieving exactly
@@ -113,7 +122,6 @@ impl QueryBudgetConfig {
 }
 
 /// Namespace vocabulary of a knowledgebase.
-///
 /// `code` is the one namespace treated structurally differently everywhere:
 /// it is fed by the tree-sitter code indexer rather than by markdown memory
 /// files, so `rssearch_vector_hits` migrates it from flat JSON instead of
@@ -160,7 +168,6 @@ impl NamespaceConfig {
 
 /// The embedding model's output dimension, plus the policy for what happens
 /// when a store on disk disagrees with it.
-///
 /// This is the one setting that can DESTROY data, so it is modelled
 /// explicitly rather than as a bare `usize`. libsql's `F32_BLOB(n)` column
 /// type is fixed at CREATE time and its `vector_top_k` index is built against
@@ -206,13 +213,11 @@ impl EmbedDimConfig {
 }
 
 /// Code-index chunking and pass budgets.
-///
 /// Every value here was a bare literal in `code_index.rs`, which made the
 /// indexing cost profile un-tunable per project -- and these are exactly the
 /// knobs that matter when a corpus does not resemble the one they were chosen
 /// against. A prose-heavy tree wants a different chunk split than a code tree;
 /// a slow machine wants a different wall budget than a fast one.
-///
 /// Per this module's own invariant, the defaults reproduce the historical
 /// literals EXACTLY, so adopting the config is a no-op until a value is
 /// deliberately edited.
@@ -247,13 +252,11 @@ impl Default for IndexConfig {
 }
 
 /// Size caps on discipline notes.
-///
 /// The two length caps HARD-REFUSE a note that exceeds them, so they are not
 /// merely cosmetic: a project whose policy names are longer than 64 chars
 /// cannot record them at all. `active_policies_limit` truncates the list fed
 /// into every instruction payload, so it trades context budget against how
 /// many standing policies the agent can actually see.
-///
 /// Defaults reproduce the previous literals exactly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DisciplineNoteConfig {
@@ -273,7 +276,6 @@ impl Default for DisciplineNoteConfig {
 
 /// Which edited files count as "runs in a browser", and therefore owe a
 /// browser witness before COMPLETE.
-///
 /// This one is a real guarantee hole rather than an inconvenience. The
 /// browser-witness-coverage gate only demands a witness for files this
 /// classifier claims, so a project whose client lives in a directory outside
@@ -281,7 +283,6 @@ impl Default for DisciplineNoteConfig {
 /// one of its client edits classified as non-browser -- and the gate then
 /// passed with zero coverage, reporting a guarantee it had never checked.
 /// Silent false-negatives in a gate are worse than a loud failure.
-///
 /// Defaults reproduce the previous literals exactly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrowserWitnessConfig {
@@ -313,13 +314,11 @@ impl Default for BrowserWitnessConfig {
 
 /// How much, and what, the instruction payload puts in front of the agent
 /// every dispatch.
-///
 /// These shape what the agent actually SEES, which makes them the most
 /// consequential numbers in the orchestrator and the least defensible as
 /// literals. The stopword list in particular is English-only: a project
 /// working in another language gets orient-noun extraction that filters
 /// nothing, silently degrading recall quality rather than failing.
-///
 /// Defaults reproduce the previous literals exactly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InstructionPayloadConfig {
@@ -362,14 +361,12 @@ impl Default for InstructionPayloadConfig {
 }
 
 /// Step-pipeline lifetime, size, and retry budgets.
-///
 /// These were four literals in pipeline.rs, two of them written twice --
 /// `max_result_bytes` at the point it is ADVERTISED to the caller and again
 /// at the point it is ENFORCED, and the attempt budget likewise. Two
 /// independent literals meant to be one value is a latent divergence bug:
 /// change one and the pipeline promises a limit it does not apply, or
 /// applies one it never announced.
-///
 /// Defaults reproduce the previous literals exactly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PipelineConfig {
@@ -398,14 +395,12 @@ impl Default for PipelineConfig {
 }
 
 /// What the claim audit looks for, and where.
-///
 /// Both halves were hardcoded: an English marker vocabulary and `AGENTS.md`
 /// as the only scanned file. Neither generalises -- another project keeps its
 /// running log under a different filename, and a project whose notes are
 /// written in another language (or simply with a different house vocabulary,
 /// e.g. "deployed"/"verified") gets a silently useless audit rather than an
 /// obviously broken one.
-///
 /// Defaults reproduce the previous literals exactly, so an unset config is a
 /// guaranteed no-op.
 #[derive(Clone, Debug, PartialEq)]
@@ -432,7 +427,6 @@ impl Default for ClaimAuditConfig {
 }
 
 /// A whole knowledgebase's retrieval settings.
-///
 /// Threaded by reference into the vector modules. Constructed with
 /// `RagConfig::default()` at every call site today; a resolution layer will
 /// later hand in a populated one without any of those modules changing shape.
@@ -486,7 +480,6 @@ impl Default for RagConfig {
 }
 
 /// Accept only `[A-Za-z_][A-Za-z0-9_]*`.
-///
 /// Deliberately stricter than SQLite's own identifier rules (no quoting, no
 /// dots, no unicode): these names reach SQL through `format!`, never a bind
 /// parameter, so the whitelist is the entire defence. Rejecting a legal-but-
@@ -518,7 +511,6 @@ impl RagConfig {
 
     /// Reject a config whose settings would destroy or permanently break a
     /// store, BEFORE any schema call acts on it.
-    ///
     /// A resolution layer reads config off disk, so unlike the compile-time
     /// assertion in `embed.rs` these values are not known until runtime -- and
     /// the failure mode is silent and total: a `dim` the compiled embedder
@@ -529,19 +521,16 @@ impl RagConfig {
     /// back to defaults, since silently ignoring an operator's stated dim is
     /// how a store gets rebuilt at a width nobody asked for.
     /// Build from a resolved config value, defaulting every absent field.
-    ///
     /// This is the bridge that was missing: `config.rs` resolved a full 4-tier
     /// chain and `RagConfig` was a complete value type, but nothing joined
     /// them -- `config::resolve()`'s only caller was its own reporting verb, so
     /// every knob here came from `Default` no matter what a project vendored.
     /// The whole configuration surface was therefore observable and inert.
-    ///
     /// Absent keys default rather than erroring, because `config.rs` deep-merges
     /// a partial tier over the builtin: a config legitimately ships only the
     /// keys it wants to change. An unparseable key is a different matter and is
     /// reported, since silently ignoring a value someone wrote is the failure
     /// this whole chain exists to avoid.
-    ///
     /// Validation runs before returning, so a config that would produce an
     /// unusable store is refused here rather than at the first query.
     pub fn from_value(v: &serde_json::Value) -> Result<RagConfig, String> {
@@ -584,7 +573,6 @@ impl RagConfig {
     }
 
     /// The knowledgebase settings actually in force for this project.
-    ///
     /// Resolves the 4-tier config chain and builds a `RagConfig` from it,
     /// falling back to the compiled defaults when no tier supplies one or when
     /// what it supplies is unusable. This is the bridge every consumer should
@@ -592,20 +580,28 @@ impl RagConfig {
     /// reporting verb, so the entire RAG surface was observable and inert --
     /// `config_resolve` could report a tier had won while every knob still came
     /// from `Default`.
-    ///
     /// A config that fails validation degrades to defaults rather than
     /// propagating an error, because the alternative is a project whose
     /// retrieval stops working entirely over a mistyped number. The rejection
     /// is reported through `resolve_and_report`'s own events, so it is loud
     /// without being fatal.
     ///
-    /// Deliberately NOT memoised: the plugin instance is process-wide and
-    /// shared across concurrently-active projects, so a cached config would
-    /// leak project A's knowledgebase settings into project B -- the invariant
-    /// this module's own header states.
     pub fn resolved() -> RagConfig {
+        let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+        let now = unsafe { crate::wasm_dispatch::host_now_ms() };
+        if let Ok(guard) = RESOLVED_CACHE.lock() {
+            if let Some(entry) = guard.as_ref() {
+                if entry.root == root && now.saturating_sub(entry.ts_ms) < RESOLVED_CACHE_TTL_MS {
+                    return entry.config.clone();
+                }
+            }
+        }
         let value = crate::config::resolve().config.value;
-        RagConfig::from_value(&value).unwrap_or_default()
+        let config = RagConfig::from_value(&value).unwrap_or_default();
+        if let Ok(mut guard) = RESOLVED_CACHE.lock() {
+            *guard = Some(ResolvedEntry { root, ts_ms: now, config: config.clone() });
+        }
+        config
     }
 
     pub fn validate(&self) -> Result<(), String> {

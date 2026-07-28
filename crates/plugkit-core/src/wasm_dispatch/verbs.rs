@@ -464,7 +464,7 @@ fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do
     }
     let namespaces = discipline_fanout_namespaces(namespace);
     let now_ms = unsafe { host_now_ms() } as i64;
-    let cfg = crate::ragconfig::RagConfig::default();
+    let cfg = crate::ragconfig::RagConfig::resolved();
     let mut memory_namespaces: Vec<String> = Vec::new();
     for ns in &namespaces {
         if cfg.namespaces.is_code(ns) {
@@ -506,14 +506,14 @@ pub fn memory_recall_backend(query_embedding: &Value, namespace: &str, limit: u3
     let (_, mem_ns) = rssearch_vector_hits(query_embedding, namespace, limit, true);
     let mem_ns = mem_ns?;
     let now_ms = unsafe { host_now_ms() } as i64;
-    let cfg = crate::ragconfig::RagConfig::default();
+    let cfg = crate::ragconfig::RagConfig::resolved();
     crate::rssearch_vectors::search_memory_hits_cfg(query_embedding, &mem_ns, limit as usize, now_ms, &cfg)
         .ok()
         .filter(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
 }
 
 fn recall(body: &Value) -> u64 {
-    let cfg = crate::ragconfig::RagConfig::default();
+    let cfg = crate::ragconfig::RagConfig::resolved();
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_limit as u64) as u32;
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or(&cfg.namespaces.default);
@@ -767,7 +767,7 @@ fn memorize_prune(body: &Value) -> u64 {
 }
 
 fn codesearch(body: &Value) -> u64 {
-    let cfg = crate::ragconfig::RagConfig::default();
+    let cfg = crate::ragconfig::RagConfig::resolved();
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_k as u64) as u32;
     if query.is_empty() { return err("codesearch", "query required"); }
