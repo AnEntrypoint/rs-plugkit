@@ -71,6 +71,10 @@ jobs:
         with:
           targets: wasm32-wasip1
 
+      - name: Pin embedded source SHA to the exact checked-out commit
+        shell: bash
+        run: echo "PLUGKIT_BUILD_SHA=${{ needs.bump.outputs.sha }}" >> "$GITHUB_ENV"
+
       - name: Install wasi-sdk (clang + sysroot for tree-sitter C grammars)
         run: |
           WASI_VERSION=24
@@ -125,6 +129,15 @@ jobs:
         run: |
           test -f "target/wasm32-wasip1/release/rs_plugkit.wasm" || { echo "rs_plugkit.wasm not built"; exit 1; }
 
+      - name: Verify fat WASM embeds the exact built commit SHA
+        shell: bash
+        run: |
+          if ! grep -a -q "$PLUGKIT_BUILD_SHA" "target/wasm32-wasip1/release/rs_plugkit.wasm"; then
+            echo "::error::Built fat wasm does not contain source SHA $PLUGKIT_BUILD_SHA -- artifact does not correspond to the commit it claims to be built from, refusing to publish"
+            exit 1
+          fi
+          echo "Confirmed: fat wasm embeds source SHA $PLUGKIT_BUILD_SHA"
+
       - name: Rename fat WASM binary
         shell: bash
         run: |
@@ -161,6 +174,15 @@ jobs:
         shell: bash
         run: |
           test -f "target/wasm32-wasip1/release/rs_plugkit.wasm" || { echo "rs_plugkit.wasm (slim) not built"; exit 1; }
+
+      - name: Verify slim WASM embeds the exact built commit SHA
+        shell: bash
+        run: |
+          if ! grep -a -q "$PLUGKIT_BUILD_SHA" "target/wasm32-wasip1/release/rs_plugkit.wasm"; then
+            echo "::error::Built slim wasm does not contain source SHA $PLUGKIT_BUILD_SHA -- artifact does not correspond to the commit it claims to be built from, refusing to publish"
+            exit 1
+          fi
+          echo "Confirmed: slim wasm embeds source SHA $PLUGKIT_BUILD_SHA"
 
       - name: Verify slim artifact is genuinely smaller (no embedded safetensors)
         shell: bash
@@ -223,13 +245,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
           VER: ${{ needs.bump.outputs.version }}
+          BUILT_SHA: ${{ needs.bump.outputs.sha }}
         run: |
           set -e
           if ! gh release view "v$VER" --repo AnEntrypoint/plugkit-bin >/dev/null 2>&1; then
             gh release create "v$VER" \
               --repo AnEntrypoint/plugkit-bin \
               --title "plugkit v$VER (WASM)" \
-              --notes "Auto-published WASM-only build from rs-plugkit CI at $GITHUB_SHA"
+              --notes "Auto-published WASM-only build from rs-plugkit CI at $BUILT_SHA"
           fi
           gh release upload "v$VER" \
             --repo AnEntrypoint/plugkit-bin \

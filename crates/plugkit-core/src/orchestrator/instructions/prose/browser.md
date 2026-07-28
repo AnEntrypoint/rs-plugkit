@@ -17,6 +17,7 @@ YOU drive the browser through the spool: plugkit holds Chromium handle, per-proj
 The body is a string, these shapes:
 
 ```
+sessionId=<id>\n<any shape below>
 session new
 session list
 session close <id>
@@ -31,6 +32,8 @@ trace\n<expression>
 screenshot\n<expression>
 dom=<css-selector>\n
 ```
+
+**`sessionId=<id>\n` is the ONLY reliable way to pin a dispatch to YOUR OWN chromium when a project's spool is shared by more than one concurrent gm session.** Without it, session targeting falls back to a shared per-project pointer that the LAST dispatch of ANY session (yours or another concurrent one) last wrote -- under genuine concurrency (two sessions driving the same repo, the ordinary case for a shared-daemon project) this silently routes your eval into a foreign session's already-open page and hands back whatever that page's state happens to be, satisfying `ok:true` with someone else's data rather than yours. Stack it first, ahead of every other prefix: `sessionId=<your-id>\ntimeout=<ms>\nurl=<url>\n<expression>`. Pick your own SESSION_ID (the same one threaded through every other spool verb's JSON body) and use it on every browser dispatch for the whole turn -- the same discipline as picking one sessionId for reuse (see below), just made explicit instead of implicit.
 
 **Never a JSON object body.** The body is always one of the plain-text shapes above -- never `{"command":"launch","url":"...","timeoutMs":...}` or any other JSON-object payload. Every other spool verb (`prd-add`, `mutable-add`, `transition`, ...) takes structured JSON, which makes a JSON body an easy but wrong guess for `browser` specifically -- this verb is the one exception, string-only. A JSON-shaped body is rejected up front with a clear error naming the supported shapes; passing it anyway used to fall through to evaluating the raw JSON as a JS expression, producing an opaque `SyntaxError: Unexpected token ':'` with no indication of the real mistake. To launch and navigate: `session new` once, then `url=<target>\n<expression>` on the same or next dispatch -- there is no separate "launch" command.
 

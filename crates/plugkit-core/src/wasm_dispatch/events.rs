@@ -10,7 +10,7 @@ pub(crate) fn set_dispatch_session_id(sid: Option<String>) {
     DISPATCH_SESSION_ID.with(|cell| *cell.borrow_mut() = sid);
 }
 
-fn current_dispatch_session_id() -> Option<String> {
+pub(crate) fn current_dispatch_session_id() -> Option<String> {
     DISPATCH_SESSION_ID.with(|cell| cell.borrow().clone())
 }
 

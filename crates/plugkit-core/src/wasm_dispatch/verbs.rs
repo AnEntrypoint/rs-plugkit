@@ -952,6 +952,7 @@ fn health(_body: &Value) -> u64 {
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
         "crate_version": env!("CARGO_PKG_VERSION"),
+        "source_sha": env!("PLUGKIT_SOURCE_SHA"),
         "loaded_module_is_compiled_version_above_not_project_pin": true,
         "project_gm_json_pinned_version": project_gm_json_pinned_version(),
         "now": now,
@@ -1068,10 +1069,12 @@ fn browser(body: &Value, body_s: &str) -> u64 {
     if code.is_empty() { return err("browser", "code required (provide JS body or {code, cwd?, sessionId?} JSON)"); }
     let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
     let explicit_sid = body.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-    let session_id = if explicit_sid.is_empty() {
-        host_read(".gm/exec-spool/.session-current").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_default()
-    } else {
+    let session_id = if !explicit_sid.is_empty() {
         explicit_sid
+    } else if let Some(dispatch_sid) = super::events::current_dispatch_session_id().filter(|s| !s.trim().is_empty()) {
+        dispatch_sid
+    } else {
+        host_read(".gm/exec-spool/.session-current").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_default()
     };
     let timeout_ms = match body.get("timeoutMs") {
         None | Some(Value::Null) => BROWSER_DEFAULT_TIMEOUT_MS,
