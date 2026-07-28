@@ -26,12 +26,12 @@ fn clamp_timeout(requested: Option<u64>) -> u64 {
     bounded
 }
 
-fn err_resp(verb: &str, msg: &str) -> (String, String, i32) {
-    (json!({ "ok": false, "verb": verb, "error": msg }).to_string(), String::new(), 1)
+fn err_resp(_verb: &str, msg: &str) -> (String, String, i32) {
+    (String::new(), msg.to_string(), 1)
 }
 
-fn ok_resp(verb: &str, data: Value) -> (String, String, i32) {
-    (json!({ "ok": true, "verb": verb, "data": data }).to_string(), String::new(), 0)
+fn ok_resp(_verb: &str, data: Value) -> (String, String, i32) {
+    (data.to_string(), String::new(), 0)
 }
 
 #[cfg(target_arch = "wasm32")]
