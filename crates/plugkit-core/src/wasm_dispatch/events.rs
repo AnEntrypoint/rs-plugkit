@@ -1,5 +1,18 @@
 use serde_json::{json, Value};
 use super::host_abi::{host_log, host_now_ms, host_read};
+use std::cell::RefCell;
+
+thread_local! {
+    static DISPATCH_SESSION_ID: RefCell<Option<String>> = RefCell::new(None);
+}
+
+pub(crate) fn set_dispatch_session_id(sid: Option<String>) {
+    DISPATCH_SESSION_ID.with(|cell| *cell.borrow_mut() = sid);
+}
+
+fn current_dispatch_session_id() -> Option<String> {
+    DISPATCH_SESSION_ID.with(|cell| cell.borrow().clone())
+}
 
 pub(crate) fn log_deviation_push(event: &str, detail: &str) {
     let msg = format!("plugkit gate: {} {}", event, detail);
@@ -27,7 +40,8 @@ pub(crate) fn log_deviation_push(event: &str, detail: &str) {
 pub(crate) fn emit_event(event: &str, fields: Value) {
     let mut obj = serde_json::Map::new();
     obj.insert("event".to_string(), Value::String(event.to_string()));
-    let sess = host_read(".gm/exec-spool/.session-current").unwrap_or_default();
+    let sess = current_dispatch_session_id()
+        .unwrap_or_else(|| host_read(".gm/exec-spool/.session-current").unwrap_or_default());
     let sess_trim = sess.trim();
     if !sess_trim.is_empty() {
         obj.insert("sess".to_string(), Value::String(sess_trim.to_string()));

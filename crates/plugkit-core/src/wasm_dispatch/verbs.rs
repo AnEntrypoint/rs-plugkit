@@ -938,7 +938,7 @@ fn health(_body: &Value) -> u64 {
             "lang_preserved": lang_preserved,
         }))
         .collect();
-    fn installed_release_tag() -> Value {
+    fn project_gm_json_pinned_version() -> Value {
         match crate::wasm_dispatch::host_read("gm.json")
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .and_then(|v| v.get("plugkitVersion").and_then(|p| p.as_str().map(String::from)))
@@ -952,7 +952,8 @@ fn health(_body: &Value) -> u64 {
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
         "crate_version": env!("CARGO_PKG_VERSION"),
-        "serving_release_tag": installed_release_tag(),
+        "loaded_module_is_compiled_version_above_not_project_pin": true,
+        "project_gm_json_pinned_version": project_gm_json_pinned_version(),
         "now": now,
         "imports": super::host_abi::HOST_IMPORTS,
         "subsystems": subsystems,
@@ -1773,7 +1774,9 @@ fn git_finalize(body: &Value) -> u64 {
 
 fn git_log(body: &Value) -> u64 {
     let cwd = body_cwd(body);
-    let count = body.get("count").and_then(|v| v.as_u64()).unwrap_or(10);
+    let count = body.get("limit").and_then(|v| v.as_u64())
+        .or_else(|| body.get("count").and_then(|v| v.as_u64()))
+        .unwrap_or(10);
     let nflag = format!("-{}", count);
     let r = git_call_argv(&["log", &nflag, "--oneline", "--no-color"], cwd);
     let out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
@@ -1964,16 +1967,27 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     let body: Value = if body_s.is_empty() { Value::Null } else {
         serde_json::from_str(&body_s).unwrap_or(Value::Null)
     };
+    let dispatch_session_id = body.get("sessionId").and_then(|v| v.as_str())
+        .or_else(|| body.get("session_id").and_then(|v| v.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    super::events::set_dispatch_session_id(dispatch_session_id);
+    let result_packed = dispatch_gated_verb(&verb, &body, &body_s);
+    super::events::set_dispatch_session_id(None);
+    result_packed
+}
+
+fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
     #[cfg(target_arch = "wasm32")]
     let dispatch_start_ms = unsafe { host_now_ms() };
-    let gate = crate::gates::check_dispatch(&verb, &body);
+    let gate = crate::gates::check_dispatch(verb, body);
     if !gate.allowed {
-        return pack(gate.to_denial_json(&verb).to_string());
+        return pack(gate.to_denial_json(verb).to_string());
     }
     let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-    crate::browser_witness::record_from_body(cwd_for_witness, &body);
-    if crate::orchestrator::is_orchestrator_verb(&verb) {
-        let (out, err_msg, code) = crate::orchestrator::dispatch(&verb, "", &body_s);
+    crate::browser_witness::record_from_body(cwd_for_witness, body);
+    if crate::orchestrator::is_orchestrator_verb(verb) {
+        let (out, err_msg, code) = crate::orchestrator::dispatch(verb, "", body_s);
         #[cfg(target_arch = "wasm32")]
         {
             let ms = unsafe { host_now_ms() }.saturating_sub(dispatch_start_ms);
@@ -1981,11 +1995,13 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         }
         if code == 0 {
             let data: Value = serde_json::from_str(&out).unwrap_or(Value::String(out));
-            return ok(&verb, data);
+            return ok(verb, data);
         }
-        return err_json(&verb, json!({ "error": err_msg, "stdout": out, "exitCode": code }));
+        return err_json(verb, json!({ "error": err_msg, "stdout": out, "exitCode": code }));
     }
-    let result = match verb.as_str() {
+    let body = body.clone();
+    let body_s = body_s.to_string();
+    let result = match verb {
         "fs_read" => fs_read(&body),
         "fs_write" => fs_write(&body),
         "fs_readdir" => fs_readdir(&body),

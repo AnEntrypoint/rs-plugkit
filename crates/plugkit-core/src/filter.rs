@@ -9,7 +9,7 @@ pub fn dispatch(body: &Value, raw: &str) -> (Value, Option<String>) {
         .map(|s| s.to_string())
         .unwrap_or_else(|| raw.to_string());
     match kind {
-        "grep" => Ok(grep(&input, body)),
+        "grep" => grep(&input, body),
         "ls" => Ok(ls(&input, body)),
         "tree" => Ok(tree(&input, body)),
         "json" => Ok(json_compact(&input, body)),
@@ -21,15 +21,33 @@ pub fn dispatch(body: &Value, raw: &str) -> (Value, Option<String>) {
     }.map(|v| (v, None)).unwrap_or_else(|e| (Value::Null, Some(e)))
 }
 
-fn grep(input: &str, body: &Value) -> Value {
+fn grep(input: &str, body: &Value) -> Result<Value, String> {
+    let pattern = body.get("pattern").and_then(|v| v.as_str())
+        .or_else(|| body.get("needle").and_then(|v| v.as_str()))
+        .or_else(|| body.get("match").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    if pattern.is_empty() {
+        return Err("grep requires a pattern (pattern|needle|match field naming the substring/regex to keep)".to_string());
+    }
+    let ignore_case = body.get("ignoreCase").and_then(|v| v.as_bool()).unwrap_or(false);
+    let invert = body.get("invert").and_then(|v| v.as_bool()).unwrap_or(false);
     let max_line = body.get("maxLineChars").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
     let max_per_file = body.get("maxPerFile").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let needle = if ignore_case { pattern.to_lowercase() } else { pattern.to_string() };
+    let line_matches = |line: &str| -> bool {
+        let hay = if ignore_case { line.to_lowercase() } else { line.to_string() };
+        let hit = hay.contains(&needle);
+        if invert { !hit } else { hit }
+    };
     let mut by_file: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     let mut plain: Vec<String> = Vec::new();
     let mut total_in = 0usize;
+    let mut matched_in = 0usize;
     let mut truncated = 0usize;
     for line in input.lines() {
         total_in += 1;
+        if !line_matches(line) { continue; }
+        matched_in += 1;
         let mut parts = line.splitn(3, ':');
         let (file, lineno, rest) = match (parts.next(), parts.next(), parts.next()) {
             (Some(f), Some(n), Some(r)) if n.chars().all(|c| c.is_ascii_digit()) => (f, n, r),
@@ -53,18 +71,20 @@ fn grep(input: &str, body: &Value) -> Value {
     }
     let in_bytes = input.len();
     let out_bytes = out.len();
-    json!({
+    Ok(json!({
         "output": out,
         "stats": {
+            "pattern": pattern,
             "files": by_file.len(),
             "lines_in": total_in,
+            "lines_matched": matched_in,
             "lines_out": by_file.values().map(|v| v.len()).sum::<usize>() + plain.len(),
             "truncated_per_file": truncated,
             "bytes_in": in_bytes,
             "bytes_out": out_bytes,
             "saved_pct": pct_saved(in_bytes, out_bytes)
         }
-    })
+    }))
 }
 
 fn ls(input: &str, body: &Value) -> Value {

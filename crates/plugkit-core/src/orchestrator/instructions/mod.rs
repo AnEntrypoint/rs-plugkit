@@ -402,11 +402,16 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         }
     }
 
+    let prior_session_owner = read_state().session_id;
+    let session_mismatch = match (&session_id_opt, &prior_session_owner) {
+        (Some(incoming), Some(prior)) => incoming != prior,
+        _ => false,
+    };
     let notify_session = session_id_opt
         .clone()
-        .or_else(|| read_state().session_id);
+        .or_else(|| prior_session_owner.clone());
 
-    if let Some(sid) = session_id_opt {
+    if let Some(sid) = session_id_opt.clone() {
         let mut st = read_state();
         st.session_id = Some(sid);
         let _ = super::state::write_state(&st);
@@ -503,6 +508,9 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
             .into_iter()
             .map(|(from, to, missing)| json!({ "from": from, "to": to, "missing_gates": missing }))
             .collect::<Vec<_>>(),
+        "session_id": session_id_opt,
+        "session_owner_before_this_dispatch": prior_session_owner,
+        "session_mismatch": session_mismatch,
         "sub_phase": if await_result.is_some() { "AWAIT-RESULT" } else { "" },
         "await_result": await_result,
         "instruction": instruction,
