@@ -202,6 +202,8 @@ pub const GRAPH_SCHEMA_VERSION_LEGACY: u32 = 0;
 pub struct Graph {
     #[serde(default)]
     pub schema_version: u32,
+    #[serde(default)]
+    pub min_plugkit_version: Option<String>,
     pub states: Vec<StateNode>,
     pub edges: Vec<Edge>,
     #[serde(default)]
@@ -262,6 +264,44 @@ impl Graph {
 
     /// Report policy keys this build does not recognise, so a typo is visible
     /// rather than silently ignored. Never fatal -- see KNOWN_POLICY_KEYS.
+    pub fn min_plugkit_version_unmet(&self) -> Option<String> {
+        let declared = self.min_plugkit_version.as_ref()?.trim().to_string();
+        if declared.is_empty() {
+            return None;
+        }
+        let running = env!("CARGO_PKG_VERSION");
+        let parse = |s: &str| -> Option<Vec<u64>> {
+            let core = s.split(['-', '+']).next().unwrap_or(s);
+            let parts: Vec<u64> = core.split('.').map(|p| p.trim().parse::<u64>().ok()).collect::<Option<Vec<u64>>>()?;
+            if parts.is_empty() { None } else { Some(parts) }
+        };
+        let (Some(want), Some(have)) = (parse(&declared), parse(running)) else {
+            return Some(format!(
+                "graph declares min_plugkit_version `{declared}` which is not a dotted numeric version, \
+                 so it cannot be compared against this build's `{running}` -- the floor is being ignored \
+                 rather than silently enforced"
+            ));
+        };
+        let len = want.len().max(have.len());
+        for i in 0..len {
+            let w = want.get(i).copied().unwrap_or(0);
+            let h = have.get(i).copied().unwrap_or(0);
+            if h > w {
+                return None;
+            }
+            if h < w {
+                return Some(format!(
+                    "graph declares min_plugkit_version `{declared}` but this build is `{running}` -- \
+                     it was authored against a newer plugkit, so any predicate, policy key or gate added \
+                     since `{running}` is absent here. An unknown predicate name denies its gate forever \
+                     and an unknown policy key is ignored, both of which read as a legitimately-failing \
+                     workflow rather than as a version mismatch"
+                ));
+            }
+        }
+        None
+    }
+
     pub fn policy_default_drift() -> Vec<String> {
         let mut problems = Vec::new();
         let defaulted = Policy::default();
@@ -505,6 +545,7 @@ fn hook_file_exists(hook: &str) -> bool {
 fn default_graph() -> Graph {
     Graph {
         schema_version: GRAPH_SCHEMA_VERSION,
+        min_plugkit_version: None,
         states: vec![
             StateNode { key: "PLAN".into(), prose_key: "plan".into(), skill: Some("gm-execute".into()) },
             StateNode { key: "EXECUTE".into(), prose_key: "execute".into(), skill: Some("gm-emit".into()) },
