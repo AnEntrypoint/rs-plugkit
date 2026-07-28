@@ -294,12 +294,7 @@ impl Default for RagConfig {
     }
 }
 
-/// Accept only `[A-Za-z_][A-Za-z0-9_]*`.
-/// Deliberately stricter than SQLite's own identifier rules (no quoting, no
-/// dots, no unicode): these names reach SQL through `format!`, never a bind
-/// parameter, so the whitelist is the entire defence. Rejecting a legal-but-
-/// exotic name is a far better failure than accepting one carrying a quote.
-fn valid_sql_ident(name: &str) -> Result<(), String> {
+fn reject_unless_ascii_alnum_underscore_sql_ident(name: &str) -> Result<(), String> {
     let mut chars = name.chars();
     let ok = match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {
@@ -319,40 +314,15 @@ fn valid_sql_ident(name: &str) -> Result<(), String> {
 }
 
 impl RagConfig {
-    /// Convenience for the many call sites that only need the dimension.
     pub fn dim(&self) -> usize {
         self.embed.dim
     }
 
-    /// Reject a config whose settings would destroy or permanently break a
-    /// store, BEFORE any schema call acts on it.
-    /// A resolution layer reads config off disk, so unlike the compile-time
-    /// assertion in `embed.rs` these values are not known until runtime -- and
-    /// the failure mode is silent and total: a `dim` the compiled embedder
-    /// cannot emit makes every `ensure_schema_*` drop its table (width
-    /// mismatch), then every write fails its own width check, leaving a
-    /// permanently empty knowledgebase that reports no errors at the verb
-    /// layer. Callers should refuse a config that fails this rather than fall
-    /// back to defaults, since silently ignoring an operator's stated dim is
-    /// how a store gets rebuilt at a width nobody asked for.
-    /// Build from a resolved config value, defaulting every absent field.
-    /// This is the bridge that was missing: `config.rs` resolved a full 4-tier
-    /// chain and `RagConfig` was a complete value type, but nothing joined
-    /// them -- `config::resolve()`'s only caller was its own reporting verb, so
-    /// every knob here came from `Default` no matter what a project vendored.
-    /// The whole configuration surface was therefore observable and inert.
-    /// Absent keys default rather than erroring, because `config.rs` deep-merges
-    /// a partial tier over the builtin: a config legitimately ships only the
-    /// keys it wants to change. An unparseable key is a different matter and is
-    /// reported, since silently ignoring a value someone wrote is the failure
-    /// this whole chain exists to avoid.
-    /// Validation runs before returning, so a config that would produce an
-    /// unusable store is refused here rather than at the first query.
     pub fn from_value(v: &serde_json::Value) -> Result<RagConfig, String> {
         let mut cfg = RagConfig::default();
         let mut problems: Vec<String> = Vec::new();
 
-        let num = |parent: &str, key: &str, out: &mut usize, problems: &mut Vec<String>| {
+        let overwrite_present_usize_or_record_problem = |parent: &str, key: &str, out: &mut usize, problems: &mut Vec<String>| {
             if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
                 match found.as_u64() {
                     Some(n) => *out = n as usize,
@@ -360,7 +330,7 @@ impl RagConfig {
                 }
             }
         };
-        let num64 = |parent: &str, key: &str, out: &mut u64, problems: &mut Vec<String>| {
+        let overwrite_present_u64_or_record_problem = |parent: &str, key: &str, out: &mut u64, problems: &mut Vec<String>| {
             if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
                 match found.as_u64() {
                     Some(n) => *out = n,
@@ -369,12 +339,12 @@ impl RagConfig {
             }
         };
 
-        num64("index", "wall_budget_ms", &mut cfg.index.wall_budget_ms, &mut problems);
-        num("index", "max_file_bytes", &mut cfg.index.max_file_bytes, &mut problems);
-        num("index", "max_chunks_per_file_per_pass", &mut cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only, &mut problems);
-        num("index", "oversized_chunk_split_threshold", &mut cfg.index.split_chunk_above_bytes, &mut problems);
-        num("memory", "embed_dim", &mut cfg.embed.dim, &mut problems);
-        num("memory", "recall_limit", &mut cfg.budget.default_limit, &mut problems);
+        overwrite_present_u64_or_record_problem("index", "wall_budget_ms", &mut cfg.index.wall_budget_ms, &mut problems);
+        overwrite_present_usize_or_record_problem("index", "max_file_bytes", &mut cfg.index.max_file_bytes, &mut problems);
+        overwrite_present_usize_or_record_problem("index", "max_chunks_per_file_per_pass", &mut cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only, &mut problems);
+        overwrite_present_usize_or_record_problem("index", "oversized_chunk_split_threshold", &mut cfg.index.split_chunk_above_bytes, &mut problems);
+        overwrite_present_usize_or_record_problem("memory", "embed_dim", &mut cfg.embed.dim, &mut problems);
+        overwrite_present_usize_or_record_problem("memory", "recall_limit", &mut cfg.budget.default_limit, &mut problems);
 
         if let Some(ns) = v.get("memory").and_then(|m| m.get("namespace")).and_then(|n| n.as_str()) {
             cfg.namespaces.default = ns.to_string();
@@ -387,36 +357,26 @@ impl RagConfig {
         Ok(cfg)
     }
 
-    /// The knowledgebase settings actually in force for this project.
-    /// Resolves the 4-tier config chain and builds a `RagConfig` from it,
-    /// falling back to the compiled defaults when no tier supplies one or when
-    /// what it supplies is unusable. This is the bridge every consumer should
-    /// call: `from_value` existed and was correct, but its only caller was the
-    /// reporting verb, so the entire RAG surface was observable and inert --
-    /// `config_resolve` could report a tier had won while every knob still came
-    /// from `Default`.
-    /// A config that fails validation degrades to defaults rather than
-    /// propagating an error, because the alternative is a project whose
-    /// retrieval stops working entirely over a mistyped number. The rejection
-    /// is reported through `resolve_and_report`'s own events, so it is loud
-    /// without being fatal.
-    ///
     pub fn resolved() -> RagConfig {
-        let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-        let now = unsafe { crate::wasm_dispatch::host_now_ms() };
-        if let Ok(guard) = RESOLVED_CACHE.lock() {
-            if let Some(entry) = guard.as_ref() {
-                if entry.root == root && now.saturating_sub(entry.ts_ms) < RESOLVED_CACHE_TTL_MS {
-                    return entry.config.clone();
+        let project_root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+        let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+        if let Ok(cache) = RESOLVED_CACHE.lock() {
+            if let Some(fresh_entry) = cache.as_ref() {
+                if fresh_entry.root == project_root && now_ms.saturating_sub(fresh_entry.ts_ms) < RESOLVED_CACHE_TTL_MS {
+                    return fresh_entry.config.clone();
                 }
             }
         }
-        let value = crate::config::resolve().config.value;
-        let config = RagConfig::from_value(&value).unwrap_or_default();
-        if let Ok(mut guard) = RESOLVED_CACHE.lock() {
-            *guard = Some(ResolvedEntryScopedToOneProjectRootNeverGlobal { root, ts_ms: now, config: config.clone() });
+        let tiered_config_value = crate::config::resolve().config.value;
+        let resolved_config_or_defaults_on_validation_failure = RagConfig::from_value(&tiered_config_value).unwrap_or_default();
+        if let Ok(mut cache) = RESOLVED_CACHE.lock() {
+            *cache = Some(ResolvedEntryScopedToOneProjectRootNeverGlobal {
+                root: project_root,
+                ts_ms: now_ms,
+                config: resolved_config_or_defaults_on_validation_failure.clone(),
+            });
         }
-        config
+        resolved_config_or_defaults_on_validation_failure
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -453,8 +413,8 @@ impl RagConfig {
             return Err("ragconfig: budget.pool_multiplier must be non-zero; a zero pool retrieves nothing".to_string());
         }
         for names in [&self.rssearch, &self.git_commits, &self.code_chunks, &self.legacy_memories_alongside_code_chunks] {
-            valid_sql_ident(&names.table)?;
-            valid_sql_ident(&names.index)?;
+            reject_unless_ascii_alnum_underscore_sql_ident(&names.table)?;
+            reject_unless_ascii_alnum_underscore_sql_ident(&names.index)?;
         }
         if self.namespaces.code.is_empty() || self.namespaces.default.is_empty() {
             return Err("ragconfig: namespaces.code and namespaces.default must be non-empty".to_string());
