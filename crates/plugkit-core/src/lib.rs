@@ -14,6 +14,9 @@ pub mod code_index;
 pub mod embed;
 
 #[cfg(target_arch = "wasm32")]
+pub mod embed_marker;
+
+#[cfg(target_arch = "wasm32")]
 pub mod pipeline;
 
 #[cfg(target_arch = "wasm32")]

@@ -40,7 +40,9 @@ static MODEL_SAFETENSORS: &[u8] = include_bytes!("../../../weights/bge-small-en-
 #[cfg(not(feature = "slim"))]
 static TOKENIZER_JSON: &[u8] = include_bytes!("../../../weights/bge-tokenizer.json");
 
-const EMBED_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
+pub const EMBED_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
+
+pub const EMBED_QUERY_PREFIX_IDENTITY: &str = BGE_QUERY_PREFIX;
 
 /// The model's output width. NOT config-driven, and deliberately so: this is a
 /// property of the safetensors blob compiled into this binary (and of the

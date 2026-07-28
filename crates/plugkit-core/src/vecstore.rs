@@ -43,38 +43,79 @@ pub fn vec_to_json_literal(v: &[f32]) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string())
 }
 
-pub fn embedding_col_dim_at(db_name: &str, table: &str) -> Option<usize> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmbeddingColumn {
+    Absent,
+    Width(usize),
+    Unparseable,
+}
+
+pub fn embedding_col_at(db_name: &str, table: &str) -> EmbeddingColumn {
     let sql = format!("SELECT type FROM pragma_table_info('{}') WHERE name = 'embedding'", table);
-    let rows = libsql_query(db_name, &sql).ok()?;
-    let arr = rows.as_array()?;
-    let row = arr.first()?;
-    let ty = row.get("type")?.as_str()?;
-    let start = ty.find('(')? + 1;
-    let end = ty.find(')')?;
-    if end < start { return None; }
-    ty[start..end].parse::<usize>().ok()
+    let rows = match libsql_query(db_name, &sql) {
+        Ok(r) => r,
+        Err(_) => return EmbeddingColumn::Absent,
+    };
+    let ty = match rows.as_array().and_then(|a| a.first()).and_then(|r| r.get("type")).and_then(|t| t.as_str()) {
+        Some(t) => t,
+        None => return EmbeddingColumn::Absent,
+    };
+    let parsed = ty
+        .find('(')
+        .and_then(|open| ty.find(')').map(|close| (open + 1, close)))
+        .filter(|(start, end)| end >= start)
+        .and_then(|(start, end)| ty[start..end].parse::<usize>().ok());
+    match parsed {
+        Some(w) => EmbeddingColumn::Width(w),
+        None => EmbeddingColumn::Unparseable,
+    }
+}
+
+pub fn embedding_col_dim_at(db_name: &str, table: &str) -> Option<usize> {
+    match embedding_col_at(db_name, table) {
+        EmbeddingColumn::Width(w) => Some(w),
+        _ => None,
+    }
 }
 
 pub fn drop_if_dim_mismatch_at(db_name: &str, table: &str) -> Result<bool, String> {
     drop_if_dim_mismatch_at_cfg(db_name, table, &EmbedDimConfig::default())
 }
 
+fn drop_table(db_name: &str, table: &str, cfg: &EmbedDimConfig, reason: &str, old_dim: Value) -> Result<bool, String> {
+    let _ = libsql_exec(db_name, &format!("DROP INDEX IF EXISTS {}_vec", table));
+    libsql_exec(db_name, &format!("DROP TABLE IF EXISTS {}", table))?;
+    crate::wasm_dispatch::emit_event("table_dropped", json!({
+        "table": table,
+        "reason": reason,
+        "old_dim": old_dim,
+        "new_dim": cfg.dim,
+    }));
+    Ok(true)
+}
+
 pub fn drop_if_dim_mismatch_at_cfg(db_name: &str, table: &str, cfg: &EmbedDimConfig) -> Result<bool, String> {
-    match embedding_col_dim_at(db_name, table) {
-        Some(found) => {
-            if !cfg.should_drop_table_for_dim_mismatch(table, found) {
+    match embedding_col_at(db_name, table) {
+        EmbeddingColumn::Width(found) => {
+            if cfg.should_drop_table_for_dim_mismatch(table, found) {
+                return drop_table(db_name, table, cfg, "dim_mismatch", json!(found));
+            }
+            if cfg.keep_mismatched_table_intact_instead_of_dropping {
                 return Ok(false);
             }
-            let _ = libsql_exec(db_name, &format!("DROP INDEX IF EXISTS {}_vec", table));
-            libsql_exec(db_name, &format!("DROP TABLE IF EXISTS {}", table))?;
-            crate::wasm_dispatch::emit_event("table_dropped", json!({
-                "table": table,
-                "old_dim": found,
-                "new_dim": cfg.dim,
-            }));
-            Ok(true)
+            if crate::embed_marker::embed_generation_changed() {
+                return drop_table(db_name, table, cfg, "embed_generation_changed", json!(found));
+            }
+            Ok(false)
         }
-        None => Ok(false),
+        EmbeddingColumn::Unparseable => {
+            crate::wasm_dispatch::emit_event("embed_col_type_unparseable", json!({
+                "table": table,
+                "expected_dim": cfg.dim,
+            }));
+            Ok(false)
+        }
+        EmbeddingColumn::Absent => Ok(false),
     }
 }
 
