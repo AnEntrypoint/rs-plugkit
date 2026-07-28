@@ -834,7 +834,7 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
         std::collections::HashMap::new()
     };
     let chunk_rows = |fp: &str| -> usize { chunk_counts.get(fp).copied().unwrap_or(0) };
-    let r = if root.is_empty() { "/" } else { root };
+    let r = if root.is_empty() { "." } else { root };
     let limit = max_files.max(50).min(2000);
     let files = collect_files(r, limit);
     const PRUNE_ENUMERATION_CAP: usize = 20000;
@@ -842,6 +842,33 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
     {
         let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+    }
+    if full_files.is_empty() && !prior.is_empty() {
+        let msg = format!(
+            "code_index: ABORTED root={} scanned zero files while {} prior manifests exist -- refusing to treat scan-failure as delete-everything; host_fs_readdir likely returned nothing for this root (sandbox containment or wrong root?)",
+            r, prior.len()
+        );
+        let _ = unsafe { host_log(1, msg.as_ptr(), msg.len() as u32) };
+        crate::wasm_dispatch::emit_event("codeinsight_index_zero_scan_aborted", json!({
+            "root": r,
+            "prior_manifests": prior.len(),
+        }));
+        return json!({
+            "ok": false,
+            "error": "zero_scan_aborted",
+            "reason": format!("scanned zero files under root={} while {} previously-indexed files exist on disk; refusing to delete the existing index. Check that root resolves inside the sandboxed project directory.", r, prior.len()),
+            "files_scanned": 0,
+            "files_indexed": 0,
+            "chunks": 0,
+            "embedded": 0,
+            "reused": 0,
+            "reused_files": 0,
+            "removed_files": 0,
+            "skipped_no_embed": 0,
+            "deferred_files": 0,
+            "kvvec_cleared_dim_mismatch": kvvec_cleared,
+            "by_language": {},
+        });
     }
     let index_wall_budget_ms: u64 = cfg.index.wall_budget_ms;
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };

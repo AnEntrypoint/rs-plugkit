@@ -1434,7 +1434,7 @@ fn sql_deserialize(body: &Value) -> u64 {
 }
 
 fn codeinsight_index(body: &Value) -> u64 {
-    let root = body.get("root").and_then(|v| v.as_str()).unwrap_or("/");
+    let root = body.get("root").and_then(|v| v.as_str()).unwrap_or(".");
     let max_files = body.get("max_files").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
     pack(crate::code_index::index(root, max_files).to_string())
 }
