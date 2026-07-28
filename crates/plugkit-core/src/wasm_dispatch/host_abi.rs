@@ -91,6 +91,11 @@ pub fn git_call_argv(argv: &[&str], cwd: Option<&str>) -> Value {
     git_call(&json, cwd)
 }
 
+const _: () = assert!(
+    std::mem::size_of::<usize>() == 4,
+    "packed (ptr,len) u64 ABI requires a 32-bit address space: a usize wider than 4 bytes makes `ptr & 0xffff_ffff` a silent truncation"
+);
+
 /// Hand a string to the host as a packed `(ptr, len)` pair.
 ///
 /// `shrink_to_fit` is load-bearing, not tidiness. `String::into_bytes` keeps
@@ -103,10 +108,22 @@ pub fn git_call_argv(argv: &[&str], cwd: Option<&str>) -> Value {
 pub(crate) fn pack(s: String) -> u64 {
     let mut v = s.into_bytes();
     v.shrink_to_fit();
-    let len = v.len() as u64;
-    let ptr = v.as_mut_ptr() as u64;
+    let len = v.len();
+    let ptr = v.as_mut_ptr() as usize;
     std::mem::forget(v);
-    (ptr & 0xffff_ffff) | (len << 32)
+    pack_ptr_len(ptr, len)
+}
+
+pub(crate) fn pack_ptr_len(ptr: usize, len: usize) -> u64 {
+    assert!(
+        (ptr as u64) <= 0xffff_ffff,
+        "pack: pointer {ptr:#x} exceeds the 32-bit field of the packed ABI"
+    );
+    assert!(
+        (len as u64) <= 0xffff_ffff,
+        "pack: length {len} exceeds the 32-bit field of the packed ABI"
+    );
+    (ptr as u64 & 0xffff_ffff) | ((len as u64) << 32)
 }
 
 pub(crate) fn read_str(ptr: *const u8, len: u32) -> String {
@@ -133,6 +150,8 @@ pub(crate) fn unpack_to_value(packed: u64) -> Value {
 pub fn unpack_to_value_pub(packed: u64) -> Value { unpack_to_value(packed) }
 
 pub fn unpack_to_string_pub(packed: u64) -> Option<String> { unpack_to_string(packed) }
+
+pub fn pack_ptr_len_pub(ptr: usize, len: usize) -> u64 { pack_ptr_len(ptr, len) }
 
 pub fn host_cwd_string() -> Option<String> {
     let packed = unsafe { host_cwd() };

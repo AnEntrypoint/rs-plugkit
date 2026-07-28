@@ -11,7 +11,7 @@ pub use host_abi::{
     host_env_get, host_browser_exec, host_task_proc, host_git,
     host_plugin_call,
     host_task, git_call, git_porcelain, git_call_argv, plugin_call,
-    unpack_to_value_pub, unpack_to_string_pub,
+    unpack_to_value_pub, unpack_to_string_pub, pack_ptr_len_pub,
     host_read, host_write, host_stat, host_exists, host_remove,
     host_kv_read, host_cwd_string,
 };

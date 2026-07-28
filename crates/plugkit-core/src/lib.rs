@@ -103,6 +103,12 @@ pub extern "C" fn plugkit_version() -> *const u8 {
 #[no_mangle]
 pub extern "C" fn plugkit_alloc(len: usize) -> *mut u8 {
     let mut v = Vec::<u8>::with_capacity(len);
+    assert_eq!(
+        v.capacity(),
+        len,
+        "plugkit_alloc: allocator returned capacity {} for a request of {len}; every packed buffer is reclaimed as Vec::from_raw_parts(p, len, len), so a capacity that differs from the request frees a layout the allocator never issued",
+        v.capacity()
+    );
     let p = v.as_mut_ptr();
     std::mem::forget(v);
     p
@@ -118,10 +124,10 @@ pub unsafe extern "C" fn plugkit_free(ptr: *mut u8, len: usize) {
 fn pack_result(s: String) -> u64 {
     let mut v = s.into_bytes();
     v.shrink_to_fit();
-    let len = v.len() as u64;
-    let ptr = v.as_mut_ptr() as u64;
+    let len = v.len();
+    let ptr = v.as_mut_ptr() as usize;
     std::mem::forget(v);
-    (ptr & 0xffff_ffff) | (len << 32)
+    crate::wasm_dispatch::pack_ptr_len_pub(ptr, len)
 }
 
 #[cfg(target_arch = "wasm32")]

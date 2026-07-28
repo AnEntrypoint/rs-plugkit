@@ -34,6 +34,9 @@ Terminal phase. After the push lands, dispatch `transition` to COMPLETE; plugkit
 
 **A response with no further tool call after this point IS the conversation ending, permanently -- not a pause the user resumes.** Writing "Session N closes, ready to resume with /gm," listing architecture decisions made as a wrap-up, or any other closing/summary sentence as the last content of a response has the exact same effect as never continuing again: there is no future turn where this same chain picks back up on its own. The only way "done" actually produces a next action instead of silence is dispatching `Skill(skill="gm-continue")` as the literal last thing in this same response -- not next time, not after the summary, in place of the summary.
 
+## Constraints
+
+
 ## Dispatch
 
 `phase-status` to confirm chain state, then `transition` to COMPLETE if not already. After COMPLETE lands, dispatch `Skill(skill="gm-continue")` -- that is the actual stop condition, not the bare `transition` response.
