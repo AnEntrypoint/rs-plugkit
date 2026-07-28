@@ -48,6 +48,7 @@ fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
         ("browser-witness-coverage", "true when every client-side file edited this session (per .gm/exec-spool/.turn-browser-edits.json) has a matching entry in .gm/exec-spool/.turn-browser-witnessed with the same content hash", pred_browser_witness_coverage),
         ("claim-audit-clean", "true when the claim audit finds no unwitnessed completion claims -- see orchestrator::claim_audit", pred_claim_audit_clean),
         ("submodules-clean", "true when no submodule has drifted from its recorded commit -- see orchestrator::submodule_drift", pred_submodules_clean),
+        ("no-synthetic-test-files", "true when the working diff introduces no standing test file (*.test.*, *.spec.*, or a test/tests/__tests__ directory). VERIFY doctrine forbids them: verification is a live exec_js/browser witness against real code, never a suite asserting against mocks. Emits deviation.synthetic-test-file naming the offending paths when it fails.", pred_no_synthetic_test_files as PredicateFn),
         ("remote-hook-refused", "always false. Substituted by fsm::graph() for a gate whose ONLY condition was a hook supplied by a non-local tier: hooks execute only from the project-vendored graph, so the author's condition is genuinely not being evaluated and the edge it guards must not be waved through. Vendor the graph (and its hook) locally to restore the gate.", pred_remote_hook_refused),
     ]
 }
@@ -123,6 +124,58 @@ fn prd_has_open_items() -> bool {
 fn worktree_dirty() -> bool {
     !crate::wasm_dispatch::git_porcelain().trim().is_empty()
 }
+
+/// Standing test files introduced in the working diff.
+///
+/// VERIFY doctrine states that a `deviation.synthetic-test-file` blocks the
+/// transition, and that promise had no implementation at all -- the kind was
+/// named in served prose and emitted by no code, so the rule read as enforced
+/// while being advisory. This scans what the doctrine actually describes: the
+/// diff, not the whole tree, so a repo that already contains a suite is not
+/// permanently blocked by history it did not create this turn.
+#[cfg(target_arch = "wasm32")]
+fn synthetic_test_files_in_diff() -> Vec<String> {
+    let porcelain = crate::wasm_dispatch::git_porcelain();
+    let mut found = Vec::new();
+    for line in porcelain.lines() {
+        let path = line.get(3..).unwrap_or("").trim();
+        if path.is_empty() {
+            continue;
+        }
+        let lower = path.to_ascii_lowercase();
+        let name = lower.rsplit('/').next().unwrap_or(&lower).to_string();
+        let is_test_file = name.contains(".test.") || name.contains(".spec.");
+        let is_test_dir = lower.contains("/test/")
+            || lower.contains("/tests/")
+            || lower.contains("/__tests__/")
+            || lower.starts_with("test/")
+            || lower.starts_with("tests/")
+            || lower.starts_with("__tests__/");
+        if is_test_file || is_test_dir {
+            found.push(path.to_string());
+        }
+    }
+    found
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn synthetic_test_files_in_diff() -> Vec<String> { vec![] }
+
+#[cfg(target_arch = "wasm32")]
+fn pred_no_synthetic_test_files() -> bool {
+    let found = synthetic_test_files_in_diff();
+    if found.is_empty() {
+        return true;
+    }
+    crate::wasm_dispatch::emit_event("deviation.synthetic-test-file", serde_json::json!({
+        "files": found,
+        "reason": "VERIFY doctrine forbids standing test files: delete them and replace their assertions with a live exec_js/browser witness, then re-verify",
+    }));
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn pred_no_synthetic_test_files() -> bool { true }
 #[cfg(not(target_arch = "wasm32"))]
 fn worktree_dirty() -> bool { false }
 
@@ -187,6 +240,21 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
         }
         let witness_hash = witnessed_hashes.get(file).and_then(|v| v.as_str()).unwrap_or("");
         if witness_hash != edit_hash {
+            let kind = if witness_hash.is_empty() {
+                "browser-witness-missing"
+            } else {
+                "browser-witness-hash-mismatch"
+            };
+            crate::wasm_dispatch::emit_event(&format!("deviation.{kind}"), serde_json::json!({
+                "file": file,
+                "edit_hash": edit_hash,
+                "witness_hash": witness_hash,
+                "reason": if witness_hash.is_empty() {
+                    "this file was edited but never witnessed in a browser dispatch"
+                } else {
+                    "this file was witnessed, then edited again -- the witness is stale"
+                },
+            }));
             unwitnessed.push(file.to_string());
         }
     }
