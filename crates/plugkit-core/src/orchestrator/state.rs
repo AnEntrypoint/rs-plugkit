@@ -1,6 +1,17 @@
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use super::gm_dir;
 use crate::pkfs;
+
+#[cfg(target_arch = "wasm32")]
+fn dispatch_session_id() -> Option<String> {
+    crate::wasm_dispatch::current_dispatch_session_id()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_session_id() -> Option<String> {
+    None
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -129,8 +140,19 @@ pub fn set_phase_with_session(phase: Phase, last_skill: Option<String>, session_
 
 pub fn handle_status() -> (String, String, i32) {
     let s = read_state();
-    match serde_json::to_string_pretty(&s) {
-        Ok(out) => (out, String::new(), 0),
-        Err(e) => (String::new(), format!("serialize error: {}", e), 1),
+    let requesting_session_id = dispatch_session_id();
+    let session_mismatch = match (&requesting_session_id, &s.session_id) {
+        (Some(incoming), Some(prior)) => incoming != prior,
+        _ => false,
+    };
+    let mut payload = match serde_json::to_value(&s) {
+        Ok(v) => v,
+        Err(e) => return (String::new(), format!("serialize error: {}", e), 1),
+    };
+    if let Value::Object(ref mut m) = payload {
+        m.insert("session_owner_before_this_dispatch".to_string(), json!(s.session_id));
+        m.insert("session_id".to_string(), json!(requesting_session_id));
+        m.insert("session_mismatch".to_string(), json!(session_mismatch));
     }
+    (payload.to_string(), String::new(), 0)
 }

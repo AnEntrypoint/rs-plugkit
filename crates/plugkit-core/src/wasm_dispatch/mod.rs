@@ -15,7 +15,7 @@ pub use host_abi::{
     host_read, host_write, host_stat, host_exists, host_remove_file_never_directory,
     host_kv_read, host_cwd_string,
 };
-pub(crate) use events::emit_event;
+pub(crate) use events::{current_dispatch_session_id, emit_event};
 pub use verbs::{memory_recall_backend, route_hint, vec_search_local};
 pub use verbs::{
     ERR_CODE_FAILED, ERR_CODE_GATE_DENIED, ERR_CODE_INVALID_ARGS, ERR_CODE_PANIC,
