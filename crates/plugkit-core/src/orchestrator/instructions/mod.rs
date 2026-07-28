@@ -240,7 +240,7 @@ fn orient_nouns(prompt: &str) -> Vec<String> {
         .filter(|w| w.len() > 2)
         .filter(|w| {
             let lower = w.to_lowercase();
-            !cfg.orient_stopwords.iter().any(|sw| sw.to_lowercase() == lower)
+            !cfg.orient_stopwords_compared_lowercase.iter().any(|sw| sw.to_lowercase() == lower)
         })
         .map(|s| s.to_string())
         .collect();

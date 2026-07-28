@@ -254,17 +254,17 @@ pub fn ensure_schema_at_cfg(path: &str, cfg: &crate::ragconfig::RagConfig) -> Re
     // `CREATE TABLE IF NOT EXISTS` at the new width against a surviving table
     // is a silent no-op, leaving the store queryable only at the old width).
     let _ = drop_if_dim_mismatch_cfg(path, &cfg.code_chunks.table, &cfg.embed);
-    let _ = drop_if_dim_mismatch_cfg(path, &cfg.memories.table, &cfg.embed);
+    let _ = drop_if_dim_mismatch_cfg(path, &cfg.legacy_memories_alongside_code_chunks.table, &cfg.embed);
     libsql_wasm::exec(path, &format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, body TEXT, embedding F32_BLOB({}))",
         cfg.code_chunks.table, cfg.dim()
     ))?;
     libsql_wasm::exec(path, &format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, namespace TEXT, text TEXT, ts INTEGER, embedding F32_BLOB({}))",
-        cfg.memories.table, cfg.dim()
+        cfg.legacy_memories_alongside_code_chunks.table, cfg.dim()
     ))?;
     crate::vecns::VecTableSpec::from_names(path, &cfg.code_chunks).ensure_index();
-    crate::vecns::VecTableSpec::from_names(path, &cfg.memories).ensure_index();
+    crate::vecns::VecTableSpec::from_names(path, &cfg.legacy_memories_alongside_code_chunks).ensure_index();
     Ok(())
 }
 

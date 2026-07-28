@@ -48,20 +48,11 @@ impl Default for ScoringConfig {
     }
 }
 
-/// How many rows to pull out of the ANN index relative to the caller's limit.
-/// The ANN pool must overshoot the requested limit because recency reweighting
-/// and dedup both happen AFTER retrieval: a hit that wins on final score can
-/// sit outside the top-`limit` by raw cosine distance, so retrieving exactly
-/// `limit` rows would make the reranker a no-op.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryBudgetConfig {
     pub pool_multiplier: usize,
     pub pool_floor: usize,
-    /// Default `limit` when a caller does not specify one (the `recall` verb's
-    /// historical `unwrap_or(8)`).
     pub default_limit: usize,
-    /// Default `k` for the code-search verbs (their historical
-    /// `unwrap_or(10)`).
     pub default_k: usize,
 }
 
@@ -138,99 +129,57 @@ impl EmbedDimConfig {
     }
 }
 
-/// Code-index chunking and pass budgets.
-/// Every value here was a bare literal in `code_index.rs`, which made the
-/// indexing cost profile un-tunable per project -- and these are exactly the
-/// knobs that matter when a corpus does not resemble the one they were chosen
-/// against. A prose-heavy tree wants a different chunk split than a code tree;
-/// a slow machine wants a different wall budget than a fast one.
-/// Per this module's own invariant, the defaults reproduce the historical
-/// literals EXACTLY, so adopting the config is a no-op until a value is
-/// deliberately edited.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexConfig {
-    /// Split a chunk whose body exceeds this many bytes (was 8192).
-    pub oversized_chunk_split_threshold: usize,
-    /// Ceiling on chunks embedded per file per pass (was 64). A COUNT bound
-    /// only -- the real protection is `wall_budget_ms`, because per-chunk
-    /// embed cost is highly non-uniform: a 49-chunk prose file took 39981ms
-    /// while sitting comfortably under this cap.
-    pub max_chunks_per_file_per_pass: usize,
-    /// Wall-clock budget for one indexing pass (was 30000ms). A pass that
-    /// exceeds it defers the remaining files rather than running to
-    /// completion, so one large tree cannot starve the supervisor heartbeat.
+    pub split_chunk_above_bytes: usize,
+    pub max_chunks_embedded_per_file_per_pass_count_bound_only: usize,
     pub wall_budget_ms: u64,
-    /// Skip any file larger than this (was 256 * 1024). A file that size is
-    /// nearly always generated or vendored, and embedding it costs far more
-    /// than it returns.
     pub max_file_bytes: usize,
 }
 
 impl Default for IndexConfig {
     fn default() -> Self {
         IndexConfig {
-            oversized_chunk_split_threshold: 8192,
-            max_chunks_per_file_per_pass: 64,
+            split_chunk_above_bytes: 8192,
+            max_chunks_embedded_per_file_per_pass_count_bound_only: 64,
             wall_budget_ms: 30_000,
             max_file_bytes: 256 * 1024,
         }
     }
 }
 
-/// Size caps on discipline notes.
-/// The two length caps HARD-REFUSE a note that exceeds them, so they are not
-/// merely cosmetic: a project whose policy names are longer than 64 chars
-/// cannot record them at all. `active_policies_limit` truncates the list fed
-/// into every instruction payload, so it trades context budget against how
-/// many standing policies the agent can actually see.
-/// Defaults reproduce the previous literals exactly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DisciplineNoteConfig {
-    /// Longest accepted note name (was 64). Exceeding it is refused, not truncated.
-    pub max_name_len: usize,
-    /// Longest accepted note body (was 200). Exceeding it is refused, not truncated.
-    pub max_text_len: usize,
-    /// Active policies surfaced in the instruction payload (was 50).
-    pub active_policies_limit: usize,
+    pub max_name_len_hard_refuse_not_truncate: usize,
+    pub max_text_len_hard_refuse_not_truncate: usize,
+    pub active_policies_surfaced_in_instruction_payload_limit: usize,
 }
 
 impl Default for DisciplineNoteConfig {
     fn default() -> Self {
-        DisciplineNoteConfig { max_name_len: 64, max_text_len: 200, active_policies_limit: 50 }
+        DisciplineNoteConfig {
+            max_name_len_hard_refuse_not_truncate: 64,
+            max_text_len_hard_refuse_not_truncate: 200,
+            active_policies_surfaced_in_instruction_payload_limit: 50,
+        }
     }
 }
 
-/// Which edited files count as "runs in a browser", and therefore owe a
-/// browser witness before COMPLETE.
-/// This one is a real guarantee hole rather than an inconvenience. The
-/// browser-witness-coverage gate only demands a witness for files this
-/// classifier claims, so a project whose client lives in a directory outside
-/// the hardcoded prefix list (`ui/`, `renderer/`, `apps/web/`, ...) had every
-/// one of its client edits classified as non-browser -- and the gate then
-/// passed with zero coverage, reporting a guarantee it had never checked.
-/// Silent false-negatives in a gate are worse than a loud failure.
-/// Defaults reproduce the previous literals exactly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrowserWitnessConfig {
-    /// Extensions that are browser-running wherever they live, because the
-    /// file type itself implies a rendered surface.
-    pub always_browser_extensions: Vec<String>,
-    /// Extensions that are browser-running ONLY under one of
-    /// `browser_dir_prefixes` -- a `.js` file can equally be server code.
-    pub conditional_extensions: Vec<String>,
-    /// Path prefixes (normalised to `/`, matched lowercase) that mark a
-    /// conditional extension as client-side.
-    pub browser_dir_prefixes: Vec<String>,
+    pub always_browser_extensions_regardless_of_directory: Vec<String>,
+    pub conditional_extensions_only_under_browser_dir_prefixes: Vec<String>,
+    pub browser_dir_prefixes_normalized_slash_lowercase: Vec<String>,
 }
 
 impl Default for BrowserWitnessConfig {
     fn default() -> Self {
         BrowserWitnessConfig {
-            always_browser_extensions: [".html", ".htm", ".tsx", ".jsx", ".vue", ".svelte"]
+            always_browser_extensions_regardless_of_directory: [".html", ".htm", ".tsx", ".jsx", ".vue", ".svelte"]
                 .iter().map(|s| s.to_string()).collect(),
-            conditional_extensions: [".mjs", ".cjs", ".js", ".ts", ".css", ".scss", ".sass"]
+            conditional_extensions_only_under_browser_dir_prefixes: [".mjs", ".cjs", ".js", ".ts", ".css", ".scss", ".sass"]
                 .iter().map(|s| s.to_string()).collect(),
-            browser_dir_prefixes: [
+            browser_dir_prefixes_normalized_slash_lowercase: [
                 "public/", "site/", "app/", "pages/", "components/", "client/", "web/",
                 "src/frontend/", "packages/web-app/", "frontend/", "webapp/",
             ].iter().map(|s| s.to_string()).collect(),
@@ -238,32 +187,15 @@ impl Default for BrowserWitnessConfig {
     }
 }
 
-/// How much, and what, the instruction payload puts in front of the agent
-/// every dispatch.
-/// These shape what the agent actually SEES, which makes them the most
-/// consequential numbers in the orchestrator and the least defensible as
-/// literals. The stopword list in particular is English-only: a project
-/// working in another language gets orient-noun extraction that filters
-/// nothing, silently degrading recall quality rather than failing.
-/// Defaults reproduce the previous literals exactly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InstructionPayloadConfig {
-    /// Ready-wave PRD rows surfaced per dispatch (was 3).
     pub ready_wave_limit: usize,
-    /// Recall hits fetched for the instruction payload (was 5).
-    /// `u32` to match `recall_hits`' own signature -- no cast at the call site.
     pub instruction_recall_hits: u32,
-    /// Recall hits fetched on a transition (was 3).
     pub transition_recall_hits: u32,
-    /// Prompt echo truncation, in chars (was 400).
     pub prompt_excerpt_chars: usize,
-    /// Age past which a turn marker is treated as stale (was 6h).
     pub max_marker_age_ms: i64,
-    /// Orient-noun keywords kept from a prompt (was 5).
     pub orient_noun_limit: usize,
-    /// Words filtered out of orient-noun extraction. Lowercased on both
-    /// sides at compare time, so casing here does not matter.
-    pub orient_stopwords: Vec<String>,
+    pub orient_stopwords_compared_lowercase: Vec<String>,
 }
 
 impl Default for InstructionPayloadConfig {
@@ -275,7 +207,7 @@ impl Default for InstructionPayloadConfig {
             prompt_excerpt_chars: 400,
             max_marker_age_ms: 6 * 60 * 60 * 1000,
             orient_noun_limit: 5,
-            orient_stopwords: [
+            orient_stopwords_compared_lowercase: [
                 "the","a","an","to","of","in","on","for","and","or","is","are","was","were",
                 "be","been","being","do","does","did","have","has","had","i","you","we","they",
                 "it","this","that","these","those","with","from","as","at","by","but","if",
@@ -286,26 +218,11 @@ impl Default for InstructionPayloadConfig {
     }
 }
 
-/// Step-pipeline lifetime, size, and retry budgets.
-/// These were four literals in pipeline.rs, two of them written twice --
-/// `max_result_bytes` at the point it is ADVERTISED to the caller and again
-/// at the point it is ENFORCED, and the attempt budget likewise. Two
-/// independent literals meant to be one value is a latent divergence bug:
-/// change one and the pipeline promises a limit it does not apply, or
-/// applies one it never announced.
-/// Defaults reproduce the previous literals exactly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PipelineConfig {
-    /// How long a pipeline state row stays valid (was 120_000ms).
     pub ttl_ms: u64,
-    /// Result payloads above this are summarised rather than returned whole
-    /// (was 2048 bytes).
     pub summarize_threshold: usize,
-    /// Hard ceiling on a single step's serialized result (was 4096 bytes).
-    /// Advertised to the caller AND enforced on validation -- one field now,
-    /// so the two cannot disagree.
-    pub max_result_bytes: usize,
-    /// Total attempts a step gets before it is failed out (was 2).
+    pub max_result_bytes_advertised_and_enforced_by_one_field: usize,
     pub max_attempts: u64,
 }
 
@@ -314,73 +231,45 @@ impl Default for PipelineConfig {
         PipelineConfig {
             ttl_ms: 120_000,
             summarize_threshold: 2048,
-            max_result_bytes: 4096,
+            max_result_bytes_advertised_and_enforced_by_one_field: 4096,
             max_attempts: 2,
         }
     }
 }
 
-/// What the claim audit looks for, and where.
-/// Both halves were hardcoded: an English marker vocabulary and `AGENTS.md`
-/// as the only scanned file. Neither generalises -- another project keeps its
-/// running log under a different filename, and a project whose notes are
-/// written in another language (or simply with a different house vocabulary,
-/// e.g. "deployed"/"verified") gets a silently useless audit rather than an
-/// obviously broken one.
-/// Defaults reproduce the previous literals exactly, so an unset config is a
-/// guaranteed no-op.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClaimAuditConfig {
-    /// Phrases that mark a line as ASSERTING something shipped, and therefore
-    /// as owing a commit hash. Matched case-insensitively as substrings.
-    pub markers: Vec<String>,
-    /// Files scanned for unbacked claims, relative to the project root.
-    /// A path that does not exist is skipped, not an error -- a project
-    /// without one of these files simply has nothing to audit there.
-    pub scan_paths: Vec<String>,
+    pub shipped_claim_markers_matched_case_insensitive_substring: Vec<String>,
+    pub scan_paths_relative_to_project_root_missing_is_skip_not_error: Vec<String>,
 }
 
 impl Default for ClaimAuditConfig {
     fn default() -> Self {
         ClaimAuditConfig {
-            markers: ["shipped", "validated", "confirmed live", "landed in", "fixed in", "live-witnessed"]
+            shipped_claim_markers_matched_case_insensitive_substring: ["shipped", "validated", "confirmed live", "landed in", "fixed in", "live-witnessed"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            scan_paths: vec!["AGENTS.md".to_string()],
+            scan_paths_relative_to_project_root_missing_is_skip_not_error: vec!["AGENTS.md".to_string()],
         }
     }
 }
 
-/// A whole knowledgebase's retrieval settings.
-/// Threaded by reference into the vector modules. Constructed with
-/// `RagConfig::default()` at every call site today; a resolution layer will
-/// later hand in a populated one without any of those modules changing shape.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RagConfig {
     pub embed: EmbedDimConfig,
     pub namespaces: NamespaceConfig,
     pub scoring: ScoringConfig,
     pub budget: QueryBudgetConfig,
-    /// Chunking and pass budgets for the code indexer.
     pub index: IndexConfig,
-    /// The namespace-keyed memory/RAG table (default `rssearch_vectors`).
     pub rssearch: VecTableNames,
-    /// Commit-message/diff vectors (default `git_commit_vectors`).
     pub git_commits: VecTableNames,
-    /// Tree-sitter code chunks (default `code_chunks`).
     pub code_chunks: VecTableNames,
-    /// Legacy flat memory table kept alongside `code_chunks` in the project db.
-    pub memories: VecTableNames,
-    /// Claim-audit marker vocabulary and scanned files.
+    pub legacy_memories_alongside_code_chunks: VecTableNames,
     pub claim_audit: ClaimAuditConfig,
-    /// Step-pipeline lifetime, size, and retry budgets.
     pub pipeline: PipelineConfig,
-    /// What the instruction payload puts in front of the agent each dispatch.
     pub instruction_payload: InstructionPayloadConfig,
-    /// Which edited files owe a browser witness.
     pub browser_witness: BrowserWitnessConfig,
-    /// Size caps on discipline notes.
     pub discipline_note: DisciplineNoteConfig,
 }
 
@@ -395,7 +284,7 @@ impl Default for RagConfig {
             rssearch: VecTableNames::with_conventional_vec_index("rssearch_vectors"),
             git_commits: VecTableNames::with_conventional_vec_index("git_commit_vectors"),
             code_chunks: VecTableNames::with_conventional_vec_index("code_chunks"),
-            memories: VecTableNames::with_conventional_vec_index("memories"),
+            legacy_memories_alongside_code_chunks: VecTableNames::with_conventional_vec_index("memories"),
             claim_audit: ClaimAuditConfig::default(),
             pipeline: PipelineConfig::default(),
             instruction_payload: InstructionPayloadConfig::default(),
@@ -482,8 +371,8 @@ impl RagConfig {
 
         num64("index", "wall_budget_ms", &mut cfg.index.wall_budget_ms, &mut problems);
         num("index", "max_file_bytes", &mut cfg.index.max_file_bytes, &mut problems);
-        num("index", "max_chunks_per_file_per_pass", &mut cfg.index.max_chunks_per_file_per_pass, &mut problems);
-        num("index", "oversized_chunk_split_threshold", &mut cfg.index.oversized_chunk_split_threshold, &mut problems);
+        num("index", "max_chunks_per_file_per_pass", &mut cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only, &mut problems);
+        num("index", "oversized_chunk_split_threshold", &mut cfg.index.split_chunk_above_bytes, &mut problems);
         num("memory", "embed_dim", &mut cfg.embed.dim, &mut problems);
         num("memory", "recall_limit", &mut cfg.budget.default_limit, &mut problems);
 
@@ -563,7 +452,7 @@ impl RagConfig {
         if self.budget.pool_multiplier == 0 {
             return Err("ragconfig: budget.pool_multiplier must be non-zero; a zero pool retrieves nothing".to_string());
         }
-        for names in [&self.rssearch, &self.git_commits, &self.code_chunks, &self.memories] {
+        for names in [&self.rssearch, &self.git_commits, &self.code_chunks, &self.legacy_memories_alongside_code_chunks] {
             valid_sql_ident(&names.table)?;
             valid_sql_ident(&names.index)?;
         }

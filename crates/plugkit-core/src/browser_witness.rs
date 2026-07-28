@@ -17,13 +17,13 @@ pub fn is_browser_running_file(rel: &str) -> bool {
 pub fn is_browser_running_file_cfg(rel: &str, cfg: &crate::ragconfig::BrowserWitnessConfig) -> bool {
     if rel.is_empty() { return false; }
     let norm = rel.replace('\\', "/");
-    for ext in &cfg.always_browser_extensions {
+    for ext in &cfg.always_browser_extensions_regardless_of_directory {
         if lower_ends_with(&norm, ext) { return true; }
     }
-    let is_codey = cfg.conditional_extensions.iter().any(|e| lower_ends_with(&norm, e));
+    let is_codey = cfg.conditional_extensions_only_under_browser_dir_prefixes.iter().any(|e| lower_ends_with(&norm, e));
     if !is_codey { return false; }
     let lower = norm.to_lowercase();
-    cfg.browser_dir_prefixes.iter().any(|p| lower.starts_with(&p.to_lowercase()))
+    cfg.browser_dir_prefixes_normalized_slash_lowercase.iter().any(|p| lower.starts_with(&p.to_lowercase()))
 }
 
 fn relpath(cwd: &str, abs: &str) -> String {

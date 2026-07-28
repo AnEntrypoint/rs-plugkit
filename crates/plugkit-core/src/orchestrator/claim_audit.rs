@@ -23,7 +23,7 @@ fn line_asserts_shipped_claim(line: &str) -> bool {
 
 fn line_asserts_shipped_claim_cfg(line: &str, cfg: &crate::ragconfig::ClaimAuditConfig) -> bool {
     let lower = line.to_ascii_lowercase();
-    cfg.markers
+    cfg.shipped_claim_markers_matched_case_insensitive_substring
         .iter()
         .any(|marker| lower.contains(&marker.to_ascii_lowercase()))
 }
@@ -88,7 +88,7 @@ pub fn handle_audit(_content: &str) -> (String, String, i32) {
 
     let audit_cfg = claim_audit_config();
 
-    for scan_path in &audit_cfg.scan_paths {
+    for scan_path in &audit_cfg.scan_paths_relative_to_project_root_missing_is_skip_not_error {
         let full = std::path::Path::new(".").join(scan_path).to_string_lossy().to_string();
         if let Some(text) = pkfs::read_to_string(&full) {
             scan_text_for_hash_claims(&text, scan_path, &mut findings, &mut scanned_line_count, &audit_cfg);

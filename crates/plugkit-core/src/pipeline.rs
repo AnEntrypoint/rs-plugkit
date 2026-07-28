@@ -188,7 +188,7 @@ pub fn build_pending_step(text: &str, namespace: &str, project_path: Option<&str
             "id": step_id,
             "payload": payload,
             "prompt_template": prompt_template,
-            "max_result_bytes": pipeline_cfg().max_result_bytes,
+            "max_result_bytes": pipeline_cfg().max_result_bytes_advertised_and_enforced_by_one_field,
             "result_schema": result_schema
         },
         "token": token,
@@ -298,7 +298,7 @@ pub fn handle_continue(body: &Value) -> Value {
     }
 
     let schema = state.get("result_schema").cloned().unwrap_or(json!({}));
-    if let Err(e) = validate_result(result, &schema, pipeline_cfg().max_result_bytes) {
+    if let Err(e) = validate_result(result, &schema, pipeline_cfg().max_result_bytes_advertised_and_enforced_by_one_field) {
         let attempts_used = state.get("attempts_used").and_then(|v| v.as_u64()).unwrap_or(0);
         let attempts_remaining = pipeline_cfg().max_attempts.saturating_sub(attempts_used + 1);
         if attempts_remaining == 0 {

@@ -26,12 +26,12 @@ pub fn handle(content: &str) -> (String, String, i32) {
     if discipline.is_empty() {
         return (String::new(), "discipline-note refused: discipline name required".to_string(), 1);
     }
-    if discipline.len() > note_cfg().max_name_len {
+    if discipline.len() > note_cfg().max_name_len_hard_refuse_not_truncate {
         return (
             String::new(),
             format!(
                 "discipline-note refused: discipline name exceeds {} char cap (got {} chars)",
-                note_cfg().max_name_len,
+                note_cfg().max_name_len_hard_refuse_not_truncate,
                 discipline.len()
             ),
             1,
@@ -55,12 +55,12 @@ pub fn handle(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    if text.chars().count() > note_cfg().max_text_len {
+    if text.chars().count() > note_cfg().max_text_len_hard_refuse_not_truncate {
         return (
             String::new(),
             format!(
                 "discipline-note refused: text exceeds {} char terseness ceiling (got {} chars) -- compress and retry",
-                note_cfg().max_text_len,
+                note_cfg().max_text_len_hard_refuse_not_truncate,
                 text.chars().count()
             ),
             1,
@@ -125,7 +125,7 @@ pub fn active_policies() -> serde_json::Value {
             let capped: String = text
                 .lines()
                 .rev()
-                .take(note_cfg().active_policies_limit)
+                .take(note_cfg().active_policies_surfaced_in_instruction_payload_limit)
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
