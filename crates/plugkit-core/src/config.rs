@@ -498,9 +498,22 @@ fn join(base: &str, rel: &str) -> String {
 /// `USERPROFILE`). Returns `None` rather than poll_detect's `"."` fallback:
 /// `"."` is the PROJECT directory here, and silently reading a user-wide tier
 /// out of the project would collapse tier 3 into tier 2.
+fn env_var(key: &str) -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let packed = unsafe { crate::wasm_dispatch::host_env_get(key.as_ptr(), key.len() as u32) };
+        if let Some(s) = crate::wasm_dispatch::unpack_to_string_pub(packed) {
+            if !s.trim().is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    std::env::var(key).ok()
+}
+
 fn home_dir() -> Option<String> {
     for key in ["HOME", "USERPROFILE"] {
-        if let Ok(s) = std::env::var(key) {
+        if let Some(s) = env_var(key) {
             let t = s.trim().trim_end_matches(['/', '\\']);
             if !t.is_empty() {
                 return Some(t.to_string());
