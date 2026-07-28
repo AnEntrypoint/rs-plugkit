@@ -11,7 +11,7 @@ fn lower_ends_with(s: &str, ext: &str) -> bool {
 }
 
 pub fn is_browser_running_file(rel: &str) -> bool {
-    is_browser_running_file_cfg(rel, &crate::ragconfig::BrowserWitnessConfig::default())
+    is_browser_running_file_cfg(rel, &crate::ragconfig::RagConfig::resolved().browser_witness)
 }
 
 pub fn is_browser_running_file_cfg(rel: &str, cfg: &crate::ragconfig::BrowserWitnessConfig) -> bool {

@@ -13,8 +13,12 @@ fn extract_commit_hash_tokens(line: &str) -> Vec<String> {
         .collect()
 }
 
+fn claim_audit_config() -> crate::ragconfig::ClaimAuditConfig {
+    crate::ragconfig::RagConfig::resolved().claim_audit
+}
+
 fn line_asserts_shipped_claim(line: &str) -> bool {
-    line_asserts_shipped_claim_cfg(line, &crate::ragconfig::ClaimAuditConfig::default())
+    line_asserts_shipped_claim_cfg(line, &claim_audit_config())
 }
 
 fn line_asserts_shipped_claim_cfg(line: &str, cfg: &crate::ragconfig::ClaimAuditConfig) -> bool {
@@ -82,7 +86,7 @@ pub fn handle_audit(_content: &str) -> (String, String, i32) {
     let mut findings: Vec<HashClaimFinding> = Vec::new();
     let mut scanned_line_count = 0usize;
 
-    let audit_cfg = crate::ragconfig::ClaimAuditConfig::default();
+    let audit_cfg = claim_audit_config();
 
     for scan_path in &audit_cfg.scan_paths {
         let full = std::path::Path::new(".").join(scan_path).to_string_lossy().to_string();
