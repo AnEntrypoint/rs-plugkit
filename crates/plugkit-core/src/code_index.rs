@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use crate::wasm_dispatch::{host_read, host_stat, unpack_to_value_pub};
+use crate::wasm_dispatch::{host_read, host_stat, unpack_to_value_pub, plugin_call, plugin_ok, plugin_failure_code};
 use crate::vecstore::{drop_if_dim_mismatch_at_cfg as drop_if_dim_mismatch_cfg, vec_to_json_literal};
 
 #[link(wasm_import_module = "env")]
@@ -12,23 +12,6 @@ extern "C" {
     fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
     fn host_kv_query(ns_ptr: *const u8, ns_len: u32, q_ptr: *const u8, q_len: u32) -> u64;
     fn host_kv_delete(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u32;
-    fn host_plugin_call(plugin_ptr: *const u8, plugin_len: u32, verb_ptr: *const u8, verb_len: u32, body_ptr: *const u8, body_len: u32) -> u64;
-}
-
-fn call_out_of_process_plugin(plugin: &str, verb: &str, body: &Value) -> Value {
-    let body_s = body.to_string();
-    let packed = unsafe {
-        host_plugin_call(
-            plugin.as_ptr(), plugin.len() as u32,
-            verb.as_ptr(), verb.len() as u32,
-            body_s.as_ptr(), body_s.len() as u32,
-        )
-    };
-    unpack_to_value_pub(packed)
-}
-
-fn plugin_ok(resp: &Value) -> bool {
-    resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 use crate::libsql_wasm;
@@ -415,11 +398,25 @@ fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option
 }
 
 fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String, String, usize, usize, String)> {
-    let resp = call_out_of_process_plugin("treesitter", "parse", &json!({ "lang": lang_name, "source": source }));
-    if !plugin_ok(&resp) { return Vec::new(); }
+    let resp = plugin_call("treesitter", "parse", &json!({ "lang": lang_name, "source": source }));
+    if !plugin_ok(&resp) {
+        crate::wasm_dispatch::emit_event("code_index_treesitter_failed", json!({
+            "lang": lang_name,
+            "plugin_failure": plugin_failure_code(&resp),
+            "source_len": source.len(),
+        }));
+        return Vec::new();
+    }
     let nodes = match resp.get("nodes").and_then(|v| v.as_array()) {
         Some(n) => n,
-        None => return Vec::new(),
+        None => {
+            crate::wasm_dispatch::emit_event("code_index_treesitter_failed", json!({
+                "lang": lang_name,
+                "plugin_failure": crate::wasm_dispatch::PLUGIN_FAIL_MALFORMED,
+                "source_len": source.len(),
+            }));
+            return Vec::new();
+        }
     };
     let src_bytes = source.as_bytes();
     let mut out = Vec::new();
@@ -475,8 +472,14 @@ fn split_oversized_chunk(
 }
 
 fn embed_text(text: &str) -> Option<Vec<f32>> {
-    let resp = call_out_of_process_plugin("bert", "embed", &json!({ "text": text }));
-    if !plugin_ok(&resp) { return None; }
+    let resp = plugin_call("bert", "embed", &json!({ "text": text }));
+    if !plugin_ok(&resp) {
+        crate::wasm_dispatch::emit_event("code_index_embed_failed", json!({
+            "plugin_failure": plugin_failure_code(&resp),
+            "text_len": text.len(),
+        }));
+        return None;
+    }
     resp.get("embedding").and_then(json_to_f32_vec)
 }
 
@@ -1100,8 +1103,14 @@ fn embed_text_batch_fallback(inputs: &[String]) -> Vec<Option<Vec<f32>>> {
 
 fn embed_texts_batch(inputs: &[String]) -> Vec<Option<Vec<f32>>> {
     if inputs.is_empty() { return Vec::new(); }
-    let resp = call_out_of_process_plugin("bert", "embed_batch", &json!({ "texts": inputs }));
-    if !plugin_ok(&resp) { return embed_text_batch_fallback(inputs); }
+    let resp = plugin_call("bert", "embed_batch", &json!({ "texts": inputs }));
+    if !plugin_ok(&resp) {
+        crate::wasm_dispatch::emit_event("code_index_embed_batch_failed", json!({
+            "plugin_failure": plugin_failure_code(&resp),
+            "batch_len": inputs.len(),
+        }));
+        return embed_text_batch_fallback(inputs);
+    }
     match resp.get("embeddings").and_then(|v| v.as_array()) {
         Some(arr) if arr.len() == inputs.len() => {
             arr.iter().map(|e| if e.is_null() { None } else { json_to_f32_vec(e) }).collect()

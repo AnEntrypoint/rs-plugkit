@@ -1,57 +1,53 @@
 use serde_json::Value;
 
-#[link(wasm_import_module = "env")]
-extern "C" {
-    pub fn host_cwd() -> u64;
-    pub fn host_fs_read(path_ptr: *const u8, path_len: u32) -> u64;
-    pub fn host_fs_write(path_ptr: *const u8, path_len: u32, data_ptr: *const u8, data_len: u32) -> u32;
-    pub fn host_fs_remove(path_ptr: *const u8, path_len: u32) -> u32;
-    pub fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
-    pub fn host_fs_stat(path_ptr: *const u8, path_len: u32) -> u64;
-    pub fn host_fetch(url_ptr: *const u8, url_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
-    pub fn host_kv_get(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u64;
-    pub fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
-    pub fn host_kv_delete(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u32;
-    pub fn host_kv_query(ns_ptr: *const u8, ns_len: u32, q_ptr: *const u8, q_len: u32) -> u64;
-    pub fn host_vec_search(q_ptr: *const u8, q_len: u32, k: u32) -> u64;
-    pub fn host_vec_embed(text_ptr: *const u8, text_len: u32, out_ptr: *mut f32, out_len: u32) -> i32;
-    pub fn host_exec_js(code_ptr: *const u8, code_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
-    pub fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
-    pub fn host_now_ms() -> u64;
-    pub fn host_env_get(key_ptr: *const u8, key_len: u32) -> u64;
-    pub fn host_browser_exec(body_ptr: *const u8, body_len: u32, cwd_ptr: *const u8, cwd_len: u32, session_id_ptr: *const u8, session_id_len: u32) -> u64;
-    pub fn host_task_proc(action_ptr: *const u8, action_len: u32, params_ptr: *const u8, params_len: u32) -> u64;
-    pub fn host_git(args_ptr: *const u8, args_len: u32, cwd_ptr: *const u8, cwd_len: u32) -> u64;
-    pub fn host_plugin_call(plugin_ptr: *const u8, plugin_len: u32, verb_ptr: *const u8, verb_len: u32, body_ptr: *const u8, body_len: u32) -> u64;
+/// Declares the host ABI once and derives both the `extern "C"` block and
+/// [`HOST_IMPORTS`] from that single list.
+///
+/// A name is now structurally incapable of appearing in one and not the other.
+/// The previous arrangement kept the two by hand and drifted twice: first to 16
+/// of 20 (omitting host_cwd, host_git, host_kv_delete and host_plugin_call, so
+/// `health` did not advertise that inter-plugin calling exists), and then again
+/// after that repair, when host_fs_remove was added to the extern block alone
+/// and host_random_fill was declared in a function-scoped extern in embed.rs --
+/// leaving `health`, which serves this list as the truth about what the guest
+/// imports, wrong about two of them.
+macro_rules! host_abi {
+    ($(fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?;)+) => {
+        #[link(wasm_import_module = "env")]
+        extern "C" {
+            $(pub fn $name($($arg: $ty),*) $(-> $ret)?;)+
+        }
+
+        /// Every name declared by the `host_abi!` invocation above, in
+        /// declaration order. `health` advertises this.
+        pub const HOST_IMPORTS: &[&str] = &[$(stringify!($name)),+];
+    };
 }
 
-/// Every name in the `extern "C"` block above, in declaration order. `health`
-/// advertises this instead of its own hand-maintained copy, which had drifted
-/// to 16 of the 20 -- omitting host_cwd, host_git, host_kv_delete and
-/// host_plugin_call, so health did not even advertise that inter-plugin
-/// calling exists.
-pub const HOST_IMPORTS: &[&str] = &[
-    "host_cwd",
-    "host_fs_read",
-    "host_fs_write",
-    "host_fs_readdir",
-    "host_fs_stat",
-    "host_fetch",
-    "host_kv_get",
-    "host_kv_put",
-    "host_kv_delete",
-    "host_kv_query",
-    "host_vec_search",
-    "host_vec_embed",
-    "host_exec_js",
-    "host_log",
-    "host_now_ms",
-    "host_env_get",
-    "host_browser_exec",
-    "host_task_proc",
-    "host_git",
-    "host_plugin_call",
-];
+host_abi! {
+    fn host_cwd() -> u64;
+    fn host_fs_read(path_ptr: *const u8, path_len: u32) -> u64;
+    fn host_fs_write(path_ptr: *const u8, path_len: u32, data_ptr: *const u8, data_len: u32) -> u32;
+    fn host_fs_remove(path_ptr: *const u8, path_len: u32) -> u32;
+    fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
+    fn host_fs_stat(path_ptr: *const u8, path_len: u32) -> u64;
+    fn host_fetch(url_ptr: *const u8, url_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
+    fn host_kv_get(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u64;
+    fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
+    fn host_kv_delete(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u32;
+    fn host_kv_query(ns_ptr: *const u8, ns_len: u32, q_ptr: *const u8, q_len: u32) -> u64;
+    fn host_vec_search(q_ptr: *const u8, q_len: u32, k: u32) -> u64;
+    fn host_vec_embed(text_ptr: *const u8, text_len: u32, out_ptr: *mut f32, out_len: u32) -> i32;
+    fn host_exec_js(code_ptr: *const u8, code_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
+    fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
+    fn host_now_ms() -> u64;
+    fn host_env_get(key_ptr: *const u8, key_len: u32) -> u64;
+    fn host_random_fill(ptr: *mut u8, len: u32) -> u32;
+    fn host_browser_exec(body_ptr: *const u8, body_len: u32, cwd_ptr: *const u8, cwd_len: u32, session_id_ptr: *const u8, session_id_len: u32) -> u64;
+    fn host_task_proc(action_ptr: *const u8, action_len: u32, params_ptr: *const u8, params_len: u32) -> u64;
+    fn host_git(args_ptr: *const u8, args_len: u32, cwd_ptr: *const u8, cwd_len: u32) -> u64;
+    fn host_plugin_call(plugin_ptr: *const u8, plugin_len: u32, verb_ptr: *const u8, verb_len: u32, body_ptr: *const u8, body_len: u32) -> u64;
+}
 
 pub fn plugin_call(plugin: &str, verb: &str, body: &Value) -> Value {
     let body_s = body.to_string();

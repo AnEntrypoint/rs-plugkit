@@ -1,6 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 
-mod host_abi;
+pub(crate) mod host_abi;
 mod events;
 mod verbs;
 
@@ -22,6 +22,6 @@ pub use verbs::{
     ERR_CODE_RETIRED_VERB, ERR_CODE_UNKNOWN_VERB, ERR_CODE_UNSUPPORTED,
     PLUGIN_FAIL_DEADLINE, PLUGIN_FAIL_HOST_EMPTY, PLUGIN_FAIL_MALFORMED,
     PLUGIN_FAIL_NOT_LOADED, PLUGIN_FAIL_PLUGIN_ERROR, PLUGIN_FAIL_UNKNOWN_PLUGIN,
-    plugin_failure_code,
+    plugin_failure_code, plugin_ok, plugin_error_detail,
 };
 pub use verbs::dispatch_verb;

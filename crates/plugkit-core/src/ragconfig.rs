@@ -583,6 +583,31 @@ impl RagConfig {
         Ok(cfg)
     }
 
+    /// The knowledgebase settings actually in force for this project.
+    ///
+    /// Resolves the 4-tier config chain and builds a `RagConfig` from it,
+    /// falling back to the compiled defaults when no tier supplies one or when
+    /// what it supplies is unusable. This is the bridge every consumer should
+    /// call: `from_value` existed and was correct, but its only caller was the
+    /// reporting verb, so the entire RAG surface was observable and inert --
+    /// `config_resolve` could report a tier had won while every knob still came
+    /// from `Default`.
+    ///
+    /// A config that fails validation degrades to defaults rather than
+    /// propagating an error, because the alternative is a project whose
+    /// retrieval stops working entirely over a mistyped number. The rejection
+    /// is reported through `resolve_and_report`'s own events, so it is loud
+    /// without being fatal.
+    ///
+    /// Deliberately NOT memoised: the plugin instance is process-wide and
+    /// shared across concurrently-active projects, so a cached config would
+    /// leak project A's knowledgebase settings into project B -- the invariant
+    /// this module's own header states.
+    pub fn resolved() -> RagConfig {
+        let value = crate::config::resolve().config.value;
+        RagConfig::from_value(&value).unwrap_or_default()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.embed.dim == 0 {
             return Err("ragconfig: embed.dim must be non-zero".to_string());

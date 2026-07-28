@@ -214,6 +214,79 @@ pub fn validate_repo_url(url: &str) -> Result<(), String> {
     ))
 }
 
+/// Transports the `fetch` verb may name.
+///
+/// Narrower than [`ALLOWED_URL_SCHEMES`] on purpose. That list serves `git`,
+/// which legitimately speaks `ssh://` and `git://`; `host_fetch` is an HTTP
+/// client and can do nothing with either, so admitting them would widen the
+/// accepted surface without enabling a single real call.
+///
+/// Deliberately ABSENT, each for a concrete reason:
+/// - `file://` -- the host's fetch implementation would read local disk through
+///   a verb whose whole contract is "reach the network", bypassing the
+///   `path_within_project` containment every fs_* verb applies.
+/// - `data:` and `blob:` -- carry their payload inline, so a caller that can
+///   name one can hand the host arbitrary bytes to interpret as a response.
+/// - schemeless input (`example.com/x`, `//example.com/x`) -- resolution is
+///   left to the host, and a bare `/etc/passwd` or a UNC `\\host\share` reads
+///   as a local location under some resolvers.
+const ALLOWED_FETCH_SCHEMES: &[&str] = &["https://", "http://"];
+
+/// Longest accepted fetch URL.
+const MAX_FETCH_URL_LEN: usize = 2048;
+
+/// Validate a URL before it reaches `host_fetch`.
+///
+/// The scheme allowlist is the substantive check; the control-character,
+/// whitespace and length rules exist because `host_fetch` hands the string to a
+/// URL parser and then to an HTTP client, and a newline inside a URL is the
+/// classic request-splitting primitive.
+///
+/// A host is required to be present and non-empty so that `https://` alone, or
+/// `https:///etc/passwd` (empty authority, which several parsers read as a
+/// local path), is refused rather than passed to the host to interpret.
+pub fn validate_fetch_url(url: &str) -> Result<(), String> {
+    let what = "fetch url";
+    let u = url.trim();
+    if u.is_empty() {
+        return Err(format!("{what}: empty"));
+    }
+    if u.len() > MAX_FETCH_URL_LEN {
+        return Err(format!("{what}: exceeds {MAX_FETCH_URL_LEN} bytes"));
+    }
+    if u.chars().any(|c| c.is_control()) {
+        return Err(format!(
+            "{what}: contains a control character; a newline inside a URL is a request-splitting primitive"
+        ));
+    }
+    if u.contains(char::is_whitespace) {
+        return Err(format!("{what}: {:?} contains whitespace", u));
+    }
+    let lower = u.to_ascii_lowercase();
+    let Some(scheme) = ALLOWED_FETCH_SCHEMES.iter().find(|s| lower.starts_with(**s)) else {
+        return Err(format!(
+            "{what}: {:?} does not use an allowed transport. Permitted: {}. \
+             file:// and data: are refused because fetch exists to reach the network, \
+             and a schemeless URL is refused because its resolution is left to the host.",
+            u,
+            ALLOWED_FETCH_SCHEMES.join(", ")
+        ));
+    };
+    let authority = &u[scheme.len()..];
+    let host_end = authority
+        .find(['/', '?', '#'])
+        .unwrap_or(authority.len());
+    let host = &authority[..host_end];
+    let host = host.rsplit('@').next().unwrap_or(host);
+    if host.is_empty() {
+        return Err(format!(
+            "{what}: {:?} names no host; an empty authority is read as a local path by some parsers",
+            u
+        ));
+    }
+    Ok(())
+}
+
 /// Recognise git's scp-like `[user@]host:path` remote syntax.
 ///
 /// Requires a `:` that is not part of a scheme (no `//` follows it) and a

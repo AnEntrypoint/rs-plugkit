@@ -74,11 +74,9 @@ const QUERY_CACHE_CAP: usize = 64;
 const QUERY_CACHE_TTL_MS: i64 = 600_000;
 
 fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
-    #[link(wasm_import_module = "env")]
-    extern "C" {
-        fn host_random_fill(ptr: *mut u8, len: u32) -> u32;
-    }
-    let rc = unsafe { host_random_fill(buf.as_mut_ptr(), buf.len() as u32) };
+    let rc = unsafe {
+        crate::wasm_dispatch::host_abi::host_random_fill(buf.as_mut_ptr(), buf.len() as u32)
+    };
     if rc == 0 {
         Err(getrandom::Error::UNSUPPORTED)
     } else {

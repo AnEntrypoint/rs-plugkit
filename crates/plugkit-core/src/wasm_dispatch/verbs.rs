@@ -8,7 +8,12 @@ use super::host_abi::{
 use super::events::{emit_event, log_deviation_push, install_panic_hook};
 use crate::orchestrator::yaml_util::base64_decode;
 
-fn plugin_ok(resp: &Value) -> bool {
+/// The single reader of a plugin response's `ok` flag.
+///
+/// `code_index` previously kept a byte-identical private copy alongside its own
+/// clone of `plugin_call`, so every hardening applied here -- the failure-code
+/// taxonomy in particular -- missed the treesitter and bert paths entirely.
+pub fn plugin_ok(resp: &Value) -> bool {
     resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
@@ -46,7 +51,7 @@ pub fn plugin_failure_code(resp: &Value) -> &'static str {
 /// a plugin-reported failure -- it is a shape the guest cannot interpret. This
 /// is the `unpack_to_value` bare-string fallback path where `.get("ok")`
 /// returns None and the real host message would otherwise be discarded.
-fn plugin_error_detail(resp: &Value, fallback: &str) -> Value {
+pub fn plugin_error_detail(resp: &Value, fallback: &str) -> Value {
     let code = plugin_failure_code(resp);
     let message = match resp {
         Value::String(raw) => raw.clone(),
@@ -236,10 +241,39 @@ fn fs_stat(body: &Value) -> u64 {
     }
 }
 
+pub const FETCH_DEFAULT_TIMEOUT_MS: u64 = 30_000;
+pub const FETCH_MAX_TIMEOUT_MS: u64 = 300_000;
+
 fn fetch(body: &Value) -> u64 {
     let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
     if url.is_empty() { return err("fetch", "url required"); }
-    let opts = body.get("opts").map(|v| v.to_string()).unwrap_or_else(|| "{}".to_string());
+    if let Err(reason) = crate::config_path::validate_fetch_url(url) {
+        return err_coded("fetch", ERR_CODE_INVALID_ARGS, &reason);
+    }
+    let has_explicit_timeout = body.get("timeoutMs").is_some()
+        || body.get("opts").and_then(|o| o.get("timeoutMs")).is_some();
+    let timeout_ms = if has_explicit_timeout {
+        match crate::validation::validate_timeout_ms(body, true) {
+            Ok(n) if n > FETCH_MAX_TIMEOUT_MS => {
+                return err_json("fetch", json!({
+                    "error": "timeoutMs above ceiling",
+                    "max": FETCH_MAX_TIMEOUT_MS,
+                    "received": n,
+                }));
+            }
+            Ok(n) => n,
+            Err(detail) => return err_json("fetch", detail),
+        }
+    } else {
+        FETCH_DEFAULT_TIMEOUT_MS
+    };
+    let mut opts_obj = body.get("opts").cloned().unwrap_or_else(|| json!({}));
+    if let Some(map) = opts_obj.as_object_mut() {
+        map.insert("timeoutMs".to_string(), json!(timeout_ms));
+    } else {
+        opts_obj = json!({"timeoutMs": timeout_ms});
+    }
+    let opts = opts_obj.to_string();
     let packed = unsafe { host_fetch(url.as_ptr(), url.len() as u32, opts.as_ptr(), opts.len() as u32) };
     let v = unpack_to_value(packed);
     if v.is_null() { return err("fetch", "host_fetch empty"); }
@@ -987,15 +1021,23 @@ fn browser(body: &Value, body_s: &str) -> u64 {
     } else {
         explicit_sid
     };
-    let timeout_ms = match body.get("timeoutMs").and_then(|v| v.as_u64()) {
-        None => BROWSER_DEFAULT_TIMEOUT_MS,
-        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
-        Some(n) => return err_json("browser", json!({
-            "error": "timeoutMs below floor",
-            "error_code": ERR_CODE_INVALID_ARGS,
-            "min": crate::validation::MIN_TIMEOUT_MS,
-            "received": n,
-        })),
+    let timeout_ms = match body.get("timeoutMs") {
+        None | Some(Value::Null) => BROWSER_DEFAULT_TIMEOUT_MS,
+        Some(raw) => match raw.as_u64() {
+            Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
+            Some(n) => return err_json("browser", json!({
+                "error": "timeoutMs below floor",
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "min": crate::validation::MIN_TIMEOUT_MS,
+                "received": n,
+            })),
+            None => return err_json("browser", json!({
+                "error": "timeoutMs must be a positive integer number of milliseconds -- a string, float or negative value is rejected rather than silently falling back to the default budget",
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "min": crate::validation::MIN_TIMEOUT_MS,
+                "received": raw.clone(),
+            })),
+        },
     };
     let envelope = json!({ "body": code, "timeoutMs": timeout_ms }).to_string();
     let packed = unsafe { host_browser_exec(
