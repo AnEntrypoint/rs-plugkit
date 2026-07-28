@@ -1,12 +1,15 @@
 - id: commit-push-feature-branch
   subject: Commit and push to claude/project-structure-mermaid-7pwny0 only; never main, no force-push, no history rewrite, no submodule pin change
-  witness: explicit task constraint; current branch is already claude/project-structure-mermaid-7pwny0
-  status: pending
+  witness: 'Two commits pushed via git_finalize with an explicit branch argument: 20c2695 (the prose.rs fix) and 866e48e (the PRD note flush). git rev-parse HEAD equals git rev-parse origin/claude/project-structure-mermaid-7pwny0 at 866e48ee0a3377cf71586a3178623aca6ccbb464. git branch -r --contains HEAD lists ONLY origin/claude/project-structure-mermaid-7pwny0. origin/main remains at 3c88574, the same commit it held at session start, so main was never written. No force flag was used and no history was rewritten; no submodule pointer exists in this standalone clone to change.'
+  status: completed
+  commit_comment: Pushed to claude/project-structure-mermaid-7pwny0; origin/main untouched
 - id: no-ci-marker-fabrication
   subject: GitHub API is blocked by org policy this session, so no workflow run can be observed; the .ci-validated marker must NOT be written and the unverifiable step must be reported honestly rather than papered over
-  witness: explicit task constraint; COMPLETE gate normally requires .ci-validated with current HEAD sha
-  status: pending
+  witness: 'ls of .gm/exec-spool/.ci-validated returns ''No such file or directory'' after the push, confirming no marker was written. No GitHub workflow run was observed or claimed: the org policy blocks the GitHub API from this session, so CI green is genuinely unverified here and is reported as such rather than asserted. The compile evidence that DOES exist is local and real: cargo check --target wasm32-wasip1 --features slim on the pushed tree.'
+  status: completed
+  commit_comment: No .ci-validated marker written; CI status left honestly unverified
 - id: codesearch-embedder-unavailable
   subject: 'Noticed: codesearch and recall are both dead in this environment because the bert plugin resolves to unknown_plugin, so semantic discovery degraded to nothing and exec_js had to carry discovery; record the gap rather than let it evaporate'
-  witness: watcher.log evt embed_query_failed plugin_failure=unknown_plugin and rssearch_vector_hits_skipped on every codesearch/recall dispatch this session
-  status: pending
+  witness: 'Recorded as a session-environment defect, not worked around silently. Every codesearch and recall dispatch this session returned error_code=failed, and .gm/exec-spool/.watcher.log carries the cause: evt embed_query_failed with plugin_failure=unknown_plugin and reason ''bert plugin call failed'', followed by rssearch_vector_hits_skipped and codesearch_degraded kv_hits=0. The bert wasm plugin is not registered with this agentplug daemon, so semantic retrieval has no embedder and the keyword fallback matched nothing. Discovery for this task was carried by exec_js, which the orchestrator prose explicitly leaves unrestricted for investigation. This is an agentplug plugin-registration gap outside rs-plugkit''s own source, surfaced here so it is not mistaken for an empty index.'
+  status: completed
+  commit_comment: Recorded the bert/unknown_plugin embedder outage that disabled codesearch and recall this session
