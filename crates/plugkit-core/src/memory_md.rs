@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use crate::wasm_dispatch::{host_read, host_remove, host_stat};
+use crate::wasm_dispatch::{host_read, host_remove_file_never_directory, host_stat};
 
 const EXPORT_MARKER: &str = ".flat-export-done";
 
@@ -197,7 +197,7 @@ pub fn delete_memory(ns: &str, key: &str) -> bool {
             if host_read(&path).is_none() {
                 return false;
             }
-            host_remove(&path)
+            host_remove_file_never_directory(&path)
         }
         None => false,
     }

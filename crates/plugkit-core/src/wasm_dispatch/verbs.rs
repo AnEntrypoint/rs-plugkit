@@ -8,11 +8,6 @@ use super::host_abi::{
 use super::events::{emit_event, log_deviation_push, install_panic_hook};
 use crate::orchestrator::yaml_util::base64_decode;
 
-/// The single reader of a plugin response's `ok` flag.
-///
-/// `code_index` previously kept a byte-identical private copy alongside its own
-/// clone of `plugin_call`, so every hardening applied here -- the failure-code
-/// taxonomy in particular -- missed the treesitter and bert paths entirely.
 pub fn plugin_ok(resp: &Value) -> bool {
     resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
 }
@@ -24,40 +19,44 @@ pub const PLUGIN_FAIL_MALFORMED: &str = "malformed_response";
 pub const PLUGIN_FAIL_HOST_EMPTY: &str = "host_returned_empty";
 pub const PLUGIN_FAIL_PLUGIN_ERROR: &str = "plugin_error";
 
-/// Classifies a `host_plugin_call` response into a stable machine-readable
-/// failure code so a host-side deadline abort, an unknown/unloaded plugin, a
-/// non-JSON host reply and the plugin's own returned error stop collapsing
-/// into one indistinguishable branch at every call site.
+fn text_names_deadline_exceeded(low: &str) -> bool {
+    (low.contains("deadline") && low.contains("exceed"))
+        || (low.contains(" exceeded ") && low.contains("executing verb"))
+}
+
+fn text_names_unknown_plugin(low: &str) -> bool {
+    low.contains("unknown plugin") || low.contains("not registered")
+}
+
 pub fn plugin_failure_code(resp: &Value) -> &'static str {
     if resp.is_null() { return PLUGIN_FAIL_HOST_EMPTY; }
     if let Value::String(raw) = resp {
         let low = raw.to_ascii_lowercase();
-        if low.contains("deadline") && low.contains("exceed") { return PLUGIN_FAIL_DEADLINE; }
-        if low.contains("unknown plugin") || low.contains("not registered") { return PLUGIN_FAIL_UNKNOWN_PLUGIN; }
+        if text_names_deadline_exceeded(&low) { return PLUGIN_FAIL_DEADLINE; }
+        if text_names_unknown_plugin(&low) { return PLUGIN_FAIL_UNKNOWN_PLUGIN; }
         return PLUGIN_FAIL_MALFORMED;
     }
     let raw_err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
     let low = raw_err.to_ascii_lowercase();
-    if low == PLUGIN_FAIL_UNKNOWN_PLUGIN || low.contains("unknown plugin") || low.contains("not registered") {
+    if low == PLUGIN_FAIL_UNKNOWN_PLUGIN || text_names_unknown_plugin(&low) {
         return PLUGIN_FAIL_UNKNOWN_PLUGIN;
     }
     if low == PLUGIN_FAIL_NOT_LOADED || low.contains("not loaded") { return PLUGIN_FAIL_NOT_LOADED; }
-    if low.contains("deadline") && low.contains("exceed") { return PLUGIN_FAIL_DEADLINE; }
-    if low.contains(" exceeded ") && low.contains("executing verb") { return PLUGIN_FAIL_DEADLINE; }
+    if text_names_deadline_exceeded(&low) { return PLUGIN_FAIL_DEADLINE; }
     PLUGIN_FAIL_PLUGIN_ERROR
 }
 
-/// A response whose ok flag is absent AND which carries no error field is not
-/// a plugin-reported failure -- it is a shape the guest cannot interpret. This
-/// is the `unpack_to_value` bare-string fallback path where `.get("ok")`
-/// returns None and the real host message would otherwise be discarded.
-pub fn plugin_error_detail(resp: &Value, fallback: &str) -> Value {
-    let code = plugin_failure_code(resp);
-    let message = match resp {
+fn plugin_error_message_or_bare_string_fallback(resp: &Value, message_when_shape_unrecognized: &str) -> String {
+    match resp {
         Value::String(raw) => raw.clone(),
         Value::Null => "host_plugin_call returned no bytes".to_string(),
-        _ => resp.get("error").and_then(|v| v.as_str()).unwrap_or(fallback).to_string(),
-    };
+        _ => resp.get("error").and_then(|v| v.as_str()).unwrap_or(message_when_shape_unrecognized).to_string(),
+    }
+}
+
+pub fn plugin_error_detail(resp: &Value, message_when_shape_unrecognized: &str) -> Value {
+    let code = plugin_failure_code(resp);
+    let message = plugin_error_message_or_bare_string_fallback(resp, message_when_shape_unrecognized);
     let mut detail = json!({
         "error": message,
         "plugin_failure": code,
@@ -69,13 +68,9 @@ pub fn plugin_error_detail(resp: &Value, fallback: &str) -> Value {
     detail
 }
 
-fn plugin_error(resp: &Value, fallback: &str) -> String {
+fn plugin_error(resp: &Value, message_when_shape_unrecognized: &str) -> String {
     let code = plugin_failure_code(resp);
-    let message = match resp {
-        Value::String(raw) => raw.clone(),
-        Value::Null => "host_plugin_call returned no bytes".to_string(),
-        _ => resp.get("error").and_then(|v| v.as_str()).unwrap_or(fallback).to_string(),
-    };
+    let message = plugin_error_message_or_bare_string_fallback(resp, message_when_shape_unrecognized);
     format!("[{}] {}", code, message)
 }
 
@@ -440,12 +435,6 @@ fn discipline_fanout_namespaces(base: &str) -> Vec<String> {
 
 pub const EMBED_UNAVAILABLE: &str = "query embedding unavailable -- the bert embedder failed, so no vector search was attempted";
 
-/// True when `embed_query` produced nothing usable for a vector search.
-///
-/// `embed_query` returns `Value::Null` on all three of its failure paths, and a
-/// successful call can still yield an empty array. Neither can be searched
-/// against, and every caller must reach the same verdict from the same test --
-/// this is the predicate that guarantees it.
 pub fn query_embedding_unusable(query_embedding: &Value) -> bool {
     match query_embedding {
         Value::Null => true,
@@ -1122,32 +1111,20 @@ fn browser(body: &Value, body_s: &str) -> u64 {
     }
 }
 
-fn db_name_from(body: &Value) -> String {
+fn db_display_label_not_identity(body: &Value) -> String {
     body.get("db_name").or_else(|| body.get("db")).and_then(|v| v.as_str()).unwrap_or("main").to_string()
 }
 
-fn db_path_from(body: &Value) -> String {
+fn db_identity_path(body: &Value) -> String {
     match body.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => crate::code_index::project_db_path(None),
     }
 }
 
-/// Open a database by PATH. The `db` field is vestigial.
-///
-/// Two guest modules appeared to disagree about what identifies a database --
-/// this one sends `{db, path}` while `libsql_wasm` sends `{path}` alone across
-/// twelve calls. Reading the plugin settles it: `agentplug-libsql` reads only
-/// `path` and never reads `db` at all, and its own comment explains why --
-/// one plugin instance now serves every project, so a bare `name` is no longer
-/// a meaningful identifier and there is no persistent name-to-connection map.
-///
-/// `db` is kept on the wire because it costs nothing and reads as a label in
-/// dispatch logs, but it must not be treated as identity: two calls carrying
-/// different `db` values and the same `path` address the same database.
 fn sql_open(body: &Value) -> u64 {
-    let path = db_path_from(body);
-    let name = db_name_from(body);
+    let path = db_identity_path(body);
+    let name = db_display_label_not_identity(body);
     let resp = call_plugin("libsql", "open", &json!({ "db": name, "path": path }));
     if plugin_ok(&resp) {
         ok("sql_open", json!({ "path": path, "db_name": name }))
@@ -1157,8 +1134,8 @@ fn sql_open(body: &Value) -> u64 {
 }
 
 fn sql_close(body: &Value) -> u64 {
-    let name = db_name_from(body);
-    let path = db_path_from(body);
+    let name = db_display_label_not_identity(body);
+    let path = db_identity_path(body);
     let resp = call_plugin("libsql", "close", &json!({ "db": name, "path": path }));
     if plugin_ok(&resp) {
         ok("sql_close", json!({ "db_name": name }))
@@ -1178,8 +1155,8 @@ fn sql_exec(body: &Value) -> u64 {
         Some(s) => s,
         None => return err("sql_exec", "missing sql"),
     };
-    let name = db_name_from(body);
-    let path = db_path_from(body);
+    let name = db_display_label_not_identity(body);
+    let path = db_identity_path(body);
     let resp = call_plugin("libsql", "exec", &json!({ "db": name, "path": path, "sql": sql }));
     if plugin_ok(&resp) {
         ok("sql_exec", json!({}))
@@ -1193,8 +1170,8 @@ fn sql_query(body: &Value) -> u64 {
         Some(s) => s,
         None => return err("sql_query", "missing sql"),
     };
-    let name = db_name_from(body);
-    let path = db_path_from(body);
+    let name = db_display_label_not_identity(body);
+    let path = db_identity_path(body);
     let resp = call_plugin("libsql", "query", &json!({ "db": name, "path": path, "sql": sql }));
     if plugin_ok(&resp) {
         let rows = resp.get("rows").cloned().unwrap_or_else(|| json!([]));
@@ -1204,80 +1181,43 @@ fn sql_query(body: &Value) -> u64 {
     }
 }
 
-/// Cache config for a verb call.
-///
-/// Overrides arrive per-call rather than from a stored profile because the
-/// plugin instance is shared across concurrently-active projects: a config
-/// cached in a process-global would leak one project's budgets into another's
-/// cache operations. Anything absent falls back to `cache::DEFAULTS`, which is
-/// the single place the defaults live.
-/// Cache budgets for one dispatch: compiled defaults, then vendored config,
-/// then this call's own body.
-///
-/// The config layer was the missing rung. `CacheConfig`'s own doc calls these
-/// budgets configuration rather than constants, but the only way to set them
-/// was to restate all four on every single dispatch -- so in practice every
-/// caller got `DEFAULTS`, and a project could not express a cache policy at
-/// all. Reading the resolved config here is what makes "this step uses the
-/// cache, with these budgets" expressible as vendored data instead of as
-/// argument-passing discipline at each call site.
-///
-/// The body still wins, so a caller with a genuinely unusual payload can
-/// override a project-wide budget for one call without changing the project's
-/// policy.
-fn cache_cfg_from(body: &Value) -> crate::cache::CacheConfig {
-    let mut cfg = crate::cache::DEFAULTS;
-
-    let resolved = crate::config::resolve().config.value;
-    if let Some(c) = resolved.get("cache") {
-        if let Some(n) = c.get("max_entries_per_namespace").and_then(|v| v.as_u64()) {
-            cfg.max_entries_per_namespace = n as usize;
-        }
-        if let Some(n) = c.get("max_bytes_per_namespace").and_then(|v| v.as_u64()) {
-            cfg.max_bytes_per_namespace = n as usize;
-        }
-        if let Some(n) = c.get("max_value_bytes").and_then(|v| v.as_u64()) {
-            cfg.max_value_bytes = n as usize;
-        }
-        if let Some(n) = c.get("default_ttl_ms").and_then(|v| v.as_i64()) {
-            cfg.default_ttl_ms = Some(n);
-        }
-    }
-
-    if let Some(n) = body.get("max_entries_per_namespace").and_then(|v| v.as_u64()) {
+fn apply_cache_budget_overrides_from(cfg: &mut crate::cache::CacheConfig, source: &Value) {
+    if let Some(n) = source.get("max_entries_per_namespace").and_then(|v| v.as_u64()) {
         cfg.max_entries_per_namespace = n as usize;
     }
-    if let Some(n) = body.get("max_bytes_per_namespace").and_then(|v| v.as_u64()) {
+    if let Some(n) = source.get("max_bytes_per_namespace").and_then(|v| v.as_u64()) {
         cfg.max_bytes_per_namespace = n as usize;
     }
-    if let Some(n) = body.get("max_value_bytes").and_then(|v| v.as_u64()) {
+    if let Some(n) = source.get("max_value_bytes").and_then(|v| v.as_u64()) {
         cfg.max_value_bytes = n as usize;
     }
-    if let Some(n) = body.get("default_ttl_ms").and_then(|v| v.as_i64()) {
+    if let Some(n) = source.get("default_ttl_ms").and_then(|v| v.as_i64()) {
         cfg.default_ttl_ms = Some(n);
     }
+}
+
+fn cache_cfg_from_defaults_then_vendored_config_then_this_call_body(body: &Value) -> crate::cache::CacheConfig {
+    let mut cfg = crate::cache::DEFAULTS;
+    let resolved = crate::config::resolve().config.value;
+    if let Some(vendored_cache_section) = resolved.get("cache") {
+        apply_cache_budget_overrides_from(&mut cfg, vendored_cache_section);
+    }
+    apply_cache_budget_overrides_from(&mut cfg, body);
     cfg
 }
 
-/// Surface a cache failure with its machine-readable class attached, so a
-/// caller reaching this over host_plugin_call can branch on `error_kind`
-/// without parsing the message.
-fn cache_err(verb: &str, e: crate::cache::CacheError) -> u64 {
+fn cache_err_with_machine_readable_kind(verb: &str, e: crate::cache::CacheError) -> u64 {
     err_json(verb, json!({ "error": e.message(), "error_kind": e.kind() }))
 }
 
-/// A miss reports `ok:true, hit:false`; a store failure reports `ok:false`.
-/// Keeping those distinct across the verb boundary is the whole point of the
-/// cache contract -- collapsing them here would reintroduce, at the wire level,
-/// exactly the ambiguity the recall fix removed from the in-process path.
 fn cache_get(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
-    let cfg = cache_cfg_from(body);
+    let cfg = cache_cfg_from_defaults_then_vendored_config_then_this_call_body(body);
     match crate::cache::get(&cfg, ns, key) {
         Ok(Some(entry)) => ok("cache_get", json!({ "hit": true, "entry": entry.to_json() })),
         Ok(None) => ok("cache_get", json!({ "hit": false, "namespace": ns, "key": key })),
-        Err(e) => cache_err("cache_get", e),
+        Err(e) => cache_err_with_machine_readable_kind("cache_get", e),
     }
 }
 
@@ -1290,40 +1230,29 @@ fn cache_put(body: &Value) -> u64 {
         _ => return err("cache_put", "value required"),
     };
     let ttl = body.get("ttl_ms").and_then(|v| v.as_i64());
-    let cfg = cache_cfg_from(body);
+    let cfg = cache_cfg_from_defaults_then_vendored_config_then_this_call_body(body);
     match crate::cache::put(&cfg, ns, key, &value, ttl) {
         Ok(hash) => ok("cache_put", json!({ "content_hash": hash, "bytes": value.len() })),
-        Err(e) => cache_err("cache_put", e),
+        Err(e) => cache_err_with_machine_readable_kind("cache_put", e),
     }
 }
 
 fn cache_invalidate(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
-    let cfg = cache_cfg_from(body);
+    let cfg = cache_cfg_from_defaults_then_vendored_config_then_this_call_body(body);
     match body.get("key").and_then(|v| v.as_str()).filter(|k| !k.is_empty()) {
         Some(key) => match crate::cache::invalidate(&cfg, ns, key) {
             Ok(existed) => ok("cache_invalidate", json!({ "removed": existed })),
-            Err(e) => cache_err("cache_invalidate", e),
+            Err(e) => cache_err_with_machine_readable_kind("cache_invalidate", e),
         },
         None => match crate::cache::invalidate_namespace(&cfg, ns) {
             Ok(n) => ok("cache_invalidate", json!({ "removed": n, "namespace": ns })),
-            Err(e) => cache_err("cache_invalidate", e),
+            Err(e) => cache_err_with_machine_readable_kind("cache_invalidate", e),
         },
     }
 }
 
-/// Resolve the 4-tier config chain and report WHICH tier won and why.
-///
-/// Without a verb the chain is unreachable from the spool, which is how it
-/// shipped inert: `config::resolve()` existed and compiled, but nothing could
-/// invoke it, so no project could observe (or debug) its own configuration.
-///
-/// Deliberately reports `rejected` alongside the winning tier. A tier that
-/// exists but is malformed does NOT fall through silently -- an author who
-/// wrote a broken config must see that it was rejected, rather than watch gm
-/// quietly run defaults and conclude their file was ignored for some other
-/// reason.
-fn config_resolve(_body: &Value) -> u64 {
+fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u64 {
     let r = crate::config::resolve();
     let mut payload = r.to_json();
 
@@ -1350,7 +1279,7 @@ fn config_resolve(_body: &Value) -> u64 {
 
 fn cache_stats(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
-    let cfg = cache_cfg_from(body);
+    let cfg = cache_cfg_from_defaults_then_vendored_config_then_this_call_body(body);
     match crate::cache::stats(&cfg, ns) {
         Ok((entries, bytes)) => ok("cache_stats", json!({
             "namespace": ns,
@@ -1361,7 +1290,7 @@ fn cache_stats(body: &Value) -> u64 {
             "max_value_bytes": cfg.max_value_bytes,
             "default_ttl_ms": cfg.default_ttl_ms,
         })),
-        Err(e) => cache_err("cache_stats", e),
+        Err(e) => cache_err_with_machine_readable_kind("cache_stats", e),
     }
 }
 
@@ -1401,8 +1330,8 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 fn sql_serialize(body: &Value) -> u64 {
-    let name = db_name_from(body);
-    let path = db_path_from(body);
+    let name = db_display_label_not_identity(body);
+    let path = db_identity_path(body);
     let resp = call_plugin("libsql", "serialize", &json!({ "db": name, "path": path }));
     if !plugin_ok(&resp) {
         return err_plugin("sql_serialize", &resp, "serialize failed");
@@ -1423,8 +1352,8 @@ fn sql_deserialize(body: &Value) -> u64 {
     };
     let bytes = match b64_decode(s) { Some(b) => b, None => return err("sql_deserialize", "invalid base64") };
     let size = bytes.len();
-    let name = db_name_from(body);
-    let path = db_path_from(body);
+    let name = db_display_label_not_identity(body);
+    let path = db_identity_path(body);
     let resp = call_plugin("libsql", "deserialize", &json!({ "db": name, "path": path, "bytes_b64": s }));
     if plugin_ok(&resp) {
         ok("sql_deserialize", json!({ "restored": size, "db_name": name }))
@@ -2090,7 +2019,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "lang" => lang(&body),
         "browser" => browser(&body, &body_s),
         "health" => health(&body),
-        "config_resolve" => config_resolve(&body),
+        "config_resolve" => config_resolve_report_winning_tier_and_any_rejected_tier(&body),
         "sql_open" => sql_open(&body),
         "sql_close" => sql_close(&body),
         "sql_list_dbs" => sql_list_dbs(&body),

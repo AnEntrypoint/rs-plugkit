@@ -26,7 +26,7 @@
 
 use serde_json::json;
 
-use crate::wasm_dispatch::{host_cwd_string, host_read, host_remove, host_stat, host_write};
+use crate::wasm_dispatch::{host_cwd_string, host_read, host_remove_file_never_directory, host_stat, host_write};
 
 /// Marker value recorded once a project's reap completes.
 ///
@@ -130,7 +130,7 @@ pub fn reap_retired_artifacts() {
         // vanishes between the stat and the remove (a racing sibling boot) is
         // expected, and host_remove already reports miss rather than erroring.
         let size = stat_size(&abs);
-        if host_remove(&abs) {
+        if host_remove_file_never_directory(&abs) {
             freed_bytes = freed_bytes.saturating_add(size);
             reclaimed.push(json!({ "path": rel, "bytes": size }));
         }

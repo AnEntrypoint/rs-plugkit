@@ -193,7 +193,7 @@ fn write_state(src: &RepoSource, st: &SyncState) {
         return;
     }
     if !rename(&tmp, &path) {
-        let _ = crate::wasm_dispatch::host_remove(&tmp);
+        let _ = crate::wasm_dispatch::host_remove_file_never_directory(&tmp);
     }
 }
 

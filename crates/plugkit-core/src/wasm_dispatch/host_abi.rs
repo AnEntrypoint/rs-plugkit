@@ -1,30 +1,17 @@
 use serde_json::Value;
 
-/// Declares the host ABI once and derives both the `extern "C"` block and
-/// [`HOST_IMPORTS`] from that single list.
-///
-/// A name is now structurally incapable of appearing in one and not the other.
-/// The previous arrangement kept the two by hand and drifted twice: first to 16
-/// of 20 (omitting host_cwd, host_git, host_kv_delete and host_plugin_call, so
-/// `health` did not advertise that inter-plugin calling exists), and then again
-/// after that repair, when host_fs_remove was added to the extern block alone
-/// and host_random_fill was declared in a function-scoped extern in embed.rs --
-/// leaving `health`, which serves this list as the truth about what the guest
-/// imports, wrong about two of them.
-macro_rules! host_abi {
+macro_rules! host_abi_extern_block_and_host_imports_list_from_one_declaration {
     ($(fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?;)+) => {
         #[link(wasm_import_module = "env")]
         extern "C" {
             $(pub fn $name($($arg: $ty),*) $(-> $ret)?;)+
         }
 
-        /// Every name declared by the `host_abi!` invocation above, in
-        /// declaration order. `health` advertises this.
         pub const HOST_IMPORTS: &[&str] = &[$(stringify!($name)),+];
     };
 }
 
-host_abi! {
+host_abi_extern_block_and_host_imports_list_from_one_declaration! {
     fn host_cwd() -> u64;
     fn host_fs_read(path_ptr: *const u8, path_len: u32) -> u64;
     fn host_fs_write(path_ptr: *const u8, path_len: u32, data_ptr: *const u8, data_len: u32) -> u32;
@@ -96,22 +83,17 @@ const _: () = assert!(
     "packed (ptr,len) u64 ABI requires a 32-bit address space: a usize wider than 4 bytes makes `ptr & 0xffff_ffff` a silent truncation"
 );
 
-/// Hand a string to the host as a packed `(ptr, len)` pair.
-///
-/// `shrink_to_fit` is load-bearing, not tidiness. `String::into_bytes` keeps
-/// the string's CAPACITY, which routinely exceeds its length, while the
-/// matching `plugkit_free` reconstructs the Vec with `len` as both length and
-/// capacity. Handing the allocator a different layout than it issued is
-/// undefined behaviour, and it was reachable on every packed response whose
-/// backing string had spare capacity -- which is most of them, since they are
-/// built by `format!` and `to_string`.
 pub(crate) fn pack(s: String) -> u64 {
     let mut v = s.into_bytes();
-    v.shrink_to_fit();
+    shrink_capacity_to_length_so_plugkit_free_reconstructs_the_same_vec_layout(&mut v);
     let len = v.len();
     let ptr = v.as_mut_ptr() as usize;
     std::mem::forget(v);
     pack_ptr_len(ptr, len)
+}
+
+fn shrink_capacity_to_length_so_plugkit_free_reconstructs_the_same_vec_layout(v: &mut Vec<u8>) {
+    v.shrink_to_fit();
 }
 
 pub(crate) fn pack_ptr_len(ptr: usize, len: usize) -> u64 {
@@ -177,19 +159,7 @@ pub fn host_exists(path: &str) -> bool {
     host_stat(path).map(|v| !v.is_null()).unwrap_or(false)
 }
 
-/// Delete a file, via the host's own filesystem import.
-///
-/// Previously this spawned a node subprocess through `host_exec_js` to run
-/// `fs.unlinkSync`, then decided the outcome by string-matching `"removed"` in
-/// its stdout -- a process launch, a 15s timeout, a JSON round-trip, and a
-/// stringly-typed result, all to delete one file. The host has implemented
-/// `host_fs_remove` natively the whole time; it simply was not declared in the
-/// extern block above, so the guest could not see it.
-///
-/// The host refuses directories and reports 0 for both "was a directory" and
-/// "failed", which is the same collapsed outcome the old shim produced, so
-/// this is a straight substitution with no behavioural change to callers.
-pub fn host_remove(path: &str) -> bool {
+pub fn host_remove_file_never_directory(path: &str) -> bool {
     let rc = unsafe { host_fs_remove(path.as_ptr(), path.len() as u32) };
     rc != 0
 }
