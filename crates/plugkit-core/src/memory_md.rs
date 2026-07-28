@@ -248,7 +248,7 @@ const SYNC_REKEY_ROWS_DEADLINE_MS: u64 = 3500;
 const SYNC_SHADOW_ABORT_THRESHOLD: u32 = 5;
 const REKEY_BATCH_MAX: usize = 25;
 
-fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>), String> {
+fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>, Vec<(String, String)>), String> {
     let Some(dir) = md_dir(ns) else {
         crate::wasm_dispatch::emit_event("memory_md_namespace_invalid", json!({
             "namespace": ns,
@@ -261,7 +261,7 @@ fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>), String> {
     };
     let entries = match crate::pkfs::readdir(&dir) {
         Some(Value::Array(a)) => a,
-        _ => return Ok(("empty".to_string(), Vec::new())),
+        _ => return Ok(("empty".to_string(), Vec::new(), Vec::new())),
     };
     let mut names: Vec<String> = entries
         .iter()
@@ -271,16 +271,19 @@ fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>), String> {
         .collect();
     names.sort();
     if names.is_empty() {
-        return Ok(("empty".to_string(), Vec::new()));
+        return Ok(("empty".to_string(), Vec::new(), Vec::new()));
     }
     let mut acc = String::new();
     let mut docs = Vec::new();
+    let mut file_hashes: Vec<(String, String)> = Vec::new();
     for name in &names {
         let path = format!("{}/{}", dir, name);
         let content = host_read(&path).unwrap_or_default();
+        let file_hash = format!("{:016x}", crate::pipeline::fnv1a64(content.as_bytes()));
+        file_hashes.push((name.clone(), file_hash.clone()));
         acc.push_str(name);
         acc.push('\0');
-        acc.push_str(&format!("{:016x}", crate::pipeline::fnv1a64(content.as_bytes())));
+        acc.push_str(&file_hash);
         acc.push('\0');
         match parse(&content) {
             Some(doc) => docs.push(doc),
@@ -293,7 +296,7 @@ fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>), String> {
         }
     }
     docs.sort_by(|a, b| a.key.cmp(&b.key));
-    Ok((format!("{:016x}", crate::pipeline::fnv1a64(acc.as_bytes())), docs))
+    Ok((format!("{:016x}", crate::pipeline::fnv1a64(acc.as_bytes())), docs, file_hashes))
 }
 
 fn is_malformed(err: &str) -> bool {
@@ -474,10 +477,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
         let (digest, files) = match scan_manifest(ns) {
             Some(v) => v,
             None => match scan_corpus(ns) {
-                Ok((d, docs)) => (
-                    d.clone(),
-                    docs.iter().map(|doc| (format!("{}.md", doc.key), d.clone())).collect(),
-                ),
+                Ok((d, _docs, file_hashes)) => (d, file_hashes),
                 Err(e) => {
                     converged = false;
                     report.push(json!({ "namespace": ns, "error": e }));

@@ -615,14 +615,27 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     Some((fp, FileManifest { hash, digest_hash, mtime_ms, commit_overview, chunks }))
 }
 
-const SUBMODULE_DIRS: &[&str] = &[
-    "rs-plugkit", "rs-codeinsight", "rs-search",
-    "agentplug", "agentplug-bert", "agentplug-libsql", "agentplug-treesitter",
-];
-
+/// Whether a path lives inside a submodule, so per-file git history is skipped.
+///
+/// Derived from `.gitmodules` via the same helper the submodules gate uses,
+/// rather than a hardcoded list of THIS repo's own sibling names. That list was
+/// the identical vacuous-vocabulary shape already fixed in the gate: for any
+/// other project it matched nothing, so every file in a real submodule paid a
+/// `git log -1` subprocess whose output describes the wrong repository.
+///
+/// Matches on any path SEGMENT rather than only the first, since a submodule is
+/// frequently nested (`client/vendor/wireweave`, which is exactly what this
+/// project declares).
 fn is_submodule_path(fp: &str) -> bool {
-    let first_seg = fp.split('/').next().unwrap_or(fp);
-    SUBMODULE_DIRS.contains(&first_seg)
+    let paths = crate::orchestrator::submodule_drift::submodule_paths();
+    if paths.is_empty() {
+        return false;
+    }
+    let norm = fp.replace('\\', "/");
+    paths.iter().any(|p| {
+        let p = p.trim_matches('/');
+        !p.is_empty() && (norm == p || norm.starts_with(&format!("{p}/")))
+    })
 }
 
 fn compute_commit_overview(fp: &str) -> Option<String> {
