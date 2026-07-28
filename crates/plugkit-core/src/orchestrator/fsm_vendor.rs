@@ -119,6 +119,30 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
     let (ok, status) = write_if_absent_or_forced(predicates_path, &predicates_ref, force);
     results.push(json!({ "path": predicates_path, "ok": ok, "status": status }));
 
+    let deviations_ref = {
+        let mut lines = vec![
+            "# Compiled deviation kinds".to_string(),
+            String::new(),
+            "Every deviation this build can emit, generated from the SAME table (`orchestrator::deviations::DEVIATION_TABLE`) the emitters themselves reference, so this cannot silently drift out of sync with what actually fires. A kind absent from this list is not emitted by any compiled code path -- if the served doctrine names one, the doctrine is describing an enforcement that does not exist.".to_string(),
+            String::new(),
+            "`severity` is the DEFAULT. Override it per project by adding a `deviation_severity` map to the `policy` object in .gm/instructions/fsm/graph.json, keyed by the kind name and valued `\"deny\"` or `\"log\"`:".to_string(),
+            String::new(),
+            "```json".to_string(),
+            "{ \"policy\": { \"deviation_severity\": { \"unsolicited-doc-created\": \"deny\", \"synthetic-test-file\": \"deny\" } } }".to_string(),
+            "```".to_string(),
+            String::new(),
+            "`deny` means the emitter refuses the dispatch (a gate denial, or a non-zero rc). `log` means it records the event and lets the dispatch proceed. The map is empty by default, so an unconfigured project gets exactly the severities listed below. A key naming an unknown kind, or a value that is neither `deny` nor `log`, falls back to the default and is reported by `fsm-validate` rather than silently configuring nothing.".to_string(),
+            String::new(),
+        ];
+        for (name, desc, sev) in crate::orchestrator::deviations::known_deviations() {
+            lines.push(format!("- `{}` (default `{}`) -- {}", name, sev.as_str(), desc));
+        }
+        lines.join("\n")
+    };
+    let deviations_path = ".gm/instructions/fsm/deviations.md";
+    let (ok, status) = write_if_absent_or_forced(deviations_path, &deviations_ref, force);
+    results.push(json!({ "path": deviations_path, "ok": ok, "status": status }));
+
     let hook_path = ".gm/instructions/hooks/example.js";
     let (ok, status) = write_if_absent_or_forced(hook_path, EXAMPLE_HOOK, force);
     results.push(json!({ "path": hook_path, "ok": ok, "status": status }));
@@ -191,6 +215,20 @@ pub fn handle_validate(_content: &str) -> (String, String, i32) {
         "states": graph.states.len(),
         "edges": graph.edges.len(),
         "gates": graph.gates.len(),
+        "deviation_kinds": crate::orchestrator::deviations::known_deviations()
+            .into_iter()
+            .map(|(name, desc, default_sev)| json!({
+                "kind": name,
+                "description": desc,
+                "default_severity": default_sev.as_str(),
+                "effective_severity": crate::orchestrator::deviations::effective_severity_with(
+                    name, &graph.policy.deviation_severity
+                ).as_str(),
+            }))
+            .collect::<Vec<Value>>(),
+        "deviation_kinds_note": "Every deviation kind this build can emit, with its registry default and the severity actually in force after policy.deviation_severity. A kind whose effective differs from its default has been overridden by this project. See fsm/deviations.md (generated from the same table).",
+        "deviation_severity_warnings": graph.deviation_severity_warnings(),
+        "deviation_severity_warnings_note": "policy.deviation_severity entries this build cannot honour -- an unknown kind name, or a value that is neither \"deny\" nor \"log\". NON-FATAL: each falls back to the registry default and the rest of the graph, including its other overrides, serves normally. Reported rather than rejected because discarding a whole graph over one mistyped severity key would silently drop every unrelated customisation in it.",
         "note": if ok {
             "graph passes referential-integrity validation: every edge's endpoints and gates resolve, every gate has a predicate or hook, every state is reachable and has a path to the terminal phase, and every declared prose_key resolves to real prose."
         } else {

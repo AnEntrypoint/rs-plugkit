@@ -313,7 +313,11 @@ pub fn scan_turn_entry(_cwd: &str) {
         }
         if let Some(pattern) = is_spool_poll_command(&cmd) {
             let cmd_preview: String = cmd.chars().take(160).collect();
-            let msg = format!("deviation.spool-poll pattern={} command={}", pattern, cmd_preview);
+            let severity = crate::orchestrator::deviations::effective_severity("spool-poll");
+            let msg = format!(
+                "deviation.spool-poll severity={} pattern={} command={}",
+                severity.as_str(), pattern, cmd_preview
+            );
             log_warn(&msg);
             deviation_count += 1;
             if deviation_count >= 32 { break; }

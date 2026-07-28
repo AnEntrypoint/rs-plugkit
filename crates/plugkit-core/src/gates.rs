@@ -121,14 +121,23 @@ fn long_gap_should_fire(last_instruction_ms: u64, prev_dispatch_ms: u64, now: u6
 fn log_deviation(event: &str, detail: &str) {
     let msg = format!("plugkit gate: {} {}", event, detail);
     unsafe { host_log(2, msg.as_ptr(), msg.len() as u32); }
-    let evt_payload = json!({
+    let registered = crate::orchestrator::deviations::kind_is_known(event);
+    let severity = crate::orchestrator::deviations::effective_severity(event);
+    let mut payload = json!({
         "event": format!("deviation.{}", event),
         "sub": "hook",
         "detail": detail,
+        "kind": event,
+        "severity": severity.as_str(),
         "ts": now_ms(),
         "source": "rs-plugkit/gates",
     });
-    let evt_line = format!("evt: {}", evt_payload);
+    if !registered {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("unregistered_kind".to_string(), json!(true));
+        }
+    }
+    let evt_line = format!("evt: {}", payload);
     unsafe { host_log(1, evt_line.as_ptr(), evt_line.len() as u32); }
 }
 
@@ -187,6 +196,38 @@ fn classify_operation(verb: &str, body: &Value) -> &'static str {
     }
     if verb == "fs_write" { return "write"; }
     "verb"
+}
+
+/// Whether a kind's EFFECTIVE severity is deny, after policy overrides.
+///
+/// Every call site guarded by this was previously log-only by structure alone --
+/// the branch emitted and fell through. Default severities in the registry match
+/// that exactly, so with an empty `policy.deviation_severity` (the default) this
+/// returns false at every one of them and behaviour is bit-identical to before.
+fn deviation_denies(kind: &str) -> bool {
+    crate::orchestrator::deviations::effective_severity(kind)
+        == crate::orchestrator::deviations::Severity::Deny
+}
+
+/// A path that is a standing test file rather than a live witness.
+///
+/// `deviation.synthetic-test-file` was named in the served VERIFY doctrine as
+/// something that "blocks `transition`" while no Rust code emitted it at all --
+/// the doctrine promised an enforcement that did not exist. This is the detector
+/// that makes the promise real. It stays Log by default because the doctrine is
+/// gm's, not plugkit's: a project that genuinely wants a test suite must not have
+/// its writes denied by an engine default, and one that wants the VERIFY rule
+/// enforced promotes the kind via policy.deviation_severity.
+fn is_synthetic_test_path(rel: &str) -> bool {
+    let norm = rel.replace('\\', "/").to_lowercase();
+    let segments: Vec<&str> = norm.split('/').filter(|s| !s.is_empty()).collect();
+    let Some(file) = segments.last() else { return false };
+    if segments.iter().rev().skip(1).any(|s| *s == "test" || *s == "tests" || *s == "__tests__" || *s == "spec") {
+        return true;
+    }
+    let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+    stem.ends_with(".test") || stem.ends_with(".spec")
+        || stem.ends_with("_test") || stem.ends_with("_spec")
 }
 
 fn is_unsolicited_toplevel_doc(rel: &str) -> bool {
@@ -404,12 +445,30 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         if let Some(p) = body_path_field(body) {
             if is_unsolicited_toplevel_doc(&p) {
                 log_deviation("unsolicited-doc-created", &p);
+                if deviation_denies("unsolicited-doc-created") {
+                    return GateVerdict::deny(format!(
+                        "unsolicited-doc-created: `{}` is a top-level doc outside policy.toplevel_doc_allowlist, and this project's policy.deviation_severity promotes this kind to deny. A report/summary/findings file is not the deliverable -- return the finding in the response, or write it where the work lives.",
+                        p
+                    ));
+                }
+            }
+        }
+        if let Some(p) = body_path_field(body) {
+            if is_synthetic_test_path(&p) {
+                log_deviation("synthetic-test-file", &p);
+                if deviation_denies("synthetic-test-file") {
+                    return GateVerdict::deny(format!(
+                        "synthetic-test-file: `{}` is a standing test file, and this project's policy.deviation_severity promotes this kind to deny. Doctrine is a live exec_js/browser witness run THIS turn, not a test case deferred to a later run.",
+                        p
+                    ));
+                }
             }
         }
     }
 
     if operation == "complete" {
         let (body_s, _err, code) = crate::orchestrator::prd::handle_list("");
+        let mut anti_shape: Vec<String> = Vec::new();
         if code == 0 {
             if let Ok(v) = serde_json::from_str::<Value>(&body_s) {
                 if let Some(items) = v.get("items").and_then(|v| v.as_array()) {
@@ -420,10 +479,18 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                         if witness.trim().is_empty() {
                             let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                             log_deviation("prd-anti-shape", &format!("id={} status={} no witness_evidence on closing transition", id, status));
+                            anti_shape.push(id.to_string());
                         }
                     }
                 }
             }
+        }
+        if !anti_shape.is_empty() && deviation_denies("prd-anti-shape") {
+            return GateVerdict::deny(format!(
+                "prd-anti-shape: {} row(s) are marked closed with empty witness_evidence ({}), and this project's policy.deviation_severity promotes this kind to deny. Re-resolve each with its own distinct witness_evidence before closing the chain.",
+                anti_shape.len(),
+                anti_shape.join(", ")
+            )).with_next("prd-resolve");
         }
     }
 

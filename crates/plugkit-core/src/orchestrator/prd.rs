@@ -378,6 +378,18 @@ fn nearest_known_id(target: &str, known: &[String]) -> Option<String> {
     })
 }
 
+/// Whether a registry kind still refuses, after policy overrides.
+///
+/// These three kinds default to Severity::Deny in the registry, matching the
+/// structural refusal each already performed, so with the default empty override
+/// map this returns true at every call site and behaviour is unchanged. It exists
+/// for the demotion direction: a project whose workflow legitimately resolves rows
+/// without per-row witness text sets the kind to "log" and gets the event without
+/// the refusal, instead of having to disable the whole policy flag.
+fn deviation_refuses(kind: &str) -> bool {
+    super::deviations::effective_severity(kind) == super::deviations::Severity::Deny
+}
+
 pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -386,10 +398,11 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let (id_target, witness, commit_comment) = parse_resolve_target(trimmed);
     let policy = super::fsm::graph().policy;
     let has_witness = witness.as_ref().map(|w| !w.trim().is_empty()).unwrap_or(false);
-    if policy.require_witness_evidence && !has_witness {
+    if policy.require_witness_evidence && !has_witness && deviation_refuses("prd-resolve-no-witness") {
         let body = serde_json::json!({
             "error": format!("prd-resolve refused: no witness_evidence for {}", id_target),
             "deviation_kind": "prd-resolve-no-witness",
+            "deviation_severity": "deny",
             "prd_id": id_target,
             "hint": "resolve requires non-empty witness_evidence (file:line | codesearch hit | exec snippet | browser page.evaluate result). A row cannot be marked completed without evidence the work is real - this gate exists because an agent under closure-pressure marked undone tasks completed with an absent witness. Body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\", \"commit_comment\": \"<optional one-line resolution note, bundled into the next commit message>\"}. Do the work, capture its witness, then resolve.",
         }).to_string();
@@ -401,7 +414,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         return (String::new(), format!("{} does not exist", path.display()), 1);
     }
 
-    if policy.reject_duplicate_witness {
+    if policy.reject_duplicate_witness && deviation_refuses("prd-resolve-duplicate-witness") {
     if let Some(w) = witness.as_ref() {
         let trimmed_w = w.trim();
         if trimmed_w.len() >= 24 {
@@ -417,6 +430,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                                     let body = serde_json::json!({
                                         "error": format!("prd-resolve refused: witness_evidence for {} is byte-identical to the witness already recorded for {}", id_target, other_id.unwrap_or("?")),
                                         "deviation_kind": "prd-resolve-duplicate-witness",
+                                        "deviation_severity": "deny",
                                         "prd_id": id_target,
                                         "duplicate_of": other_id,
                                         "hint": "Identical witness text across structurally distinct PRD rows is the rubber-stamp tell -- generic phrasing like 'code written and tested' copy-pasted across multiple ids means the rows were marked completed without each one's own real, distinct evidence. Every row's witness_evidence must be specific to what THAT row actually did: a distinct file:line, a distinct exec_js/browser output, a distinct codesearch hit. If the rows genuinely share one piece of evidence (rare), that itself is a sign they should have been one row, not three -- re-scope via prd-add instead of resolving separately with copy-pasted text.",
@@ -481,6 +495,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             let body = serde_json::json!({
                 "error": format!("prd id not found: {}", id_target),
                 "deviation_kind": "prd-resolve-unknown-id",
+                "deviation_severity": "deny",
                 "prd_id": id_target,
                 "known_ids": known_ids,
                 "suggested_id": suggested_id,

@@ -2,6 +2,7 @@ pub mod state;
 pub mod fsm;
 pub mod fsm_vendor;
 pub mod transitions;
+pub mod deviations;
 pub mod cas;
 pub mod mutables;
 pub mod memorize;

@@ -247,6 +247,8 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
             };
             crate::wasm_dispatch::emit_event(&format!("deviation.{kind}"), serde_json::json!({
                 "file": file,
+                "kind": kind,
+                "severity": super::deviations::effective_severity(kind).as_str(),
                 "edit_hash": edit_hash,
                 "witness_hash": witness_hash,
                 "reason": if witness_hash.is_empty() {

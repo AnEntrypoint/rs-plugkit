@@ -116,6 +116,18 @@ pub struct Policy {
     pub mutables_require_witness_evidence: bool,
     #[serde(default = "default_cas_max_attempts")]
     pub cas_max_attempts: u32,
+    /// Per-deviation-kind severity override, keyed by a name in
+    /// `orchestrator::deviations::DEVIATION_TABLE`, valued "deny" or "log".
+    ///
+    /// Empty by default, so every kind keeps the registry's declared severity and
+    /// the shipped behaviour is unchanged. A project promotes a log-only kind
+    /// (unsolicited-doc-created, prd-anti-shape, platform-search-drift, spool-poll,
+    /// complete-chain-poll, synthetic-test-file) to a hard denial by naming it here,
+    /// or demotes a denying one where the workflow legitimately differs. Unknown
+    /// keys and unparseable values fall back to the registry default and surface as
+    /// a non-fatal warning rather than silently weakening a gate.
+    #[serde(default = "default_deviation_severity")]
+    pub deviation_severity: std::collections::BTreeMap<String, String>,
 }
 
 fn default_toplevel_doc_allowlist() -> Vec<String> {
@@ -155,6 +167,9 @@ fn default_mutables_default_status() -> String { "unknown".to_string() }
 fn default_mutables_witness_status() -> String { "witnessed".to_string() }
 fn default_mutables_require_witness_evidence() -> bool { true }
 fn default_cas_max_attempts() -> u32 { 5 }
+fn default_deviation_severity() -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::new()
+}
 
 impl Default for Policy {
     fn default() -> Self {
@@ -179,6 +194,7 @@ impl Default for Policy {
             mutables_witness_status: default_mutables_witness_status(),
             mutables_require_witness_evidence: default_mutables_require_witness_evidence(),
             cas_max_attempts: default_cas_max_attempts(),
+            deviation_severity: default_deviation_severity(),
         }
     }
 }
@@ -243,7 +259,7 @@ impl Graph {
         "longgap_threshold_ms", "require_witness_evidence", "prd_closed_statuses",
         "mutables_resolved_statuses", "reject_duplicate_witness", "initial_phase",
         "terminal_phase", "mutables_default_status", "mutables_witness_status",
-        "mutables_require_witness_evidence", "cas_max_attempts",
+        "mutables_require_witness_evidence", "cas_max_attempts", "deviation_severity",
     ];
 
     /// Report policy keys this build does not recognise, so a typo is visible
@@ -256,6 +272,33 @@ impl Graph {
             .filter(|k| !Self::KNOWN_POLICY_KEYS.contains(&k.as_str()))
             .cloned()
             .collect()
+    }
+
+    /// Deviation-severity overrides this build cannot honour, as NON-FATAL warnings.
+    ///
+    /// Deliberately not part of `validate()`. A `validate()` problem REJECTS the whole
+    /// graph and falls back to the compiled default, which is the right response to a
+    /// referential break (an edge to a state that does not exist cannot be traversed).
+    /// It is the wrong response here: a single mistyped severity key would discard
+    /// every unrelated customisation in the file -- states, edges, gates, thresholds --
+    /// and silently weaken the FSM far beyond the one line that was wrong. Both
+    /// failures here are already self-limiting, because `effective_severity` falls back
+    /// to the registry default for an unknown kind or an unparseable value, so the
+    /// graph stays perfectly usable. Same reasoning, and same non-fatal treatment, as
+    /// `unknown_policy_keys`.
+    pub fn deviation_severity_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for unknown in super::deviations::unknown_severity_overrides(&self.policy.deviation_severity) {
+            warnings.push(format!(
+                "policy.deviation_severity names `{unknown}`, which is not a kind in the compiled deviation registry (see fsm/deviations.md for the valid set) -- this override configures nothing"
+            ));
+        }
+        for bad in super::deviations::invalid_severity_values(&self.policy.deviation_severity) {
+            warnings.push(format!(
+                "policy.deviation_severity entry `{bad}` is not a valid severity -- only \"deny\" and \"log\" are accepted; the registry default applies instead"
+            ));
+        }
+        warnings
     }
 
     pub fn validate(&self) -> Vec<String> {
@@ -644,6 +687,17 @@ fn load_tier(raw: &str, path: &str, tier: GraphTier) -> Option<Graph> {
                     "tier": tier.as_str(),
                     "keys": unknown,
                     "reason": "these policy keys are not recognised by this build and are being IGNORED -- a typo would look exactly like this. If they are from a newer build, this is expected and harmless.",
+                }));
+            }
+
+            let severity_warnings = g.deviation_severity_warnings();
+            if !severity_warnings.is_empty() {
+                #[cfg(target_arch = "wasm32")]
+                crate::wasm_dispatch::emit_event("fsm_graph_deviation_severity_warnings", serde_json::json!({
+                    "path": path,
+                    "tier": tier.as_str(),
+                    "warnings": severity_warnings,
+                    "reason": "these policy.deviation_severity entries name an unknown deviation kind or an invalid severity value, and are being IGNORED -- the registry default applies for each. Non-fatal by design: the rest of this graph, including its other severity overrides, is serving normally.",
                 }));
             }
 

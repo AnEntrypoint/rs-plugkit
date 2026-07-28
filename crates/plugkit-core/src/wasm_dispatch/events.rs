@@ -4,13 +4,22 @@ use super::host_abi::{host_log, host_now_ms, host_read};
 pub(crate) fn log_deviation_push(event: &str, detail: &str) {
     let msg = format!("plugkit gate: {} {}", event, detail);
     unsafe { host_log(2, msg.as_ptr(), msg.len() as u32); }
-    let evt_payload = json!({
+    let registered = crate::orchestrator::deviations::kind_is_known(event);
+    let severity = crate::orchestrator::deviations::effective_severity(event);
+    let mut evt_payload = json!({
         "event": format!("deviation.{}", event),
         "sub": "hook",
         "detail": detail,
+        "kind": event,
+        "severity": severity.as_str(),
         "ts": unsafe { host_now_ms() },
         "source": "rs-plugkit/git_push",
     });
+    if !registered {
+        if let Some(obj) = evt_payload.as_object_mut() {
+            obj.insert("unregistered_kind".to_string(), json!(true));
+        }
+    }
     let evt_line = format!("evt: {}", evt_payload);
     unsafe { host_log(1, evt_line.as_ptr(), evt_line.len() as u32); }
 }

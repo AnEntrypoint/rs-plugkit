@@ -115,17 +115,38 @@ fn running_tasks_exist() -> bool {
     super::task::any_running()
 }
 
+/// Shape a skipped-scan result according to the kind's effective severity.
+///
+/// Both residual skips have always returned rc=0 with a `scan: "skipped"` body --
+/// advisory, not refusing. That stays the registry default (Severity::Log), so an
+/// unconfigured project sees byte-identical behaviour. A project that promotes the
+/// kind gets the same body plus a non-empty stderr and rc=1, which is what turns an
+/// advisory skip into a refusal the caller cannot read past.
+fn deviation_scan_result(
+    payload: serde_json::Value,
+    severity: super::deviations::Severity,
+    reason: &str,
+) -> (String, String, i32) {
+    match severity {
+        super::deviations::Severity::Deny => (payload.to_string(), reason.to_string(), 1),
+        super::deviations::Severity::Log => (payload.to_string(), String::new(), 0),
+    }
+}
+
 pub fn handle_scan(_content: &str) -> (String, String, i32) {
     let marker = gm_dir().join("residual-check-fired");
 
     if !prd_empty_or_missing() {
+        let reason = crate::prose::resolve_and_mark("residual/prd-open", RESIDUAL_PRD_OPEN_DEFAULT);
+        let severity = super::deviations::effective_severity("residual-premature");
         let payload = serde_json::json!({
             "scan": "skipped",
-            "reason": crate::prose::resolve_and_mark("residual/prd-open", RESIDUAL_PRD_OPEN_DEFAULT),
+            "reason": reason.clone(),
             "deviation_kind": "residual-premature",
+            "deviation_severity": severity.as_str(),
             "next_dispatch": "prd-list"
         });
-        return (payload.to_string(), String::new(), 0);
+        return deviation_scan_result(payload, severity, &reason);
     }
 
     if browser_sessions_open() {
@@ -155,14 +176,16 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
         )
         .replace("{modified}", &modified.to_string())
         .replace("{untracked}", &untracked.to_string());
+        let severity = super::deviations::effective_severity("residual-dirty-tree");
         let payload = serde_json::json!({
             "scan": "skipped",
-            "reason": reason,
+            "reason": reason.clone(),
             "deviation_kind": "residual-dirty-tree",
+            "deviation_severity": severity.as_str(),
             "modified": modified,
             "untracked": untracked
         });
-        return (payload.to_string(), String::new(), 0);
+        return deviation_scan_result(payload, severity, &reason);
     }
 
     let marker_s = marker.to_string_lossy().to_string();

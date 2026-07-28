@@ -293,6 +293,9 @@ fn idev(event: &str, detail: &str) {
         "event": format!("deviation.{}", event),
         "sub": "hook",
         "detail": detail,
+        "kind": event,
+        "severity": crate::orchestrator::deviations::effective_severity(event).as_str(),
+        "registered": crate::orchestrator::deviations::kind_is_known(event),
         "ts": super::state::now_ms(),
         "source": "rs-plugkit/instruction",
     });
