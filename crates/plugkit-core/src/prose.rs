@@ -187,7 +187,16 @@ pub fn config_repo_text(key: &str) -> Option<String> {
 }
 
 fn read_from_config_repo(key: &str) -> SourceRead {
-    let cache = crate::config::SOURCE_CACHE_REL;
+    match read_from_cache_root(crate::config::SOURCE_CACHE_REL, key) {
+        SourceRead::NotConfigured | SourceRead::Miss => match crate::config::user_cache_root() {
+            Some(user_cache) => read_from_cache_root(&user_cache, key),
+            None => SourceRead::Miss,
+        },
+        other => other,
+    }
+}
+
+fn read_from_cache_root(cache: &str, key: &str) -> SourceRead {
     let dir = pkfs::read_to_string(&format!("{cache}/gm.config.json"))
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')).ok())
         .and_then(|v| v.get("instructions").and_then(|i| i.get("dir")).and_then(|d| d.as_str()).map(|s| s.to_string()))

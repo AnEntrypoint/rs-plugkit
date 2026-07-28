@@ -511,6 +511,10 @@ fn env_var(key: &str) -> Option<String> {
     std::env::var(key).ok()
 }
 
+pub fn user_cache_root() -> Option<String> {
+    home_dir().map(|home| join(&home, SOURCE_CACHE_REL))
+}
+
 fn home_dir() -> Option<String> {
     for key in ["HOME", "USERPROFILE"] {
         if let Some(s) = env_var(key) {

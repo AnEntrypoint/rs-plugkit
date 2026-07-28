@@ -176,12 +176,14 @@ fn normalize_lexically(path: &str) -> Vec<String> {
     out
 }
 
+fn is_rooted(p: &str) -> bool {
+    let s = p.replace('\\', "/");
+    s.starts_with('/') || s.chars().nth(1) == Some(':')
+}
+
 pub fn path_contained_within(root: &str, candidate: &str) -> bool {
     let c = candidate.replace('\\', "/");
-    if c.starts_with('/') || c.starts_with("//") {
-        return false;
-    }
-    if c.chars().nth(1) == Some(':') {
+    if is_rooted(&c) && !is_rooted(root) {
         return false;
     }
     let root_parts = normalize_lexically(root);
