@@ -56,13 +56,24 @@ jobs:
       - name: Pre-build steps
         if: inputs.pre_build_steps != ''
         shell: bash
-        run: ${{ inputs.pre_build_steps }}
+        env:
+          STEP_SCRIPT: ${{ inputs.pre_build_steps }}
+        run: |
+          printf '%s\n' "$STEP_SCRIPT" > /tmp/pre_build_steps.sh
+          bash /tmp/pre_build_steps.sh
 
       - name: Build
         shell: bash
+        env:
+          BUILD_ENV_SCRIPT: ${{ inputs.build_env }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
         run: |
-          ${{ inputs.build_env }}
-          ${{ inputs.build_command }}
+          printf '%s\n' "$BUILD_ENV_SCRIPT" > /tmp/build_env.sh
+          set -a
+          source /tmp/build_env.sh
+          set +a
+          printf '%s\n' "$BUILD_COMMAND" > /tmp/build_command.sh
+          bash /tmp/build_command.sh
 
       - name: Read version
         id: ver
