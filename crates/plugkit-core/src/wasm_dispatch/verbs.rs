@@ -1509,6 +1509,28 @@ fn branch_status(body: &Value) -> u64 {
     }))
 }
 
+fn resolve_ref(cwd: Option<&str>, refspec: &str) -> Option<String> {
+    let sha = exec_git_in(cwd, &format!("rev-parse {}", refspec)).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
+fn verify_push_landed(cwd: Option<&str>, branch: &str, local_head: &str, remote_before: Option<&str>) -> Result<(String, bool), String> {
+    let _ = git_call_argv(&["fetch", "origin", branch], cwd);
+    let remote_after = resolve_ref(cwd, &format!("origin/{}", branch));
+    let remote_after = match remote_after {
+        Some(s) => s,
+        None => return Err(format!("could not resolve origin/{} after push -- remote-tracking ref missing", branch)),
+    };
+    if remote_after != local_head {
+        return Err(format!(
+            "push claimed success but origin/{} ({}) does not match local HEAD ({}) after fetch -- remote did not actually advance to this commit",
+            branch, remote_after, local_head
+        ));
+    }
+    let already_current = remote_before.map(|b| b == local_head).unwrap_or(false);
+    Ok((remote_after, already_current))
+}
+
 fn git_push(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let explicit_branch = body.get("branch").and_then(|v| v.as_str()).map(String::from);
@@ -1554,6 +1576,12 @@ fn git_push(body: &Value) -> u64 {
             "next_action_hint": "Read porcelain field, decide stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. Do NOT retry git_push with the same dirty tree -- the gate will deny again.",
         }).to_string());
     }
+    let local_head_before = exec_git_in(repo.as_deref(), "rev-parse HEAD").trim().to_string();
+    if local_head_before.is_empty() {
+        return err("git_push", "could not resolve local HEAD before push -- refusing to proceed without a known starting point");
+    }
+    let _ = git_call_argv(&["fetch", "origin", &branch], repo.as_deref());
+    let remote_before = resolve_ref(repo.as_deref(), &format!("origin/{}", branch));
     let (mut push_out, mut push_succeeded) = exec_git_push_in(repo.as_deref(), &branch);
     let mut attempts = 0u32;
     let mut rebased = false;
@@ -1596,13 +1624,35 @@ fn git_push(body: &Value) -> u64 {
             "next_dispatch": "instruction",
         }).to_string());
     }
-    ok("git_push", json!({
-        "branch": branch,
-        "repo": repo,
-        "output": push_out,
-        "rebased": rebased,
-        "rebase_retries": attempts,
-    }))
+    let local_head_after = exec_git_in(repo.as_deref(), "rev-parse HEAD").trim().to_string();
+    match verify_push_landed(repo.as_deref(), &branch, &local_head_after, remote_before.as_deref()) {
+        Err(reason) => {
+            log_deviation_push("push-claimed-success-unverified", &branch);
+            pack(json!({
+                "ok": false,
+                "verb": "git_push",
+                "verification_failed": true,
+                "repo": repo,
+                "branch": branch,
+                "local_head": local_head_after,
+                "remote_before": remote_before,
+                "subprocess_output": push_out,
+                "reason": reason,
+                "next_dispatch": "instruction",
+            }).to_string())
+        }
+        Ok((remote_sha, already_current)) => ok("git_push", json!({
+            "branch": branch,
+            "repo": repo,
+            "output": push_out,
+            "rebased": rebased,
+            "rebase_retries": attempts,
+            "remote_advanced": !already_current,
+            "already_current": already_current,
+            "remote_sha": remote_sha,
+            "local_head": local_head_after,
+        })),
+    }
 }
 
 fn git_add(body: &Value) -> u64 {
@@ -1651,6 +1701,7 @@ fn git_commit(body: &Value) -> u64 {
     if git_porcelain_in(cwd).trim().is_empty() && !allow_empty {
         return ok("git_commit", json!({ "nothing_to_commit": true }));
     }
+    let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
     let _ = git_call_argv(&["add", "-A"], cwd);
     let bundled_message = bundle_prd_commit_comments(cwd, message);
     let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
@@ -1665,7 +1716,11 @@ fn git_commit(body: &Value) -> u64 {
         }
         return err("git_commit", if serr.is_empty() { sout } else { serr });
     }
-    let sha = exec_git_in(cwd, "rev-parse --short HEAD").trim().to_string();
+    let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    if head_after.is_empty() || head_after == head_before {
+        return err("git_commit", "commit reported success (exit 0) but HEAD did not move -- refusing to claim committed:true without a real new sha");
+    }
+    let sha = head_after[..head_after.len().min(10)].to_string();
     let summary = message.lines().next().unwrap_or("").to_string();
     ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary }))
 }
@@ -1679,6 +1734,7 @@ fn git_finalize(body: &Value) -> u64 {
     let mut committed = false;
     let mut sha = String::new();
     let mut summary = String::new();
+    let head_before_any_commit = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
 
     let dirty = !git_porcelain_in(cwd_ref).trim().is_empty();
     if dirty {
@@ -1696,8 +1752,12 @@ fn git_finalize(body: &Value) -> u64 {
                 return err("git_finalize", &format!("commit failed: {}", if serr.is_empty() { sout } else { serr }));
             }
         } else {
+            let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
+            if head_after.is_empty() || head_after == head_before_any_commit {
+                return err("git_finalize", "commit reported success (exit 0) but HEAD did not move -- refusing to claim committed:true without a real new sha");
+            }
             committed = true;
-            sha = exec_git_in(cwd_ref, "rev-parse --short HEAD").trim().to_string();
+            sha = head_after[..head_after.len().min(10)].to_string();
             summary = message.lines().next().unwrap_or("").to_string();
             emit_event("git.commit", json!({ "sha": sha, "summary": summary, "repo": repo }));
             steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
@@ -1710,35 +1770,40 @@ fn git_finalize(body: &Value) -> u64 {
             let _ = git_call_argv(&["add", "-A"], cwd_ref);
             let cr = git_call_argv(&["commit", "--allow-empty", "-m", bundled_message.as_str()], cwd_ref);
             let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-            if ccode == 0 {
+            let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
+            if ccode == 0 && !head_after.is_empty() && head_after != head_before_any_commit {
                 committed = true;
-                sha = exec_git_in(cwd_ref, "rev-parse --short HEAD").trim().to_string();
+                sha = head_after[..head_after.len().min(10)].to_string();
                 summary = bundled_message.lines().next().unwrap_or("").to_string();
                 steps.push(json!({ "step": "commit", "sha": sha, "summary": summary, "flushed_pending_prd_notes": true }));
             }
         }
+    }
+
+    if !committed {
         let ahead_result = git_call("rev-list --count @{u}..HEAD", cwd_ref);
         let ahead_code = ahead_result.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         let ahead_stderr = ahead_result.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
         let no_upstream = ahead_code != 0 && (ahead_stderr.contains("no upstream") || ahead_stderr.contains("unknown revision") || ahead_stderr.contains("@{u}"));
-        if committed {
-        } else if no_upstream {
-            sha = exec_git_in(cwd_ref, "rev-parse --short HEAD").trim().to_string();
-            summary = exec_git_in(cwd_ref, "log -1 --pretty=%s").trim().to_string();
-            committed = true;
-            steps.push(json!({ "step": "commit", "already_committed": true, "sha": sha, "summary": summary, "no_upstream": true }));
-        } else {
-            let ahead = ahead_result.get("stdout").and_then(|x| x.as_str()).unwrap_or("0").trim().to_string();
-            let ahead_n: u64 = ahead.parse().unwrap_or(0);
-            if ahead_n > 0 {
-                sha = exec_git_in(cwd_ref, "rev-parse --short HEAD").trim().to_string();
-                summary = exec_git_in(cwd_ref, "log -1 --pretty=%s").trim().to_string();
-                committed = true;
-                steps.push(json!({ "step": "commit", "already_committed": true, "sha": sha, "summary": summary, "ahead": ahead_n }));
-            } else {
-                steps.push(json!({ "step": "commit", "nothing_to_commit": true }));
-            }
+        let ahead_n: u64 = ahead_result.get("stdout").and_then(|x| x.as_str()).unwrap_or("0").trim().parse().unwrap_or(0);
+        if !dirty && !no_upstream && ahead_n == 0 {
+            return ok("git_finalize", json!({
+                "nothing_to_commit": true,
+                "committed": false,
+                "pushed": false,
+                "steps": [{"step": "commit", "nothing_to_commit": true}],
+            }));
         }
+        sha = head_before_any_commit[..head_before_any_commit.len().min(10)].to_string();
+        summary = exec_git_in(cwd_ref, "log -1 --pretty=%s").trim().to_string();
+        steps.push(json!({
+            "step": "commit",
+            "nothing_new_to_commit": true,
+            "already_ahead_of_upstream": true,
+            "sha": sha,
+            "summary": summary,
+            "no_upstream": no_upstream,
+        }));
     }
 
     let leftover = git_porcelain_in(cwd_ref);
@@ -1763,14 +1828,21 @@ fn git_finalize(body: &Value) -> u64 {
         }).to_string());
     }
     emit_event("git.push", json!({ "repo": repo, "sha": sha }));
-    let branch = push_resp.get("data").and_then(|d| d.get("branch")).and_then(|b| b.as_str()).unwrap_or("").to_string();
-    steps.push(json!({ "step": "push", "branch": branch }));
+    let push_data = push_resp.get("data");
+    let branch = push_data.and_then(|d| d.get("branch")).and_then(|b| b.as_str()).unwrap_or("").to_string();
+    let remote_advanced = push_data.and_then(|d| d.get("remote_advanced")).and_then(|b| b.as_bool()).unwrap_or(false);
+    let already_current = push_data.and_then(|d| d.get("already_current")).and_then(|b| b.as_bool()).unwrap_or(false);
+    let remote_sha = push_data.and_then(|d| d.get("remote_sha")).and_then(|s| s.as_str()).unwrap_or("").to_string();
+    steps.push(json!({ "step": "push", "branch": branch, "remote_advanced": remote_advanced, "already_current": already_current }));
     ok("git_finalize", json!({
         "committed": committed,
         "pushed": true,
         "sha": sha,
         "summary": summary,
         "branch": branch,
+        "remote_advanced": remote_advanced,
+        "already_current": already_current,
+        "remote_sha": remote_sha,
         "steps": steps,
     }))
 }
