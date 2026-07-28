@@ -329,6 +329,13 @@ fn host_kv_query_raw(namespace: &str, query: &str) -> Value {
 
 const MIGRATE_BUDGET_MS: u64 = 2000;
 
+/// How many distinct row-write failures the migration reports individually
+/// before falling back to the aggregate count. Bounded so one systematically
+/// broken namespace cannot flood the event stream, and independent of the
+/// unrelated skip counters so a malformed row early in the loop cannot
+/// suppress the reporting of genuine write failures after it.
+const MIGRATE_REPORTED_FAILURES: u32 = 5;
+
 pub fn migrate_namespace_from_flat_json(namespace: &str, now_ms: i64) -> Result<Value, String> {
     migrate_namespace_from_flat_json_cfg(namespace, now_ms, &default_cfg())
 }
@@ -378,6 +385,7 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut migrated = 0u32;
     let mut skipped = 0u32;
+    let mut write_failures = 0u32;
     let mut deferred = 0u32;
     for entry in &entries {
         let key = match entry.get("key").and_then(|k| k.as_str()) { Some(k) => k, None => { skipped += 1; continue; } };
@@ -397,13 +405,14 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
         match write_cfg(namespace, key, &text, &embedding, now_ms, cfg) {
             Ok(()) => migrated += 1,
             Err(e) => {
-                if skipped == 0 {
+                if write_failures < MIGRATE_REPORTED_FAILURES {
                     crate::wasm_dispatch::emit_event("rssearch_vectors_migrate_row_failed", json!({
                         "namespace": namespace,
                         "key": key,
                         "error": e,
                     }));
                 }
+                write_failures += 1;
                 skipped += 1;
             }
         }
@@ -412,6 +421,7 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
         "namespace": namespace,
         "migrated_count": migrated,
         "skipped_count": skipped,
+        "write_failure_count": write_failures,
         "deferred_count": deferred,
     }));
     Ok(json!({ "migrated": true, "namespace": namespace, "migrated_count": migrated, "skipped_count": skipped, "deferred_count": deferred }))
