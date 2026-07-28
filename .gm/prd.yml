@@ -1,0 +1,97 @@
+- id: reproduce-config-tier-gap
+  subject: 'Reproduce the reported gap with the real resolver before editing: key gates/long-gap-no-instruction against a gm-config-shaped cache must currently miss the top-level gates/ dir and fall through to the compiled default'
+  witness: 'Real prose::resolve_detailed run natively against a cache dir populated from gm-config''s own tracked tree: gates/long-gap-no-instruction -> tier=compiled_default, residual/prd-open -> compiled_default, residual/dirty-tree -> compiled_default, while entry/plan/verify -> source_repo. The config-repo tier is unreachable for both message namespaces exactly as reported.'
+  status: completed
+  commit_comment: Reproduced the config-repo-tier gap for gates/* and residual/* keys against the real resolver
+- id: native-prose-harness
+  subject: 'Build an out-of-repo native harness that compiles the REAL prose.rs and config_path.rs via #[path] and supplies a real-filesystem pkfs, so resolve_detailed can be exercised directly at the Rust level'
+  witness: cargo build of the out-of-repo harness succeeded; its dead-code warnings cite /home/user/rs-plugkit/crates/plugkit-core/src/prose.rs and config_path.rs by absolute path, proving the REAL sources are the compilation units. Harness supplies only pkfs (real std::fs), a config shim carrying the real SOURCE_CACHE_REL value, and now_ms.
+  status: completed
+  commit_comment: Native harness compiles the real prose.rs/config_path.rs with a real-filesystem pkfs
+- id: implement-messages-dir-resolution
+  subject: Teach read_from_cache_root to honor messages.gates_dir for gates/* keys and messages.residual_dir for residual/* keys, using the post-prefix remainder as the file stem, falling back to instructions.dir when the field is absent
+  witness: 'read_from_cache_root now parses gm.config.json once, then picks a CacheLocation via message_location (gates/ -> messages.gates_dir, residual/ -> messages.residual_dir, remainder after the namespace becomes the file stem) falling back to instructions_location. Live: gates/long-gap-no-instruction and residual/prd-open both flipped from tier=compiled_default to tier=source_repo, served text byte-identical to the cache files.'
+  status: completed
+  commit_comment: read_from_cache_root honors messages.gates_dir and messages.residual_dir for the gates/ and residual/ key namespaces
+- id: witness-gates-key-config-tier
+  subject: 'Witness a gates key resolving FROM the config-repo cache tier after the fix: gates/long-gap-no-instruction returns the cache file text with Outcome::SourceRepo'
+  witness: 'A1/A2 against a cache populated from gm-config''s tracked tree: key gates/long-gap-no-instruction returns tier=source_repo and served text equals the on-disk gates/long-gap-no-instruction.md trimmed byte-for-byte (starts ''long-gap-no-instruction: {gap_ms}ms since last `instruction`'').'
+  status: completed
+  commit_comment: gates/* keys now resolve from the config-repo tier
+- id: witness-local-override-wins
+  subject: 'Witness three-tier order intact: a project-local .gm/instructions/gates/<key>.md still beats the config-repo cache file for the same key, returning Outcome::LocalOverride'
+  witness: 'D1/D2/D3: with the stock gm-config cache present AND .gm/instructions/gates/long-gap-no-instruction.md, .gm/instructions/residual/prd-open.md, .gm/instructions/entry.md planted, all three return tier=local_override serving the local text, so the project-vendored tier still precedes the config-repo tier for message namespaces and phase prose alike.'
+  status: completed
+  commit_comment: 'Three-tier order intact: project-local override still beats the config-repo tier'
+- id: witness-residual-key-config-tier
+  subject: 'Witness a residual key resolving FROM the config-repo cache tier after the fix: residual/prd-open returns the cache file text with Outcome::SourceRepo'
+  witness: 'A3/A4: key residual/prd-open returns tier=source_repo with served text equal to the on-disk residual/prd-open.md byte-for-byte (''PRD still has items; complete or remove them before residual...''). E2 additionally proves residual_dir is genuinely read rather than hardcoded: relocating it to copy/residual served RELOCATED RESIDUAL.'
+  status: completed
+  commit_comment: residual/* keys now resolve from the config-repo tier
+- id: witness-absent-fields-fallback
+  subject: Witness that a gm.config.json with NO messages block (and one with messages present but gates_dir/residual_dir missing) resolves gates/residual keys exactly as before, at {cache}/{instructions.dir}/{key}.md
+  witness: 'B1/B2: gm.config.json with the messages block deleted returns gates and residual keys at tier=compiled_default, identical to pre-change behaviour. B4: with messages absent, a file planted at <cache>/<instructions.dir>/gates/<key>.md IS served (tier=source_repo, ''LEGACY NESTED UNDER instructions.dir''), proving the old path is still the fallback rather than merely unreachable. C1/C2: messages present carrying only residual_dir leaves gates on the old path while residual resolves from the config tier, so the fallback is per-field not per-block.'
+  status: completed
+  commit_comment: Absent gates_dir/residual_dir falls back per-field to the previous instructions.dir path
+- id: witness-phase-prose-unchanged
+  subject: Witness that phase-prose keys (entry, plan, execute, emit, verify, consolidate, browser, update_docs) still resolve from {cache}/{instructions.dir}/{key}.md, byte-identical before and after the change
+  witness: 'A5: all eight phase-prose keys (entry, plan, execute, emit, verify, consolidate, browser, update_docs) return tier=source_repo with served text byte-identical to <cache>/prose/<key>.md. B3 confirms they are unaffected when the messages block is absent, and D3 that a local prose override still wins. message_location returns None for any key lacking a gates/ or residual/ prefix, so phase keys never enter the new branch.'
+  status: completed
+  commit_comment: Phase-prose resolution byte-identical before and after the change
+- id: confirm-fsm-graph-untouched
+  subject: Confirm fsm.graph resolution is cache-ROOT-relative and never routes through prose::read_from_cache_root, so this change cannot affect it
+  witness: 'Repo-wide grep for SOURCE_CACHE_REL returns exactly two readers: fsm.rs:703/705 (source_repo_graph_path, which joins the cache root with the config fsm.graph pointer directly and never calls into prose) and prose.rs:190. The edit is confined to read_from_cache_root plus two new private helpers, so no fsm code path changed; git diff --stat shows one file, 55 insertions 11 deletions, all inside prose.rs.'
+  status: completed
+  commit_comment: fsm.graph stays cache-root-relative and is untouched by this change
+- id: unsafe-messages-dir-rejected
+  subject: An unsafe messages.gates_dir/residual_dir (traversal, backslash, absolute) must return SourceRead::Broken naming the offending FIELD, never silently fall through or interpolate, matching how instructions.dir is already guarded
+  witness: 'F1-F5: gates_dir ''../../../etc'' and residual_dir ''ok\\bad'' both yield tier=degraded with reasons ''.gm/config-source-cache/gm.config.json: messages.gates_dir is not a safe relative path'' and ''... messages.residual_dir is not a safe relative path'' -- the offending FIELD is named, not the generic instructions.dir it previously always said -- and the compiled default is still served rather than the resolution failing.'
+  status: completed
+  commit_comment: Unsafe messages.gates_dir/residual_dir is refused and names the offending field
+- id: containment-check-still-applies
+  subject: path_contained_within must still gate the composed path when a messages dir supplies it, so a dir that escapes the cache root is refused rather than read
+  witness: 'The path_contained_within(cache, &full) guard is retained verbatim on the single composed path, now reporting the declaring field rather than a hardcoded instructions.dir label; both the message and instructions branches converge on that one composed path so neither can bypass it. Honest limit: as before this change, validate_source_path rejects ''..'' components first, so the containment branch is defence-in-depth that fires only if that validator ever loosens -- F1 exercises the traversal input and is caught by the validator, which is the pre-existing ordering, not a regression.'
+  status: completed
+  commit_comment: Containment guard preserved on the composed path for both directory sources
+- id: degenerate-key-and-dir-shapes
+  subject: 'Degenerate shapes must not misresolve: bare key ''gates'' with no slash, key ''gates/'' with empty remainder, empty-string gates_dir, non-string gates_dir, and a deeper key like gates/a/b'
+  witness: 'G1 empty gates_dir reads at the cache root (served ROOT LEVEL GATE). G2 non-string residual_dir (12345) falls back to instructions.dir. G3 bare key ''gates'' is not treated as a namespace. G4 key ''gates/'' is rejected upstream by validate_prose_key (''prose key: empty path component'') so an empty stem can never produce a bare-directory read. G5b a deeper key residual/a/b reads <cache>/<residual_dir>/a/b.md (served DEEP STEM PRESERVED) and specifically NOT the decoy planted at <cache>/prose/residual/a/b.md, proving the full post-namespace remainder is kept as the stem.'
+  status: completed
+  commit_comment: Degenerate key and directory shapes resolve safely
+- id: user-cache-tier-parity
+  subject: The user-wide cache root fallback in read_from_config_repo must gain the same messages-dir behavior as the project cache root, since both go through read_from_cache_root
+  witness: 'H1-H3: with the project cache removed entirely and gm-config''s tree materialized at $HOME/.gm/config-source-cache instead, gates/long-gap-no-instruction, residual/prd-open and entry all return tier=source_repo. Both roots share read_from_cache_root, so the new behaviour reaches the user-wide tier with no separate wiring.'
+  status: completed
+  commit_comment: User-wide cache root gains the same messages-dir behaviour
+- id: cargo-check-both-targets
+  subject: cargo check must pass for the real crate after the edit; attempt the wasm32 target too and record honestly if the toolchain target is unavailable in this session
+  witness: cargo check --target wasm32-wasip1 --features slim (the production target) succeeds on the real crate with only four pre-existing warnings and zero errors; grep for prose.rs in that output returns NO PROSE MENTION. Native x86_64 cargo check fails with 19 error lines, but git stash of prose.rs alone shows an identical 19 with prose.rs unmentioned in both, so the native failure is pre-existing (config.rs calls the wasm32-gated resolve_and_report unconditionally) and this edit adds nothing to it. rustup target add wasm32-wasip1 succeeded in-session.
+  status: completed
+  commit_comment: Verified on wasm32-wasip1; native check failure confirmed pre-existing and unrelated
+- id: style-compliance-audit
+  subject: 'Audit the diff for ecosystem style: no new code comments, no non-ASCII decorative glyphs, no test files or test directories added to the repo, and no stale doc sentence left describing the old single-directory layout'
+  witness: 'Diff scan of the 55 added lines: 0 new non-doc code comments, 0 non-ASCII characters, 0 test files or directories anywhere in git status. The only 7 added doc-comment lines are the rewrite of the pre-existing config_repo_text doc block, changed solely because the change would otherwise have left it stating that instructions.dir alone determines the layout -- a stale doc being worse than none. No new documentation was introduced.'
+  status: completed
+  commit_comment: No new comments, no non-ASCII, no test files; one pre-existing doc block kept accurate
+- id: harness-outside-repo-worktree-clean
+  subject: The verification harness must live entirely outside the repo tree and leave git status --porcelain showing only the intended source edit, so no scratch artifact is committed
+  witness: 'The harness, fixtures and verification scripts all live under the session scratchpad at /tmp/claude-0/.../scratchpad, referencing the repo sources only by absolute #[path]. git status --porcelain in rs-plugkit shows exactly two entries: '' M crates/plugkit-core/src/prose.rs'' and ''?? .gm/prd.yml'', with no scratch artifact inside the repo.'
+  status: completed
+  commit_comment: Verification harness lives entirely outside the repo tree
+- id: commit-push-feature-branch
+  subject: Commit and push to claude/project-structure-mermaid-7pwny0 only; never main, no force-push, no history rewrite, no submodule pin change
+  witness: explicit task constraint; current branch is already claude/project-structure-mermaid-7pwny0
+  status: pending
+- id: no-ci-marker-fabrication
+  subject: GitHub API is blocked by org policy this session, so no workflow run can be observed; the .ci-validated marker must NOT be written and the unverifiable step must be reported honestly rather than papered over
+  witness: explicit task constraint; COMPLETE gate normally requires .ci-validated with current HEAD sha
+  status: pending
+- id: codesearch-embedder-unavailable
+  subject: 'Noticed: codesearch and recall are both dead in this environment because the bert plugin resolves to unknown_plugin, so semantic discovery degraded to nothing and exec_js had to carry discovery; record the gap rather than let it evaporate'
+  witness: watcher.log evt embed_query_failed plugin_failure=unknown_plugin and rssearch_vector_hits_skipped on every codesearch/recall dispatch this session
+  status: pending
+- id: source-json-tier-bypass-observed
+  subject: 'Noticed during the adversarial sweep: when .gm/instructions/source.json exists, read_from_source_repo serves from .gm/instructions-source-cache and never consults the gm.config.json cache tier for ANY key, prose included. Determine whether this change affects it and record the behaviour honestly.'
+  witness: 'N1/N2: with .gm/instructions/source.json present and a cold instructions-source-cache, gates/long-gap-no-instruction AND entry both return tier=compiled_default even though a fully populated gm.config.json cache sits alongside. This is pre-existing routing in read_from_source_repo (it delegates to read_from_config_repo only when source.json is absent) and is byte-identical before and after this change, since the edit is confined to read_from_cache_root. That tier has no gm.config.json to read messages from, so it is genuinely outside the reported defect rather than a missed case; recorded so it is not rediscovered as a regression.'
+  status: completed
+  commit_comment: 'Confirmed the legacy source.json tier is unaffected: it never consulted gm.config.json, before or after'

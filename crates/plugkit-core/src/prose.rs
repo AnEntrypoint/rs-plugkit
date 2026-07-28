@@ -176,9 +176,13 @@ enum SourceRead {
 /// project could point at a config repo, have it cloned and serving for the
 /// config chain, and still receive compiled prose forever.
 ///
-/// The layout comes from the repo's own `gm.config.json`, whose `instructions`
-/// block declares `dir` (default `prose`) alongside the key inventory, so the
-/// repo describes its own shape rather than this module assuming one.
+/// The layout comes from the repo's own `gm.config.json`: the `instructions`
+/// block declares `dir` (default `prose`) alongside the key inventory, and the
+/// `messages` block declares `gates_dir` and `residual_dir` for the `gates/`
+/// and `residual/` key namespaces, so the repo describes its own shape rather
+/// than this module assuming one. A namespace whose directory is not declared
+/// falls back to `instructions.dir`, which is what every pre-`messages` config
+/// repo relies on.
 pub fn config_repo_text(key: &str) -> Option<String> {
     match read_from_config_repo(key) {
         SourceRead::Hit(text) => Some(text),
@@ -196,23 +200,63 @@ fn read_from_config_repo(key: &str) -> SourceRead {
     }
 }
 
+const MESSAGE_NAMESPACES: &[(&str, &str)] = &[("gates/", "gates_dir"), ("residual/", "residual_dir")];
+
+struct CacheLocation {
+    dir: String,
+    stem: String,
+    declaring_field: String,
+}
+
+fn instructions_location(config: Option<&serde_json::Value>, key: &str) -> CacheLocation {
+    CacheLocation {
+        dir: config
+            .and_then(|v| v.get("instructions"))
+            .and_then(|i| i.get("dir"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("prose")
+            .to_string(),
+        stem: key.to_string(),
+        declaring_field: "instructions.dir".to_string(),
+    }
+}
+
+fn message_location(config: Option<&serde_json::Value>, key: &str) -> Option<CacheLocation> {
+    let messages = config?.get("messages")?;
+    for &(namespace, field) in MESSAGE_NAMESPACES {
+        let Some(stem) = key.strip_prefix(namespace) else {
+            continue;
+        };
+        if stem.is_empty() {
+            return None;
+        }
+        let dir = messages.get(field).and_then(|d| d.as_str())?;
+        return Some(CacheLocation {
+            dir: dir.to_string(),
+            stem: stem.to_string(),
+            declaring_field: format!("messages.{field}"),
+        });
+    }
+    None
+}
+
 fn read_from_cache_root(cache: &str, key: &str) -> SourceRead {
-    let dir = pkfs::read_to_string(&format!("{cache}/gm.config.json"))
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')).ok())
-        .and_then(|v| v.get("instructions").and_then(|i| i.get("dir")).and_then(|d| d.as_str()).map(|s| s.to_string()))
-        .unwrap_or_else(|| "prose".to_string());
+    let config = pkfs::read_to_string(&format!("{cache}/gm.config.json"))
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')).ok());
+    let CacheLocation { dir, stem, declaring_field } = message_location(config.as_ref(), key)
+        .unwrap_or_else(|| instructions_location(config.as_ref(), key));
     if validate_source_path(&dir).is_err() {
-        return SourceRead::Broken(format!("{cache}/gm.config.json: instructions.dir is not a safe relative path"));
+        return SourceRead::Broken(format!("{cache}/gm.config.json: {declaring_field} is not a safe relative path"));
     }
     let trimmed = dir.trim().trim_matches('/');
     let full = if trimmed.is_empty() {
-        format!("{cache}/{key}.md")
+        format!("{cache}/{stem}.md")
     } else {
-        format!("{cache}/{trimmed}/{key}.md")
+        format!("{cache}/{trimmed}/{stem}.md")
     };
     if !crate::config_path::path_contained_within(cache, &full) {
         return SourceRead::Broken(format!(
-            "{cache}/gm.config.json: instructions.dir resolves to {full}, which escapes {cache}"
+            "{cache}/gm.config.json: {declaring_field} resolves to {full}, which escapes {cache}"
         ));
     }
     match read_clean(&full) {
