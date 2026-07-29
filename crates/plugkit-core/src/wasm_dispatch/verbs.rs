@@ -1789,7 +1789,21 @@ fn git_log(body: &Value) -> u64 {
         .or_else(|| body.get("count").and_then(|v| v.as_u64()))
         .unwrap_or(10);
     let nflag = format!("-{}", count);
-    let r = git_call_argv(&["log", &nflag, "--oneline", "--no-color"], cwd);
+    let range = body.get("range").and_then(|v| v.as_str())
+        .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+        .unwrap_or("").trim();
+    let mut argv: Vec<&str> = vec!["log", &nflag, "--oneline", "--no-color"];
+    if !range.is_empty() { argv.push(range); }
+    let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 0 {
+        let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+        return err_json("git_log", json!({
+            "error": stderr,
+            "range": range,
+            "hint": "git rejected the range; check both endpoints exist locally (a remote-tracking ref may need git_fetch first)"
+        }));
+    }
     let out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
     let commits: Vec<Value> = out.lines().filter(|l| !l.is_empty()).map(|l| {
         let mut it = l.splitn(2, ' ');
@@ -1804,14 +1818,29 @@ fn git_diff(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let staged = body.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
     let path = body.get("path").and_then(|v| v.as_str());
+    let range = body.get("range").and_then(|v| v.as_str())
+        .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+        .unwrap_or("").trim();
+    let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
     let mut argv: Vec<&str> = vec!["diff", "--no-color"];
     if staged { argv.push("--staged"); }
+    if stat { argv.push("--stat"); }
+    if !range.is_empty() { argv.push(range); }
     if let Some(p) = path { argv.push("--"); argv.push(p); }
     let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 0 {
+        let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+        return err_json("git_diff", json!({
+            "error": stderr,
+            "range": range,
+            "hint": "git rejected the range; an empty diff must never be inferred from a rejected argument -- check both endpoints exist locally"
+        }));
+    }
     let mut diff = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let truncated = diff.len() > 60000;
     if truncated { diff.truncate(60000); }
-    ok("git_diff", json!({ "diff": diff, "truncated": truncated }))
+    ok("git_diff", json!({ "diff": diff, "truncated": truncated, "range": range }))
 }
 
 fn git_show(body: &Value) -> u64 {
@@ -1858,6 +1887,82 @@ fn git_checkout(body: &Value) -> u64 {
     let argv: Vec<&str> = if create { vec!["checkout", "-b", refspec] } else { vec!["checkout", refspec] };
     if let Err(e) = run_git_checked(&argv, cwd, "git_checkout", "checkout failed") { return e; }
     ok("git_checkout", json!({ "checked_out": refspec, "created": create }))
+}
+
+fn git_merge(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if refspec.is_empty() { return err("git_merge", "ref required"); }
+    let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    let ff_only = body.get("ff_only").and_then(|v| v.as_bool()).unwrap_or(false);
+    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let mut argv: Vec<&str> = vec!["merge", "--no-edit"];
+    if ff_only { argv.push("--ff-only"); }
+    if !message.is_empty() { argv.push("-m"); argv.push(message); }
+    argv.push(refspec);
+    let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let out = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 {
+        let conflicts: Vec<String> = exec_git_in(cwd, "diff --name-only --diff-filter=U")
+            .lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        return err_json("git_merge", json!({
+            "error": out,
+            "conflicted": !conflicts.is_empty(),
+            "conflicts": conflicts,
+            "head": head_before,
+            "hint": "resolve each conflicted path, git_add them, then git_commit; or git_merge_abort to restore the pre-merge HEAD"
+        }));
+    }
+    let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    ok("git_merge", json!({
+        "merged": refspec,
+        "head_before": head_before,
+        "head_after": head_after,
+        "already_up_to_date": head_before == head_after,
+        "fast_forward": out.contains("Fast-forward"),
+        "output": out
+    }))
+}
+
+fn git_merge_abort(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    if let Err(e) = run_git_checked(&["merge", "--abort"], cwd, "git_merge_abort", "merge abort failed") { return e; }
+    ok("git_merge_abort", json!({ "aborted": true, "head": exec_git_in(cwd, "rev-parse HEAD").trim() }))
+}
+
+fn git_branch_delete(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let name = body.get("branch").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if name.is_empty() { return err("git_branch_delete", "branch required"); }
+    let remote = body.get("remote").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    if remote {
+        let remote_name = body.get("remote_name").and_then(|v| v.as_str()).unwrap_or("origin");
+        let r = git_call_argv(&["push", remote_name, "--delete", name], cwd);
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        let out = format!("{}{}",
+            r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+            r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+        if code != 0 { return err("git_branch_delete", &out); }
+        return ok("git_branch_delete", json!({ "deleted": name, "scope": "remote", "remote": remote_name, "output": out }));
+    }
+    let flag = if force { "-D" } else { "-d" };
+    let r = git_call_argv(&["branch", flag, name], cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let out = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 {
+        return err_json("git_branch_delete", json!({
+            "error": out,
+            "unmerged_guard": !force && out.contains("not fully merged"),
+            "hint": "git refused because the branch holds commits reachable from nowhere else; merge it first, or pass force true only if that work is genuinely disposable"
+        }));
+    }
+    ok("git_branch_delete", json!({ "deleted": name, "scope": "local", "forced": force, "output": out }))
 }
 
 fn git_rm(body: &Value) -> u64 {
@@ -2086,6 +2191,9 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_fetch" => git_fetch(&body),
         "git_branch" => git_branch(&body),
         "git_checkout" => git_checkout(&body),
+        "git_merge" => git_merge(&body),
+        "git_merge_abort" => git_merge_abort(&body),
+        "git_branch_delete" => git_branch_delete(&body),
         "git_rm" => git_rm(&body),
         "git_revert" => git_revert(&body),
         "git_reset" => git_reset(&body),
