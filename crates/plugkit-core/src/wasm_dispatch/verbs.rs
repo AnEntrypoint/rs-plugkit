@@ -2085,6 +2085,17 @@ fn request_fingerprint(verb: &str, body_s: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+fn verb_body_must_be_json(verb: &str) -> bool {
+    !matches!(
+        verb,
+        "browser"
+            | "exec_js" | "nodejs" | "javascript" | "node" | "js"
+            | "python" | "py"
+            | "bash" | "sh" | "shell" | "zsh"
+            | "powershell" | "ps1"
+    )
+}
+
 fn stamp_request_identity(packed: u64, fingerprint: &str, body_parse_failed: bool) -> u64 {
     let mut value = super::host_abi::unpack_to_value(packed);
     if let Some(obj) = value.as_object_mut() {
@@ -2100,7 +2111,9 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     let verb = read_str(verb_ptr as *const u8, verb_len);
     let body_s = read_str(body_ptr as *const u8, body_len);
     let fingerprint = request_fingerprint(&verb, &body_s);
-    let body_parse_failed = !body_s.is_empty() && serde_json::from_str::<Value>(&body_s).is_err();
+    let body_parse_failed = verb_body_must_be_json(&verb)
+        && !body_s.is_empty()
+        && serde_json::from_str::<Value>(&body_s).is_err();
     let body: Value = if body_s.is_empty() { Value::Null } else {
         serde_json::from_str(&body_s).unwrap_or(Value::Null)
     };
