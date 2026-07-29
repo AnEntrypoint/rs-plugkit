@@ -35,14 +35,32 @@ const DAEMON_PROJECT_CONFIG_EXAMPLE: &str = r#"{
 "#;
 
 const SOURCE_SPEC_EXAMPLE: &str = r#"{
-  "_comment": "Scaffolded INERT, with an .example suffix, because activating it changes where this project's workflow comes from. Rename to .gm/instructions/source.json to apply it to this project -- that is the only path prose::resolve reads; there is no home-directory tier. A file that is present but unreachable degrades to the compiled default -- it never hard-fails.",
+  "_comment": "Scaffolded INERT, with an .example suffix, because activating it changes where this project's PROSE comes from (phase text, gate-denial and residual-scan messages). Rename to .gm/instructions/source.json to apply it to this project -- that is the only path prose::resolve reads; there is no home-directory tier. A file that is present but unreachable degrades to the compiled default -- it never hard-fails. This spec does NOT cover the FSM graph itself (states/edges/gates/policy) or gate hooks -- see .gm/config.source.json.example and .gm/gm.config.json.example for that.",
   "_tiers": "Resolution order, highest first: (1) project-vendored .gm/instructions/<key>.md, (2) this spec's source repo cache, (3) compiled defaults.",
   "_shadowing": "A vendored tier-1 file WINS over whatever this repo supplies for the same key. fsm-vendor writes compiled defaults into .gm/instructions/, so running it here inertises this repo's prose for every key it wrote. Delete the local file to fall back to the repo.",
   "_debounce": "The source repo is re-synced at most once per plugin_update_poll_interval_secs (default 600s) per project, so a fresh push is not picked up immediately.",
-  "_hooks": "Hooks are refused from this tier by design: a hook is arbitrary JS run at gate evaluation, and an auto-updating remote must not gain code execution. A repo-supplied graph can only bind gates to the compiled predicates.",
   "repo": "https://github.com/AnEntrypoint/gm-config",
   "branch": "main",
   "path": ""
+}
+"#;
+
+const CONFIG_SOURCE_SPEC_EXAMPLE: &str = r#"{
+  "_comment": "Scaffolded INERT, with an .example suffix, because activating it changes where this project's FSM GRAPH, POLICY, and GATE HOOKS come from -- a much bigger authority grant than .gm/instructions/source.json's prose-only scope. Rename to .gm/config.source.json (this project only) or ~/.gm/config.source.json (every project this user runs, lower priority than the project file) to activate.",
+  "_tiers": "Resolution order, highest first: (1) .gm/gm.config.json (a real config committed into this project), (2) .gm/config.source.json (this file, activated), (3) ~/.gm/config.source.json (user-wide), (4) compiled defaults. See .gm/gm.config.json.example for the file this spec's repo is expected to publish (fsm.graph names the relative path to a graph.json within that repo).",
+  "_debounce": "Re-synced at most once per plugin_update_poll_interval_secs (default 600s) per project.",
+  "_hooks": "WARNING: a graph pulled through this tier can carry gate hooks -- arbitrary JS executed on this machine at every gate evaluation. CONSEQUENCE: anyone who can push to this repo, or compromise it, gets code execution on every project pointing at it, with no local review step. This tier has the exact same authority as a project's own local git history. Only point this at a repo you trust with full code-execution authority over every machine that syncs it.",
+  "repo": "https://github.com/AnEntrypoint/gm-config",
+  "branch": "main",
+  "path": ""
+}
+"#;
+
+const GM_CONFIG_EXAMPLE: &str = r#"{
+  "_comment": "Scaffolded INERT, with an .example suffix. This is the real config schema (config.rs), not a pointer -- rename to .gm/gm.config.json to apply it directly, or publish something shaped like this from the repo named in .gm/config.source.json.",
+  "fsm": {
+    "graph": ""
+  }
 }
 "#;
 
@@ -543,7 +561,27 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
         "ok": ok,
         "status": status,
         "inert": true,
-        "activate": "rename to .gm/instructions/source.json -- this is the only path prose::resolve reads, project-root only, no home-directory tier",
+        "activate": "rename to .gm/instructions/source.json -- covers PROSE only (phase text, gate-denial, residual-scan messages), project-root only, no home-directory tier",
+    }));
+
+    let config_source_spec_path = ".gm/config.source.json.example";
+    let (ok, status) = write_if_absent_or_forced(config_source_spec_path, CONFIG_SOURCE_SPEC_EXAMPLE, force);
+    results.push(json!({
+        "path": config_source_spec_path,
+        "ok": ok,
+        "status": status,
+        "inert": true,
+        "activate": "rename to .gm/config.source.json (this project) or ~/.gm/config.source.json (every project this user runs) -- covers the FSM GRAPH, POLICY, and GATE HOOKS, a much broader authority grant than the prose-only source.json above",
+    }));
+
+    let gm_config_path = ".gm/gm.config.json.example";
+    let (ok, status) = write_if_absent_or_forced(gm_config_path, GM_CONFIG_EXAMPLE, force);
+    results.push(json!({
+        "path": gm_config_path,
+        "ok": ok,
+        "status": status,
+        "inert": true,
+        "activate": "rename to .gm/gm.config.json for a real config committed into this project, or publish a file shaped like this from the repo named in .gm/config.source.json -- fsm.graph names the relative path to a graph.json within that repo",
     }));
 
     let validation = fsm::graph().validate();

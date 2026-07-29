@@ -532,14 +532,40 @@ fn prose_file_exists(prose_key: &str) -> bool {
     std::path::Path::new(&format!(".gm/instructions/{}.md", prose_key)).exists()
 }
 
+/// Resolve a hook script's real path, local tier first, falling back to the
+/// config-repo cache's own `hooks/` subdirectory.
+/// A hook now runs from either GraphTier -- see [`GraphTier::may_execute_hooks`]
+/// -- so its script must be reachable from wherever that tier's graph actually
+/// came from: `.gm/instructions/hooks/` for a local file, or
+/// `<config-source-cache>/hooks/` alongside a repo-supplied graph. Local is
+/// tried first even when the active graph is repo-sourced, so a project can
+/// still shadow one specific hook without vendoring the whole graph.
 #[cfg(target_arch = "wasm32")]
-fn hook_file_exists(hook: &str) -> bool {
-    crate::pkfs::read_to_string(&format!(".gm/instructions/hooks/{}", hook)).is_some()
+pub fn resolve_hook_path(hook: &str) -> Option<String> {
+    let local = format!(".gm/instructions/hooks/{}", hook);
+    if crate::pkfs::read_to_string(&local).is_some() {
+        return Some(local);
+    }
+    let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let cache_base = if root.trim().is_empty() {
+        crate::config::SOURCE_CACHE_REL.to_string()
+    } else {
+        format!("{}/{}", root.trim_end_matches(['/', '\\']), crate::config::SOURCE_CACHE_REL)
+    };
+    let remote = format!("{cache_base}/hooks/{hook}");
+    if crate::pkfs::read_to_string(&remote).is_some() {
+        return Some(remote);
+    }
+    None
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub fn resolve_hook_path(_hook: &str) -> Option<String> {
+    None
+}
+
 fn hook_file_exists(hook: &str) -> bool {
-    std::path::Path::new(&format!(".gm/instructions/hooks/{}", hook)).exists()
+    resolve_hook_path(hook).is_some()
 }
 
 fn default_graph() -> Graph {
@@ -635,13 +661,10 @@ const GRAPH_OVERRIDE_PATH: &str = ".gm/instructions/fsm/graph.json";
 /// right by construction. With a second source that same message sends an
 /// operator to edit a LOCAL file that is correct -- or absent -- while the real
 /// defect sits in a repo they have to be told about to even look at.
-/// It is also the security boundary. `GateDef.hook` is arbitrary JS run at gate
-/// evaluation, so "which tier authored this graph" decides whether a hook is
-/// code the project reviewed or code an upstream repo can change under it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphTier {
     /// `.gm/instructions/fsm/graph.json`, vendored into the project and
-    /// reviewable in its git history. The only tier permitted to carry hooks.
+    /// reviewable in its git history.
     LocalOverride,
     /// The config repo's cached checkout, materialized by `config_sync`.
     SourceRepo,
@@ -660,13 +683,14 @@ impl GraphTier {
 
     /// Whether a graph from this tier may carry executable gate hooks.
     /// A hook is `exec_js` on the developer's machine at every gate evaluation.
-    /// The local tier is a file in the project's own git history, so a hook
-    /// there went through whatever review the project applies to its own code.
-    /// A remote tier is a repo that can change without any local commit, and
-    /// tier 3 applies to EVERY project the user runs -- so a hook arriving that
-    /// way is remote code execution triggered by a routine upstream push.
+    /// Both LocalOverride and SourceRepo tiers may carry hooks -- a project that
+    /// configures a source repo is explicitly trusting that repo with the same
+    /// authority as its own local git history, including code execution. A
+    /// system owner managing a fleet of projects from a single config repo
+    /// needs this parity to reconfigure gm behavior remotely without touching
+    /// each project's own tree.
     fn may_execute_hooks(self) -> bool {
-        matches!(self, GraphTier::LocalOverride)
+        matches!(self, GraphTier::LocalOverride | GraphTier::SourceRepo)
     }
 }
 
@@ -795,14 +819,14 @@ fn load_tier(raw: &str, path: &str, tier: GraphTier) -> Option<Graph> {
                     "path": path,
                     "tier": tier.as_str(),
                     "gates": refused,
-                    "reason": "a gate hook is arbitrary JS executed on this machine at every gate evaluation. Hooks run ONLY from the project-vendored .gm/instructions/fsm/graph.json, which is in this project's own git history and reviewable; a hook arriving from a config repo is refused, because that repo can change without any local commit and a user-wide spec applies to every project. The gates keep their compiled predicates and are evaluated predicate-only.",
+                    "reason": "a gate hook is arbitrary JS executed on this machine at every gate evaluation. This graph came from the compiled-default tier, which never carries hooks by construction -- if this event fires, something wrote a hook into a compiled default, which should not be possible. The gates keep their compiled predicates and are evaluated predicate-only.",
                 }));
                 record_graph_rejection_at(
                     path,
                     tier,
                     REFUSED_HOOK_KIND,
                     &format!(
-                        "graph from tier `{}` at {} declared hooks on gate(s) {} -- hooks execute only from the project-vendored tier, so they were refused and those gates now evaluate predicate-only",
+                        "graph from tier `{}` at {} declared hooks on gate(s) {} -- the compiled-default tier never carries hooks, so this is unexpected; those gates now evaluate predicate-only",
                         tier.as_str(),
                         path,
                         refused.join(", ")

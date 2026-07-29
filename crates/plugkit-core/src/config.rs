@@ -98,6 +98,19 @@ pub const SOURCE_SPEC_REL: &str = ".gm/config.source.json";
 /// artifact -- it belongs in gitignore.rs's `MANAGED_ENTRIES`, not in git.
 pub const SOURCE_CACHE_REL: &str = ".gm/config-source-cache";
 
+/// gm's own shared config repo, tried when a project sets up neither
+/// [`SOURCE_SPEC_REL`] tier -- the zero-config starting point so a fresh
+/// install already pulls from a maintained default instead of running fully
+/// unconfigured. A project's own tier 1 or 2/3 spec still wins outright; this
+/// is strictly the tier BELOW user-repo-spec and ABOVE the compiled default.
+pub const DEFAULT_REPO_URL: &str = "https://github.com/AnEntrypoint/gm-config";
+
+/// Cache directory for [`DEFAULT_REPO_URL`], kept distinct from
+/// [`SOURCE_CACHE_REL`] so an explicit project/user spec pointing at a
+/// DIFFERENT repo never collides on disk with the implicit default's own
+/// checkout.
+pub const DEFAULT_REPO_CACHE_REL: &str = ".gm/config-source-cache-default";
+
 /// Which tier produced a config. Reported to callers because a config's
 /// meaning depends on where it came from -- "why is this setting on" is
 /// unanswerable without it, for a human reading a log or a caller deciding
@@ -107,6 +120,7 @@ pub enum Tier {
     ProjectVendored,
     ProjectRepoSpec,
     UserRepoSpec,
+    ImplicitDefaultRepo,
     BuiltinDefault,
 }
 
@@ -116,6 +130,7 @@ impl Tier {
             Tier::ProjectVendored => "project_vendored",
             Tier::ProjectRepoSpec => "project_repo_spec",
             Tier::UserRepoSpec => "user_repo_spec",
+            Tier::ImplicitDefaultRepo => "implicit_default_repo",
             Tier::BuiltinDefault => "builtin_default",
         }
     }
@@ -671,6 +686,19 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
         }
     }
 
+    match load_implicit_default_repo_tier(project_root, fetcher) {
+        Load::Accepted(config) => {
+            return Resolution {
+                config,
+                tier: Tier::ImplicitDefaultRepo,
+                why: format!("gm's own shared default config repo at {DEFAULT_REPO_URL} (no project or user config.source.json configured)"),
+                rejected,
+            }
+        }
+        Load::Rejected { reason } => rejected.push(reason),
+        Load::Absent => {}
+    }
+
     let why = if rejected.is_empty() {
         "no config found in any tier; using builtin defaults".to_string()
     } else {
@@ -684,6 +712,37 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
         tier: Tier::BuiltinDefault,
         why,
         rejected,
+    }
+}
+
+/// Try gm's own shared default config repo, only reached when neither the
+/// project nor the user has configured a [`SOURCE_SPEC_REL`] of their own.
+/// Constructs a [`RepoSource`] directly rather than reading a spec file --
+/// there is no file to point at, `DEFAULT_REPO_URL` IS the spec, compiled in.
+/// A fetch failure (offline, repo genuinely gone) degrades to `Load::Absent`
+/// rather than `Load::Rejected`, unlike an explicit tier's fetch failure --
+/// an operator never configured this repo, so a transient failure to reach
+/// it should read as "nothing here" (fall through quietly to the compiled
+/// default), not as a rejection worth surfacing for a tier nobody opted into.
+fn load_implicit_default_repo_tier(project_root: &str, fetcher: &dyn RepoFetcher) -> Load {
+    let src = RepoSource {
+        repo: DEFAULT_REPO_URL.to_string(),
+        reference: None,
+        path: String::new(),
+        cache_dir: join(project_root, DEFAULT_REPO_CACHE_REL),
+        tier_label: Tier::ImplicitDefaultRepo.as_str().to_string(),
+    };
+    if fetcher.refresh(&src).is_err() {
+        return Load::Absent;
+    }
+    let cfg_path = src.config_path();
+    let Some(text) = read_across_publish(&cfg_path) else {
+        return Load::Absent;
+    };
+    match parse_config(&text, &cfg_path) {
+        Load::Accepted(config) => Load::Accepted(config),
+        Load::Rejected { reason } => Load::Rejected { reason },
+        Load::Absent => Load::Absent,
     }
 }
 

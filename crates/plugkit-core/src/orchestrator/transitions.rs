@@ -49,7 +49,7 @@ fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
         ("claim-audit-clean", "true when the claim audit finds no unwitnessed completion claims -- see orchestrator::claim_audit", pred_claim_audit_clean),
         ("submodules-clean", "true when no submodule has drifted from its recorded commit -- see orchestrator::submodule_drift", pred_submodules_clean),
         ("no-synthetic-test-files", "true when the working diff introduces no standing test file (*.test.*, *.spec.*, or a test/tests/__tests__ directory). VERIFY doctrine forbids them: verification is a live exec_js/browser witness against real code, never a suite asserting against mocks. Emits deviation.synthetic-test-file naming the offending paths when it fails.", pred_no_synthetic_test_files as PredicateFn),
-        ("remote-hook-refused", "always false. Substituted by fsm::graph() for a gate whose ONLY condition was a hook supplied by a non-local tier: hooks execute only from the project-vendored graph, so the author's condition is genuinely not being evaluated and the edge it guards must not be waved through. Vendor the graph (and its hook) locally to restore the gate.", pred_remote_hook_refused),
+        ("remote-hook-refused", "always false. Substituted by fsm::graph() for a gate whose ONLY condition was a hook supplied by the compiled-default tier, which never legitimately carries one: the author's condition is genuinely not being evaluated and the edge it guards must not be waved through. Local and source-repo tier hooks both execute normally and never hit this substitution. Vendor the graph (and its hook) into .gm/instructions/fsm/graph.json, or configure source.json, to restore the gate.", pred_remote_hook_refused),
     ]
 }
 
@@ -310,7 +310,7 @@ impl HookOutcome {
 
 #[cfg(target_arch = "wasm32")]
 fn hook_outcome(hook_path: &str) -> HookOutcome {
-    let full = format!(".gm/instructions/hooks/{}", hook_path);
+    let Some(full) = fsm::resolve_hook_path(hook_path) else { return HookOutcome::Missing };
     let Some(script) = crate::pkfs::read_to_string(&full) else { return HookOutcome::Missing };
     let opts = serde_json::json!({ "timeoutMs": fsm::graph().policy.hook_timeout_ms }).to_string();
     let packed = unsafe {
