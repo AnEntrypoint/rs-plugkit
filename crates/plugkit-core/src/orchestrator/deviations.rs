@@ -170,6 +170,11 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
         "`git_push` found the remote ahead after its rebase-retry budget was spent -- another writer is pushing to the same branch concurrently",
         Severity::Log,
     ),
+    (
+        "push-claimed-success-unverified",
+        "`git_push` exited success but a post-push fetch found origin does not match local HEAD -- the push did not actually land despite the reported exit code",
+        Severity::Deny,
+    ),
 ];
 
 /// Every registered kind with its description, for generated references.
