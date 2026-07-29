@@ -82,7 +82,7 @@ const EXAMPLE_HOOK: &str = r#"// Example FSM jit-hook (per fsm-framework-jit-hoo
 //
 // This example: a made-up project-specific condition -- deny until a
 // file named .gm/ship-approved exists, so a human (or an earlier CI
-// step) has to touch that file before the FSM lets CONSOLIDATE proceed.
+// step) has to touch that file before the FSM lets DECIDE proceed.
 const fs = require('fs');
 return fs.existsSync('.gm/ship-approved');
 "#;
