@@ -35,13 +35,13 @@ const DAEMON_PROJECT_CONFIG_EXAMPLE: &str = r#"{
 "#;
 
 const SOURCE_SPEC_EXAMPLE: &str = r#"{
-  "_comment": "Scaffolded INERT, with an .example suffix, because activating it changes where this project's workflow comes from. Rename to .gm/config.source.json to apply it to this project, or to ~/.gm/config.source.json to apply it to every project for this user; the project file wins where both exist. A file that is present but unreachable degrades to the last-good cache, then to the compiled default -- it never hard-fails.",
-  "_tiers": "Resolution order, highest first: (1) project-vendored .gm/instructions/<key>.md and .gm/gm.config.json, (2) this spec in the project, (3) this spec under the home directory, (4) compiled defaults.",
-  "_shadowing": "A vendored tier-1 file WINS over whatever this repo supplies for the same key. fsm-vendor writes compiled defaults into .gm/instructions/, so running it here inertises this repo's prose for every key it wrote -- it reports each such file as shadows_config_repo. Delete the local file to fall back to the repo.",
-  "_debounce": "The remote sha is probed at most once per 15 minutes per source, so a fresh push is not picked up immediately.",
+  "_comment": "Scaffolded INERT, with an .example suffix, because activating it changes where this project's workflow comes from. Rename to .gm/instructions/source.json to apply it to this project -- that is the only path prose::resolve reads; there is no home-directory tier. A file that is present but unreachable degrades to the compiled default -- it never hard-fails.",
+  "_tiers": "Resolution order, highest first: (1) project-vendored .gm/instructions/<key>.md, (2) this spec's source repo cache, (3) compiled defaults.",
+  "_shadowing": "A vendored tier-1 file WINS over whatever this repo supplies for the same key. fsm-vendor writes compiled defaults into .gm/instructions/, so running it here inertises this repo's prose for every key it wrote. Delete the local file to fall back to the repo.",
+  "_debounce": "The source repo is re-synced at most once per plugin_update_poll_interval_secs (default 600s) per project, so a fresh push is not picked up immediately.",
   "_hooks": "Hooks are refused from this tier by design: a hook is arbitrary JS run at gate evaluation, and an auto-updating remote must not gain code execution. A repo-supplied graph can only bind gates to the compiled predicates.",
   "repo": "https://github.com/AnEntrypoint/gm-config",
-  "reference": "main",
+  "branch": "main",
   "path": ""
 }
 "#;
@@ -536,14 +536,14 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
     let (ok, status) = write_if_absent_or_forced(daemon_project_config_path, DAEMON_PROJECT_CONFIG_EXAMPLE, force);
     results.push(json!({ "path": daemon_project_config_path, "ok": ok, "status": status }));
 
-    let source_spec_path = ".gm/config.source.json.example";
+    let source_spec_path = ".gm/instructions/source.json.example";
     let (ok, status) = write_if_absent_or_forced(source_spec_path, SOURCE_SPEC_EXAMPLE, force);
     results.push(json!({
         "path": source_spec_path,
         "ok": ok,
         "status": status,
         "inert": true,
-        "activate": "rename to .gm/config.source.json (this project only) or to ~/.gm/config.source.json (every project for this user)",
+        "activate": "rename to .gm/instructions/source.json -- this is the only path prose::resolve reads, project-root only, no home-directory tier",
     }));
 
     let validation = fsm::graph().validate();
