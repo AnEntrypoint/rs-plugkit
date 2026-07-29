@@ -39,4 +39,4 @@ Terminal phase. After the push lands, dispatch `transition` to COMPLETE; plugkit
 
 ## Dispatch
 
-`phase-status` to confirm chain state, then `transition` to COMPLETE if not already. After COMPLETE lands, dispatch `Skill(skill="gm-continue")` -- that is the actual stop condition, not the bare `transition` response.
+`phase-status` to check chain state, then `transition` to COMPLETE if not already. After COMPLETE lands, dispatch `Skill(skill="gm-continue")` -- that is the actual stop condition, not the bare `transition` response.

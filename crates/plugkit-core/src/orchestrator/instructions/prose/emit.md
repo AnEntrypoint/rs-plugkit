@@ -16,7 +16,7 @@ On-disk content is the goal-relative reference; diffing an unread file diffs an 
 
 Feed EMIT only digest-matching-live-filesystem search output; a stale-index result is an L1 bluff.
 
-## Write-then-verify
+## Write-then-check
 
 One write per artifact, then a disk Read against every touched path -- witness the change, never reason it succeeded. Verified disk state IS the witness, not the tool-call return. Discrepancy -> regress to root cause, never retry.
 
@@ -24,7 +24,7 @@ One write per artifact, then a disk Read against every touched path -- witness t
 
 ## Artifact scope
 
-PRD names the writable artifacts; closure narrative goes to the commit message + `memorize-fire`, never the response body -- a file PRD does not name is response-body displacing dispatch. Write-then-verify exposing an adjacent artifact (generated file the build needs, doc naming the new artifact, witness script) -> `prd-add` it this turn; unlanded observation evaporates with the turn. Uncertain writes -> re-dispatch `instruction`.
+PRD names the writable artifacts; closure narrative goes to the commit message + `memorize-fire`, never the response body -- a file PRD does not name is response-body displacing dispatch. Write-then-check exposing an adjacent artifact (generated file the build needs, doc naming the new artifact, witness script) -> `prd-add` it this turn; unlanded observation evaporates with the turn. Uncertain writes -> re-dispatch `instruction`.
 
 ## Constraints
 

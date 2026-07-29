@@ -37,7 +37,7 @@ Five phases = scheduling; filter = engine on every candidate, gating witness/wri
 - **200-line vertical slices:** one responsibility per file; input->process->output complete in the module; zero-config defaults correct for 90%; universal runtime (browser/Node/mobile/Bare).
 - **Async boundary explicit:** sequential awaitable primitives; no implicit callback ordering; unified error channel, never swallow rejections; tests await real ops, mock-free.
 - **Naming by scale:** <50 lines single-letter algebraic; 50-200 short descriptors; >200 full names; public APIs explicit.
-- **Fail fast, loud, deterministic:** halt on precondition violation with exact state; assert on emitted semantics, not return values; sentinel words + checksum headers on critical structures, verified on every access; never silently degrade.
+- **Fail fast, loud, deterministic:** stop on precondition violation with exact state; assert on emitted semantics, not return values; sentinel words + checksum headers on critical structures, verified on every access; never silently degrade.
 - **Binary transport, append-only persistence:** varint fields; lexical cursors for sparse reads; append-only sequence for replay; chunked by lexical range, modify only the touched chunk.
 - **Single focused task per session:** no drive-by refactors; pre-compute and inline.
 
@@ -87,7 +87,7 @@ Every capability has exactly one sanctioned surface and the platform's native to
 
 ## Memorize
 
-Write the recall index only via `memorize-fire`; surfaces outside it produce memos the index never sees. Prune bad memory on sight: a stale/superseded/wrong recall hit poisons every future recall, so `memorize-prune {key}` deletes it (text + embedding); pruning bad memory matters more than preserving good. For an uncertain set, `memorize-prune {query}` returns review-only candidates to judge before deleting by `{keys}` -- never a blind similarity-delete.
+Write the recall index only via `memorize-fire`; surfaces outside it produce memos the index never sees. Prune bad memory on sight: a stale/superseded/wrong recall hit poisons every future recall, so `memorize-prune {key}` removes it (text + embedding); pruning bad memory matters more than preserving good. For an uncertain set, `memorize-prune {query}` returns review-only candidates to judge before removing by `{keys}` -- never a blind similarity-removal.
 
 ## Constraints
 
