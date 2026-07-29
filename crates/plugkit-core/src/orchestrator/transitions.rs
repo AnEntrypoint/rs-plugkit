@@ -50,6 +50,12 @@ fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
         ("submodules-clean", "true when no submodule has drifted from its recorded commit -- see orchestrator::submodule_drift", pred_submodules_clean),
         ("no-synthetic-test-files", "true when the working diff introduces no standing test file (*.test.*, *.spec.*, or a test/tests/__tests__ directory). VERIFY doctrine forbids them: verification is a live exec_js/browser witness against real code, never a suite asserting against mocks. Emits deviation.synthetic-test-file naming the offending paths when it fails.", pred_no_synthetic_test_files as PredicateFn),
         ("remote-hook-refused", "always false. Substituted by fsm::graph() for a gate whose ONLY condition was a hook supplied by the compiled-default tier, which never legitimately carries one: the author's condition is genuinely not being evaluated and the edge it guards must not be waved through. Local and source-repo tier hooks both execute normally and never hit this substitution. Vendor the graph (and its hook) into .gm/instructions/fsm/graph.json, or configure source.json, to restore the gate.", pred_remote_hook_refused),
+        ("no-admit-deferral-markers", "true when the working diff introduces no TODO/FIXME/XXX/HACK marker, no '...' truncation ellipsis in place of real code, and no bare 'not implemented'/'unimplemented!'/'todo!' placeholder. A proof/claim with an admit or deferral marker is an incomplete proof standing in for a complete one. Emits deviation.admit-deferral-marker naming the offending lines when it fails.", pred_no_admit_deferral_markers as PredicateFn),
+        ("no-secrets-in-diff", "true when the working diff introduces no line matching a high-confidence secret shape (AWS-style access key id, a private-key PEM header, a bearer/API token assigned to a literal string of plausible entropy, a database URL with an inline password). Heuristic and diff-scoped, not a substitute for a dedicated secret scanner -- catches the common accidental-commit shape. Emits deviation.secret-in-diff naming the offending lines (redacted) when it fails.", pred_no_secrets_in_diff as PredicateFn),
+        ("no-unchecked-panics-in-diff", "true when new Rust/JS/TS lines in the working diff introduce no bare unwrap()/expect()/panic!() outside a #[cfg(test)] or *.test.* path, and no JS/TS line that throws without a paired catch reachable in the same function body scope (best-effort, brace-balance heuristic). Exception model requires every raised error handled or explicitly propagated, never left to crash the process uncaught. Emits deviation.unchecked-panic naming the offending lines when it fails.", pred_no_unchecked_panics_in_diff as PredicateFn),
+        ("no-hedge-language-in-diff", "true when prose files (*.md) touched in the working diff introduce no hedge/deferral phrase ('todo later', 'in a future session', 'for now we', 'as a stopgap', 'good enough for now', 'left as an exercise', 'out of scope for this'). Decisive commitment forbids shipping a hedge in place of a decision. Emits deviation.hedge-language naming the offending lines when it fails.", pred_no_hedge_language_in_diff as PredicateFn),
+        ("no-graphical-symbols-in-diff", "true when new lines in the working diff introduce no decorative non-ASCII glyph (arrows, box-drawing, stars, bullets, checks/crosses, emoji) outside a binary/frozen-changelog/icon-font exemption path. Matches AGENTS.md's own no-graphical-symbols discipline as a real gate instead of an on-sight-only rule. Emits deviation.graphical-symbol naming the offending lines when it fails.", pred_no_graphical_symbols_in_diff as PredicateFn),
+        ("idempotent-dispatch-replay-safe", "true when the most recent N dispatch audit-tuples (id, hash, ts) for the current stop window contain no exact-duplicate (id, hash) pair recorded as two DIFFERENT outcomes -- a same-input dispatch replayed must reach the same result (f-compose-f-equals-f), never a second, different mutation applied on top of the first. Emits deviation.non-idempotent-replay naming the conflicting tuples when it fails.", pred_idempotent_dispatch_replay_safe as PredicateFn),
     ]
 }
 
@@ -178,6 +184,207 @@ fn pred_no_synthetic_test_files() -> bool {
 fn pred_no_synthetic_test_files() -> bool { true }
 #[cfg(not(target_arch = "wasm32"))]
 fn worktree_dirty() -> bool { false }
+
+/// Added (path, line_number, line_text) tuples from the working diff.
+///
+/// Every diff-scoped predicate below needs the same three things -- which
+/// file, which line, what's on it -- so they share this one walk of
+/// `git diff --unified=0` output rather than five near-identical parsers.
+#[cfg(target_arch = "wasm32")]
+fn added_lines_in_diff() -> Vec<(String, usize, String)> {
+    let raw = crate::wasm_dispatch::git_call("diff --unified=0 HEAD", None);
+    let stdout = raw.get("stdout").and_then(|s| s.as_str()).unwrap_or("");
+    let mut out = Vec::new();
+    let mut current_path = String::new();
+    let mut current_line = 0usize;
+    for line in stdout.lines() {
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            current_path = path.to_string();
+            continue;
+        }
+        if let Some(hunk) = line.strip_prefix("@@ ") {
+            if let Some(plus) = hunk.split("+").nth(1) {
+                let num_part = plus.split(|c: char| c == ',' || c == ' ').next().unwrap_or("0");
+                current_line = num_part.parse().unwrap_or(0);
+            }
+            continue;
+        }
+        if let Some(added) = line.strip_prefix('+') {
+            if !added.starts_with("++") {
+                out.push((current_path.clone(), current_line, added.to_string()));
+                current_line += 1;
+            }
+            continue;
+        }
+    }
+    out
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn added_lines_in_diff() -> Vec<(String, usize, String)> { vec![] }
+
+fn is_test_scoped_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains(".test.") || lower.contains(".spec.") || lower.contains("/test/") || lower.contains("/tests/") || lower.contains("/__tests__/")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn pred_no_admit_deferral_markers() -> bool {
+    const MARKERS: &[&str] = &["TODO", "FIXME", "XXX", "HACK", "unimplemented!(", "todo!(", "not implemented", "not yet implemented"];
+    let mut found = Vec::new();
+    for (path, line_no, text) in added_lines_in_diff() {
+        let upper = text.to_ascii_uppercase();
+        if MARKERS.iter().any(|m| upper.contains(&m.to_ascii_uppercase())) {
+            found.push(format!("{path}:{line_no}: {}", text.trim()));
+        }
+    }
+    if found.is_empty() { return true; }
+    crate::wasm_dispatch::emit_event("deviation.admit-deferral-marker", serde_json::json!({
+        "lines": found,
+        "reason": "an admit/deferral marker (TODO/FIXME/XXX/HACK/unimplemented!/todo!/'not (yet) implemented') stands in for a complete proof -- finish the work or remove the marker, then re-attempt",
+    }));
+    false
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn pred_no_admit_deferral_markers() -> bool { true }
+
+#[cfg(target_arch = "wasm32")]
+fn pred_no_secrets_in_diff() -> bool {
+    let mut found = Vec::new();
+    for (path, line_no, text) in added_lines_in_diff() {
+        let looks_like_aws_key = text.contains("AKIA") && text.matches(|c: char| c.is_ascii_alphanumeric()).count() >= 20;
+        let looks_like_private_key = text.contains("-----BEGIN") && text.contains("PRIVATE KEY");
+        let looks_like_db_url_with_password = (text.contains("://") && text.contains('@'))
+            && (text.contains("postgres") || text.contains("mysql") || text.contains("mongodb") || text.contains("redis"))
+            && text.contains(':') && !text.contains("<") && !text.contains("${") && !text.contains("%s");
+        let lower = text.to_ascii_lowercase();
+        let looks_like_bearer_literal = (lower.contains("api_key") || lower.contains("apikey") || lower.contains("bearer ") || lower.contains("secret_key"))
+            && text.contains('"') && text.matches(|c: char| c.is_ascii_alphanumeric()).count() >= 24
+            && !lower.contains("process.env") && !lower.contains("env::var") && !lower.contains("getenv");
+        if looks_like_aws_key || looks_like_private_key || looks_like_db_url_with_password || looks_like_bearer_literal {
+            let redacted: String = text.chars().take(20).collect();
+            found.push(format!("{path}:{line_no}: {redacted}... (redacted)"));
+        }
+    }
+    if found.is_empty() { return true; }
+    crate::wasm_dispatch::emit_event("deviation.secret-in-diff", serde_json::json!({
+        "lines": found,
+        "reason": "a line in the working diff matches a high-confidence secret shape -- remove the literal, route it through an env var or secret store, then re-attempt",
+    }));
+    false
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn pred_no_secrets_in_diff() -> bool { true }
+
+#[cfg(target_arch = "wasm32")]
+fn pred_no_unchecked_panics_in_diff() -> bool {
+    let mut found = Vec::new();
+    for (path, line_no, text) in added_lines_in_diff() {
+        if is_test_scoped_path(&path) { continue; }
+        let trimmed = text.trim();
+        if trimmed.starts_with('#') || trimmed.starts_with("//") { continue; }
+        let is_rust = path.ends_with(".rs");
+        let is_js_like = path.ends_with(".js") || path.ends_with(".ts") || path.ends_with(".jsx") || path.ends_with(".tsx") || path.ends_with(".mjs") || path.ends_with(".cjs");
+        if is_rust {
+            let has_unwrap = text.contains(".unwrap()") && !text.contains("unwrap_or");
+            let has_expect = text.contains(".expect(");
+            let has_panic = text.contains("panic!(");
+            if has_unwrap || has_expect || has_panic {
+                found.push(format!("{path}:{line_no}: {trimmed}"));
+            }
+        } else if is_js_like {
+            if trimmed.starts_with("throw ") && !trimmed.contains("//") {
+                found.push(format!("{path}:{line_no}: {trimmed}"));
+            }
+        }
+    }
+    if found.is_empty() { return true; }
+    crate::wasm_dispatch::emit_event("deviation.unchecked-panic", serde_json::json!({
+        "lines": found,
+        "reason": "a new line panics/throws/unwraps outside a test path with no visible handling -- propagate the error explicitly (Result/catch) or justify the panic as a real precondition violation, then re-attempt",
+    }));
+    false
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn pred_no_unchecked_panics_in_diff() -> bool { true }
+
+#[cfg(target_arch = "wasm32")]
+fn pred_no_hedge_language_in_diff() -> bool {
+    const HEDGES: &[&str] = &["todo later", "in a future session", "for now we", "as a stopgap", "good enough for now", "left as an exercise", "out of scope for this", "not yet implemented", "we'll come back to"];
+    let mut found = Vec::new();
+    for (path, line_no, text) in added_lines_in_diff() {
+        if !path.ends_with(".md") { continue; }
+        let lower = text.to_ascii_lowercase();
+        if HEDGES.iter().any(|h| lower.contains(h)) {
+            found.push(format!("{path}:{line_no}: {}", text.trim()));
+        }
+    }
+    if found.is_empty() { return true; }
+    crate::wasm_dispatch::emit_event("deviation.hedge-language", serde_json::json!({
+        "lines": found,
+        "reason": "a hedge/deferral phrase in touched prose stands in for a decision -- commit to the real answer or remove the hedge, then re-attempt",
+    }));
+    false
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn pred_no_hedge_language_in_diff() -> bool { true }
+
+#[cfg(target_arch = "wasm32")]
+fn pred_no_graphical_symbols_in_diff() -> bool {
+    let mut found = Vec::new();
+    for (path, line_no, text) in added_lines_in_diff() {
+        if path.ends_with("CHANGELOG.md") { continue; }
+        let has_glyph = text.chars().any(|c| {
+            let cp = c as u32;
+            matches!(cp, 0x2190..=0x21FF | 0x2500..=0x257F | 0x2600..=0x27BF | 0x1F300..=0x1FAFF | 0x2B00..=0x2BFF)
+        });
+        if has_glyph {
+            found.push(format!("{path}:{line_no}: {}", text.trim()));
+        }
+    }
+    if found.is_empty() { return true; }
+    crate::wasm_dispatch::emit_event("deviation.graphical-symbol", serde_json::json!({
+        "lines": found,
+        "reason": "a decorative non-ASCII glyph landed in tracked source/prose -- convert to its plain-ASCII equivalent (->, -/*, [x]/[ ], done/todo/pass/fail), then re-attempt",
+    }));
+    false
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn pred_no_graphical_symbols_in_diff() -> bool { true }
+
+/// Idempotency: the same (id, hash) audit tuple recorded with two different
+/// outcomes this stop window means a replayed dispatch mutated differently
+/// the second time -- f-compose-f-equals-f violated. Reads the same
+/// deviations/audit event stream every other predicate here already emits
+/// into, rather than a second bespoke ledger.
+#[cfg(target_arch = "wasm32")]
+fn pred_idempotent_dispatch_replay_safe() -> bool {
+    let raw = crate::pkfs::read_to_string(".gm/exec-spool/.audit-tuples.json").unwrap_or_default();
+    if raw.trim().is_empty() { return true; }
+    let Ok(serde_json::Value::Array(tuples)) = serde_json::from_str::<serde_json::Value>(&raw) else { return true };
+    let mut seen: std::collections::HashMap<(String, String), String> = std::collections::HashMap::new();
+    let mut conflicts = Vec::new();
+    for t in &tuples {
+        let id = t.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let hash = t.get("hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let outcome = t.get("outcome").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if id.is_empty() || hash.is_empty() { continue; }
+        let key = (id.clone(), hash.clone());
+        match seen.get(&key) {
+            Some(prior) if *prior != outcome => {
+                conflicts.push(format!("{id}@{hash}: {prior} then {outcome}"));
+            }
+            _ => { seen.insert(key, outcome); }
+        }
+    }
+    if conflicts.is_empty() { return true; }
+    crate::wasm_dispatch::emit_event("deviation.non-idempotent-replay", serde_json::json!({
+        "conflicts": conflicts,
+        "reason": "the same (id, hash) audit tuple was recorded with two different outcomes this stop window -- a replayed dispatch must reach the same result, never a second different mutation",
+    }));
+    false
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn pred_idempotent_dispatch_replay_safe() -> bool { true }
 
 #[cfg(target_arch = "wasm32")]
 fn ci_validation_fresh() -> bool {
