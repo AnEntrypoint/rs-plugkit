@@ -202,7 +202,7 @@ pub fn witness_all_pending_edits(cwd: &str) -> usize {
 ///
 /// The counterpart to [`record_edit`], and it did not exist: nothing in either
 /// repo wrote `.turn-browser-witnessed`, while `browser-witness-coverage` read
-/// it on every `CONSOLIDATE -> COMPLETE` attempt. A missing file parses as an
+/// it on every closing-edge attempt into the terminal phase. A missing file parses as an
 /// empty map, so every recorded edit compared its hash against `""` and the
 /// gate could never be satisfied once any client-side file had been touched --
 /// a permanent block with no way to clear it.
