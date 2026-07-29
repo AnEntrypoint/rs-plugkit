@@ -6,6 +6,13 @@ pub mod verify;
 pub mod consolidate;
 pub mod update_docs;
 pub mod browser;
+pub mod specify;
+pub mod prove;
+pub mod state;
+pub mod conc;
+pub mod sec;
+pub mod res;
+pub mod decide;
 
 use serde_json::json;
 use super::state::{read_state, Phase};
@@ -125,6 +132,13 @@ pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
         "consolidate" => consolidate::TEXT,
         "update_docs" => update_docs::TEXT,
         "browser" => browser::TEXT,
+        "specify" => specify::TEXT,
+        "prove" => prove::TEXT,
+        "state" => state::TEXT,
+        "conc" => conc::TEXT,
+        "sec" => sec::TEXT,
+        "res" => res::TEXT,
+        "decide" => decide::TEXT,
         _ => entry::TEXT,
     }
 }
@@ -147,6 +161,7 @@ pub fn has_compiled_default_for_prose_key(key: &str) -> bool {
     matches!(
         key,
         "plan" | "execute" | "emit" | "verify" | "consolidate" | "update_docs" | "browser" | "entry"
+            | "specify" | "prove" | "state" | "conc" | "sec" | "res" | "decide"
     )
 }
 
@@ -171,10 +186,10 @@ pub fn get_instruction(phase: &str) -> String {
 
 fn next_phase_hint(phase: &str) -> Option<String> {
     let upper = phase.trim().to_ascii_uppercase();
-    if upper.is_empty() || upper == "ENTRY" || upper == "ORCHESTRATOR" {
-        return Some("PLAN".to_string());
-    }
     let g = super::fsm::graph();
+    if upper.is_empty() || upper == "ENTRY" || upper == "ORCHESTRATOR" {
+        return Some(g.policy.initial_phase.clone());
+    }
     g.default_edge_from(&upper)
         .map(|e| e.to.clone())
         .filter(|to| !to.eq_ignore_ascii_case(&upper))

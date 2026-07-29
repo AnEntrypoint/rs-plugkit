@@ -2,15 +2,17 @@
 
 YOU are the state machine. Plugkit is the synchronous library serving this prose; advancing the chain is your dispatch. Every write lands only through the verb you dispatch to land it.
 
+Stage 3 of the pipeline: AST and source representation. Every node expanded and grounded -- no truncation, no phantom code, no placeholder standing in for the real line. Source hygiene is enforced at the exit gate, not aspirational: the EMIT -> STATE edge carries the compiled `no-synthetic-test-files`, `no-graphical-symbols-in-diff`, and `no-admit-deferral-markers` gates. Kolmogorov-minimal: the shortest correct expression of the transform, boilerplate trending to zero, style homogeneous with the surrounding tree.
+
 L3 audit on disk. Land every node of the covering family; your first emit = closure.
 
 ## Scope: file mutation ONLY (hard rule)
 
-EMIT's precondition: mutables already resolved -- EXECUTE's job, done before arrival. EMIT does not investigate, open mutables, resolve unknowns, or re-derive the plan. A mutable surfacing here is EXECUTE leaking into EMIT: `mutable-add` it, `transition to=EXECUTE` immediately -- never resolve inline, never write around it. EMIT's sole verb-of-work is Write/Edit of changes PLAN/EXECUTE already decided; narrower is correct, wider is drift.
+EMIT's precondition: mutables already resolved -- PROVE's job, done before arrival. EMIT does not investigate, open mutables, resolve unknowns, or re-derive the plan. A mutable surfacing here is PROVE leaking into EMIT: `mutable-add` it, `transition to=PROVE` immediately -- never resolve inline, never write around it. EMIT's sole verb-of-work is Write/Edit of changes SPECIFY/PROVE already decided; narrower is correct, wider is drift.
 
 ## Read-before-write
 
-On-disk content is the goal-relative reference; diffing an unread file diffs an imagined baseline. Observed disk divergence -> `transition` back to PLAN.
+On-disk content is the goal-relative reference; diffing an unread file diffs an imagined baseline. Observed disk divergence -> `transition` back to SPECIFY.
 
 ## Fresh index
 
@@ -31,4 +33,4 @@ PRD names the writable artifacts; closure narrative goes to the commit message +
 
 ## Dispatch
 
-`transition` when every planned artifact is written and disk-verified. New unknown -> `transition` back to PLAN.
+`transition` when every planned artifact is written and disk-verified. New unknown -> `transition` back to SPECIFY.

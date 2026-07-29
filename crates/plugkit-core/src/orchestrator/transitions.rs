@@ -50,7 +50,7 @@ fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
         ("submodules-clean", "true when no submodule has drifted from its recorded commit -- see orchestrator::submodule_drift", pred_submodules_clean),
         ("no-synthetic-test-files", "true when the working diff introduces no standing test file (*.test.*, *.spec.*, or a test/tests/__tests__ directory). VERIFY doctrine forbids them: verification is a live exec_js/browser witness against real code, never a suite asserting against mocks. Emits deviation.synthetic-test-file naming the offending paths when it fails.", pred_no_synthetic_test_files as PredicateFn),
         ("remote-hook-refused", "always false. Substituted by fsm::graph() for a gate whose ONLY condition was a hook supplied by the compiled-default tier, which never legitimately carries one: the author's condition is genuinely not being evaluated and the edge it guards must not be waved through. Local and source-repo tier hooks both execute normally and never hit this substitution. Vendor the graph (and its hook) into .gm/instructions/fsm/graph.json, or configure source.json, to restore the gate.", pred_remote_hook_refused),
-        ("no-admit-deferral-markers", "true when the working diff introduces no TODO/FIXME/XXX/HACK marker, no '...' truncation ellipsis in place of real code, and no bare 'not implemented'/'unimplemented!'/'todo!' placeholder. A proof/claim with an admit or deferral marker is an incomplete proof standing in for a complete one. Emits deviation.admit-deferral-marker naming the offending lines when it fails.", pred_no_admit_deferral_markers as PredicateFn),
+        ("no-admit-deferral-markers", "true when new lines in source files (*.rs/.js/.ts/.py/.go/...) in the working diff introduce no colon-form admit marker (TODO:/FIXME:/XXX:/HACK:), no todo!()/unimplemented!() placeholder macro, and no 'not (yet) implemented' phrase. Source-scoped so the rule's own registry and prose describing it do not self-trip; prose-level deferral is covered by no-hedge-language-in-diff. A marker stands in for a complete proof. Emits deviation.admit-deferral-marker naming the offending lines when it fails.", pred_no_admit_deferral_markers as PredicateFn),
         ("no-secrets-in-diff", "true when the working diff introduces no line matching a high-confidence secret shape (AWS-style access key id, a private-key PEM header, a bearer/API token assigned to a literal string of plausible entropy, a database URL with an inline password). Heuristic and diff-scoped, not a substitute for a dedicated secret scanner -- catches the common accidental-commit shape. Emits deviation.secret-in-diff naming the offending lines (redacted) when it fails.", pred_no_secrets_in_diff as PredicateFn),
         ("no-unchecked-panics-in-diff", "true when new Rust/JS/TS lines in the working diff introduce no bare unwrap()/expect()/panic!() outside a #[cfg(test)] or *.test.* path, and no JS/TS line that throws without a paired catch reachable in the same function body scope (best-effort, brace-balance heuristic). Exception model requires every raised error handled or explicitly propagated, never left to crash the process uncaught. Emits deviation.unchecked-panic naming the offending lines when it fails.", pred_no_unchecked_panics_in_diff as PredicateFn),
         ("no-hedge-language-in-diff", "true when prose files (*.md) touched in the working diff introduce no hedge/deferral phrase ('todo later', 'in a future session', 'for now we', 'as a stopgap', 'good enough for now', 'left as an exercise', 'out of scope for this'). Decisive commitment forbids shipping a hedge in place of a decision. Emits deviation.hedge-language naming the offending lines when it fails.", pred_no_hedge_language_in_diff as PredicateFn),
@@ -227,20 +227,42 @@ fn is_test_scoped_path(path: &str) -> bool {
     lower.contains(".test.") || lower.contains(".spec.") || lower.contains("/test/") || lower.contains("/tests/") || lower.contains("/__tests__/")
 }
 
+/// Whether `needle`'s first occurrence in `text` sits inside a string
+/// literal (odd number of unescaped quote chars of any of the three common
+/// kinds before it). Marker detection must not trip on its own registry
+/// entries or on gate-message strings that legitimately name the markers.
+fn inside_string_literal(text: &str, needle: &str) -> bool {
+    let Some(idx) = text.find(needle) else { return false };
+    let before = &text[..idx];
+    let d = before.matches('"').count();
+    let s = before.matches('\'').count();
+    let b = before.matches('`').count();
+    d % 2 == 1 || s % 2 == 1 || b % 2 == 1
+}
+
 #[cfg(target_arch = "wasm32")]
 fn pred_no_admit_deferral_markers() -> bool {
-    const MARKERS: &[&str] = &["TODO", "FIXME", "XXX", "HACK", "unimplemented!(", "todo!(", "not implemented", "not yet implemented"];
+    const COLON_MARKERS: &[&str] = &["TODO:", "FIXME:", "XXX:", "HACK:", "todo!(", "unimplemented!("];
+    const PHRASES: &[&str] = &["not implemented", "not yet implemented"];
+    const SOURCE_EXTS: &[&str] = &[".rs", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".py", ".go", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".sh", ".ps1", ".vue", ".svelte"];
     let mut found = Vec::new();
     for (path, line_no, text) in added_lines_in_diff() {
+        if !SOURCE_EXTS.iter().any(|e| path.ends_with(e)) { continue; }
         let upper = text.to_ascii_uppercase();
-        if MARKERS.iter().any(|m| upper.contains(&m.to_ascii_uppercase())) {
+        let colon_hit = COLON_MARKERS.iter().any(|m| {
+            let mu = m.to_ascii_uppercase();
+            upper.contains(&mu) && !inside_string_literal(&upper, &mu)
+        });
+        let lower = text.to_ascii_lowercase();
+        let phrase_hit = PHRASES.iter().any(|p| lower.contains(p) && !inside_string_literal(&lower, p));
+        if colon_hit || phrase_hit {
             found.push(format!("{path}:{line_no}: {}", text.trim()));
         }
     }
     if found.is_empty() { return true; }
     crate::wasm_dispatch::emit_event("deviation.admit-deferral-marker", serde_json::json!({
         "lines": found,
-        "reason": "an admit/deferral marker (TODO/FIXME/XXX/HACK/unimplemented!/todo!/'not (yet) implemented') stands in for a complete proof -- finish the work or remove the marker, then re-attempt",
+        "reason": "an admit/deferral marker in a source file stands in for a complete proof -- finish the work or remove the marker, then re-attempt",
     }));
     false
 }

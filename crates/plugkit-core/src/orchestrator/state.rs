@@ -59,7 +59,7 @@ pub struct TurnState {
 impl Default for TurnState {
     fn default() -> Self {
         TurnState {
-            phase: Phase::plan(),
+            phase: initial_phase(),
             session_id: None,
             last_skill: None,
             updated_at_ms: now_ms(),
@@ -67,6 +67,18 @@ impl Default for TurnState {
             pending_step_deadline_ms: None,
         }
     }
+}
+
+fn initial_phase() -> Phase {
+    Phase::parse(&super::fsm::graph().policy.initial_phase).unwrap_or_else(Phase::plan)
+}
+
+fn migrate_to_active_graph(mut s: TurnState) -> TurnState {
+    let g = super::fsm::graph();
+    if !g.has_state(s.phase.as_str()) {
+        s.phase = initial_phase();
+    }
+    s
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -94,7 +106,7 @@ pub fn read_state() -> TurnState {
     }
     match pkfs::read_to_string(&ps) {
         Some(s) => match serde_json::from_str(&s) {
-            Ok(v) => v,
+            Ok(v) => migrate_to_active_graph(v),
             Err(e) => {
                 let now = now_ms();
                 let backup_path = format!("{}.corrupted-{}", ps, now);
