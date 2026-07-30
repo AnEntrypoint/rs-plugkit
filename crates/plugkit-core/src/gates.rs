@@ -192,26 +192,11 @@ fn is_transition_to_complete(verb: &str, body: &Value) -> bool {
             .unwrap_or(false)
 }
 
-/// Whether a kind's EFFECTIVE severity is deny, after policy overrides.
-///
-/// Every call site guarded by this was previously log-only by structure alone --
-/// the branch emitted and fell through. Default severities in the registry match
-/// that exactly, so with an empty `policy.deviation_severity` (the default) this
-/// returns false at every one of them and behaviour is bit-identical to before.
-fn deviation_denies(kind: &str) -> bool {
+fn effective_severity_is_deny(kind: &str) -> bool {
     crate::orchestrator::deviations::effective_severity(kind)
         == crate::orchestrator::deviations::Severity::Deny
 }
 
-/// A path that is a standing test file rather than a live witness.
-///
-/// `deviation.synthetic-test-file` was named in the served VERIFY doctrine as
-/// something that "blocks `transition`" while no Rust code emitted it at all --
-/// the doctrine promised an enforcement that did not exist. This is the detector
-/// that makes the promise real. It stays Log by default because the doctrine is
-/// gm's, not plugkit's: a project that genuinely wants a test suite must not have
-/// its writes denied by an engine default, and one that wants the VERIFY rule
-/// enforced promotes the kind via policy.deviation_severity.
 fn is_synthetic_test_path(rel: &str) -> bool {
     let norm = rel.replace('\\', "/").to_lowercase();
     let segments: Vec<&str> = norm.split('/').filter(|s| !s.is_empty()).collect();
@@ -288,10 +273,6 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    // Which verbs count as a shell, and whether shell git is denied at all,
-    // are policy rather than compile-time facts: a workflow whose shell verb has
-    // a different name got no protection from the hardcoded list, and one that
-    // legitimately wants shell git had no way to say so.
     let shell_policy = policy.clone();
     if shell_policy.deny_shell_git && shell_policy.shell_verbs.iter().any(|v| v == verb) {
         let cmd = body.get("command").and_then(|v| v.as_str())
@@ -424,7 +405,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         if let Some(p) = body_path_field(body) {
             if is_unsolicited_toplevel_doc(&p) {
                 log_deviation("unsolicited-doc-created", &p);
-                if deviation_denies("unsolicited-doc-created") {
+                if effective_severity_is_deny("unsolicited-doc-created") {
                     return GateVerdict::deny(format!(
                         "unsolicited-doc-created: `{}` is a top-level doc outside policy.toplevel_doc_allowlist, and this project's policy.deviation_severity promotes this kind to deny. A report/summary/findings file is not the deliverable -- return the finding in the response, or write it where the work lives.",
                         p
@@ -435,7 +416,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         if let Some(p) = body_path_field(body) {
             if is_synthetic_test_path(&p) {
                 log_deviation("synthetic-test-file", &p);
-                if deviation_denies("synthetic-test-file") {
+                if effective_severity_is_deny("synthetic-test-file") {
                     return GateVerdict::deny(format!(
                         "synthetic-test-file: `{}` is a standing test file, and this project's policy.deviation_severity promotes this kind to deny. Doctrine is a live exec_js/browser witness run THIS turn, not a test case deferred to a later run.",
                         p
@@ -464,7 +445,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 }
             }
         }
-        if !anti_shape.is_empty() && deviation_denies("prd-anti-shape") {
+        if !anti_shape.is_empty() && effective_severity_is_deny("prd-anti-shape") {
             return GateVerdict::deny(format!(
                 "prd-anti-shape: {} row(s) are marked closed with empty witness_evidence ({}), and this project's policy.deviation_severity promotes this kind to deny. Re-resolve each with its own distinct witness_evidence before closing the chain.",
                 anti_shape.len(),
