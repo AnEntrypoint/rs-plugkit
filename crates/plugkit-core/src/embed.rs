@@ -3,8 +3,11 @@
 use std::sync::OnceLock;
 
 use candle_core::{DType, Device, Tensor};
+#[cfg(not(feature = "slim"))]
 use candle_nn::VarBuilder;
-use candle_transformers::models::bert::{BertModel, Config, HiddenAct, PositionEmbeddingType};
+use candle_transformers::models::bert::BertModel;
+#[cfg(not(feature = "slim"))]
+use candle_transformers::models::bert::{Config, HiddenAct, PositionEmbeddingType};
 use tokenizers::Tokenizer;
 
 #[link(wasm_import_module = "env")]
@@ -124,6 +127,7 @@ fn probe_host_embed() -> bool {
     rc == EMBED_DIM as i32
 }
 
+#[cfg(not(feature = "slim"))]
 fn bge_small_config() -> Config {
     Config {
         vocab_size: 30522,

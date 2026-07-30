@@ -1116,12 +1116,19 @@ fn browser(body: &Value, body_s: &str) -> u64 {
     match unpack_to_string(packed) {
         Some(s) => {
             let v: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
-            let witnessed = crate::browser_witness::witness_all_pending_edits_by_rehashing_current_content(&cwd);
+            let transport_ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
+                && !v.get("timed_out").and_then(|b| b.as_bool()).unwrap_or(false)
+                && v.get("exit_code").and_then(|n| n.as_i64()).map(|c| c == 0).unwrap_or(true);
             let mut v = v;
-            if witnessed > 0 {
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("witness_marked".to_string(), json!(witnessed));
+            if transport_ok {
+                let witnessed = crate::browser_witness::witness_all_pending_edits_by_rehashing_current_content(&cwd);
+                if witnessed > 0 {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("witness_marked".to_string(), json!(witnessed));
+                    }
                 }
+            } else if let Some(obj) = v.as_object_mut() {
+                obj.insert("witness_skipped_transport_failure".to_string(), json!(true));
             }
             record_app_loads_witness_from_response(cwd, &v);
             ok("browser", v)

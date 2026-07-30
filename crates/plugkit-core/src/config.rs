@@ -583,21 +583,36 @@ fn load_repo_tier(
         Ok(None) => return Load::Absent,
         Err(reason) => return Load::Rejected { reason },
     };
-    if let Err(e) = fetcher.refresh(&src) {
-        return Load::Rejected {
-            reason: format!(
-                "{spec_path}: could not refresh config repo {}: {e}",
-                src.repo
-            ),
-        };
-    }
+    // A transient refresh failure (offline, a concurrent process holding the
+    // repo's git lock, a momentary network blip) must not discard an already-
+    // materialized cache from a PRIOR successful refresh -- that cache is
+    // real, present-on-disk config a project explicitly opted into, not
+    // nothing. Falling through to a lower tier (or the compiled BuiltinDefault
+    // config, whose fsm.graph key is simply absent) on every transient blip
+    // silently swaps a project's intentionally-configured FSM graph/prose for
+    // an unrelated one mid-session: a phase persisted under the cached graph
+    // (e.g. a custom initial state) stops being a valid state in whatever
+    // tier resolution fell back to, and every subsequent `transition` denies
+    // with "no edge" against a graph the project never even serves stably.
+    // Try the fetch; on failure, read whatever is already cached before
+    // giving up -- only a genuinely empty/never-populated cache degrades this
+    // tier to Rejected/Absent.
+    let refresh_err = fetcher.refresh(&src).err();
     let cfg_path = src.config_path();
     let Some(text) = read_across_publish(&cfg_path) else {
-        return Load::Rejected {
-            reason: format!(
-                "{spec_path}: config repo {} refreshed, but no config file at {cfg_path}",
-                src.repo
-            ),
+        return match refresh_err {
+            Some(e) => Load::Rejected {
+                reason: format!(
+                    "{spec_path}: could not refresh config repo {} ({e}), and no cached config file at {cfg_path} to fall back on",
+                    src.repo
+                ),
+            },
+            None => Load::Rejected {
+                reason: format!(
+                    "{spec_path}: config repo {} refreshed, but no config file at {cfg_path}",
+                    src.repo
+                ),
+            },
         };
     };
     match parse_config(&text, &cfg_path) {
@@ -724,6 +739,27 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
 /// an operator never configured this repo, so a transient failure to reach
 /// it should read as "nothing here" (fall through quietly to the compiled
 /// default), not as a rejection worth surfacing for a tier nobody opted into.
+///
+/// BUT: "nothing here" only applies when nothing is genuinely cached either.
+/// A refresh failure with an already-materialized cache from a prior
+/// successful fetch is NOT "nothing here" -- it is real, present config this
+/// project has been running against, and discarding it on every transient
+/// git-fetch blip (network hiccup, a concurrent process holding the repo's
+/// lock -- both observed in practice) silently flips the active tier from
+/// ImplicitDefaultRepo down to BuiltinDefault mid-session. BuiltinDefault has
+/// no `fsm.graph` key, so the FSM graph changes underneath an in-flight
+/// session: a persisted phase that was valid under the cached graph is no
+/// longer a state in the newly-resolved (compiled default) graph, and
+/// `transition` denies every dispatch with "no edge from `X` to `Y`" against
+/// a graph the project was never actually configured to run -- confirmed live
+/// 2026-07-30 (thebird project, gm-plugkit runtime): `turn-state.json` showed
+/// `phase:"PLAN"` (compiled-default's state, not the config repo's own
+/// SPECIFY-based graph) even though `.gm/config-source-cache-default/
+/// gm.config.json` on disk had a valid, populated `fsm.graph` pointer the
+/// whole time -- proving `fetcher.refresh` was failing intermittently and
+/// this function was discarding the good cache on every failure instead of
+/// reading it. Read whatever is cached before giving up; only a genuinely
+/// empty/never-populated cache degrades this tier to Absent.
 fn load_implicit_default_repo_tier(project_root: &str, fetcher: &dyn RepoFetcher) -> Load {
     let src = RepoSource {
         repo: DEFAULT_REPO_URL.to_string(),
@@ -732,9 +768,7 @@ fn load_implicit_default_repo_tier(project_root: &str, fetcher: &dyn RepoFetcher
         cache_dir: join(project_root, DEFAULT_REPO_CACHE_REL),
         tier_label: Tier::ImplicitDefaultRepo.as_str().to_string(),
     };
-    if fetcher.refresh(&src).is_err() {
-        return Load::Absent;
-    }
+    let _ = fetcher.refresh(&src);
     let cfg_path = src.config_path();
     let Some(text) = read_across_publish(&cfg_path) else {
         return Load::Absent;

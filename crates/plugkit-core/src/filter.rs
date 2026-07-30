@@ -249,7 +249,7 @@ fn git_status(input: &str) -> Value {
     let mut untracked: Vec<String> = Vec::new();
     for line in input.lines() {
         if line.len() < 3 { continue; }
-        let (x, y, path) = (line.chars().nth(0).unwrap_or(' '),
+        let (x, y, path) = (line.chars().next().unwrap_or(' '),
                              line.chars().nth(1).unwrap_or(' '),
                              line.get(3..).unwrap_or("").to_string());
         if x == '?' && y == '?' { untracked.push(path); continue; }

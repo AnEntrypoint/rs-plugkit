@@ -1,18 +1,33 @@
 use super::fsm::{self, GateDef, HookMode};
-use super::state::{Phase, set_phase_with_session, read_state};
+use super::state::{Phase, read_state_with_graph, set_phase_with_session_with_graph};
 use super::prd;
 use super::recall;
 use super::mutables;
 
-pub fn next_skill(current: &Phase) -> String {
-    let g = fsm::graph();
+/// Resolves the FSM graph itself via `g`, supplied by the caller rather than
+/// re-resolved here. `fsm::graph()` performs a full config-resolution pass
+/// (including a real network git-fetch through the source-repo tiers) on
+/// EVERY call -- calling it independently at each site that needs "the
+/// graph" within a single dispatch let two calls inside the SAME `handle()`
+/// invocation observe two DIFFERENT resolved graphs if the underlying tier
+/// flips mid-dispatch (a debounce window elapsing between calls, a
+/// config-repo cache directory being concurrently refreshed by another
+/// process). That TOCTOU let a persisted phase pass `migrate_to_active_graph`
+/// against graph-instance-A's states, then fail the transition edge-check
+/// moments later against graph-instance-B's edges -- observed live 2026-07-30
+/// (thebird project): `transition{to:EXECUTE}` denied "no edge from PLAN to
+/// EXECUTE" repeatedly even though `PLAN` had just passed state validation in
+/// the same dispatch. `handle()` below now resolves the graph exactly ONCE
+/// and threads that single `Graph` value through every helper in this
+/// function's call chain, so within one dispatch every check agrees on which
+/// graph is active, whatever the resolution answer to a NEW dispatch may be.
+pub fn next_skill(current: &Phase, g: &fsm::Graph) -> String {
     g.state(current.as_str())
         .and_then(|s| s.skill.clone())
         .unwrap_or_else(|| format!("gm-{}", current.as_str().to_ascii_lowercase()))
 }
 
-pub fn next_phase(current: &Phase) -> Phase {
-    let g = fsm::graph();
+pub fn next_phase(current: &Phase, g: &fsm::Graph) -> Phase {
     match g.default_edge_from(current.as_str()) {
         Some(e) => Phase::parse(&e.to).unwrap_or_else(|| current.clone()),
         None => current.clone(),
@@ -657,10 +672,14 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
 pub fn handle(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     let mut session_id: Option<String> = None;
-    let cur = read_state();
+    // Resolve the graph exactly ONCE for this whole dispatch (see the doc
+    // comment on next_skill/next_phase above) -- every helper below takes
+    // this same `graph` value rather than re-resolving independently.
+    let graph = fsm::graph();
+    let cur = read_state_with_graph(&graph);
     let cur_phase = cur.phase.clone();
     let target = if trimmed.is_empty() {
-        next_phase(&cur_phase)
+        next_phase(&cur_phase, &graph)
     } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
             session_id = Some(sid.to_string());
@@ -673,7 +692,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
                 Some(p) => p,
                 None => return (String::new(), format!("invalid phase: {}", s), 1),
             },
-            None => next_phase(&cur_phase),
+            None => next_phase(&cur_phase, &graph),
         }
     } else {
         match Phase::parse(trimmed) {
@@ -681,8 +700,6 @@ pub fn handle(content: &str) -> (String, String, i32) {
             None => return (String::new(), format!("invalid phase: {}", trimmed), 1),
         }
     };
-
-    let graph = fsm::graph();
 
     if !graph.has_state(target.as_str()) {
         return (
@@ -700,8 +717,8 @@ pub fn handle(content: &str) -> (String, String, i32) {
         return r;
     }
 
-    let skill = next_skill(&target);
-    match set_phase_with_session(target.clone(), Some(skill.clone()), session_id) {
+    let skill = next_skill(&target, &graph);
+    match set_phase_with_session_with_graph(target.clone(), Some(skill.clone()), session_id, &graph) {
         Ok(s) => {
             #[cfg(target_arch = "wasm32")]
             crate::wasm_dispatch::emit_event("phase.transitioned", serde_json::json!({ "from": cur_phase.as_str(), "phase": s.phase.as_str() }));
