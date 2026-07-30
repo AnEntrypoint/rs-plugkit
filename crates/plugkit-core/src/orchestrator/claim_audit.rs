@@ -17,10 +17,6 @@ fn claim_audit_config() -> crate::ragconfig::ClaimAuditConfig {
     crate::ragconfig::RagConfig::resolved().claim_audit
 }
 
-fn line_asserts_shipped_claim(line: &str) -> bool {
-    line_asserts_shipped_claim_cfg(line, &claim_audit_config())
-}
-
 fn line_asserts_shipped_claim_cfg(line: &str, cfg: &crate::ragconfig::ClaimAuditConfig) -> bool {
     let lower = line.to_ascii_lowercase();
     cfg.shipped_claim_markers_matched_case_insensitive_substring

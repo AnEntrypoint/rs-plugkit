@@ -987,26 +987,6 @@ const REFUSED_HOOK_KIND: &str = "remote-hook-refused";
 /// Where a graph rejection is recorded so it OUTLIVES the dispatch that hit it.
 pub const GRAPH_REJECTION_PATH: &str = ".gm/fsm-graph-rejected.json";
 
-/// Persist the fact that a vendored graph was rejected and the default is
-/// serving in its place.
-/// Until now the only signal was an emitted event, which is invisible on
-/// native (the emit is cfg-gated to wasm32) and easy to miss even on wasm.
-/// The operator's experience was gm behaving perfectly normally while their
-/// entire config was ignored -- the worst shape a config failure can take,
-/// because nothing about the running system looks wrong. A file on disk can
-/// be read by the instruction payload, by a human, or by CI, long after the
-/// dispatch that produced it.
-fn record_graph_rejection(kind: &str, detail: &str) {
-    record_graph_rejection_at(GRAPH_OVERRIDE_PATH, GraphTier::LocalOverride, kind, detail);
-}
-
-/// Record a rejection against the file that actually produced it.
-/// The un-attributed form was correct only while the local override was the
-/// sole possible source. With a repo tier, naming `GRAPH_OVERRIDE_PATH`
-/// unconditionally would tell an operator to fix a local file that may be
-/// perfectly valid, or not exist at all, while the real defect sits in a config
-/// repo -- a rejection notice that misdirects is worse than none, because it is
-/// acted on.
 fn record_graph_rejection_at(path: &str, tier: GraphTier, kind: &str, detail: &str) {
     let effect = match (kind, tier) {
         (REFUSED_HOOK_KIND, _) => "the graph itself IS serving -- only its hooks were refused. The affected gates now evaluate predicate-only, and any gate whose hook was its ONLY condition can no longer pass at all. Vendor the graph and its hook into .gm/instructions/fsm/graph.json to restore them.",

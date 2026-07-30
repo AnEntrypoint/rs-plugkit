@@ -104,7 +104,7 @@ pub fn handle_stop(content: &str) -> (String, String, i32) {
         v.get("id").and_then(|x| x.as_str())
             .or_else(|| v.get("task_id").and_then(|x| x.as_str()))
             .map(|s| s.to_string())
-            .or_else(|| if let Some(s) = v.as_str() { Some(s.to_string()) } else { None })
+            .or_else(|| v.as_str().map(|s| s.to_string()))
     } else {
         Some(content.trim().to_string())
     };
@@ -136,7 +136,7 @@ pub fn handle_output(content: &str) -> (String, String, i32) {
 pub fn live_running_tasks() -> Value {
     let result = host_task("list", &json!({}));
     let tasks = result.get("tasks").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let now_ms = host_now_ms() as u64;
+    let now_ms = host_now_ms();
     let mut running: Vec<Value> = Vec::new();
     for t in tasks {
         if t.get("status").and_then(|v| v.as_str()) == Some("running") {
@@ -208,7 +208,7 @@ pub fn stuck_spool() -> Value {
     let out_dir = gm_dir().join("exec-spool").join("out");
     let in_ps = in_dir.to_string_lossy().to_string();
     let out_ps = out_dir.to_string_lossy().to_string();
-    let now_ms = host_now_ms() as u64;
+    let now_ms = host_now_ms();
     let mut stuck: Vec<Value> = Vec::new();
     let verbs = match pkfs::readdir(&in_ps) {
         Some(v) => v,
