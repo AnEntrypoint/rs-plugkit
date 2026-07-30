@@ -10,7 +10,7 @@ Stage, commit, push -- via the git verbs, never a shell git. `git_finalize {mess
 
 ## CI/CD validation
 
-The push IS part of the validation dispatch, but CONSOLIDATE also witnesses the pipeline going green, not just the push landing. Watch the triggered run (`gh run watch` equivalent via the exec/fetch verbs, or poll the remote CI status) and on green, `fs_write` `.gm/exec-spool/.ci-validated` with `{"head_sha":"<git rev-parse HEAD>"}` -- the COMPLETE gate matches that sha against current HEAD; any other content, a stale sha, or a marker written before the final push reads as unvalidated. Red is not a stop: name the cause, fix, re-push, re-watch. A CI check skipped because "the diff looked safe" is an unwitnessed slice.
+The push IS part of the validation dispatch, but CONSOLIDATE also witnesses the pipeline going green, not just the push landing. Dispatch `ci-status {repo, sha}` with the repo and SHA just pushed. Poll it until `status` is `success` or `failure`, not still pending. On `success`, `fs_write` `.gm/exec-spool/.ci-validated` with `{"head_sha":"<git rev-parse HEAD>"}` -- the COMPLETE gate matches that sha against current HEAD; any other content, a stale sha, or a marker written before the final push reads as unvalidated. On `failure`, read the response's `failed_jobs` array and `prd-add` one row per distinct failure, naming the job and the cause from that structured data -- never a vague "CI failed" row. Fix, re-push, re-dispatch `ci-status`. A CI check skipped because "the diff looked safe" is an unwitnessed slice.
 
 ## Constraints
 
