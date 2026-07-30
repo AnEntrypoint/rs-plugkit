@@ -275,7 +275,7 @@ fn fetch(body: &Value) -> u64 {
     ok("fetch", v)
 }
 
-const ENV_GET_ALLOWED_EXACT: &[&str] = &["CLAUDE_PROJECT_DIR"];
+const ENV_GET_ALLOWED_EXACT: &[&str] = &["CLAUDE_PROJECT_DIR", "GITHUB_TOKEN", "GH_TOKEN"];
 const ENV_GET_ALLOWED_PREFIXES: &[&str] = &["PLUGKIT_", "GM_"];
 
 fn env_get_allowed(key: &str) -> bool {
@@ -1868,6 +1868,146 @@ fn git_fetch(body: &Value) -> u64 {
     ok("git_fetch", json!({ "remote": remote, "output": out }))
 }
 
+fn ci_status_resolve_repo(body: &Value, cwd: Option<&str>) -> Result<String, u64> {
+    if let Some(explicit) = body.get("repo").and_then(|v| v.as_str()) {
+        let explicit = explicit.trim();
+        if !explicit.is_empty() {
+            return Ok(explicit.to_string());
+        }
+    }
+    let url = exec_git_in(cwd, "config --get remote.origin.url").trim().to_string();
+    if url.is_empty() {
+        return Err(err("ci-status", "repo required (pass {repo:\"owner/name\"} or run inside a checkout with an origin remote)"));
+    }
+    let trimmed = url.trim_end_matches(".git");
+    let owner_name = trimmed
+        .rsplit_once('/')
+        .and_then(|(rest, name)| rest.rsplit_once(['/', ':']).map(|(_, owner)| format!("{}/{}", owner, name)));
+    match owner_name {
+        Some(s) if s.contains('/') => Ok(s),
+        _ => Err(err("ci-status", &format!("could not parse owner/name from origin remote url: {}", url))),
+    }
+}
+
+fn ci_status_resolve_sha(body: &Value, cwd: Option<&str>) -> Result<String, u64> {
+    let requested = body.get("sha").and_then(|v| v.as_str())
+        .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+        .unwrap_or("latest").trim();
+    if requested.is_empty() || requested.eq_ignore_ascii_case("latest") {
+        let sha = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+        if sha.is_empty() {
+            return Err(err("ci-status", "sha not provided and unable to resolve local HEAD"));
+        }
+        return Ok(sha);
+    }
+    Ok(requested.to_string())
+}
+
+fn ci_status_token() -> Option<String> {
+    if let Some(s) = unpack_to_string(unsafe { host_env_get(b"GITHUB_TOKEN".as_ptr(), 12) }) {
+        if !s.is_empty() { return Some(s); }
+    }
+    if let Some(s) = unpack_to_string(unsafe { host_env_get(b"GH_TOKEN".as_ptr(), 8) }) {
+        if !s.is_empty() { return Some(s); }
+    }
+    None
+}
+
+fn ci_status_conclusion_to_status(conclusion: &str, gh_status: &str) -> &'static str {
+    if gh_status != "completed" {
+        return "pending";
+    }
+    match conclusion {
+        "success" => "success",
+        "failure" | "timed_out" | "cancelled" | "action_required" | "startup_failure" => "failure",
+        _ => "unknown",
+    }
+}
+
+fn ci_status(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let repo = match ci_status_resolve_repo(body, cwd) { Ok(r) => r, Err(e) => return e };
+    let sha = match ci_status_resolve_sha(body, cwd) { Ok(s) => s, Err(e) => return e };
+    let url = format!("https://api.github.com/repos/{}/actions/runs?head_sha={}&per_page=20", repo, sha);
+    if let Err(reason) = crate::config_path::validate_fetch_url(&url) {
+        return err_coded("ci-status", ERR_CODE_INVALID_ARGS, &reason);
+    }
+    let token = body.get("token").and_then(|v| v.as_str()).map(String::from).or_else(ci_status_token);
+    let mut headers = json!({
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "plugkit-ci-status",
+    });
+    if let Some(t) = &token {
+        headers["Authorization"] = json!(format!("Bearer {}", t));
+    }
+    let opts = json!({ "timeoutMs": FETCH_DEFAULT_TIMEOUT_MS, "headers": headers }).to_string();
+    let packed = unsafe { host_fetch(url.as_ptr(), url.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    let resp = unpack_to_value(packed);
+    if resp.is_null() {
+        return err("ci-status", "host_fetch empty");
+    }
+    let body_text = resp.get("body").and_then(|v| v.as_str())
+        .or_else(|| resp.get("text").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let status_code = resp.get("status").and_then(|v| v.as_i64())
+        .or_else(|| resp.get("statusCode").and_then(|v| v.as_i64()))
+        .unwrap_or(0);
+    if status_code != 200 {
+        return err_json("ci-status", json!({
+            "error": format!("GitHub Actions API returned HTTP {}", status_code),
+            "repo": repo,
+            "sha": sha,
+            "response": body_text,
+        }));
+    }
+    let parsed: Value = serde_json::from_str(body_text).unwrap_or(Value::Null);
+    let runs = parsed.get("workflow_runs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if runs.is_empty() {
+        return ok("ci-status", json!({
+            "status": "unknown",
+            "repo": repo,
+            "sha": sha,
+            "failed_jobs": [],
+            "run_url": Value::Null,
+            "reason": "no workflow runs found for this sha yet",
+        }));
+    }
+    let mut overall = "success";
+    let mut failed_jobs: Vec<Value> = vec![];
+    let mut run_url: Option<String> = None;
+    let mut any_pending = false;
+    let mut any_failure = false;
+    for run in &runs {
+        let gh_status = run.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let conclusion = run.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
+        let per_run_status = ci_status_conclusion_to_status(conclusion, gh_status);
+        let html_url = run.get("html_url").and_then(|v| v.as_str()).map(String::from);
+        if run_url.is_none() { run_url = html_url.clone(); }
+        if per_run_status == "pending" { any_pending = true; }
+        if per_run_status == "failure" {
+            any_failure = true;
+            failed_jobs.push(json!({
+                "name": run.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                "conclusion": conclusion,
+                "run_url": html_url,
+            }));
+        }
+    }
+    if any_failure {
+        overall = "failure";
+    } else if any_pending {
+        overall = "pending";
+    }
+    ok("ci-status", json!({
+        "status": overall,
+        "repo": repo,
+        "sha": sha,
+        "failed_jobs": failed_jobs,
+        "run_url": run_url,
+        "run_count": runs.len(),
+    }))
+}
+
 fn git_branch(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let current = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
@@ -2202,6 +2342,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_diff" => git_diff(&body),
         "git_show" => git_show(&body),
         "git_fetch" => git_fetch(&body),
+        "ci-status" | "ci_status" => ci_status(&body),
         "git_branch" => git_branch(&body),
         "git_checkout" => git_checkout(&body),
         "git_merge" => git_merge(&body),
