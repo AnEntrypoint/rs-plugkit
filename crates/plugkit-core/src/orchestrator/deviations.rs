@@ -111,6 +111,11 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
         Severity::Deny,
     ),
     (
+        "prd-resolve-fabricated-dispatch",
+        "`prd-resolve` supplied a witness_dispatch_id that does not exist in this guest's own dispatch ledger -- the referenced dispatch never actually ran",
+        Severity::Deny,
+    ),
+    (
         "residual-premature",
         "`residual-scan` was dispatched while .gm/prd.yml still carries open rows -- the scan is a close-out probe and has nothing to report until the PRD is empty",
         Severity::Log,

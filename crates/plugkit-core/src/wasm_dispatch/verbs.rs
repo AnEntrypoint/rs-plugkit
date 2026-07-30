@@ -2236,12 +2236,14 @@ fn verb_body_must_be_json(verb: &str) -> bool {
     )
 }
 
-fn stamp_request_identity(packed: u64, fingerprint: &str, body_parse_failed: bool) -> u64 {
-    let mut value = super::host_abi::unpack_to_value(packed);
+fn stamp_request_identity(mut value: Value, fingerprint: &str, body_parse_failed: bool, dispatch_id: Option<&str>) -> u64 {
     if let Some(obj) = value.as_object_mut() {
         obj.insert("request_fingerprint".to_string(), json!(fingerprint));
         if body_parse_failed {
             obj.insert("body_parse_error".to_string(), json!(true));
+        }
+        if let Some(id) = dispatch_id {
+            obj.insert("dispatch_id".to_string(), json!(id));
         }
     }
     pack(value.to_string())
@@ -2264,7 +2266,16 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     super::events::set_dispatch_session_id(dispatch_session_id);
     let result_packed = dispatch_gated_verb(&verb, &body, &body_s);
     super::events::set_dispatch_session_id(None);
-    stamp_request_identity(result_packed, &fingerprint, body_parse_failed)
+    let result_value = super::host_abi::unpack_to_value(result_packed);
+    #[cfg(target_arch = "wasm32")]
+    let dispatch_id = {
+        let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+        let exit_code = if result_value.get("ok").and_then(|v| v.as_bool()).unwrap_or(true) { 0 } else { 1 };
+        Some(crate::dispatch_ledger::record(cwd, &verb, &fingerprint, exit_code))
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let dispatch_id: Option<String> = None;
+    stamp_request_identity(result_value, &fingerprint, body_parse_failed, dispatch_id.as_deref())
 }
 
 fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {

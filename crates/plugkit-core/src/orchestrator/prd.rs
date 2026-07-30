@@ -273,7 +273,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     (serde_json::json!({ key: id }).to_string(), String::new(), 0)
 }
 
-fn parse_resolve_target(trimmed: &str) -> (String, Option<String>, Option<String>) {
+fn parse_resolve_target(trimmed: &str) -> (String, Option<String>, Option<String>, Option<String>, Option<String>) {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         let id = v.get("id")
             .or_else(|| v.get("prd_id"))
@@ -294,6 +294,11 @@ fn parse_resolve_target(trimmed: &str) -> (String, Option<String>, Option<String
             .or_else(|| v.get("resolution_note"))
             .and_then(|s| s.as_str())
             .map(|s| s.to_string());
+        let mut witness_dispatch_id = v.get("witness_dispatch_id")
+            .or_else(|| v.get("dispatch_id"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let cwd = v.get("cwd").and_then(|s| s.as_str()).map(|s| s.to_string());
         let id = if let Ok(inner) = serde_json::from_str::<serde_json::Value>(&id) {
             if let Some(im) = inner.as_object() {
                 let recovered = im.get("key")
@@ -316,6 +321,12 @@ fn parse_resolve_target(trimmed: &str) -> (String, Option<String>, Option<String
                         .and_then(|s| s.as_str())
                         .map(|s| s.to_string());
                 }
+                if witness_dispatch_id.is_none() {
+                    witness_dispatch_id = im.get("witness_dispatch_id")
+                        .or_else(|| im.get("dispatch_id"))
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                }
                 recovered.unwrap_or(id)
             } else {
                 id
@@ -323,14 +334,14 @@ fn parse_resolve_target(trimmed: &str) -> (String, Option<String>, Option<String
         } else {
             id
         };
-        (id, wit, comment)
+        (id, wit, comment, witness_dispatch_id, cwd)
     } else if let Some((id, wit)) = recover_truncated_envelope(trimmed) {
-        (id, wit, None)
+        (id, wit, None, None, None)
     } else {
         let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
         let id = parts.first().map(|s| s.to_string()).unwrap_or_else(|| trimmed.to_string());
         let wit = parts.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        (id, wit, None)
+        (id, wit, None, None, None)
     }
 }
 
@@ -395,7 +406,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     if trimmed.is_empty() {
         return (String::new(), "missing PRD item id".to_string(), 1);
     }
-    let (id_target, witness, commit_comment) = parse_resolve_target(trimmed);
+    let (id_target, witness, commit_comment, witness_dispatch_id, resolve_cwd) = parse_resolve_target(trimmed);
     let policy = super::fsm::graph().policy;
     let has_witness = witness.as_ref().map(|w| !w.trim().is_empty()).unwrap_or(false);
     if policy.require_witness_evidence && !has_witness && deviation_refuses("prd-resolve-no-witness") {
@@ -407,6 +418,21 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             "hint": "resolve requires non-empty witness_evidence (file:line | codesearch hit | exec snippet | browser page.evaluate result). A row cannot be marked completed without evidence the work is real - this gate exists because an agent under closure-pressure marked undone tasks completed with an absent witness. Body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\", \"commit_comment\": \"<optional one-line resolution note, bundled into the next commit message>\"}. Do the work, capture its witness, then resolve.",
         }).to_string();
         return (body, format!("prd-resolve refused: no witness_evidence for {}", id_target), 1);
+    }
+    #[cfg(target_arch = "wasm32")]
+    if let Some(dispatch_id) = witness_dispatch_id.as_ref() {
+        let cwd = resolve_cwd.as_deref().unwrap_or("");
+        if crate::dispatch_ledger::lookup(cwd, dispatch_id).is_none() {
+            let body = serde_json::json!({
+                "error": format!("prd-resolve refused: witness_dispatch_id {} not found in this guest's dispatch ledger", dispatch_id),
+                "deviation_kind": "prd-resolve-fabricated-dispatch",
+                "deviation_severity": "deny",
+                "prd_id": id_target,
+                "witness_dispatch_id": dispatch_id,
+                "hint": "witness_dispatch_id must be the `dispatch_id` field returned in a PRIOR spool response (every verb's response now carries one). This id was not found in .gm/exec-spool/.dispatch-ledger.json, so it does not correspond to a real dispatch that actually ran -- either it was invented, or it belongs to a different cwd/project. Resolve again either omitting witness_dispatch_id, or with the exact dispatch_id copied from the response of the dispatch that produced this row's evidence.",
+            }).to_string();
+            return (body, format!("prd-resolve refused: unknown witness_dispatch_id for {}", id_target), 1);
+        }
     }
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
@@ -509,7 +535,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         Ok(()) => {
             #[cfg(target_arch = "wasm32")]
             crate::wasm_dispatch::emit_event("prd.resolved", serde_json::json!({ "id": id_target }));
-            (serde_json::json!({ "resolved": id_target, "commit_comment_attached": commit_comment.is_some() }).to_string(), String::new(), 0)
+            (serde_json::json!({ "resolved": id_target, "commit_comment_attached": commit_comment.is_some(), "witness_dispatch_id_verified": witness_dispatch_id.is_some() }).to_string(), String::new(), 0)
         }
         Err((out, err, rc)) => (out, err, rc),
     }

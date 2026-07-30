@@ -34,6 +34,9 @@ pub mod gates;
 pub mod browser_witness;
 
 #[cfg(target_arch = "wasm32")]
+pub mod dispatch_ledger;
+
+#[cfg(target_arch = "wasm32")]
 pub mod poll_detect;
 
 /// Config surface for the RAG/vector layer (namespaces, table names, embed
