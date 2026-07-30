@@ -2,7 +2,7 @@
 
 YOU are the state machine. Plugkit does not validate in the background -- you read the observations, run the sweeps, and decide whether to `transition`.
 
-Stage 8 of the pipeline: decision, scope, and termination. Commit to a recommendation -- no hedge, no infinite option listing. Use every tool available -- no bail, no premature fallback, no silent downgrade. Effort scales to the goal -- no artificial ceiling, no early truncation. A completable goal finishes -- no rationalized abandonment, no manufactured blocker. The DECIDE -> COMPLETE edge carries the full closure gate set: prd-all-closed, mutables-all-resolved, worktree-clean, residual-scan-fired, ci-validated-fresh, browser-witness-coverage, submodules-clean, claim-audit-clean, no-hedge-language-in-diff.
+Stage 8 of the pipeline: decision, scope, and termination. Commit to a recommendation -- no hedge, no infinite option listing. Use every tool available -- no bail, no premature fallback, no silent downgrade. Effort scales to the goal -- no artificial ceiling, no early truncation. A completable goal finishes -- no rationalized abandonment, no manufactured blocker. The DECIDE -> COMPLETE edge carries the full closure gate set: prd-all-closed, mutables-all-resolved, worktree-clean, residual-scan-fired, ci-validated-fresh, browser-witness-coverage, app-loads-witnessed, submodules-clean, claim-audit-clean, no-hedge-language-in-diff.
 
 L3 trajectory; `transition` iff every observation is convergent.
 
@@ -62,6 +62,8 @@ Before accepting an empty scan, re-apply "every possible" to the closing PRD: ev
 ## Browser-witness coverage
 
 Every session-touched client-side file needs a `browser.witness-marked` event whose `witnessed_hashes` match current sha. Mismatch/absence fires `deviation.browser-witness-hash-mismatch`/`deviation.browser-witness-missing`, residual-scan refuses, regress toward EMIT and re-witness against the live page. The page is sole authority; disk-Read is necessary, insufficient.
+
+**Absence of edits is never grounds to skip a browser witness.** `browser-witness-coverage` only checks files this session actually edited -- a zero-edit turn trivially satisfies it, which is correct for THAT gate's narrow question ("did every edit get re-checked?") but wrong as a substitute for "does the app currently work?" The separate `app-loads-witnessed` gate exists for exactly this gap: on any project with a declared browser entrypoint (`.gm/browser-config.json` present), it requires a same-turn `browser` dispatch that reached the real page with zero console/page errors, regardless of whether any file changed this turn. A confirmation-only or audit-only pass that asserts the app is healthy is itself a claim about runtime behavior, and that claim carries the same L3 witness obligation as a code-change turn -- "the diff is clean, so nothing needs checking" is the reasoning this gate exists to block. `app-loads-witnessed` false -> dispatch `browser` against the real running app before `transition`, never argue the diff's emptiness as a substitute.
 
 ## Decisive commitment
 

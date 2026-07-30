@@ -46,6 +46,7 @@ fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
         ("worktree-clean", "true when `git status --porcelain` is empty -- no uncommitted/unpushed delta", pred_worktree_clean),
         ("ci-validated-fresh", "true when .gm/exec-spool/.ci-validated exists and its head_sha matches the current `git rev-parse HEAD` -- a witnessed-green CI run for the exact pushed commit", ci_validation_fresh as PredicateFn),
         ("browser-witness-coverage", "true when every client-side file edited this session (per .gm/exec-spool/.turn-browser-edits.json) has a matching entry in .gm/exec-spool/.turn-browser-witnessed with the same content hash", pred_browser_witness_coverage),
+        ("app-loads-witnessed", "true when this project has no .gm/browser-config.json (no declared browser entrypoint, nothing to check), OR the most recent `browser` dispatch this stop window recorded a healthy app-loads witness (ok:true, zero pageErrors, zero console error-level lines) in .gm/exec-spool/.app-loads-witnessed.json. Unlike browser-witness-coverage, this check is unconditional -- it does not read .turn-browser-edits.json and is never vacuously satisfied by an empty edit list, so a zero-edit confirmation/audit turn claiming the app is healthy still must dispatch `browser` this turn to prove it.", pred_app_loads_witnessed as PredicateFn),
         ("claim-audit-clean", "true when the claim audit finds no unwitnessed completion claims -- see orchestrator::claim_audit", pred_claim_audit_clean),
         ("submodules-clean", "true when no submodule has drifted from its recorded commit -- see orchestrator::submodule_drift", pred_submodules_clean),
         ("no-synthetic-test-files", "true when the working diff introduces no standing test file (*.test.*, *.spec.*, or a test/tests/__tests__ directory). VERIFY doctrine forbids them: verification is a live exec_js/browser witness against real code, never a suite asserting against mocks. Emits deviation.synthetic-test-file naming the offending paths when it fails.", pred_no_synthetic_test_files as PredicateFn),
@@ -65,6 +66,10 @@ fn pred_prd_all_closed() -> bool { !prd_has_open_items() }
 fn pred_mutables_all_resolved() -> bool { mutables::pending_detailed().is_empty() }
 fn pred_worktree_clean() -> bool { !worktree_dirty() }
 fn pred_browser_witness_coverage() -> bool { check_browser_witness_coverage_for_cwd("").is_empty() }
+#[cfg(target_arch = "wasm32")]
+fn pred_app_loads_witnessed() -> bool { crate::browser_witness::app_loads_witnessed_this_stop_window("") }
+#[cfg(not(target_arch = "wasm32"))]
+fn pred_app_loads_witnessed() -> bool { true }
 fn pred_claim_audit_clean() -> bool { super::claim_audit::claim_audit_clean() }
 fn pred_submodules_clean() -> bool { super::submodule_drift::submodules_clean() }
 
@@ -638,6 +643,7 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
                     "worktree-clean" => "git_finalize",
                     "ci-validated-fresh" => "exec_js",
                     "browser-witness-coverage" => "browser",
+                    "app-loads-witnessed" => "browser",
                     "claim-audit-clean" => "claim-audit",
                     "submodules-clean" => "git_add",
                     _ => "instruction",

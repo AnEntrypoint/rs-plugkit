@@ -1051,6 +1051,30 @@ fn shell_exec(body: &Value, body_s: &str, lang: &str) -> u64 {
     }
 }
 
+fn browser_page_health_or_none_for_session_management_body(v: &Value) -> Option<bool> {
+    let debug = v.get("debug")?;
+    let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    let page_errors_empty = debug.get("pageErrors").and_then(|a| a.as_array()).map(|a| a.is_empty()).unwrap_or(true);
+    let console_clean = debug.get("console").and_then(|a| a.as_array())
+        .map(|entries| !entries.iter().any(|e| {
+            e.get("level").and_then(|l| l.as_str()).map(|l| l.eq_ignore_ascii_case("error")).unwrap_or(false)
+        }))
+        .unwrap_or(true);
+    Some(ok && page_errors_empty && console_clean)
+}
+
+fn record_app_loads_witness_from_response(cwd: &str, v: &Value) {
+    let Some(healthy) = browser_page_health_or_none_for_session_management_body(v) else { return };
+    let detail = if healthy {
+        "browser dispatch reached the page with ok:true, zero pageErrors, zero console error-level lines".to_string()
+    } else {
+        let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+        let page_err_count = v.get("debug").and_then(|d| d.get("pageErrors")).and_then(|a| a.as_array()).map(|a| a.len()).unwrap_or(0);
+        format!("browser dispatch unhealthy: ok={ok}, pageErrors={page_err_count}")
+    };
+    crate::browser_witness::record_app_loads_witness_unconditional_on_edits(cwd, healthy, &detail);
+}
+
 fn browser(body: &Value, body_s: &str) -> u64 {
     let code = body.get("code").and_then(|v| v.as_str()).map(|s| s.to_string())
         .filter(|s| !s.is_empty())
@@ -1092,13 +1116,14 @@ fn browser(body: &Value, body_s: &str) -> u64 {
     match unpack_to_string(packed) {
         Some(s) => {
             let v: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
-            let witnessed = crate::browser_witness::witness_all_pending_edits(&cwd);
+            let witnessed = crate::browser_witness::witness_all_pending_edits_by_rehashing_current_content(&cwd);
             let mut v = v;
             if witnessed > 0 {
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("witness_marked".to_string(), json!(witnessed));
                 }
             }
+            record_app_loads_witness_from_response(cwd, &v);
             ok("browser", v)
         }
         None => err_json("browser", json!({

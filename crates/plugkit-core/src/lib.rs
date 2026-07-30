@@ -257,6 +257,7 @@ mod wasm_hooks {
         clear_marker("gm-fired-this-turn");
         clear_marker("residual-check-fired");
         clear_marker("claim-audit-fired");
+        crate::browser_witness::clear_app_loads_witness_at_stop_window_boundary("");
         write_marker("needs-gm");
         let _ = crate::gitignore::ensure_managed_gitignore("");
         // Reap state left behind by subsystems this codebase has since
@@ -275,6 +276,7 @@ mod wasm_hooks {
         clear_marker("gm-fired-this-turn");
         clear_marker("residual-check-fired");
         clear_marker("claim-audit-fired");
+        crate::browser_witness::clear_app_loads_witness_at_stop_window_boundary("");
         clear_marker("needs-gm");
         let _ = host_write(&path_for("turn-state.json"), "{}");
         json!({ "continue": true })
@@ -284,6 +286,7 @@ mod wasm_hooks {
         clear_marker("gm-fired-this-turn");
         clear_marker("residual-check-fired");
         clear_marker("claim-audit-fired");
+        crate::browser_witness::clear_app_loads_witness_at_stop_window_boundary("");
         write_marker("needs-gm");
         let prompt = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
         if !prompt.is_empty() {

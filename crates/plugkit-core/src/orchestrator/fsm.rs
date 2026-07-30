@@ -593,7 +593,7 @@ fn default_graph() -> Graph {
             Edge { from: "CONC".into(), to: "SEC".into(), gates: vec![] },
             Edge { from: "SEC".into(), to: "RES".into(), gates: vec!["no-secrets-in-diff".into()] },
             Edge { from: "RES".into(), to: "DECIDE".into(), gates: vec!["no-unchecked-panics-in-diff".into()] },
-            Edge { from: "DECIDE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into(), "worktree-clean".into(), "residual-scan-fired".into(), "ci-validated-fresh".into(), "browser-witness-coverage".into(), "submodules-clean".into(), "claim-audit-clean".into(), "no-hedge-language-in-diff".into()] },
+            Edge { from: "DECIDE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into(), "worktree-clean".into(), "residual-scan-fired".into(), "ci-validated-fresh".into(), "browser-witness-coverage".into(), "app-loads-witnessed".into(), "submodules-clean".into(), "claim-audit-clean".into(), "no-hedge-language-in-diff".into()] },
             Edge { from: "PROVE".into(), to: "SPECIFY".into(), gates: vec![] },
             Edge { from: "EMIT".into(), to: "SPECIFY".into(), gates: vec![] },
             Edge { from: "STATE".into(), to: "EMIT".into(), gates: vec![] },
@@ -650,6 +650,13 @@ fn default_graph() -> Graph {
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
                 message: "transition rejected: client-edit-no-witness -- one or more client-side files edited this session lack a matching browser-witness. Dispatch `browser` to page.evaluate the invariant each edit establishes, then re-attempt.".into(),
+            },
+            GateDef {
+                name: "app-loads-witnessed".into(),
+                predicate: Some("app-loads-witnessed".into()),
+                hook: None,
+                hook_mode: HookMode::PredicateOnly,
+                message: "transition rejected: this project declares a browser entrypoint (.gm/browser-config.json present) but no same-turn `browser` dispatch recorded a healthy app-loads witness. Absence of file edits is never grounds to skip this -- a confirmation/audit turn asserting the app works is itself a claim, and that claim needs the same live witness a code-change turn needs. Dispatch `browser` against the real running app, confirm it loads with zero console/page errors, then re-attempt.".into(),
             },
             GateDef {
                 name: "claim-audit-clean".into(),

@@ -162,16 +162,7 @@ pub fn record_from_body(cwd: &str, body: &Value) {
     }
 }
 
-/// Mark every edited client-side file as witnessed, after a browser dispatch
-/// has actually loaded the page.
-///
-/// A `browser` dispatch that ran real script against the live page IS the
-/// witness the gate is asking about, so this is where the witness record
-/// belongs. Re-hashing at this moment (rather than copying the edit's stored
-/// hash) is what makes the record honest: a file edited again after this point
-/// gets a new edit hash that no longer matches, and correctly reads as
-/// unwitnessed on the next check.
-pub fn witness_all_pending_edits(cwd: &str) -> usize {
+pub fn witness_all_pending_edits_by_rehashing_current_content(cwd: &str) -> usize {
     let edits_path = if cwd.is_empty() {
         ".gm/exec-spool/.turn-browser-edits.json".to_string()
     } else {
@@ -198,19 +189,6 @@ pub fn witness_all_pending_edits(cwd: &str) -> usize {
     marked
 }
 
-/// Record that `file_path` was witnessed live in the browser this session.
-///
-/// The counterpart to [`record_edit`], and it did not exist: nothing in either
-/// repo wrote `.turn-browser-witnessed`, while `browser-witness-coverage` read
-/// it on every closing-edge attempt into the terminal phase. A missing file parses as an
-/// empty map, so every recorded edit compared its hash against `""` and the
-/// gate could never be satisfied once any client-side file had been touched --
-/// a permanent block with no way to clear it.
-///
-/// Stored as a `file -> hash` object because that is the shape the gate reads,
-/// and hashed at witness time from the file's CURRENT bytes, so editing a file
-/// after witnessing it correctly invalidates the witness rather than carrying a
-/// stale pass forward.
 pub fn record_witness(cwd: &str, file_path: &str) -> Result<bool, String> {
     let rel = if cwd.is_empty() { file_path.to_string() } else { relpath(cwd, file_path) };
     let rel_slash = rel.replace('\\', "/");
@@ -240,4 +218,50 @@ pub fn record_witness(cwd: &str, file_path: &str) -> Result<bool, String> {
         return Err(format!("host_fs_write failed for {}", witnessed_path));
     }
     Ok(true)
+}
+
+fn app_loads_witness_path(cwd: &str) -> String {
+    if cwd.is_empty() {
+        ".gm/exec-spool/.app-loads-witnessed.json".to_string()
+    } else {
+        format!("{}/.gm/exec-spool/.app-loads-witnessed.json", cwd.trim_end_matches('/').trim_end_matches('\\'))
+    }
+}
+
+fn browser_config_path(cwd: &str) -> String {
+    if cwd.is_empty() {
+        ".gm/browser-config.json".to_string()
+    } else {
+        format!("{}/.gm/browser-config.json", cwd.trim_end_matches('/').trim_end_matches('\\'))
+    }
+}
+
+pub fn project_declares_browser_entrypoint_via_browser_config_presence(cwd: &str) -> bool {
+    host_read(&browser_config_path(cwd)).is_some()
+}
+
+pub fn record_app_loads_witness_unconditional_on_edits(cwd: &str, healthy: bool, detail: &str) {
+    let path = app_loads_witness_path(cwd);
+    let entry = json!({ "healthy": healthy, "detail": detail, "ts": now_ms() });
+    if !host_write(&path, &entry.to_string()) {
+        log_warn(&format!("browser_witness: write failed for {}", path));
+    }
+}
+
+pub fn app_loads_witnessed_this_stop_window(cwd: &str) -> bool {
+    if !project_declares_browser_entrypoint_via_browser_config_presence(cwd) {
+        return true;
+    }
+    let raw = host_read(&app_loads_witness_path(cwd)).unwrap_or_default();
+    if raw.trim().is_empty() {
+        return false;
+    }
+    serde_json::from_str::<Value>(&raw)
+        .ok()
+        .and_then(|v| v.get("healthy").and_then(|h| h.as_bool()))
+        .unwrap_or(false)
+}
+
+pub fn clear_app_loads_witness_at_stop_window_boundary(cwd: &str) {
+    let _ = host_write(&app_loads_witness_path(cwd), "");
 }
