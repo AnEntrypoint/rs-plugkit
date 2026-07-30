@@ -149,6 +149,15 @@ fn report(key: &str, outcome: &Outcome) {
                     "detail": "gm-config, the mandatory default prose source, did not resolve for this key. The compiled default was served as an emergency payload -- this project is running on baked-in prose that may be stale relative to gm-config's actual current content, not a healthy no-override state.",
                 }),
             );
+            let marker = serde_json::json!({
+                "key": key,
+                "reason": reason,
+                "ts": crate::orchestrator::state::now_ms(),
+            });
+            let _ = pkfs::write(
+                ".gm/exec-spool/.config-repo-unreachable.json",
+                &marker.to_string(),
+            );
         }
         _ => {}
     }

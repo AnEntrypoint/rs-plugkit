@@ -480,6 +480,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let unsupervised_watcher = expire_stale_marker(read_spool_json(".pre-supervised-watcher.json"));
     let gm_plugkit_stale = expire_stale_marker(read_spool_json(".gm-plugkit-stale.json"));
     let wrapper_stale_in_memory = expire_stale_marker(read_spool_json(".wrapper-stale-in-memory.json"));
+    let config_repo_unreachable =
+        expire_stale_marker(read_spool_json(".config-repo-unreachable.json"));
     let running_tasks_count = match &running_tasks {
         serde_json::Value::Array(a) => a.len(),
         _ => 0,
@@ -541,6 +543,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "config_changed": config_changed,
         "gm_plugkit_stale": gm_plugkit_stale,
         "wrapper_stale_in_memory": wrapper_stale_in_memory,
+        "config_repo_unreachable": config_repo_unreachable,
         "running_tasks": running_tasks,
         "open_browser_sessions": open_browser_sessions,
         "stuck_spool": stuck_spool,
