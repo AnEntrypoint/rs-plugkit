@@ -640,7 +640,7 @@ fn default_graph() -> Graph {
                 message: "transition rejected: the same (id, hash) dispatch audit tuple was recorded with two different outcomes this stop window -- a replayed dispatch must reach the same result (f-compose-f-equals-f), never a second different mutation. Resolve the divergence, then re-attempt.".into(),
             },
         ],
-        policy: Policy::default(),
+        policy,
     }
 }
 

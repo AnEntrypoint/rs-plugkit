@@ -398,7 +398,9 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         ilog(&format!("instruction::handle fresh prompt on stuck {} chain (no pending PRD) -> reset phase to {}", phase, initial_phase));
         phase = initial_phase.clone();
         let mut st = read_state();
-        st.phase = Phase::parse(&initial_phase).unwrap_or_else(Phase::plan);
+        st.phase = Phase::parse(&initial_phase)
+            .or_else(|| super::fsm::graph().states.first().and_then(|s| Phase::parse(&s.key)))
+            .unwrap_or_else(Phase::plan);
         let _ = super::state::write_state(&st);
     }
 
@@ -406,13 +408,15 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         if fresh_prompt && policy.fresh_prompt_resets_phase {
             phase = initial_phase.clone();
             let mut st = read_state();
-            st.phase = Phase::parse(&initial_phase).unwrap_or_else(Phase::plan);
+            st.phase = Phase::parse(&initial_phase)
+                .or_else(|| super::fsm::graph().states.first().and_then(|s| Phase::parse(&s.key)))
+                .unwrap_or_else(Phase::plan);
             let _ = super::state::write_state(&st);
             ilog(&format!("instruction::handle fresh prompt on {} chain -> reset phase to {}", terminal_phase, initial_phase));
         } else if prd_pending_count(&prd_items_json()) == 0 && session_id_opt.is_some() {
             idev(
                 "complete-chain-poll",
-                "instruction re-dispatched on terminal chain (phase=COMPLETE, prd_pending=0, no fresh prompt). The chain is closed; stop dispatching. A new request resets to PLAN.",
+                &format!("instruction re-dispatched on terminal chain (phase={}, prd_pending=0, no fresh prompt). The chain is closed; stop dispatching. A new request resets to {}.", terminal_phase, initial_phase),
             );
         }
     }
