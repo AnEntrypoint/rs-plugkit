@@ -73,10 +73,25 @@ fn initial_phase() -> Phase {
     Phase::parse(&super::fsm::graph().policy.initial_phase).unwrap_or_else(Phase::plan)
 }
 
-fn migrate_to_active_graph(mut s: TurnState) -> TurnState {
-    let g = super::fsm::graph();
+/// Migrates a persisted `TurnState` whose `phase` may not be valid in the
+/// caller's already-resolved `g` to the graph's own initial phase. Takes `g`
+/// rather than resolving `fsm::graph()` itself: each resolution is a real
+/// network fetch through the config-repo tiers, and two independent
+/// resolutions within one dispatch can observe two DIFFERENT graphs if the
+/// tier flips mid-dispatch (a debounce window elapsing between calls, a
+/// config-repo cache directory being concurrently refreshed by another
+/// process). That TOCTOU let a persisted phase pass migration against
+/// graph-instance-A's states, then fail the transition edge-check moments
+/// later against graph-instance-B's edges -- observed live 2026-07-30
+/// (thebird project): `transition{to:EXECUTE}` denied "no edge from PLAN to
+/// EXECUTE" repeatedly even though `PLAN` had just passed state validation in
+/// the same dispatch. Every caller in this module now resolves the graph
+/// exactly once per dispatch and threads that single value through every
+/// helper that needs it (see transitions::handle), so within one dispatch
+/// every check agrees on which graph is active.
+fn migrate_to_graph(mut s: TurnState, g: &super::fsm::Graph) -> TurnState {
     if !g.has_state(s.phase.as_str()) {
-        s.phase = initial_phase();
+        s.phase = Phase::parse(&g.policy.initial_phase).unwrap_or_else(Phase::plan);
     }
     s
 }
@@ -99,14 +114,23 @@ pub fn state_path() -> std::path::PathBuf {
 }
 
 pub fn read_state() -> TurnState {
+    let g = super::fsm::graph();
+    read_state_with_graph(&g)
+}
+
+/// `read_state` split so a caller resolving the graph once for a whole
+/// dispatch (see transitions::handle) can pass it in, avoiding a second
+/// independent `fsm::graph()` network resolution that could disagree with
+/// the first (see migrate_to_graph's doc comment).
+pub fn read_state_with_graph(g: &super::fsm::Graph) -> TurnState {
     let p = state_path();
     let ps = p.to_string_lossy().to_string();
     if !pkfs::exists(&ps) {
-        return TurnState::default();
+        return default_state_for_graph(g);
     }
     match pkfs::read_to_string(&ps) {
         Some(s) => match serde_json::from_str(&s) {
-            Ok(v) => migrate_to_active_graph(v),
+            Ok(v) => migrate_to_graph(v, g),
             Err(e) => {
                 let now = now_ms();
                 let backup_path = format!("{}.corrupted-{}", ps, now);
@@ -118,10 +142,21 @@ pub fn read_state() -> TurnState {
                     "error": e.to_string(),
                     "backupPath": backup_path,
                 }));
-                TurnState::default()
+                default_state_for_graph(g)
             }
         },
-        None => TurnState::default(),
+        None => default_state_for_graph(g),
+    }
+}
+
+fn default_state_for_graph(g: &super::fsm::Graph) -> TurnState {
+    TurnState {
+        phase: Phase::parse(&g.policy.initial_phase).unwrap_or_else(Phase::plan),
+        session_id: None,
+        last_skill: None,
+        updated_at_ms: now_ms(),
+        pending_step_id: None,
+        pending_step_deadline_ms: None,
     }
 }
 
@@ -137,7 +172,20 @@ pub fn write_state(state: &TurnState) -> Result<(), std::io::Error> {
 }
 
 pub fn set_phase_with_session(phase: Phase, last_skill: Option<String>, session_id: Option<String>) -> Result<TurnState, std::io::Error> {
-    let mut s = read_state();
+    let g = super::fsm::graph();
+    set_phase_with_session_with_graph(phase, last_skill, session_id, &g)
+}
+
+/// `set_phase_with_session` split so a caller resolving the graph once for a
+/// whole dispatch (see transitions::handle) can pass it in, avoiding a
+/// second independent `fsm::graph()` network resolution (see
+/// migrate_to_graph's doc comment). `phase` here is the already-validated
+/// target the caller computed against that SAME graph, so this function does
+/// not re-validate it -- only the underlying `read_state_with_graph` call
+/// uses `g`, to migrate whatever was on disk consistently with the rest of
+/// this dispatch.
+pub fn set_phase_with_session_with_graph(phase: Phase, last_skill: Option<String>, session_id: Option<String>, g: &super::fsm::Graph) -> Result<TurnState, std::io::Error> {
+    let mut s = read_state_with_graph(g);
     s.phase = phase;
     if last_skill.is_some() {
         s.last_skill = last_skill;
