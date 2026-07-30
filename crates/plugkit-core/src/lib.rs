@@ -35,6 +35,7 @@ pub mod browser_witness;
 
 #[cfg(target_arch = "wasm32")]
 pub mod dispatch_ledger;
+pub mod evidence_receipt;
 
 #[cfg(target_arch = "wasm32")]
 pub mod poll_detect;
