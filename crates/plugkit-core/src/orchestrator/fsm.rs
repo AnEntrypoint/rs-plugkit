@@ -46,48 +46,16 @@ pub struct Policy {
     pub await_allowed_verbs: Vec<String>,
     #[serde(default = "default_longgap_exempt_verbs")]
     pub longgap_exempt_verbs: Vec<String>,
-    /// Verbs whose dispatch RESETS the long-gap clock (`.gm/last-instruction-ts`).
-    /// The third member of the same family as the two above, and the only one
-    /// that was not configurable: exempt verbs are not PENALISED by the clock,
-    /// whereas these actively REFRESH it. A project that renames or adds an
-    /// orienting verb has to be able to say so here, or that verb dispatches
-    /// forever without ever clearing the long-gap denial it keeps triggering.
     #[serde(default = "default_longgap_refresh_verbs")]
     pub longgap_refresh_verbs: Vec<String>,
-    /// Whether a fresh user prompt RESETS a stuck or finished chain back to
-    /// the initial phase.
-    /// Two heuristics, both in `instruction`: a fresh prompt on a non-initial,
-    /// non-terminal phase with zero pending PRD rows is read as a stalled
-    /// chain and reset; and a fresh prompt on the terminal phase starts over.
-    /// Both are right for gm, where a new prompt means new work -- but they
-    /// are the only place a READ-shaped verb WRITES turn state, and a spec
-    /// whose phases model something longer-lived than one prompt (a release
-    /// train, an approval queue) would find its phase silently rewound by a
-    /// question. Default `true` preserves today's behaviour exactly.
     #[serde(default = "default_true")]
     pub fresh_prompt_resets_phase: bool,
-    /// Verbs treated as "a shell" for the shell-bypass check, and the tool that
-    /// bypass is steering people toward.
-    /// Hardcoding these made the rule un-vendorable: a workflow whose shell verb
-    /// is named something else got no protection at all, and one that
-    /// legitimately wants shell git had no way to say so. Kept as policy rather
-    /// than a compile-time constant precisely because "which verb is a shell" is
-    /// a property of the workflow, not of the engine.
     #[serde(default = "default_shell_verbs")]
     pub shell_verbs: Vec<String>,
-    /// Set false to allow shell git. Defaults to true: the shell path bypasses
-    /// the porcelain gate and the witness ledger, so it stays denied unless a
-    /// workflow deliberately opts out.
     #[serde(default = "default_deny_shell_git")]
     pub deny_shell_git: bool,
     #[serde(default = "default_gate_repeat_escalate_threshold")]
     pub gate_repeat_escalate_threshold: u64,
-    /// Wall-clock budget for one gate hook, in ms.
-    /// A hook is arbitrary project-supplied JS run at gate evaluation, so its
-    /// runtime is a property of the workflow rather than of the engine: a hook
-    /// that shells out to a linter or waits on a network check legitimately
-    /// needs longer than one that stats a file. Exceeding the budget fails the
-    /// gate CLOSED, which makes an under-set value a denial nobody can clear.
     #[serde(default = "default_hook_timeout_ms")]
     pub hook_timeout_ms: u64,
     #[serde(default = "default_longgap_threshold_ms")]
@@ -112,15 +80,6 @@ pub struct Policy {
     pub mutables_require_witness_evidence: bool,
     #[serde(default = "default_cas_max_attempts")]
     pub cas_max_attempts: u32,
-    /// Per-deviation-kind severity override, keyed by a name in
-    /// `orchestrator::deviations::DEVIATION_TABLE`, valued "deny" or "log".
-    /// Empty by default, so every kind keeps the registry's declared severity and
-    /// the shipped behaviour is unchanged. A project promotes a log-only kind
-    /// (unsolicited-doc-created, prd-anti-shape, platform-search-drift, spool-poll,
-    /// complete-chain-poll, synthetic-test-file) to a hard denial by naming it here,
-    /// or demotes a denying one where the workflow legitimately differs. Unknown
-    /// keys and unparseable values fall back to the registry default and surface as
-    /// a non-fatal warning rather than silently weakening a gate.
     #[serde(default = "default_deviation_severity")]
     pub deviation_severity: std::collections::BTreeMap<String, String>,
 }
@@ -233,26 +192,6 @@ impl Graph {
         self.gates.iter().find(|g| g.name.eq_ignore_ascii_case(name))
     }
 
-    /// Referential integrity of a loaded graph, checked BEFORE it is trusted.
-    /// A vendored graph is remote-authored input, and every one of these
-    /// mistakes fails silently at runtime rather than at load: an edge naming a
-    /// state that does not exist is simply never traversable; an edge naming a
-    /// gate that does not exist drops that gate's protection while the graph
-    /// still reads as guarded; a `gates.predicate` outside the compiled
-    /// registry produces a gate that can never be satisfied. Each is worse than
-    /// a parse error because the config looks correct.
-    /// Returns every problem rather than the first, so an author fixing a
-    /// hand-written graph sees the whole list instead of peeling them off one
-    /// dispatch at a time.
-    /// Keys a graph may legitimately carry, for the non-fatal typo warning.
-    /// Deliberately NOT enforced via serde's `deny_unknown_fields`, which would
-    /// be actively harmful here: this config is repo-backed and auto-updating,
-    /// so a graph regenerated by a NEWER binary carries fields an OLDER binary
-    /// has never heard of, and a hard reject would drop every older binary in
-    /// the fleet back to compiled defaults. Serde's default-on-missing gives
-    /// backward compatibility; rejecting unknown keys would remove forward
-    /// compatibility, and this system needs both. A warning gets the typo
-    /// signal without the outage.
     pub const KNOWN_POLICY_KEYS: &'static [&'static str] = &[
         "toplevel_doc_allowlist", "await_allowed_verbs", "longgap_exempt_verbs", "longgap_refresh_verbs", "fresh_prompt_resets_phase",
         "shell_verbs", "deny_shell_git", "gate_repeat_escalate_threshold", "hook_timeout_ms",
@@ -262,8 +201,6 @@ impl Graph {
         "mutables_require_witness_evidence", "cas_max_attempts", "deviation_severity",
     ];
 
-    /// Report policy keys this build does not recognise, so a typo is visible
-    /// rather than silently ignored. Never fatal -- see KNOWN_POLICY_KEYS.
     pub fn min_plugkit_version_unmet(&self) -> Option<String> {
         let declared = self.min_plugkit_version.as_ref()?.trim().to_string();
         if declared.is_empty() {
@@ -368,17 +305,6 @@ impl Graph {
             .collect()
     }
 
-    /// Deviation-severity overrides this build cannot honour, as NON-FATAL warnings.
-    /// Deliberately not part of `validate()`. A `validate()` problem REJECTS the whole
-    /// graph and falls back to the compiled default, which is the right response to a
-    /// referential break (an edge to a state that does not exist cannot be traversed).
-    /// It is the wrong response here: a single mistyped severity key would discard
-    /// every unrelated customisation in the file -- states, edges, gates, thresholds --
-    /// and silently weaken the FSM far beyond the one line that was wrong. Both
-    /// failures here are already self-limiting, because `effective_severity` falls back
-    /// to the registry default for an unknown kind or an unparseable value, so the
-    /// graph stays perfectly usable. Same reasoning, and same non-fatal treatment, as
-    /// `unknown_policy_keys`.
     pub fn deviation_severity_warnings(&self) -> Vec<String> {
         let mut warnings = Vec::new();
         for unknown in super::deviations::unknown_severity_overrides(&self.policy.deviation_severity) {
@@ -532,14 +458,6 @@ fn prose_file_exists(prose_key: &str) -> bool {
     std::path::Path::new(&format!(".gm/instructions/{}.md", prose_key)).exists()
 }
 
-/// Resolve a hook script's real path, local tier first, falling back to the
-/// config-repo cache's own `hooks/` subdirectory.
-/// A hook now runs from either GraphTier -- see [`GraphTier::may_execute_hooks`]
-/// -- so its script must be reachable from wherever that tier's graph actually
-/// came from: `.gm/instructions/hooks/` for a local file, or
-/// `<config-source-cache>/hooks/` alongside a repo-supplied graph. Local is
-/// tried first even when the active graph is repo-sourced, so a project can
-/// still shadow one specific hook without vendoring the whole graph.
 #[cfg(target_arch = "wasm32")]
 pub fn resolve_hook_path(hook: &str) -> Option<String> {
     let local = format!(".gm/instructions/hooks/{}", hook);
@@ -728,20 +646,10 @@ fn default_graph() -> Graph {
 
 const GRAPH_OVERRIDE_PATH: &str = ".gm/instructions/fsm/graph.json";
 
-/// Where a candidate graph's bytes came from.
-/// Attribution is not cosmetic here. Before the cache tier existed there was
-/// exactly one source, so every error could name `GRAPH_OVERRIDE_PATH` and be
-/// right by construction. With a second source that same message sends an
-/// operator to edit a LOCAL file that is correct -- or absent -- while the real
-/// defect sits in a repo they have to be told about to even look at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphTier {
-    /// `.gm/instructions/fsm/graph.json`, vendored into the project and
-    /// reviewable in its git history.
     LocalOverride,
-    /// The config repo's cached checkout, materialized by `config_sync`.
     SourceRepo,
-    /// [`default_graph`], compiled in. Cannot fail, which keeps `graph()` total.
     CompiledDefault,
 }
 
@@ -754,26 +662,11 @@ impl GraphTier {
         }
     }
 
-    /// Whether a graph from this tier may carry executable gate hooks.
-    /// A hook is `exec_js` on the developer's machine at every gate evaluation.
-    /// Both LocalOverride and SourceRepo tiers may carry hooks -- a project that
-    /// configures a source repo is explicitly trusting that repo with the same
-    /// authority as its own local git history, including code execution. A
-    /// system owner managing a fleet of projects from a single config repo
-    /// needs this parity to reconfigure gm behavior remotely without touching
-    /// each project's own tree.
     fn may_execute_hooks(self) -> bool {
         matches!(self, GraphTier::LocalOverride | GraphTier::SourceRepo)
     }
 }
 
-/// Path within the config-source cache holding a repo-supplied graph, if the
-/// resolved config points at one.
-/// The pointer is read from the resolved config's `fsm.graph` key -- the key
-/// `gm.config.json` has always declared and nothing has ever read. Resolution
-/// goes through `config::resolve()` so the graph rides the same 4-tier chain,
-/// the same debounced fetcher, and the same rejection reporting as everything
-/// else, rather than growing a second parallel notion of "where config lives".
 #[cfg(target_arch = "wasm32")]
 fn source_repo_graph_path() -> Option<String> {
     let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
@@ -809,27 +702,10 @@ fn source_repo_graph_path() -> Option<String> {
     None
 }
 
-/// Resolve the active FSM graph across all three tiers.
-/// Order, first usable wins: project-vendored `.gm/instructions/fsm/graph.json`,
-/// then the config repo's cached `fsm.graph`, then [`default_graph`]. This is
-/// deliberately the same shape `prose::resolve` already runs for instruction
-/// text -- the graph was the one surface a config repo could not supply, which
-/// meant a remote repo could restyle the prose of a workflow but never change
-/// its states, edges, gates or policy: the central claim of the feature, unmet.
-/// A tier that PARSES but fails validation does not fall through to the next
-/// tier silently -- it is recorded via [`record_graph_rejection`] and the
-/// compiled default serves, so a broken graph is never quietly replaced by a
-/// different author's working one.
 pub fn graph() -> Graph {
     graph_detailed().0
 }
 
-/// Resolve the graph and report which tier answered and from what path.
-/// `graph()` alone made the resolution unobservable: an operator pointing a
-/// project at a config repo had no way to confirm the graph came from there
-/// rather than from a local file they forgot about or from the compiled
-/// default. Reporting the tier is what turns "a repo can supply an FSM" from a
-/// claim into something checkable, which is the whole point of the tier.
 pub fn graph_detailed() -> (Graph, GraphTier, String) {
     if let Some(raw) = pkfs::read_to_string(GRAPH_OVERRIDE_PATH) {
         return match load_tier(&raw, GRAPH_OVERRIDE_PATH, GraphTier::LocalOverride) {
@@ -851,15 +727,8 @@ pub fn graph_detailed() -> (Graph, GraphTier, String) {
     (default_graph(), GraphTier::CompiledDefault, COMPILED_PATH.to_string())
 }
 
-/// Stand-in path for the compiled tier, which has no file.
 const COMPILED_PATH: &str = "<compiled default>";
 
-/// Parse, sanitize and validate one tier's bytes, attributing every failure to
-/// the file it actually came from.
-/// `None` means this tier was rejected and the caller must serve the compiled
-/// default. Returning the default from HERE would have made the served tier
-/// unreportable, which is precisely the confusion the attribution work exists
-/// to remove.
 fn load_tier(raw: &str, path: &str, tier: GraphTier) -> Option<Graph> {
     match serde_json::from_str::<Graph>(raw) {
         Ok(mut g) => {
@@ -939,18 +808,6 @@ fn load_tier(raw: &str, path: &str, tier: GraphTier) -> Option<Graph> {
     }
 }
 
-/// Remove hooks a tier is not trusted to execute, returning the gate names that
-/// were stripped.
-/// Refused LOUDLY rather than ignored, and rather than rejecting the whole
-/// graph. Rejecting outright would let any upstream push disable a downstream
-/// project's entire workflow; ignoring silently would leave an operator reading
-/// a graph whose gates say `hook_mode: both` while only the predicate runs.
-/// Stripping plus a named denial keeps the workflow running and states exactly
-/// which guarantee was withdrawn.
-/// `hook_mode` is downgraded alongside the hook, because a `HookOnly` gate whose
-/// hook is gone evaluates to `false` forever -- refusing the hook would
-/// otherwise wedge the transition it guards, turning a security refusal into an
-/// unclearable denial.
 fn strip_untrusted_hooks(g: &mut Graph, tier: GraphTier) -> Vec<String> {
     if tier.may_execute_hooks() {
         return Vec::new();
@@ -974,24 +831,10 @@ fn strip_untrusted_hooks(g: &mut Graph, tier: GraphTier) -> Vec<String> {
     refused
 }
 
-/// Predicate substituted for a gate whose only condition was a refused remote
-/// hook.
-/// Such a gate has no way left to be satisfied, and `validate()` rejects a gate
-/// with neither predicate nor hook -- which would take the whole graph down
-/// over the refusal. Pointing it at a compiled predicate that always denies
-/// keeps the graph loadable while making the gate impossible to pass, which is
-/// the honest outcome: the condition the author wrote is genuinely not being
-/// evaluated, so the transition it guards must not be waved through.
 const REFUSED_HOOK_PREDICATE: &str = "remote-hook-refused";
 
-/// Rejection `kind` for a refused hook.
-/// Named rather than inlined because it is written at the call site and matched
-/// on when composing the operator-facing `effect`: a hook refusal is the one
-/// rejection where the graph KEEPS serving, so a drifted spelling would
-/// silently restore the wrong "the default is serving" text.
 const REFUSED_HOOK_KIND: &str = "remote-hook-refused";
 
-/// Where a graph rejection is recorded so it OUTLIVES the dispatch that hit it.
 pub const GRAPH_REJECTION_PATH: &str = ".gm/fsm-graph-rejected.json";
 
 fn record_graph_rejection_at(path: &str, tier: GraphTier, kind: &str, detail: &str) {
@@ -1010,32 +853,12 @@ fn record_graph_rejection_at(path: &str, tier: GraphTier, kind: &str, detail: &s
     let _ = crate::pkfs::write(GRAPH_REJECTION_PATH, &payload.to_string());
 }
 
-/// Drop a stale rejection once the graph loads cleanly (or is removed), so the
-/// marker always reflects the CURRENT state rather than the worst state ever
-/// seen. A rejection notice that outlives the problem it describes trains
-/// people to ignore it.
-/// Truncated rather than deleted: pkfs exposes no remove, and lib.rs's own
-/// clear_marker uses the same empty-write convention. `graph_rejection()`
-/// treats empty as absent.
 fn clear_graph_rejection() {
     if crate::pkfs::exists(GRAPH_REJECTION_PATH) {
         let _ = crate::pkfs::write(GRAPH_REJECTION_PATH, "");
     }
 }
 
-/// Gates the BUILT-IN default enforces on an edge that the ACTIVE graph does
-/// not, per edge.
-/// A vendored graph.json replaces the default wholesale -- there is no merge --
-/// so a project that vendored before a gate was added never receives it, and
-/// its edges stay permanently weaker than the built-in with nothing saying so.
-/// `claim-audit-clean` and `submodules-clean` are exactly this case today.
-/// Deliberately REPORTS rather than merges. Silently adding gates to a graph
-/// someone wrote by hand would change their FSM's meaning under them, which is
-/// its own failure; and a project may have dropped a gate on purpose. Naming
-/// the difference lets that be a decision instead of an accident.
-/// Returns `(from, to, missing_gates)` for each edge that is weaker than its
-/// default counterpart. An edge the default does not have at all is not
-/// reported: it is a genuinely new edge, not a weakened one.
 pub fn gates_missing_vs_default(active: &Graph) -> Vec<(String, String, Vec<String>)> {
     let default = default_graph();
     let mut out = Vec::new();
@@ -1191,7 +1014,6 @@ pub fn vendored_graph_raw() -> Option<String> {
     pkfs::read_to_string(GRAPH_OVERRIDE_PATH)
 }
 
-/// The active graph rejection, if any -- for the instruction payload.
 pub fn graph_rejection() -> Option<serde_json::Value> {
     let raw = crate::pkfs::read_to_string(GRAPH_REJECTION_PATH)?;
     if raw.trim().is_empty() { return None; }
