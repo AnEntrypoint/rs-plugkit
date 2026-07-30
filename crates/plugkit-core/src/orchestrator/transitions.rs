@@ -4,23 +4,6 @@ use super::prd;
 use super::recall;
 use super::mutables;
 
-/// Resolves the FSM graph itself via `g`, supplied by the caller rather than
-/// re-resolved here. `fsm::graph()` performs a full config-resolution pass
-/// (including a real network git-fetch through the source-repo tiers) on
-/// EVERY call -- calling it independently at each site that needs "the
-/// graph" within a single dispatch let two calls inside the SAME `handle()`
-/// invocation observe two DIFFERENT resolved graphs if the underlying tier
-/// flips mid-dispatch (a debounce window elapsing between calls, a
-/// config-repo cache directory being concurrently refreshed by another
-/// process). That TOCTOU let a persisted phase pass `migrate_to_active_graph`
-/// against graph-instance-A's states, then fail the transition edge-check
-/// moments later against graph-instance-B's edges -- observed live 2026-07-30
-/// (thebird project): `transition{to:EXECUTE}` denied "no edge from PLAN to
-/// EXECUTE" repeatedly even though `PLAN` had just passed state validation in
-/// the same dispatch. `handle()` below now resolves the graph exactly ONCE
-/// and threads that single `Graph` value through every helper in this
-/// function's call chain, so within one dispatch every check agrees on which
-/// graph is active, whatever the resolution answer to a NEW dispatch may be.
 pub fn next_skill(current: &Phase, g: &fsm::Graph) -> String {
     g.state(current.as_str())
         .and_then(|s| s.skill.clone())
@@ -38,19 +21,6 @@ pub fn known_predicates() -> Vec<(&'static str, &'static str)> {
     predicate_table().iter().map(|(name, desc, _)| (*name, *desc)).collect()
 }
 
-/// The ONE table: name, human description, and evaluator declared together.
-///
-/// These used to be two independent lists -- `known_predicates()` for the
-/// generated reference and a `match` in `predicate_result` for the behaviour --
-/// and they drifted: the match dispatched 8 predicates while the list published
-/// 6, so `fsm_vendor` generated a `predicates.md` that contradicted the default
-/// `graph.json` it generated beside it, while asserting in its own text that it
-/// could not drift. Declaring all three facets in one place makes that class of
-/// bug unrepresentable: you cannot add an evaluator without also supplying the
-/// name and description the reference is generated from.
-///
-/// The evaluator is a fn pointer rather than a closure so this stays a plain
-/// const-shaped table with no allocation or lazy init.
 type PredicateFn = fn() -> bool;
 
 fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
@@ -104,25 +74,6 @@ fn predicate_result(name: &str) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-/// ONE global marker, deliberately -- not per-edge, and not per-phase.
-///
-/// Residual-scan asks "is there loose work left in this window" -- a question
-/// whose answer cannot differ between two edges of one continuous closing walk
-/// inside the same window. Scoping it per-edge would force a redundant second
-/// scan of state nothing has touched since the first, which reads as
-/// diligence but is pure ceremony.
-///
-/// CAVEAT, and it is the real weakness here: the window boundary is enforced
-/// ENTIRELY by `clear_marker("residual-check-fired")` in lib.rs's
-/// session_start/session_end/prompt_submit hooks. Where those hooks do not
-/// run, nothing ever clears this file, and the predicate then reports a scan
-/// from an arbitrarily old session as if it had just fired -- observed live
-/// with a marker ten days stale (its `gm-fired-this-turn` sibling, cleared by
-/// the same hooks, was months stale). So the freshness guarantee is exactly
-/// as good as hook delivery, and fails OPEN when that is absent. A mtime-vs-
-/// session-start comparison here would degrade gracefully instead; not done
-/// in this pass because the marker carries no timestamp to compare against
-/// and adding one is a wire-format change, not a comment fix.
 fn residual_scan_fired() -> bool {
     let residual_marker = super::gm_dir().join("residual-check-fired");
     crate::pkfs::read_to_string(&residual_marker.to_string_lossy().to_string())
@@ -148,16 +99,8 @@ fn worktree_dirty() -> bool {
     !crate::wasm_dispatch::git_porcelain().trim().is_empty()
 }
 
-/// Standing test files introduced in the working diff.
-///
-/// VERIFY doctrine states that a `deviation.synthetic-test-file` blocks the
-/// transition, and that promise had no implementation at all -- the kind was
-/// named in served prose and emitted by no code, so the rule read as enforced
-/// while being advisory. This scans what the doctrine actually describes: the
-/// diff, not the whole tree, so a repo that already contains a suite is not
-/// permanently blocked by history it did not create this turn.
 #[cfg(target_arch = "wasm32")]
-fn synthetic_test_files_in_diff() -> Vec<String> {
+fn synthetic_test_files_added_in_working_diff() -> Vec<String> {
     let porcelain = crate::wasm_dispatch::git_porcelain();
     let mut found = Vec::new();
     for line in porcelain.lines() {
@@ -182,11 +125,11 @@ fn synthetic_test_files_in_diff() -> Vec<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn synthetic_test_files_in_diff() -> Vec<String> { vec![] }
+fn synthetic_test_files_added_in_working_diff() -> Vec<String> { vec![] }
 
 #[cfg(target_arch = "wasm32")]
 fn pred_no_synthetic_test_files() -> bool {
-    let found = synthetic_test_files_in_diff();
+    let found = synthetic_test_files_added_in_working_diff();
     if found.is_empty() {
         return true;
     }
@@ -202,11 +145,6 @@ fn pred_no_synthetic_test_files() -> bool { true }
 #[cfg(not(target_arch = "wasm32"))]
 fn worktree_dirty() -> bool { false }
 
-/// Added (path, line_number, line_text) tuples from the working diff.
-///
-/// Every diff-scoped predicate below needs the same three things -- which
-/// file, which line, what's on it -- so they share this one walk of
-/// `git diff --unified=0` output rather than five near-identical parsers.
 #[cfg(target_arch = "wasm32")]
 fn added_lines_in_diff() -> Vec<(String, usize, String)> {
     let raw = crate::wasm_dispatch::git_call("diff --unified=0 HEAD", None);
@@ -244,11 +182,7 @@ fn is_test_scoped_path(path: &str) -> bool {
     lower.contains(".test.") || lower.contains(".spec.") || lower.contains("/test/") || lower.contains("/tests/") || lower.contains("/__tests__/")
 }
 
-/// Whether `needle`'s first occurrence in `text` sits inside a string
-/// literal (odd number of unescaped quote chars of any of the three common
-/// kinds before it). Marker detection must not trip on its own registry
-/// entries or on gate-message strings that legitimately name the markers.
-fn inside_string_literal(text: &str, needle: &str) -> bool {
+fn needle_first_occurrence_sits_inside_quoted_string_literal(text: &str, needle: &str) -> bool {
     let Some(idx) = text.find(needle) else { return false };
     let before = &text[..idx];
     let d = before.matches('"').count();
@@ -268,10 +202,10 @@ fn pred_no_admit_deferral_markers() -> bool {
         let upper = text.to_ascii_uppercase();
         let colon_hit = COLON_MARKERS.iter().any(|m| {
             let mu = m.to_ascii_uppercase();
-            upper.contains(&mu) && !inside_string_literal(&upper, &mu)
+            upper.contains(&mu) && !needle_first_occurrence_sits_inside_quoted_string_literal(&upper, &mu)
         });
         let lower = text.to_ascii_lowercase();
-        let phrase_hit = PHRASES.iter().any(|p| lower.contains(p) && !inside_string_literal(&lower, p));
+        let phrase_hit = PHRASES.iter().any(|p| lower.contains(p) && !needle_first_occurrence_sits_inside_quoted_string_literal(&lower, p));
         if colon_hit || phrase_hit {
             found.push(format!("{path}:{line_no}: {}", text.trim()));
         }
@@ -390,11 +324,6 @@ fn pred_no_graphical_symbols_in_diff() -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 fn pred_no_graphical_symbols_in_diff() -> bool { true }
 
-/// Idempotency: the same (id, hash) audit tuple recorded with two different
-/// outcomes this stop window means a replayed dispatch mutated differently
-/// the second time -- f-compose-f-equals-f violated. Reads the same
-/// deviations/audit event stream every other predicate here already emits
-/// into, rather than a second bespoke ledger.
 #[cfg(target_arch = "wasm32")]
 fn pred_idempotent_dispatch_replay_safe() -> bool {
     let raw = crate::pkfs::read_to_string(".gm/exec-spool/.audit-tuples.json").unwrap_or_default();
@@ -511,21 +440,11 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
 #[cfg(not(target_arch = "wasm32"))]
 fn check_browser_witness_coverage_for_cwd(_cwd: &str) -> Vec<String> { vec![] }
 
-/// Why a hook did not pass.
-///
-/// Every one of these previously collapsed to a bare `false`, so an operator
-/// staring at a denial could not tell a MISSING hook file from a hook that ran
-/// and legitimately said no -- one is a broken config, the other is the system
-/// working. They demand opposite responses and looked identical.
 pub enum HookOutcome {
     Passed,
-    /// The hook file does not exist at `.gm/instructions/hooks/<path>`.
     Missing,
-    /// exec_js itself failed (threw, timed out, unreadable result).
     ExecFailed,
-    /// The hook ran fine and returned something other than `true`.
     ReturnedFalse,
-    /// Hooks are not available on this build (native).
     Unsupported,
 }
 
@@ -534,7 +453,6 @@ impl HookOutcome {
         matches!(self, HookOutcome::Passed)
     }
 
-    /// Operator-facing explanation, appended to the gate's own message.
     pub fn reason(&self, hook_path: &str) -> Option<String> {
         match self {
             HookOutcome::Passed => None,
@@ -608,7 +526,7 @@ fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, S
     for gate_name in &edge.gates {
         let Some(g) = graph.gate(gate_name) else { continue };
         if !evaluate_gate(g) {
-            let detail = hook_failure_detail(g);
+            let detail = hook_denial_detail_or_none_if_predicate_caused_it(g);
             let message = match detail {
                 Some(d) => format!("{} -- {}", g.message, d),
                 None => g.message.clone(),
@@ -619,13 +537,7 @@ fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, S
     None
 }
 
-/// The hook-specific reason a gate denied, when a hook is what denied it.
-///
-/// `None` when the gate has no hook, when the hook is not consulted in this
-/// mode, or when the hook passed and a compiled predicate is what failed --
-/// in that last case the predicate is the real cause and a hook note would
-/// misdirect.
-fn hook_failure_detail(g: &GateDef) -> Option<String> {
+fn hook_denial_detail_or_none_if_predicate_caused_it(g: &GateDef) -> Option<String> {
     if matches!(g.hook_mode, HookMode::PredicateOnly) {
         return None;
     }
@@ -646,7 +558,7 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
     for gate_name in &edge.gates {
         let Some(g) = graph.gate(gate_name) else { continue };
         if !evaluate_gate(g) {
-            residuals.push(match hook_failure_detail(g) {
+            residuals.push(match hook_denial_detail_or_none_if_predicate_caused_it(g) {
                 Some(d) => format!("{} -- {}", g.message, d),
                 None => g.message.clone(),
             });
@@ -672,9 +584,6 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
 pub fn handle(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     let mut session_id: Option<String> = None;
-    // Resolve the graph exactly ONCE for this whole dispatch (see the doc
-    // comment on next_skill/next_phase above) -- every helper below takes
-    // this same `graph` value rather than re-resolving independently.
     let graph = fsm::graph();
     let cur = read_state_with_graph(&graph);
     let cur_phase = cur.phase.clone();
