@@ -211,11 +211,20 @@ enum SourceRead {
 
 /// Read one prose key from the config repo the CONFIG chain already fetches.
 ///
-/// This tier was dead on a directory-name disagreement, not a missing feature:
-/// `config_sync` clones into `.gm/config-source-cache` while this module read
-/// `.gm/instructions-source-cache`, a path nothing has ever written. So a
-/// project could point at a config repo, have it cloned and serving for the
-/// config chain, and still receive compiled prose forever.
+/// This tier has been dead twice on a directory-name disagreement, not a
+/// missing feature. First: `config_sync` clones into `.gm/config-source-cache`
+/// while this module read `.gm/instructions-source-cache`, a path nothing
+/// ever wrote. Second (the implicit-default case, no `source.json`): this
+/// module hardcoded `.gm/config-source-cache`/the user-tier cache, but
+/// `config::resolve()`'s `ImplicitDefaultRepo` tier -- the common,
+/// zero-configuration case that resolves gm-config for every project by
+/// default -- materializes into `.gm/config-source-cache-default` instead, a
+/// third directory this module never read either. Both times the config
+/// chain had a real, live, correctly-fetched checkout while this module
+/// looked at an empty directory and silently served the compiled default
+/// forever. `read_from_config_repo` now calls `config::resolve()` itself and
+/// reads `resolved.cache_dir`, so it always looks at whichever directory the
+/// ACTUALLY-winning tier used, whatever that tier turns out to be.
 ///
 /// The layout comes from the repo's own `gm.config.json`: the `instructions`
 /// block declares `dir` (default `prose`) alongside the key inventory, and the

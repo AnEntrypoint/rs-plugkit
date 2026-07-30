@@ -464,13 +464,8 @@ pub fn resolve_hook_path(hook: &str) -> Option<String> {
     if crate::pkfs::read_to_string(&local).is_some() {
         return Some(local);
     }
-    let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-    let cache_base = if root.trim().is_empty() {
-        crate::config::SOURCE_CACHE_REL.to_string()
-    } else {
-        format!("{}/{}", root.trim_end_matches(['/', '\\']), crate::config::SOURCE_CACHE_REL)
-    };
-    let remote = format!("{cache_base}/hooks/{hook}");
+    let cache_base = crate::config::resolve().cache_dir?;
+    let remote = format!("{}/hooks/{hook}", cache_base.trim_end_matches(['/', '\\']));
     if crate::pkfs::read_to_string(&remote).is_some() {
         return Some(remote);
     }
