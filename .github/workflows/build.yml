@@ -3,10 +3,10 @@ name: Build
 on:
   push:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
+    paths-ignore: ['**.md', '!crates/plugkit-core/src/orchestrator/instructions/prose/**.md', 'docs/**', 'LICENSE', '.gitignore']
   pull_request:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
+    paths-ignore: ['**.md', '!crates/plugkit-core/src/orchestrator/instructions/prose/**.md', 'docs/**', 'LICENSE', '.gitignore']
   workflow_dispatch:
     inputs:
       upstream_repo:
