@@ -531,7 +531,7 @@ fn code_vec_ns() -> String {
     ns.vec_namespace(&ns.code)
 }
 
-const MANIFEST_VERSION: u64 = 5;
+const MANIFEST_VERSION: u64 = 6;
 
 #[derive(Clone)]
 struct ChunkRecord {
@@ -541,6 +541,7 @@ struct ChunkRecord {
     ls: usize,
     le: usize,
     emb: Vec<f32>,
+    content_hash: u32,
 }
 
 struct FileManifest {
@@ -572,6 +573,7 @@ fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, commit
         "ls": c.ls,
         "le": c.le,
         "emb": c.emb,
+        "ch": c.content_hash,
     })).collect();
     json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "digest_hash": digest_hash, "mtime_ms": mtime_ms, "commit_overview": commit_overview, "chunks": arr }).to_string()
 }
@@ -614,7 +616,13 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
         let ls = c.get("ls").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
         let le = c.get("le").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
         let emb = json_to_f32_vec(c.get("emb")?)?;
-        chunks.push(ChunkRecord { key, kind, name, ls, le, emb });
+        // Absent on manifests written before v6 (content_hash didn't exist yet);
+        // 0 is not a valid fnv1a64-derived u32 output for any real chunk body in
+        // practice-safe terms here, and reuse-by-hash simply never matches it, so
+        // that one chunk falls back to the pre-existing "re-embed whole file"
+        // path once until it is naturally rewritten with a real hash.
+        let content_hash = c.get("ch").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+        chunks.push(ChunkRecord { key, kind, name, ls, le, emb, content_hash });
     }
     Some((fp, FileManifest { hash, digest_hash, mtime_ms, commit_overview, chunks }))
 }
@@ -979,6 +987,23 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
             let _ = libsql_wasm::exec_params(&db_path, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
         }
 
+        // Chunk-level reuse: a file-hash change forces re-extraction (tree-sitter
+        // boundaries can shift even when a single function's body is untouched),
+        // but most edits touch one function -- everything else's (kind, name,
+        // body) triple is byte-identical to the prior pass. Index prior chunks by
+        // that triple's content hash so an unchanged chunk skips embed_texts_batch
+        // entirely and reuses its stored vector, instead of the whole file always
+        // paying full re-embed cost on any single-line change.
+        let prior_chunk_by_identity: std::collections::HashMap<(String, String, u32), &ChunkRecord> = prior
+            .get(fp)
+            .map(|m| {
+                m.chunks
+                    .iter()
+                    .map(|c| ((c.kind.clone(), c.name.clone(), c.content_hash), c))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut chunks = extract_chunks(fp, &content, lang_name);
         if chunks.is_empty() && lang_name == "markdown" && !content.trim().is_empty() {
             let whole = content.chars().take(4000).collect::<String>();
@@ -1018,24 +1043,51 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
             }));
         }
 
-        let embed_inputs: Vec<String> = chunks.iter()
-            .map(|(_, name, _, _, body)| format!("{} {}", name, truncate_for_embed(body)))
+        let chunk_content_hashes: Vec<u32> = chunks.iter()
+            .map(|(_, _, _, _, body)| crate::pipeline::fnv1a64(body.as_bytes()) as u32)
             .collect();
+        let reused_embs: Vec<Option<Vec<f32>>> = chunks.iter().zip(chunk_content_hashes.iter())
+            .map(|((kind, name, _, _, _), ch)| {
+                prior_chunk_by_identity.get(&(kind.clone(), name.clone(), *ch)).map(|c| c.emb.clone())
+            })
+            .collect();
+
+        let embed_inputs: Vec<String> = chunks.iter().zip(reused_embs.iter())
+            .filter(|(_, reused)| reused.is_none())
+            .map(|((_, name, _, _, body), _)| format!("{} {}", name, truncate_for_embed(body)))
+            .collect();
+        let reused_chunk_count = reused_embs.iter().filter(|r| r.is_some()).count();
         let embed_started = unsafe { crate::wasm_dispatch::host_now_ms() };
-        let embed_results = embed_texts_batch(&embed_inputs);
+        let mut fresh_embeds = embed_texts_batch(&embed_inputs).into_iter();
         let embed_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(embed_started);
         if embed_ms > 3000 {
-            let msg = format!("code_index: SLOW embed_texts_batch fp={} chunks={} embed_ms={}", fp, embed_inputs.len(), embed_ms);
+            let msg = format!("code_index: SLOW embed_texts_batch fp={} chunks={} reused_chunks={} embed_ms={}", fp, embed_inputs.len(), reused_chunk_count, embed_ms);
             let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
             crate::wasm_dispatch::emit_event("code_index_slow_file_embed", json!({
                 "path": fp,
                 "chunks": embed_inputs.len(),
+                "reused_chunks": reused_chunk_count,
                 "embed_ms": embed_ms,
             }));
         }
+        if reused_chunk_count > 0 {
+            crate::wasm_dispatch::emit_event("code_index_chunk_reuse", json!({
+                "path": fp,
+                "chunks_total": chunks.len(),
+                "chunks_reused": reused_chunk_count,
+                "chunks_embedded": embed_inputs.len(),
+            }));
+        }
+
+        let embed_results: Vec<(Option<Vec<f32>>, bool)> = reused_embs.into_iter()
+            .map(|reused| match reused {
+                Some(v) => (Some(v), true),
+                None => (fresh_embeds.next().unwrap_or(None), false),
+            })
+            .collect();
 
         let mut records: Vec<ChunkRecord> = Vec::new();
-        for (idx, ((kind, name, ls, le, body), emb_opt)) in chunks.into_iter().zip(embed_results.into_iter()).enumerate() {
+        for (idx, (((kind, name, ls, le, body), (emb_opt, was_reused)), content_hash)) in chunks.into_iter().zip(embed_results.into_iter()).zip(chunk_content_hashes.into_iter()).enumerate() {
             let v = match emb_opt {
                 Some(v) => v,
                 None => {
@@ -1046,9 +1098,13 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
                 }
             };
             chunked += 1;
-            embedded += 1;
+            if was_reused {
+                reused += 1;
+            } else {
+                embedded += 1;
+            }
             let key = format!("ci-{:x}-{:x}-{}", path_hash, file_hash, idx);
-            let rec = ChunkRecord { key, kind, name, ls, le, emb: v };
+            let rec = ChunkRecord { key, kind, name, ls, le, emb: v, content_hash };
             write_chunk(libsql_ok, &db_path, fp, &rec, &body);
             records.push(rec);
         }
