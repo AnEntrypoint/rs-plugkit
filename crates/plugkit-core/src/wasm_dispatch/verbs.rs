@@ -1092,12 +1092,30 @@ fn browser(body: &Value, body_s: &str) -> u64 {
     match unpack_to_string(packed) {
         Some(s) => {
             let v: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
-            let witnessed = crate::browser_witness::witness_all_pending_edits(&cwd);
+            // Only count this as a witness when the dispatch itself succeeded
+            // at the transport level (ok:true, no timeout, exit_code==0 when
+            // present). This cannot know whether the CALLER's own assertion
+            // inside the eval passed -- an eval that runs clean and returns
+            // {ready:false} is still ok:true here, and that gap is closed in
+            // prose (browser.md: "a negative result is a fail, not a
+            // witness"), not mechanically. But a transport-level failure
+            // (crash, timeout, no response) marking a file "witnessed" was a
+            // strictly worse bug: it let a dispatch that never even ran real
+            // script against the page satisfy the gate. Previously this
+            // branch witnessed unconditionally on ANY parseable response.
+            let transport_ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
+                && !v.get("timed_out").and_then(|b| b.as_bool()).unwrap_or(false)
+                && v.get("exit_code").and_then(|n| n.as_i64()).map(|c| c == 0).unwrap_or(true);
             let mut v = v;
-            if witnessed > 0 {
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("witness_marked".to_string(), json!(witnessed));
+            if transport_ok {
+                let witnessed = crate::browser_witness::witness_all_pending_edits(&cwd);
+                if witnessed > 0 {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("witness_marked".to_string(), json!(witnessed));
+                    }
                 }
+            } else if let Some(obj) = v.as_object_mut() {
+                obj.insert("witness_skipped_transport_failure".to_string(), json!(true));
             }
             ok("browser", v)
         }
