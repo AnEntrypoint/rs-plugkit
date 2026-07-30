@@ -6,6 +6,28 @@ Stage 1 of the pipeline: specification and epistemology. Output(i) must satisfy 
 
 L1 baseline + L2 covering family. You loaded prior memory on entry via `instruction`.
 
+## Preferences (named, narrow)
+
+Architecture & Design
+
+* SOLID Principles (Robert C. Martin)
+* Clean Architecture (Robert C. Martin)
+* Vertical Slice Architecture (Jimmy Bogard)
+* Separation of Concerns (Edsger W. Dijkstra)
+* Deep Modules (John Ousterhout)
+* SSOT (Single Source of Truth)
+
+Execution & Workflow
+
+* Mikado Method (Ola Ellnestam & Daniel Brolund)
+* Strangler Fig Pattern (Martin Fowler)
+* Thin Vertical Slice (Alistair Cockburn)
+* Spike Solution (Kent Beck)
+
+Execution Policy Guardrails
+
+* XY Problem Avoidance (Mark Jason Dominus)
+
 ## Orient
 
 First non-trivial dispatch = single-message parallel fan-out, `recall` + `codesearch`, against request nouns. Query beats recalled-from-memory assumption. Hits = baseline; misses = fresh ground. Skip orient -> plan reasoned from stale memory, not witnessed tree-read.

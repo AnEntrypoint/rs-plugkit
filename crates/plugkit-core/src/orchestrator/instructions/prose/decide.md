@@ -10,6 +10,12 @@ L3 trajectory; `transition` iff every observation is convergent.
 [worktree-clean] [remote-pushed] [prd-empty] [mutables-witnessed]
 ```
 
+## Preferences (named, narrow)
+
+Execution & Workflow
+
+* Definition of Done (Ken Schwaber & Jeff Sutherland)
+
 ## Adversarial corner-case sweep (hard rule)
 
 DECIDE is adversarial, never confirmatory: hunt every way EMIT's write breaks, via real `exec_js`/`browser` execution, never prose reasoning. Each class below gets its own exec_js/browser dispatch witnessing outcome (pass or found-and-fixed) before transitioning on; a reachable-but-unswept class is not an implicit pass:

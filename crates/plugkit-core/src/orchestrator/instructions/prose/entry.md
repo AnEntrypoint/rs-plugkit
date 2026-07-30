@@ -31,15 +31,12 @@ Five phases = scheduling; filter = engine on every candidate, gating witness/wri
 
 ## Code Invariants (every possible emission)
 
-- **State minimized:** sequential downward flow; explicit state flags; external input through a unified queue before mutation; state changes are explicit assignment, never a buried side effect or init hidden in helpers.
-- **Hardware reality:** benchmark before abstracting; pass scope explicitly (closures hide scope cost in hot loops); mutate in place, pools over allocation; native data flow on hot paths (no Promise chains / class hierarchies / operator overloading there).
-- **Flat structure:** denormalized graphs over nested documents; partial-field over whole-document writes; bytes over JSON for transport (pre-compute size, allocate once); lexical ordering for deterministic tie-breaking.
-- **200-line vertical slices:** one responsibility per file; input->process->output complete in the module; zero-config defaults correct for 90%; universal runtime (browser/Node/mobile/Bare).
-- **Async boundary explicit:** sequential awaitable primitives; no implicit callback ordering; unified error channel, never swallow rejections; tests await real ops, mock-free.
+The named-principle canon lives distributed across the stage prose files (Correctness & Reliability + Idempotency at STATE, Performance at CONC, Architecture + Workflow + XY at SPECIFY, Code Quality at EMIT, Security at SEC, Definition of Done at DECIDE, Chain-of-Thought at PROVE); those names are the wide preferences with narrow selection text, and they govern every emission. What remains here is the gm-specific operational residue the canon does not cover:
+
 - **Naming by scale:** <50 lines single-letter algebraic; 50-200 short descriptors; >200 full names; public APIs explicit.
-- **Fail fast, loud, deterministic:** stop on precondition violation with exact state; assert on emitted semantics, not return values; sentinel words + checksum headers on critical structures, verified on every access; never silently degrade.
 - **Binary transport, append-only persistence:** varint fields; lexical cursors for sparse reads; append-only sequence for replay; chunked by lexical range, modify only the touched chunk.
 - **Single focused task per session:** no drive-by refactors; pre-compute and inline.
+- **Async boundary explicit:** sequential awaitable primitives; no implicit callback ordering; unified error channel, never swallow rejections.
 
 ## Token Discipline
 

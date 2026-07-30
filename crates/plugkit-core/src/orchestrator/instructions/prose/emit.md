@@ -6,6 +6,19 @@ Stage 3 of the pipeline: AST and source representation. Every node expanded and 
 
 L3 audit on disk. Land every node of the covering family; your first emit = closure.
 
+## Preferences (named, narrow)
+
+Code Quality
+
+* DRY (Andy Hunt & Dave Thomas)
+* KISS Principle (Kelly Johnson)
+* YAGNI (Ron Jeffries & Kent Beck)
+* SLAP (Single Level of Abstraction Principle - Kent Beck)
+* Law of Demeter (Ian Holland & Karl Lieberherr)
+* Code Smells (Kent Beck & Martin Fowler)
+* Cohesion Criteria (Larry Constantine & Edward Yourdon)
+* IOSP (Integration Operation Segregation Principle - Ralf Westphal)
+
 ## Scope: file mutation ONLY (hard rule)
 
 EMIT's precondition: mutables already resolved -- PROVE's job, done before arrival. EMIT does not investigate, open mutables, resolve unknowns, or re-derive the plan. A mutable surfacing here is PROVE leaking into EMIT: `mutable-add` it, `transition to=PROVE` immediately -- never resolve inline, never write around it. EMIT's sole verb-of-work is Write/Edit of changes SPECIFY/PROVE already decided; narrower is correct, wider is drift.
