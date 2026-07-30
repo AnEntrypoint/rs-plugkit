@@ -115,6 +115,17 @@ pub struct Resolution {
     pub tier: Tier,
     pub why: String,
     pub rejected: Vec<String>,
+    /// Absolute directory the winning tier's repo checkout is materialized
+    /// into, when the winning tier is repo-backed. `None` for
+    /// `ProjectVendored` (no checkout, a single file) and `BuiltinDefault`
+    /// (nothing fetched). A caller resolving a path RELATIVE to this
+    /// resolution's config (e.g. `fsm.graph`, an instructions-source `path`)
+    /// must join against this field rather than guess a tier's cache dir
+    /// from a hardcoded constant -- three distinct constants
+    /// (`SOURCE_CACHE_REL`, `DEFAULT_REPO_CACHE_REL`, `user_cache_root()`)
+    /// name three different directories, and only the tier that actually won
+    /// knows which one holds the checkout this `Resolution` was read from.
+    pub cache_dir: Option<String>,
 }
 
 impl Resolution {
@@ -410,6 +421,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
                     tier: Tier::ProjectVendored,
                     why: format!("project-vendored config at {p1}"),
                     rejected,
+                    cache_dir: None,
                 }
             }
             Load::Rejected { reason } => rejected.push(reason),
@@ -417,14 +429,16 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
         }
     }
 
+    let p2_cache_dir = join(project_root, SOURCE_CACHE_REL);
     let p2 = join(project_root, SOURCE_SPEC_REL);
-    match load_repo_tier(&p2, join(project_root, SOURCE_CACHE_REL), fetcher, Tier::ProjectRepoSpec.as_str()) {
+    match load_repo_tier(&p2, p2_cache_dir.clone(), fetcher, Tier::ProjectRepoSpec.as_str()) {
         Load::Accepted(config) => {
             return Resolution {
                 config,
                 tier: Tier::ProjectRepoSpec,
                 why: format!("in-project config-repo spec at {p2}"),
                 rejected,
+                cache_dir: Some(p2_cache_dir),
             }
         }
         Load::Rejected { reason } => rejected.push(reason),
@@ -432,14 +446,16 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
     }
 
     if let Some(home) = home_dir() {
+        let p3_cache_dir = join(&home, SOURCE_CACHE_REL);
         let p3 = join(&home, SOURCE_SPEC_REL);
-        match load_repo_tier(&p3, join(&home, SOURCE_CACHE_REL), fetcher, Tier::UserRepoSpec.as_str()) {
+        match load_repo_tier(&p3, p3_cache_dir.clone(), fetcher, Tier::UserRepoSpec.as_str()) {
             Load::Accepted(config) => {
                 return Resolution {
                     config,
                     tier: Tier::UserRepoSpec,
                     why: format!("user-wide config-repo spec at {p3}"),
                     rejected,
+                    cache_dir: Some(p3_cache_dir),
                 }
             }
             Load::Rejected { reason } => rejected.push(reason),
@@ -447,6 +463,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
         }
     }
 
+    let implicit_cache_dir = join(project_root, DEFAULT_REPO_CACHE_REL);
     match load_implicit_default_repo_tier(project_root, fetcher) {
         Load::Accepted(config) => {
             return Resolution {
@@ -454,6 +471,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
                 tier: Tier::ImplicitDefaultRepo,
                 why: format!("gm's own shared default config repo at {DEFAULT_REPO_URL} (no project or user config.source.json configured)"),
                 rejected,
+                cache_dir: Some(implicit_cache_dir),
             }
         }
         Load::Rejected { reason } => rejected.push(reason),
@@ -473,6 +491,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
         tier: Tier::BuiltinDefault,
         why,
         rejected,
+        cache_dir: None,
     }
 }
 

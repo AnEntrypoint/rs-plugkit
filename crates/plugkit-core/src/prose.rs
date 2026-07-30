@@ -57,6 +57,14 @@ pub enum Outcome {
     /// A tier WAS configured but could not be used. `reason` names the file and
     /// the specific defect; the compiled default was served anyway.
     Degraded { reason: String },
+    /// gm-config is the mandatory source for this key and it could not be
+    /// reached (no local override, no cached checkout, remote unreachable).
+    /// The compiled default is served as the emergency payload so a dispatch
+    /// still gets usable text, but this Outcome is distinguishable from
+    /// `CompiledDefault` (the normal, healthy "nobody overrode this key"
+    /// case) so a caller can surface the reachability failure loudly instead
+    /// of treating a config outage as ordinary operation.
+    ConfigRepoUnreachable { reason: String },
 }
 
 impl Outcome {
@@ -66,12 +74,13 @@ impl Outcome {
             Outcome::SourceRepo => "source_repo",
             Outcome::CompiledDefault => "compiled_default",
             Outcome::Degraded { .. } => "degraded",
+            Outcome::ConfigRepoUnreachable { .. } => "config_repo_unreachable",
         }
     }
 
     /// True when an operator wrote configuration that is not taking effect.
     pub fn is_degraded(&self) -> bool {
-        matches!(self, Outcome::Degraded { .. })
+        matches!(self, Outcome::Degraded { .. } | Outcome::ConfigRepoUnreachable { .. })
     }
 }
 
@@ -110,21 +119,38 @@ pub fn resolve_detailed(key: &str, default: &str) -> (String, Outcome) {
         SourceRead::NotConfigured => (default.to_string(), Outcome::CompiledDefault),
         SourceRead::Miss => (default.to_string(), Outcome::CompiledDefault),
         SourceRead::Broken(reason) => (default.to_string(), Outcome::Degraded { reason }),
+        SourceRead::ConfigRepoUnreachable(reason) => {
+            (default.to_string(), Outcome::ConfigRepoUnreachable { reason })
+        }
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 fn report(key: &str, outcome: &Outcome) {
-    if let Outcome::Degraded { reason } = outcome {
-        crate::wasm_dispatch::emit_event(
-            "prose_tier_degraded",
-            serde_json::json!({
-                "key": key,
-                "reason": reason,
-                "served": "compiled_default",
-                "detail": "a prose tier is configured but could not be used, so the compiled default was served instead. The override is silently inert until this is fixed.",
-            }),
-        );
+    match outcome {
+        Outcome::Degraded { reason } => {
+            crate::wasm_dispatch::emit_event(
+                "prose_tier_degraded",
+                serde_json::json!({
+                    "key": key,
+                    "reason": reason,
+                    "served": "compiled_default",
+                    "detail": "a prose tier is configured but could not be used, so the compiled default was served instead. The override is silently inert until this is fixed.",
+                }),
+            );
+        }
+        Outcome::ConfigRepoUnreachable { reason } => {
+            crate::wasm_dispatch::emit_event(
+                "prose_config_repo_unreachable",
+                serde_json::json!({
+                    "key": key,
+                    "reason": reason,
+                    "served": "compiled_default",
+                    "detail": "gm-config, the mandatory default prose source, did not resolve for this key. The compiled default was served as an emergency payload -- this project is running on baked-in prose that may be stale relative to gm-config's actual current content, not a healthy no-override state.",
+                }),
+            );
+        }
+        _ => {}
     }
 }
 
@@ -166,6 +192,12 @@ enum SourceRead {
     Miss,
     /// Source is configured but unusable. An operator must act.
     Broken(String),
+    /// The mandatory gm-config default source itself never resolved (no
+    /// cached checkout anywhere, remote unreachable) -- distinct from
+    /// `Broken`, which describes an EXPLICIT project/user `source.json` an
+    /// operator wrote and misconfigured. This is not a misconfiguration; it
+    /// is the one mandatory dependency being unreachable.
+    ConfigRepoUnreachable(String),
 }
 
 /// Read one prose key from the config repo the CONFIG chain already fetches.
@@ -190,13 +222,20 @@ pub fn config_repo_text(key: &str) -> Option<String> {
     }
 }
 
+/// Consults the SAME resolution `config::resolve()` uses for `gm.config.json`
+/// itself, rather than guessing a tier's cache dir from a hardcoded constant.
+/// `config::resolve()` pulls (calls the fetcher, which materializes/refreshes
+/// the winning tier's checkout) before returning, so this is a real pull on
+/// every prose resolution, not a passive read of whatever cache happened to
+/// already exist from an unrelated earlier call this session.
 fn read_from_config_repo(key: &str) -> SourceRead {
-    match read_from_cache_root(crate::config::SOURCE_CACHE_REL, key) {
-        SourceRead::NotConfigured | SourceRead::Miss => match crate::config::user_cache_root() {
-            Some(user_cache) => read_from_cache_root(&user_cache, key),
-            None => SourceRead::Miss,
-        },
-        other => other,
+    let resolved = crate::config::resolve();
+    match resolved.cache_dir {
+        Some(cache_dir) => read_from_cache_root(&cache_dir, key),
+        None => SourceRead::ConfigRepoUnreachable(format!(
+            "gm-config (the mandatory default prose source) did not resolve: {}",
+            resolved.why
+        )),
     }
 }
 

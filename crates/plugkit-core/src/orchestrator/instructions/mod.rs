@@ -152,7 +152,7 @@ pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
 pub fn has_compiled_default_for_prose_key(key: &str) -> bool {
     matches!(
         key,
-        "plan" | "execute" | "emit" | "verify" | "consolidate" | "update_docs" | "browser" | "entry"
+        "emit" | "update_docs" | "browser" | "entry"
             | "specify" | "prove" | "state" | "conc" | "sec" | "res" | "decide"
     )
 }

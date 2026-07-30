@@ -669,7 +669,6 @@ impl GraphTier {
 
 #[cfg(target_arch = "wasm32")]
 fn source_repo_graph_path() -> Option<String> {
-    let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let resolved = crate::config::resolve();
     let rel = resolved
         .config
@@ -689,12 +688,8 @@ fn source_repo_graph_path() -> Option<String> {
         }));
         return None;
     }
-    let base = if root.trim().is_empty() {
-        crate::config::SOURCE_CACHE_REL.to_string()
-    } else {
-        format!("{}/{}", root.trim_end_matches(['/', '\\']), crate::config::SOURCE_CACHE_REL)
-    };
-    Some(format!("{base}/{rel}"))
+    let base = resolved.cache_dir?;
+    Some(format!("{}/{rel}", base.trim_end_matches(['/', '\\'])))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
