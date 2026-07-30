@@ -183,19 +183,13 @@ fn current_phase_key() -> String {
     crate::orchestrator::state::read_state().phase.as_str().to_string()
 }
 
-fn classify_operation(verb: &str, body: &Value) -> &'static str {
-    if verb == "transition" {
-        if let Some(to) = body.get("to").and_then(|v| v.as_str()) {
-            if to.eq_ignore_ascii_case("complete") || to.eq_ignore_ascii_case("stop") {
-                return "complete";
-            }
-            if to.eq_ignore_ascii_case("consolidate") {
-                return "consolidate";
-            }
-        }
-    }
-    if verb == "fs_write" { return "write"; }
-    "verb"
+fn is_transition_to_complete(verb: &str, body: &Value) -> bool {
+    verb == "transition"
+        && body
+            .get("to")
+            .and_then(|v| v.as_str())
+            .map(|to| to.eq_ignore_ascii_case("complete") || to.eq_ignore_ascii_case("stop"))
+            .unwrap_or(false)
 }
 
 /// Whether a kind's EFFECTIVE severity is deny, after policy overrides.
@@ -310,7 +304,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 || first.ends_with("/git.exe") || first.ends_with("\\git.exe")
         };
         let git_dominant = cmd
-            .split(|c| c == ';' || c == '\n' || c == '|' || c == '&')
+            .split([';', '\n', '|', '&'])
             .map(|s| s.trim_start())
             .any(|s| {
                 let first = s.split_whitespace().next().unwrap_or("");
@@ -318,7 +312,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             });
         let git_in_subshell = extract_substitution_bodies(cmd).into_iter().any(|inner| {
             inner
-                .split(|c| c == ';' || c == '\n' || c == '|' || c == '&')
+                .split([';', '\n', '|', '&'])
                 .map(|s| s.trim_start())
                 .any(|s| {
                     let first = s.split_whitespace().next().unwrap_or("");
@@ -382,21 +376,12 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    let operation = classify_operation(verb, body);
+    let is_complete_transition = is_transition_to_complete(verb, body);
 
-    // Which phase is this transition actually heading for?
-    //
-    // Previously this branch matched two hardcoded operations and mapped them
-    // to two hardcoded destination phases, so a vendored graph that put gates
-    // on any OTHER edge got them silently ignored -- the gates would sit in
-    // graph.json looking authoritative while never being consulted, which is
-    // the worst outcome for a safety check. Derive the destination from the
-    // request instead, and let the graph decide whether that edge is guarded.
-    let requested_to = if verb == "transition" {
+    let requested_to_phase = if verb == "transition" {
         body.get("to")
             .and_then(|v| v.as_str())
             .map(|s| {
-                // "stop" is a historical alias for the terminal phase.
                 if s.eq_ignore_ascii_case("stop") {
                     policy.terminal_phase.clone()
                 } else {
@@ -407,17 +392,11 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         None
     };
 
-    if let Some(to) = requested_to {
+    if let Some(to) = requested_to_phase {
         let from = current_phase_key();
         let to = to.as_str();
         let (residuals, next_recovery) = crate::orchestrator::transitions::gate_residuals(&from, to);
         if !residuals.is_empty() {
-            // Key the repeat counter and the human label on the DESTINATION
-            // phase rather than the coarse operation. Two different guarded
-            // edges are two different stuck states, and sharing one counter
-            // would let alternating denials escalate as if they were the same
-            // loop -- or, worse, label a custom edge's denial "stop-gate" and
-            // point the reader at the wrong gate entirely.
             let gate_key = to.to_ascii_lowercase();
             log_deviation("gate-deny", &format!("{}-gate residuals={}", gate_key, residuals.len()));
             let repeat_count = record_gate_repeat(&gate_key, "gate-deny");
@@ -466,7 +445,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    if operation == "complete" {
+    if is_complete_transition {
         let (body_s, _err, code) = crate::orchestrator::prd::handle_list("");
         let mut anti_shape: Vec<String> = Vec::new();
         if code == 0 {

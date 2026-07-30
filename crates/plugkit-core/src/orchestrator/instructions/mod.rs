@@ -1,9 +1,5 @@
 pub mod entry;
-pub mod plan;
-pub mod execute;
 pub mod emit;
-pub mod verify;
-pub mod consolidate;
 pub mod update_docs;
 pub mod browser;
 pub mod specify;
@@ -125,11 +121,7 @@ fn should_residual_scan(prd_pending: usize, running_tasks_count: usize) -> bool 
 
 pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
     match key {
-        "plan" => plan::TEXT,
-        "execute" => execute::TEXT,
         "emit" => emit::TEXT,
-        "verify" => verify::TEXT,
-        "consolidate" => consolidate::TEXT,
         "update_docs" => update_docs::TEXT,
         "browser" => browser::TEXT,
         "specify" => specify::TEXT,
