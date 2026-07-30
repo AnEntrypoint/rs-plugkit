@@ -150,7 +150,20 @@ impl Default for IndexConfig {
         IndexConfig {
             split_chunk_above_bytes: 8192,
             max_chunks_embedded_per_file_per_pass_count_bound_only: 64,
-            pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound: 800,
+            // Real measurement (2026-07-30, .watcher.log code_index_slow_file_embed
+            // events against the bert plugin's wasm-hosted BERT forward pass):
+            // 501703ms/33 chunks, 138049ms/13, 126331ms/21, 97884ms/10, 21753ms/6
+            // -- 3626ms to 15203ms per chunk, 15-30x the previous 800ms guess. The
+            // old value let budget_chunks (code_index.rs's per-file cap derived
+            // from remaining_ms / this constant) admit far more chunks than the
+            // real wall-budget could ever finish, so a single slow file could blow
+            // past both this module's own wall_budget_ms AND the wasmtime dispatch
+            // epoch deadline before the next per-file check point could catch it --
+            // the actual cause of the poisoned-Store crashes this constant's
+            // mis-calibration produced. Rounded up from the worst observed
+            // per-chunk cost, not the average, since this bound exists specifically
+            // to keep a single file from starving the whole pass.
+            pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound: 16_000,
             wall_budget_ms: 30_000,
             max_file_bytes: 256 * 1024,
             extra_skip_dirs_appended_to_builtins_never_replacing: Vec::new(),
