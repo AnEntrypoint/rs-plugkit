@@ -1917,7 +1917,30 @@ fn git_finalize(body: &Value) -> u64 {
         }));
     }
 
-    let leftover = git_porcelain_in(cwd_ref);
+    let mut leftover = git_porcelain_in(cwd_ref);
+    // A file this dispatch just committed can reappear as dirty because a
+    // concurrent writer touched it between the commit and this probe --
+    // .gm/prd.yml is rewritten by every prd-add/prd-resolve, including ones
+    // from other sessions sharing the daemon. That is not untriaged residual,
+    // and the caller cannot triage it away; re-probing once settles it. Only
+    // files absent from the commit this dispatch just made are real residual.
+    if committed && !leftover.trim().is_empty() && porcelain_only_touches(&leftover, &files_in_commit(cwd_ref)) {
+        leftover = git_porcelain_in(cwd_ref);
+        if !leftover.trim().is_empty() && porcelain_only_touches(&leftover, &files_in_commit(cwd_ref)) {
+            let _ = git_call_argv(&["add", "-A"], cwd_ref);
+            let amend = git_call_argv(&["commit", "--amend", "--no-edit"], cwd_ref);
+            if amend.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0 {
+                let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
+                sha = head_after[..head_after.len().min(10)].to_string();
+                steps.push(json!({
+                    "step": "absorb_concurrent_write",
+                    "sha": sha,
+                    "note": "a file this dispatch committed was rewritten by a concurrent writer before the porcelain probe; amended rather than refusing the push",
+                }));
+            }
+            leftover = git_porcelain_in(cwd_ref);
+        }
+    }
     if !leftover.trim().is_empty() {
         return err("git_finalize", &format!("worktree still dirty after commit (untriaged residual) -- refusing push. Porcelain:\n{}", leftover.lines().take(8).collect::<Vec<_>>().join("\n")));
     }
@@ -2396,6 +2419,35 @@ fn exec_git_in(repo: Option<&str>, args: &str) -> String {
 
 fn git_porcelain_in(repo: Option<&str>) -> String {
     super::host_abi::porcelain_or_dirty(git_call("status --porcelain", repo))
+}
+
+fn files_in_commit(repo: Option<&str>) -> Vec<String> {
+    exec_git_in(repo, "show --name-only --pretty=format: HEAD")
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// True when every dirty path in `porcelain` also appears in `committed`, i.e.
+/// the worktree is only dirty in files this dispatch itself just wrote.
+fn porcelain_only_touches(porcelain: &str, committed: &[String]) -> bool {
+    if committed.is_empty() {
+        return false;
+    }
+    let mut any = false;
+    for line in porcelain.lines() {
+        let path = line.get(3..).unwrap_or("").trim().trim_matches('"');
+        if path.is_empty() {
+            continue;
+        }
+        any = true;
+        let normalized = path.replace('\\', "/");
+        if !committed.iter().any(|c| c.replace('\\', "/") == normalized) {
+            return false;
+        }
+    }
+    any
 }
 
 fn exec_git_push_in(repo: Option<&str>, branch: &str) -> (String, bool) {
