@@ -16,7 +16,7 @@ pub use host_abi::{
     host_kv_read, host_cwd_string,
 };
 pub(crate) use events::{current_dispatch_session_id, emit_event};
-pub use verbs::{memory_recall_backend, route_hint, vec_search_local};
+pub use verbs::{memory_recall_backend, route_hint, vec_search_local, embed_query};
 pub use verbs::{
     ERR_CODE_FAILED, ERR_CODE_GATE_DENIED, ERR_CODE_INVALID_ARGS, ERR_CODE_PANIC,
     ERR_CODE_RETIRED_VERB, ERR_CODE_UNKNOWN_VERB, ERR_CODE_UNSUPPORTED,

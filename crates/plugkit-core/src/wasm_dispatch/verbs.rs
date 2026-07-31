@@ -83,7 +83,7 @@ pub fn vec_search_local(embedding: &Value, namespace: &str, k: u32) -> Value {
     hits
 }
 
-fn embed_query(query: &str) -> Value {
+pub fn embed_query(query: &str) -> Value {
     let trimmed = query.trim();
     if trimmed.is_empty() {
         emit_event("embed_query_failed", json!({ "reason": "empty query after trim" }));
@@ -507,6 +507,21 @@ fn recall(body: &Value) -> u64 {
     let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_limit as u64) as u32;
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or(&cfg.namespaces.default);
     if query.is_empty() { return err("recall", "query required"); }
+    let (_dataflow_doc, dataflow_tier, dataflow_path) = crate::dataflow::document_detailed();
+    if dataflow_tier != crate::dataflow::DataflowTier::CompiledDefault {
+        if let Some(pipeline) = crate::dataflow::pipeline_for("recall") {
+            emit_event("dataflow_pipeline_override_used", json!({
+                "entry_point": "recall", "tier": dataflow_tier.as_str(), "path": dataflow_path,
+            }));
+            let mut request = body.clone();
+            if let Some(obj) = request.as_object_mut() {
+                obj.insert("namespaces".to_string(), json!([namespace]));
+                obj.insert("limit".to_string(), json!(limit));
+            }
+            let out = crate::dataflow_exec::run(&pipeline, request);
+            return ok("recall", out);
+        }
+    }
     check_sigil_ignored(query, namespace);
     let derived_query = query.to_string();
     let embedding = embed_query(query);
@@ -760,6 +775,23 @@ fn codesearch(body: &Value) -> u64 {
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_k as u64) as u32;
     if query.is_empty() { return err("codesearch", "query required"); }
+    let (_dataflow_doc, dataflow_tier, dataflow_path) = crate::dataflow::document_detailed();
+    if dataflow_tier != crate::dataflow::DataflowTier::CompiledDefault {
+        if let Some(pipeline) = crate::dataflow::pipeline_for("codesearch") {
+            emit_event("dataflow_pipeline_override_used", json!({
+                "entry_point": "codesearch", "tier": dataflow_tier.as_str(), "path": dataflow_path,
+            }));
+            let cand_k = cfg.budget.pool(k as usize).max(50) as u32;
+            let mut request = body.clone();
+            if let Some(obj) = request.as_object_mut() {
+                obj.insert("code_namespace".to_string(), json!(cfg.namespaces.code));
+                obj.insert("k".to_string(), json!(k));
+                obj.insert("cand_k".to_string(), json!(cand_k));
+            }
+            let out = crate::dataflow_exec::run(&pipeline, request);
+            return ok("codesearch", out);
+        }
+    }
     if body.get("rebuild").and_then(|v| v.as_bool()).unwrap_or(false)
         && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
         let cleared = crate::code_index::clear_codeinsight_full_cfg(&cfg);

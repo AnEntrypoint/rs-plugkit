@@ -99,6 +99,14 @@ pub mod config_sync;
 pub mod orchestrator;
 pub mod filter;
 pub mod validation;
+/// Data-driven plugin-orchestration pipeline schema: the dataflow counterpart
+/// to `orchestrator::fsm`'s phase graph. See module docs for the tiered
+/// resolution and step/fuse/condition shape.
+pub mod dataflow;
+/// Executor walking a `dataflow::Pipeline`, dispatching each step's
+/// plugin+verb and threading outputs per its input mapping.
+#[cfg(target_arch = "wasm32")]
+pub mod dataflow_exec;
 
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
