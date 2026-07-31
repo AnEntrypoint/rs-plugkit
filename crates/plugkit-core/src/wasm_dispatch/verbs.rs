@@ -1871,6 +1871,33 @@ fn git_finalize(body: &Value) -> u64 {
     let already_current = push_data.and_then(|d| d.get("already_current")).and_then(|b| b.as_bool()).unwrap_or(false);
     let remote_sha = push_data.and_then(|d| d.get("remote_sha")).and_then(|s| s.as_str()).unwrap_or("").to_string();
     steps.push(json!({ "step": "push", "branch": branch, "remote_advanced": remote_advanced, "already_current": already_current }));
+
+    // Auto-close the push->CI->marker loop right here instead of requiring
+    // the agent to separately remember to dispatch ci-status and then
+    // fs_write the marker: check once immediately (GitHub Actions usually
+    // hasn't even registered the run yet at push+0s, so "unknown"/"pending"
+    // is the expected common outcome, not a failure of this check), and only
+    // when it happens to already be green does this same dispatch also
+    // write .ci-validated -- the fast-path case needs zero follow-up calls.
+    // A pending/failed/unknown result is surfaced plainly so the agent knows
+    // exactly which verb to re-dispatch (ci-status) rather than guessing.
+    let head_sha = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
+    let ci_check = ci_status_value(&json!({ "repo": repo, "sha": head_sha }));
+    let (ci_status_summary, ci_validated_written) = match &ci_check {
+        Ok(v) => {
+            let status = v.get("data").and_then(|d| d.get("status")).and_then(|s| s.as_str()).unwrap_or("unknown");
+            let written = if status == "success" && !head_sha.is_empty() {
+                let marker = json!({ "head_sha": head_sha }).to_string();
+                crate::pkfs::write(".gm/exec-spool/.ci-validated", &marker)
+            } else {
+                false
+            };
+            (v.get("data").cloned().unwrap_or(Value::Null), written)
+        }
+        Err(e) => (e.clone(), false),
+    };
+    steps.push(json!({ "step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written }));
+
     ok("git_finalize", json!({
         "committed": committed,
         "pushed": true,
@@ -1881,6 +1908,8 @@ fn git_finalize(body: &Value) -> u64 {
         "already_current": already_current,
         "remote_sha": remote_sha,
         "steps": steps,
+        "ci_validated_marker_written": ci_validated_written,
+        "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
     }))
 }
 
@@ -2025,13 +2054,20 @@ fn ci_status_conclusion_to_status(conclusion: &str, gh_status: &str) -> &'static
     }
 }
 
-fn ci_status(body: &Value) -> u64 {
+/// Core of the `ci-status` verb, returning the plain structured result
+/// rather than a packed wasm response -- lets `git_finalize` call the exact
+/// same check inline right after a push, instead of requiring the agent to
+/// dispatch a separate `ci-status` verb before the CONSOLIDATE gate can see
+/// a fresh result. `Err(Value)` carries an error-shaped body for the caller
+/// to surface as-is (never a packed `u64` -- this helper has no wasm-only
+/// callers left once `ci_status` below delegates to it).
+fn ci_status_value(body: &Value) -> Result<Value, Value> {
     let cwd = body_cwd(body);
-    let repo = match ci_status_resolve_repo(body, cwd) { Ok(r) => r, Err(e) => return e };
-    let sha = match ci_status_resolve_sha(body, cwd) { Ok(s) => s, Err(e) => return e };
+    let repo = ci_status_resolve_repo(body, cwd).map_err(|packed| unpack_to_value(packed))?;
+    let sha = ci_status_resolve_sha(body, cwd).map_err(|packed| unpack_to_value(packed))?;
     let url = format!("https://api.github.com/repos/{}/actions/runs?head_sha={}&per_page=20", repo, sha);
     if let Err(reason) = crate::config_path::validate_fetch_url(&url) {
-        return err_coded("ci-status", ERR_CODE_INVALID_ARGS, &reason);
+        return Err(json!({ "ok": false, "verb": "ci-status", "error": reason, "error_code": ERR_CODE_INVALID_ARGS }));
     }
     let token = body.get("token").and_then(|v| v.as_str()).map(String::from).or_else(ci_status_token);
     let mut headers = json!({
@@ -2045,7 +2081,7 @@ fn ci_status(body: &Value) -> u64 {
     let packed = unsafe { host_fetch(url.as_ptr(), url.len() as u32, opts.as_ptr(), opts.len() as u32) };
     let resp = unpack_to_value(packed);
     if resp.is_null() {
-        return err("ci-status", "host_fetch empty");
+        return Err(json!({ "ok": false, "verb": "ci-status", "error": "host_fetch empty" }));
     }
     let body_text = resp.get("body").and_then(|v| v.as_str())
         .or_else(|| resp.get("text").and_then(|v| v.as_str()))
@@ -2054,23 +2090,21 @@ fn ci_status(body: &Value) -> u64 {
         .or_else(|| resp.get("statusCode").and_then(|v| v.as_i64()))
         .unwrap_or(0);
     if status_code != 200 {
-        return err_json("ci-status", json!({
+        return Err(json!({
+            "ok": false, "verb": "ci-status",
             "error": format!("GitHub Actions API returned HTTP {}", status_code),
-            "repo": repo,
-            "sha": sha,
-            "response": body_text,
+            "repo": repo, "sha": sha, "response": body_text,
         }));
     }
     let parsed: Value = serde_json::from_str(body_text).unwrap_or(Value::Null);
     let runs = parsed.get("workflow_runs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     if runs.is_empty() {
-        return ok("ci-status", json!({
-            "status": "unknown",
-            "repo": repo,
-            "sha": sha,
-            "failed_jobs": [],
-            "run_url": Value::Null,
-            "reason": "no workflow runs found for this sha yet",
+        return Ok(json!({
+            "ok": true, "verb": "ci-status", "data": {
+                "status": "unknown", "repo": repo, "sha": sha,
+                "failed_jobs": [], "run_url": Value::Null,
+                "reason": "no workflow runs found for this sha yet",
+            },
         }));
     }
     let mut overall = "success";
@@ -2099,14 +2133,19 @@ fn ci_status(body: &Value) -> u64 {
     } else if any_pending {
         overall = "pending";
     }
-    ok("ci-status", json!({
-        "status": overall,
-        "repo": repo,
-        "sha": sha,
-        "failed_jobs": failed_jobs,
-        "run_url": run_url,
-        "run_count": runs.len(),
+    Ok(json!({
+        "ok": true, "verb": "ci-status", "data": {
+            "status": overall, "repo": repo, "sha": sha,
+            "failed_jobs": failed_jobs, "run_url": run_url, "run_count": runs.len(),
+        },
     }))
+}
+
+fn ci_status(body: &Value) -> u64 {
+    match ci_status_value(body) {
+        Ok(v) => pack(v.to_string()),
+        Err(v) => pack(v.to_string()),
+    }
 }
 
 fn git_branch(body: &Value) -> u64 {

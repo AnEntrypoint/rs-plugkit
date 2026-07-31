@@ -568,7 +568,7 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
                     "prd-all-closed" => "prd-resolve",
                     "mutables-all-resolved" => "mutable-resolve",
                     "worktree-clean" => "git_finalize",
-                    "ci-validated-fresh" => "exec_js",
+                    "ci-validated-fresh" => "ci-status",
                     "browser-witness-coverage" => "browser",
                     "app-loads-witnessed" => "browser",
                     "claim-audit-clean" => "claim-audit",
