@@ -122,13 +122,19 @@ fn dispatch_gm_internal(verb: &str, body: &Value) -> Value {
             let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
             crate::rssearch_vectors::search_with_recency(&embedding, &namespaces, limit, now_ms).unwrap_or(Value::Null)
         }
-        "chunk_split" => {
-            // Placeholder pass-through until code_index.rs's chunker is
-            // extracted into a directly-callable function (rewire-code-index-
-            // pipeline-onto-executor PRD row) -- returns its input unchanged
-            // so a codesearch/recall-only project (no code_index override) is
-            // never affected by this entry point's incompleteness.
-            body.clone()
+        "extract_chunks" => {
+            let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let source = body.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let lang = body.get("lang").and_then(|v| v.as_str()).unwrap_or("");
+            let chunks = crate::code_index::extract_chunks(path, source, lang);
+            let bodies: Vec<Value> = chunks.iter().map(|(_, _, _, _, body)| json!(body)).collect();
+            let structured: Vec<Value> = chunks
+                .iter()
+                .map(|(kind, name, line_start, line_end, body)| {
+                    json!({ "kind": kind, "name": name, "line_start": line_start, "line_end": line_end, "body": body })
+                })
+                .collect();
+            json!({ "bodies": bodies, "chunks": structured })
         }
         other => json!({ "ok": false, "error": format!("unknown gm-internal dataflow verb: {other}") }),
     }

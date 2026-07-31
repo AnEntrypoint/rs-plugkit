@@ -312,31 +312,33 @@ fn default_document() -> DataflowDocument {
         },
     );
 
-    // code_index: treesitter-parse -> chunk-split -> embed-batch -> cache-write.
+    // code_index: extract_chunks (parse-via-treesitter + node-to-chunk in one
+    // real call) -> embed-batch -> cache-write. NOTE: this pipeline covers
+    // only the per-file chunk/embed/cache transform -- the wall-budget,
+    // deferred-file convergence, and digest/manifest bookkeeping that wraps
+    // it in code_index.rs's index_cfg() is intentionally NOT expressed here
+    // (safety-critical, see dataflow_exec.rs's chunk_split doc comment); a
+    // dataflow override of this entry point governs only the per-file
+    // extract/embed/cache-write step shape, not the outer indexing loop.
     pipelines.insert(
         "code_index".to_string(),
         Pipeline {
             entry_point: "code_index".to_string(),
             steps: vec![
                 StepNode {
-                    id: "parse".to_string(),
-                    plugin: "treesitter".to_string(),
-                    verb: "parse_file".to_string(),
-                    input: InputMapping { fields: btreemap([("path", "request.path")]) },
-                    when: None,
-                },
-                StepNode {
                     id: "chunk".to_string(),
                     plugin: "gm".to_string(),
-                    verb: "chunk_split".to_string(),
-                    input: InputMapping { fields: btreemap([("symbols", "steps.parse.symbols")]) },
+                    verb: "extract_chunks".to_string(),
+                    input: InputMapping {
+                        fields: btreemap([("path", "request.path"), ("source", "request.source"), ("lang", "request.lang")]),
+                    },
                     when: None,
                 },
                 StepNode {
                     id: "embed_batch".to_string(),
                     plugin: "bert".to_string(),
                     verb: "embed_batch".to_string(),
-                    input: InputMapping { fields: btreemap([("texts", "steps.chunk.texts")]) },
+                    input: InputMapping { fields: btreemap([("texts", "steps.chunk.bodies")]) },
                     when: None,
                 },
                 StepNode {

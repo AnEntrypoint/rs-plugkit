@@ -401,7 +401,7 @@ fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option
     }
 }
 
-fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String, String, usize, usize, String)> {
+pub fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String, String, usize, usize, String)> {
     let resp = plugin_call("treesitter", "parse", &json!({ "lang": lang_name, "source": source }));
     if !plugin_ok(&resp) {
         crate::wasm_dispatch::emit_event("code_index_treesitter_failed", json!({
