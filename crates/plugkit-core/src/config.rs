@@ -408,22 +408,14 @@ fn type_name_of(v: &Value) -> &'static str {
     }
 }
 
-/// Parse a repo-source SPEC (tiers 2 and 3). Separate from [`parse_config`]
-/// because a spec is a pointer with an entirely different required shape --
-/// conflating them would let a config-shaped file satisfy a spec read.
-fn parse_source_spec(text: &str, origin: &str, cache_dir: String, tier_label: &str) -> Result<Option<RepoSource>, String> {
-    let cleaned = text.trim_start_matches('\u{feff}');
-    if cleaned.trim().is_empty() {
-        return Ok(None);
-    }
-    let v: Value = serde_json::from_str(cleaned)
-        .map_err(|e| format!("{origin}: not valid JSON: {e}"))?;
-    let Some(obj) = v.as_object() else {
-        return Err(format!(
-            "{origin}: top level must be a JSON object, found {}",
-            type_name_of(&v)
-        ));
-    };
+/// Parse ONE repo-source object (a single entry of a tier-2/3 spec, whether
+/// the spec file held a bare object or one element of an array). `cache_root`
+/// is the tier's cache root; the entry's own sub-directory beneath it is
+/// derived from a content hash of (repo, reference, path) so N entries in one
+/// spec never collide on disk, and reordering the array (same entries, new
+/// priority) resolves to the SAME sub-directories rather than triggering a
+/// needless re-clone.
+fn parse_source_entry(obj: &Map<String, Value>, origin: &str, cache_root: &str, tier_label: &str) -> Result<RepoSource, String> {
     let repo = obj
         .get("repo")
         .and_then(|x| x.as_str())
@@ -447,13 +439,53 @@ fn parse_source_spec(text: &str, origin: &str, cache_dir: String, tier_label: &s
     let raw_path = obj.get("path").and_then(|x| x.as_str()).unwrap_or("");
     crate::config_path::validate_source_path(raw_path).map_err(|e| format!("{origin}: {e}"))?;
     let path = raw_path.trim().trim_matches('/').to_string();
-    Ok(Some(RepoSource {
+    let entry_hash = crate::pipeline::fnv1a64(format!("{repo}|{}|{path}", reference.as_deref().unwrap_or("")).as_bytes());
+    let cache_dir = format!("{cache_root}/{entry_hash:016x}");
+    Ok(RepoSource {
         repo,
         reference,
         path,
         cache_dir,
         tier_label: tier_label.to_string(),
-    }))
+    })
+}
+
+/// Parse a repo-source SPEC (tiers 2 and 3): either a bare `{repo,...}`
+/// object (the original single-source shape, treated as a 1-element list for
+/// backward compatibility) or a JSON array of such objects, resolved and
+/// deep-merged in array order (first entry's keys win, falling through to the
+/// next entry, then to the tier below). Separate from [`parse_config`]
+/// because a spec is a pointer with an entirely different required shape --
+/// conflating them would let a config-shaped file satisfy a spec read.
+fn parse_source_spec(text: &str, origin: &str, cache_root: &str, tier_label: &str) -> Result<Vec<RepoSource>, String> {
+    let cleaned = text.trim_start_matches('\u{feff}');
+    if cleaned.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let v: Value = serde_json::from_str(cleaned)
+        .map_err(|e| format!("{origin}: not valid JSON: {e}"))?;
+    match &v {
+        Value::Object(obj) => Ok(vec![parse_source_entry(obj, origin, cache_root, tier_label)?]),
+        Value::Array(items) => {
+            if items.is_empty() {
+                return Err(format!("{origin}: source spec array must not be empty"));
+            }
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let obj = item.as_object().ok_or_else(|| {
+                        format!("{origin}: array entry {i} must be a JSON object, found {}", type_name_of(item))
+                    })?;
+                    parse_source_entry(obj, &format!("{origin}[{i}]"), cache_root, tier_label)
+                })
+                .collect()
+        }
+        other => Err(format!(
+            "{origin}: top level must be a JSON object or an array of objects, found {}",
+            type_name_of(other)
+        )),
+    }
 }
 
 /// Validate a branch/tag/sha before it reaches a `git fetch`/`clone --branch`
@@ -569,20 +601,12 @@ fn read_across_publish(path: &str) -> Option<String> {
     None
 }
 
-fn load_repo_tier(
-    spec_path: &str,
-    cache_dir: String,
-    fetcher: &dyn RepoFetcher,
-    tier_label: &str,
-) -> Load {
-    let Some(raw) = pkfs::read_to_string(spec_path) else {
-        return Load::Absent;
-    };
-    let src = match parse_source_spec(&raw, spec_path, cache_dir, tier_label) {
-        Ok(Some(s)) => s,
-        Ok(None) => return Load::Absent,
-        Err(reason) => return Load::Rejected { reason },
-    };
+/// Load ONE already-resolved [`RepoSource`]: refresh it, read its config file.
+///
+/// Every failure after the spec PARSES is a rejection, not a fallthrough --
+/// once a user has declared "my config lives in that repo", quietly running
+/// someone else's config because the fetch failed is worse than stopping.
+fn load_one_repo_source(src: &RepoSource, spec_path: &str, fetcher: &dyn RepoFetcher) -> Load {
     // A transient refresh failure (offline, a concurrent process holding the
     // repo's git lock, a momentary network blip) must not discard an already-
     // materialized cache from a PRIOR successful refresh -- that cache is
@@ -597,7 +621,7 @@ fn load_repo_tier(
     // Try the fetch; on failure, read whatever is already cached before
     // giving up -- only a genuinely empty/never-populated cache degrades this
     // tier to Rejected/Absent.
-    let refresh_err = fetcher.refresh(&src).err();
+    let refresh_err = fetcher.refresh(src).err();
     let cfg_path = src.config_path();
     let Some(text) = read_across_publish(&cfg_path) else {
         return match refresh_err {
@@ -623,6 +647,56 @@ fn load_repo_tier(
     }
 }
 
+/// Load a repo-backed tier that may declare MULTIPLE sources (an array in the
+/// spec file): each is loaded independently, and a bad/unreachable entry never
+/// blocks the OTHERS -- only every entry failing (or the spec being genuinely
+/// empty/absent) degrades the whole tier to `Absent`/`Rejected`. Configs from
+/// entries that DID load are deep-merged in array order: entry 0's keys win,
+/// falling through entry-by-entry, matching the same first-non-empty-wins
+/// semantics `resolve_with` already applies across tiers.
+fn load_repo_tier(
+    spec_path: &str,
+    cache_root: String,
+    fetcher: &dyn RepoFetcher,
+    tier_label: &str,
+) -> Load {
+    let Some(raw) = pkfs::read_to_string(spec_path) else {
+        return Load::Absent;
+    };
+    let sources = match parse_source_spec(&raw, spec_path, &cache_root, tier_label) {
+        Ok(list) if list.is_empty() => return Load::Absent,
+        Ok(list) => list,
+        Err(reason) => return Load::Rejected { reason },
+    };
+    let mut merged: Option<Config> = None;
+    let mut entry_failures: Vec<String> = Vec::new();
+    for src in &sources {
+        match load_one_repo_source(src, spec_path, fetcher) {
+            Load::Accepted(cfg) => {
+                merged = Some(match merged {
+                    None => cfg,
+                    Some(prior) => Config {
+                        version: prior.version,
+                        value: deep_merge(&cfg.value, &prior.value),
+                    },
+                });
+            }
+            Load::Rejected { reason } => entry_failures.push(reason),
+            Load::Absent => entry_failures.push(format!("{}: no config file present", src.config_path())),
+        }
+    }
+    match merged {
+        Some(cfg) => Load::Accepted(cfg),
+        None => Load::Rejected {
+            reason: format!(
+                "{spec_path}: every source in this tier failed to load ({} entries): {}",
+                sources.len(),
+                entry_failures.join("; ")
+            ),
+        },
+    }
+}
+
 /// Resolve the full chain against a project root, reporting which tier won.
 ///
 /// `project_root` is passed in rather than resolved here so callers that
@@ -645,10 +719,29 @@ fn load_repo_tier(
 /// fresh every call) because the plugin instance is process-wide and shared
 /// across concurrently-active projects -- a cached root would leak one
 /// project's config into another's dispatch.
+/// Resolves the config, then honors the resolved `sync.debounce_ms` for the
+/// repo-tier fetch that produced it. The first pass necessarily runs on the
+/// compiled default debounce (`GitRepoFetcher::default()`), since the debounce
+/// setting itself lives inside the config being fetched -- a chicken-and-egg
+/// only a second pass can resolve. The second pass is cheap: `ensure_current`'s
+/// debounce state is a per-`RepoSource` file read plus an mkdir-lock, not a
+/// network round trip, unless the debounce window has actually elapsed.
 pub fn resolve() -> Resolution {
     let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-    let fetcher = crate::config_sync::GitRepoFetcher::default();
-    resolve_and_report(&root, &fetcher)
+    let bootstrap_fetcher = crate::config_sync::GitRepoFetcher::default();
+    let first_pass = resolve_and_report(&root, &bootstrap_fetcher);
+    let configured_debounce_ms = first_pass
+        .config
+        .get("sync")
+        .and_then(|s| s.get("debounce_ms"))
+        .and_then(|v| v.as_u64());
+    match configured_debounce_ms {
+        Some(ms) if ms != bootstrap_fetcher.debounce_ms => {
+            let tuned_fetcher = crate::config_sync::GitRepoFetcher::with_debounce_ms(ms);
+            resolve_and_report(&root, &tuned_fetcher)
+        }
+        _ => first_pass,
+    }
 }
 
 pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution {

@@ -37,6 +37,8 @@ pub struct ScoringConfig {
     pub dedup_jaccard_near_duplicate_threshold: f64,
     pub bm25_k1_term_frequency_saturation: f64,
     pub bm25_b_document_length_normalization: f64,
+    pub fusion_rrf_k: f64,
+    pub fusion_identifier_boost: f64,
 }
 
 impl Default for ScoringConfig {
@@ -48,6 +50,8 @@ impl Default for ScoringConfig {
             dedup_jaccard_near_duplicate_threshold: 0.7,
             bm25_k1_term_frequency_saturation: 1.2,
             bm25_b_document_length_normalization: 0.75,
+            fusion_rrf_k: rs_search::fusion::RRF_K,
+            fusion_identifier_boost: rs_search::fusion::IDENTIFIER_BOOST,
         }
     }
 }
@@ -407,8 +411,21 @@ impl RagConfig {
         append_present_strings_or_record_problem("index", "force_include_path_substrings", &mut cfg.index.force_include_path_substrings_overriding_every_skip, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_k1", &mut cfg.scoring.bm25_k1_term_frequency_saturation, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_b", &mut cfg.scoring.bm25_b_document_length_normalization, &mut problems);
+        overwrite_present_f64_or_record_problem("scoring", "fusion_rrf_k", &mut cfg.scoring.fusion_rrf_k, &mut problems);
+        overwrite_present_f64_or_record_problem("scoring", "fusion_identifier_boost", &mut cfg.scoring.fusion_identifier_boost, &mut problems);
+        overwrite_present_f64_or_record_problem("scoring", "recency_floor", &mut cfg.scoring.recency_floor, &mut problems);
+        overwrite_present_f64_or_record_problem("scoring", "cos_floor", &mut cfg.scoring.cos_floor_applied_before_recency_rescue, &mut problems);
+        overwrite_present_f64_or_record_problem("scoring", "dedup_jaccard_threshold", &mut cfg.scoring.dedup_jaccard_near_duplicate_threshold, &mut problems);
+        overwrite_present_f64_or_record_problem("scoring", "half_life_ms", &mut cfg.scoring.half_life_ms, &mut problems);
         overwrite_present_usize_or_record_problem("memory", "embed_dim", &mut cfg.embed.dim, &mut problems);
         overwrite_present_usize_or_record_problem("memory", "recall_limit", &mut cfg.budget.default_limit, &mut problems);
+        overwrite_present_usize_or_record_problem("memory", "pool_multiplier", &mut cfg.budget.pool_multiplier, &mut problems);
+        overwrite_present_usize_or_record_problem("memory", "pool_floor", &mut cfg.budget.pool_floor, &mut problems);
+        overwrite_present_usize_or_record_problem("memory", "default_k", &mut cfg.budget.default_k, &mut problems);
+        overwrite_present_u64_or_record_problem("pipeline", "ttl_ms", &mut cfg.pipeline.ttl_ms, &mut problems);
+        overwrite_present_usize_or_record_problem("pipeline", "summarize_threshold", &mut cfg.pipeline.summarize_threshold, &mut problems);
+        overwrite_present_usize_or_record_problem("pipeline", "max_result_bytes", &mut cfg.pipeline.max_result_bytes_advertised_and_enforced_by_one_field, &mut problems);
+        overwrite_present_u64_or_record_problem("pipeline", "max_attempts", &mut cfg.pipeline.max_attempts, &mut problems);
 
         if let Some(ns) = v.get("memory").and_then(|m| m.get("namespace")).and_then(|n| n.as_str()) {
             cfg.namespaces.default = ns.to_string();
@@ -483,6 +500,18 @@ impl RagConfig {
             return Err(format!(
                 "ragconfig: scoring.bm25_k1 {} must be finite and non-negative; it is the term-frequency saturation parameter and a negative value inverts the ranking",
                 self.scoring.bm25_k1_term_frequency_saturation
+            ));
+        }
+        if !(self.scoring.fusion_rrf_k > 0.0) {
+            return Err(format!(
+                "ragconfig: scoring.fusion_rrf_k {} must be positive; it is a denominator added to each rank position and a non-positive value can divide by zero or invert ranking",
+                self.scoring.fusion_rrf_k
+            ));
+        }
+        if !(self.scoring.fusion_identifier_boost >= 0.0) {
+            return Err(format!(
+                "ragconfig: scoring.fusion_identifier_boost {} must be non-negative; it multiplies the BM25 list's RRF contribution for identifier-shaped queries and a negative value would penalize BM25 matches instead of boosting them",
+                self.scoring.fusion_identifier_boost
             ));
         }
         if !(0.0..=1.0).contains(&self.scoring.bm25_b_document_length_normalization) {
