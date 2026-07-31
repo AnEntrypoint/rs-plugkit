@@ -158,6 +158,39 @@ pub const ERR_CODE_INVALID_ARGS: &str = "invalid_args";
 pub const ERR_CODE_PANIC: &str = "panic";
 pub const ERR_CODE_GATE_DENIED: &str = "gate_denied";
 
+/// Answers "is this project using the config I wrote" in one dispatch: which
+/// tier won and why, plus the values a caller is most likely to have set and
+/// most likely to be surprised by. Reads the same resolver every live path
+/// reads, so a value here is the value actually in force, not a restatement.
+fn effective_config_report() -> Value {
+    let resolution = crate::config::resolve();
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    json!({
+        "tier": resolution.tier.as_str(),
+        "why": resolution.why,
+        "version": resolution.config.version,
+        "rejected_tiers": resolution.rejected,
+        "embed_dim": cfg.dim(),
+        "tables": {
+            "rssearch": cfg.rssearch.table,
+            "code_chunks": cfg.code_chunks.table,
+            "git_commits": cfg.git_commits.table,
+        },
+        "scoring": {
+            "half_life_ms": cfg.scoring.half_life_ms,
+            "recency_floor": cfg.scoring.recency_floor,
+            "cos_floor": cfg.scoring.cos_floor_applied_before_recency_rescue,
+            "fusion_rrf_k": cfg.scoring.fusion_rrf_k,
+        },
+        "budget": {
+            "default_limit": cfg.budget.default_limit,
+            "default_k": cfg.budget.default_k,
+            "pool_multiplier": cfg.budget.pool_multiplier,
+            "pool_floor": cfg.budget.pool_floor,
+        },
+    })
+}
+
 fn next_dispatch_hint_for(verb: &str) -> Value {
     if verb == "instruction" { Value::Null } else { json!("instruction") }
 }
@@ -1014,6 +1047,7 @@ fn health(_body: &Value) -> u64 {
         "now": now,
         "imports": super::host_abi::HOST_IMPORTS,
         "imports_count": super::host_abi::HOST_IMPORTS.len(),
+        "effective_config": effective_config_report(),
         "subsystems": subsystems,
         "verb_aliases": aliases,
         "error_codes": [
