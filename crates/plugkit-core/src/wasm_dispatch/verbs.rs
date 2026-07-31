@@ -467,6 +467,7 @@ fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do
             memory_namespaces.push(ns.clone());
         }
     }
+    let sync_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let converged = if memory_namespaces.is_empty() {
         false
     } else if do_sync {
@@ -475,11 +476,24 @@ fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do
     } else {
         crate::memory_md::has_stored_digest(&memory_namespaces)
     };
+    let search_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    emit_event("recall_vector_phase_timing", json!({
+        "sync_ms": search_started_ms - sync_started_ms,
+        "did_sync": do_sync,
+        "namespaces": namespaces.len(),
+    }));
     let hits = match crate::rssearch_vectors::search_with_recency_cfg(query_embedding, &namespaces, limit as usize, now_ms, &cfg) {
-        Ok(hits) => hits,
+        Ok(hits) => {
+            emit_event("recall_vector_phase_timing", json!({
+                "search_ms": unsafe { crate::wasm_dispatch::host_now_ms() } - search_started_ms,
+                "outcome": "ok",
+            }));
+            hits
+        }
         Err(e) => {
             emit_event("rssearch_vector_hits_failed", json!({
                 "namespace": namespace, "error": e,
+                "search_ms": unsafe { crate::wasm_dispatch::host_now_ms() } - search_started_ms,
                 "reason": "search_with_recency failed even after malformed-db recovery attempt",
             }));
             json!({ "error": e })
@@ -488,11 +502,19 @@ fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do
     (hits, if converged { Some(memory_namespaces) } else { None })
 }
 
+/// `do_sync` is FALSE here deliberately. This is the read path: it used to
+/// pass true, which ran `memory_md::sync_index` -- a full corpus scan that
+/// re-embeds and rewrites every changed file's vector row -- synchronously
+/// inside every recall. That work is supposed to be skipped once the stored
+/// digest matches, but a sync that does not finish stores its digest with a
+/// `:partial` suffix, which can never equal a freshly computed one, so the
+/// re-index re-ran on every call and never converged. A read must not pay for
+/// indexing; sync belongs on the write path and in explicit maintenance.
 pub fn memory_recall_backend(query_embedding: &Value, namespace: &str, limit: u32) -> Option<Value> {
     if query_embedding_unusable(query_embedding) {
         return None;
     }
-    let (_, mem_ns) = rssearch_vector_hits(query_embedding, namespace, limit, true);
+    let (_, mem_ns) = rssearch_vector_hits(query_embedding, namespace, limit, false);
     let mem_ns = mem_ns?;
     let now_ms = unsafe { host_now_ms() } as i64;
     let cfg = crate::ragconfig::RagConfig::resolved();
