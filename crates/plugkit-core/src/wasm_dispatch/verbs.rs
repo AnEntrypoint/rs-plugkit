@@ -181,6 +181,10 @@ fn effective_config_report() -> Value {
             "recency_floor": cfg.scoring.recency_floor,
             "cos_floor": cfg.scoring.cos_floor_applied_before_recency_rescue,
             "fusion_rrf_k": cfg.scoring.fusion_rrf_k,
+            "fusion_identifier_boost": cfg.scoring.fusion_identifier_boost,
+            "bm25_k1": cfg.scoring.bm25_k1_term_frequency_saturation,
+            "bm25_b": cfg.scoring.bm25_b_document_length_normalization,
+            "dedup_jaccard": cfg.scoring.dedup_jaccard_near_duplicate_threshold,
         },
         "budget": {
             "default_limit": cfg.budget.default_limit,
