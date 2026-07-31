@@ -1361,6 +1361,30 @@ fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u6
     ok("config_resolve", payload)
 }
 
+fn dataflow_resolve(_body: &Value) -> u64 {
+    let (doc, tier, path) = crate::dataflow::document_detailed();
+    let pipelines: serde_json::Map<String, Value> = doc
+        .pipelines
+        .iter()
+        .map(|(name, p)| {
+            (
+                name.clone(),
+                json!({
+                    "steps": p.steps.iter().map(|s| json!({"id": s.id, "plugin": s.plugin, "verb": s.verb})).collect::<Vec<_>>(),
+                    "fuse": p.fuse.iter().map(|f| json!({"id": f.id, "strategy": f.strategy, "sources": f.sources})).collect::<Vec<_>>(),
+                    "output": p.output,
+                }),
+            )
+        })
+        .collect();
+    ok("dataflow_resolve", json!({
+        "tier": tier.as_str(),
+        "path": path,
+        "schema_version": doc.schema_version,
+        "pipelines": Value::Object(pipelines),
+    }))
+}
+
 fn cache_stats(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
     let cfg = cache_cfg_from_defaults_then_vendored_config_then_this_call_body(body);
@@ -2394,6 +2418,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "browser" => browser(&body, &body_s),
         "health" => health(&body),
         "config_resolve" => config_resolve_report_winning_tier_and_any_rejected_tier(&body),
+        "dataflow_resolve" => dataflow_resolve(&body),
         "sql_open" => sql_open(&body),
         "sql_close" => sql_close(&body),
         "sql_list_dbs" => sql_list_dbs(&body),

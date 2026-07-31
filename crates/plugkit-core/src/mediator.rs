@@ -33,7 +33,7 @@ pub const SQL_VERBS: &[&str] = &["sql_open", "sql_close", "sql_list_dbs", "sql_e
 pub const MEMORY_VERBS: &[&str] = &["memorize", "memorize-prune", "recall", "codeinsight_index", "codesearch", "forget", "discipline"];
 pub const EXEC_VERBS: &[&str] = &["exec_js", "lang", "python", "bash", "powershell", "ssh", "go", "rust", "c", "cpp", "java", "deno"];
 pub const BROWSER_VERBS: &[&str] = &["browser"];
-pub const META_VERBS: &[&str] = &["health", "config_resolve", "status", "close", "filter", "cache_get", "cache_put", "cache_invalidate", "cache_stats", "wait", "learn"];
+pub const META_VERBS: &[&str] = &["health", "config_resolve", "dataflow_resolve", "status", "close", "filter", "cache_get", "cache_put", "cache_invalidate", "cache_stats", "wait", "learn"];
 
 /// The verb alias table, declared instead of being implicit in
 /// `dispatch_verb_inner`'s `|`-joined match arms. Each entry is
