@@ -464,13 +464,8 @@ pub fn resolve_hook_path(hook: &str) -> Option<String> {
     if crate::pkfs::read_to_string(&local).is_some() {
         return Some(local);
     }
-    let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-    let cache_base = if root.trim().is_empty() {
-        crate::config::SOURCE_CACHE_REL.to_string()
-    } else {
-        format!("{}/{}", root.trim_end_matches(['/', '\\']), crate::config::SOURCE_CACHE_REL)
-    };
-    let remote = format!("{cache_base}/hooks/{hook}");
+    let cache_base = crate::config::resolve().cache_dir?;
+    let remote = format!("{}/hooks/{hook}", cache_base.trim_end_matches(['/', '\\']));
     if crate::pkfs::read_to_string(&remote).is_some() {
         return Some(remote);
     }
@@ -669,7 +664,6 @@ impl GraphTier {
 
 #[cfg(target_arch = "wasm32")]
 fn source_repo_graph_path() -> Option<String> {
-    let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let resolved = crate::config::resolve();
     let rel = resolved
         .config
@@ -689,12 +683,8 @@ fn source_repo_graph_path() -> Option<String> {
         }));
         return None;
     }
-    let base = if root.trim().is_empty() {
-        crate::config::SOURCE_CACHE_REL.to_string()
-    } else {
-        format!("{}/{}", root.trim_end_matches(['/', '\\']), crate::config::SOURCE_CACHE_REL)
-    };
-    Some(format!("{base}/{rel}"))
+    let base = resolved.cache_dir?;
+    Some(format!("{}/{rel}", base.trim_end_matches(['/', '\\'])))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

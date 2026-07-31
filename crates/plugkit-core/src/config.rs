@@ -1,120 +1,21 @@
-//! The 4-tier gm configuration resolution chain.
-//!
-//! Generalizes the 3-tier chain `prose.rs` already runs for instruction
-//! overrides (local `.gm/instructions/<key>.md` -> repo spec at
-//! `.gm/instructions/source.json` -> compiled default) into a config chain
-//! that adds the user-wide tier prose.rs lacks, and -- unlike prose.rs, whose
-//! unit is an opaque markdown blob that cannot be malformed -- carries a
-//! versioned, parseable schema, so it needs a total parser and explicit
-//! failure reporting where prose.rs needed neither.
-//!
-//! # Resolution order (first match wins)
-//!
-//! 1. [`Tier::ProjectVendored`] -- `<project>/.gm/gm.config.json`, a real
-//!    config committed into the project itself.
-//! 2. [`Tier::ProjectRepoSpec`] -- `<project>/.gm/config.source.json`, which
-//!    does NOT contain config, only a pointer at a config REPO plus the cache
-//!    directory that repo is materialized into.
-//! 3. [`Tier::UserRepoSpec`] -- `<home>/.gm/config.source.json`, the same
-//!    pointer shape, applying to every project this user runs.
-//! 4. [`Tier::BuiltinDefault`] -- [`Config::builtin_default`], compiled in.
-//!    Always succeeds, so resolution is total: there is no "no config" state.
-//!
-//! ## Why a single `.gm/gm.config.json`, not a `.gm/config/` directory
-//!
-//! The brief allowed either. A directory forces three decisions a single file
-//! does not have: what orders the files (lexical? a manifest?), what happens
-//! when two files set the same key, and what a stray non-config file in there
-//! means. Each is a new silent-misresolution surface, and none buys anything
-//! this schema needs -- partial override is already expressible as a partial
-//! JSON object, which is exactly what the deep merge below consumes. The
-//! precedent agrees: `prose.rs` points at a config repo with a single
-//! `source.json`, not a spec directory.
-//!
-//! ## Deep-merge semantics (precise)
-//!
-//! Tiers do NOT merge with each other -- first match wins, whole. Merging is
-//! strictly WITHIN one tier: a resolved config is
-//! `deep_merge(builtin_default, tier_config)`, so a tier may ship a partial
-//! object and inherit the rest. The rules, applied by [`deep_merge`]:
-//!
-//! - **object + object** -> recurse key by key. Keys present only in the base
-//!   survive; keys present in the override replace or recurse.
-//! - **any + non-object** -> the override REPLACES the base outright.
-//! - **array + array** -> REPLACE, never concatenate or element-wise merge.
-//!   Arrays here are ordered whole values (an allowlist, a phase order);
-//!   appending would make "remove an inherited entry" inexpressible, and
-//!   element-wise merge would make list order load-bearing in a way no caller
-//!   could predict.
-//! - **explicit JSON `null` in the override** -> REPLACES with null rather
-//!   than being skipped. `null` is a deliberate authored value ("unset this"),
-//!   and treating it as absent would make it impossible to clear an inherited
-//!   key. Absence is expressed by omitting the key, which is a different thing
-//!   and the reason the distinction is worth keeping.
-//!
-//! Merge is applied only to a config that already PARSED and version-checked.
-//! A malformed or unknown-version tier is [`Rejected`](Load::Rejected), never
-//! silently merged as an empty object.
-
 use serde_json::{json, Map, Value};
 
 use crate::pkfs;
 
-/// Schema version this build understands.
-///
-/// Bump only for a BREAKING shape change. A config declaring a version above
-/// this is rejected loudly (see [`check_version`]) rather than parsed on the
-/// hope the unknown fields are additive -- a newer config almost certainly
-/// relies on semantics this build does not have, and honoring the half of it
-/// we recognize would apply a config nobody wrote.
 pub const SCHEMA_VERSION: u64 = 1;
 
-/// Oldest schema version this build can still read.
-///
-/// A RANGE, not an equality, for the same reason `Policy` takes serde defaults
-/// instead of `deny_unknown_fields`: in an auto-updating config system the
-/// config repo legitimately leads the binary. An exact-match gate meant the
-/// moment a shared config bumped its version, every not-yet-updated client in
-/// the fleet dropped to the compiled defaults at once -- a fleet-wide outage
-/// triggered by a routine publish.
-///
-/// A config NEWER than this build is now accepted with a reported warning
-/// rather than rejected: every field carries a default, unknown keys are
-/// surfaced rather than fatal, so applying the recognised subset is strictly
-/// closer to the author's intent than silently ignoring the whole file.
-/// Genuinely breaking changes raise this floor.
 pub const MIN_READABLE_SCHEMA_VERSION: u64 = 1;
 
-/// Filename of a real, vendored config (tier 1). Project-relative.
 pub const PROJECT_CONFIG_REL: &str = ".gm/gm.config.json";
 
-/// Filename of a repo-source SPEC (tiers 2 and 3) -- a pointer, not a config.
-/// Deliberately distinct from [`PROJECT_CONFIG_REL`] so the two can coexist in
-/// one `.gm/` and so a reader can never mistake one for the other.
 pub const SOURCE_SPEC_REL: &str = ".gm/config.source.json";
 
-/// Where a fetched config repo is materialized. Mirrors prose.rs's
-/// `.gm/instructions-source-cache` convention, and is likewise a derived
-/// artifact -- it belongs in gitignore.rs's `MANAGED_ENTRIES`, not in git.
 pub const SOURCE_CACHE_REL: &str = ".gm/config-source-cache";
 
-/// gm's own shared config repo, tried when a project sets up neither
-/// [`SOURCE_SPEC_REL`] tier -- the zero-config starting point so a fresh
-/// install already pulls from a maintained default instead of running fully
-/// unconfigured. A project's own tier 1 or 2/3 spec still wins outright; this
-/// is strictly the tier BELOW user-repo-spec and ABOVE the compiled default.
 pub const DEFAULT_REPO_URL: &str = "https://github.com/AnEntrypoint/gm-config";
 
-/// Cache directory for [`DEFAULT_REPO_URL`], kept distinct from
-/// [`SOURCE_CACHE_REL`] so an explicit project/user spec pointing at a
-/// DIFFERENT repo never collides on disk with the implicit default's own
-/// checkout.
 pub const DEFAULT_REPO_CACHE_REL: &str = ".gm/config-source-cache-default";
 
-/// Which tier produced a config. Reported to callers because a config's
-/// meaning depends on where it came from -- "why is this setting on" is
-/// unanswerable without it, for a human reading a log or a caller deciding
-/// whether it is safe to write a change back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     ProjectVendored,
@@ -136,14 +37,6 @@ impl Tier {
     }
 }
 
-/// A parsed, version-checked config.
-///
-/// Held as a `Value` rather than a struct of named fields on purpose: the
-/// consumers of individual keys are spread across subsystems that land
-/// independently, and a fixed struct would force every key addition through
-/// this file. The version gate is what makes that safe -- an unrecognized
-/// SHAPE is caught by [`check_version`], so the loose value is only ever a
-/// shape this build declared it understands.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub version: u64,
@@ -151,8 +44,6 @@ pub struct Config {
 }
 
 impl Config {
-    /// Tier 4. The one tier that cannot fail, which is what makes
-    /// [`resolve`] total.
     pub fn builtin_default() -> Config {
         Config {
             version: SCHEMA_VERSION,
@@ -169,21 +60,6 @@ impl Config {
         self.value.get(key)
     }
 
-    /// Top-level keys this build does not recognise.
-    ///
-    /// The complement of the version range: that gate lets a NEWER config
-    /// through, and this reports which of its keys are being ignored. Without
-    /// it a typo (`memoryy`) is indistinguishable from a key from a future
-    /// schema -- both silently do nothing, which is the failure mode the whole
-    /// resolution chain exists to avoid.
-    ///
-    /// Reported, never fatal, for the same reason unknown POLICY keys are
-    /// warned about rather than rejected: in an auto-updating system an
-    /// unrecognised key is usually a newer spec, not corruption.
-    ///
-    /// `_`-prefixed keys are skipped. The reference config repo documents
-    /// itself with `_comment` entries, and flagging its own house style as
-    /// suspicious would train people to ignore this report.
     pub fn unknown_top_level_keys(&self) -> Vec<String> {
         const KNOWN: &[&str] = &["version", "instructions", "index", "memory", "cache", "sync", "fsm", "messages", "rag", "scoring"];
         let Some(obj) = self.value.as_object() else { return Vec::new() };
@@ -195,46 +71,23 @@ impl Config {
     }
 }
 
-/// Outcome of loading ONE tier. A total parser: every load lands in exactly
-/// one arm, and neither arm is reached by panicking or by silently
-/// substituting a default.
-///
-/// `Rejected` is deliberately NOT a fallthrough signal. A tier that exists but
-/// is broken is an authoring error the user must see; skipping to the next
-/// tier would apply a config they did not write while hiding the one they did.
 #[derive(Debug, Clone)]
 pub enum Load {
-    /// Parsed, version-checked, and merged over the builtin default.
     Accepted(Config),
-    /// Present but unusable. `reason` names the file and the specific defect.
     Rejected { reason: String },
-    /// Tier is not configured here at all. The only outcome that advances the
-    /// chain to the next tier.
     Absent,
 }
 
-/// A repo-backed config source, as declared by a tier-2 or tier-3 spec file.
 #[derive(Debug, Clone)]
 pub struct RepoSource {
-    /// Git remote to clone/pull.
     pub repo: String,
-    /// Optional branch/tag/sha. `None` means the remote's default branch.
     pub reference: Option<String>,
-    /// Path WITHIN the repo to the config file, relative and slash-trimmed.
-    /// Empty means the repo root holds `gm.config.json` directly.
     pub path: String,
-    /// Absolute path of the directory the repo is materialized into. Computed
-    /// by this module (never read from the spec) so a spec file can never
-    /// redirect writes to an arbitrary location on disk.
     pub cache_dir: String,
-    /// Which tier produced this source, carried so a change notification can
-    /// say WHERE a config moved rather than only that something did. Two tiers
-    /// can name the same repo, so the repo url alone does not identify it.
     pub tier_label: String,
 }
 
 impl RepoSource {
-    /// Absolute path of the config file once the repo is materialized.
     pub fn config_path(&self) -> String {
         if self.path.is_empty() {
             format!("{}/gm.config.json", self.cache_dir)
@@ -244,35 +97,10 @@ impl RepoSource {
     }
 }
 
-/// The seam a sibling agent fills in: materialize/refresh a repo-backed source
-/// into `src.cache_dir`.
-///
-/// Deliberately NOT implemented here -- git fetching is another agent's scope.
-/// This trait is the entire contract between the two halves: resolution calls
-/// [`RepoFetcher::refresh`] before reading a repo-backed tier, and treats any
-/// `Err` as a REJECTION of that tier (not a fallthrough), so a fetch failure
-/// surfaces instead of silently demoting the user to a lower tier whose config
-/// says something different.
-///
-/// Implementors must be safe under the process-wide shared plugin instance:
-/// two concurrently-active projects can call `refresh` at once, and the two
-/// project-tier cache dirs are distinct paths, but a shared user-tier cache
-/// dir can genuinely be hit twice concurrently -- so the implementation needs
-/// its own locking or an atomic publish, exactly as gitignore.rs and
-/// legacy_reaper.rs each had to reason about.
 pub trait RepoFetcher {
-    /// Ensure `src.cache_dir` holds a current checkout. `Ok(())` promises
-    /// `src.config_path()` is readable if the repo contains it.
     fn refresh(&self, src: &RepoSource) -> Result<(), String>;
 }
 
-/// A fetcher that does nothing and reports why.
-///
-/// Lets resolution be exercised end to end before the git half lands: a
-/// repo-backed tier whose cache is already populated resolves normally, and
-/// one whose cache is cold is REJECTED with a reason naming the missing
-/// implementation -- rather than appearing to work by falling through to a
-/// lower tier.
 pub struct NoopFetcher;
 
 impl RepoFetcher for NoopFetcher {
@@ -281,18 +109,23 @@ impl RepoFetcher for NoopFetcher {
     }
 }
 
-/// The full result of a resolution: the config, which tier won, and why.
-///
-/// `why` is a human sentence, and `rejected` carries every tier that was
-/// present-but-broken on the way down. Both exist because a resolution that
-/// only returns the winning config makes a misconfiguration invisible -- the
-/// user sees defaults and has nothing to explain them.
 #[derive(Debug, Clone)]
 pub struct Resolution {
     pub config: Config,
     pub tier: Tier,
     pub why: String,
     pub rejected: Vec<String>,
+    /// Absolute directory the winning tier's repo checkout is materialized
+    /// into, when the winning tier is repo-backed. `None` for
+    /// `ProjectVendored` (no checkout, a single file) and `BuiltinDefault`
+    /// (nothing fetched). A caller resolving a path RELATIVE to this
+    /// resolution's config (e.g. `fsm.graph`, an instructions-source `path`)
+    /// must join against this field rather than guess a tier's cache dir
+    /// from a hardcoded constant -- three distinct constants
+    /// (`SOURCE_CACHE_REL`, `DEFAULT_REPO_CACHE_REL`, `user_cache_root()`)
+    /// name three different directories, and only the tier that actually won
+    /// knows which one holds the checkout this `Resolution` was read from.
+    pub cache_dir: Option<String>,
 }
 
 impl Resolution {
@@ -307,9 +140,6 @@ impl Resolution {
     }
 }
 
-/// Deep-merge `over` onto `base`. See the module doc comment for the exact
-/// rules; the short form is: objects recurse, everything else (arrays and
-/// explicit nulls included) replaces.
 pub fn deep_merge(base: &Value, over: &Value) -> Value {
     match (base, over) {
         (Value::Object(b), Value::Object(o)) => {
@@ -327,8 +157,6 @@ pub fn deep_merge(base: &Value, over: &Value) -> Value {
     }
 }
 
-/// Total version gate. Every non-`Ok` return names the concrete defect,
-/// because "config rejected" alone is not actionable.
 fn check_version(v: &Value, origin: &str) -> Result<u64, String> {
     let Some(raw) = v.get("version") else {
         return Err(format!(
@@ -358,13 +186,6 @@ fn check_version(v: &Value, origin: &str) -> Result<u64, String> {
     Ok(n)
 }
 
-/// Parse config TEXT into a `Load`. The single choke point every tier's bytes
-/// pass through, so malformed input has exactly one handler.
-///
-/// Never panics: every failure path is an explicit `Rejected`. Empty/whitespace
-/// text is `Absent` rather than rejected -- an empty file is how a tier is
-/// disabled, matching prose.rs's `read_clean`, which treats blank content as
-/// "not set" too.
 pub fn parse_config(text: &str, origin: &str) -> Load {
     let cleaned = text.trim_start_matches('\u{feff}');
     if cleaned.trim().is_empty() {
@@ -488,17 +309,6 @@ fn parse_source_spec(text: &str, origin: &str, cache_root: &str, tier_label: &st
     }
 }
 
-/// Validate a branch/tag/sha before it reaches a `git fetch`/`clone --branch`
-/// argv.
-///
-/// A ref is as attacker-controlled as the URL beside it, and lands in the same
-/// argv. The leading-`-` check is the load-bearing one: `--upload-pack=<cmd>`
-/// in a ref position is git's other documented arbitrary-command vector, and an
-/// argv array does not prevent it because the string is still parsed as an
-/// option once git sees the dash.
-///
-/// The remaining rules are git's own `check-ref-format` restrictions, applied
-/// here rather than discovered as an opaque git failure three calls later.
 fn validate_git_ref(reference: &str) -> Result<(), String> {
     let r = reference.trim();
     if r.is_empty() {
@@ -529,9 +339,6 @@ fn validate_git_ref(reference: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Join a base directory and a project/home-relative path. Kept in one place
-/// so trailing-separator handling cannot drift between tiers (gitignore.rs
-/// open-codes the same care for exactly this reason).
 fn join(base: &str, rel: &str) -> String {
     let b = base.trim_end_matches(['/', '\\']);
     if b.is_empty() {
@@ -541,10 +348,6 @@ fn join(base: &str, rel: &str) -> String {
     }
 }
 
-/// User home directory, matching poll_detect.rs's precedent (`HOME`, then
-/// `USERPROFILE`). Returns `None` rather than poll_detect's `"."` fallback:
-/// `"."` is the PROJECT directory here, and silently reading a user-wide tier
-/// out of the project would collapse tier 3 into tier 2.
 fn env_var(key: &str) -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -574,12 +377,6 @@ fn home_dir() -> Option<String> {
     None
 }
 
-/// Load one repo-backed tier: read its spec, refresh the repo, read the
-/// resulting config.
-///
-/// Every failure after the spec PARSES is a rejection, not a fallthrough --
-/// once a user has declared "my config lives in that repo", quietly running
-/// someone else's config because the fetch failed is worse than stopping.
 const PUBLISH_SWAP_READ_ATTEMPTS: u32 = 5;
 
 const PUBLISH_SWAP_RETRY_MS: u64 = 3;
@@ -719,13 +516,15 @@ fn load_repo_tier(
 /// fresh every call) because the plugin instance is process-wide and shared
 /// across concurrently-active projects -- a cached root would leak one
 /// project's config into another's dispatch.
-/// Resolves the config, then honors the resolved `sync.debounce_ms` for the
-/// repo-tier fetch that produced it. The first pass necessarily runs on the
-/// compiled default debounce (`GitRepoFetcher::default()`), since the debounce
-/// setting itself lives inside the config being fetched -- a chicken-and-egg
-/// only a second pass can resolve. The second pass is cheap: `ensure_current`'s
-/// debounce state is a per-`RepoSource` file read plus an mkdir-lock, not a
-/// network round trip, unless the debounce window has actually elapsed.
+///
+/// Also resolves the config, then honors the resolved `sync.debounce_ms` for
+/// the repo-tier fetch that produced it. The first pass necessarily runs on
+/// the compiled default debounce (`GitRepoFetcher::default()`), since the
+/// debounce setting itself lives inside the config being fetched -- a
+/// chicken-and-egg only a second pass can resolve. The second pass is cheap:
+/// `ensure_current`'s debounce state is a per-`RepoSource` file read plus an
+/// mkdir-lock, not a network round trip, unless the debounce window has
+/// actually elapsed.
 pub fn resolve() -> Resolution {
     let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let bootstrap_fetcher = crate::config_sync::GitRepoFetcher::default();
@@ -748,30 +547,32 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
     let mut rejected: Vec<String> = Vec::new();
 
     let p1 = join(project_root, PROJECT_CONFIG_REL);
-    match pkfs::read_to_string(&p1) {
-        Some(text) => match parse_config(&text, &p1) {
+    if let Some(text) = pkfs::read_to_string(&p1) {
+        match parse_config(&text, &p1) {
             Load::Accepted(config) => {
                 return Resolution {
                     config,
                     tier: Tier::ProjectVendored,
                     why: format!("project-vendored config at {p1}"),
                     rejected,
+                    cache_dir: None,
                 }
             }
             Load::Rejected { reason } => rejected.push(reason),
             Load::Absent => {}
-        },
-        None => {}
+        }
     }
 
+    let p2_cache_dir = join(project_root, SOURCE_CACHE_REL);
     let p2 = join(project_root, SOURCE_SPEC_REL);
-    match load_repo_tier(&p2, join(project_root, SOURCE_CACHE_REL), fetcher, Tier::ProjectRepoSpec.as_str()) {
+    match load_repo_tier(&p2, p2_cache_dir.clone(), fetcher, Tier::ProjectRepoSpec.as_str()) {
         Load::Accepted(config) => {
             return Resolution {
                 config,
                 tier: Tier::ProjectRepoSpec,
                 why: format!("in-project config-repo spec at {p2}"),
                 rejected,
+                cache_dir: Some(p2_cache_dir),
             }
         }
         Load::Rejected { reason } => rejected.push(reason),
@@ -779,14 +580,16 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
     }
 
     if let Some(home) = home_dir() {
+        let p3_cache_dir = join(&home, SOURCE_CACHE_REL);
         let p3 = join(&home, SOURCE_SPEC_REL);
-        match load_repo_tier(&p3, join(&home, SOURCE_CACHE_REL), fetcher, Tier::UserRepoSpec.as_str()) {
+        match load_repo_tier(&p3, p3_cache_dir.clone(), fetcher, Tier::UserRepoSpec.as_str()) {
             Load::Accepted(config) => {
                 return Resolution {
                     config,
                     tier: Tier::UserRepoSpec,
                     why: format!("user-wide config-repo spec at {p3}"),
                     rejected,
+                    cache_dir: Some(p3_cache_dir),
                 }
             }
             Load::Rejected { reason } => rejected.push(reason),
@@ -794,6 +597,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
         }
     }
 
+    let implicit_cache_dir = join(project_root, DEFAULT_REPO_CACHE_REL);
     match load_implicit_default_repo_tier(project_root, fetcher) {
         Load::Accepted(config) => {
             return Resolution {
@@ -801,6 +605,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
                 tier: Tier::ImplicitDefaultRepo,
                 why: format!("gm's own shared default config repo at {DEFAULT_REPO_URL} (no project or user config.source.json configured)"),
                 rejected,
+                cache_dir: Some(implicit_cache_dir),
             }
         }
         Load::Rejected { reason } => rejected.push(reason),
@@ -820,39 +625,10 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
         tier: Tier::BuiltinDefault,
         why,
         rejected,
+        cache_dir: None,
     }
 }
 
-/// Try gm's own shared default config repo, only reached when neither the
-/// project nor the user has configured a [`SOURCE_SPEC_REL`] of their own.
-/// Constructs a [`RepoSource`] directly rather than reading a spec file --
-/// there is no file to point at, `DEFAULT_REPO_URL` IS the spec, compiled in.
-/// A fetch failure (offline, repo genuinely gone) degrades to `Load::Absent`
-/// rather than `Load::Rejected`, unlike an explicit tier's fetch failure --
-/// an operator never configured this repo, so a transient failure to reach
-/// it should read as "nothing here" (fall through quietly to the compiled
-/// default), not as a rejection worth surfacing for a tier nobody opted into.
-///
-/// BUT: "nothing here" only applies when nothing is genuinely cached either.
-/// A refresh failure with an already-materialized cache from a prior
-/// successful fetch is NOT "nothing here" -- it is real, present config this
-/// project has been running against, and discarding it on every transient
-/// git-fetch blip (network hiccup, a concurrent process holding the repo's
-/// lock -- both observed in practice) silently flips the active tier from
-/// ImplicitDefaultRepo down to BuiltinDefault mid-session. BuiltinDefault has
-/// no `fsm.graph` key, so the FSM graph changes underneath an in-flight
-/// session: a persisted phase that was valid under the cached graph is no
-/// longer a state in the newly-resolved (compiled default) graph, and
-/// `transition` denies every dispatch with "no edge from `X` to `Y`" against
-/// a graph the project was never actually configured to run -- confirmed live
-/// 2026-07-30 (thebird project, gm-plugkit runtime): `turn-state.json` showed
-/// `phase:"PLAN"` (compiled-default's state, not the config repo's own
-/// SPECIFY-based graph) even though `.gm/config-source-cache-default/
-/// gm.config.json` on disk had a valid, populated `fsm.graph` pointer the
-/// whole time -- proving `fetcher.refresh` was failing intermittently and
-/// this function was discarding the good cache on every failure instead of
-/// reading it. Read whatever is cached before giving up; only a genuinely
-/// empty/never-populated cache degrades this tier to Absent.
 fn load_implicit_default_repo_tier(project_root: &str, fetcher: &dyn RepoFetcher) -> Load {
     let src = RepoSource {
         repo: DEFAULT_REPO_URL.to_string(),
@@ -873,12 +649,6 @@ fn load_implicit_default_repo_tier(project_root: &str, fetcher: &dyn RepoFetcher
     }
 }
 
-/// Resolve, then report the outcome to the watcher log.
-///
-/// Separate from [`resolve_with`] so the pure resolution stays callable
-/// without side effects. A rejection is emitted at every call rather than
-/// once, because a config the user believes is active but which is silently
-/// rejected is precisely the failure this whole module exists to prevent.
 #[cfg(target_arch = "wasm32")]
 pub fn resolve_and_report(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution {
     let r = resolve_with(project_root, fetcher);

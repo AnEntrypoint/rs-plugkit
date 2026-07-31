@@ -31,6 +31,12 @@ On-disk content is the goal-relative reference; diffing an unread file diffs an 
 
 Feed EMIT only digest-matching-live-filesystem search output; a stale-index result is an L1 bluff.
 
+## Exec-only-via-jit (hard rule)
+
+A build, a subprocess, a filesystem probe, a process-management check -- any shell-shaped operation -- is an `exec_js` dispatch, never a direct Bash/PowerShell tool call. Git specifically is the `git_*` verb family, never `git` invoked through Bash/PowerShell -- `deviation.bash-git-bypass` names this exactly. Every dispatch that bypasses the daemon's own queue back-doors around its threading and pays a full process-spawn cost instead. Exempt only: the single unavoidable spool-dispatch Write itself and the paired Read of its response.
+
+**The shared `gm` plugin instance serializes across every project sharing the daemon, independent of the outer dispatch loop's own worker concurrency.** A long-running dispatch (a slow `exec_js`, a heavy `codesearch` rebuild) on ANY project holds a single process-wide lock for the full duration of any `gm`-plugin wasm call, blocking every OTHER project's `gm`-plugin dispatch too -- live-witnessed: a 15s busy-loop `exec_js` on one project delayed an unrelated dispatch on a different project by 18-21s. A slow dispatch anywhere still creates a real cross-project pause; parallelize by splitting real work across worktrees/projects rather than fanning out multiple subagents at one project's spool.
+
 ## Write-then-check
 
 One write per artifact, then a disk Read against every touched path -- witness the change, never reason it succeeded. Verified disk state IS the witness, not the tool-call return. Discrepancy -> regress to root cause, never retry.

@@ -1,9 +1,5 @@
 pub mod entry;
-pub mod plan;
-pub mod execute;
 pub mod emit;
-pub mod verify;
-pub mod consolidate;
 pub mod update_docs;
 pub mod browser;
 pub mod specify;
@@ -125,11 +121,7 @@ fn should_residual_scan(prd_pending: usize, running_tasks_count: usize) -> bool 
 
 pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
     match key {
-        "plan" => plan::TEXT,
-        "execute" => execute::TEXT,
         "emit" => emit::TEXT,
-        "verify" => verify::TEXT,
-        "consolidate" => consolidate::TEXT,
         "update_docs" => update_docs::TEXT,
         "browser" => browser::TEXT,
         "specify" => specify::TEXT,
@@ -160,7 +152,7 @@ pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
 pub fn has_compiled_default_for_prose_key(key: &str) -> bool {
     matches!(
         key,
-        "plan" | "execute" | "emit" | "verify" | "consolidate" | "update_docs" | "browser" | "entry"
+        "emit" | "update_docs" | "browser" | "entry"
             | "specify" | "prove" | "state" | "conc" | "sec" | "res" | "decide"
     )
 }
@@ -488,6 +480,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let unsupervised_watcher = expire_stale_marker(read_spool_json(".pre-supervised-watcher.json"));
     let gm_plugkit_stale = expire_stale_marker(read_spool_json(".gm-plugkit-stale.json"));
     let wrapper_stale_in_memory = expire_stale_marker(read_spool_json(".wrapper-stale-in-memory.json"));
+    let config_repo_unreachable =
+        expire_stale_marker(read_spool_json(".config-repo-unreachable.json"));
     let running_tasks_count = match &running_tasks {
         serde_json::Value::Array(a) => a.len(),
         _ => 0,
@@ -549,6 +543,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "config_changed": config_changed,
         "gm_plugkit_stale": gm_plugkit_stale,
         "wrapper_stale_in_memory": wrapper_stale_in_memory,
+        "config_repo_unreachable": config_repo_unreachable,
         "running_tasks": running_tasks,
         "open_browser_sessions": open_browser_sessions,
         "stuck_spool": stuck_spool,

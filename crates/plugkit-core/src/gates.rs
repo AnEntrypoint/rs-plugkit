@@ -183,41 +183,20 @@ fn current_phase_key() -> String {
     crate::orchestrator::state::read_state().phase.as_str().to_string()
 }
 
-fn classify_operation(verb: &str, body: &Value) -> &'static str {
-    if verb == "transition" {
-        if let Some(to) = body.get("to").and_then(|v| v.as_str()) {
-            if to.eq_ignore_ascii_case("complete") || to.eq_ignore_ascii_case("stop") {
-                return "complete";
-            }
-            if to.eq_ignore_ascii_case("consolidate") {
-                return "consolidate";
-            }
-        }
-    }
-    if verb == "fs_write" { return "write"; }
-    "verb"
+fn is_transition_to_complete(verb: &str, body: &Value) -> bool {
+    verb == "transition"
+        && body
+            .get("to")
+            .and_then(|v| v.as_str())
+            .map(|to| to.eq_ignore_ascii_case("complete") || to.eq_ignore_ascii_case("stop"))
+            .unwrap_or(false)
 }
 
-/// Whether a kind's EFFECTIVE severity is deny, after policy overrides.
-///
-/// Every call site guarded by this was previously log-only by structure alone --
-/// the branch emitted and fell through. Default severities in the registry match
-/// that exactly, so with an empty `policy.deviation_severity` (the default) this
-/// returns false at every one of them and behaviour is bit-identical to before.
-fn deviation_denies(kind: &str) -> bool {
+fn effective_severity_is_deny(kind: &str) -> bool {
     crate::orchestrator::deviations::effective_severity(kind)
         == crate::orchestrator::deviations::Severity::Deny
 }
 
-/// A path that is a standing test file rather than a live witness.
-///
-/// `deviation.synthetic-test-file` was named in the served VERIFY doctrine as
-/// something that "blocks `transition`" while no Rust code emitted it at all --
-/// the doctrine promised an enforcement that did not exist. This is the detector
-/// that makes the promise real. It stays Log by default because the doctrine is
-/// gm's, not plugkit's: a project that genuinely wants a test suite must not have
-/// its writes denied by an engine default, and one that wants the VERIFY rule
-/// enforced promotes the kind via policy.deviation_severity.
 fn is_synthetic_test_path(rel: &str) -> bool {
     let norm = rel.replace('\\', "/").to_lowercase();
     let segments: Vec<&str> = norm.split('/').filter(|s| !s.is_empty()).collect();
@@ -294,10 +273,6 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    // Which verbs count as a shell, and whether shell git is denied at all,
-    // are policy rather than compile-time facts: a workflow whose shell verb has
-    // a different name got no protection from the hardcoded list, and one that
-    // legitimately wants shell git had no way to say so.
     let shell_policy = policy.clone();
     if shell_policy.deny_shell_git && shell_policy.shell_verbs.iter().any(|v| v == verb) {
         let cmd = body.get("command").and_then(|v| v.as_str())
@@ -310,7 +285,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 || first.ends_with("/git.exe") || first.ends_with("\\git.exe")
         };
         let git_dominant = cmd
-            .split(|c| c == ';' || c == '\n' || c == '|' || c == '&')
+            .split([';', '\n', '|', '&'])
             .map(|s| s.trim_start())
             .any(|s| {
                 let first = s.split_whitespace().next().unwrap_or("");
@@ -318,7 +293,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             });
         let git_in_subshell = extract_substitution_bodies(cmd).into_iter().any(|inner| {
             inner
-                .split(|c| c == ';' || c == '\n' || c == '|' || c == '&')
+                .split([';', '\n', '|', '&'])
                 .map(|s| s.trim_start())
                 .any(|s| {
                     let first = s.split_whitespace().next().unwrap_or("");
@@ -382,21 +357,12 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    let operation = classify_operation(verb, body);
+    let is_complete_transition = is_transition_to_complete(verb, body);
 
-    // Which phase is this transition actually heading for?
-    //
-    // Previously this branch matched two hardcoded operations and mapped them
-    // to two hardcoded destination phases, so a vendored graph that put gates
-    // on any OTHER edge got them silently ignored -- the gates would sit in
-    // graph.json looking authoritative while never being consulted, which is
-    // the worst outcome for a safety check. Derive the destination from the
-    // request instead, and let the graph decide whether that edge is guarded.
-    let requested_to = if verb == "transition" {
+    let requested_to_phase = if verb == "transition" {
         body.get("to")
             .and_then(|v| v.as_str())
             .map(|s| {
-                // "stop" is a historical alias for the terminal phase.
                 if s.eq_ignore_ascii_case("stop") {
                     policy.terminal_phase.clone()
                 } else {
@@ -407,17 +373,11 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         None
     };
 
-    if let Some(to) = requested_to {
+    if let Some(to) = requested_to_phase {
         let from = current_phase_key();
         let to = to.as_str();
         let (residuals, next_recovery) = crate::orchestrator::transitions::gate_residuals(&from, to);
         if !residuals.is_empty() {
-            // Key the repeat counter and the human label on the DESTINATION
-            // phase rather than the coarse operation. Two different guarded
-            // edges are two different stuck states, and sharing one counter
-            // would let alternating denials escalate as if they were the same
-            // loop -- or, worse, label a custom edge's denial "stop-gate" and
-            // point the reader at the wrong gate entirely.
             let gate_key = to.to_ascii_lowercase();
             log_deviation("gate-deny", &format!("{}-gate residuals={}", gate_key, residuals.len()));
             let repeat_count = record_gate_repeat(&gate_key, "gate-deny");
@@ -445,7 +405,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         if let Some(p) = body_path_field(body) {
             if is_unsolicited_toplevel_doc(&p) {
                 log_deviation("unsolicited-doc-created", &p);
-                if deviation_denies("unsolicited-doc-created") {
+                if effective_severity_is_deny("unsolicited-doc-created") {
                     return GateVerdict::deny(format!(
                         "unsolicited-doc-created: `{}` is a top-level doc outside policy.toplevel_doc_allowlist, and this project's policy.deviation_severity promotes this kind to deny. A report/summary/findings file is not the deliverable -- return the finding in the response, or write it where the work lives.",
                         p
@@ -456,7 +416,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         if let Some(p) = body_path_field(body) {
             if is_synthetic_test_path(&p) {
                 log_deviation("synthetic-test-file", &p);
-                if deviation_denies("synthetic-test-file") {
+                if effective_severity_is_deny("synthetic-test-file") {
                     return GateVerdict::deny(format!(
                         "synthetic-test-file: `{}` is a standing test file, and this project's policy.deviation_severity promotes this kind to deny. Doctrine is a live exec_js/browser witness run THIS turn, not a test case deferred to a later run.",
                         p
@@ -466,7 +426,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
-    if operation == "complete" {
+    if is_complete_transition {
         let (body_s, _err, code) = crate::orchestrator::prd::handle_list("");
         let mut anti_shape: Vec<String> = Vec::new();
         if code == 0 {
@@ -485,7 +445,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 }
             }
         }
-        if !anti_shape.is_empty() && deviation_denies("prd-anti-shape") {
+        if !anti_shape.is_empty() && effective_severity_is_deny("prd-anti-shape") {
             return GateVerdict::deny(format!(
                 "prd-anti-shape: {} row(s) are marked closed with empty witness_evidence ({}), and this project's policy.deviation_severity promotes this kind to deny. Re-resolve each with its own distinct witness_evidence before closing the chain.",
                 anti_shape.len(),
