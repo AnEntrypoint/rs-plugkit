@@ -89,6 +89,7 @@ pub fn recover_malformed_shared_db() -> bool {
         crate::wasm_dispatch::emit_event("shared_db_recreate_failed", serde_json::json!({ "path": path, "error": e }));
         return false;
     }
+    crate::rssearch_vectors::forget_ensured_schema();
     crate::rssearch_vectors::ensure_schema().is_ok()
 }
 

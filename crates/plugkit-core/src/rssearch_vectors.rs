@@ -1,6 +1,8 @@
 #![cfg(target_arch = "wasm32")]
 
 use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 use crate::ragconfig::RagConfig;
 use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
@@ -40,8 +42,34 @@ pub fn ensure_schema() -> Result<(), String> {
     ensure_schema_cfg(&default_cfg())
 }
 
+/// `ensure_schema_cfg` is called by EVERY read as well as every write, and it
+/// issues four separate libsql round trips (dim-mismatch probe, CREATE TABLE,
+/// pragma_table_info, CREATE INDEX over a vector index). The plugin opens the
+/// database fresh per call, so on a large store that fixed cost dominates the
+/// search it is supposed to be preparing for. The schema cannot change under a
+/// running process except through this function, so remembering the
+/// (path, dim) pairs already ensured makes the repeat calls free while still
+/// re-running in full whenever either changes.
+static SCHEMA_ENSURED: Mutex<Option<HashSet<(String, usize)>>> = Mutex::new(None);
+
+/// Anything that destroys the tables out from under the memo must call this,
+/// or the next `ensure_schema_cfg` returns Ok against a database that no
+/// longer has the schema in it.
+pub fn forget_ensured_schema() {
+    if let Some(seen) = SCHEMA_ENSURED.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        seen.clear();
+    }
+}
+
 pub fn ensure_schema_cfg(cfg: &RagConfig) -> Result<(), String> {
     let path = shared_db_path();
+    let memo_key = (path.clone(), cfg.dim());
+    {
+        let guard = SCHEMA_ENSURED.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.as_ref().is_some_and(|seen| seen.contains(&memo_key)) {
+            return Ok(());
+        }
+    }
     shared_ensure_open(&path)?;
     // ORDER IS LOAD-BEARING: the mismatch guard runs before the CREATE, so a
     // config-driven `embed.dim` change destroys the old-width table first.
@@ -59,6 +87,11 @@ pub fn ensure_schema_cfg(cfg: &RagConfig) -> Result<(), String> {
         ))?;
     }
     spec(&path, cfg).ensure_index();
+    SCHEMA_ENSURED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashSet::new)
+        .insert(memo_key);
     Ok(())
 }
 
