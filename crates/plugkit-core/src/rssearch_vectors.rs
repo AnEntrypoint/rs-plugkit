@@ -272,17 +272,6 @@ fn jaccard_overlap(a: &str, b: &str) -> f64 {
     inter / (ta.len() as f64 + tb.len() as f64 - inter)
 }
 
-pub fn search_memory_hits(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64, cos_floor: f64) -> Result<Value, String> {
-    // The explicit `cos_floor` argument WINS over config here. Both live call
-    // sites in verbs.rs pass 0.0, and the wrapper's per-namespace floor (the
-    // codeinsight COS_FLOOR) arrives through this argument -- so treating
-    // config as an override would silently discard a caller's deliberate,
-    // narrower choice.
-    let mut cfg = default_cfg();
-    cfg.scoring.cos_floor_applied_before_recency_rescue = cos_floor;
-    search_memory_hits_cfg(query_embedding, namespaces, limit, now_ms, &cfg)
-}
-
 pub fn search_memory_hits_cfg(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64, cfg: &RagConfig) -> Result<Value, String> {
     let qvec = json_to_f32_vec(query_embedding)
         .ok_or_else(|| "rssearch_vectors search_memory_hits: invalid query embedding".to_string())?;
