@@ -1013,6 +1013,7 @@ fn health(_body: &Value) -> u64 {
         "project_gm_json_pinned_version": project_gm_json_pinned_version(),
         "now": now,
         "imports": super::host_abi::HOST_IMPORTS,
+        "imports_count": super::host_abi::HOST_IMPORTS.len(),
         "subsystems": subsystems,
         "verb_aliases": aliases,
         "error_codes": [
@@ -1022,6 +1023,7 @@ fn health(_body: &Value) -> u64 {
         "plugin_failure_codes": [
             PLUGIN_FAIL_UNKNOWN_PLUGIN, PLUGIN_FAIL_NOT_LOADED, PLUGIN_FAIL_DEADLINE,
             PLUGIN_FAIL_MALFORMED, PLUGIN_FAIL_HOST_EMPTY, PLUGIN_FAIL_PLUGIN_ERROR,
+            PLUGIN_FAIL_RESPONSE_LOST,
         ],
         "lifecycle_liveness": lifecycle_liveness()
     }))
