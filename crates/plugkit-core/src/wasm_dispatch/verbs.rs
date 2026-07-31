@@ -1882,7 +1882,16 @@ fn git_finalize(body: &Value) -> u64 {
     // A pending/failed/unknown result is surfaced plainly so the agent knows
     // exactly which verb to re-dispatch (ci-status) rather than guessing.
     let head_sha = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
-    let ci_check = ci_status_value(&json!({ "repo": repo, "sha": head_sha }));
+    // "cwd", never "repo" or "github_repo" here: this dispatch's own `repo`
+    // local is a filesystem cwd path (from body_cwd), and ci_status_value's
+    // body.repo/body.github_repo mean a GitHub owner/name identifier -- the
+    // same field name meaning two different things across these two verbs is
+    // exactly the collision ci-status-repo-field-collides-with-git-verbs-
+    // cwd-field named. Passing it as "cwd" lets ci_status_value's own
+    // body_cwd(body) resolve the right working directory for its git-remote
+    // lookup, while leaving repo/github_repo absent so it correctly falls
+    // through to parsing that directory's real origin URL.
+    let ci_check = ci_status_value(&json!({ "cwd": repo, "sha": head_sha }));
     let (ci_status_summary, ci_validated_written) = match &ci_check {
         Ok(v) => {
             let status = v.get("data").and_then(|d| d.get("status")).and_then(|s| s.as_str()).unwrap_or("unknown");
@@ -1998,8 +2007,18 @@ fn git_fetch(body: &Value) -> u64 {
     ok("git_fetch", json!({ "remote": remote, "output": out }))
 }
 
+/// Reads `github_repo` (the unambiguous, preferred field name -- an
+/// `owner/name` GitHub identifier). `repo` is accepted too for backward
+/// compatibility, but that name collides with `body_cwd`'s own `repo` field
+/// (a filesystem cwd path, used by every git_* verb): a caller that reuses
+/// one body object across a `git_finalize` dispatch and a `ci-status`
+/// dispatch would silently feed a cwd path where an owner/name is expected.
+/// `github_repo` is checked first specifically so a caller that already knows
+/// to avoid the collision has an unambiguous field to reach for.
 fn ci_status_resolve_repo(body: &Value, cwd: Option<&str>) -> Result<String, u64> {
-    if let Some(explicit) = body.get("repo").and_then(|v| v.as_str()) {
+    if let Some(explicit) = body.get("github_repo").and_then(|v| v.as_str())
+        .or_else(|| body.get("repo").and_then(|v| v.as_str()))
+    {
         let explicit = explicit.trim();
         if !explicit.is_empty() {
             return Ok(explicit.to_string());
@@ -2007,7 +2026,7 @@ fn ci_status_resolve_repo(body: &Value, cwd: Option<&str>) -> Result<String, u64
     }
     let url = exec_git_in(cwd, "config --get remote.origin.url").trim().to_string();
     if url.is_empty() {
-        return Err(err("ci-status", "repo required (pass {repo:\"owner/name\"} or run inside a checkout with an origin remote)"));
+        return Err(err("ci-status", "github_repo required (pass {github_repo:\"owner/name\"} or run inside a checkout with an origin remote) -- github_repo is preferred over the also-accepted repo field, which means a filesystem cwd path on git_finalize/git_push and every other git_* verb"));
     }
     let trimmed = url.trim_end_matches(".git");
     let owner_name = trimmed
