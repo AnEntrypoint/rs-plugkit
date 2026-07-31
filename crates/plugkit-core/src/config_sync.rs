@@ -222,13 +222,28 @@ fn exec_js_stdout(code: &str, timeout_ms: u32) -> Option<String> {
 /// which makes creation an atomic test-and-set across processes. `fs.writeFile`
 /// would not work here -- it succeeds unconditionally and would hand the lock
 /// to every caller at once.
+///
+/// The lock directory's PARENT must exist before that atomic mkdir can ever
+/// succeed or meaningfully fail: a brand-new source's cache root (e.g. a
+/// project's first-ever `.gm/config-source-cache/<hash>/`) has no parent on
+/// disk yet, so a non-recursive `mkdirSync(lockPath)` fails with ENOENT --
+/// indistinguishable from ENOENT on the FOLLOWING probe stat, which the
+/// original code treated identically to "someone else holds it", reporting
+/// `busy` for a lock nobody was ever holding. `mkdirSync(parent,{recursive:
+/// true})` first makes that ENOENT case impossible, so a genuine EEXIST from
+/// the lock mkdir itself is the only remaining reason it can fail.
 fn try_lock(src: &RepoSource) -> bool {
     let path = lock_path(src);
     let Ok(p) = serde_json::to_string(&path) else {
         return false;
     };
+    let Ok(parent_p) = serde_json::to_string(&cache_root(src)) else {
+        return false;
+    };
     let code = format!(
         "const fs=require('fs');const p={p};const staleMs={LOCK_STALE_MS};\
+         const parentDir=require('path').dirname({parent_p});\
+         try{{fs.mkdirSync(parentDir,{{recursive:true}});}}catch(e0){{}}\
          process.stdout.write((function(){{\
          try{{fs.mkdirSync(p);return 'acquired';}}catch(e){{}}\
          let st=null;try{{st=fs.statSync(p);}}catch(e2){{return 'busy';}}\

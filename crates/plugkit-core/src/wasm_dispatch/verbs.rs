@@ -1296,6 +1296,9 @@ fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u6
                     "embed_dim": rag.embed.dim,
                     "default_namespace": rag.namespaces.default,
                     "recall_default_limit": rag.budget.default_limit,
+                    "recall_pool_multiplier": rag.budget.pool_multiplier,
+                    "recall_pool_floor": rag.budget.pool_floor,
+                    "recall_default_k": rag.budget.default_k,
                     "index_wall_budget_ms": rag.index.wall_budget_ms,
                     "index_max_file_bytes": rag.index.max_file_bytes,
                     "index_max_chunks_per_file_per_pass": rag.index.max_chunks_embedded_per_file_per_pass_count_bound_only,
@@ -1305,6 +1308,16 @@ fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u6
                     "index_force_include_path_substrings": rag.index.force_include_path_substrings_overriding_every_skip,
                     "scoring_bm25_k1": rag.scoring.bm25_k1_term_frequency_saturation,
                     "scoring_bm25_b": rag.scoring.bm25_b_document_length_normalization,
+                    "scoring_recency_floor": rag.scoring.recency_floor,
+                    "scoring_cos_floor": rag.scoring.cos_floor_applied_before_recency_rescue,
+                    "scoring_dedup_jaccard_threshold": rag.scoring.dedup_jaccard_near_duplicate_threshold,
+                    "scoring_half_life_ms": rag.scoring.half_life_ms,
+                    "scoring_fusion_rrf_k": rag.scoring.fusion_rrf_k,
+                    "scoring_fusion_identifier_boost": rag.scoring.fusion_identifier_boost,
+                    "pipeline_ttl_ms": rag.pipeline.ttl_ms,
+                    "pipeline_summarize_threshold": rag.pipeline.summarize_threshold,
+                    "pipeline_max_result_bytes": rag.pipeline.max_result_bytes_advertised_and_enforced_by_one_field,
+                    "pipeline_max_attempts": rag.pipeline.max_attempts,
                 }));
             }
             Err(reason) => {

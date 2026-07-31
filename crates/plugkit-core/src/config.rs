@@ -525,8 +525,35 @@ fn load_repo_tier(
 /// `ensure_current`'s debounce state is a per-`RepoSource` file read plus an
 /// mkdir-lock, not a network round trip, unless the debounce window has
 /// actually elapsed.
+///
+/// Cached for a few seconds per project root (mirroring `ragconfig.rs`'s
+/// `RagConfig::resolved()` cache). Several independent call sites
+/// (`prose::resolve`, `RagConfig::resolved`, `fsm::graph`, the `config_resolve`
+/// verb) each call this function fresh within one dispatch; without a cache,
+/// a cold repo-tier source gets its own mkdir-lock acquisition attempted once
+/// per call site in the same few milliseconds -- the LATER attempts see the
+/// FIRST one's still-held lock and misreport "another process is cloning"
+/// even though it is this same process's own earlier, still-in-flight call.
+const RESOLVE_CACHE_TTL_MS: u64 = 2_000;
+
+struct ResolveCacheEntryScopedToOneProjectRootNeverGlobal {
+    root: String,
+    ts_ms: u64,
+    resolution: Resolution,
+}
+
+static RESOLVE_CACHE: std::sync::Mutex<Option<ResolveCacheEntryScopedToOneProjectRootNeverGlobal>> = std::sync::Mutex::new(None);
+
 pub fn resolve() -> Resolution {
     let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as u64;
+    if let Ok(cache) = RESOLVE_CACHE.lock() {
+        if let Some(entry) = cache.as_ref() {
+            if entry.root == root && now_ms.saturating_sub(entry.ts_ms) < RESOLVE_CACHE_TTL_MS {
+                return entry.resolution.clone();
+            }
+        }
+    }
     let bootstrap_fetcher = crate::config_sync::GitRepoFetcher::default();
     let first_pass = resolve_and_report(&root, &bootstrap_fetcher);
     let configured_debounce_ms = first_pass
@@ -534,13 +561,21 @@ pub fn resolve() -> Resolution {
         .get("sync")
         .and_then(|s| s.get("debounce_ms"))
         .and_then(|v| v.as_u64());
-    match configured_debounce_ms {
+    let resolution = match configured_debounce_ms {
         Some(ms) if ms != bootstrap_fetcher.debounce_ms => {
             let tuned_fetcher = crate::config_sync::GitRepoFetcher::with_debounce_ms(ms);
             resolve_and_report(&root, &tuned_fetcher)
         }
         _ => first_pass,
+    };
+    if let Ok(mut cache) = RESOLVE_CACHE.lock() {
+        *cache = Some(ResolveCacheEntryScopedToOneProjectRootNeverGlobal {
+            root,
+            ts_ms: now_ms,
+            resolution: resolution.clone(),
+        });
     }
+    resolution
 }
 
 pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution {
