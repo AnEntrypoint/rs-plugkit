@@ -78,10 +78,6 @@ pub fn embedding_col_dim_at(db_name: &str, table: &str) -> Option<usize> {
     }
 }
 
-pub fn drop_if_dim_mismatch_at(db_name: &str, table: &str) -> Result<bool, String> {
-    drop_if_dim_mismatch_at_cfg(db_name, table, &EmbedDimConfig::default())
-}
-
 fn drop_table(db_name: &str, table: &str, cfg: &EmbedDimConfig, reason: &str, old_dim: Value) -> Result<bool, String> {
     let _ = libsql_exec(db_name, &format!("DROP INDEX IF EXISTS {}_vec", table));
     libsql_exec(db_name, &format!("DROP TABLE IF EXISTS {}", table))?;

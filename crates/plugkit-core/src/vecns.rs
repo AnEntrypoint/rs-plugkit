@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 use crate::ragconfig::{EmbedDimConfig, QueryBudgetConfig, ScoringConfig, VecTableNames};
-use crate::vecstore::{drop_if_dim_mismatch_at, drop_if_dim_mismatch_at_cfg, vec_to_json_literal};
+use crate::vecstore::{drop_if_dim_mismatch_at_cfg, vec_to_json_literal};
 use crate::wasm_dispatch::unpack_to_value_pub;
 
 #[link(wasm_import_module = "env")]
@@ -88,12 +88,8 @@ impl<'a> VecTableSpec<'a> {
         ));
     }
 
-    pub fn drop_if_dim_mismatch(&self) -> bool {
-        drop_if_dim_mismatch_at(self.db_name, self.table).unwrap_or(false)
-    }
-
     /// Config-driven mismatch guard. Every schema-ensuring path must call this
-    /// (or its default-config sibling above) BEFORE its CREATE TABLE, because
+    /// BEFORE its CREATE TABLE, because
     /// `CREATE TABLE IF NOT EXISTS` is a silent no-op against a surviving
     /// old-width table -- the width in the CREATE would be ignored and the
     /// store would keep answering queries with the wrong vector length.
