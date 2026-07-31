@@ -144,7 +144,8 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
             "reason": reason.clone(),
             "deviation_kind": "residual-premature",
             "deviation_severity": severity.as_str(),
-            "next_dispatch": "prd-list"
+            "next_dispatch": "prd-list",
+            "next_dispatch_hint": "prd-list"
         });
         return deviation_scan_result(payload, severity, &reason);
     }
@@ -153,7 +154,8 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
         let payload = serde_json::json!({
             "scan": "skipped",
             "reason": crate::prose::resolve_and_mark("residual/browser-open", RESIDUAL_BROWSER_OPEN_DEFAULT),
-            "next_dispatch": "browser"
+            "next_dispatch": "browser",
+            "next_dispatch_hint": "browser"
         });
         return (payload.to_string(), String::new(), 0);
     }
@@ -162,7 +164,8 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
         let payload = serde_json::json!({
             "scan": "skipped",
             "reason": crate::prose::resolve_and_mark("residual/tasks-running", RESIDUAL_TASKS_RUNNING_DEFAULT),
-            "next_dispatch": "phase-status"
+            "next_dispatch": "phase-status",
+            "next_dispatch_hint": "phase-status"
         });
         return (payload.to_string(), String::new(), 0);
     }

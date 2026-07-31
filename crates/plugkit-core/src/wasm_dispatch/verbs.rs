@@ -1659,6 +1659,8 @@ fn git_push(body: &Value) -> u64 {
                 current_branch, current_branch
             ),
             "next_dispatch": "instruction",
+            "next_dispatch_hint": "instruction",
+            "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
         }).to_string());
     }
     let porcelain = git_porcelain_in(repo.as_deref());
@@ -1678,6 +1680,8 @@ fn git_push(body: &Value) -> u64 {
                 repo.as_deref().unwrap_or("cwd"), branch, porcelain_preview, more
             ),
             "next_dispatch": "instruction",
+            "next_dispatch_hint": "instruction",
+            "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
             "next_action_hint": "Read porcelain field, decide stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. Do NOT retry git_push with the same dirty tree -- the gate will deny again.",
         }).to_string());
     }
