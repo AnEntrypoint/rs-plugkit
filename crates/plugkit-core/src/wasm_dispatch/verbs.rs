@@ -1338,6 +1338,16 @@ fn cache_invalidate(body: &Value) -> u64 {
     }
 }
 
+fn config_sync_now_force_immediate_refresh(_body: &Value) -> u64 {
+    let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let r = crate::config::resolve_forced(&root);
+    let mut payload = r.to_json();
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("forced".to_string(), json!(true));
+    }
+    ok("config-sync-now", payload)
+}
+
 fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u64 {
     let r = crate::config::resolve();
     let mut payload = r.to_json();
@@ -1346,7 +1356,7 @@ fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u6
         obj.insert("unknown_keys".to_string(), json!(r.config.unknown_top_level_keys()));
         match crate::ragconfig::RagConfig::from_value(&r.config.value) {
             Ok(rag) => {
-                obj.insert("rag_effective".to_string(), json!({
+                let mut rag_effective = json!({
                     "embed_dim": rag.embed.dim,
                     "default_namespace": rag.namespaces.default,
                     "recall_default_limit": rag.budget.default_limit,
@@ -1372,7 +1382,30 @@ fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u6
                     "pipeline_summarize_threshold": rag.pipeline.summarize_threshold,
                     "pipeline_max_result_bytes": rag.pipeline.max_result_bytes_advertised_and_enforced_by_one_field,
                     "pipeline_max_attempts": rag.pipeline.max_attempts,
-                }));
+                });
+                if let Some(rag_obj) = rag_effective.as_object_mut() {
+                    rag_obj.insert("rssearch_table".to_string(), json!(rag.rssearch.table));
+                    rag_obj.insert("rssearch_index".to_string(), json!(rag.rssearch.index));
+                    rag_obj.insert("git_commits_table".to_string(), json!(rag.git_commits.table));
+                    rag_obj.insert("git_commits_index".to_string(), json!(rag.git_commits.index));
+                    rag_obj.insert("code_chunks_table".to_string(), json!(rag.code_chunks.table));
+                    rag_obj.insert("code_chunks_index".to_string(), json!(rag.code_chunks.index));
+                    rag_obj.insert("instruction_payload_ready_wave_limit".to_string(), json!(rag.instruction_payload.ready_wave_limit));
+                    rag_obj.insert("instruction_payload_instruction_recall_hits".to_string(), json!(rag.instruction_payload.instruction_recall_hits));
+                    rag_obj.insert("instruction_payload_transition_recall_hits".to_string(), json!(rag.instruction_payload.transition_recall_hits));
+                    rag_obj.insert("instruction_payload_prompt_excerpt_chars".to_string(), json!(rag.instruction_payload.prompt_excerpt_chars));
+                    rag_obj.insert("instruction_payload_max_marker_age_ms".to_string(), json!(rag.instruction_payload.max_marker_age_ms));
+                    rag_obj.insert("instruction_payload_orient_noun_limit".to_string(), json!(rag.instruction_payload.orient_noun_limit));
+                    rag_obj.insert("browser_witness_always_extensions".to_string(), json!(rag.browser_witness.always_browser_extensions_regardless_of_directory));
+                    rag_obj.insert("browser_witness_conditional_extensions".to_string(), json!(rag.browser_witness.conditional_extensions_only_under_browser_dir_prefixes));
+                    rag_obj.insert("browser_witness_dir_prefixes".to_string(), json!(rag.browser_witness.browser_dir_prefixes_normalized_slash_lowercase));
+                    rag_obj.insert("discipline_note_max_name_len".to_string(), json!(rag.discipline_note.max_name_len_hard_refuse_not_truncate));
+                    rag_obj.insert("discipline_note_max_text_len".to_string(), json!(rag.discipline_note.max_text_len_hard_refuse_not_truncate));
+                    rag_obj.insert("discipline_note_active_policies_instruction_limit".to_string(), json!(rag.discipline_note.active_policies_surfaced_in_instruction_payload_limit));
+                    rag_obj.insert("claim_audit_shipped_markers".to_string(), json!(rag.claim_audit.shipped_claim_markers_matched_case_insensitive_substring));
+                    rag_obj.insert("claim_audit_scan_paths".to_string(), json!(rag.claim_audit.scan_paths_relative_to_project_root_missing_is_skip_not_error));
+                }
+                obj.insert("rag_effective".to_string(), rag_effective);
             }
             Err(reason) => {
                 obj.insert("rag_effective".to_string(), Value::Null);
@@ -2498,6 +2531,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "browser" => browser(&body, &body_s),
         "health" => health(&body),
         "config_resolve" => config_resolve_report_winning_tier_and_any_rejected_tier(&body),
+        "config-sync-now" => config_sync_now_force_immediate_refresh(&body),
         "dataflow_resolve" => dataflow_resolve(&body),
         "sql_open" => sql_open(&body),
         "sql_close" => sql_close(&body),

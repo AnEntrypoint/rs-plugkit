@@ -396,6 +396,22 @@ impl RagConfig {
                 }
             }
         };
+        let overwrite_present_i64_or_record_problem = |parent: &str, key: &str, out: &mut i64, problems: &mut Vec<String>| {
+            if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
+                match found.as_i64() {
+                    Some(n) => *out = n,
+                    None => problems.push(format!("{parent}.{key} must be an integer, got {found}")),
+                }
+            }
+        };
+        let overwrite_present_string_or_record_problem = |parent: &str, key: &str, out: &mut String, problems: &mut Vec<String>| {
+            if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
+                match found.as_str() {
+                    Some(s) => *out = s.to_string(),
+                    None => problems.push(format!("{parent}.{key} must be a string, got {found}")),
+                }
+            }
+        };
         let append_present_strings_or_record_problem = |parent: &str, key: &str, out: &mut Vec<String>, problems: &mut Vec<String>| {
             let found = match v.get(parent).and_then(|p| p.get(key)) {
                 Some(f) => f,
@@ -439,6 +455,44 @@ impl RagConfig {
         overwrite_present_usize_or_record_problem("pipeline", "summarize_threshold", &mut cfg.pipeline.summarize_threshold, &mut problems);
         overwrite_present_usize_or_record_problem("pipeline", "max_result_bytes", &mut cfg.pipeline.max_result_bytes_advertised_and_enforced_by_one_field, &mut problems);
         overwrite_present_u64_or_record_problem("pipeline", "max_attempts", &mut cfg.pipeline.max_attempts, &mut problems);
+
+        overwrite_present_usize_or_record_problem("instruction_payload", "ready_wave_limit", &mut cfg.instruction_payload.ready_wave_limit, &mut problems);
+        if let Some(found) = v.get("instruction_payload").and_then(|p| p.get("instruction_recall_hits")) {
+            match found.as_u64() {
+                Some(n) => cfg.instruction_payload.instruction_recall_hits = n as u32,
+                None => problems.push(format!("instruction_payload.instruction_recall_hits must be a non-negative integer, got {found}")),
+            }
+        }
+        if let Some(found) = v.get("instruction_payload").and_then(|p| p.get("transition_recall_hits")) {
+            match found.as_u64() {
+                Some(n) => cfg.instruction_payload.transition_recall_hits = n as u32,
+                None => problems.push(format!("instruction_payload.transition_recall_hits must be a non-negative integer, got {found}")),
+            }
+        }
+        overwrite_present_usize_or_record_problem("instruction_payload", "prompt_excerpt_chars", &mut cfg.instruction_payload.prompt_excerpt_chars, &mut problems);
+        overwrite_present_i64_or_record_problem("instruction_payload", "max_marker_age_ms", &mut cfg.instruction_payload.max_marker_age_ms, &mut problems);
+        overwrite_present_usize_or_record_problem("instruction_payload", "orient_noun_limit", &mut cfg.instruction_payload.orient_noun_limit, &mut problems);
+        append_present_strings_or_record_problem("instruction_payload", "extra_orient_stopwords", &mut cfg.instruction_payload.orient_stopwords_compared_lowercase, &mut problems);
+
+        append_present_strings_or_record_problem("browser_witness", "extra_always_browser_extensions", &mut cfg.browser_witness.always_browser_extensions_regardless_of_directory, &mut problems);
+        append_present_strings_or_record_problem("browser_witness", "extra_conditional_extensions", &mut cfg.browser_witness.conditional_extensions_only_under_browser_dir_prefixes, &mut problems);
+        append_present_strings_or_record_problem("browser_witness", "extra_dir_prefixes", &mut cfg.browser_witness.browser_dir_prefixes_normalized_slash_lowercase, &mut problems);
+
+        overwrite_present_usize_or_record_problem("discipline_note", "max_name_len", &mut cfg.discipline_note.max_name_len_hard_refuse_not_truncate, &mut problems);
+        overwrite_present_usize_or_record_problem("discipline_note", "max_text_len", &mut cfg.discipline_note.max_text_len_hard_refuse_not_truncate, &mut problems);
+        overwrite_present_usize_or_record_problem("discipline_note", "active_policies_instruction_limit", &mut cfg.discipline_note.active_policies_surfaced_in_instruction_payload_limit, &mut problems);
+
+        append_present_strings_or_record_problem("claim_audit", "extra_shipped_claim_markers", &mut cfg.claim_audit.shipped_claim_markers_matched_case_insensitive_substring, &mut problems);
+        append_present_strings_or_record_problem("claim_audit", "extra_scan_paths", &mut cfg.claim_audit.scan_paths_relative_to_project_root_missing_is_skip_not_error, &mut problems);
+
+        for (parent, names) in [
+            ("rssearch", &mut cfg.rssearch),
+            ("git_commits", &mut cfg.git_commits),
+            ("code_chunks", &mut cfg.code_chunks),
+        ] {
+            overwrite_present_string_or_record_problem(parent, "table", &mut names.table, &mut problems);
+            overwrite_present_string_or_record_problem(parent, "index", &mut names.index, &mut problems);
+        }
 
         if let Some(ns) = v.get("memory").and_then(|m| m.get("namespace")).and_then(|n| n.as_str()) {
             cfg.namespaces.default = ns.to_string();

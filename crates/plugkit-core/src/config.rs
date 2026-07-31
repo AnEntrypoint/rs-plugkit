@@ -578,6 +578,24 @@ pub fn resolve() -> Resolution {
     resolution
 }
 
+/// Force an immediate remote-ref probe against every repo-backed tier this
+/// project could resolve, bypassing the normal debounce entirely
+/// (`GitRepoFetcher::with_debounce_ms(0)` -- `ensure_current`'s own debounce
+/// check is `elapsed < required`, which a `required` of 0 can never satisfy).
+/// For an agent that just pushed a change to its own config repo: this is the
+/// on-demand refresh that lets that change apply THIS session instead of
+/// waiting out `sync.debounce_ms` (default 15 minutes). Invalidates the
+/// short-lived resolve cache so the very next plain `resolve()` call sees the
+/// fresh result rather than a cached pre-refresh one.
+pub fn resolve_forced(project_root: &str) -> Resolution {
+    let forced_fetcher = crate::config_sync::GitRepoFetcher::with_debounce_ms(0);
+    let resolution = resolve_with(project_root, &forced_fetcher);
+    if let Ok(mut cache) = RESOLVE_CACHE.lock() {
+        *cache = None;
+    }
+    resolution
+}
+
 pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution {
     let mut rejected: Vec<String> = Vec::new();
 
