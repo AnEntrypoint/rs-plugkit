@@ -73,7 +73,10 @@ pub fn recreate_shared_db(path: &str) -> Result<(), String> {
 }
 
 pub fn is_malformed(err: &str) -> bool {
-    err.contains("malformed")
+    let e = err.to_ascii_lowercase();
+    e.contains("database disk image is malformed")
+        || e.contains("sqlite_corrupt")
+        || e.contains("file is not a database")
 }
 
 pub fn recover_malformed_shared_db() -> bool {
