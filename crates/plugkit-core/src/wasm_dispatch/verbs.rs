@@ -18,6 +18,11 @@ pub const PLUGIN_FAIL_DEADLINE: &str = "deadline_exceeded";
 pub const PLUGIN_FAIL_MALFORMED: &str = "malformed_response";
 pub const PLUGIN_FAIL_HOST_EMPTY: &str = "host_returned_empty";
 pub const PLUGIN_FAIL_PLUGIN_ERROR: &str = "plugin_error";
+/// The host built a response and lost it handing it to the guest (an epoch
+/// abort mid-write, a failed guest allocation, an oversized payload). Distinct
+/// from `host_returned_empty`, which is a plugin that genuinely answered with
+/// nothing, and retryable in a way that an empty answer is not.
+pub const PLUGIN_FAIL_RESPONSE_LOST: &str = "plugin_response_lost";
 
 fn text_names_deadline_exceeded(low: &str) -> bool {
     (low.contains("deadline") && low.contains("exceed"))
@@ -28,10 +33,15 @@ fn text_names_unknown_plugin(low: &str) -> bool {
     low.contains("unknown plugin") || low.contains("not registered")
 }
 
+fn text_names_response_lost(low: &str) -> bool {
+    low.contains("plugin_response_lost") || low.contains("never reached the guest")
+}
+
 pub fn plugin_failure_code(resp: &Value) -> &'static str {
     if resp.is_null() { return PLUGIN_FAIL_HOST_EMPTY; }
     if let Value::String(raw) = resp {
         let low = raw.to_ascii_lowercase();
+        if text_names_response_lost(&low) { return PLUGIN_FAIL_RESPONSE_LOST; }
         if text_names_deadline_exceeded(&low) { return PLUGIN_FAIL_DEADLINE; }
         if text_names_unknown_plugin(&low) { return PLUGIN_FAIL_UNKNOWN_PLUGIN; }
         return PLUGIN_FAIL_MALFORMED;
@@ -42,6 +52,7 @@ pub fn plugin_failure_code(resp: &Value) -> &'static str {
         return PLUGIN_FAIL_UNKNOWN_PLUGIN;
     }
     if low == PLUGIN_FAIL_NOT_LOADED || low.contains("not loaded") { return PLUGIN_FAIL_NOT_LOADED; }
+    if text_names_response_lost(&low) { return PLUGIN_FAIL_RESPONSE_LOST; }
     if text_names_deadline_exceeded(&low) { return PLUGIN_FAIL_DEADLINE; }
     PLUGIN_FAIL_PLUGIN_ERROR
 }
@@ -60,7 +71,9 @@ pub fn plugin_error_detail(resp: &Value, message_when_shape_unrecognized: &str) 
     let mut detail = json!({
         "error": message,
         "plugin_failure": code,
-        "retryable": code == PLUGIN_FAIL_NOT_LOADED || code == PLUGIN_FAIL_DEADLINE,
+        "retryable": code == PLUGIN_FAIL_NOT_LOADED
+            || code == PLUGIN_FAIL_DEADLINE
+            || code == PLUGIN_FAIL_RESPONSE_LOST,
     });
     if let Some(p) = resp.get("plugin").and_then(|v| v.as_str()) {
         detail["plugin"] = json!(p);
