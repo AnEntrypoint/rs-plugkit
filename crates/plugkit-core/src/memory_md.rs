@@ -203,6 +203,15 @@ pub fn delete_memory(ns: &str, key: &str) -> bool {
     }
 }
 
+/// The vector table this module reads with raw SQL. Every other reference to
+/// that store here goes through `crate::rssearch_vectors`, which already
+/// resolves the name from config; these few hand-written queries must resolve
+/// it the same way or a configured rename silently leaves them querying a
+/// table that no longer exists.
+fn vector_table() -> String {
+    crate::ragconfig::RagConfig::resolved().rssearch.table
+}
+
 fn ensure_meta_table() -> Result<(), String> {
     crate::rssearch_vectors::ensure_schema()?;
     crate::shared_db::shared_exec(
@@ -567,7 +576,10 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                 continue;
             }
             let row = crate::shared_db::shared_query_params(
-                "SELECT text, updated_at, deleted FROM rssearch_vectors WHERE namespace=?1 AND key=?2",
+                &format!(
+                    "SELECT text, updated_at, deleted FROM {} WHERE namespace=?1 AND key=?2",
+                    vector_table()
+                ),
                 &[ns, &doc.key],
             ).ok().and_then(|r| r.as_array().and_then(|a| a.first().cloned()));
             match row {
@@ -579,7 +591,10 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                         if updated_at != doc.updated {
                             let upd = doc.updated.to_string();
                             let _ = crate::shared_db::shared_exec_params(
-                                "UPDATE rssearch_vectors SET updated_at=?1 WHERE namespace=?2 AND key=?3",
+                                &format!(
+                                    "UPDATE {} SET updated_at=?1 WHERE namespace=?2 AND key=?3",
+                                    vector_table()
+                                ),
                                 &[&upd, ns, &doc.key],
                             );
                             retimed += 1;
@@ -681,7 +696,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                 .map(|n| n.trim_end_matches(".md").to_string())
                 .collect();
             if let Ok(rows) = crate::shared_db::shared_query_params(
-                "SELECT key FROM rssearch_vectors WHERE namespace=?1 AND deleted=0",
+                &format!("SELECT key FROM {} WHERE namespace=?1 AND deleted=0", vector_table()),
                 &[ns],
             ) {
                 if let Some(arr) = rows.as_array() {
