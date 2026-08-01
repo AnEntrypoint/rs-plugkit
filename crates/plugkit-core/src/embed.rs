@@ -582,9 +582,64 @@ pub fn embed_text_json_query(query_text: &str) -> Option<serde_json::Value> {
         return Some(vec_to_json(cached));
     }
 
+    if let Some(spilled) = query_spill_get(trimmed) {
+        query_cache_put(trimmed, &spilled);
+        crate::wasm_dispatch::emit_event("embed.query_spill_hit", serde_json::json!({
+            "query_len": trimmed.len(),
+        }));
+        return Some(vec_to_json(spilled));
+    }
+
     let v = embed_text(&condition_query(trimmed))?;
     query_cache_put(trimmed, &v);
+    query_spill_put(trimmed, &v);
     Some(vec_to_json(v))
+}
+
+/// The in-process query cache lives in a `static` inside the gm wasm Store,
+/// so every Store eviction throws it away -- and evictions are frequent: this
+/// repo's daemon log showed 40 of them against a single recorded cache hit,
+/// i.e. the cache was being destroyed far faster than it could earn its keep.
+/// Spilling each entry to KV, keyed by a hash of the conditioned query text,
+/// lets a warm embedding survive a respawn. A miss here is free; the caller
+/// simply embeds as before.
+const QUERY_SPILL_NAMESPACE: &str = "embed-query-spill";
+
+fn query_spill_key(text: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("q{:016x}-{}", h, text.len())
+}
+
+fn query_spill_get(text: &str) -> Option<Vec<f32>> {
+    let raw = crate::wasm_dispatch::host_kv_read(QUERY_SPILL_NAMESPACE, &query_spill_key(text))?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let arr = parsed.get("v")?.as_array()?;
+    if parsed.get("t").and_then(|t| t.as_str()) != Some(text) {
+        return None;
+    }
+    let v: Vec<f32> = arr.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect();
+    if v.len() != arr.len() || v.is_empty() {
+        return None;
+    }
+    Some(v)
+}
+
+fn query_spill_put(text: &str, v: &[f32]) {
+    let payload = serde_json::json!({ "t": text, "v": v });
+    let val = payload.to_string();
+    let key = query_spill_key(text);
+    let ns = QUERY_SPILL_NAMESPACE;
+    unsafe {
+        crate::wasm_dispatch::host_kv_put(
+            ns.as_ptr(), ns.len() as u32,
+            key.as_ptr(), key.len() as u32,
+            val.as_ptr(), val.len() as u32,
+        );
+    }
 }
 
 fn vec_to_json(v: Vec<f32>) -> serde_json::Value {
