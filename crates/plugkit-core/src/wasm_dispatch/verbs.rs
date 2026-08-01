@@ -158,6 +158,31 @@ pub const ERR_CODE_INVALID_ARGS: &str = "invalid_args";
 pub const ERR_CODE_PANIC: &str = "panic";
 pub const ERR_CODE_GATE_DENIED: &str = "gate_denied";
 
+/// A plugin response is FLAT and per-verb; a gm verb response wraps its
+/// payload under `data`. Those are two different envelopes, and the plugin one
+/// was never written down -- a caller learned each payload field by reading
+/// the call site that consumed it. Publishing it here makes the contract
+/// discoverable and gives a plugin author something to conform to.
+///
+/// Every entry below is the field a live call site actually reads, not an
+/// aspiration: `embedding` (13 read sites), `rows` (9), `bytes_b64` (2),
+/// `nodes` (1), `dbs` (1). Adding a verb here without a real consumer would
+/// make this documentation lie, which is worse than leaving it undocumented.
+fn plugin_response_envelope_contract() -> Value {
+    json!({
+        "shape": "flat: {ok: bool, <payload-field>: ...} -- NOT wrapped under `data` the way a gm verb response is",
+        "failure": "{ok: false, error: string}; a missing `error` on a failed response is classified by plugin_failure_code",
+        "payload_field_by_verb": {
+            "bert.embed": "embedding",
+            "libsql.query": "rows",
+            "libsql.query_params": "rows",
+            "libsql.serialize": "bytes_b64 (also mirrored as `data` for older callers; `bytes_b64` is the contract field)",
+            "libsql.list_dbs": "dbs",
+            "treesitter.parse": "nodes",
+        },
+    })
+}
+
 /// Answers "is this project using the config I wrote" in one dispatch: which
 /// tier won and why, plus the values a caller is most likely to have set and
 /// most likely to be surprised by. Reads the same resolver every live path
@@ -1052,6 +1077,7 @@ fn health(_body: &Value) -> u64 {
         "imports": super::host_abi::HOST_IMPORTS,
         "imports_count": super::host_abi::HOST_IMPORTS.len(),
         "effective_config": effective_config_report(),
+        "plugin_response_envelope": plugin_response_envelope_contract(),
         "subsystems": subsystems,
         "verb_aliases": aliases,
         "error_codes": [
