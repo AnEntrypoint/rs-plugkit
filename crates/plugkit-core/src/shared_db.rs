@@ -72,11 +72,11 @@ pub fn recreate_shared_db(path: &str) -> Result<(), String> {
     shared_ensure_open(path)
 }
 
+/// Gates deletion of the shared database, so it classifies on the numeric
+/// SQLITE_CORRUPT/SQLITE_NOTADB the plugin reports rather than on a phrase
+/// that any message quoting it would also match.
 pub fn is_malformed(err: &str) -> bool {
-    let e = err.to_ascii_lowercase();
-    e.contains("database disk image is malformed")
-        || e.contains("sqlite_corrupt")
-        || e.contains("file is not a database")
+    crate::libsql_wasm::classify_error(err) == crate::libsql_wasm::LibsqlErrorKind::Corrupt
 }
 
 pub fn recover_malformed_shared_db() -> bool {

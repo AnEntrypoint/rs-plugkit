@@ -5,6 +5,75 @@ use serde_json::{json, Value};
 use crate::orchestrator::yaml_util::{base64_decode, base64_encode};
 use crate::wasm_dispatch::{host_cwd_string, plugin_call};
 
+/// What a libsql failure actually was, recovered from the plugin's message.
+///
+/// The plugin flattens a real `sqlite3_extended_errcode` into its error string
+/// ("exec rc=11 ext=11 msg=..."), so the codes are present but unusable by a
+/// consumer without re-parsing. Two consumers make DESTRUCTIVE decisions on
+/// that string -- shared_db deletes the database on "malformed", vecns drops
+/// an index on "shadow row" -- and a bare `contains` there matches any message
+/// that merely quotes the phrase, including one describing a different db.
+///
+/// Classifying on the numeric code first, and only falling back to text when
+/// no code is present, keeps those decisions on ground the plugin actually
+/// asserted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LibsqlErrorKind {
+    Corrupt,
+    Busy,
+    NotFound,
+    ShadowRow,
+    Other,
+}
+
+const SQLITE_BUSY: i64 = 5;
+const SQLITE_LOCKED: i64 = 6;
+const SQLITE_CORRUPT: i64 = 11;
+const SQLITE_NOTADB: i64 = 26;
+
+fn parse_code(err: &str, field: &str) -> Option<i64> {
+    let at = err.find(field)? + field.len();
+    let rest = &err[at..];
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+pub fn classify_error(err: &str) -> LibsqlErrorKind {
+    let code = parse_code(err, "ext=").or_else(|| parse_code(err, "rc="));
+    if let Some(c) = code {
+        let primary = c & 0xff;
+        match primary {
+            SQLITE_CORRUPT | SQLITE_NOTADB => return LibsqlErrorKind::Corrupt,
+            SQLITE_BUSY | SQLITE_LOCKED => return LibsqlErrorKind::Busy,
+            _ => {}
+        }
+        // The plugin stated a code and it was not corruption. Text matching
+        // past this point would let a message that merely QUOTES "database
+        // disk image is malformed" -- a log line, an error about a different
+        // file -- trigger deletion of this database. The code is the
+        // authority; only ShadowRow is text-only, since no SQLite code
+        // expresses it.
+        return if err.to_ascii_lowercase().contains("shadow row") {
+            LibsqlErrorKind::ShadowRow
+        } else {
+            LibsqlErrorKind::Other
+        };
+    }
+    let e = err.to_ascii_lowercase();
+    if e.contains("shadow row") {
+        LibsqlErrorKind::ShadowRow
+    } else if e.contains("database disk image is malformed")
+        || e.contains("sqlite_corrupt")
+        || e.contains("file is not a database")
+    {
+        LibsqlErrorKind::Corrupt
+    } else if e.contains("no such table") || e.contains("not found") {
+        LibsqlErrorKind::NotFound
+    } else {
+        LibsqlErrorKind::Other
+    }
+}
+
 fn plugin_ok_err(resp: &Value) -> Result<(), String> {
     let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if ok {

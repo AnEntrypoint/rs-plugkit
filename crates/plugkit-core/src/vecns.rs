@@ -110,8 +110,9 @@ impl<'a> VecTableSpec<'a> {
     }
 }
 
+/// Gates dropping and rebuilding a vector index.
 pub fn is_shadow_row_err(err: &str) -> bool {
-    err.contains("shadow row")
+    crate::libsql_wasm::classify_error(err) == crate::libsql_wasm::LibsqlErrorKind::ShadowRow
 }
 
 pub fn exec_with_shadow_row_recovery(
