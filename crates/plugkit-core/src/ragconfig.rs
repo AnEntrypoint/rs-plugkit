@@ -214,6 +214,28 @@ impl IndexConfig {
     }
 }
 
+/// Bounds on the in-process embedding caches. Capacity and TTL decide how
+/// much repeat work is avoided between Store evictions; the cacheability
+/// threshold decides which passages are worth remembering at all. A large
+/// corpus and a small cap interact badly -- entries evict before they are
+/// reused -- and that tradeoff is workload-specific, so it belongs in config.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbedCacheConfig {
+    pub query_cache_capacity: usize,
+    pub query_cache_ttl_ms: i64,
+    pub plain_cache_max_text_bytes: usize,
+}
+
+impl Default for EmbedCacheConfig {
+    fn default() -> Self {
+        EmbedCacheConfig {
+            query_cache_capacity: 64,
+            query_cache_ttl_ms: 600_000,
+            plain_cache_max_text_bytes: 4096,
+        }
+    }
+}
+
 /// Budgets bounding a memory_md sync pass. These were compiled-in constants,
 /// which made a slow store unfixable from config: a sync that cannot finish
 /// inside its budget records a `:partial` digest, and a `:partial` digest can
@@ -367,6 +389,7 @@ pub struct RagConfig {
     pub browser_witness: BrowserWitnessConfig,
     pub discipline_note: DisciplineNoteConfig,
     pub memory_sync: MemorySyncBudgetConfig,
+    pub embed_cache: EmbedCacheConfig,
 }
 
 impl Default for RagConfig {
@@ -387,6 +410,7 @@ impl Default for RagConfig {
             browser_witness: BrowserWitnessConfig::default(),
             discipline_note: DisciplineNoteConfig::default(),
             memory_sync: MemorySyncBudgetConfig::default(),
+            embed_cache: EmbedCacheConfig::default(),
         }
     }
 }
@@ -495,6 +519,8 @@ impl RagConfig {
         overwrite_present_u64_or_record_problem("memory_sync", "rekey_rows_deadline_ms", &mut cfg.memory_sync.rekey_rows_deadline_ms, &mut problems);
         overwrite_present_usize_or_record_problem("memory_sync", "rekey_batch_max", &mut cfg.memory_sync.rekey_batch_max, &mut problems);
         overwrite_present_usize_or_record_problem("memory_sync", "rename_batch_chunk", &mut cfg.memory_sync.rename_batch_chunk, &mut problems);
+        overwrite_present_usize_or_record_problem("embed_cache", "query_cache_capacity", &mut cfg.embed_cache.query_cache_capacity, &mut problems);
+        overwrite_present_usize_or_record_problem("embed_cache", "plain_cache_max_text_bytes", &mut cfg.embed_cache.plain_cache_max_text_bytes, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_k1", &mut cfg.scoring.bm25_k1_term_frequency_saturation, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_b", &mut cfg.scoring.bm25_b_document_length_normalization, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "fusion_rrf_k", &mut cfg.scoring.fusion_rrf_k, &mut problems);

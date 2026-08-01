@@ -218,6 +218,11 @@ fn effective_config_report() -> Value {
             "bm25_b": cfg.scoring.bm25_b_document_length_normalization,
             "dedup_jaccard": cfg.scoring.dedup_jaccard_near_duplicate_threshold,
         },
+        "embed_cache": {
+            "query_cache_capacity": cfg.embed_cache.query_cache_capacity,
+            "query_cache_ttl_ms": cfg.embed_cache.query_cache_ttl_ms,
+            "plain_cache_max_text_bytes": cfg.embed_cache.plain_cache_max_text_bytes,
+        },
         "memory_sync": {
             "embed_budget_ms": cfg.memory_sync.embed_budget_ms,
             "total_budget_ms": cfg.memory_sync.total_budget_ms,

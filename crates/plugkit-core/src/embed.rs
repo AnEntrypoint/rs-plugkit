@@ -89,8 +89,6 @@ pub fn condition_query(query_text: &str) -> String {
     format!("{}{}", BGE_QUERY_PREFIX, query_text)
 }
 
-const QUERY_CACHE_CAP: usize = 64;
-const QUERY_CACHE_TTL_MS: i64 = 600_000;
 
 fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
     let rc = unsafe {
@@ -276,7 +274,7 @@ macro_rules! step {
 }
 
 pub fn embed_text(text: &str) -> Option<Vec<f32>> {
-    let cacheable = text.len() <= PLAIN_CACHE_MAX_TEXT;
+    let cacheable = text.len() <= plain_cache_max_text();
     if cacheable {
         if let Some(v) = cache_get(&PLAIN_CACHE, text) {
             return Some(v);
@@ -406,7 +404,7 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
     let mut out: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
     let mut uncached_idx: Vec<usize> = Vec::new();
     for (i, t) in texts.iter().enumerate() {
-        let cacheable = t.len() <= PLAIN_CACHE_MAX_TEXT;
+        let cacheable = t.len() <= plain_cache_max_text();
         if cacheable {
             if let Some(v) = cache_get(&PLAIN_CACHE, t) {
                 out[i] = Some(v);
@@ -420,7 +418,7 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
     let mut still_uncached: Vec<usize> = Vec::new();
     for &i in &uncached_idx {
         if let Some(v) = try_host_embed(&texts[i]) {
-            let cacheable = texts[i].len() <= PLAIN_CACHE_MAX_TEXT;
+            let cacheable = texts[i].len() <= plain_cache_max_text();
             if cacheable { cache_put(&PLAIN_CACHE, &texts[i], &v); }
             out[i] = Some(v);
         } else {
@@ -542,7 +540,7 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
             Ok(results) => {
                 for (j, &i) in sub_uncached.iter().enumerate() {
                     if let Some(v) = &results[j] {
-                        let cacheable = texts[i].len() <= PLAIN_CACHE_MAX_TEXT;
+                        let cacheable = texts[i].len() <= plain_cache_max_text();
                         if cacheable { cache_put(&PLAIN_CACHE, &texts[i], v); }
                     }
                     out[i] = results[j].clone();
@@ -664,7 +662,7 @@ struct CacheEntry {
 
 /// Hash-keyed embedding cache with a bounded insertion-order recency ring.
 ///
-/// The keys are up to `PLAIN_CACHE_MAX_TEXT` bytes of source text, so the
+/// The keys are up to the configured plain-cache text limit bytes of source text, so the
 /// previous `Vec<CacheEntry>` shape paid a full-vector `retain` plus a
 /// `position()` scan of whole-string comparisons on every get, and a second
 /// `retain` plus repeated `remove(0)` memmoves on every put. Keying on
@@ -679,7 +677,7 @@ struct CacheEntry {
 /// so an expired entry costs its own removal and nothing else.
 ///
 /// `BTreeMap` rather than `HashMap` because these are `static` caches and only
-/// the former is const-constructible; against a `QUERY_CACHE_CAP`-bounded map
+/// the former is const-constructible; against a capacity-bounded map
 /// its lookup is a handful of 8-byte integer comparisons, which is the point
 /// -- the cost being removed here is comparing multi-kilobyte strings, not the
 /// difference between a tree probe and a hash probe.
@@ -697,7 +695,17 @@ impl EmbedCache {
 static QUERY_CACHE: Mutex<EmbedCache> = Mutex::new(EmbedCache::new());
 static PLAIN_CACHE: Mutex<EmbedCache> = Mutex::new(EmbedCache::new());
 
-const PLAIN_CACHE_MAX_TEXT: usize = 4096;
+fn plain_cache_max_text() -> usize {
+    crate::ragconfig::RagConfig::resolved().embed_cache.plain_cache_max_text_bytes
+}
+
+fn query_cache_capacity() -> usize {
+    crate::ragconfig::RagConfig::resolved().embed_cache.query_cache_capacity
+}
+
+fn query_cache_ttl_ms() -> i64 {
+    crate::ragconfig::RagConfig::resolved().embed_cache.query_cache_ttl_ms
+}
 
 fn now_ms() -> i64 {
     unsafe { crate::wasm_dispatch::host_now_ms() as i64 }
@@ -730,7 +738,7 @@ fn cache_get(cache: &Mutex<EmbedCache>, key: &str) -> Option<Vec<f32>> {
     let mut guard = cache.lock().ok()?;
     let now = now_ms();
     let hit = match guard.entries.get(&slot) {
-        Some(e) if e.key == key && now - e.ts_ms < QUERY_CACHE_TTL_MS => Some(e.embedding.clone()),
+        Some(e) if e.key == key && now - e.ts_ms < query_cache_ttl_ms() => Some(e.embedding.clone()),
         Some(_) => None,
         None => return None,
     };
@@ -750,7 +758,7 @@ fn cache_put(cache: &Mutex<EmbedCache>, key: &str, embedding: &[f32]) {
     if guard.entries.insert(slot, entry).is_none() {
         guard.order.push_back(slot);
     }
-    while guard.order.len() > QUERY_CACHE_CAP {
+    while guard.order.len() > query_cache_capacity() {
         if let Some(evicted) = guard.order.pop_front() {
             guard.entries.remove(&evicted);
         }
