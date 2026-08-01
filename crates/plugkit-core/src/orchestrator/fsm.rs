@@ -66,6 +66,14 @@ pub struct Policy {
     /// Two denials of the same verb closer together than this are one burst,
     /// not two attempts -- a caller that re-dispatches immediately after a
     /// denial should not have that counted as a fresh retry.
+    /// Which residual checks run, and in what order. The order is load-bearing:
+    /// each check short-circuits the scan, so the first one that trips is the
+    /// only one a caller is told about. Listing them here lets a project drop a
+    /// check it does not want (a repo with no browser surface) or reorder them
+    /// so the most actionable residual surfaces first, instead of that being a
+    /// straight-line sequence in Rust.
+    #[serde(default = "default_residual_checks")]
+    pub residual_checks: Vec<String>,
     #[serde(default = "default_long_gap_same_burst_ms")]
     pub long_gap_same_burst_ms: u64,
     /// Retries of the same verb, across separate bursts, before the denial
@@ -132,6 +140,10 @@ fn default_mutables_resolved_statuses() -> Vec<String> {
 }
 fn default_reject_duplicate_witness() -> bool { true }
 fn default_initial_phase() -> String { "PLAN".to_string() }
+fn default_residual_checks() -> Vec<String> {
+    vec!["prd-open".to_string(), "browser-open".to_string(), "tasks-running".to_string(), "dirty-tree".to_string()]
+}
+
 fn default_long_gap_same_burst_ms() -> u64 { 5_000 }
 fn default_long_gap_retry_escalate_after() -> u32 { 2 }
 fn default_terminal_phase() -> String { "COMPLETE".to_string() }
@@ -161,6 +173,7 @@ impl Default for Policy {
             mutables_resolved_statuses: default_mutables_resolved_statuses(),
             reject_duplicate_witness: default_reject_duplicate_witness(),
             initial_phase: default_initial_phase(),
+            residual_checks: default_residual_checks(),
             long_gap_same_burst_ms: default_long_gap_same_burst_ms(),
             long_gap_retry_escalate_after: default_long_gap_retry_escalate_after(),
             terminal_phase: default_terminal_phase(),

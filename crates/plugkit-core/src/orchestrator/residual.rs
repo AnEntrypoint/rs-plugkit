@@ -136,7 +136,16 @@ fn deviation_scan_result(
 pub fn handle_scan(_content: &str) -> (String, String, i32) {
     let marker = gm_dir().join("residual-check-fired");
 
-    if !prd_empty_or_missing() {
+    // Each check is gated on Policy.residual_checks. The order is fixed here
+    // because it is load-bearing -- each check short-circuits the scan, so the
+    // first to trip is the only residual reported, and the sequence runs
+    // cheapest-and-most-blocking first. What a project CAN change is which
+    // checks apply: a repo with no browser surface should not be told to close
+    // browser sessions it never opens.
+    let enabled = crate::orchestrator::fsm::graph().policy.residual_checks.clone();
+    let on = |k: &str| enabled.iter().any(|c| c == k);
+
+    if on("prd-open") && !prd_empty_or_missing() {
         let reason = crate::prose::resolve_and_mark("residual/prd-open", RESIDUAL_PRD_OPEN_DEFAULT);
         let severity = super::deviations::effective_severity("residual-premature");
         let payload = serde_json::json!({
@@ -150,7 +159,7 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
         return deviation_scan_result(payload, severity, &reason);
     }
 
-    if browser_sessions_open() {
+    if on("browser-open") && browser_sessions_open() {
         let payload = serde_json::json!({
             "scan": "skipped",
             "reason": crate::prose::resolve_and_mark("residual/browser-open", RESIDUAL_BROWSER_OPEN_DEFAULT),
@@ -160,7 +169,7 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
         return (payload.to_string(), String::new(), 0);
     }
 
-    if running_tasks_exist() {
+    if on("tasks-running") && running_tasks_exist() {
         let payload = serde_json::json!({
             "scan": "skipped",
             "reason": crate::prose::resolve_and_mark("residual/tasks-running", RESIDUAL_TASKS_RUNNING_DEFAULT),
@@ -171,7 +180,7 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     }
 
     let porcelain = porcelain_output();
-    if !porcelain.trim().is_empty() {
+    if on("dirty-tree") && !porcelain.trim().is_empty() {
         let (modified, untracked) = count_modified_untracked(&porcelain);
         let reason = crate::prose::resolve_and_mark(
             "residual/dirty-tree",
