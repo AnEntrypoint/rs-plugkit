@@ -63,6 +63,15 @@ pub struct Policy {
     pub deny_shell_git: bool,
     #[serde(default = "default_gate_repeat_escalate_threshold")]
     pub gate_repeat_escalate_threshold: u64,
+    /// Two denials of the same verb closer together than this are one burst,
+    /// not two attempts -- a caller that re-dispatches immediately after a
+    /// denial should not have that counted as a fresh retry.
+    #[serde(default = "default_long_gap_same_burst_ms")]
+    pub long_gap_same_burst_ms: u64,
+    /// Retries of the same verb, across separate bursts, before the denial
+    /// escalates from a plain refusal to the recovery guidance.
+    #[serde(default = "default_long_gap_retry_escalate_after")]
+    pub long_gap_retry_escalate_after: u32,
     #[serde(default = "default_hook_timeout_ms")]
     pub hook_timeout_ms: u64,
     #[serde(default = "default_longgap_threshold_ms")]
@@ -123,6 +132,8 @@ fn default_mutables_resolved_statuses() -> Vec<String> {
 }
 fn default_reject_duplicate_witness() -> bool { true }
 fn default_initial_phase() -> String { "PLAN".to_string() }
+fn default_long_gap_same_burst_ms() -> u64 { 5_000 }
+fn default_long_gap_retry_escalate_after() -> u32 { 2 }
 fn default_terminal_phase() -> String { "COMPLETE".to_string() }
 fn default_mutables_default_status() -> String { "unknown".to_string() }
 fn default_mutables_witness_status() -> String { "witnessed".to_string() }
@@ -150,6 +161,8 @@ impl Default for Policy {
             mutables_resolved_statuses: default_mutables_resolved_statuses(),
             reject_duplicate_witness: default_reject_duplicate_witness(),
             initial_phase: default_initial_phase(),
+            long_gap_same_burst_ms: default_long_gap_same_burst_ms(),
+            long_gap_retry_escalate_after: default_long_gap_retry_escalate_after(),
             terminal_phase: default_terminal_phase(),
             mutables_default_status: default_mutables_default_status(),
             mutables_witness_status: default_mutables_witness_status(),

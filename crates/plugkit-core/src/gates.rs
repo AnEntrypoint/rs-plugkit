@@ -331,10 +331,10 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             let retry_state = host_read(&crate::pkfs::anchor(".gm/long-gap-retry-state")).unwrap_or_default();
             let (last_verb, count, last_denial_ts) = parse_retry_state_v2(&retry_state);
             let since_last_denial = now.saturating_sub(last_denial_ts);
-            let same_burst = last_denial_ts > 0 && since_last_denial <= 5_000;
-            let new_count = if last_verb == verb && since_last_denial > 5_000 { count + 1 } else if last_verb == verb { count } else { 1u32 };
+            let same_burst = last_denial_ts > 0 && since_last_denial <= policy.long_gap_same_burst_ms;
+            let new_count = if last_verb == verb && since_last_denial > policy.long_gap_same_burst_ms { count + 1 } else if last_verb == verb { count } else { 1u32 };
             let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/long-gap-retry-state"), &format!("{}|{}|{}", verb, new_count, now));
-            if new_count >= 2 {
+            if new_count >= policy.long_gap_retry_escalate_after {
                 if !same_burst {
                     log_deviation("long-gap-retry-without-instruction", &format!("verb={} consecutive_retries={} gap_ms={}", verb, new_count, gap_ms));
                 }
