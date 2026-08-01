@@ -465,10 +465,10 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         .unwrap_or_default();
     let query = if !prompt_query.is_empty() { prompt_query } else { prd_subject_query };
     ilog(&format!("instruction::handle pre-recall query_len={} prd_pending={}", query.len(), prd_pending));
-    let recall_hits = if query.is_empty() {
-        serde_json::Value::Array(Vec::new())
+    let (recall_hits, recall_embed_failed) = if query.is_empty() {
+        (serde_json::Value::Array(Vec::new()), false)
     } else {
-        recall::recall_hits(&query, payload_cfg().instruction_recall_hits)
+        recall::recall_hits_reporting_embed_failure(&query, payload_cfg().instruction_recall_hits)
     };
     ilog("instruction::handle post-recall");
 
@@ -536,6 +536,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "prd_pending": prd_pending,
         "next_phase_hint": next,
         "recall_hits": recall_hits,
+        "recall_embed_failed": recall_embed_failed,
         "orient_nouns": nouns,
         "codeinsight_overview": codeinsight_overview,
         "ready_wave": wave,

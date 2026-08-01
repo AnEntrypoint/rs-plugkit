@@ -47,8 +47,12 @@ fn emit_recall(query: &str, hits: &serde_json::Value, mode: &str, namespace: &st
 }
 
 pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
+    recall_hits_reporting_embed_failure(query_text, limit).0
+}
+
+pub fn recall_hits_reporting_embed_failure(query_text: &str, limit: u32) -> (serde_json::Value, bool) {
     if query_text.trim().is_empty() {
-        return serde_json::Value::Array(Vec::new());
+        return (serde_json::Value::Array(Vec::new()), false);
     }
     let query = derive_query(query_text);
     let embed_input = if query_text.len() <= 512 { query_text } else { &query };
@@ -57,12 +61,20 @@ pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
     {
         use crate::wasm_dispatch::host_kv_query;
         rlog(&format!("recall::recall_hits start query_len={} embed_len={} limit={}", query.len(), embed_input.len(), limit));
-        let embedding = crate::embed::embed_text_json_query(embed_input).unwrap_or(serde_json::Value::Null);
+        let embedding_opt = crate::embed::embed_text_json_query(embed_input);
+        let embed_failed = embedding_opt.is_none();
+        let embedding = embedding_opt.unwrap_or(serde_json::Value::Null);
         rlog(&format!("recall::recall_hits embed_done embedded={}", !embedding.is_null()));
+        if embed_failed {
+            crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
+                "step": "recall_hits_embed_query",
+                "query_len": query.len(),
+            }));
+        }
         if let Some(md_hits) = crate::wasm_dispatch::memory_recall_backend(&embedding, namespace, limit) {
             rlog("recall::recall_hits done via md-index");
             emit_recall(&query, &md_hits, "vector_top_k", namespace);
-            return md_hits;
+            return (md_hits, embed_failed);
         }
         let vec_hits = crate::wasm_dispatch::vec_search_local(&embedding, namespace, limit);
         rlog("recall::recall_hits vec_search returned");
@@ -71,7 +83,7 @@ pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
         {
             rlog("recall::recall_hits done via vec_search");
             emit_recall(&query, &vec_hits, "vector_top_k", namespace);
-            return vec_hits;
+            return (vec_hits, embed_failed);
         }
         let packed = unsafe {
             host_kv_query(namespace.as_ptr(), namespace.len() as u32,
@@ -81,12 +93,12 @@ pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
         let kv_hits = crate::wasm_dispatch::unpack_to_value_pub(packed);
         let result = if kv_hits.is_null() { serde_json::Value::Array(Vec::new()) } else { kv_hits };
         emit_recall(&query, &result, "kv_query", namespace);
-        result
+        (result, embed_failed)
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = (&query, embed_input, namespace, limit);
-        serde_json::Value::Array(Vec::new())
+        (serde_json::Value::Array(Vec::new()), false)
     }
 }
 
@@ -95,42 +107,19 @@ pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
     if prompt.is_empty() {
         return (String::new(), "auto-recall requires user prompt as body".to_string(), 1);
     }
+    let (results, embed_failed) = recall_hits_reporting_embed_failure(prompt, 3);
     let query = derive_query(prompt);
-    let embed_input = if prompt.len() <= 512 { prompt } else { query.as_str() };
-    let limit: u32 = 3;
-    let namespace = "default";
     #[cfg(target_arch = "wasm32")]
-    let results = {
-        use crate::wasm_dispatch::host_kv_query;
-        let embedding = crate::embed::embed_text_json_query(embed_input).unwrap_or(serde_json::Value::Null);
-        if let Some(md_hits) = crate::wasm_dispatch::memory_recall_backend(&embedding, namespace, limit) {
-            md_hits
-        } else {
-            let vec_hits = crate::wasm_dispatch::vec_search_local(&embedding, namespace, limit);
-            if !vec_hits.is_null()
-                && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false)
-            {
-                vec_hits
-            } else {
-                let packed = unsafe {
-                    host_kv_query(namespace.as_ptr(), namespace.len() as u32,
-                                  query.as_ptr(), query.len() as u32)
-                };
-                crate::wasm_dispatch::unpack_to_value_pub(packed)
-            }
-        }
-    };
-    #[cfg(not(target_arch = "wasm32"))]
-    let results = {
-        let _ = (embed_input, namespace);
-        serde_json::Value::Array(Vec::new())
-    };
-    #[cfg(target_arch = "wasm32")]
-    emit_recall(&query, &results, "auto_recall", namespace);
+    emit_recall(&query, &results, "auto_recall", "default");
     let payload = serde_json::json!({
         "query": query,
-        "limit": limit,
+        "limit": 3,
         "results": results,
+        "embed_failed": embed_failed,
     });
-    (payload.to_string(), String::new(), 0)
+    if embed_failed {
+        (payload.to_string(), "embedder unavailable; recall results are empty, not exhaustive -- do not treat as a genuine no-hits result".to_string(), 1)
+    } else {
+        (payload.to_string(), String::new(), 0)
+    }
 }

@@ -402,6 +402,10 @@ fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option
 }
 
 pub fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String, String, usize, usize, String)> {
+    extract_chunks_reporting_plugin_failure(_path, source, lang_name).0
+}
+
+pub fn extract_chunks_reporting_plugin_failure(_path: &str, source: &str, lang_name: &str) -> (Vec<(String, String, usize, usize, String)>, bool) {
     let resp = plugin_call("treesitter", "parse", &json!({ "lang": lang_name, "source": source }));
     if !plugin_ok(&resp) {
         crate::wasm_dispatch::emit_event("code_index_treesitter_failed", json!({
@@ -409,7 +413,7 @@ pub fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String
             "plugin_failure": plugin_failure_code(&resp),
             "source_len": source.len(),
         }));
-        return Vec::new();
+        return (Vec::new(), true);
     }
     let nodes = match resp.get("nodes").and_then(|v| v.as_array()) {
         Some(n) => n,
@@ -419,7 +423,7 @@ pub fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String
                 "plugin_failure": crate::wasm_dispatch::PLUGIN_FAIL_MALFORMED,
                 "source_len": source.len(),
             }));
-            return Vec::new();
+            return (Vec::new(), true);
         }
     };
     let src_bytes = source.as_bytes();
@@ -436,7 +440,7 @@ pub fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String
         let name = node.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
         out.push((kind.to_string(), name, line_start, line_end, body));
     }
-    out
+    (out, false)
 }
 
 const OVERSIZED_CHUNK_SPLIT_THRESHOLD: usize = 8192;
@@ -505,29 +509,20 @@ fn json_to_f32_vec(v: &Value) -> Option<Vec<f32>> {
     None
 }
 
-// The indexing pipeline below threads no config: it is a deep call chain
-// (walk -> chunk -> embed -> persist) whose every level would need a
-// `&RagConfig` parameter to reach these three namespace names. Rather than
-// leave them as free-floating literals that a config change would silently
-// desync from, they are resolved ONCE here from the same
-// `NamespaceConfig::default()` the rest of the RAG layer defaults to.
-// Threading real config down this chain is the remaining step; until then a
-// non-default `namespaces.code` would only take effect on the query side, so
-// these deliberately resolve from defaults rather than pretending otherwise.
-fn code_ns_default() -> crate::ragconfig::NamespaceConfig {
+fn indexing_pipeline_namespace_config_unthreaded_default() -> crate::ragconfig::NamespaceConfig {
     crate::ragconfig::NamespaceConfig::default()
 }
 
 fn manifest_ns() -> String {
-    code_ns_default().manifest_namespace()
+    indexing_pipeline_namespace_config_unthreaded_default().manifest_namespace()
 }
 
 fn code_ns() -> String {
-    code_ns_default().code
+    indexing_pipeline_namespace_config_unthreaded_default().code
 }
 
 fn code_vec_ns() -> String {
-    let ns = code_ns_default();
+    let ns = indexing_pipeline_namespace_config_unthreaded_default();
     ns.vec_namespace(&ns.code)
 }
 
@@ -893,6 +888,7 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
     let mut reused_files = 0;
     let mut skipped_no_embed = 0u32;
     let mut deferred_files = 0u32;
+    let mut treesitter_failures = 0u32;
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut digest_entries: Vec<(String, u32)> = Vec::with_capacity(files.len());
@@ -1006,7 +1002,10 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
             })
             .unwrap_or_default();
 
-        let mut chunks = extract_chunks(fp, &content, lang_name);
+        let (mut chunks, treesitter_failed) = extract_chunks_reporting_plugin_failure(fp, &content, lang_name);
+        if treesitter_failed {
+            treesitter_failures += 1;
+        }
         if chunks.is_empty() && lang_name == "markdown" && !content.trim().is_empty() {
             let whole = content.chars().take(4000).collect::<String>();
             let line_end = content.lines().count().max(1);
@@ -1158,8 +1157,9 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
             "embedded": embedded,
         }));
     }
+    let silently_empty_due_to_plugin_failure = indexed > 0 && chunked == 0 && treesitter_failures >= indexed as u32;
     json!({
-        "ok": true,
+        "ok": !silently_empty_due_to_plugin_failure,
         "files_scanned": files.len(),
         "files_indexed": indexed,
         "chunks": chunked,
@@ -1169,6 +1169,7 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
         "removed_files": removed_files,
         "skipped_no_embed": skipped_no_embed,
         "deferred_files": deferred_files,
+        "treesitter_failures": treesitter_failures,
         "kvvec_cleared_dim_mismatch": kvvec_cleared,
         "by_language": langs,
     })

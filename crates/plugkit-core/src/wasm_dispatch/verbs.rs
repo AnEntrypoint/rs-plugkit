@@ -384,7 +384,8 @@ fn fetch(body: &Value) -> u64 {
     let packed = unsafe { host_fetch(url.as_ptr(), url.len() as u32, opts.as_ptr(), opts.len() as u32) };
     let v = unpack_to_value(packed);
     if v.is_null() { return err("fetch", "host_fetch empty"); }
-    ok("fetch", v)
+    let transport_completed = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    if transport_completed { ok("fetch", v) } else { err_json("fetch", v) }
 }
 
 const ENV_GET_ALLOWED_EXACT: &[&str] = &["CLAUDE_PROJECT_DIR", "GITHUB_TOKEN", "GH_TOKEN"];
@@ -585,6 +586,13 @@ fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do
     } else if do_sync {
         let sync = crate::memory_md::sync_index(&memory_namespaces, now_ms);
         sync.get("converged").and_then(|v| v.as_bool()).unwrap_or(false)
+    } else if !crate::memory_md::has_stored_digest(&memory_namespaces) {
+        let fresh_clone_never_synced_sync = crate::memory_md::sync_index(&memory_namespaces, now_ms);
+        emit_event("recall_first_touch_sync", json!({
+            "namespaces": memory_namespaces,
+            "result": fresh_clone_never_synced_sync,
+        }));
+        fresh_clone_never_synced_sync.get("converged").and_then(|v| v.as_bool()).unwrap_or(false)
     } else {
         crate::memory_md::has_stored_digest(&memory_namespaces)
     };
@@ -1079,6 +1087,22 @@ fn lifecycle_liveness() -> Value {
     })
 }
 
+fn health_probe_recall() -> Value {
+    let probe = json!({ "query": "health check probe query", "limit": 1 });
+    let packed = recall(&probe);
+    let v = unpack_to_value(packed);
+    let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    json!({ "ok": ok, "error": if ok { Value::Null } else { v.get("error").cloned().unwrap_or(Value::Null) } })
+}
+
+fn health_probe_codesearch() -> Value {
+    let probe = json!({ "query": "health check probe query", "k": 1 });
+    let packed = codesearch(&probe);
+    let v = unpack_to_value(packed);
+    let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    json!({ "ok": ok, "error": if ok { Value::Null } else { v.get("error").cloned().unwrap_or(Value::Null) } })
+}
+
 fn health(_body: &Value) -> u64 {
     let now = unsafe { host_now_ms() };
     let subsystems: Vec<Value> = crate::mediator::all_verbs_by_subsystem()
@@ -1103,8 +1127,13 @@ fn health(_body: &Value) -> u64 {
         }
     }
 
+    let recall_health = health_probe_recall();
+    let codesearch_health = health_probe_codesearch();
+    let subsystems_healthy = recall_health.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
+        && codesearch_health.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+
     ok("health", json!({
-        "ok": true,
+        "ok": subsystems_healthy,
         "version": env!("CARGO_PKG_VERSION"),
         "crate_version": env!("CARGO_PKG_VERSION"),
         "source_sha": env!("PLUGKIT_SOURCE_SHA"),
@@ -1116,6 +1145,7 @@ fn health(_body: &Value) -> u64 {
         "effective_config": effective_config_report(),
         "plugin_response_envelope": plugin_response_envelope_contract(),
         "subsystems": subsystems,
+        "subsystem_probes": { "recall": recall_health, "codesearch": codesearch_health },
         "verb_aliases": aliases,
         "error_codes": [
             ERR_CODE_FAILED, ERR_CODE_RETIRED_VERB, ERR_CODE_UNSUPPORTED,
@@ -1297,14 +1327,18 @@ fn browser(body: &Value, body_s: &str) -> u64 {
                         obj.insert("witness_marked".to_string(), json!(witnessed));
                     }
                 }
-            } else if let Some(obj) = v.as_object_mut() {
-                obj.insert("witness_skipped_transport_failure".to_string(), json!(true));
+                record_app_loads_witness_from_response(cwd, &v);
+                ok("browser", v)
+            } else {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("witness_skipped_transport_failure".to_string(), json!(true));
+                }
+                record_app_loads_witness_from_response(cwd, &v);
+                err_json("browser", v)
             }
-            record_app_loads_witness_from_response(cwd, &v);
-            ok("browser", v)
         }
         None => err_json("browser", json!({
-            "error": "host_browser_exec returned empty -- the browser host produced no bytes at all, which is the daemon-flake symptom, NOT a script that returned undefined",
+            "error": "host_browser_exec returned empty -- the browser host produced no bytes at all (NOT a script that returned undefined). Two known causes: (1) a genuinely dead/crashed daemon worker -- check .status.json ts freshness and reboot if stale; (2) the host DID produce a real response but the wasm-to-guest write failed on a wasmtime epoch-interruption deadline mid-handoff (agentplug daemon.log line 'write_guest_bytes: ... hit the epoch deadline ... returning 0') -- in that case Chrome may have launched and even completed the dispatch, but the result never reached this response. Either way the fix is the same: re-dispatch.",
             "error_code": ERR_CODE_FAILED,
             "timeout_ms": timeout_ms,
             "session_id": session_id,
