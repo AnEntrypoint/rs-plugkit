@@ -397,6 +397,15 @@ pub struct PipelineConfig {
     pub summarize_threshold: usize,
     pub max_result_bytes_advertised_and_enforced_by_one_field: usize,
     pub max_attempts: u64,
+    /// The summarize step's whole policy. The threshold decided WHETHER to
+    /// summarize while the prompt, the size targets and the result schema --
+    /// what the summary actually is -- stayed compiled in, so a project could
+    /// change when summarization happens but not what it produces.
+    pub summarize_prompt_template: String,
+    pub summarize_target_chars: usize,
+    pub summarize_max_summary_chars: usize,
+    pub summarize_input_char_cap: usize,
+    pub summarize_preserve: Vec<String>,
 }
 
 impl Default for PipelineConfig {
@@ -405,6 +414,11 @@ impl Default for PipelineConfig {
             ttl_ms: 120_000,
             summarize_threshold: 2048,
             max_result_bytes_advertised_and_enforced_by_one_field: 4096,
+            summarize_prompt_template: "Summarize the following text into <={{target_chars}} chars, preserving entities and any numeric facts. Return JSON {\"summary\": string}. Input:\n{{input}}".to_string(),
+            summarize_target_chars: 400,
+            summarize_max_summary_chars: 800,
+            summarize_input_char_cap: 8192,
+            summarize_preserve: vec!["entities".to_string(), "numbers".to_string(), "ids".to_string()],
             max_attempts: 2,
         }
     }
@@ -605,6 +619,10 @@ impl RagConfig {
         overwrite_present_u64_or_record_problem("pipeline", "ttl_ms", &mut cfg.pipeline.ttl_ms, &mut problems);
         overwrite_present_usize_or_record_problem("pipeline", "summarize_threshold", &mut cfg.pipeline.summarize_threshold, &mut problems);
         overwrite_present_usize_or_record_problem("pipeline", "max_result_bytes", &mut cfg.pipeline.max_result_bytes_advertised_and_enforced_by_one_field, &mut problems);
+        overwrite_present_string_or_record_problem("pipeline", "summarize_prompt_template", &mut cfg.pipeline.summarize_prompt_template, &mut problems);
+        overwrite_present_usize_or_record_problem("pipeline", "summarize_target_chars", &mut cfg.pipeline.summarize_target_chars, &mut problems);
+        overwrite_present_usize_or_record_problem("pipeline", "summarize_max_summary_chars", &mut cfg.pipeline.summarize_max_summary_chars, &mut problems);
+        overwrite_present_usize_or_record_problem("pipeline", "summarize_input_char_cap", &mut cfg.pipeline.summarize_input_char_cap, &mut problems);
         overwrite_present_u64_or_record_problem("pipeline", "max_attempts", &mut cfg.pipeline.max_attempts, &mut problems);
 
         overwrite_present_usize_or_record_problem("instruction_payload", "ready_wave_limit", &mut cfg.instruction_payload.ready_wave_limit, &mut problems);

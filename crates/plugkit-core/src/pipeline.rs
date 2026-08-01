@@ -135,18 +135,21 @@ pub fn build_pending_step(text: &str, namespace: &str, project_path: Option<&str
     let now = unsafe { host_now_ms() } as u64;
     let deadline_ms = now + pipeline_cfg().ttl_ms;
     let kv_key = format!("rs-learn/pipeline/{}", step_id);
-    let bounded_input: String = text.chars().take(8192).collect();
+    let pcfg = pipeline_cfg();
+    let bounded_input: String = text.chars().take(pcfg.summarize_input_char_cap).collect();
     let payload = json!({
         "input": bounded_input,
-        "target_chars": 400,
-        "preserve": ["entities", "numbers", "ids"]
+        "target_chars": pcfg.summarize_target_chars,
+        "preserve": pcfg.summarize_preserve.clone()
     });
     let result_schema = json!({
         "type": "object",
         "required": ["summary"],
-        "properties": { "summary": { "type": "string", "maxLength": 800 } }
+        "properties": { "summary": { "type": "string", "maxLength": pcfg.summarize_max_summary_chars } }
     });
-    let prompt_template = "Summarize the following text into <=400 chars, preserving entities and any numeric facts. Return JSON {\"summary\": string}. Input:\n{{input}}";
+    let prompt_template = pcfg
+        .summarize_prompt_template
+        .replace("{{target_chars}}", &pcfg.summarize_target_chars.to_string());
 
     let state = json!({
         "flow_id": flow_id,

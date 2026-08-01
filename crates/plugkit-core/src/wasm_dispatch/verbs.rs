@@ -268,6 +268,14 @@ fn effective_config_report() -> Value {
         },
         "guards": guard_surface_report(),
         "shared_store_contract": shared_store_contract(),
+        "pipeline": {
+            "ttl_ms": cfg.pipeline.ttl_ms,
+            "summarize_threshold": cfg.pipeline.summarize_threshold,
+            "summarize_target_chars": cfg.pipeline.summarize_target_chars,
+            "summarize_max_summary_chars": cfg.pipeline.summarize_max_summary_chars,
+            "summarize_input_char_cap": cfg.pipeline.summarize_input_char_cap,
+            "summarize_preserve": cfg.pipeline.summarize_preserve,
+        },
         "db_path": {
             "state_root_dir": cfg.db_path.state_root_dir,
             "db_filename": cfg.db_path.db_filename,
