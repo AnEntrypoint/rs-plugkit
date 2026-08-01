@@ -725,7 +725,21 @@ impl RagConfig {
             }
         }
         let tiered_config_value = crate::config::resolve().config.value;
-        let resolved_config_or_defaults_on_validation_failure = RagConfig::from_value(&tiered_config_value).unwrap_or_default();
+        // A validation failure discards EVERY setting in the file, not just the
+        // offending one. Silently swallowing it meant an operator saw their
+        // whole config ignored with no indication which value caused it --
+        // every explanatory message validate() composes was written into a
+        // Result that was then dropped.
+        let resolved_config_or_defaults_on_validation_failure = match RagConfig::from_value(&tiered_config_value) {
+            Ok(cfg) => cfg,
+            Err(reason) => {
+                crate::wasm_dispatch::emit_event("ragconfig_validation_failed", serde_json::json!({
+                    "reason": reason,
+                    "effect": "the ENTIRE resolved config is being ignored and compiled defaults are in use -- not just the offending key",
+                }));
+                RagConfig::default()
+            }
+        };
         if let Ok(mut cache) = RESOLVED_CACHE.lock() {
             *cache = Some(ResolvedEntryScopedToOneProjectRootNeverGlobal {
                 root: project_root,
