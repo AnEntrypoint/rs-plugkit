@@ -800,17 +800,35 @@ fn truncate_for_embed(body: &str) -> &str {
     &body[..e]
 }
 
-fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: &str) {
+/// Returns false when the chunk was meant to reach libsql and did not.
+///
+/// The caller writes a manifest asserting which chunks are indexed. Dropping
+/// this result let that manifest claim a chunk the insert had rejected, so the
+/// manifest and code_chunks disagreed permanently and the file re-processed on
+/// every pass with nothing surfaced.
+fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: &str) -> bool {
+    let mut persisted = true;
     if libsql_ok {
         let embedding_lit = vec_to_json_literal(&c.emb);
         let ls = c.ls.to_string();
         let le = c.le.to_string();
         let body_trunc = truncate_body(body);
         let params: [&str; 7] = [fp, &c.kind, &c.name, &ls, &le, body_trunc, &embedding_lit];
-        let _ = libsql_wasm::exec_params(db_path, (&insert_chunk_sql()), &params);
+        if let Err(e) = libsql_wasm::exec_params(db_path, (&insert_chunk_sql()), &params) {
+            persisted = false;
+            crate::wasm_dispatch::emit_event("code_index_chunk_insert_failed", serde_json::json!({
+                "path": fp,
+                "chunk_key": c.key,
+                "line_start": c.ls,
+                "line_end": c.le,
+                "error": e,
+                "reason": "the chunk did not reach code_chunks; its file's manifest is being withheld so the next pass retries instead of recording an index that is not there",
+            }));
+        }
     }
     let emb_json = serde_json::json!({ "embedding": c.emb }).to_string();
     fv_put(&code_ns(), &c.key, &emb_json);
+    persisted
 }
 
 fn delete_chunk_keys(chunks: &[ChunkRecord]) {
@@ -980,11 +998,15 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
                 if libsql_ok {
                     let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
                 }
+                let mut all_persisted = true;
                 for c in &m.chunks {
                     let body = slice_lines(&content, c.ls, c.le);
-                    write_chunk(libsql_ok, &db_path, fp, c, &body);
+                    all_persisted &= write_chunk(libsql_ok, &db_path, fp, c, &body);
                     chunked += 1;
                     reused += 1;
+                }
+                if !all_persisted {
+                    fv_delete(&manifest_ns(), fp);
                 }
                 reused_files += 1;
                 continue;
@@ -1100,6 +1122,7 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
             .collect();
 
         let mut records: Vec<ChunkRecord> = Vec::new();
+        let mut file_fully_persisted = true;
         for (idx, (((kind, name, ls, le, body), (emb_opt, was_reused)), content_hash)) in chunks.into_iter().zip(embed_results.into_iter()).zip(chunk_content_hashes.into_iter()).enumerate() {
             let v = match emb_opt {
                 Some(v) => v,
@@ -1118,11 +1141,15 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
             }
             let key = format!("ci-{:x}-{:x}-{}", path_hash, file_hash, idx);
             let rec = ChunkRecord { key, kind, name, ls, le, emb: v, content_hash };
-            write_chunk(libsql_ok, &db_path, fp, &rec, &body);
+            file_fully_persisted &= write_chunk(libsql_ok, &db_path, fp, &rec, &body);
             records.push(rec);
         }
-        let commit_overview = compute_commit_overview(fp);
-        fv_put(&manifest_ns(), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, &commit_overview, &records));
+        if file_fully_persisted {
+            let commit_overview = compute_commit_overview(fp);
+            fv_put(&manifest_ns(), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, &commit_overview, &records));
+        } else {
+            fv_delete(&manifest_ns(), fp);
+        }
     }
 
     let files_set: std::collections::HashSet<&str> = full_files.iter().map(|s| s.trim_start_matches("./").trim_start_matches('/')).collect();
