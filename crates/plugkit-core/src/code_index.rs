@@ -443,8 +443,12 @@ pub fn extract_chunks_reporting_plugin_failure(_path: &str, source: &str, lang_n
     (out, false)
 }
 
-const OVERSIZED_CHUNK_SPLIT_THRESHOLD: usize = 8192;
-const OVERSIZED_CHUNK_OVERLAP: usize = 800;
+// Overlap is derived, not independently configured: it must stay strictly
+// below the split threshold or  underflows and the splitter loops.
+// Ten percent keeps that invariant true for any threshold a caller sets.
+fn oversized_chunk_overlap(threshold: usize) -> usize {
+    (threshold / 10).max(1).min(threshold.saturating_sub(1))
+}
 
 fn split_oversized_chunk(
     kind: &str,
@@ -453,17 +457,19 @@ fn split_oversized_chunk(
     line_end: usize,
     body: &str,
 ) -> Vec<(String, String, usize, usize, String)> {
-    if body.len() <= OVERSIZED_CHUNK_SPLIT_THRESHOLD {
+    let split_threshold = crate::ragconfig::RagConfig::resolved().index.split_chunk_above_bytes.max(2);
+    let overlap = oversized_chunk_overlap(split_threshold);
+    if body.len() <= split_threshold {
         return vec![(kind.to_string(), name.to_string(), line_start, line_end, body.to_string())];
     }
     let total_lines = line_end.saturating_sub(line_start).max(1);
     let bytes_per_line = (body.len() as f64 / total_lines as f64).max(1.0);
-    let stride = OVERSIZED_CHUNK_SPLIT_THRESHOLD - OVERSIZED_CHUNK_OVERLAP;
+    let stride = split_threshold - overlap;
     let mut out = Vec::new();
     let mut start = 0usize;
     let mut part = 0usize;
     while start < body.len() {
-        let mut end = (start + OVERSIZED_CHUNK_SPLIT_THRESHOLD).min(body.len());
+        let mut end = (start + split_threshold).min(body.len());
         while end > start && !body.is_char_boundary(end) { end -= 1; }
         let sub_body = &body[start..end];
         let sub_line_start = line_start + ((start as f64 / bytes_per_line) as usize);
@@ -471,7 +477,7 @@ fn split_oversized_chunk(
         let sub_name = if part == 0 { name.to_string() } else { format!("{}#part{}", name, part + 1) };
         out.push((kind.to_string(), sub_name, sub_line_start, sub_line_end.max(sub_line_start), sub_body.to_string()));
         if end >= body.len() { break; }
-        let mut next_start = end.saturating_sub(OVERSIZED_CHUNK_OVERLAP);
+        let mut next_start = end.saturating_sub(overlap);
         while next_start > 0 && !body.is_char_boundary(next_start) { next_start -= 1; }
         start = next_start.max(start + stride.min(1));
         part += 1;
@@ -1017,7 +1023,7 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
             let line_end = content.lines().count().max(1);
             chunks.push(("document".to_string(), String::new(), 1, line_end, whole));
         }
-        if chunks.iter().any(|(_, _, _, _, body)| body.len() > OVERSIZED_CHUNK_SPLIT_THRESHOLD) {
+        if chunks.iter().any(|(_, _, _, _, body)| body.len() > crate::ragconfig::RagConfig::resolved().index.split_chunk_above_bytes) {
             chunks = chunks
                 .into_iter()
                 .flat_map(|(kind, name, ls, le, body)| split_oversized_chunk(&kind, &name, ls, le, &body))
