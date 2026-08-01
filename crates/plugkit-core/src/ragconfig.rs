@@ -214,6 +214,25 @@ impl IndexConfig {
     }
 }
 
+/// The two bookkeeping tables backing markdown-memory sync. They sit in the
+/// same database as the configurable vector tables but were hardcoded, so a
+/// project that renamed its vector tables to coexist with another store still
+/// collided on these two.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryMdTableNames {
+    pub meta: String,
+    pub files: String,
+}
+
+impl Default for MemoryMdTableNames {
+    fn default() -> Self {
+        MemoryMdTableNames {
+            meta: "memories_md_meta".to_string(),
+            files: "memories_md_files".to_string(),
+        }
+    }
+}
+
 /// Wall budgets for the two background passes that embed in bulk: migrating a
 /// namespace off the legacy flat-JSON store, and vectorizing git commits.
 /// Both stop early when the budget runs out and resume on a later call, so a
@@ -411,6 +430,7 @@ pub struct RagConfig {
     pub memory_sync: MemorySyncBudgetConfig,
     pub embed_cache: EmbedCacheConfig,
     pub bulk_embed: BulkEmbedBudgetConfig,
+    pub memory_md_tables: MemoryMdTableNames,
 }
 
 impl Default for RagConfig {
@@ -433,6 +453,7 @@ impl Default for RagConfig {
             memory_sync: MemorySyncBudgetConfig::default(),
             embed_cache: EmbedCacheConfig::default(),
             bulk_embed: BulkEmbedBudgetConfig::default(),
+            memory_md_tables: MemoryMdTableNames::default(),
         }
     }
 }
@@ -545,6 +566,8 @@ impl RagConfig {
         overwrite_present_usize_or_record_problem("embed_cache", "plain_cache_max_text_bytes", &mut cfg.embed_cache.plain_cache_max_text_bytes, &mut problems);
         overwrite_present_u64_or_record_problem("bulk_embed", "flat_json_migration_budget_ms", &mut cfg.bulk_embed.flat_json_migration_budget_ms, &mut problems);
         overwrite_present_u64_or_record_problem("bulk_embed", "git_commit_embed_budget_ms", &mut cfg.bulk_embed.git_commit_embed_budget_ms, &mut problems);
+        overwrite_present_string_or_record_problem("memory_md_tables", "meta", &mut cfg.memory_md_tables.meta, &mut problems);
+        overwrite_present_string_or_record_problem("memory_md_tables", "files", &mut cfg.memory_md_tables.files, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_k1", &mut cfg.scoring.bm25_k1_term_frequency_saturation, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_b", &mut cfg.scoring.bm25_b_document_length_normalization, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "fusion_rrf_k", &mut cfg.scoring.fusion_rrf_k, &mut problems);

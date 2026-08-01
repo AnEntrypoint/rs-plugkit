@@ -212,16 +212,24 @@ fn vector_table() -> String {
     crate::ragconfig::RagConfig::resolved().rssearch.table
 }
 
+fn meta_table() -> String {
+    crate::ragconfig::RagConfig::resolved().memory_md_tables.meta
+}
+
+fn files_table() -> String {
+    crate::ragconfig::RagConfig::resolved().memory_md_tables.files
+}
+
 fn ensure_meta_table() -> Result<(), String> {
     crate::rssearch_vectors::ensure_schema()?;
     crate::shared_db::shared_exec(
-        "CREATE TABLE IF NOT EXISTS memories_md_meta (namespace TEXT PRIMARY KEY, digest TEXT)",
+        &format!("CREATE TABLE IF NOT EXISTS {} (namespace TEXT PRIMARY KEY, digest TEXT)", meta_table()),
     )
 }
 
 fn meta_digest(ns: &str) -> Option<String> {
     let rows = crate::shared_db::shared_query_params(
-        "SELECT digest FROM memories_md_meta WHERE namespace=?1",
+        &format!("SELECT digest FROM {} WHERE namespace=?1", meta_table()),
         &[ns],
     ).ok()?;
     rows.as_array()?.first()?.get("digest")?.as_str().map(String::from)
@@ -229,7 +237,7 @@ fn meta_digest(ns: &str) -> Option<String> {
 
 fn store_meta_digest(ns: &str, digest: &str) {
     let _ = crate::shared_db::shared_exec_params(
-        "INSERT INTO memories_md_meta(namespace, digest) VALUES(?1,?2) ON CONFLICT(namespace) DO UPDATE SET digest=excluded.digest",
+        &format!("INSERT INTO {}(namespace, digest) VALUES(?1,?2) ON CONFLICT(namespace) DO UPDATE SET digest=excluded.digest", meta_table()),
         &[ns, digest],
     );
 }
@@ -396,14 +404,14 @@ fn scan_manifest(ns: &str) -> Option<(String, Vec<(String, String)>)> {
 
 fn ensure_files_table() -> Result<(), String> {
     crate::shared_db::shared_exec(
-        "CREATE TABLE IF NOT EXISTS memories_md_files (namespace TEXT NOT NULL, name TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(namespace, name))",
+        &format!("CREATE TABLE IF NOT EXISTS {} (namespace TEXT NOT NULL, name TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(namespace, name))", files_table()),
     )
 }
 
 fn stored_file_hashes(ns: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     if let Ok(rows) = crate::shared_db::shared_query_params(
-        "SELECT name, hash FROM memories_md_files WHERE namespace=?1",
+        &format!("SELECT name, hash FROM {} WHERE namespace=?1", files_table()),
         &[ns],
     ) {
         if let Some(arr) = rows.as_array() {
@@ -422,14 +430,14 @@ fn stored_file_hashes(ns: &str) -> std::collections::HashMap<String, String> {
 
 fn store_file_hash(ns: &str, name: &str, hash: &str) {
     let _ = crate::shared_db::shared_exec_params(
-        "INSERT INTO memories_md_files(namespace, name, hash) VALUES(?1,?2,?3) ON CONFLICT(namespace, name) DO UPDATE SET hash=excluded.hash",
+        &format!("INSERT INTO {}(namespace, name, hash) VALUES(?1,?2,?3) ON CONFLICT(namespace, name) DO UPDATE SET hash=excluded.hash", files_table()),
         &[ns, name, hash],
     );
 }
 
 fn drop_file_hash(ns: &str, name: &str) {
     let _ = crate::shared_db::shared_exec_params(
-        "DELETE FROM memories_md_files WHERE namespace=?1 AND name=?2",
+        &format!("DELETE FROM {} WHERE namespace=?1 AND name=?2", files_table()),
         &[ns, name],
     );
 }

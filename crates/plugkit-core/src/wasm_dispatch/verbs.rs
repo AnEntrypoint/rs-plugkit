@@ -207,6 +207,8 @@ fn effective_config_report() -> Value {
             "rssearch": cfg.rssearch.table,
             "code_chunks": cfg.code_chunks.table,
             "git_commits": cfg.git_commits.table,
+            "memory_md_meta": cfg.memory_md_tables.meta,
+            "memory_md_files": cfg.memory_md_tables.files,
         },
         "scoring": {
             "half_life_ms": cfg.scoring.half_life_ms,
