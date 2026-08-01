@@ -214,6 +214,23 @@ impl IndexConfig {
     }
 }
 
+/// Where the store lives. The filename and the state-root directory were
+/// hardcoded in two DIFFERENT modules (code_index for the filename, libsql_wasm
+/// for the .gm segment), so relocating a store meant editing both and knowing
+/// they existed. A project that wants its gm state somewhere other than .gm --
+/// or two stores side by side -- has no way to say so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DbPathConfig {
+    pub state_root_dir: String,
+    pub db_filename: String,
+}
+
+impl Default for DbPathConfig {
+    fn default() -> Self {
+        DbPathConfig { state_root_dir: ".gm".to_string(), db_filename: "gm.db".to_string() }
+    }
+}
+
 /// The two bookkeeping tables backing markdown-memory sync. They sit in the
 /// same database as the configurable vector tables but were hardcoded, so a
 /// project that renamed its vector tables to coexist with another store still
@@ -431,6 +448,7 @@ pub struct RagConfig {
     pub embed_cache: EmbedCacheConfig,
     pub bulk_embed: BulkEmbedBudgetConfig,
     pub memory_md_tables: MemoryMdTableNames,
+    pub db_path: DbPathConfig,
 }
 
 impl Default for RagConfig {
@@ -454,6 +472,7 @@ impl Default for RagConfig {
             embed_cache: EmbedCacheConfig::default(),
             bulk_embed: BulkEmbedBudgetConfig::default(),
             memory_md_tables: MemoryMdTableNames::default(),
+            db_path: DbPathConfig::default(),
         }
     }
 }
@@ -568,6 +587,8 @@ impl RagConfig {
         overwrite_present_u64_or_record_problem("bulk_embed", "git_commit_embed_budget_ms", &mut cfg.bulk_embed.git_commit_embed_budget_ms, &mut problems);
         overwrite_present_string_or_record_problem("memory_md_tables", "meta", &mut cfg.memory_md_tables.meta, &mut problems);
         overwrite_present_string_or_record_problem("memory_md_tables", "files", &mut cfg.memory_md_tables.files, &mut problems);
+        overwrite_present_string_or_record_problem("db_path", "state_root_dir", &mut cfg.db_path.state_root_dir, &mut problems);
+        overwrite_present_string_or_record_problem("db_path", "db_filename", &mut cfg.db_path.db_filename, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_k1", &mut cfg.scoring.bm25_k1_term_frequency_saturation, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_b", &mut cfg.scoring.bm25_b_document_length_normalization, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "fusion_rrf_k", &mut cfg.scoring.fusion_rrf_k, &mut problems);

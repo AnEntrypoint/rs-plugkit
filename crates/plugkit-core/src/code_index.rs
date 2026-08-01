@@ -276,7 +276,7 @@ pub fn ensure_schema_at_cfg(path: &str, cfg: &crate::ragconfig::RagConfig) -> Re
 fn project_db_filename(project_path: Option<&str>) -> String {
     match project_path {
         Some(p) if !p.is_empty() => format!("ext-{:x}.db", crc32(p)),
-        _ => "gm.db".to_string(),
+        _ => crate::ragconfig::RagConfig::resolved().db_path.db_filename,
     }
 }
 

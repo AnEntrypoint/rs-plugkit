@@ -224,6 +224,11 @@ fn effective_config_report() -> Value {
             "flat_json_migration_budget_ms": cfg.bulk_embed.flat_json_migration_budget_ms,
             "git_commit_embed_budget_ms": cfg.bulk_embed.git_commit_embed_budget_ms,
         },
+        "db_path": {
+            "state_root_dir": cfg.db_path.state_root_dir,
+            "db_filename": cfg.db_path.db_filename,
+            "resolved": crate::code_index::project_db_path(None),
+        },
         "embed_cache": {
             "query_cache_capacity": cfg.embed_cache.query_cache_capacity,
             "query_cache_ttl_ms": cfg.embed_cache.query_cache_ttl_ms,

@@ -30,7 +30,7 @@ pub fn absolute_db_path(filename: &str) -> String {
     match host_cwd_string() {
         Some(cwd) if !cwd.is_empty() => {
             let cwd = cwd.trim_end_matches(['/', '\\']);
-            format!("{}/.gm/{}", cwd, filename)
+            format!("{}/{}/{}", cwd, crate::ragconfig::RagConfig::resolved().db_path.state_root_dir, filename)
         }
         _ => filename.to_string(),
     }
