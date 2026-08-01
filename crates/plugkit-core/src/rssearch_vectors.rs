@@ -182,6 +182,55 @@ pub fn undelete(namespace: &str, key: &str, updated_at_ms: i64) -> Result<(), St
     undelete_cfg(namespace, key, updated_at_ms, &default_cfg())
 }
 
+/// Hard-deletes soft-deleted rows, which nothing else does.
+///
+/// `mark_deleted` sets a tombstone and every read filters on it, so a pruned
+/// row stops being findable but never stops occupying the table or its vector
+/// index. Measured on this repo's store before this existed: 328 tombstones
+/// against 427 live rows -- 43% of the table unreclaimable, with all 755
+/// entries still carried by the vector index the ANN query scans.
+///
+/// Deliberately explicit rather than automatic. The prune surface is
+/// agent-judged by design ("never auto-similarity-deleted"), and reclaiming
+/// storage is a different decision from deciding a memory is unwanted, so this
+/// is a verb a caller invokes, not a policy that runs behind them.
+pub fn vacuum_tombstones_cfg(namespace: Option<&str>, cfg: &RagConfig) -> Result<u64, String> {
+    ensure_schema_cfg(cfg)?;
+    let count_sql = match namespace {
+        Some(_) => format!(
+            "SELECT count(1) AS n FROM (SELECT key FROM {} WHERE deleted=1 AND namespace=?1)",
+            cfg.rssearch.table
+        ),
+        None => format!(
+            "SELECT count(1) AS n FROM (SELECT key FROM {} WHERE deleted=1)",
+            cfg.rssearch.table
+        ),
+    };
+    let params: Vec<&str> = namespace.into_iter().collect();
+    let reclaimable = shared_query_params(&count_sql, &params)
+        .ok()
+        .and_then(|rows| rows.as_array()?.first()?.get("n")?.as_i64())
+        .unwrap_or(0)
+        .max(0) as u64;
+    if reclaimable == 0 {
+        return Ok(0);
+    }
+    let delete_sql = match namespace {
+        Some(_) => format!("DELETE FROM {} WHERE deleted=1 AND namespace=?1", cfg.rssearch.table),
+        None => format!("DELETE FROM {} WHERE deleted=1", cfg.rssearch.table),
+    };
+    shared_exec_params(&delete_sql, &params)?;
+    crate::wasm_dispatch::emit_event("rssearch_vectors_vacuumed", json!({
+        "namespace": namespace,
+        "rows_reclaimed": reclaimable,
+    }));
+    Ok(reclaimable)
+}
+
+pub fn vacuum_tombstones(namespace: Option<&str>) -> Result<u64, String> {
+    vacuum_tombstones_cfg(namespace, &default_cfg())
+}
+
 pub fn undelete_cfg(namespace: &str, key: &str, updated_at_ms: i64, cfg: &RagConfig) -> Result<(), String> {
     if let Err(e) = ensure_schema_cfg(cfg) {
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));

@@ -909,6 +909,22 @@ fn memory_md_write_path(namespace: &str, key: &str, text: &str) -> Option<String
     }
 }
 
+/// Reclaims soft-deleted rows. Explicit rather than automatic: prune decides
+/// a memory is unwanted, this decides the storage is worth reclaiming, and
+/// those are different judgements. Reports how many rows it took so a caller
+/// can tell a no-op from real work.
+fn memorize_vacuum(body: &Value) -> u64 {
+    let namespace = body.get("namespace").and_then(|v| v.as_str());
+    match crate::rssearch_vectors::vacuum_tombstones(namespace) {
+        Ok(n) => ok("memorize-vacuum", json!({
+            "namespace": namespace,
+            "rows_reclaimed": n,
+            "note": if n == 0 { "no soft-deleted rows to reclaim" } else { "tombstoned rows hard-deleted; the vector index no longer carries them" },
+        })),
+        Err(e) => err("memorize-vacuum", &e),
+    }
+}
+
 fn memorize_prune(body: &Value) -> u64 {
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     let mut keys: Vec<String> = Vec::new();
@@ -2841,6 +2857,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "codesearch" => codesearch(&body),
         "memorize" => memorize_with_raw(&body, &body_s),
         "memorize-prune" | "memorize_prune" => memorize_prune(&body),
+        "memorize-vacuum" | "memorize_vacuum" => memorize_vacuum(&body),
         "recall" => recall(&body),
         "python" | "py" => shell_exec(&body, &body_s, "python"),
         "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, &body_s, "bash"),
