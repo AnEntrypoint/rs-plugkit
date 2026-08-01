@@ -2171,8 +2171,8 @@ fn git_finalize(body: &Value) -> u64 {
     let (ci_status_summary, ci_validated_written) = match &ci_check {
         Ok(v) => {
             let status = v.get("data").and_then(|d| d.get("status")).and_then(|s| s.as_str()).unwrap_or("unknown");
-            let written = if status == "success" && !head_sha.is_empty() {
-                let marker = json!({ "head_sha": head_sha }).to_string();
+            let written = if (status == "success" || status == "no_applicable_workflow") && !head_sha.is_empty() {
+                let marker = json!({ "head_sha": head_sha, "reason": status }).to_string();
                 crate::pkfs::write(".gm/exec-spool/.ci-validated", &marker)
             } else {
                 false
@@ -2394,6 +2394,21 @@ fn ci_status_value(body: &Value) -> Result<Value, Value> {
     let parsed: Value = serde_json::from_str(body_text).unwrap_or(Value::Null);
     let runs = parsed.get("workflow_runs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     if runs.is_empty() {
+        const NO_APPLICABLE_WORKFLOW_GRACE_SECS: i64 = 120;
+        let commit_epoch_secs = crate::wasm_dispatch::git_call(&format!("log -1 --format=%ct {}", sha), cwd)
+            .get("stdout").and_then(|v| v.as_str())
+            .and_then(|s| s.trim().parse::<i64>().ok());
+        let now_secs = unsafe { host_now_ms() } as i64 / 1000;
+        let commit_age_secs = commit_epoch_secs.map(|ts| now_secs.saturating_sub(ts));
+        if commit_age_secs.is_some_and(|age| age >= NO_APPLICABLE_WORKFLOW_GRACE_SECS) {
+            return Ok(json!({
+                "ok": true, "verb": "ci-status", "data": {
+                    "status": "no_applicable_workflow", "repo": repo, "sha": sha,
+                    "failed_jobs": [], "run_url": Value::Null,
+                    "reason": format!("zero workflow runs appeared for this sha after {}s -- a genuinely triggered workflow starts within seconds of the push, so this sha's changed paths did not match any workflow trigger (e.g. paths-ignore). Treated as a legitimate pass-through, not a pending/failed run.", commit_age_secs.unwrap()),
+                },
+            }));
+        }
         return Ok(json!({
             "ok": true, "verb": "ci-status", "data": {
                 "status": "unknown", "repo": repo, "sha": sha,
