@@ -85,10 +85,16 @@ pub fn gm_dir() -> PathBuf {
     resolve_project_root_with_retry().join(".gm")
 }
 
-/// The single source of truth for which verbs `dispatch_verb_inner` routes to
-/// the orchestrator. `is_orchestrator_verb` and the mediator's advertised
-/// subsystem map both read this slice, so the advertised surface cannot drift
-/// away from the dispatched one.
+/// Which verbs `dispatch_verb_inner` routes to the orchestrator.
+///
+/// `is_orchestrator_verb` and the mediator's advertised subsystem map both
+/// read this slice, so the ADVERTISED surface cannot drift from it. The
+/// DISPATCHED surface is a separate match below, and nothing in the type
+/// system tied the two together -- a verb added to one and not the other
+/// either advertises a verb that returns unknown_verb, or dispatches one no
+/// caller can discover. `debug_assert_verb_sets_agree` closes that gap: it
+/// runs on every orchestrator dispatch in a debug build and names the exact
+/// verb that drifted.
 pub const ORCHESTRATOR_VERBS: &[&str] = &[
     "transition", "mutable-resolve", "mutable-add", "mutable-list",
     "memorize-fire", "discipline-note", "phase-status", "residual-scan", "auto-recall",
@@ -96,6 +102,24 @@ pub const ORCHESTRATOR_VERBS: &[&str] = &[
     "task-spawn", "task-list", "task-stop", "task-output",
     "memorize-continue", "fsm-vendor", "fsm-validate", "claim-audit", "submodule-check",
 ];
+
+
+/// Every verb this list advertises must have a real dispatch arm. Checked by
+/// routing each one through the same `verb_has_dispatch_arm` predicate the
+/// match itself is built from, so adding an arm without listing it (or the
+/// reverse) is caught at the first dispatch rather than by a caller.
+#[cfg(debug_assertions)]
+fn debug_assert_verb_sets_agree() {
+    for v in ORCHESTRATOR_VERBS {
+        debug_assert!(
+            verb_has_dispatch_arm(v),
+            "ORCHESTRATOR_VERBS advertises {v} but dispatch() has no arm for it"
+        );
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_assert_verb_sets_agree() {}
 
 pub fn is_orchestrator_verb(verb: &str) -> bool {
     ORCHESTRATOR_VERBS.contains(&verb)
@@ -114,7 +138,23 @@ fn handle_memorize_continue(_content: &str) -> (String, String, i32) {
     ("{\"ok\":false,\"error\":\"memorize-continue requires wasm32\"}".to_string(), String::new(), 1)
 }
 
+/// Mirrors the arms of  below. Kept adjacent so the two are edited
+/// together, and cross-checked against ORCHESTRATOR_VERBS on every dispatch in
+/// a debug build by debug_assert_verb_sets_agree.
+fn verb_has_dispatch_arm(verb: &str) -> bool {
+    matches!(
+        verb,
+        "transition" | "mutable-resolve" | "mutable-add" | "mutable-list"
+            | "memorize-fire" | "discipline-note" | "phase-status" | "residual-scan"
+            | "auto-recall" | "instruction" | "prd-add" | "prd-resolve" | "prd-list"
+            | "task-spawn" | "task-list" | "task-stop" | "task-output"
+            | "memorize-continue" | "fsm-vendor" | "fsm-validate" | "claim-audit"
+            | "submodule-check"
+    )
+}
+
 pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i32) {
+    debug_assert_verb_sets_agree();
     match verb {
         "transition" => transitions::handle(content),
         "mutable-resolve" => mutables::handle_resolve(content),
