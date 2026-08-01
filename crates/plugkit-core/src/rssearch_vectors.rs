@@ -227,6 +227,71 @@ pub fn vacuum_tombstones_cfg(namespace: Option<&str>, cfg: &RagConfig) -> Result
     Ok(reclaimable)
 }
 
+pub struct TombstoneCensus {
+    pub live: u64,
+    pub tombstoned: u64,
+}
+
+impl TombstoneCensus {
+    pub fn total(&self) -> u64 {
+        self.live + self.tombstoned
+    }
+
+    pub fn tombstone_ratio(&self) -> f64 {
+        let total = self.total();
+        if total == 0 { 0.0 } else { self.tombstoned as f64 / total as f64 }
+    }
+}
+
+fn scoped_count(deleted_flag: u8, namespace: Option<&str>, cfg: &RagConfig) -> u64 {
+    let sql = match namespace {
+        Some(_) => format!(
+            "SELECT count(1) AS n FROM (SELECT key FROM {} WHERE deleted={} AND namespace=?1)",
+            cfg.rssearch.table, deleted_flag
+        ),
+        None => format!(
+            "SELECT count(1) AS n FROM (SELECT key FROM {} WHERE deleted={})",
+            cfg.rssearch.table, deleted_flag
+        ),
+    };
+    let params: Vec<&str> = namespace.into_iter().collect();
+    shared_query_params(&sql, &params)
+        .ok()
+        .and_then(|rows| rows.as_array()?.first()?.get("n")?.as_i64())
+        .unwrap_or(0)
+        .max(0) as u64
+}
+
+/// Counts live and tombstoned rows without mutating either.
+///
+/// Both counts carry a predicate deliberately: an unfiltered aggregate over a
+/// libsql F32_BLOB table answers 0 even when the table is full, so a census
+/// built on `COUNT(*)` would report an empty store and invite a caller to act
+/// on that.
+pub fn tombstone_census_cfg(namespace: Option<&str>, cfg: &RagConfig) -> Result<TombstoneCensus, String> {
+    ensure_schema_cfg(cfg)?;
+    Ok(TombstoneCensus {
+        live: scoped_count(0, namespace, cfg),
+        tombstoned: scoped_count(1, namespace, cfg),
+    })
+}
+
+/// Whether the census crosses either reclaim threshold.
+///
+/// Either threshold alone is sufficient: a ratio catches a small store that has
+/// gone mostly-tombstone, a count catches a large store whose ratio stays low
+/// while the absolute waste grows. A store at 43% tombstones, which is what
+/// prompted this policy, trips the ratio.
+pub fn retention_reclaim_due(census: &TombstoneCensus, cfg: &RagConfig) -> bool {
+    census.tombstoned > 0
+        && (census.tombstone_ratio() >= cfg.retention.tombstone_ratio_threshold
+            || census.tombstoned >= cfg.retention.tombstone_count_threshold)
+}
+
+pub fn tombstone_census(namespace: Option<&str>) -> Result<TombstoneCensus, String> {
+    tombstone_census_cfg(namespace, &default_cfg())
+}
+
 pub fn vacuum_tombstones(namespace: Option<&str>) -> Result<u64, String> {
     vacuum_tombstones_cfg(namespace, &default_cfg())
 }

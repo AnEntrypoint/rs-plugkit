@@ -954,6 +954,43 @@ fn memorize_vacuum(body: &Value) -> u64 {
     }
 }
 
+fn memorize_retention(body: &Value) -> u64 {
+    let namespace = body.get("namespace").and_then(|v| v.as_str());
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    let census = match crate::rssearch_vectors::tombstone_census(namespace) {
+        Ok(c) => c,
+        Err(e) => return err("memorize-retention", &e),
+    };
+    let due = crate::rssearch_vectors::retention_reclaim_due(&census, &cfg);
+    let apply = body.get("apply").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let reclaimed = if apply && due {
+        match crate::rssearch_vectors::vacuum_tombstones(namespace) {
+            Ok(n) => Some(n),
+            Err(e) => return err("memorize-retention", &e),
+        }
+    } else {
+        None
+    };
+
+    ok("memorize-retention", json!({
+        "namespace": namespace,
+        "live": census.live,
+        "tombstoned": census.tombstoned,
+        "tombstone_ratio": census.tombstone_ratio(),
+        "would_reclaim": census.tombstoned,
+        "reclaim_due": due,
+        "auto_vacuum_enabled": cfg.retention.auto_vacuum_enabled,
+        "thresholds": {
+            "tombstone_ratio_threshold": cfg.retention.tombstone_ratio_threshold,
+            "tombstone_count_threshold": cfg.retention.tombstone_count_threshold,
+        },
+        "applied": reclaimed.is_some(),
+        "rows_reclaimed": reclaimed,
+        "note": "Report-only unless `apply:true` AND a threshold is crossed. Reclaims space from rows ALREADY tombstoned by an agent's own prune -- it never tombstones a live row, so no memory is deleted that was not already judged unwanted.",
+    }))
+}
+
 fn memorize_prune(body: &Value) -> u64 {
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     let mut keys: Vec<String> = Vec::new();
@@ -2887,6 +2924,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "memorize" => memorize_with_raw(&body, &body_s),
         "memorize-prune" | "memorize_prune" => memorize_prune(&body),
         "memorize-vacuum" | "memorize_vacuum" => memorize_vacuum(&body),
+        "memorize-retention" | "memorize_retention" => memorize_retention(&body),
         "recall" => recall(&body),
         "python" | "py" => shell_exec(&body, &body_s, "python"),
         "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, &body_s, "bash"),

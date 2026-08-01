@@ -298,6 +298,33 @@ impl Default for EmbedCacheConfig {
 /// never equal a freshly computed one, so the pass re-runs forever and never
 /// converges. That exact loop caused this session's recall stall. Raising the
 /// budget is the operator-side fix, so it has to be reachable.
+/// Thresholds for reclaiming space from ALREADY-tombstoned rows.
+///
+/// Reclaim-only by construction: nothing here ever tombstones a live row. The
+/// prune surface is agent-judged and never auto-similarity-deleted, so deciding
+/// a memory is unwanted stays a human/agent call; this only decides when the
+/// space behind rows already judged unwanted gets returned.
+///
+/// `auto_vacuum_enabled` defaults false so an unconfigured store behaves
+/// exactly as before. The report is available regardless, which is the intended
+/// order of adoption: look at what a policy would reclaim before enabling one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RetentionConfig {
+    pub auto_vacuum_enabled: bool,
+    pub tombstone_ratio_threshold: f64,
+    pub tombstone_count_threshold: u64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        RetentionConfig {
+            auto_vacuum_enabled: false,
+            tombstone_ratio_threshold: 0.25,
+            tombstone_count_threshold: 200,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemorySyncBudgetConfig {
     pub embed_budget_ms: u64,
@@ -463,6 +490,7 @@ pub struct RagConfig {
     pub bulk_embed: BulkEmbedBudgetConfig,
     pub memory_md_tables: MemoryMdTableNames,
     pub db_path: DbPathConfig,
+    pub retention: RetentionConfig,
 }
 
 impl Default for RagConfig {
@@ -482,6 +510,7 @@ impl Default for RagConfig {
             instruction_payload: InstructionPayloadConfig::default(),
             browser_witness: BrowserWitnessConfig::default(),
             discipline_note: DisciplineNoteConfig::default(),
+            retention: RetentionConfig::default(),
             memory_sync: MemorySyncBudgetConfig::default(),
             embed_cache: EmbedCacheConfig::default(),
             bulk_embed: BulkEmbedBudgetConfig::default(),
@@ -544,6 +573,14 @@ impl RagConfig {
                 }
             }
         };
+        let overwrite_present_bool_or_record_problem = |parent: &str, key: &str, out: &mut bool, problems: &mut Vec<String>| {
+            if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
+                match found.as_bool() {
+                    Some(b) => *out = b,
+                    None => problems.push(format!("{parent}.{key} must be a boolean, got {found}")),
+                }
+            }
+        };
         let overwrite_present_i64_or_record_problem = |parent: &str, key: &str, out: &mut i64, problems: &mut Vec<String>| {
             if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
                 match found.as_i64() {
@@ -590,6 +627,9 @@ impl RagConfig {
         overwrite_present_usize_or_record_problem("index", "digest_max_files", &mut cfg.index.digest_max_files, &mut problems);
         overwrite_present_usize_or_record_problem("index", "prune_pass_file_limit_floor", &mut cfg.index.prune_pass_file_limit_floor, &mut problems);
         overwrite_present_usize_or_record_problem("index", "prune_pass_file_limit_ceiling", &mut cfg.index.prune_pass_file_limit_ceiling, &mut problems);
+        overwrite_present_bool_or_record_problem("retention", "auto_vacuum_enabled", &mut cfg.retention.auto_vacuum_enabled, &mut problems);
+        overwrite_present_f64_or_record_problem("retention", "tombstone_ratio_threshold", &mut cfg.retention.tombstone_ratio_threshold, &mut problems);
+        overwrite_present_u64_or_record_problem("retention", "tombstone_count_threshold", &mut cfg.retention.tombstone_count_threshold, &mut problems);
         overwrite_present_u64_or_record_problem("memory_sync", "embed_budget_ms", &mut cfg.memory_sync.embed_budget_ms, &mut problems);
         overwrite_present_u64_or_record_problem("memory_sync", "total_budget_ms", &mut cfg.memory_sync.total_budget_ms, &mut problems);
         overwrite_present_u64_or_record_problem("memory_sync", "rekey_rows_deadline_ms", &mut cfg.memory_sync.rekey_rows_deadline_ms, &mut problems);
