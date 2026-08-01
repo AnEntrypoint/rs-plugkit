@@ -356,11 +356,32 @@ fn merge_policy_doc() -> String {
 }
 
 fn write_if_absent_or_forced(path: &str, content: &str, force: bool) -> (bool, &'static str) {
-    if !force && pkfs::exists(path) {
+    let existed = pkfs::exists(path);
+    if !force && existed {
         return (false, "skipped-existing");
     }
+    // force:true overwrites operator-authored config. Back the old content up
+    // first: a vendor pass regenerates from live code, so without this a hand-
+    // tuned graph or gate set is gone with no undo and no copy anywhere.
+    // Identical content is not backed up -- a no-op rewrite should not bury the
+    // one real backup under a stack of copies of itself.
+    let mut backed_up = false;
+    if force && existed {
+        if let Some(prev) = pkfs::read_to_string(path) {
+            if prev.as_str() != content {
+                backed_up = pkfs::write(&format!("{path}.bak"), &prev);
+            }
+        }
+    }
     let ok = pkfs::write(path, content);
-    (ok, if ok { "written" } else { "write-failed" })
+    let status = if !ok {
+        "write-failed"
+    } else if backed_up {
+        "written-previous-backed-up"
+    } else {
+        "written"
+    };
+    (ok, status)
 }
 
 pub fn handle_vendor(content: &str) -> (String, String, i32) {
