@@ -158,6 +158,30 @@ pub const ERR_CODE_INVALID_ARGS: &str = "invalid_args";
 pub const ERR_CODE_PANIC: &str = "panic";
 pub const ERR_CODE_GATE_DENIED: &str = "gate_denied";
 
+/// What each guard actually enforces, and -- more usefully -- what it does
+/// NOT. Enforcement is spread across three independent mechanisms with no
+/// shared descriptor, so a caller auditing what a verb may reach has to read
+/// five separate call sites to find out. Publishing the surface makes an
+/// unguarded verb visible as a stated fact rather than as an absence nobody
+/// happened to notice.
+fn guard_surface_report() -> Value {
+    json!({
+        "path_within_project": {
+            "rejects": ["any .. segment", "absolute paths", "paths containing a drive colon"],
+            "applied_to": ["fs_read", "fs_write", "fs_remove", "fs_stat", "fs_readdir"],
+        },
+        "env_get": {
+            "allowed_exact": ENV_GET_ALLOWED_EXACT,
+            "allowed_prefixes": ENV_GET_ALLOWED_PREFIXES,
+        },
+        "kv_put": { "allowed_namespaces": KV_PUT_ALLOWED_NAMESPACES },
+        "unguarded": {
+            "verbs": ["fetch", "exec_js", "browser"],
+            "note": "These reach the network, a Node process, and a real browser with no allowlist of their own. That is deliberate -- they exist to run arbitrary caller-supplied work -- but it means the trust boundary for them is the CALLER, not this layer.",
+        },
+    })
+}
+
 /// A plugin response is FLAT and per-verb; a gm verb response wraps its
 /// payload under `data`. Those are two different envelopes, and the plugin one
 /// was never written down -- a caller learned each payload field by reading
@@ -224,6 +248,7 @@ fn effective_config_report() -> Value {
             "flat_json_migration_budget_ms": cfg.bulk_embed.flat_json_migration_budget_ms,
             "git_commit_embed_budget_ms": cfg.bulk_embed.git_commit_embed_budget_ms,
         },
+        "guards": guard_surface_report(),
         "db_path": {
             "state_root_dir": cfg.db_path.state_root_dir,
             "db_filename": cfg.db_path.db_filename,
