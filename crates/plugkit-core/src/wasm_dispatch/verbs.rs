@@ -218,6 +218,14 @@ fn effective_config_report() -> Value {
             "bm25_b": cfg.scoring.bm25_b_document_length_normalization,
             "dedup_jaccard": cfg.scoring.dedup_jaccard_near_duplicate_threshold,
         },
+        "memory_sync": {
+            "embed_budget_ms": cfg.memory_sync.embed_budget_ms,
+            "total_budget_ms": cfg.memory_sync.total_budget_ms,
+            "rekey_rows_deadline_ms": cfg.memory_sync.rekey_rows_deadline_ms,
+            "shadow_abort_threshold": cfg.memory_sync.shadow_abort_threshold,
+            "rekey_batch_max": cfg.memory_sync.rekey_batch_max,
+            "rename_batch_chunk": cfg.memory_sync.rename_batch_chunk,
+        },
         "index": {
             "wall_budget_ms": cfg.index.wall_budget_ms,
             "max_file_bytes": cfg.index.max_file_bytes,

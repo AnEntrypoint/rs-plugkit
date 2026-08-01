@@ -214,6 +214,35 @@ impl IndexConfig {
     }
 }
 
+/// Budgets bounding a memory_md sync pass. These were compiled-in constants,
+/// which made a slow store unfixable from config: a sync that cannot finish
+/// inside its budget records a `:partial` digest, and a `:partial` digest can
+/// never equal a freshly computed one, so the pass re-runs forever and never
+/// converges. That exact loop caused this session's recall stall. Raising the
+/// budget is the operator-side fix, so it has to be reachable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySyncBudgetConfig {
+    pub embed_budget_ms: u64,
+    pub total_budget_ms: u64,
+    pub rekey_rows_deadline_ms: u64,
+    pub shadow_abort_threshold: u32,
+    pub rekey_batch_max: usize,
+    pub rename_batch_chunk: usize,
+}
+
+impl Default for MemorySyncBudgetConfig {
+    fn default() -> Self {
+        MemorySyncBudgetConfig {
+            embed_budget_ms: 1500,
+            total_budget_ms: 2000,
+            rekey_rows_deadline_ms: 3500,
+            shadow_abort_threshold: 5,
+            rekey_batch_max: 25,
+            rename_batch_chunk: 60,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DisciplineNoteConfig {
     pub max_name_len_hard_refuse_not_truncate: usize,
@@ -337,6 +366,7 @@ pub struct RagConfig {
     pub instruction_payload: InstructionPayloadConfig,
     pub browser_witness: BrowserWitnessConfig,
     pub discipline_note: DisciplineNoteConfig,
+    pub memory_sync: MemorySyncBudgetConfig,
 }
 
 impl Default for RagConfig {
@@ -356,6 +386,7 @@ impl Default for RagConfig {
             instruction_payload: InstructionPayloadConfig::default(),
             browser_witness: BrowserWitnessConfig::default(),
             discipline_note: DisciplineNoteConfig::default(),
+            memory_sync: MemorySyncBudgetConfig::default(),
         }
     }
 }
@@ -459,6 +490,11 @@ impl RagConfig {
         overwrite_present_usize_or_record_problem("index", "digest_max_files", &mut cfg.index.digest_max_files, &mut problems);
         overwrite_present_usize_or_record_problem("index", "prune_pass_file_limit_floor", &mut cfg.index.prune_pass_file_limit_floor, &mut problems);
         overwrite_present_usize_or_record_problem("index", "prune_pass_file_limit_ceiling", &mut cfg.index.prune_pass_file_limit_ceiling, &mut problems);
+        overwrite_present_u64_or_record_problem("memory_sync", "embed_budget_ms", &mut cfg.memory_sync.embed_budget_ms, &mut problems);
+        overwrite_present_u64_or_record_problem("memory_sync", "total_budget_ms", &mut cfg.memory_sync.total_budget_ms, &mut problems);
+        overwrite_present_u64_or_record_problem("memory_sync", "rekey_rows_deadline_ms", &mut cfg.memory_sync.rekey_rows_deadline_ms, &mut problems);
+        overwrite_present_usize_or_record_problem("memory_sync", "rekey_batch_max", &mut cfg.memory_sync.rekey_batch_max, &mut problems);
+        overwrite_present_usize_or_record_problem("memory_sync", "rename_batch_chunk", &mut cfg.memory_sync.rename_batch_chunk, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_k1", &mut cfg.scoring.bm25_k1_term_frequency_saturation, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_b", &mut cfg.scoring.bm25_b_document_length_normalization, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "fusion_rrf_k", &mut cfg.scoring.fusion_rrf_k, &mut problems);

@@ -115,7 +115,7 @@ fn rename_batch(pairs: &[(String, String)]) -> usize {
         return 0;
     }
     let mut total = 0usize;
-    for chunk in pairs.chunks(RENAME_BATCH_CHUNK) {
+    for chunk in pairs.chunks(rename_batch_chunk()) {
         let list: Vec<Value> = chunk.iter().map(|(t, p)| json!({ "t": t, "p": p })).collect();
         let payload = match serde_json::to_string(&Value::Array(list)) {
             Ok(s) => s,
@@ -251,11 +251,6 @@ pub fn has_stored_digest(namespaces: &[String]) -> bool {
     true
 }
 
-const SYNC_EMBED_BUDGET_MS: u64 = 1500;
-const SYNC_TOTAL_BUDGET_MS: u64 = 2000;
-const SYNC_REKEY_ROWS_DEADLINE_MS: u64 = 3500;
-const SYNC_SHADOW_ABORT_THRESHOLD: u32 = 5;
-const REKEY_BATCH_MAX: usize = 25;
 
 fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>, Vec<(String, String)>), String> {
     let Some(dir) = md_dir(ns) else {
@@ -443,6 +438,12 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
     if ensure_meta_table().is_err() || ensure_files_table().is_err() {
         return json!({ "converged": false, "error": "memories md meta/files table ensure failed" });
     }
+    let budget = crate::ragconfig::RagConfig::resolved().memory_sync;
+    let budget_embed_ms = budget.embed_budget_ms;
+    let budget_total_ms = budget.total_budget_ms;
+    let budget_rekey_deadline_ms = budget.rekey_rows_deadline_ms;
+    let budget_shadow_abort = budget.shadow_abort_threshold;
+    let budget_rekey_batch = budget.rekey_batch_max;
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut recreated = false;
     let mut converged = true;
@@ -525,13 +526,13 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                     crate::wasm_dispatch::emit_event("memory_md_sync_row_failed", json!({
                         "namespace": ns, "key": key, "error": e,
                     }));
-                    if *shadow_failed >= SYNC_SHADOW_ABORT_THRESHOLD { 2 } else { 0 }
+                    if *shadow_failed >= budget_shadow_abort { 2 } else { 0 }
                 }
             }
         };
         for (name, hash) in &changed {
             let total_elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-            if total_elapsed > SYNC_TOTAL_BUDGET_MS {
+            if total_elapsed > budget.total_budget_ms {
                 deferred += 1;
                 continue;
             }
@@ -553,7 +554,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
             };
             let expected = content_key(ns, &doc.text);
             if doc.key != expected || *name != format!("{}.md", expected) {
-                if rekey_pairs.len() >= REKEY_BATCH_MAX {
+                if rekey_pairs.len() >= budget.rekey_batch_max {
                     deferred += 1;
                     continue;
                 }
@@ -617,7 +618,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                         Some(e) => Some(e),
                         None => {
                             let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-                            if elapsed > SYNC_EMBED_BUDGET_MS && embeds > 0 {
+                            if elapsed > budget.embed_budget_ms && embeds > 0 {
                                 deferred += 1;
                                 continue;
                             }
@@ -678,7 +679,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
             }));
             for (key, text, emb, updated) in &rekey_rows {
                 let total_elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-                if total_elapsed > SYNC_REKEY_ROWS_DEADLINE_MS {
+                if total_elapsed > budget.rekey_rows_deadline_ms {
                     break;
                 }
                 let rc = write_row(key, text, emb, *updated, &mut upserted, &mut failed, &mut shadow_failed);
@@ -792,7 +793,9 @@ fn flat_mtime_ms(ns: &str, key: &str) -> Option<i64> {
 
 const EXPORT_BATCH_MAX: usize = 200;
 
-const RENAME_BATCH_CHUNK: usize = 60;
+fn rename_batch_chunk() -> usize {
+    crate::ragconfig::RagConfig::resolved().memory_sync.rename_batch_chunk
+}
 
 fn flat_store_digest(entries: &[(String, String)]) -> (String, usize) {
     let mut keyed: Vec<(&String, &String)> = entries
