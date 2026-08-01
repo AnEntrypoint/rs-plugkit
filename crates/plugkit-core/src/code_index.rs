@@ -757,7 +757,7 @@ fn slice_lines(content: &str, ls: usize, le: usize) -> String {
 /// degrades to slow rather than to wrong.
 fn chunk_rows_by_path(db_path: &str) -> std::collections::HashMap<String, usize> {
     let mut out = std::collections::HashMap::new();
-    let rows = match libsql_wasm::query(db_path, "SELECT path, COUNT(*) AS c FROM code_chunks GROUP BY path") {
+    let rows = match libsql_wasm::query(db_path, &format!("SELECT path, COUNT(*) AS c FROM {} GROUP BY path", chunks_table())) {
         Ok(r) => r,
         Err(_) => return out,
     };
@@ -774,7 +774,13 @@ fn chunk_rows_by_path(db_path: &str) -> std::collections::HashMap<String, usize>
     out
 }
 
-const INSERT_CHUNK_SQL: &str = "INSERT INTO code_chunks(path, kind, name, line_start, line_end, body, embedding) VALUES(?1,?2,?3,?4,?5,?6,vector(?7))";
+fn chunks_table() -> String {
+    crate::ragconfig::RagConfig::resolved().code_chunks.table
+}
+
+fn insert_chunk_sql() -> String {
+    format!("INSERT INTO {}(path, kind, name, line_start, line_end, body, embedding) VALUES(?1,?2,?3,?4,?5,?6,vector(?7))", chunks_table())
+}
 
 fn truncate_body(body: &str) -> &str {
     let mut e = body.len().min(8192);
@@ -795,7 +801,7 @@ fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: 
         let le = c.le.to_string();
         let body_trunc = truncate_body(body);
         let params: [&str; 7] = [fp, &c.kind, &c.name, &ls, &le, body_trunc, &embedding_lit];
-        let _ = libsql_wasm::exec_params(db_path, INSERT_CHUNK_SQL, &params);
+        let _ = libsql_wasm::exec_params(db_path, (&insert_chunk_sql()), &params);
     }
     let emb_json = serde_json::json!({ "embedding": c.emb }).to_string();
     fv_put(&code_ns(), &c.key, &emb_json);
@@ -966,7 +972,7 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
                     continue;
                 }
                 if libsql_ok {
-                    let _ = libsql_wasm::exec_params(&db_path, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
+                    let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
                 }
                 for c in &m.chunks {
                     let body = slice_lines(&content, c.ls, c.le);
@@ -978,11 +984,11 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
                 continue;
             }
             if libsql_ok {
-                let _ = libsql_wasm::exec_params(&db_path, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
+                let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
             }
             delete_chunk_keys(&m.chunks);
         } else if libsql_ok {
-            let _ = libsql_wasm::exec_params(&db_path, "DELETE FROM code_chunks WHERE path=?1", &[fp]);
+            let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
         }
 
         // Chunk-level reuse: a file-hash change forces re-extraction (tree-sitter
@@ -1256,44 +1262,74 @@ pub fn overview() -> Value {
         return Value::Null;
     }
     let db_path = project_db_path(None);
-    let file_count = libsql_wasm::query_params(&db_path, "SELECT COUNT(DISTINCT path) AS c FROM code_chunks", &[])
-        .ok()
-        .and_then(|rows| rows.as_array().and_then(|a| a.first().cloned()))
-        .and_then(|row| row.get("c").and_then(|v| v.as_u64()))
-        .unwrap_or(0);
-    let symbol_count = libsql_wasm::query_params(&db_path, "SELECT COUNT(*) AS c FROM code_chunks", &[])
-        .ok()
-        .and_then(|rows| rows.as_array().and_then(|a| a.first().cloned()))
-        .and_then(|row| row.get("c").and_then(|v| v.as_u64()))
-        .unwrap_or(0);
+    // A failed count and a genuinely empty index both used to arrive as 0.
+    // They are not the same thing: a `database is locked` here (the shared
+    // daemon holding the file) reported "0 symbols" for a fully populated
+    // store, which reads as data loss rather than as a transient failure.
+    let mut count_error: Option<String> = None;
+    let mut count_via = |sql: String| -> Option<u64> {
+        match libsql_wasm::query_params(&db_path, &sql, &[]) {
+            Ok(rows) => rows
+                .as_array()
+                .and_then(|a| a.first().cloned())
+                .and_then(|row| row.get("c").and_then(|v| v.as_u64())),
+            Err(e) => {
+                if count_error.is_none() {
+                    count_error = Some(e);
+                }
+                None
+            }
+        }
+    };
+    let file_count_opt = count_via(format!("SELECT COUNT(DISTINCT path) AS c FROM {}", chunks_table()));
+    let file_count = file_count_opt.unwrap_or(0);
+    // SUM over a GROUP BY subquery, not a bare COUNT(*): an unfiltered
+    // aggregate over an F32_BLOB vector table answers 0 even when the table is
+    // full. Measured on this repo's store -- COUNT(*) on code_chunks returns 0
+    // (and still 0 with a predicate) while this form returns 138, matching the
+    // _vec_shadow companion exactly.
+    let symbol_count_opt = count_via(format!(
+        "SELECT SUM(c) AS c FROM (SELECT COUNT(*) AS c FROM {} GROUP BY path)",
+        chunks_table()
+    ));
+    let symbol_count = symbol_count_opt.unwrap_or(0);
     let by_kind = libsql_wasm::query_params(
         &db_path,
-        "SELECT kind, COUNT(*) AS c FROM code_chunks GROUP BY kind ORDER BY c DESC LIMIT 10",
+        &format!("SELECT kind, COUNT(*) AS c FROM {} GROUP BY kind ORDER BY c DESC LIMIT 10", chunks_table()),
         &[],
     )
     .unwrap_or(Value::Array(Vec::new()));
     let largest_files = libsql_wasm::query_params(
         &db_path,
-        "SELECT path, COUNT(*) AS c FROM code_chunks GROUP BY path ORDER BY c DESC LIMIT 10",
+        &format!("SELECT path, COUNT(*) AS c FROM {} GROUP BY path ORDER BY c DESC LIMIT 10", chunks_table()),
         &[],
     )
     .unwrap_or(Value::Array(Vec::new()));
-    json!({
+    let mut out = json!({
         "file_count": file_count,
         "symbol_count": symbol_count,
         "by_kind": by_kind,
         "largest_files": largest_files,
         "digest": stored_digest(),
         "likely_orphaned": likely_orphaned_symbols(&db_path, 20),
-    })
+    });
+    if let Some(e) = count_error {
+        out["counts_unavailable"] = json!(true);
+        out["counts_error"] = json!(e);
+        crate::wasm_dispatch::emit_event("codeinsight_overview_counts_failed", json!({ "error": e }));
+    }
+    out
 }
 
 fn likely_orphaned_symbols(db_path: &str, limit: usize) -> Value {
     let candidates = libsql_wasm::query_params(
         db_path,
-        "SELECT id, path, kind, name, line_start FROM code_chunks \
-         WHERE kind IN ('function_item','function_declaration','method_definition') \
-         AND name != '' AND LENGTH(name) > 3 LIMIT 2000",
+        &format!(
+            "SELECT id, path, kind, name, line_start FROM {} \
+             WHERE kind IN ('function_item','function_declaration','method_definition') \
+             AND name != '' AND LENGTH(name) > 3 LIMIT 2000",
+            chunks_table()
+        ),
         &[],
     )
     .ok()
@@ -1309,7 +1345,7 @@ fn likely_orphaned_symbols(db_path: &str, limit: usize) -> Value {
         let pat_s = format!("%{}%", name);
         let count = libsql_wasm::query_params(
             db_path,
-            "SELECT COUNT(*) AS c FROM code_chunks WHERE id != ?1 AND body LIKE ?2",
+            &format!("SELECT SUM(c) AS c FROM (SELECT COUNT(*) AS c FROM {} WHERE id != ?1 AND body LIKE ?2 GROUP BY path)", chunks_table()),
             &[id_s.as_str(), pat_s.as_str()],
         )
         .ok()
@@ -1521,7 +1557,7 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
         Some(v) => v,
         None => {
             let like = format!("%{}%", query);
-            let sql = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM code_chunks WHERE body LIKE ?1 OR name LIKE ?1 LIMIT {}", k);
+            let sql = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM {} WHERE body LIKE ?1 OR name LIKE ?1 LIMIT {}", chunks_table(), k);
             return match libsql_wasm::query_params(&db_path, &sql, &[&like]) {
                 Ok(rows) => json!({ "ok": true, "mode": "fallback_like", "rows": rows }),
                 Err(e) => json!({ "ok": false, "mode": "fallback_like", "error": e }),
@@ -1545,7 +1581,7 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
         }
         Err(e) => {
             let like = format!("%{}%", query);
-            let sql2 = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM code_chunks WHERE body LIKE ?1 OR name LIKE ?1 LIMIT {}", k);
+            let sql2 = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM {} WHERE body LIKE ?1 OR name LIKE ?1 LIMIT {}", chunks_table(), k);
             match libsql_wasm::query_params(&db_path, &sql2, &[&like]) {
                 Ok(rows) => json!({ "ok": true, "mode": "fallback_like_after_vec_err", "vec_err": e, "rows": rows }),
                 Err(e2) => json!({ "ok": false, "vec_err": e, "fallback_err": e2 }),
