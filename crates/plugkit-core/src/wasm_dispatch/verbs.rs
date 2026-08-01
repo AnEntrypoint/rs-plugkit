@@ -176,12 +176,16 @@ fn plugin_response_envelope_contract() -> Value {
             "unfiltered_aggregate_on_vector_table": "An UNFILTERED aggregate over a libsql F32_BLOB vector table answers 0 even when the table is full. Measured on this repo's store: `SELECT COUNT(*) FROM rssearch_vectors` returns 0, and the subquery form without a WHERE also returns 0 -- but the same aggregate WITH any predicate returns 755, reconciling exactly against 428 live plus 327 tombstoned rows. The missing predicate is the trigger, not the aggregate. The query verbs pass SQL through untouched, so nothing stops a caller reading that 0 as an empty knowledgebase and acting on it (dropping the table, re-indexing, reporting data loss). Always count with a predicate, or count the <table>_vec_shadow companion. PRAGMA integrity_check is separately unreliable on these tables -- it fails with `unknown function: libsql_vector_idx()`, which is not corruption.",
         },
         "payload_field_by_verb": {
-            "bert.embed": "embedding",
+            "bert.embed": "embedding (plus `dim`); takes {text, kind} where kind=\"query\" selects the query conditioning, anything else is treated as a passage",
+            "bert.embed_batch": "embeddings (array, one per input); takes {texts}",
             "libsql.query": "rows",
             "libsql.query_params": "rows",
             "libsql.serialize": "bytes_b64 (also mirrored as `data` for older callers; `bytes_b64` is the contract field)",
-            "libsql.list_dbs": "dbs",
-            "treesitter.parse": "nodes",
+            "libsql.list_dbs": "dbs (always empty: connections are no longer tracked by name)",
+            "libsql.open/close/begin/commit/rollback": "ACCEPTED BUT INERT -- every exec/query is its own open-operate-close cycle, so these are no-ops kept only so existing callers do not break. A caller must not assume begin/commit gives it a transaction.",
+            "treesitter.parse": "nodes (plus `lang`, null when neither ext nor lang resolves -- an unresolved language is ok:true with an empty nodes array, NOT an error)",
+            "treesitter.extract_chunks": "chunks (plus `lang`)",
+            "treesitter.lang_for_ext": "lang (null when the extension is unrecognized)",
         },
     })
 }
