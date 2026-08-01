@@ -7,7 +7,6 @@ use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shar
 use crate::vecns::{self, QueryBudget, VecTableSpec};
 use crate::wasm_dispatch::plugin_call;
 
-const EMBED_BUDGET_MS: u64 = 30000;
 const MIN_EMBEDS_PER_PASS: u32 = 8;
 const DIFF_CHAR_CAP: usize = 4000;
 const LOG_WINDOW: usize = 500;
@@ -150,11 +149,12 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
     /// the cost of continuing through a dead embedder is a wedged daemon.
     const MAX_CONSECUTIVE_EMBED_FAILURES: u32 = 5;
     let mut consecutive_embed_failures: u32 = 0;
+    let embed_budget_ms = crate::ragconfig::RagConfig::resolved().bulk_embed.git_commit_embed_budget_ms;
     for (hash, subject) in &entries {
         if present.contains(hash) { continue; }
         if Some(hash.as_str()) == watermark.as_deref() { continue; }
         let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        if elapsed > EMBED_BUDGET_MS && embedded >= MIN_EMBEDS_PER_PASS {
+        if elapsed > embed_budget_ms && embedded >= MIN_EMBEDS_PER_PASS {
             deferred += 1;
             continue;
         }

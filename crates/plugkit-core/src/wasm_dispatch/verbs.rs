@@ -218,6 +218,10 @@ fn effective_config_report() -> Value {
             "bm25_b": cfg.scoring.bm25_b_document_length_normalization,
             "dedup_jaccard": cfg.scoring.dedup_jaccard_near_duplicate_threshold,
         },
+        "bulk_embed": {
+            "flat_json_migration_budget_ms": cfg.bulk_embed.flat_json_migration_budget_ms,
+            "git_commit_embed_budget_ms": cfg.bulk_embed.git_commit_embed_budget_ms,
+        },
         "embed_cache": {
             "query_cache_capacity": cfg.embed_cache.query_cache_capacity,
             "query_cache_ttl_ms": cfg.embed_cache.query_cache_ttl_ms,

@@ -359,7 +359,6 @@ fn host_kv_query_raw(namespace: &str, query: &str) -> Value {
     crate::wasm_dispatch::unpack_to_value_pub(packed)
 }
 
-const MIGRATE_BUDGET_MS: u64 = 2000;
 
 /// How many distinct row-write failures the migration reports individually
 /// before falling back to the aggregate count. Bounded so one systematically
@@ -424,7 +423,7 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
         if key == "__digest__" { continue; }
         if present.contains(key) { continue; }
         let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        if elapsed > MIGRATE_BUDGET_MS {
+        if elapsed > cfg.bulk_embed.flat_json_migration_budget_ms {
             deferred += 1;
             continue;
         }

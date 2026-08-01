@@ -214,6 +214,26 @@ impl IndexConfig {
     }
 }
 
+/// Wall budgets for the two background passes that embed in bulk: migrating a
+/// namespace off the legacy flat-JSON store, and vectorizing git commits.
+/// Both stop early when the budget runs out and resume on a later call, so a
+/// budget too small for a large repo means the pass never finishes -- and,
+/// like the memory sync, never signals that it did not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BulkEmbedBudgetConfig {
+    pub flat_json_migration_budget_ms: u64,
+    pub git_commit_embed_budget_ms: u64,
+}
+
+impl Default for BulkEmbedBudgetConfig {
+    fn default() -> Self {
+        BulkEmbedBudgetConfig {
+            flat_json_migration_budget_ms: 2000,
+            git_commit_embed_budget_ms: 30000,
+        }
+    }
+}
+
 /// Bounds on the in-process embedding caches. Capacity and TTL decide how
 /// much repeat work is avoided between Store evictions; the cacheability
 /// threshold decides which passages are worth remembering at all. A large
@@ -390,6 +410,7 @@ pub struct RagConfig {
     pub discipline_note: DisciplineNoteConfig,
     pub memory_sync: MemorySyncBudgetConfig,
     pub embed_cache: EmbedCacheConfig,
+    pub bulk_embed: BulkEmbedBudgetConfig,
 }
 
 impl Default for RagConfig {
@@ -411,6 +432,7 @@ impl Default for RagConfig {
             discipline_note: DisciplineNoteConfig::default(),
             memory_sync: MemorySyncBudgetConfig::default(),
             embed_cache: EmbedCacheConfig::default(),
+            bulk_embed: BulkEmbedBudgetConfig::default(),
         }
     }
 }
@@ -521,6 +543,8 @@ impl RagConfig {
         overwrite_present_usize_or_record_problem("memory_sync", "rename_batch_chunk", &mut cfg.memory_sync.rename_batch_chunk, &mut problems);
         overwrite_present_usize_or_record_problem("embed_cache", "query_cache_capacity", &mut cfg.embed_cache.query_cache_capacity, &mut problems);
         overwrite_present_usize_or_record_problem("embed_cache", "plain_cache_max_text_bytes", &mut cfg.embed_cache.plain_cache_max_text_bytes, &mut problems);
+        overwrite_present_u64_or_record_problem("bulk_embed", "flat_json_migration_budget_ms", &mut cfg.bulk_embed.flat_json_migration_budget_ms, &mut problems);
+        overwrite_present_u64_or_record_problem("bulk_embed", "git_commit_embed_budget_ms", &mut cfg.bulk_embed.git_commit_embed_budget_ms, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_k1", &mut cfg.scoring.bm25_k1_term_frequency_saturation, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_b", &mut cfg.scoring.bm25_b_document_length_normalization, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "fusion_rrf_k", &mut cfg.scoring.fusion_rrf_k, &mut problems);
