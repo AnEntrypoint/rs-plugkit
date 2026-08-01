@@ -159,10 +159,14 @@ pub fn has_compiled_default_for_prose_key(key: &str) -> bool {
 
 pub fn get_instruction(phase: &str) -> String {
     let upper = phase.trim().to_ascii_uppercase();
-    let key = match upper.as_str() {
-        "ENTRY" | "ORCHESTRATOR" | "" => "entry".to_string(),
-        "BROWSER" => "browser".to_string(),
-        _ => super::fsm::graph()
+    let g = super::fsm::graph();
+    // Pseudo-phases come from Policy, so a project can rename or add one
+    // without editing Rust. An empty phase is always the entry surface.
+    let pseudo = g.policy.pseudo_phases.iter().find(|(name, _)| name == &upper).map(|(_, key)| key.clone());
+    let key = match pseudo {
+        Some(k) => k,
+        None if upper.is_empty() => "entry".to_string(),
+        None => g
             .state(&upper)
             .map(|s| s.prose_key.clone())
             .unwrap_or_else(|| "entry".to_string()),
@@ -179,7 +183,8 @@ pub fn get_instruction(phase: &str) -> String {
 fn next_phase_hint(phase: &str) -> Option<String> {
     let upper = phase.trim().to_ascii_uppercase();
     let g = super::fsm::graph();
-    if upper.is_empty() || upper == "ENTRY" || upper == "ORCHESTRATOR" {
+    let is_entry_pseudo = g.policy.pseudo_phases.iter().any(|(name, key)| name == &upper && key == "entry");
+    if upper.is_empty() || is_entry_pseudo {
         return Some(g.policy.initial_phase.clone());
     }
     g.default_edge_from(&upper)
@@ -340,7 +345,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
 
     let is_valid_phase = |upper: &str| -> bool {
-        matches!(upper, "ENTRY" | "ORCHESTRATOR" | "BROWSER") || super::fsm::graph().has_state(upper)
+        super::fsm::graph().policy.pseudo_phases.iter().any(|(name, _)| name == upper) || super::fsm::graph().has_state(upper)
     };
     let phase = match raw_phase_opt.as_deref() {
         None => read_state().phase.as_str().to_string(),

@@ -72,6 +72,13 @@ pub struct Policy {
     /// check it does not want (a repo with no browser surface) or reorder them
     /// so the most actionable residual surfaces first, instead of that being a
     /// straight-line sequence in Rust.
+    /// Phase names that are not real FSM states but still resolve to prose --
+    /// ENTRY/ORCHESTRATOR for the pre-phase surface, BROWSER for the browser
+    /// witness prose. They were matched as string literals in four places, so a
+    /// project could add a state to its graph but never a pseudo-phase, and
+    /// renaming one meant editing Rust. Maps pseudo-phase name -> prose key.
+    #[serde(default = "default_pseudo_phases")]
+    pub pseudo_phases: Vec<(String, String)>,
     #[serde(default = "default_residual_checks")]
     pub residual_checks: Vec<String>,
     #[serde(default = "default_long_gap_same_burst_ms")]
@@ -140,6 +147,14 @@ fn default_mutables_resolved_statuses() -> Vec<String> {
 }
 fn default_reject_duplicate_witness() -> bool { true }
 fn default_initial_phase() -> String { "PLAN".to_string() }
+fn default_pseudo_phases() -> Vec<(String, String)> {
+    vec![
+        ("ENTRY".to_string(), "entry".to_string()),
+        ("ORCHESTRATOR".to_string(), "entry".to_string()),
+        ("BROWSER".to_string(), "browser".to_string()),
+    ]
+}
+
 fn default_residual_checks() -> Vec<String> {
     vec!["prd-open".to_string(), "browser-open".to_string(), "tasks-running".to_string(), "dirty-tree".to_string()]
 }
@@ -173,6 +188,7 @@ impl Default for Policy {
             mutables_resolved_statuses: default_mutables_resolved_statuses(),
             reject_duplicate_witness: default_reject_duplicate_witness(),
             initial_phase: default_initial_phase(),
+            pseudo_phases: default_pseudo_phases(),
             residual_checks: default_residual_checks(),
             long_gap_same_burst_ms: default_long_gap_same_burst_ms(),
             long_gap_retry_escalate_after: default_long_gap_retry_escalate_after(),
