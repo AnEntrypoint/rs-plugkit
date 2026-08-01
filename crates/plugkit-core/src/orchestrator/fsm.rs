@@ -26,6 +26,13 @@ pub struct GateDef {
     pub hook: Option<String>,
     #[serde(default)]
     pub hook_mode: HookMode,
+    /// The verb a caller should dispatch to clear this gate. Previously the
+    /// gate->recovery-verb mapping lived only as inline with_next calls in
+    /// Rust, so a project defining its own gate in fsm/graph.json could state
+    /// the denial message but not how to recover from it -- leaving the most
+    /// actionable half of a denial unexpressible in config.
+    #[serde(default)]
+    pub next_dispatch: Option<String>,
     pub message: String,
 }
 
@@ -527,6 +534,7 @@ fn default_graph() -> Graph {
                 predicate: Some("residual-scan-fired".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: Some("residual-scan".into()),
                 message: "transition rejected: residual-scan not fired in this stop window -- dispatch `residual-scan` before DECIDE -> COMPLETE.".into(),
             },
             GateDef {
@@ -534,6 +542,7 @@ fn default_graph() -> Graph {
                 predicate: Some("prd-all-closed".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: Some("prd-resolve".into()),
                 message: "transition rejected: PRD items still pending -- execute or remove them before transitioning.".into(),
             },
             GateDef {
@@ -541,6 +550,7 @@ fn default_graph() -> Graph {
                 predicate: Some("mutables-all-resolved".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: Some("mutable-resolve".into()),
                 message: "transition rejected: mutables still pending -- resolve them with witness_evidence before transitioning.".into(),
             },
             GateDef {
@@ -548,6 +558,7 @@ fn default_graph() -> Graph {
                 predicate: Some("worktree-clean".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: worktree dirty -- commit or revert before declaring done; an unpushed delta is an unwitnessed slice.".into(),
             },
             GateDef {
@@ -555,6 +566,7 @@ fn default_graph() -> Graph {
                 predicate: Some("ci-validated-fresh".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: CI/CD validation not witnessed fresh -- .gm/exec-spool/.ci-validated missing, stale, or not matching current HEAD sha. Witness the pipeline green for the pushed HEAD, then fs_write .gm/exec-spool/.ci-validated with {\"head_sha\":\"<git rev-parse HEAD>\"} and re-attempt.".into(),
             },
             GateDef {
@@ -562,6 +574,7 @@ fn default_graph() -> Graph {
                 predicate: Some("browser-witness-coverage".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: client-edit-no-witness -- one or more client-side files edited this session lack a matching browser-witness. Dispatch `browser` to page.evaluate the invariant each edit establishes, then re-attempt.".into(),
             },
             GateDef {
@@ -569,6 +582,7 @@ fn default_graph() -> Graph {
                 predicate: Some("app-loads-witnessed".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: this project declares a browser entrypoint (.gm/browser-config.json present) but no same-turn `browser` dispatch recorded a healthy app-loads witness. Absence of file edits is never grounds to skip this -- a confirmation/audit turn asserting the app works is itself a claim, and that claim needs the same live witness a code-change turn needs. Dispatch `browser` against the real running app, confirm it loads with zero console/page errors, then re-attempt.".into(),
             },
             GateDef {
@@ -576,6 +590,7 @@ fn default_graph() -> Graph {
                 predicate: Some("claim-audit-clean".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: claim-audit not fired in this stop window, or a prior fire found a stale claim -- dispatch `claim-audit` to scan AGENTS.md for shipped/validated/fixed claims referencing a commit hash and verify each hash actually exists in this repo's git log; resolve any stale finding before re-attempting.".into(),
             },
             GateDef {
@@ -583,6 +598,7 @@ fn default_graph() -> Graph {
                 predicate: Some("submodules-clean".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: submodule pointer drift -- one or more of gm's tracked submodule gitlinks (agentplug, rs-plugkit, rs-codeinsight, rs-search, agentplug-bert, agentplug-libsql, agentplug-treesitter) no longer match that submodule's own real HEAD. `git add <drifted-path>` for each, then git_commit/git_finalize to update gm's own pointer before re-attempting.".into(),
             },
             GateDef {
@@ -590,6 +606,7 @@ fn default_graph() -> Graph {
                 predicate: Some("no-synthetic-test-files".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: standing test file(s) introduced in the working diff -- VERIFY doctrine forbids them; verification is a live exec_js/browser witness against real code, never a suite. Remove the file(s) and re-attempt with a live witness.".into(),
             },
             GateDef {
@@ -597,6 +614,7 @@ fn default_graph() -> Graph {
                 predicate: Some("no-admit-deferral-markers".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: an admit/deferral marker (TODO/FIXME/XXX/HACK/unimplemented!/todo!/'not (yet) implemented') landed in the working diff -- a marker stands in for a complete proof. Finish the work or remove the marker, then re-attempt.".into(),
             },
             GateDef {
@@ -604,6 +622,7 @@ fn default_graph() -> Graph {
                 predicate: Some("no-secrets-in-diff".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: a line in the working diff matches a high-confidence secret shape (API key, private key header, inline-password connection string, bearer literal). Route the secret through an env var or secret store, never a tracked literal, then re-attempt.".into(),
             },
             GateDef {
@@ -611,6 +630,7 @@ fn default_graph() -> Graph {
                 predicate: Some("no-unchecked-panics-in-diff".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: a new non-test line panics, throws, or unwraps with no visible handling -- the exception model requires every raised error handled or explicitly propagated, never left to crash uncaught. Propagate (Result/catch) or remove, then re-attempt.".into(),
             },
             GateDef {
@@ -618,6 +638,7 @@ fn default_graph() -> Graph {
                 predicate: Some("no-hedge-language-in-diff".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: a hedge/deferral phrase in touched prose stands in for a decision ('todo later', 'in a future session', 'as a stopgap', 'good enough for now', 'left as an exercise', 'out of scope for this'). Commit to the real answer or remove the hedge, then re-attempt.".into(),
             },
             GateDef {
@@ -625,6 +646,7 @@ fn default_graph() -> Graph {
                 predicate: Some("no-graphical-symbols-in-diff".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: a decorative non-ASCII glyph landed in tracked source/prose (arrow, box-drawing, star, bullet, check/cross, emoji). Convert to its plain-ASCII equivalent, then re-attempt.".into(),
             },
             GateDef {
@@ -632,6 +654,7 @@ fn default_graph() -> Graph {
                 predicate: Some("idempotent-dispatch-replay-safe".into()),
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
                 message: "transition rejected: the same (id, hash) dispatch audit tuple was recorded with two different outcomes this stop window -- a replayed dispatch must reach the same result (f-compose-f-equals-f), never a second different mutation. Resolve the divergence, then re-attempt.".into(),
             },
         ],

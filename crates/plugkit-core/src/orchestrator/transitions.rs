@@ -563,7 +563,13 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
                 None => g.message.clone(),
             });
             if next_dispatch.is_none() {
-                next_dispatch = Some(match gate_name.as_str() {
+                // A gate may declare its own recovery verb in fsm/graph.json.
+                // The match below is the fallback for the builtin gates, kept
+                // so an operator-authored graph that omits next_dispatch still
+                // gets a sensible verb rather than a bare instruction.
+                next_dispatch = Some(match g.next_dispatch.as_deref() {
+                    Some(v) if !v.is_empty() => v,
+                    _ => match gate_name.as_str() {
                     "residual-scan-fired" => "residual-scan",
                     "prd-all-closed" => "prd-resolve",
                     "mutables-all-resolved" => "mutable-resolve",
@@ -573,7 +579,8 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
                     "app-loads-witnessed" => "browser",
                     "claim-audit-clean" => "claim-audit",
                     "submodules-clean" => "git_add",
-                    _ => "instruction",
+                        _ => "instruction",
+                    },
                 }.to_string());
             }
         }
