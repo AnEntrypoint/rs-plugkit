@@ -176,6 +176,34 @@ fn shared_store_contract() -> Value {
     })
 }
 
+/// Every file the FSM persists, with its live existence. These paths are a
+/// compatibility surface: a caller, a backup script, or an operator reading
+/// state depends on them staying where they are, and a config-driven refactor
+/// that silently relocated one would break those readers with no signal.
+/// Publishing them turns "did anything move" into one dispatch.
+fn persisted_paths_report() -> Value {
+    let paths = [
+        ".gm/turn-state.json",
+        ".gm/prd.yml",
+        ".gm/mutables.yml",
+        ".gm/residual-check-fired",
+        ".gm/claim-audit-fired",
+        ".gm/last-instruction-ts",
+        ".gm/exec-spool/.ci-validated",
+        ".gm/exec-spool/.turn-browser-edits.json",
+        ".gm/exec-spool/.turn-browser-witnessed",
+        ".gm/exec-spool/.gate-deviation-repeats.json",
+    ];
+    let live: Vec<Value> = paths
+        .iter()
+        .map(|p| json!({ "path": p, "exists": crate::pkfs::exists(p) }))
+        .collect();
+    json!({
+        "note": "these paths are a compatibility surface -- a reader outside this crate depends on each staying where it is",
+        "paths": live,
+    })
+}
+
 /// What each guard actually enforces, and -- more usefully -- what it does
 /// NOT. Enforcement is spread across three independent mechanisms with no
 /// shared descriptor, so a caller auditing what a verb may reach has to read
@@ -267,6 +295,7 @@ fn effective_config_report() -> Value {
             "git_commit_embed_budget_ms": cfg.bulk_embed.git_commit_embed_budget_ms,
         },
         "guards": guard_surface_report(),
+        "persisted_paths": persisted_paths_report(),
         "shared_store_contract": shared_store_contract(),
         "pipeline": {
             "ttl_ms": cfg.pipeline.ttl_ms,
