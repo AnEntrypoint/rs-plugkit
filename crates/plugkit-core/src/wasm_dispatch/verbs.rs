@@ -210,19 +210,110 @@ fn persisted_paths_report() -> Value {
 /// five separate call sites to find out. Publishing the surface makes an
 /// unguarded verb visible as a stated fact rather than as an absence nobody
 /// happened to notice.
+/// What a verb is allowed to reach, declared once instead of re-derived at
+/// each call site.
+///
+/// Enforcement previously lived in three independent mechanisms with no shared
+/// vocabulary, so answering "what may this verb touch" meant reading its arm.
+/// A verb now declares a class here and `guard_for` is the single lookup.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Capability {
+    ProjectPath,
+    EnvAllowlist,
+    KvNamespace,
+    Unguarded,
+}
+
+impl Capability {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Capability::ProjectPath => "path_within_project",
+            Capability::EnvAllowlist => "env_get",
+            Capability::KvNamespace => "kv_put",
+            Capability::Unguarded => "unguarded",
+        }
+    }
+}
+
+/// The declared capability of every verb that reaches outside this module.
+///
+/// Verbs absent from this table reach nothing guarded -- they read or write
+/// state this layer already owns. Absence is therefore meaningful and not an
+/// oversight, which is why the table lists only the guarded surface rather
+/// than every one of the dispatch arms.
+const VERB_CAPABILITIES: &[(&str, Capability)] = &[
+    ("fs_read", Capability::ProjectPath),
+    ("fs_write", Capability::ProjectPath),
+    ("fs_stat", Capability::ProjectPath),
+    ("fs_readdir", Capability::ProjectPath),
+    ("env_get", Capability::EnvAllowlist),
+    ("kv_put", Capability::KvNamespace),
+    ("fetch", Capability::Unguarded),
+    ("exec_js", Capability::Unguarded),
+    ("browser", Capability::Unguarded),
+];
+
+pub fn guard_for(verb: &str) -> Option<Capability> {
+    VERB_CAPABILITIES.iter().find(|(v, _)| *v == verb).map(|(_, c)| *c)
+}
+
+fn verbs_with_capability(cap: Capability) -> Vec<&'static str> {
+    VERB_CAPABILITIES.iter().filter(|(_, c)| *c == cap).map(|(v, _)| *v).collect()
+}
+
+/// Every verb the descriptor names must be dispatchable, or the published
+/// guard surface is advertising protection for something that does not exist.
+///
+/// This is not hypothetical: the hand-maintained list this table replaced
+/// claimed `fs_remove` was path-guarded, and there has never been an fs_remove
+/// verb. A reader auditing the surface would have concluded a delete path was
+/// guarded when there was no delete path at all.
+/// Mirrors the guarded arms of the dispatch match below.
+///
+/// Deliberately a separate list from the capability table rather than derived
+/// from it: if both came from one source, the check could never disagree with
+/// itself and would prove nothing. Two independently-maintained lists that
+/// must agree is the whole mechanism.
+fn guarded_verb_is_dispatchable(verb: &str) -> bool {
+    matches!(
+        verb,
+        "fs_read" | "fs_write" | "fs_stat" | "fs_readdir"
+            | "env_get" | "kv_put" | "fetch" | "exec_js" | "browser"
+    )
+}
+
+fn capability_conformance() -> Value {
+    let undispatchable: Vec<&str> = VERB_CAPABILITIES
+        .iter()
+        .map(|(v, _)| *v)
+        .filter(|v| !guarded_verb_is_dispatchable(v))
+        .collect();
+    json!({
+        "declared_verbs": VERB_CAPABILITIES.len(),
+        "undispatchable": undispatchable,
+        "conformant": undispatchable.is_empty(),
+        "note": "A non-empty `undispatchable` means the capability table names a verb dispatch cannot reach -- the published guard surface would be describing protection over nothing.",
+    })
+}
+
 fn guard_surface_report() -> Value {
     json!({
         "path_within_project": {
             "rejects": ["any .. segment", "absolute paths", "paths containing a drive colon"],
-            "applied_to": ["fs_read", "fs_write", "fs_remove", "fs_stat", "fs_readdir"],
+            "applied_to": verbs_with_capability(Capability::ProjectPath),
         },
         "env_get": {
+            "applied_to": verbs_with_capability(Capability::EnvAllowlist),
             "allowed_exact": ENV_GET_ALLOWED_EXACT,
             "allowed_prefixes": ENV_GET_ALLOWED_PREFIXES,
         },
-        "kv_put": { "allowed_namespaces": KV_PUT_ALLOWED_NAMESPACES },
+        "kv_put": {
+            "applied_to": verbs_with_capability(Capability::KvNamespace),
+            "allowed_namespaces": KV_PUT_ALLOWED_NAMESPACES,
+        },
+        "conformance": capability_conformance(),
         "unguarded": {
-            "verbs": ["fetch", "exec_js", "browser"],
+            "verbs": verbs_with_capability(Capability::Unguarded),
             "note": "These reach the network, a Node process, and a real browser with no allowlist of their own. That is deliberate -- they exist to run arbitrary caller-supplied work -- but it means the trust boundary for them is the CALLER, not this layer.",
         },
     })
