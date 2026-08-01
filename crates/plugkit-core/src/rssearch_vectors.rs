@@ -146,11 +146,36 @@ pub fn mark_deleted(namespace: &str, key: &str) -> Result<(), String> {
 }
 
 pub fn mark_deleted_cfg(namespace: &str, key: &str, cfg: &RagConfig) -> Result<(), String> {
+    mark_deleted_reporting_match_cfg(namespace, key, cfg).map(|_| ())
+}
+
+/// Returns whether a row was actually marked, not merely whether the UPDATE
+/// executed. An UPDATE matching zero rows succeeds, so a caller using the
+/// `Result` alone cannot tell "tombstoned an existing row" from "this key was
+/// never here" -- and one that treats Ok as proof of deletion reports success
+/// for every key it is handed.
+pub fn mark_deleted_reporting_match_cfg(namespace: &str, key: &str, cfg: &RagConfig) -> Result<bool, String> {
     if let Err(e) = ensure_schema_cfg(cfg) {
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
     }
+    let existed = shared_query_params(
+        &format!(
+            "SELECT count(1) AS n FROM (SELECT key FROM {} WHERE namespace=?1 AND key=?2 AND deleted=0)",
+            cfg.rssearch.table
+        ),
+        &[namespace, key],
+    )
+    .ok()
+    .and_then(|rows| rows.as_array()?.first()?.get("n")?.as_i64())
+    .unwrap_or(0)
+        > 0;
     let sql = format!("UPDATE {} SET deleted=1 WHERE namespace=?1 AND key=?2", cfg.rssearch.table);
-    shared_exec_params(&sql, &[namespace, key])
+    shared_exec_params(&sql, &[namespace, key])?;
+    Ok(existed)
+}
+
+pub fn mark_deleted_reporting_match(namespace: &str, key: &str) -> Result<bool, String> {
+    mark_deleted_reporting_match_cfg(namespace, key, &default_cfg())
 }
 
 pub fn undelete(namespace: &str, key: &str, updated_at_ms: i64) -> Result<(), String> {

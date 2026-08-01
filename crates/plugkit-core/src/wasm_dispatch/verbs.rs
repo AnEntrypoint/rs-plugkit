@@ -869,8 +869,22 @@ fn memorize_prune(body: &Value) -> u64 {
             let flat_rc = unsafe { host_kv_delete(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
             let _ = unsafe { host_kv_delete(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32) };
             let md_deleted = crate::memory_md::delete_memory(namespace, key);
-            let idx_marked = crate::rssearch_vectors::mark_deleted(namespace, key).is_ok();
-            if flat_rc != 0 || md_deleted {
+            let idx_marked = match crate::rssearch_vectors::mark_deleted_reporting_match(namespace, key) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Surfaced, not swallowed: an index write that fails is the
+                    // difference between a tombstoned row and a silently kept one.
+                    emit_event("memory.prune_index_error", json!({"key": key, "namespace": namespace, "error": e}));
+                    false
+                }
+            };
+            // `idx_marked` counts. A row that exists only in the vector index
+            // -- no flat KV entry, no markdown file -- was previously reported
+            // as not_found even though mark_deleted had just succeeded on it,
+            // and the not_found note told the caller nothing was pruned and to
+            // re-run. Both statements were false, and re-running could not
+            // help: the row was already gone from the index.
+            if flat_rc != 0 || md_deleted || idx_marked {
                 deleted.push(key.clone());
                 emit_event("memory.pruned", json!({"key": key, "namespace": namespace, "mode": "explicit-key", "md_deleted": md_deleted, "index_marked": idx_marked}));
             } else {
