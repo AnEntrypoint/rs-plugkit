@@ -337,41 +337,11 @@ fn flat_vec_embedding(ns: &str, key: &str) -> Option<Value> {
     if emb.as_array().map(|a| a.len()).unwrap_or(0) == cfg.dim() { Some(emb) } else { None }
 }
 
-fn remove_chunk(paths: &[String]) -> usize {
-    if paths.is_empty() {
-        return 0;
-    }
-    let payload = match serde_json::to_string(paths) {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
-    let code = format!(
-        "const fs=require('fs');const paths={};let n=0;for(const p of paths){{try{{fs.unlinkSync(p);n++;}}catch(e){{}}}}process.stdout.write('removed:'+n);",
-        payload
-    );
-    let opts = "{\"timeoutMs\":30000}";
-    let packed = unsafe {
-        crate::wasm_dispatch::host_exec_js(
-            code.as_ptr(), code.len() as u32,
-            opts.as_ptr(), opts.len() as u32,
-        )
-    };
-    let out = crate::wasm_dispatch::unpack_to_string_pub(packed).unwrap_or_default();
-    let parsed: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
-    parsed
-        .get("stdout")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.strip_prefix("removed:"))
-        .and_then(|n| n.parse::<usize>().ok())
-        .unwrap_or(0)
-}
-
 fn remove_batch(paths: &[String]) -> usize {
-    let mut total = 0usize;
-    for chunk in paths.chunks(RENAME_BATCH_CHUNK) {
-        total += remove_chunk(chunk);
-    }
-    total
+    paths
+        .iter()
+        .filter(|p| host_remove_file_never_directory(p))
+        .count()
 }
 
 fn recover_malformed_db() -> bool {
