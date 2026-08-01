@@ -847,10 +847,12 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
     };
     let chunk_rows = |fp: &str| -> usize { chunk_counts.get(fp).copied().unwrap_or(0) };
     let r = if root.is_empty() { "." } else { root };
-    let limit = max_files.max(50).min(2000);
+    let limit = max_files
+        .max(cfg.index.prune_pass_file_limit_floor)
+        .min(cfg.index.prune_pass_file_limit_ceiling);
     let files = collect_files(r, limit, &cfg.index);
-    const PRUNE_ENUMERATION_CAP: usize = 20000;
-    let full_files = if limit >= PRUNE_ENUMERATION_CAP { files.clone() } else { collect_files(r, PRUNE_ENUMERATION_CAP, &cfg.index) };
+    let prune_enumeration_cap = cfg.index.prune_enumeration_file_cap;
+    let full_files = if limit >= prune_enumeration_cap { files.clone() } else { collect_files(r, prune_enumeration_cap, &cfg.index) };
     {
         let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
@@ -1194,7 +1196,6 @@ fn embed_texts_batch(inputs: &[String]) -> Vec<Option<Vec<f32>>> {
     }
 }
 
-const DIGEST_MAX_FILES: usize = 2000;
 const DIGEST_PATH: &str = ".gm/exec-spool/.codeinsight-digest";
 
 fn digest_from_entries(mut entries: Vec<(String, u32)>) -> String {
@@ -1219,7 +1220,7 @@ pub fn current_digest() -> String {
 /// never agree -- the same class of mismatch that made the stored digest
 /// permanently unequal to the computed one.
 pub fn current_digest_cfg(cfg: &crate::ragconfig::RagConfig) -> String {
-    let files = collect_files(".", DIGEST_MAX_FILES, &cfg.index);
+    let files = collect_files(".", cfg.index.digest_max_files, &cfg.index);
     let mut entries: Vec<(String, u32)> = Vec::new();
     for raw_fp in &files {
         let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();

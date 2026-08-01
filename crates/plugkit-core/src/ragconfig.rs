@@ -147,6 +147,19 @@ pub struct IndexConfig {
     pub extra_skip_dirs_appended_to_builtins_never_replacing: Vec<String>,
     pub extra_skip_file_suffixes_appended_to_builtins_never_replacing: Vec<String>,
     pub force_include_path_substrings_overriding_every_skip: Vec<String>,
+    /// Ceiling on files enumerated when deciding which chunk rows to prune.
+    /// A repo larger than this silently keeps rows for the files past the cap,
+    /// so a monorepo needs to raise it rather than discover stale rows later.
+    pub prune_enumeration_file_cap: usize,
+    /// Ceiling on files walked to compute the corpus digest. Two repos that
+    /// differ only past this cap produce the same digest, so an index can
+    /// believe it is converged when it is not.
+    pub digest_max_files: usize,
+    /// Bounds the caller-supplied file limit for a prune pass. The floor stops
+    /// a tiny limit from making a pass pointless; the ceiling stops one pass
+    /// from walking an unbounded tree.
+    pub prune_pass_file_limit_floor: usize,
+    pub prune_pass_file_limit_ceiling: usize,
 }
 
 impl Default for IndexConfig {
@@ -173,6 +186,10 @@ impl Default for IndexConfig {
             extra_skip_dirs_appended_to_builtins_never_replacing: Vec::new(),
             extra_skip_file_suffixes_appended_to_builtins_never_replacing: Vec::new(),
             force_include_path_substrings_overriding_every_skip: Vec::new(),
+            prune_enumeration_file_cap: 20000,
+            digest_max_files: 2000,
+            prune_pass_file_limit_floor: 50,
+            prune_pass_file_limit_ceiling: 2000,
         }
     }
 }
@@ -438,6 +455,10 @@ impl RagConfig {
         append_present_strings_or_record_problem("index", "extra_skip_dirs", &mut cfg.index.extra_skip_dirs_appended_to_builtins_never_replacing, &mut problems);
         append_present_strings_or_record_problem("index", "extra_skip_file_suffixes", &mut cfg.index.extra_skip_file_suffixes_appended_to_builtins_never_replacing, &mut problems);
         append_present_strings_or_record_problem("index", "force_include_path_substrings", &mut cfg.index.force_include_path_substrings_overriding_every_skip, &mut problems);
+        overwrite_present_usize_or_record_problem("index", "prune_enumeration_file_cap", &mut cfg.index.prune_enumeration_file_cap, &mut problems);
+        overwrite_present_usize_or_record_problem("index", "digest_max_files", &mut cfg.index.digest_max_files, &mut problems);
+        overwrite_present_usize_or_record_problem("index", "prune_pass_file_limit_floor", &mut cfg.index.prune_pass_file_limit_floor, &mut problems);
+        overwrite_present_usize_or_record_problem("index", "prune_pass_file_limit_ceiling", &mut cfg.index.prune_pass_file_limit_ceiling, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_k1", &mut cfg.scoring.bm25_k1_term_frequency_saturation, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "bm25_b", &mut cfg.scoring.bm25_b_document_length_normalization, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "fusion_rrf_k", &mut cfg.scoring.fusion_rrf_k, &mut problems);

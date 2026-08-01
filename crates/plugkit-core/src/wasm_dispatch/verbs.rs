@@ -218,6 +218,14 @@ fn effective_config_report() -> Value {
             "bm25_b": cfg.scoring.bm25_b_document_length_normalization,
             "dedup_jaccard": cfg.scoring.dedup_jaccard_near_duplicate_threshold,
         },
+        "index": {
+            "wall_budget_ms": cfg.index.wall_budget_ms,
+            "max_file_bytes": cfg.index.max_file_bytes,
+            "prune_enumeration_file_cap": cfg.index.prune_enumeration_file_cap,
+            "digest_max_files": cfg.index.digest_max_files,
+            "prune_pass_file_limit_floor": cfg.index.prune_pass_file_limit_floor,
+            "prune_pass_file_limit_ceiling": cfg.index.prune_pass_file_limit_ceiling,
+        },
         "budget": {
             "default_limit": cfg.budget.default_limit,
             "default_k": cfg.budget.default_k,
