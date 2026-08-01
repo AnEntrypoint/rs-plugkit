@@ -238,6 +238,9 @@ fn effective_config_report() -> Value {
         "index": {
             "wall_budget_ms": cfg.index.wall_budget_ms,
             "max_file_bytes": cfg.index.max_file_bytes,
+            "split_chunk_above_bytes": cfg.index.split_chunk_above_bytes,
+            "max_chunks_per_file_per_pass": cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only,
+            "pessimistic_ms_per_chunk": cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound,
             "prune_enumeration_file_cap": cfg.index.prune_enumeration_file_cap,
             "digest_max_files": cfg.index.digest_max_files,
             "prune_pass_file_limit_floor": cfg.index.prune_pass_file_limit_floor,
