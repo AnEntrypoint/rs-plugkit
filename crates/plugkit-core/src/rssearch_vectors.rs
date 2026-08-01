@@ -170,9 +170,26 @@ pub fn row_count(namespace: &str) -> Option<i64> {
     row_count_cfg(namespace, &default_cfg())
 }
 
+/// Counts live rows only, and never with an UNFILTERED scan.
+///
+/// An unfiltered aggregate over a libsql F32_BLOB vector table answers 0 even
+/// when the table is full. Measured on this repo's store: `SELECT COUNT(*)
+/// FROM rssearch_vectors` returns 0, and so does the subquery form without a
+/// WHERE -- but the same aggregate WITH any predicate returns 755, which
+/// reconciles exactly against 428 live plus 327 tombstoned rows. It is the
+/// missing predicate, not the aggregate, that produces the false empty.
+///
+/// This matters more than a wrong number: a caller reading 0 would conclude
+/// the knowledgebase is empty and could reasonably drop the table or re-index
+/// from scratch. The `deleted=0` filter both avoids the hazard and answers the
+/// question a caller actually means -- how many rows are live, not how many
+/// tombstones are still on disk.
 pub fn row_count_cfg(namespace: &str, cfg: &RagConfig) -> Option<i64> {
     ensure_schema_cfg(cfg).ok()?;
-    let sql = format!("SELECT COUNT(*) AS n FROM {} WHERE namespace=?1", cfg.rssearch.table);
+    let sql = format!(
+        "SELECT count(1) AS n FROM (SELECT key FROM {} WHERE namespace=?1 AND deleted=0)",
+        cfg.rssearch.table
+    );
     let rows = shared_query_params(&sql, &[namespace]).ok()?;
     rows.as_array()?.first()?.get("n")?.as_i64()
 }
