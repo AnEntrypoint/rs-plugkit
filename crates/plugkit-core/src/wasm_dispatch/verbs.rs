@@ -158,6 +158,24 @@ pub const ERR_CODE_INVALID_ARGS: &str = "invalid_args";
 pub const ERR_CODE_PANIC: &str = "panic";
 pub const ERR_CODE_GATE_DENIED: &str = "gate_denied";
 
+/// The concurrency contract over the shared store, written down because it
+/// was previously implicit: the guest hands libsql an absolute path and the
+/// plugin opens whatever it is given, with no namespacing, no ownership
+/// claim, and nothing stating what two simultaneous callers may expect.
+/// Every clause below was established by measurement in this repo, not
+/// assumed.
+fn shared_store_contract() -> Value {
+    json!({
+        "identity": "the resolved file path IS the identity -- libsql routes by path alone and ignores the `db` handle name for any real file (that field is consulted only for :memory:), so two callers naming the same file share one store and two projects with different files cannot collide",
+        "isolation": "none beyond the path. There is no per-plugin namespace and no ownership claim; any plugin handed the path reaches the whole store, including tables another plugin created.",
+        "locking": "the WASI VFS has no OS file locking and serializes with a <db>.lock DIRECTORY. It is created before a write and removed after, so an unclean exit leaves it behind and every later write returns SQLITE_BUSY forever -- no holder to find, no timeout that expires it, survives reboots. A locked error now names the directory and the remedy.",
+        "busy_timeout_ms": 8000,
+        "busy_timeout_ceiling_rule": "must stay well under the host dispatch deadline (40s). A wait that outlives the epoch budget TRAPS the instance instead of returning a reportable SQLITE_BUSY, and a trap carries no error text -- contention then looks like a crash.",
+        "journal_mode": "WAL where the conversion succeeds. It needs an exclusive lock, so it is attempted once per process per path and memoized only on a verified read-back -- PRAGMA journal_mode=WAL returns OK while silently doing nothing when it cannot take the lock.",
+        "aggregate_hazard": "an UNFILTERED aggregate over an F32_BLOB vector table answers 0 even when the table is full. Count with a predicate, or with SUM over a GROUP BY subquery, or against the <table>_vec_shadow companion. A bare COUNT(*) reporting 0 is not evidence of an empty store.",
+    })
+}
+
 /// What each guard actually enforces, and -- more usefully -- what it does
 /// NOT. Enforcement is spread across three independent mechanisms with no
 /// shared descriptor, so a caller auditing what a verb may reach has to read
@@ -249,6 +267,7 @@ fn effective_config_report() -> Value {
             "git_commit_embed_budget_ms": cfg.bulk_embed.git_commit_embed_budget_ms,
         },
         "guards": guard_surface_report(),
+        "shared_store_contract": shared_store_contract(),
         "db_path": {
             "state_root_dir": cfg.db_path.state_root_dir,
             "db_filename": cfg.db_path.db_filename,
