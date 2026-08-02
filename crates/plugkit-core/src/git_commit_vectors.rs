@@ -29,8 +29,24 @@ pub fn ensure_schema() -> Result<(), String> {
     ensure_schema_cfg(&default_cfg())
 }
 
+static SCHEMA_ENSURED: std::sync::Mutex<Option<std::collections::HashSet<(String, usize)>>> =
+    std::sync::Mutex::new(None);
+
+pub fn forget_ensured_schema() {
+    if let Some(seen) = SCHEMA_ENSURED.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        seen.clear();
+    }
+}
+
 pub fn ensure_schema_cfg(cfg: &RagConfig) -> Result<(), String> {
     let path = shared_db_path();
+    let memo_key = (path.clone(), cfg.dim());
+    {
+        let guard = SCHEMA_ENSURED.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.as_ref().is_some_and(|seen| seen.contains(&memo_key)) {
+            return Ok(());
+        }
+    }
     shared_ensure_open(&path)?;
     // Mismatch guard BEFORE the CREATE -- see the identical ordering note in
     // rssearch_vectors::ensure_schema_cfg. `CREATE TABLE IF NOT EXISTS` will
@@ -41,6 +57,11 @@ pub fn ensure_schema_cfg(cfg: &RagConfig) -> Result<(), String> {
         cfg.git_commits.table, cfg.dim()
     ))?;
     spec(&path, cfg).ensure_index();
+    SCHEMA_ENSURED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(std::collections::HashSet::new)
+        .insert(memo_key);
     Ok(())
 }
 
