@@ -581,11 +581,22 @@ struct FileManifest {
     /// once, which repopulates it.
     digest_hash: Option<u32>,
     mtime_ms: f64,
+    /// Byte size at last index, alongside mtime_ms for the stat-only fast
+    /// path's change-detection guard. mtime ALONE is not a safe cache key: a
+    /// coarse-granularity filesystem (FAT32's 2s resolution) or a fast
+    /// automated restore can reproduce an identical mtime on genuinely
+    /// changed content. Size does not catch every edit either (a same-length
+    /// in-place byte change), but combined with the existing chunk-row-count
+    /// check it costs nothing extra -- host_stat already returns size on the
+    /// same call mtime comes from -- so there is no reason not to use it.
+    /// Optional for the same backward-compat reason as digest_hash: older
+    /// manifest rows without it simply skip this check once.
+    size: Option<u64>,
     commit_overview: Option<String>,
     chunks: Vec<ChunkRecord>,
 }
 
-fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, commit_overview: &Option<String>, chunks: &[ChunkRecord]) -> String {
+fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, size: u64, commit_overview: &Option<String>, chunks: &[ChunkRecord]) -> String {
     let arr: Vec<Value> = chunks.iter().map(|c| json!({
         "key": c.key,
         "kind": c.kind,
@@ -595,7 +606,7 @@ fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, commit
         "emb": c.emb,
         "ch": c.content_hash,
     })).collect();
-    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "digest_hash": digest_hash, "mtime_ms": mtime_ms, "commit_overview": commit_overview, "chunks": arr }).to_string()
+    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "digest_hash": digest_hash, "mtime_ms": mtime_ms, "size": size, "commit_overview": commit_overview, "chunks": arr }).to_string()
 }
 
 fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
@@ -626,6 +637,7 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     let hash = parsed.get("hash").and_then(|h| h.as_u64())? as u32;
     let digest_hash = parsed.get("digest_hash").and_then(|h| h.as_u64()).map(|h| h as u32);
     let mtime_ms = parsed.get("mtime_ms").and_then(|m| m.as_f64()).unwrap_or(0.0);
+    let size = parsed.get("size").and_then(|s| s.as_u64());
     let commit_overview = parsed.get("commit_overview").and_then(|v| v.as_str()).map(String::from);
     let arr = parsed.get("chunks").and_then(|c| c.as_array())?;
     let mut chunks = Vec::with_capacity(arr.len());
@@ -644,7 +656,7 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
         let content_hash = c.get("ch").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
         chunks.push(ChunkRecord { key, kind, name, ls, le, emb, content_hash });
     }
-    Some((fp, FileManifest { hash, digest_hash, mtime_ms, commit_overview, chunks }))
+    Some((fp, FileManifest { hash, digest_hash, mtime_ms, size, commit_overview, chunks }))
 }
 
 /// Whether a path lives inside a submodule, so per-file git history is skipped.
@@ -959,12 +971,23 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
                 .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
             {
                 let stat_mtime = stat.get("mtime_ms").and_then(|v| v.as_f64());
+                let stat_size = stat.get("size").and_then(|v| v.as_u64());
                 // Only take the stat-only fast path when the manifest can supply
                 // this file's digest contribution; without it we cannot produce a
                 // digest that current_digest() will reproduce, and skipping the
                 // read would poison the whole-tree digest (see digest_hash docs).
+                //
+                // mtime equality ALONE is not a safe cache key -- a coarse
+                // filesystem mtime granularity or a fast restore can reproduce an
+                // identical timestamp on genuinely changed content. Size is a
+                // zero-cost additional signal from the same stat call; a manifest
+                // written before this field existed has size=None, which makes
+                // the size check vacuously true (`m.size.is_none() ||`) so an
+                // older row is not forced down the full-read path just for
+                // predating this guard.
+                let size_matches = m.size.is_none() || stat_size == m.size;
                 if let (Some(mtime), Some(dh)) = (stat_mtime, m.digest_hash) {
-                    if mtime == m.mtime_ms && libsql_ok && chunk_rows(fp) == m.chunks.len() {
+                    if mtime == m.mtime_ms && size_matches && libsql_ok && chunk_rows(fp) == m.chunks.len() {
                         seen.insert(fp.clone());
                         indexed += 1;
                         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
@@ -990,6 +1013,7 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
             .or_else(|| host_read(&format!("/{}", fp)))
         { Some(c) => c, None => continue };
         if content.len() > cfg.index.max_file_bytes { continue; }
+        let file_size = content.len() as u64;
         let file_mtime = crate::wasm_dispatch::host_stat(fp)
             .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
             .and_then(|s| s.get("mtime_ms").and_then(|v| v.as_f64()))
@@ -1180,7 +1204,7 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
             } else {
                 compute_commit_overview(fp)
             };
-            fv_put(&manifest_ns(), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, &commit_overview, &records));
+            fv_put(&manifest_ns(), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, file_size, &commit_overview, &records));
         } else {
             fv_delete(&manifest_ns(), fp);
         }
