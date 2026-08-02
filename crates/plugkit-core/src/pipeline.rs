@@ -162,7 +162,6 @@ pub fn build_pending_step(text: &str, namespace: &str, project_path: Option<&str
         "pipeline": [
             { "step": "summarize", "status": "pending", "id": step_id }
         ],
-        "results_so_far": {},
         "created_ms": now,
         "deadline_ms": deadline_ms,
         "attempts_used": 0,
