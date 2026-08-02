@@ -355,11 +355,17 @@ impl Default for MemorySyncBudgetConfig {
         MemorySyncBudgetConfig {
             embed_budget_ms: 1500,
             total_budget_ms: 2000,
-            rekey_rows_deadline_ms: 3500,
+            rekey_rows_deadline_ms: 1800,
             shadow_abort_threshold: 5,
             rekey_batch_max: 25,
             rename_batch_chunk: 60,
         }
+    }
+}
+
+impl MemorySyncBudgetConfig {
+    pub fn rekey_rows_deadline_within_total(&self) -> u64 {
+        self.rekey_rows_deadline_ms.min(self.total_budget_ms)
     }
 }
 

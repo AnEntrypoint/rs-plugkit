@@ -447,11 +447,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
         return json!({ "converged": false, "error": "memories md meta/files table ensure failed" });
     }
     let budget = crate::ragconfig::RagConfig::resolved().memory_sync;
-    let budget_embed_ms = budget.embed_budget_ms;
-    let budget_total_ms = budget.total_budget_ms;
-    let budget_rekey_deadline_ms = budget.rekey_rows_deadline_ms;
     let budget_shadow_abort = budget.shadow_abort_threshold;
-    let budget_rekey_batch = budget.rekey_batch_max;
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut recreated = false;
     let mut converged = true;
@@ -687,7 +683,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
             }));
             for (key, text, emb, updated) in &rekey_rows {
                 let total_elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-                if total_elapsed > budget.rekey_rows_deadline_ms {
+                if total_elapsed > budget.rekey_rows_deadline_within_total() {
                     break;
                 }
                 let rc = write_row(key, text, emb, *updated, &mut upserted, &mut failed, &mut shadow_failed);
