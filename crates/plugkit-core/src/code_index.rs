@@ -1441,21 +1441,34 @@ pub struct ChunkMeta {
     pub le: usize,
 }
 
+fn normalized_path(path: &str) -> &str {
+    path.trim_start_matches("./").trim_start_matches('/')
+}
+
 pub struct FusionCorpus {
     metas: Vec<ChunkMeta>,
     file_cache: std::collections::HashMap<String, Option<String>>,
     overview_by_path: std::collections::HashMap<String, String>,
+    index_by_key: std::collections::HashMap<String, usize>,
+    index_by_path_line: std::collections::HashMap<(String, usize), usize>,
 }
 
 impl FusionCorpus {
     pub fn load() -> Self {
         let mut metas = Vec::new();
         let mut overview_by_path = std::collections::HashMap::new();
+        let mut index_by_key = std::collections::HashMap::new();
+        let mut index_by_path_line = std::collections::HashMap::new();
         for (fp, m) in load_manifests() {
             if let Some(ov) = &m.commit_overview {
                 overview_by_path.insert(fp.clone(), ov.clone());
             }
             for c in &m.chunks {
+                let at = metas.len();
+                index_by_key.entry(c.key.clone()).or_insert(at);
+                index_by_path_line
+                    .entry((normalized_path(&fp).to_string(), c.ls))
+                    .or_insert(at);
                 metas.push(ChunkMeta {
                     key: c.key.clone(),
                     path: fp.clone(),
@@ -1466,16 +1479,22 @@ impl FusionCorpus {
                 });
             }
         }
-        FusionCorpus { metas, file_cache: std::collections::HashMap::new(), overview_by_path }
+        FusionCorpus {
+            metas,
+            file_cache: std::collections::HashMap::new(),
+            overview_by_path,
+            index_by_key,
+            index_by_path_line,
+        }
     }
 
     pub fn overview_for_key(&self, key: &str) -> Option<String> {
-        let m = self.metas.iter().find(|m| m.key == key)?;
+        let m = self.metas.get(*self.index_by_key.get(key)?)?;
         self.overview_by_path.get(&m.path).cloned()
     }
 
     pub fn symbol_for_key(&self, key: &str) -> Option<Value> {
-        let m = self.metas.iter().find(|m| m.key == key)?;
+        let m = self.metas.get(*self.index_by_key.get(key)?)?;
         Some(json!({
             "path": m.path,
             "kind": m.kind,
@@ -1493,17 +1512,12 @@ impl FusionCorpus {
     }
 
     pub fn key_for_path_line(&self, path: &str, ls: usize) -> Option<String> {
-        let norm = path.trim_start_matches("./").trim_start_matches('/');
-        self.metas.iter()
-            .find(|m| {
-                let mp = m.path.trim_start_matches("./").trim_start_matches('/');
-                mp == norm && m.ls == ls
-            })
-            .map(|m| m.key.clone())
+        let at = *self.index_by_path_line.get(&(normalized_path(path).to_string(), ls))?;
+        self.metas.get(at).map(|m| m.key.clone())
     }
 
     pub fn text_for_key(&mut self, key: &str) -> Option<String> {
-        let i = self.metas.iter().position(|m| m.key == key)?;
+        let i = *self.index_by_key.get(key)?;
         let (path, name, ls, le) = {
             let m = &self.metas[i];
             (m.path.clone(), m.name.clone(), m.ls, m.le)
