@@ -72,6 +72,7 @@ fn write_turn_summary(
     mutables_pending: usize,
     update_available: &serde_json::Value,
     config_changed_count: usize,
+    longgap_threshold_ms: u64,
 ) {
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
     let last_instruction_ts = pkfs::read_to_string(
@@ -88,7 +89,7 @@ fn write_turn_summary(
         "mutables_pending_count": mutables_pending,
         "last_instruction_ts": last_instruction_ts,
         "last_instruction_age_ms": last_instruction_ts.map(|t| now_ms.saturating_sub(t)),
-        "long_gap_threshold_ms": super::fsm::graph().policy.longgap_threshold_ms,
+        "long_gap_threshold_ms": longgap_threshold_ms,
         "update_available": update_available.clone(),
         "config_changed_count": config_changed_count,
     });
@@ -319,6 +320,7 @@ fn idev(_event: &str, _detail: &str) {}
 
 pub fn handle_instruction(content: &str) -> (String, String, i32) {
     ilog(&format!("instruction::handle start body_len={}", content.len()));
+    let graph = super::fsm::graph();
     let trimmed = content.trim();
     let mut session_id_opt: Option<String> = None;
     let mut prompt_opt: Option<String> = None;
@@ -345,7 +347,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
 
     let is_valid_phase = |upper: &str| -> bool {
-        super::fsm::graph().policy.pseudo_phases.iter().any(|(name, _)| name == upper) || super::fsm::graph().has_state(upper)
+        graph.policy.pseudo_phases.iter().any(|(name, _)| name == upper) || graph.has_state(upper)
     };
     let phase = match raw_phase_opt.as_deref() {
         None => read_state().phase.as_str().to_string(),
@@ -354,7 +356,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
             if upper.is_empty() || is_valid_phase(&upper) {
                 if upper.is_empty() { read_state().phase.as_str().to_string() } else { upper }
             } else {
-                let known: Vec<String> = super::fsm::graph().states.iter().map(|s| s.key.clone()).collect();
+                let known: Vec<String> = graph.states.iter().map(|s| s.key.clone()).collect();
                 ilog(&format!(
                     "instruction::handle invalid phase '{}' (len={}); falling back to disk state. Valid (active graph): {}",
                     &p.chars().take(80).collect::<String>(),
@@ -384,7 +386,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         !p.trim().is_empty() && is_valid_phase(&p.trim().to_ascii_uppercase())
     }).unwrap_or(false);
 
-    let policy = super::fsm::graph().policy;
+    let policy = graph.policy.clone();
     let initial_phase = policy.initial_phase.clone();
     let terminal_phase = policy.terminal_phase.clone();
 
@@ -396,7 +398,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         phase = initial_phase.clone();
         let mut st = read_state();
         st.phase = Phase::parse(&initial_phase)
-            .or_else(|| super::fsm::graph().states.first().and_then(|s| Phase::parse(&s.key)))
+            .or_else(|| graph.states.first().and_then(|s| Phase::parse(&s.key)))
             .unwrap_or_else(Phase::plan);
         let _ = super::state::write_state(&st);
     }
@@ -406,7 +408,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
             phase = initial_phase.clone();
             let mut st = read_state();
             st.phase = Phase::parse(&initial_phase)
-                .or_else(|| super::fsm::graph().states.first().and_then(|s| Phase::parse(&s.key)))
+                .or_else(|| graph.states.first().and_then(|s| Phase::parse(&s.key)))
                 .unwrap_or_else(Phase::plan);
             let _ = super::state::write_state(&st);
             ilog(&format!("instruction::handle fresh prompt on {} chain -> reset phase to {}", terminal_phase, initial_phase));
@@ -517,12 +519,13 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         mutables_pending_count,
         &update_available,
         config_changed.as_array().map(|a| a.len()).unwrap_or(0),
+        graph.policy.longgap_threshold_ms,
     );
 
     let payload = json!({
         "phase": phase,
         "fsm_graph_rejected": super::fsm::graph_rejection(),
-        "fsm_gates_weaker_than_default": super::fsm::gates_missing_vs_default(&super::fsm::graph())
+        "fsm_gates_weaker_than_default": super::fsm::gates_missing_vs_default(&graph)
             .into_iter()
             .map(|(from, to, missing)| json!({ "from": from, "to": to, "missing_gates": missing }))
             .collect::<Vec<_>>(),
