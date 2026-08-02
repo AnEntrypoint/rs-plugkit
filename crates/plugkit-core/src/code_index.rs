@@ -1348,13 +1348,17 @@ pub fn overview() -> Value {
             }
         }
     };
-    let file_count_opt = count_via(format!("SELECT COUNT(DISTINCT path) AS c FROM {}", chunks_table()));
-    let file_count = file_count_opt.unwrap_or(0);
-    // SUM over a GROUP BY subquery, not a bare COUNT(*): an unfiltered
+    // COUNT via a GROUP BY subquery, not a bare aggregate: an unfiltered
     // aggregate over an F32_BLOB vector table answers 0 even when the table is
     // full. Measured on this repo's store -- COUNT(*) on code_chunks returns 0
     // (and still 0 with a predicate) while this form returns 138, matching the
-    // _vec_shadow companion exactly.
+    // _vec_shadow companion exactly. file_count hit the identical bug via
+    // COUNT(DISTINCT path) and is fixed the same way.
+    let file_count_opt = count_via(format!(
+        "SELECT COUNT(*) AS c FROM (SELECT path FROM {} GROUP BY path)",
+        chunks_table()
+    ));
+    let file_count = file_count_opt.unwrap_or(0);
     let symbol_count_opt = count_via(format!(
         "SELECT SUM(c) AS c FROM (SELECT COUNT(*) AS c FROM {} GROUP BY path)",
         chunks_table()
