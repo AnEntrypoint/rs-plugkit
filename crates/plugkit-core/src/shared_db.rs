@@ -90,6 +90,7 @@ pub fn recover_malformed_shared_db() -> bool {
         return false;
     }
     crate::rssearch_vectors::forget_ensured_schema();
+    crate::rssearch_vectors::forget_migration_complete();
     crate::git_commit_vectors::forget_ensured_schema();
     crate::rssearch_vectors::ensure_schema().is_ok()
 }

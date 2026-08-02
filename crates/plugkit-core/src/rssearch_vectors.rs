@@ -506,6 +506,23 @@ fn host_kv_query_raw(namespace: &str, query: &str) -> Value {
 /// suppress the reporting of genuine write failures after it.
 const MIGRATE_REPORTED_FAILURES: u32 = 5;
 
+/// Namespaces confirmed fully migrated this process, so `rssearch_vector_hits`
+/// (called on every vector query) can skip straight past this entire function
+/// without paying `host_kv_query_raw`'s full flat-namespace scan just to
+/// recompute a `flat_total` that was already known to be satisfied. This is
+/// the same one-entry-per-key memoization shape as `git_commit_vectors`'s
+/// `SCHEMA_ENSURED` -- once a namespace's migration is done, it stays done for
+/// the lifetime of this process; `forget_ensured_schema`'s sibling below lets
+/// a caller invalidate it the same way the schema cache is invalidated.
+static MIGRATION_COMPLETE: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+
+pub fn forget_migration_complete() {
+    if let Some(seen) = MIGRATION_COMPLETE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        seen.clear();
+    }
+}
+
 pub fn migrate_namespace_from_flat_json(namespace: &str, now_ms: i64) -> Result<Value, String> {
     migrate_namespace_from_flat_json_cfg(namespace, now_ms, &default_cfg())
 }
@@ -513,6 +530,12 @@ pub fn migrate_namespace_from_flat_json(namespace: &str, now_ms: i64) -> Result<
 pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &RagConfig) -> Result<Value, String> {
     if namespace.is_empty() {
         return Err("migrate_namespace_from_flat_json: namespace required".to_string());
+    }
+    {
+        let guard = MIGRATION_COMPLETE.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.as_ref().map(|s| s.contains(namespace)).unwrap_or(false) {
+            return Ok(json!({ "migrated": false, "reason": "already-populated-memoized", "namespace": namespace }));
+        }
     }
     ensure_schema_cfg(cfg)?;
     let vec_ns = cfg.namespaces.vec_namespace(namespace);
@@ -524,6 +547,11 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
     let flat_total = entries.iter().filter(|e| e.get("key").and_then(|k| k.as_str()).map(|k| k != "__digest__").unwrap_or(false)).count() as i64;
     let existing = row_count_cfg(namespace, cfg).unwrap_or(0);
     if existing >= flat_total {
+        MIGRATION_COMPLETE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(std::collections::HashSet::new)
+            .insert(namespace.to_string());
         return Ok(json!({ "migrated": false, "reason": "already-populated", "existing_rows": existing }));
     }
     let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -594,5 +622,15 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
         "write_failure_count": write_failures,
         "deferred_count": deferred,
     }));
+    if deferred == 0 {
+        // This pass drained the whole backlog with nothing left over -- mark
+        // complete now rather than waiting for one more call to rediscover
+        // that fact via a fresh flat_total/existing comparison.
+        MIGRATION_COMPLETE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(std::collections::HashSet::new)
+            .insert(namespace.to_string());
+    }
     Ok(json!({ "migrated": true, "namespace": namespace, "migrated_count": migrated, "skipped_count": skipped, "deferred_count": deferred }))
 }
