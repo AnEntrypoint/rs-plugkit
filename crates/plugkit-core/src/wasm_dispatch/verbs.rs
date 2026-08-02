@@ -2243,7 +2243,17 @@ fn git_commit(body: &Value) -> u64 {
         return ok("git_commit", json!({ "nothing_to_commit": true }));
     }
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-    let _ = git_call_argv(&["add", "-A"], cwd);
+    // `no_add: true` commits exactly what a prior git_add already staged,
+    // without a second blanket `git add -A` sweeping in every OTHER file that
+    // has changed on disk since -- including another session's still-in-flight
+    // unstaged edit on a shared/concurrently-driven repo. Default stays `-A`
+    // for the common single-session convenience-commit case; a caller that
+    // explicitly staged specific paths via git_add is the one asking to opt
+    // out of the blanket sweep.
+    let no_add = body.get("no_add").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !no_add {
+        let _ = git_call_argv(&["add", "-A"], cwd);
+    }
     let bundled_message = bundle_prd_commit_comments(cwd, message);
     let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
     if allow_empty { argv.push("--allow-empty"); }
