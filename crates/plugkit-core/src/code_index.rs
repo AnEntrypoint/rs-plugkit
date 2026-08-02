@@ -1625,11 +1625,15 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
     let qvec = match inline_embedding.and_then(json_to_f32_vec).or_else(|| embed_text(query)) {
         Some(v) => v,
         None => {
+            crate::wasm_dispatch::emit_event("codesearch_degraded_to_substring", json!({
+                "reason": "no query embedding available; results are substring matches, not semantic ranking",
+                "mode": "fallback_like",
+            }));
             let like = format!("%{}%", query);
             let sql = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM {} WHERE body LIKE ?1 OR name LIKE ?1 LIMIT {}", chunks_table(), k);
             return match libsql_wasm::query_params(&db_path, &sql, &[&like]) {
-                Ok(rows) => json!({ "ok": true, "mode": "fallback_like", "rows": rows }),
-                Err(e) => json!({ "ok": false, "mode": "fallback_like", "error": e }),
+                Ok(rows) => json!({ "ok": true, "degraded": true, "degraded_reason": "embedding unavailable", "mode": "fallback_like", "rows": rows }),
+                Err(e) => json!({ "ok": false, "degraded": true, "mode": "fallback_like", "error": e }),
             };
         }
     };
@@ -1649,11 +1653,16 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
             }
         }
         Err(e) => {
+            crate::wasm_dispatch::emit_event("codesearch_degraded_to_substring", json!({
+                "reason": "vector query failed; results are substring matches, not semantic ranking",
+                "mode": "fallback_like_after_vec_err",
+                "vec_err": e,
+            }));
             let like = format!("%{}%", query);
             let sql2 = format!("SELECT path, kind, name, line_start, line_end, substr(body,1,400) AS snippet FROM {} WHERE body LIKE ?1 OR name LIKE ?1 LIMIT {}", chunks_table(), k);
             match libsql_wasm::query_params(&db_path, &sql2, &[&like]) {
-                Ok(rows) => json!({ "ok": true, "mode": "fallback_like_after_vec_err", "vec_err": e, "rows": rows }),
-                Err(e2) => json!({ "ok": false, "vec_err": e, "fallback_err": e2 }),
+                Ok(rows) => json!({ "ok": true, "degraded": true, "degraded_reason": "vector query failed", "mode": "fallback_like_after_vec_err", "vec_err": e, "rows": rows }),
+                Err(e2) => json!({ "ok": false, "degraded": true, "vec_err": e, "fallback_err": e2 }),
             }
         }
     }

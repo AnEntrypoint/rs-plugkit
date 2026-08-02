@@ -92,7 +92,8 @@ pub fn recall_hits_reporting_embed_failure(query_text: &str, limit: u32) -> (ser
         rlog("recall::recall_hits kv_query returned");
         let kv_hits = crate::wasm_dispatch::unpack_to_value_pub(packed);
         let result = if kv_hits.is_null() { serde_json::Value::Array(Vec::new()) } else { kv_hits };
-        emit_recall(&query, &result, "kv_query", namespace);
+        let mode = if embed_failed { "kv_query_degraded" } else { "kv_query" };
+        emit_recall(&query, &result, mode, namespace);
         (result, embed_failed)
     }
     #[cfg(not(target_arch = "wasm32"))]
