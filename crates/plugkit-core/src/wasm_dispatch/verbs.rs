@@ -1130,9 +1130,21 @@ fn memorize_prune(body: &Value) -> u64 {
         let mut deleted = Vec::new();
         let mut not_found = Vec::new();
         for key in &keys {
-            let flat_rc = unsafe { host_kv_delete(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
-            let _ = unsafe { host_kv_delete(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32) };
-            let md_deleted = crate::memory_md::delete_memory(namespace, key);
+            // Order is load-bearing: the SQL tombstone runs FIRST, THEN the
+            // markdown file removal. memory_md.rs's sync reconciliation loop
+            // only resurrects a tombstoned row (deleted=1) when it finds an
+            // ON-DISK FILE with matching text AND deleted==0 -- so a crash
+            // between these two steps under the OLD order (file-then-SQL)
+            // left a real resurrection window: file gone, SQL still
+            // deleted=0, and while the missing file itself would not
+            // resurrect anything on the NEXT sync (the loop only visits
+            // files that exist), a differently-timed sync running mid-prune
+            // (concurrent daemon activity) could see the file gone but the
+            // row still live and never learn it should be tombstoned at all.
+            // Tombstoning FIRST means any crash after this point leaves
+            // deleted=1 on disk immediately -- the reconciliation loop's own
+            // `deleted == 0` guard (memory_md.rs) then structurally cannot
+            // resurrect it even if the file removal below never completes.
             let idx_marked = match crate::rssearch_vectors::mark_deleted_reporting_match(namespace, key) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1142,6 +1154,9 @@ fn memorize_prune(body: &Value) -> u64 {
                     false
                 }
             };
+            let flat_rc = unsafe { host_kv_delete(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
+            let _ = unsafe { host_kv_delete(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32) };
+            let md_deleted = crate::memory_md::delete_memory(namespace, key);
             // `idx_marked` counts. A row that exists only in the vector index
             // -- no flat KV entry, no markdown file -- was previously reported
             // as not_found even though mark_deleted had just succeeded on it,
