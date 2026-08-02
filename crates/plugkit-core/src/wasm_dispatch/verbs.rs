@@ -1553,11 +1553,28 @@ fn record_app_loads_witness_from_response(cwd: &str, v: &Value) {
     crate::browser_witness::record_app_loads_witness_unconditional_on_edits(cwd, healthy, &detail);
 }
 
+const BROWSER_SUPPORTED_BODY_SHAPES: &str = "sessionId=<id>\\n<shape>, session new, session list, session close <id>, session reset <id>, <bare https:// URL>, url=<url>\\n<expr>, timeout=<ms>\\n<expr>, screenshot[=name]\\n<expr>, dom=<selector>\\n<expr>, capture\\n<expr>, profile\\n<expr>, trace\\n<expr>, or a bare JS expression";
+
 fn browser(body: &Value, body_s: &str) -> u64 {
-    let code = body.get("code").and_then(|v| v.as_str()).map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| body_s.to_string());
-    if code.is_empty() { return err("browser", "code required (provide JS body or {code, cwd?, sessionId?} JSON)"); }
+    let envelope_code = body.get("code").or_else(|| body.get("body"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    let code = match envelope_code {
+        Some(c) => c,
+        None if body.is_object() => return err_json("browser", json!({
+            "error": "browser takes a plain-text body, never a JSON object. The supplied JSON object carries neither a `code` nor a `body` string field, so there is no script to run; evaluating the raw JSON text as JavaScript would launch a Chrome instance only to fail with an opaque SyntaxError.",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
+            "received_keys": body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+        })),
+        None => body_s.to_string(),
+    };
+    if code.trim().is_empty() { return err_json("browser", json!({
+        "error": "browser body is empty -- provide one of the supported plain-text shapes",
+        "error_code": ERR_CODE_INVALID_ARGS,
+        "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
+    })); }
     let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
     let explicit_sid = body.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     let session_id = if !explicit_sid.is_empty() {
