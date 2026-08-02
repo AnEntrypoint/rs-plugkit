@@ -182,12 +182,14 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     let porcelain = porcelain_output();
     if on("dirty-tree") && !porcelain.trim().is_empty() {
         let (modified, untracked) = count_modified_untracked(&porcelain);
-        let reason = crate::prose::resolve_and_mark(
+        let reason = crate::prose::fill_placeholders(
             "residual/dirty-tree",
-            RESIDUAL_DIRTY_TREE_DEFAULT,
-        )
-        .replace("{modified}", &modified.to_string())
-        .replace("{untracked}", &untracked.to_string());
+            &crate::prose::resolve_and_mark("residual/dirty-tree", RESIDUAL_DIRTY_TREE_DEFAULT),
+            &[
+                ("modified", modified.to_string()),
+                ("untracked", untracked.to_string()),
+            ],
+        );
         let severity = super::deviations::effective_severity("residual-dirty-tree");
         let payload = serde_json::json!({
             "scan": "skipped",

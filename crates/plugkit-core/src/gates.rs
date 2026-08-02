@@ -347,12 +347,17 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 log_deviation("long-gap-no-instruction", &format!("verb={} gap_ms={}", verb, gap_ms));
             }
             return GateVerdict::deny(
-                crate::prose::resolve_and_mark(
+                crate::prose::fill_placeholders(
                     "gates/long-gap-no-instruction",
-                    GATE_LONG_GAP_NO_INSTRUCTION_DEFAULT,
-                )
-                .replace("{gap_ms}", &gap_ms.to_string())
-                .replace("{threshold_ms}", &longgap_threshold_ms.to_string()),
+                    &crate::prose::resolve_and_mark(
+                        "gates/long-gap-no-instruction",
+                        GATE_LONG_GAP_NO_INSTRUCTION_DEFAULT,
+                    ),
+                    &[
+                        ("gap_ms", gap_ms.to_string()),
+                        ("threshold_ms", longgap_threshold_ms.to_string()),
+                    ],
+                ),
             );
         }
     }

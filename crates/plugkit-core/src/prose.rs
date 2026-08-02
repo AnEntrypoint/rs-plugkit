@@ -89,6 +89,68 @@ impl Outcome {
 /// The entry point every call site uses. Reporting lives here rather than in
 /// [`resolve_detailed`] so the pure resolution stays side-effect-free and
 /// callable from a harness.
+/// Substitute `{name}` placeholders, reporting a template that lost or invented one.
+///
+/// A vendored message is free text an operator wrote, so it can silently drop a
+/// placeholder the call site fills -- a dirty-tree message without `{modified}`
+/// still reads fine while losing the counts entirely -- or invent one the call
+/// site never supplies, which then renders literally as `{staged}`.
+pub fn fill_placeholders(key: &str, template: &str, values: &[(&str, String)]) -> String {
+    let mut out = template.to_string();
+    let mut missing: Vec<&str> = Vec::new();
+    for (name, value) in values {
+        let token = format!("{{{name}}}");
+        if out.contains(&token) {
+            out = out.replace(&token, value);
+        } else {
+            missing.push(name);
+        }
+    }
+    let unfilled = remaining_placeholders(&out);
+    if !missing.is_empty() || !unfilled.is_empty() {
+        report_placeholder_mismatch(key, &missing, &unfilled);
+    }
+    out
+}
+
+fn remaining_placeholders(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if let Some(end) = text[i + 1..].find('}') {
+                let inner = &text[i + 1..i + 1 + end];
+                if !inner.is_empty()
+                    && inner.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                {
+                    found.push(inner.to_string());
+                }
+                i += end + 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    found
+}
+
+#[cfg(target_arch = "wasm32")]
+fn report_placeholder_mismatch(key: &str, missing: &[&str], unfilled: &[String]) {
+    crate::wasm_dispatch::emit_event(
+        "prose_placeholder_mismatch",
+        serde_json::json!({
+            "key": key,
+            "never_substituted": missing,
+            "left_literal_in_output": unfilled,
+            "detail": "a resolved message dropped a placeholder this call site fills (its value is lost from the output) or names one the call site never supplies (it renders literally). Both read as working text.",
+        }),
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn report_placeholder_mismatch(_key: &str, _missing: &[&str], _unfilled: &[String]) {}
+
 pub fn resolve(key: &str, default: &str) -> String {
     let (text, outcome) = resolve_detailed(key, default);
     report(key, &outcome);
