@@ -73,12 +73,41 @@ fn predicate_result(name: &str) -> bool {
     }
 }
 
+/// A bare "present" check cannot tell this stop window's own residual-scan
+/// firing from an arbitrarily old one left over because a hook never ran to
+/// clear it -- fail-OPEN is the dangerous direction for a COMPLETE gate, so
+/// the marker now carries "<session_id>:<fired_at_ms>" (residual.rs's
+/// writer) and this reader validates it against the CURRENT session, not
+/// merely its presence. Session-id equality is the primary signal (an exact
+/// stop-window identifier, matching what the row asking for this fix
+/// suggested); a fired_sid empty or a current session_id unavailable falls
+/// back to the time bound (Policy.longgap_threshold_ms, the same "how stale
+/// is too stale" constant already used elsewhere for session-gap detection)
+/// so a dispatch with no session_id attached is not permanently unable to
+/// pass this gate.
 #[cfg(target_arch = "wasm32")]
 fn residual_scan_fired() -> bool {
     let residual_marker = super::gm_dir().join("residual-check-fired");
-    crate::pkfs::read_to_string(&residual_marker.to_string_lossy().to_string())
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
+    let raw = match crate::pkfs::read_to_string(&residual_marker.to_string_lossy().to_string()) {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => return false,
+    };
+    let mut parts = raw.trim().splitn(2, ':');
+    let fired_sid = parts.next().unwrap_or("");
+    let fired_at_ms: u64 = match parts.next().and_then(|s| s.parse().ok()) {
+        Some(ms) => ms,
+        // Legacy bare "fired" sentinel (pre-wire-format-change marker still
+        // on disk) has no timestamp -- treat as stale rather than trusting a
+        // format this reader can no longer interpret.
+        None => return false,
+    };
+    let current_sid = super::state::read_state().session_id.unwrap_or_default();
+    if !fired_sid.is_empty() && !current_sid.is_empty() {
+        return fired_sid == current_sid;
+    }
+    let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let threshold_ms = super::fsm::graph().policy.longgap_threshold_ms;
+    now_ms.saturating_sub(fired_at_ms) <= threshold_ms
 }
 // Fail-closed like the sibling `pred_remote_hook_refused` stub above: the
 // native (non-wasm32) build has no filesystem-backed marker to check (no

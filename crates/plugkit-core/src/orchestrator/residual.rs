@@ -202,8 +202,18 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
         return deviation_scan_result(payload, severity, &reason);
     }
 
+    // Wire format: "<session_id>:<fired_at_ms>", not a bare "fired" sentinel.
+    // A bare existence check cannot distinguish this stop window's own scan
+    // from an arbitrarily old one left over because a hook never ran to
+    // clear it -- the dangerous direction for a COMPLETE gate, since it fails
+    // OPEN (silently allows a transition whose residual scan never actually
+    // ran this window) rather than closed. The reader (transitions.rs's
+    // residual_scan_fired) checks session_id equality first, then a time
+    // bound as the fallback for a dispatch with no session_id attached.
     let marker_s = marker.to_string_lossy().to_string();
-    let _ = pkfs::write(&marker_s, "fired");
+    let fired_sid = super::state::read_state().session_id.unwrap_or_default();
+    let fired_at_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let _ = pkfs::write(&marker_s, &format!("{}:{}", fired_sid, fired_at_ms));
 
     let message = crate::prose::resolve_and_mark("residual/imperative", RESIDUAL_IMPERATIVE_DEFAULT);
     let payload = serde_json::json!({
