@@ -80,8 +80,16 @@ fn residual_scan_fired() -> bool {
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false)
 }
+// Fail-closed like the sibling `pred_remote_hook_refused` stub above: the
+// native (non-wasm32) build has no filesystem-backed marker to check (no
+// pkfs on this target), so hardcoding `true` here made a COMPLETE-gate
+// predicate that should require a real residual-scan dispatch silently
+// pass on every native build. `false` matches the same convention the
+// remote-hook-refused substitution already uses -- inconsequential in
+// practice while wasip1 is the only shipped/maintained build target, but
+// consistent and correct if a native test path is ever exercised for real.
 #[cfg(not(target_arch = "wasm32"))]
-fn residual_scan_fired() -> bool { true }
+fn residual_scan_fired() -> bool { false }
 
 fn prd_has_open_items() -> bool {
     let (body, _err, code) = prd::handle_list("");
