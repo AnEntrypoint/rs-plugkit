@@ -56,7 +56,7 @@ A supervisor respawns the watcher under fresh code on `wrapper.drift`/`version.d
 
 ## State
 
-`cwd/.gm/`: `prd.yml`, `mutables.yml`, `exec-spool/{in,out}/`, `gm-fired-<sessionId>`, `rs-learn.db`, `disciplines/<ns>/`, `code-search/`. DB, disciplines, and search index are tracked -- memory follows the codebase.
+`cwd/.gm/`: `prd.yml`, `mutables.yml`, `exec-spool/{in,out}/`, `gm-fired-<sessionId>`, `gm.db`, `disciplines/<ns>/`, `code-search/`. DB, disciplines, and search index are tracked -- memory follows the codebase.
 
 ## Spool ABI
 
