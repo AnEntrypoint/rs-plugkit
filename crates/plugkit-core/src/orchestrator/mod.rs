@@ -64,10 +64,47 @@ fn sleep_ms(ms: u64) {
     }
 }
 
+fn current_cwd_string() -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::wasm_dispatch::host_cwd_string().unwrap_or_default()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
+    }
+}
+
+struct ProjectRootCacheEntryScopedToOneCwdNeverGlobal {
+    cwd: String,
+    root: PathBuf,
+}
+
+static PROJECT_ROOT_CACHE: std::sync::Mutex<Option<ProjectRootCacheEntryScopedToOneCwdNeverGlobal>> =
+    std::sync::Mutex::new(None);
+
+/// `git rev-parse --show-toplevel --git-common-dir` shells a subprocess (wasm:
+/// via the host git bridge, native: a real `git` child process) on every call.
+/// The project root cannot change within a process's lifetime for a fixed cwd,
+/// so this is cached exactly like `pkfs::project_root`'s `ROOT_CACHE` -- keyed
+/// by cwd (never a bare global), so a legitimate cwd change (a worktree
+/// switch, a different project driving the same shared process) still
+/// resolves fresh rather than serving a stale root for the wrong tree.
 fn resolve_project_root_with_retry() -> PathBuf {
+    let cwd = current_cwd_string();
+    if let Ok(cache) = PROJECT_ROOT_CACHE.lock() {
+        if let Some(entry) = cache.as_ref() {
+            if entry.cwd == cwd {
+                return entry.root.clone();
+            }
+        }
+    }
     let mut last_err_attempts = 0u32;
     for attempt in 0..RESOLVE_MAX_ATTEMPTS {
         if let Some(root) = git_common_dir_project_root_once() {
+            if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
+                *cache = Some(ProjectRootCacheEntryScopedToOneCwdNeverGlobal { cwd, root: root.clone() });
+            }
             return root;
         }
         last_err_attempts = attempt + 1;
