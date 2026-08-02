@@ -164,33 +164,108 @@ pub fn resolve(key: &str, default: &str) -> String {
     text
 }
 
+/// One tier's verdict: it answered, it has nothing for this key (fall
+/// through), it is configured but broken (fall through, but the caller must
+/// report it), or the key itself is unusable (terminal -- every remaining
+/// tier interpolates the SAME key into the SAME kind of path, so a key that
+/// escapes tier 1's base also escapes every other tier's; consulting them
+/// would not recover, only delay the identical verdict). `NotConfigured` and
+/// `Miss` both fall through identically -- the distinction only matters to
+/// the `SourceRead` tier that already tracks it for reporting; this enum is
+/// what every tier's fall-through-or-answer shape collapses to at the
+/// chokepoint.
+enum TierResult {
+    Answered(String, Outcome),
+    FallThrough,
+    FallThroughDegraded(Outcome),
+    Terminal(Outcome),
+}
+
+/// Tier 1: project-vendored `.gm/instructions/<key>.md` overrides everything.
+/// `cfg-tier1-project-vendored-precedence`'s own row: unconditional precedence,
+/// already the case here since this tier runs first and returns immediately
+/// on any non-blank hit. The path-escape case is `Terminal`, not a fall-
+/// through degradation, matching the pre-refactor behavior exactly: a key
+/// that fails `path_contained_within` here would fail identically in every
+/// later tier (they all interpolate the same key into a path the same way),
+/// so falling through would only delay an unreachable outcome, not recover
+/// one.
+fn tier1_project_vendored(key: &str) -> TierResult {
+    let local_path = format!("{LOCAL_BASE}/{key}.md");
+    if !crate::config_path::path_contained_within(LOCAL_BASE, &local_path) {
+        return TierResult::Terminal(Outcome::Degraded {
+            reason: format!("prose key resolves to {local_path}, which escapes {LOCAL_BASE}"),
+        });
+    }
+    match read_clean(&local_path) {
+        Some(text) => TierResult::Answered(text, Outcome::LocalOverride),
+        None => TierResult::FallThrough,
+    }
+}
+
+/// Tier 2: an in-project default-settings repo, named by `.gm/instructions/source.json`.
+/// Falls through to tier 3 internally today (`read_from_source_repo` already
+/// chains into `read_from_config_repo` when no `source.json` exists) -- kept
+/// as one function here rather than split further because tier 2 and tier 3
+/// currently share ALL of their cache-reading logic (`read_from_cache_root`);
+/// splitting them at this chokepoint without also giving tier 3 a genuinely
+/// separate cache location would misrepresent two names for one code path as
+/// two independent tiers.
+fn tier2_in_project_repo(key: &str) -> TierResult {
+    match read_from_source_repo(key) {
+        SourceRead::Hit(text) => TierResult::Answered(text, Outcome::SourceRepo),
+        SourceRead::NotConfigured => TierResult::FallThrough,
+        SourceRead::Miss => TierResult::FallThrough,
+        SourceRead::Broken(reason) => TierResult::FallThroughDegraded(Outcome::Degraded { reason }),
+        SourceRead::ConfigRepoUnreachable(reason) => {
+            TierResult::FallThroughDegraded(Outcome::ConfigRepoUnreachable { reason })
+        }
+    }
+}
+
+/// Tier 3: a user-wide default-settings repo (e.g. `~/.gm-defaults/source.json`),
+/// distinct from tier 2's PROJECT-scoped `source.json`. Genuinely unimplemented,
+/// not a stub standing in for real behavior -- `cfg-tier3-user-wide-repo-spec-
+/// sandbox-escape`'s own row is the blocking prerequisite: gm.wasm's fs sandbox
+/// is rooted at the project cwd (fsm_vendor.rs:134), so reading a home-directory
+/// config needs one of the three named sandbox-escape techniques that row must
+/// choose between (host_env_get+host_fs_read, host_exec_js, or host_plugin_call)
+/// before this tier can read anything. Always falls through so the chokepoint's
+/// existing 3-tier behavior is unchanged until that row lands the real read.
+fn tier3_user_wide_repo(_key: &str) -> TierResult {
+    TierResult::FallThrough
+}
+
 /// Resolve without emitting. Returns the text and which tier produced it.
+///
+/// ONE chokepoint, four tiers in strict precedence order, first non-empty
+/// answer wins; the compiled `default` is the answer no tier can fail to
+/// produce. Each `cfg-tier*` row's own scope is exactly the corresponding
+/// `tierN_*` function below -- this function only sequences them, so a tier's
+/// internal behavior can change without touching the other three or any of
+/// this chokepoint's 9 call sites.
 pub fn resolve_detailed(key: &str, default: &str) -> (String, Outcome) {
     if let Err(reason) = validate_prose_key(key) {
         return (default.to_string(), Outcome::Degraded { reason });
     }
 
-    let local_path = format!("{LOCAL_BASE}/{key}.md");
-    if !crate::config_path::path_contained_within(LOCAL_BASE, &local_path) {
-        return (
-            default.to_string(),
-            Outcome::Degraded {
-                reason: format!("prose key resolves to {local_path}, which escapes {LOCAL_BASE}"),
-            },
-        );
-    }
-    if let Some(text) = read_clean(&local_path) {
-        return (text, Outcome::LocalOverride);
+    let mut pending_degraded: Option<Outcome> = None;
+    for tier in [tier1_project_vendored, tier2_in_project_repo, tier3_user_wide_repo] {
+        match tier(key) {
+            TierResult::Answered(text, outcome) => return (text, outcome),
+            TierResult::Terminal(outcome) => return (default.to_string(), outcome),
+            TierResult::FallThrough => {}
+            TierResult::FallThroughDegraded(outcome) => {
+                if pending_degraded.is_none() {
+                    pending_degraded = Some(outcome);
+                }
+            }
+        }
     }
 
-    match read_from_source_repo(key) {
-        SourceRead::Hit(text) => (text, Outcome::SourceRepo),
-        SourceRead::NotConfigured => (default.to_string(), Outcome::CompiledDefault),
-        SourceRead::Miss => (default.to_string(), Outcome::CompiledDefault),
-        SourceRead::Broken(reason) => (default.to_string(), Outcome::Degraded { reason }),
-        SourceRead::ConfigRepoUnreachable(reason) => {
-            (default.to_string(), Outcome::ConfigRepoUnreachable { reason })
-        }
+    match pending_degraded {
+        Some(outcome) => (default.to_string(), outcome),
+        None => (default.to_string(), Outcome::CompiledDefault),
     }
 }
 
