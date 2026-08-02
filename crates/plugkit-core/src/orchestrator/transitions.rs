@@ -513,6 +513,18 @@ impl HookOutcome {
 fn hook_outcome(hook_path: &str) -> HookOutcome {
     let Some(full) = fsm::resolve_hook_path(hook_path) else { return HookOutcome::Missing };
     let Some(script) = crate::pkfs::read_to_string(&full) else { return HookOutcome::Missing };
+    // A remote-tier (source-repo) or local-override config can supply a hook
+    // that executes arbitrary JS via host_exec_js -- an intentional, already-
+    // documented capability (fsm_vendor.rs's own merge-policy notes), not a
+    // sandboxing gap to close. What WAS missing is an audit trail: the only
+    // existing event fires when a compiled-default-tier hook is REFUSED
+    // (pred_remote_hook_refused's substitution), never when a remote/local
+    // hook actually DOES execute. Emitting one here closes that visibility
+    // gap without touching the execution path itself.
+    crate::wasm_dispatch::emit_event("fsm_hook_executing", serde_json::json!({
+        "hook_path": hook_path,
+        "resolved_path": full,
+    }));
     let opts = serde_json::json!({ "timeoutMs": fsm::graph().policy.hook_timeout_ms }).to_string();
     let packed = unsafe {
         crate::wasm_dispatch::host_exec_js(
