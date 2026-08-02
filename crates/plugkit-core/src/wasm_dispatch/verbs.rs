@@ -309,7 +309,7 @@ fn guard_surface_report() -> Value {
         },
         "kv_put": {
             "applied_to": verbs_with_capability(Capability::KvNamespace),
-            "allowed_namespaces": KV_PUT_ALLOWED_NAMESPACES,
+            "allowed_namespaces": kv_put_allowed_namespaces(),
         },
         "conformance": capability_conformance(),
         "unguarded": {
@@ -690,13 +690,35 @@ fn kv_get(body: &Value) -> u64 {
 
 const KV_PUT_ALLOWED_NAMESPACES: &[&str] = &["default", "session", "config", "cache", "user"];
 
+/// The compiled allowlist plus any project-configured additions.
+///
+/// Additive by construction: a project can widen this for its own namespaces
+/// but cannot revoke a compiled one, so a config file can never break a caller
+/// that predates it.
+fn kv_put_allowed_namespaces() -> Vec<String> {
+    let mut all: Vec<String> = KV_PUT_ALLOWED_NAMESPACES.iter().map(|s| s.to_string()).collect();
+    for extra in &crate::ragconfig::RagConfig::resolved().namespaces.kv_put_extra {
+        if !all.iter().any(|a| a == extra) {
+            all.push(extra.clone());
+        }
+    }
+    all
+}
+
+fn kv_put_namespace_permitted(ns: &str) -> bool {
+    kv_put_allowed_namespaces().iter().any(|a| a == ns)
+}
+
 fn kv_put(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
     let val = body.get("value").and_then(|v| v.as_str()).unwrap_or("");
     if key.is_empty() { return err("kv_put", "key required"); }
-    if !KV_PUT_ALLOWED_NAMESPACES.contains(&ns) {
-        return err("kv_put", "namespace not permitted; allowed: default, session, config, cache, user");
+    if !kv_put_namespace_permitted(ns) {
+        return err(
+            "kv_put",
+            &format!("namespace not permitted; allowed: {}", kv_put_allowed_namespaces().join(", ")),
+        );
     }
     let rc = unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
     if rc != 0 { ok("kv_put", json!({"bytes": val.len()})) } else { err("kv_put", "put failed") }
