@@ -448,6 +448,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
     }
     let budget = crate::ragconfig::RagConfig::resolved().memory_sync;
     let budget_shadow_abort = budget.shadow_abort_threshold;
+    crate::vecns::begin_shadow_row_recovery_pass();
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut recreated = false;
     let mut converged = true;
@@ -761,7 +762,10 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
         }));
     }
     let _ = now_ms;
-    json!({ "converged": converged, "report": report })
+    match crate::vecns::index_left_dirty_by_shadow_rows() {
+        Some(index) => json!({ "converged": converged, "report": report, "vector_index_rebuilt": index }),
+        None => json!({ "converged": converged, "report": report }),
+    }
 }
 
 pub fn flat_kv_entries(ns: &str) -> Vec<(String, String)> {

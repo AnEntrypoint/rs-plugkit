@@ -115,6 +115,27 @@ pub fn is_shadow_row_err(err: &str) -> bool {
     crate::libsql_wasm::classify_error(err) == crate::libsql_wasm::LibsqlErrorKind::ShadowRow
 }
 
+static INDEX_REBUILT_THIS_PASS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn begin_shadow_row_recovery_pass() {
+    *INDEX_REBUILT_THIS_PASS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+pub fn index_left_dirty_by_shadow_rows() -> Option<String> {
+    INDEX_REBUILT_THIS_PASS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn claim_single_rebuild_for_pass(index: &str) -> bool {
+    let mut claimed = INDEX_REBUILT_THIS_PASS.lock().unwrap_or_else(|e| e.into_inner());
+    match claimed.as_deref() {
+        Some(already) if already == index => false,
+        _ => {
+            *claimed = Some(index.to_string());
+            true
+        }
+    }
+}
+
 pub fn exec_with_shadow_row_recovery(
     spec: &VecTableSpec<'_>,
     sql: &str,
@@ -124,6 +145,7 @@ pub fn exec_with_shadow_row_recovery(
     match spec.exec_params(sql, params) {
         Ok(()) => Ok(()),
         Err(e) if is_shadow_row_err(&e) => {
+            if !claim_single_rebuild_for_pass(spec.index) { return Err(e); }
             on_recovery(&e);
             spec.rebuild_index()?;
             spec.exec_params(sql, params)
