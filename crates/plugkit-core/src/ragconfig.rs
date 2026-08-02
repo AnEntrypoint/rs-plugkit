@@ -82,6 +82,12 @@ pub struct NamespaceConfig {
     pub default: String,
     pub vec_sidecar_suffix: String,
     pub code_manifest_suffix: String,
+    /// Discipline namespaces fanned out alongside the base on recall.
+    ///
+    /// Union-ed with `.gm/disciplines/enabled.txt` rather than replacing it:
+    /// that file is the only per-project namespace configuration that predates
+    /// this config, and a project relying on it must keep working untouched.
+    pub discipline_fanout: Vec<String>,
     /// Extra namespaces the agent-facing `kv_put` verb may write.
     ///
     /// ADDITIVE ONLY -- the compiled allowlist is always permitted, and this
@@ -94,6 +100,7 @@ pub struct NamespaceConfig {
 impl Default for NamespaceConfig {
     fn default() -> Self {
         NamespaceConfig {
+            discipline_fanout: Vec::new(),
             kv_put_extra: Vec::new(),
             code: "codeinsight".to_string(),
             default: "default".to_string(),
@@ -713,6 +720,14 @@ impl RagConfig {
 
         if let Some(ns) = v.get("memory").and_then(|m| m.get("namespace")).and_then(|n| n.as_str()) {
             cfg.namespaces.default = ns.to_string();
+        }
+        if let Some(d) = v.get("memory").and_then(|m| m.get("discipline_namespaces")).and_then(|x| x.as_array()) {
+            cfg.namespaces.discipline_fanout = d
+                .iter()
+                .filter_map(|e| e.as_str())
+                .filter(|e| !e.trim().is_empty())
+                .map(|e| e.trim().to_string())
+                .collect();
         }
         if let Some(extra) = v.get("memory").and_then(|m| m.get("kv_put_extra_namespaces")).and_then(|x| x.as_array()) {
             cfg.namespaces.kv_put_extra = extra

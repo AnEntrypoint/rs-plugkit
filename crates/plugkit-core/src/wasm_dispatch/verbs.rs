@@ -732,15 +732,27 @@ fn kv_query(body: &Value) -> u64 {
     ok("kv_query", v)
 }
 
+/// Namespaces recall fans out across, from BOTH sources unioned.
+///
+/// `.gm/disciplines/enabled.txt` predates the config and is the only
+/// per-project namespace configuration that existed before it, so it is read
+/// unchanged and a project using it needs no migration. Config entries are
+/// added on top; neither source can remove what the other contributes.
 fn discipline_fanout_namespaces(base: &str) -> Vec<String> {
     let mut out = vec![base.to_string()];
+    let mut push_unique = |name: &str, out: &mut Vec<String>| {
+        let name = name.trim();
+        if !name.is_empty() && !name.starts_with('#') && !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    };
     if let Some(content) = host_read(".gm/disciplines/enabled.txt") {
         for line in content.lines() {
-            let name = line.trim();
-            if !name.is_empty() && !name.starts_with('#') && !out.iter().any(|n| n == name) {
-                out.push(name.to_string());
-            }
+            push_unique(line, &mut out);
         }
+    }
+    for name in &crate::ragconfig::RagConfig::resolved().namespaces.discipline_fanout {
+        push_unique(name, &mut out);
     }
     out
 }
