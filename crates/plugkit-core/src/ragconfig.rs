@@ -175,6 +175,7 @@ pub struct IndexConfig {
     /// from walking an unbounded tree.
     pub prune_pass_file_limit_floor: usize,
     pub prune_pass_file_limit_ceiling: usize,
+    pub likely_orphaned_symbol_scan_enabled: bool,
 }
 
 impl Default for IndexConfig {
@@ -205,6 +206,7 @@ impl Default for IndexConfig {
             digest_max_files: 2000,
             prune_pass_file_limit_floor: 50,
             prune_pass_file_limit_ceiling: 2000,
+            likely_orphaned_symbol_scan_enabled: false,
         }
     }
 }
@@ -648,6 +650,7 @@ impl RagConfig {
         overwrite_present_usize_or_record_problem("index", "digest_max_files", &mut cfg.index.digest_max_files, &mut problems);
         overwrite_present_usize_or_record_problem("index", "prune_pass_file_limit_floor", &mut cfg.index.prune_pass_file_limit_floor, &mut problems);
         overwrite_present_usize_or_record_problem("index", "prune_pass_file_limit_ceiling", &mut cfg.index.prune_pass_file_limit_ceiling, &mut problems);
+        overwrite_present_bool_or_record_problem("index", "likely_orphaned_symbol_scan_enabled", &mut cfg.index.likely_orphaned_symbol_scan_enabled, &mut problems);
         overwrite_present_bool_or_record_problem("retention", "auto_vacuum_enabled", &mut cfg.retention.auto_vacuum_enabled, &mut problems);
         overwrite_present_f64_or_record_problem("retention", "tombstone_ratio_threshold", &mut cfg.retention.tombstone_ratio_threshold, &mut problems);
         overwrite_present_u64_or_record_problem("retention", "tombstone_count_threshold", &mut cfg.retention.tombstone_count_threshold, &mut problems);

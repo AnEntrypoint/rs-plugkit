@@ -1389,6 +1389,9 @@ pub fn overview() -> Value {
 }
 
 fn likely_orphaned_symbols(db_path: &str, limit: usize) -> Value {
+    if !crate::ragconfig::RagConfig::resolved().index.likely_orphaned_symbol_scan_enabled {
+        return Value::Array(Vec::new());
+    }
     let candidates = libsql_wasm::query_params(
         db_path,
         &format!(
@@ -1410,16 +1413,15 @@ fn likely_orphaned_symbols(db_path: &str, limit: usize) -> Value {
         let Some(id) = c.get("id").and_then(|v| v.as_u64()) else { continue };
         let id_s = id.to_string();
         let pat_s = format!("%{}%", name);
-        let count = libsql_wasm::query_params(
+        let referenced = libsql_wasm::query_params(
             db_path,
-            &format!("SELECT SUM(c) AS c FROM (SELECT COUNT(*) AS c FROM {} WHERE id != ?1 AND body LIKE ?2 GROUP BY path)", chunks_table()),
+            &format!("SELECT 1 AS hit FROM {} WHERE id != ?1 AND body LIKE ?2 LIMIT 1", chunks_table()),
             &[id_s.as_str(), pat_s.as_str()],
         )
         .ok()
-        .and_then(|rows| rows.as_array().and_then(|a| a.first().cloned()))
-        .and_then(|row| row.get("c").and_then(|v| v.as_u64()))
-        .unwrap_or(1);
-        if count == 0 {
+        .and_then(|rows| rows.as_array().map(|a| !a.is_empty()))
+        .unwrap_or(true);
+        if !referenced {
             orphaned.push(json!({
                 "path": c.get("path"),
                 "name": name,
