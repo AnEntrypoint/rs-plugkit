@@ -4,6 +4,8 @@ use serde_json::json;
 use std::sync::Mutex;
 
 const RESOLVED_CACHE_TTL_MS: u64 = 5_000;
+const HOST_DISPATCH_CALL_DEADLINE_MS: u64 = 40_000;
+const WALL_BUDGET_TAIL_MARGIN_MS: u64 = 10_000;
 
 struct ResolvedEntryScopedToOneProjectRootNeverGlobal {
     root: String,
@@ -197,7 +199,7 @@ impl Default for IndexConfig {
             // per-chunk cost, not the average, since this bound exists specifically
             // to keep a single file from starving the whole pass.
             pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound: 16_000,
-            wall_budget_ms: 30_000,
+            wall_budget_ms: HOST_DISPATCH_CALL_DEADLINE_MS - WALL_BUDGET_TAIL_MARGIN_MS,
             max_file_bytes: 256 * 1024,
             extra_skip_dirs_appended_to_builtins_never_replacing: Vec::new(),
             extra_skip_file_suffixes_appended_to_builtins_never_replacing: Vec::new(),
