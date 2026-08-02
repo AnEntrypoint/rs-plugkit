@@ -101,6 +101,41 @@ pub trait RepoFetcher {
     fn refresh(&self, src: &RepoSource) -> Result<(), String>;
 }
 
+/// Parse a single-object source spec (the `{repo, ref?, path?}` shape,
+/// `prose.rs`'s own `.gm/instructions/source.json` schema before this
+/// function existed only understood `path`) and materialize it via the
+/// shared `RepoFetcher`, returning the resolved `RepoSource` (whose
+/// `cache_dir` is where the caller reads real files from) on success.
+///
+/// Distinct from [`resolve_with`]'s repo-tier loading: that path parses a
+/// FULL `gm.config.json` out of the materialized repo and deep-merges
+/// multi-entry arrays, both irrelevant to a caller (like `prose.rs`) that
+/// wants a raw `.md` file from an arbitrary sub-path in the SAME
+/// repo/ref/path schema, not a structured config object. Sharing
+/// `parse_source_entry`/`RepoSource`/`RepoFetcher` here means a
+/// `.gm/instructions/source.json` gains the identical `repo`/`ref`/`path`
+/// validation and git-fetch machinery `.gm/config.source.json` already has,
+/// rather than a second, narrower implementation of the same idea.
+pub fn resolve_prose_repo_source(
+    spec_text: &str,
+    spec_path: &str,
+    cache_root: &str,
+    tier_label: &str,
+    fetcher: &dyn RepoFetcher,
+) -> Result<RepoSource, String> {
+    let cleaned = spec_text.trim_start_matches('\u{feff}');
+    let v: Value = serde_json::from_str(cleaned)
+        .map_err(|e| format!("{spec_path}: not valid JSON: {e}"))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| format!("{spec_path}: top level must be a JSON object"))?;
+    let src = parse_source_entry(obj, spec_path, cache_root, tier_label)?;
+    fetcher
+        .refresh(&src)
+        .map_err(|e| format!("{spec_path}: could not refresh config repo {} ({e})", src.repo))?;
+    Ok(src)
+}
+
 pub struct NoopFetcher;
 
 impl RepoFetcher for NoopFetcher {

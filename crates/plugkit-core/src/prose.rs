@@ -500,6 +500,10 @@ fn read_from_source_repo(key: &str) -> SourceRead {
             "{SOURCE_SPEC_PATH}: top level must be a JSON object"
         ));
     }
+    let has_repo_field = cfg.get("repo").and_then(|v| v.as_str()).map(|s| !s.trim().is_empty()).unwrap_or(false);
+    if has_repo_field {
+        return read_from_repo_spec_schema(key, &cfg_raw);
+    }
     let raw_path = cfg.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if let Err(reason) = validate_source_path(raw_path) {
         return SourceRead::Broken(format!("{SOURCE_SPEC_PATH}: {reason}"));
@@ -519,4 +523,45 @@ fn read_from_source_repo(key: &str) -> SourceRead {
         Some(text) => SourceRead::Hit(text),
         None => SourceRead::Miss,
     }
+}
+
+/// The `{repo, ref?, path?}` schema, sharing `config.rs`'s own
+/// `resolve_prose_repo_source`/`RepoSource`/`GitRepoFetcher` machinery so a
+/// `.gm/instructions/source.json` with a `repo` field gets the identical
+/// git-fetch, ref validation, and debounce discipline `.gm/config.source.json`
+/// already has, instead of `path`-only reads against a cache nothing ever
+/// populates. `resolve_prose_repo_source`'s own `RepoSource.cache_dir` is
+/// per-repo-hashed (see `parse_source_entry`'s `entry_hash`), so two prose
+/// sources naming different repos never collide -- distinct from the legacy
+/// `path`-only tier above, which stays on the single flat `SOURCE_CACHE_BASE`
+/// for backward compatibility with any project already relying on it.
+#[cfg(target_arch = "wasm32")]
+fn read_from_repo_spec_schema(key: &str, cfg_raw: &str) -> SourceRead {
+    let fetcher = crate::config_sync::GitRepoFetcher::default();
+    let src = match crate::config::resolve_prose_repo_source(
+        cfg_raw,
+        SOURCE_SPEC_PATH,
+        SOURCE_CACHE_BASE,
+        "prose_source_repo",
+        &fetcher,
+    ) {
+        Ok(src) => src,
+        Err(reason) => return SourceRead::Broken(reason),
+    };
+    let full = format!("{}/{key}.md", src.cache_dir);
+    if !crate::config_path::path_contained_within(&src.cache_dir, &full) {
+        return SourceRead::Broken(format!(
+            "{SOURCE_SPEC_PATH}: key {key} resolves to {full}, which escapes {}",
+            src.cache_dir
+        ));
+    }
+    match read_clean(&full) {
+        Some(text) => SourceRead::Hit(text),
+        None => SourceRead::Miss,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_from_repo_spec_schema(_key: &str, _cfg_raw: &str) -> SourceRead {
+    SourceRead::NotConfigured
 }
