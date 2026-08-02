@@ -3033,6 +3033,22 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         {
             let ms = unsafe { host_now_ms() }.saturating_sub(dispatch_start_ms);
             emit_event("dispatch.end", serde_json::json!({ "verb": verb, "ms": ms }));
+            // check_dispatch's long-gap-refresh marker was stamped at DISPATCH
+            // START (gate-check time, before this call), not completion. For a
+            // verb whose dispatch itself runs long (e.g. `instruction` hitting
+            // a slow codepath), that leaves the marker already close to or
+            // past the long-gap threshold by the time this call returns --
+            // the very NEXT gated dispatch, made immediately by an agent that
+            // was never actually idle, can then spuriously trip the
+            // long-gap-no-instruction gate. Re-stamping here after a genuinely
+            // long-gap-refresh verb completes moves the recorded time to
+            // reflect when the agent's engagement with this dispatch actually
+            // ended, which is the quantity long_gap_should_fire is meant to
+            // measure against.
+            if crate::orchestrator::fsm::graph().policy.longgap_refresh_verbs.iter().any(|v| v == verb) {
+                let now = unsafe { host_now_ms() };
+                let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-instruction-ts"), &now.to_string());
+            }
         }
         if code == 0 {
             let data: Value = serde_json::from_str(&out).unwrap_or(Value::String(out));
