@@ -269,7 +269,7 @@ fn merge_policy_rows() -> Vec<PolicyRow> {
         reader: "agentplug-host BrowserConfig::load -- a DIFFERENT crate, not this build",
         placeholders: Vec::new(),
         derived: "NOT derived from code: no reader for this path exists in plugkit, so the field list and per-field defaults below are transcribed from agentplug-host and can drift without this build noticing",
-        note: Some("The scaffolded example sets `headless: false`, while the host's own compiled fallback is `headless: true`. Removing the field therefore does NOT reproduce the vendored example's behaviour -- it inverts it.".to_string()),
+        note: Some("The scaffolded example sets `headless: false`, matching the host's own compiled fallback `headless.unwrap_or(false)`. Removing the field reproduces the vendored example's behaviour.".to_string()),
     });
 
     rows.push(PolicyRow {
