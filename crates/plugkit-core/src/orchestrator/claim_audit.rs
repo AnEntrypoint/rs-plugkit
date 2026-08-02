@@ -13,10 +13,12 @@ fn extract_commit_hash_tokens(line: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(target_arch = "wasm32")]
 fn claim_audit_config() -> crate::ragconfig::ClaimAuditConfig {
     crate::ragconfig::RagConfig::resolved().claim_audit
 }
 
+#[cfg(target_arch = "wasm32")]
 fn line_asserts_shipped_claim_cfg(line: &str, cfg: &crate::ragconfig::ClaimAuditConfig) -> bool {
     let lower = line.to_ascii_lowercase();
     cfg.shipped_claim_markers_matched_case_insensitive_substring
@@ -62,6 +64,7 @@ fn commit_hash_exists_in_repo_history(hash: &str, submodule: Option<&str>) -> bo
 #[cfg(not(target_arch = "wasm32"))]
 fn commit_hash_exists_in_repo_history(_hash: &str, _submodule: Option<&str>) -> bool { true }
 
+#[cfg(target_arch = "wasm32")]
 fn scan_text_for_hash_claims(text: &str, source_label: &str, findings: &mut Vec<HashClaimFinding>, scanned_line_count: &mut usize, cfg: &crate::ragconfig::ClaimAuditConfig) {
     for line in text.lines() {
         *scanned_line_count += 1;
@@ -78,6 +81,12 @@ fn scan_text_for_hash_claims(text: &str, source_label: &str, findings: &mut Vec<
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn handle_audit(_content: &str) -> (String, String, i32) {
+    ("{\"ok\":false,\"error\":\"claim-audit requires wasm32\"}".to_string(), String::new(), 1)
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn handle_audit(_content: &str) -> (String, String, i32) {
     let mut findings: Vec<HashClaimFinding> = Vec::new();
     let mut scanned_line_count = 0usize;

@@ -36,7 +36,7 @@ fn head_sha() -> String {
 
 pub fn write() -> Value {
     let ledger_raw = host_read(LEDGER_PATH).unwrap_or_default();
-    let ledger_hash = format!("{:016x}", crate::pipeline::fnv1a64(ledger_raw.as_bytes()));
+    let ledger_hash = format!("{:016x}", crate::hash::fnv1a64(ledger_raw.as_bytes()));
     let dispatch_count = serde_json::from_str::<Value>(&ledger_raw)
         .ok()
         .and_then(|v| v.as_array().map(|a| a.len()))

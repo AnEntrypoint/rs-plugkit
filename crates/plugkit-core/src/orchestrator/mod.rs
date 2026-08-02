@@ -190,6 +190,12 @@ fn verb_has_dispatch_arm(verb: &str) -> bool {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dispatch(verb: &str, _file_id: &str, _content: &str) -> (String, String, i32) {
+    (format!("{{\"ok\":false,\"error\":\"orchestrator verb '{}' requires wasm32\"}}", verb), String::new(), 1)
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i32) {
     debug_assert_verb_sets_agree();
     match verb {

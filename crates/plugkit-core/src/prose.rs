@@ -406,6 +406,7 @@ pub fn config_repo_text(key: &str) -> Option<String> {
 /// the winning tier's checkout) before returning, so this is a real pull on
 /// every prose resolution, not a passive read of whatever cache happened to
 /// already exist from an unrelated earlier call this session.
+#[cfg(target_arch = "wasm32")]
 fn read_from_config_repo(key: &str) -> SourceRead {
     let resolved = crate::config::resolve();
     match resolved.cache_dir {
@@ -415,6 +416,13 @@ fn read_from_config_repo(key: &str) -> SourceRead {
             resolved.why
         )),
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_from_config_repo(_key: &str) -> SourceRead {
+    SourceRead::ConfigRepoUnreachable(
+        "gm-config (the mandatory default prose source) requires wasm32 (config::resolve's git-backed fetcher is a wasm-host-bridge operation)".to_string()
+    )
 }
 
 const MESSAGE_NAMESPACES: &[(&str, &str)] = &[("gates/", "gates_dir"), ("residual/", "residual_dir")];

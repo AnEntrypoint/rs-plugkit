@@ -151,7 +151,7 @@ fn now_ms() -> u64 {
 /// result for `main` says nothing about `v2`.
 fn source_key(src: &RepoSource) -> String {
     let ident = format!("{}\u{0}{}", src.repo, src.reference.as_deref().unwrap_or(""));
-    format!("{:016x}", crate::pipeline::fnv1a64(ident.as_bytes()))
+    format!("{:016x}", crate::hash::fnv1a64(ident.as_bytes()))
 }
 
 fn cache_root(src: &RepoSource) -> String {

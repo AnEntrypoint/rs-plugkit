@@ -133,6 +133,12 @@ fn deviation_scan_result(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn handle_scan(_content: &str) -> (String, String, i32) {
+    ("{\"ok\":false,\"error\":\"residual-scan requires wasm32\"}".to_string(), String::new(), 1)
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn handle_scan(_content: &str) -> (String, String, i32) {
     let marker = gm_dir().join("residual-check-fired");
 

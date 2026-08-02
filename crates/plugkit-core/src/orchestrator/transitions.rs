@@ -55,22 +55,28 @@ fn pred_browser_witness_coverage() -> bool { check_browser_witness_coverage_for_
 fn pred_app_loads_witnessed() -> bool { crate::browser_witness::app_loads_witnessed_this_stop_window("") }
 #[cfg(not(target_arch = "wasm32"))]
 fn pred_app_loads_witnessed() -> bool { true }
+#[cfg(target_arch = "wasm32")]
 fn pred_claim_audit_clean() -> bool { super::claim_audit::claim_audit_clean() }
+#[cfg(not(target_arch = "wasm32"))]
+fn pred_claim_audit_clean() -> bool { true }
 fn pred_submodules_clean() -> bool { super::submodule_drift::submodules_clean() }
+
+#[cfg(target_arch = "wasm32")]
+fn emit_unknown_predicate(other: &str) {
+    crate::wasm_dispatch::emit_event("fsm_unknown_predicate", serde_json::json!({
+        "predicate": other,
+        "reason": "not in transitions::known_predicates(); this gate can never be satisfied. Fix the name in .gm/instructions/fsm/graph.json (see fsm/predicates.md for the valid set) or use a jit hook for a condition that has no compiled predicate.",
+    }));
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn emit_unknown_predicate(_other: &str) {}
 
 fn predicate_result(name: &str) -> bool {
     if let Some((_, _, f)) = predicate_table().iter().find(|(n, _, _)| *n == name) {
         return f();
     }
-    match name {
-        other => {
-            crate::wasm_dispatch::emit_event("fsm_unknown_predicate", serde_json::json!({
-                "predicate": other,
-                "reason": "not in transitions::known_predicates(); this gate can never be satisfied. Fix the name in .gm/instructions/fsm/graph.json (see fsm/predicates.md for the valid set) or use a jit hook for a condition that has no compiled predicate.",
-            }));
-            false
-        }
-    }
+    emit_unknown_predicate(name);
+    false
 }
 
 /// A bare "present" check cannot tell this stop window's own residual-scan
@@ -637,6 +643,12 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
     (residuals, next_dispatch)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn handle(_content: &str) -> (String, String, i32) {
+    ("{\"ok\":false,\"error\":\"transition requires wasm32\"}".to_string(), String::new(), 1)
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn handle(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     let mut session_id: Option<String> = None;

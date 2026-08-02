@@ -1,3 +1,5 @@
+#![cfg(target_arch = "wasm32")]
+
 use super::gm_dir;
 use crate::pkfs;
 

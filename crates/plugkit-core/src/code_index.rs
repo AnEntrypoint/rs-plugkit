@@ -1034,7 +1034,7 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
         // the manifest, so a later stat-only fast path can contribute the exact
         // same value without re-reading the file. Must stay identical to
         // current_digest()'s own per-file hash or the digest never matches.
-        let file_digest_hash = crate::pipeline::fnv1a64(content.as_bytes()) as u32;
+        let file_digest_hash = crate::hash::fnv1a64(content.as_bytes()) as u32;
         digest_entries.push((fp.clone(), file_digest_hash));
 
         if let Some(m) = prior.get(fp) {
@@ -1129,7 +1129,7 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
         }
 
         let chunk_content_hashes: Vec<u32> = chunks.iter()
-            .map(|(_, _, _, _, body)| crate::pipeline::fnv1a64(body.as_bytes()) as u32)
+            .map(|(_, _, _, _, body)| crate::hash::fnv1a64(body.as_bytes()) as u32)
             .collect();
         let reused_embs: Vec<Option<Vec<f32>>> = chunks.iter().zip(chunk_content_hashes.iter())
             .map(|((kind, name, _, _, _), ch)| {
@@ -1366,7 +1366,7 @@ fn digest_from_entries(mut entries: Vec<(String, u32)>) -> String {
         acc.push_str(&format!("{:08x}", hash));
         acc.push('\n');
     }
-    format!("v3:{:016x}:files={}", crate::pipeline::fnv1a64(acc.as_bytes()), entries.len())
+    format!("v3:{:016x}:files={}", crate::hash::fnv1a64(acc.as_bytes()), entries.len())
 }
 
 pub fn current_digest() -> String {
@@ -1391,7 +1391,7 @@ pub fn current_digest_cfg(cfg: &crate::ragconfig::RagConfig) -> String {
         let content = match host_read(&canon)
             .or_else(|| host_read(raw_fp))
         { Some(c) => c, None => continue };
-        let content_hash = crate::pipeline::fnv1a64(content.as_bytes()) as u32;
+        let content_hash = crate::hash::fnv1a64(content.as_bytes()) as u32;
         entries.push((canon, content_hash));
     }
     digest_from_entries(entries)

@@ -1,3 +1,5 @@
+#![cfg(target_arch = "wasm32")]
+
 use serde_json::{json, Value};
 use crate::pkfs;
 use super::instructions::{compiled_default_for_prose_key, has_compiled_default_for_prose_key};

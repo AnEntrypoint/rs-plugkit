@@ -291,7 +291,7 @@ fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>, Vec<(String, String)
     for name in &names {
         let path = format!("{}/{}", dir, name);
         let content = host_read(&path).unwrap_or_default();
-        let file_hash = format!("{:016x}", crate::pipeline::fnv1a64(content.as_bytes()));
+        let file_hash = format!("{:016x}", crate::hash::fnv1a64(content.as_bytes()));
         file_hashes.push((name.clone(), file_hash.clone()));
         acc.push_str(name);
         acc.push('\0');
@@ -308,7 +308,7 @@ fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>, Vec<(String, String)
         }
     }
     docs.sort_by(|a, b| a.key.cmp(&b.key));
-    Ok((format!("{:016x}", crate::pipeline::fnv1a64(acc.as_bytes())), docs, file_hashes))
+    Ok((format!("{:016x}", crate::hash::fnv1a64(acc.as_bytes())), docs, file_hashes))
 }
 
 fn is_malformed(err: &str) -> bool {
@@ -321,7 +321,7 @@ fn is_shadow_row(err: &str) -> bool {
 
 pub fn content_key(ns: &str, text: &str) -> String {
     let normalized = normalize_text(text);
-    let hash = crate::pipeline::fnv1a64(format!("{}|{}", ns, normalized).as_bytes());
+    let hash = crate::hash::fnv1a64(format!("{}|{}", ns, normalized).as_bytes());
     format!("mem-{:016x}-{}", hash, normalized.len())
 }
 
@@ -816,10 +816,10 @@ fn flat_store_digest(entries: &[(String, String)]) -> (String, usize) {
     for (k, v) in &keyed {
         acc.push_str(k);
         acc.push('\0');
-        acc.push_str(&format!("{:016x}", crate::pipeline::fnv1a64(v.as_bytes())));
+        acc.push_str(&format!("{:016x}", crate::hash::fnv1a64(v.as_bytes())));
         acc.push('\0');
     }
-    (format!("{:016x}:n={}", crate::pipeline::fnv1a64(acc.as_bytes()), keyed.len()), keyed.len())
+    (format!("{:016x}:n={}", crate::hash::fnv1a64(acc.as_bytes()), keyed.len()), keyed.len())
 }
 
 fn export_marker_digest(marker_body: &str) -> Option<String> {

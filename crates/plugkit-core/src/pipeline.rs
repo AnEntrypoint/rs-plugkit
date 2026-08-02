@@ -44,14 +44,7 @@ fn hmac_key() -> Result<String, String> {
     Err("GM_PIPELINE_HMAC_KEY is not set".to_string())
 }
 
-pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 1469598103934665603;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(1099511628211);
-    }
-    h
-}
+use crate::hash::fnv1a64;
 
 fn keyed_hash(key: &str, data: &str) -> String {
     let inner = fnv1a64(format!("{}|{}", key, data).as_bytes());

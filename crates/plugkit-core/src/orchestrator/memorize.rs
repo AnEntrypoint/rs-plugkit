@@ -104,7 +104,7 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         return (String::new(), format!("rejected: {} -- memo not stored", reason), 1);
     }
     let now = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let content_hash = crate::pipeline::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
+    let content_hash = crate::hash::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
     let key = format!("mem-{:016x}-{}", content_hash, text.len());
     let flat_dedup = crate::wasm_dispatch::host_kv_read(&namespace, &key)
         .map(|existing| existing == text)

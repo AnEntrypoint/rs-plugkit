@@ -1019,7 +1019,7 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
     if text.is_empty() { return err("memorize", "text required"); }
     let text = text.as_str();
     check_sigil_ignored(text, namespace);
-    let content_hash = crate::pipeline::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
+    let content_hash = crate::hash::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
     let key = format!("mem-{:016x}-{}", content_hash, text.len());
     let flat_dedup = super::host_abi::host_kv_read(namespace, &key)
         .map(|existing| existing == text)

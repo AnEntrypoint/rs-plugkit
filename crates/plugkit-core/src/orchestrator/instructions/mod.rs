@@ -17,10 +17,12 @@ use super::prd;
 use super::recall;
 use crate::pkfs;
 
+#[cfg(target_arch = "wasm32")]
 fn payload_cfg() -> crate::ragconfig::InstructionPayloadConfig {
     crate::ragconfig::RagConfig::resolved().instruction_payload
 }
 
+#[cfg(target_arch = "wasm32")]
 fn expire_stale_marker(v: serde_json::Value) -> serde_json::Value {
     let max_marker_age_ms = payload_cfg().max_marker_age_ms;
     let Some(ts) = v.get("ts") else { return v };
@@ -37,6 +39,7 @@ fn expire_stale_marker(v: serde_json::Value) -> serde_json::Value {
     v
 }
 
+#[cfg(target_arch = "wasm32")]
 fn iso8601_to_ms(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' { return None; }
@@ -66,6 +69,7 @@ fn iso8601_to_ms(s: &str) -> Option<i64> {
 /// `config_changed_count` is a count rather than the records themselves: the
 /// records ride the instruction response body, and duplicating them here would
 /// invite an agent to act on a notification twice.
+#[cfg(target_arch = "wasm32")]
 fn write_turn_summary(
     phase: &str,
     prd_pending: usize,
@@ -97,6 +101,7 @@ fn write_turn_summary(
     let _ = pkfs::write(&path.to_string_lossy().to_string(), &summary.to_string());
 }
 
+#[cfg(target_arch = "wasm32")]
 fn read_spool_json(name: &str) -> serde_json::Value {
     let path = super::gm_dir().join("exec-spool").join(name);
     let ps = path.to_string_lossy().to_string();
@@ -109,12 +114,14 @@ fn read_spool_json(name: &str) -> serde_json::Value {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn residual_check_fired_recently() -> bool {
     let marker = super::gm_dir().join("residual-check-fired");
     let ms = marker.to_string_lossy().to_string();
     pkfs::read_to_string(&ms).map(|s| !s.trim().is_empty()).unwrap_or(false)
 }
 
+#[cfg(target_arch = "wasm32")]
 fn should_residual_scan(prd_pending: usize, running_tasks_count: usize) -> bool {
     if residual_check_fired_recently() { return false; }
     prd_pending == 0 && running_tasks_count == 0
@@ -181,6 +188,7 @@ pub fn get_instruction(phase: &str) -> String {
     format!("{}\n\n{}", entry_prose, phase_prose)
 }
 
+#[cfg(target_arch = "wasm32")]
 fn next_phase_hint(phase: &str) -> Option<String> {
     let upper = phase.trim().to_ascii_uppercase();
     let g = super::fsm::graph();
@@ -193,6 +201,7 @@ fn next_phase_hint(phase: &str) -> Option<String> {
         .filter(|to| !to.eq_ignore_ascii_case(&upper))
 }
 
+#[cfg(target_arch = "wasm32")]
 fn prd_items_json() -> Vec<serde_json::Value> {
     for attempt in 0..2 {
         let (body, err, code) = prd::handle_list("");
@@ -214,15 +223,18 @@ fn prd_items_json() -> Vec<serde_json::Value> {
     Vec::new()
 }
 
+#[cfg(target_arch = "wasm32")]
 fn prd_pending_count(items: &[serde_json::Value]) -> usize {
     items.iter().filter(|it| item_is_open(it)).count()
 }
 
+#[cfg(target_arch = "wasm32")]
 fn item_is_open(it: &serde_json::Value) -> bool {
     let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
     prd::status_is_open(status)
 }
 
+#[cfg(target_arch = "wasm32")]
 fn ready_wave(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
     let completed_ids: std::collections::HashSet<String> = items.iter()
         .filter(|it| !item_is_open(it))
@@ -246,6 +258,7 @@ fn ready_wave(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+#[cfg(target_arch = "wasm32")]
 fn orient_nouns(prompt: &str) -> Vec<String> {
     let cfg = payload_cfg();
     let mut words: Vec<String> = prompt
@@ -263,12 +276,14 @@ fn orient_nouns(prompt: &str) -> Vec<String> {
     words
 }
 
+#[cfg(target_arch = "wasm32")]
 fn read_last_prompt() -> String {
     let p = super::gm_dir().join("last-prompt.txt");
     let ps = p.to_string_lossy().to_string();
     pkfs::read_to_string(&ps).unwrap_or_default()
 }
 
+#[cfg(target_arch = "wasm32")]
 fn pending_step_block(st: &super::state::TurnState) -> Option<serde_json::Value> {
     let step_id = st.pending_step_id.as_ref()?;
     let deadline = st.pending_step_deadline_ms?;
@@ -318,6 +333,7 @@ fn idev(event: &str, detail: &str) {
 #[cfg(not(target_arch = "wasm32"))]
 fn idev(_event: &str, _detail: &str) {}
 
+#[cfg(target_arch = "wasm32")]
 pub fn handle_instruction(content: &str) -> (String, String, i32) {
     ilog(&format!("instruction::handle start body_len={}", content.len()));
     let graph = super::fsm::graph();

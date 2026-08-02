@@ -295,7 +295,7 @@ fn parse_source_entry(obj: &Map<String, Value>, origin: &str, cache_root: &str, 
     let raw_path = obj.get("path").and_then(|x| x.as_str()).unwrap_or("");
     crate::config_path::validate_source_path(raw_path).map_err(|e| format!("{origin}: {e}"))?;
     let path = raw_path.trim().trim_matches('/').to_string();
-    let entry_hash = crate::pipeline::fnv1a64(format!("{repo}|{}|{path}", reference.as_deref().unwrap_or("")).as_bytes());
+    let entry_hash = crate::hash::fnv1a64(format!("{repo}|{}|{path}", reference.as_deref().unwrap_or("")).as_bytes());
     let cache_dir = format!("{cache_root}/{entry_hash:016x}");
     Ok(RepoSource {
         repo,
@@ -569,16 +569,20 @@ fn load_repo_tier(
 /// per call site in the same few milliseconds -- the LATER attempts see the
 /// FIRST one's still-held lock and misreport "another process is cloning"
 /// even though it is this same process's own earlier, still-in-flight call.
+#[cfg(target_arch = "wasm32")]
 const RESOLVE_CACHE_TTL_MS: u64 = 2_000;
 
+#[cfg(target_arch = "wasm32")]
 struct ResolveCacheEntryScopedToOneProjectRootNeverGlobal {
     root: String,
     ts_ms: u64,
     resolution: Resolution,
 }
 
+#[cfg(target_arch = "wasm32")]
 static RESOLVE_CACHE: std::sync::Mutex<Option<ResolveCacheEntryScopedToOneProjectRootNeverGlobal>> = std::sync::Mutex::new(None);
 
+#[cfg(target_arch = "wasm32")]
 pub fn resolve() -> Resolution {
     let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as u64;
@@ -622,6 +626,7 @@ pub fn resolve() -> Resolution {
 /// waiting out `sync.debounce_ms` (default 15 minutes). Invalidates the
 /// short-lived resolve cache so the very next plain `resolve()` call sees the
 /// fresh result rather than a cached pre-refresh one.
+#[cfg(target_arch = "wasm32")]
 pub fn resolve_forced(project_root: &str) -> Resolution {
     let forced_fetcher = crate::config_sync::GitRepoFetcher::with_debounce_ms(0);
     let resolution = resolve_with(project_root, &forced_fetcher);

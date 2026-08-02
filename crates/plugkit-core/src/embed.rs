@@ -785,7 +785,7 @@ fn scoped_key(key: &str) -> String {
 }
 
 fn cache_slot(key: &str) -> u64 {
-    crate::pipeline::fnv1a64(key.as_bytes())
+    crate::hash::fnv1a64(key.as_bytes())
 }
 
 fn cache_get(cache: &Mutex<EmbedCache>, key: &str) -> Option<Vec<f32>> {
