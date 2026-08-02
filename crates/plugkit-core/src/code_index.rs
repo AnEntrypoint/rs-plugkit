@@ -894,9 +894,9 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
     let limit = max_files
         .max(cfg.index.prune_pass_file_limit_floor)
         .min(cfg.index.prune_pass_file_limit_ceiling);
-    let files = collect_files(r, limit, &cfg.index);
     let prune_enumeration_cap = cfg.index.prune_enumeration_file_cap;
-    let full_files = if limit >= prune_enumeration_cap { files.clone() } else { collect_files(r, prune_enumeration_cap, &cfg.index) };
+    let full_files = collect_files(r, limit.max(prune_enumeration_cap), &cfg.index);
+    let files: Vec<String> = full_files.iter().take(limit).cloned().collect();
     {
         let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
