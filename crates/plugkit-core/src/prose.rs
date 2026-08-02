@@ -128,6 +128,22 @@ pub fn resolve_detailed(key: &str, default: &str) -> (String, Outcome) {
 #[cfg(target_arch = "wasm32")]
 fn report(key: &str, outcome: &Outcome) {
     match outcome {
+        Outcome::CompiledDefault
+            if !crate::orchestrator::instructions::has_compiled_default_for_prose_key(key) =>
+        {
+            // No file on disk AND no compiled default: compiled_default_for_prose_key's
+            // `_ => entry::TEXT` fallthrough served ENTRY prose under this key's name.
+            // Indistinguishable from a healthy entry resolve at the call site, which is
+            // how a phase can serve completely wrong prose while looking configured.
+            crate::wasm_dispatch::emit_event(
+                "prose_key_has_no_default",
+                serde_json::json!({
+                    "key": key,
+                    "served": "entry_prose_via_fallthrough",
+                    "detail": "this prose key has no vendored .gm/instructions/<key>.md and no compiled default, so ENTRY prose was served under its name. The phase is running on the wrong text -- vendor the file or add a compiled default.",
+                }),
+            );
+        }
         Outcome::Degraded { reason } => {
             crate::wasm_dispatch::emit_event(
                 "prose_tier_degraded",
