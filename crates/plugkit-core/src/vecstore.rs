@@ -48,13 +48,21 @@ pub enum EmbeddingColumn {
     Absent,
     Width(usize),
     Unparseable,
+    Unknown,
 }
 
 pub fn embedding_col_at(db_name: &str, table: &str) -> EmbeddingColumn {
     let sql = format!("SELECT type FROM pragma_table_info('{}') WHERE name = 'embedding'", table);
     let rows = match libsql_query(db_name, &sql) {
         Ok(r) => r,
-        Err(_) => return EmbeddingColumn::Absent,
+        Err(e) => {
+            crate::wasm_dispatch::emit_event("embed_col_probe_failed", json!({
+                "table": table,
+                "error": e,
+                "effect": "column width unknown; treated as indeterminate rather than absent, so no drop decision is made on it",
+            }));
+            return EmbeddingColumn::Unknown;
+        }
     };
     let ty = match rows.as_array().and_then(|a| a.first()).and_then(|r| r.get("type")).and_then(|t| t.as_str()) {
         Some(t) => t,
@@ -111,7 +119,7 @@ pub fn drop_if_dim_mismatch_at_cfg(db_name: &str, table: &str, cfg: &EmbedDimCon
             }));
             Ok(false)
         }
-        EmbeddingColumn::Absent => Ok(false),
+        EmbeddingColumn::Absent | EmbeddingColumn::Unknown => Ok(false),
     }
 }
 
