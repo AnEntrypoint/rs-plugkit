@@ -1145,7 +1145,22 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
             records.push(rec);
         }
         if file_fully_persisted {
-            let commit_overview = compute_commit_overview(fp);
+            // compute_commit_overview shells out to git. It sits after the last
+            // budget check, so on an over-budget pass it added a subprocess per
+            // file to a pass that was already meant to stop. The overview is
+            // enrichment, not correctness -- skipping it still writes a valid
+            // manifest, and the next pass recomputes it within budget.
+            let over_budget =
+                unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started) > index_wall_budget_ms;
+            let commit_overview = if over_budget {
+                crate::wasm_dispatch::emit_event("code_index_commit_overview_skipped", json!({
+                    "path": fp,
+                    "reason": "wall budget already exhausted; the git subprocess is enrichment and is deferred to the next pass",
+                }));
+                None
+            } else {
+                compute_commit_overview(fp)
+            };
             fv_put(&manifest_ns(), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, &commit_overview, &records));
         } else {
             fv_delete(&manifest_ns(), fp);
