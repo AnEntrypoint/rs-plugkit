@@ -1,9 +1,16 @@
 //! Tiered resolution of instruction/gate/residual prose.
 //!
-//! Resolution order, first non-empty wins: project-vendored
-//! `.gm/instructions/<key>.md`, then a repo-backed source materialized under
-//! `.gm/instructions-source-cache`, then the compiled default the caller
-//! supplies. The compiled default cannot fail, so [`resolve`] is total.
+//! Resolution order, first non-empty wins:
+//!
+//! 1. project-vendored `.gm/instructions/<key>.md`
+//! 2. a repo-backed source materialized under `.gm/instructions-source-cache`,
+//!    reached only when `.gm/instructions/source.json` names one
+//! 3. the gm-config repo cache, which is where a project with NO `source.json`
+//!    lands -- the common case, and the tier most easily mistaken for the
+//!    compiled default because both are "nothing local"
+//! 4. the compiled default the caller supplies
+//!
+//! The compiled default cannot fail, so [`resolve`] is total.
 //!
 //! # Why every non-hit is reported
 //!
