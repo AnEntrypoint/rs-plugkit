@@ -328,9 +328,15 @@ fn ignore_file_path(root: &str, filename: &str) -> String {
     }
 }
 
-fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
-    let gitignore_content = host_read(&ignore_file_path(root, ".gitignore"));
-    let custom_content = host_read(&ignore_file_path(root, ".codesearchignore"));
+type GitignoreMemoKey = (String, Option<String>, Option<String>);
+static GITIGNORE_MEMO: std::sync::Mutex<Option<(GitignoreMemoKey, Option<ignore::gitignore::Gitignore>)>> =
+    std::sync::Mutex::new(None);
+
+fn build_repo_gitignore(
+    root: &str,
+    gitignore_content: Option<&str>,
+    custom_content: Option<&str>,
+) -> Option<ignore::gitignore::Gitignore> {
     if gitignore_content.is_none() && custom_content.is_none() { return None; }
     let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
     for content in [gitignore_content, custom_content].into_iter().flatten() {
@@ -339,6 +345,19 @@ fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
         }
     }
     builder.build().ok()
+}
+
+fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
+    let gitignore_content = host_read(&ignore_file_path(root, ".gitignore"));
+    let custom_content = host_read(&ignore_file_path(root, ".codesearchignore"));
+    let key: GitignoreMemoKey = (root.to_string(), gitignore_content.clone(), custom_content.clone());
+    let mut memo = GITIGNORE_MEMO.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached_key, cached)) = memo.as_ref() {
+        if *cached_key == key { return cached.clone(); }
+    }
+    let built = build_repo_gitignore(root, gitignore_content.as_deref(), custom_content.as_deref());
+    *memo = Some((key, built.clone()));
+    built
 }
 
 fn gitignore_excludes(gi: &Option<ignore::gitignore::Gitignore>, rel_path: &str, is_dir: bool) -> bool {
