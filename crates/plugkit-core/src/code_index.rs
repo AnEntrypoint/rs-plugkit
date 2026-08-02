@@ -269,7 +269,14 @@ pub fn ensure_schema_at_cfg(path: &str, cfg: &crate::ragconfig::RagConfig) -> Re
     ))?;
     crate::vecns::VecTableSpec::from_names(path, &cfg.code_chunks).ensure_index();
     crate::vecns::VecTableSpec::from_names(path, &cfg.legacy_memories_alongside_code_chunks).ensure_index();
-    crate::embed_marker::record_embed_generation();
+    // Table-scoped, not the shared/global marker: this function only ever
+    // checked and (if needed) dropped these two SPECIFIC tables above, so it
+    // only records completion for those two, not for every table any other
+    // store (rssearch_vectors, git_commit_vectors) separately owns. See
+    // embed_marker.rs's marker_rel_for_table doc comment for the false-
+    // negative this closes.
+    crate::embed_marker::record_embed_generation_for_table(&cfg.code_chunks.table);
+    crate::embed_marker::record_embed_generation_for_table(&cfg.legacy_memories_alongside_code_chunks.table);
     Ok(())
 }
 

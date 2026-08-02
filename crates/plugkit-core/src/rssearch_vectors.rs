@@ -87,6 +87,13 @@ pub fn ensure_schema_cfg(cfg: &RagConfig) -> Result<(), String> {
         ))?;
     }
     spec(&path, cfg).ensure_index();
+    // Table-scoped, not the shared/global marker -- this store's own dim-
+    // mismatch check above only ever answered for cfg.rssearch.table, so it
+    // records completion for that same table, independent of whatever
+    // code_index.rs or git_commit_vectors.rs have separately recorded for
+    // THEIR OWN tables. See embed_marker.rs's marker_rel_for_table doc
+    // comment for the false-negative a single shared marker caused.
+    crate::embed_marker::record_embed_generation_for_table(&cfg.rssearch.table);
     SCHEMA_ENSURED
         .lock()
         .unwrap_or_else(|e| e.into_inner())

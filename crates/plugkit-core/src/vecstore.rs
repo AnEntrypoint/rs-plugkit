@@ -107,7 +107,7 @@ pub fn drop_if_dim_mismatch_at_cfg(db_name: &str, table: &str, cfg: &EmbedDimCon
             if cfg.keep_mismatched_table_intact_instead_of_dropping {
                 return Ok(false);
             }
-            if crate::embed_marker::embed_generation_changed() {
+            if crate::embed_marker::embed_generation_changed_for_table(table) {
                 return drop_table(db_name, table, cfg, "embed_generation_changed", json!(found));
             }
             Ok(false)

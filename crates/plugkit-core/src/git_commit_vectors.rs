@@ -57,6 +57,9 @@ pub fn ensure_schema_cfg(cfg: &RagConfig) -> Result<(), String> {
         cfg.git_commits.table, cfg.dim()
     ))?;
     spec(&path, cfg).ensure_index();
+    // Table-scoped, not the shared/global marker -- same reasoning as the
+    // sibling fix in rssearch_vectors::ensure_schema_cfg.
+    crate::embed_marker::record_embed_generation_for_table(&cfg.git_commits.table);
     SCHEMA_ENSURED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
