@@ -111,6 +111,22 @@ struct EmbedCtx {
 
 static CTX: OnceLock<EmbedCtx> = OnceLock::new();
 
+/// Lazy wasm-side fallback model, populated ONLY the first time a
+/// host_delegated context's live host_vec_embed call actually fails during
+/// real use -- never loaded eagerly just because CTX was initialized
+/// host_delegated. This is what closes the "bert host embed plugin down
+/// needs a process restart" gap: previously, once CTX chose host_delegated:true
+/// at init (host was up, so the wasm model load was skipped as a genuine and
+/// worthwhile optimization -- model load is real cost), a LATER host crash hit
+/// embed_text_uncached's host_delegated branch, which unconditionally refused
+/// with "no wasm fallback available" even on a fat (non-slim) build that HAS
+/// the weights compiled in and could have loaded them right then. `OnceLock`
+/// on CTX itself cannot be reset without a broader interior-mutability
+/// rewrite of the whole struct, so this is a second, independent OnceLock
+/// scoped to exactly the fallback model, populated on-demand.
+#[cfg(not(feature = "slim"))]
+static LAZY_WASM_FALLBACK: OnceLock<Option<(Tokenizer, BertModel, Device)>> = OnceLock::new();
+
 fn probe_host_embed() -> bool {
     let probe_text = "init-probe";
     let mut out = vec![0f32; EMBED_DIM];
@@ -147,6 +163,62 @@ fn bge_small_config() -> Config {
     }
 }
 
+#[cfg(not(feature = "slim"))]
+fn load_wasm_model_uncached() -> Result<(Tokenizer, BertModel, Device), String> {
+    gemm::set_wasm_simd128(true);
+    crate::wasm_dispatch::emit_event("gemm_simd128_flag_check", serde_json::json!({
+        "set_to": true,
+        "read_back": gemm::get_wasm_simd128(),
+    }));
+
+    let tokenizer = Tokenizer::from_bytes(TOKENIZER_JSON)
+        .map_err(|e| format!("tokenizer load: {}", e))?;
+
+    let device = Device::Cpu;
+
+    let vb = VarBuilder::from_slice_safetensors(MODEL_SAFETENSORS, DType::F32, &device)
+        .map_err(|e| format!("varbuilder safetensors: {}", e))?;
+
+    let config = bge_small_config();
+    let model = BertModel::load(vb, &config)
+        .map_err(|e| format!("bert init: {}", e))?;
+
+    crate::wasm_dispatch::emit_event("embed.model-loaded", serde_json::json!({
+        "model": EMBED_MODEL_NAME,
+        "embed_dim": EMBED_DIM,
+        "num_hidden_layers": config.num_hidden_layers,
+        "safetensors_bytes": MODEL_SAFETENSORS.len(),
+        "tokenizer_bytes": TOKENIZER_JSON.len(),
+    }));
+
+    Ok((tokenizer, model, device))
+}
+
+/// Lazily loads (once) and returns the wasm-side fallback model for a
+/// host_delegated context whose live host_vec_embed call just failed. Never
+/// called unless that live failure actually happens -- the eager-skip
+/// optimization in init_ctx (do not pay model-load cost while the host is
+/// healthy) is preserved; this only pays that cost the first time it is
+/// genuinely needed.
+#[cfg(not(feature = "slim"))]
+fn lazy_wasm_fallback() -> Option<&'static (Tokenizer, BertModel, Device)> {
+    LAZY_WASM_FALLBACK
+        .get_or_init(|| {
+            crate::wasm_dispatch::emit_event("embed.lazy-wasm-fallback-loading", serde_json::json!({
+                "reason": "host_delegated context's live host_vec_embed call failed; loading wasm-side bert model on demand instead of refusing outright",
+            }));
+            match load_wasm_model_uncached() {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    elog(&format!("embed::lazy_wasm_fallback load failed: {}", e));
+                    crate::wasm_dispatch::emit_event("embed.lazy-wasm-fallback-load-failed", serde_json::json!({ "error": e }));
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
 fn init_ctx() -> Result<EmbedCtx, String> {
     if probe_host_embed() {
         crate::wasm_dispatch::emit_event("embed.host-delegated", serde_json::json!({
@@ -175,33 +247,7 @@ fn init_ctx() -> Result<EmbedCtx, String> {
         crate::wasm_dispatch::emit_event("embed.wasm-loading", serde_json::json!({
             "reason": "host_vec_embed probe failed; loading wasm-side bert model",
         }));
-
-        gemm::set_wasm_simd128(true);
-        crate::wasm_dispatch::emit_event("gemm_simd128_flag_check", serde_json::json!({
-            "set_to": true,
-            "read_back": gemm::get_wasm_simd128(),
-        }));
-
-        let tokenizer = Tokenizer::from_bytes(TOKENIZER_JSON)
-            .map_err(|e| format!("tokenizer load: {}", e))?;
-
-        let device = Device::Cpu;
-
-        let vb = VarBuilder::from_slice_safetensors(MODEL_SAFETENSORS, DType::F32, &device)
-            .map_err(|e| format!("varbuilder safetensors: {}", e))?;
-
-        let config = bge_small_config();
-        let model = BertModel::load(vb, &config)
-            .map_err(|e| format!("bert init: {}", e))?;
-
-        crate::wasm_dispatch::emit_event("embed.model-loaded", serde_json::json!({
-            "model": EMBED_MODEL_NAME,
-            "embed_dim": EMBED_DIM,
-            "num_hidden_layers": config.num_hidden_layers,
-            "safetensors_bytes": MODEL_SAFETENSORS.len(),
-            "tokenizer_bytes": TOKENIZER_JSON.len(),
-        }));
-
+        let (tokenizer, model, device) = load_wasm_model_uncached()?;
         Ok(EmbedCtx {
             tokenizer: Some(tokenizer),
             model: Some(model),
@@ -300,10 +346,17 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
     };
 
     if c.host_delegated {
+        #[cfg(not(feature = "slim"))]
+        {
+            if let Some((tokenizer, model, device)) = lazy_wasm_fallback() {
+                elog("embed::embed_text host-delegated live call failed; using lazily-loaded wasm fallback");
+                return run_embed_forward(tokenizer, model, device, text);
+            }
+        }
         elog("embed::embed_text host-delegated but host_vec_embed returned non-EMBED_DIM; no wasm fallback available");
         crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
             "step": "host_delegated_no_fallback",
-            "error": "host_vec_embed returned non-EMBED_DIM and wasm model was skipped at init",
+            "error": "host_vec_embed returned non-EMBED_DIM; wasm fallback unavailable (slim build, or lazy load itself failed)",
         }));
         return None;
     }
@@ -322,7 +375,10 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
             return None;
         }
     };
+    run_embed_forward(tokenizer, model, &c.device, text)
+}
 
+fn run_embed_forward(tokenizer: &Tokenizer, model: &BertModel, device: &Device, text: &str) -> Option<Vec<f32>> {
     let t0 = now_ms();
     let enc = step!("tokenizer.encode", tokenizer.encode(text, true));
     let t_tokenize = now_ms();
@@ -338,9 +394,9 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
         return None;
     }
 
-    let ids_t = step!("Tensor::from_vec(ids)", Tensor::from_vec(ids.clone(), (1, seq_len), &c.device));
-    let mask_t = step!("Tensor::from_vec(mask)", Tensor::from_vec(mask.clone(), (1, seq_len), &c.device));
-    let token_type_ids = step!("Tensor::zeros(token_type_ids)", Tensor::zeros((1, seq_len), DType::U32, &c.device));
+    let ids_t = step!("Tensor::from_vec(ids)", Tensor::from_vec(ids.clone(), (1, seq_len), device));
+    let mask_t = step!("Tensor::from_vec(mask)", Tensor::from_vec(mask.clone(), (1, seq_len), device));
+    let token_type_ids = step!("Tensor::zeros(token_type_ids)", Tensor::zeros((1, seq_len), DType::U32, device));
     let t_tensor_build = now_ms();
 
     let hidden_raw = step!("model.forward", model.forward(&ids_t, &token_type_ids, Some(&mask_t)));
