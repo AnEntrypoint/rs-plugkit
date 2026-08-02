@@ -93,6 +93,25 @@ pub const ABI_VERSION: u64 = 1;
 
 /// Why a plugin call failed, as a closed set a caller can branch on.
 ///
+/// Every plugin this crate ever calls by name, declared in one place instead
+/// of scattered as a bare string literal at each `plugin_call("...", ...)`
+/// call site (grepped: 19 call sites across code_index.rs, git_commit_vectors.rs,
+/// libsql_wasm.rs, rssearch_vectors.rs, vecstore.rs, naming only "libsql",
+/// "bert", "treesitter" -- "gm" itself is never a `plugin_call` target since
+/// it is this crate). Not a full declarative manifest (no schema, no
+/// discovery, no support for a plugin unknown at compile time) -- that is a
+/// larger design decision this const deliberately does not attempt. What it
+/// DOES give: a real, compile-time-anchored list `parse_response` can check a
+/// requested name against, so a caller misspelling or inventing a plugin name
+/// gets a distinct signal from "the correctly-named plugin genuinely isn't
+/// registered on this host" instead of both looking identical. Sibling list:
+/// agentplug's daemon.rs pre-warms `["gm", "libsql", "bert", "treesitter"]` at
+/// boot -- that is a SEPARATE repo/crate with no shared-constants mechanism
+/// between them, so keeping the two in sync is a manual discipline, not an
+/// enforced one; a genuine cross-repo manifest schema would be needed to close
+/// that gap for real.
+pub const KNOWN_PLUGINS: &[&str] = &["libsql", "bert", "treesitter"];
+
 /// The distinction that motivates the whole type: `PluginNotFound` and
 /// `PluginError` are opposite faults. The first means the plugin never ran (a
 /// deployment/wiring problem -- retrying the same call forever cannot help).
@@ -302,11 +321,16 @@ pub fn parse_response(resp: &Value, plugin: &str, verb: &str) -> AbiResult {
     let obj = match resp.as_object() {
         Some(o) if !o.is_empty() => o,
         _ => {
+            let unknown_name_hint = if KNOWN_PLUGINS.contains(&plugin) {
+                String::new()
+            } else {
+                format!(" -- '{}' is not in this build's KNOWN_PLUGINS list ({:?}), so this is very likely a caller typo/wrong name rather than a genuinely unregistered plugin", plugin, KNOWN_PLUGINS)
+            };
             return Err(AbiError::new(
                 AbiErrorKind::PluginNotFound,
                 plugin,
                 verb,
-                format!("no response from plugin '{}' (verb '{}'): the host returned no payload, which means the call was never routed -- the plugin is not registered or failed to load", plugin, verb),
+                format!("no response from plugin '{}' (verb '{}'): the host returned no payload, which means the call was never routed -- the plugin is not registered or failed to load{}", plugin, verb, unknown_name_hint),
             ));
         }
     };
