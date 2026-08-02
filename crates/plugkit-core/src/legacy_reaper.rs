@@ -67,6 +67,10 @@ const RETIRED_ARTIFACTS: &[&str] = &[
     ".gm/rs-learn.db",
     ".gm/rs-learn.db-wal",
     ".gm/rs-learn.db-shm",
+    // The counter-driven deep-cycle trigger that rode alongside the old
+    // rs-learn subsystem. Nothing in the tree reads or writes this path any
+    // longer -- grepped the whole crate for "rslearn-counter", zero hits.
+    ".gm/rslearn-counter.json",
 ];
 
 /// `<project_root>/<rel>`, or None when the host cannot resolve a cwd -- in
