@@ -1173,6 +1173,8 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
 
         let mut records: Vec<ChunkRecord> = Vec::new();
         let mut file_fully_persisted = true;
+        let chunk_write_loop_started = unsafe { crate::wasm_dispatch::host_now_ms() };
+        let chunks_in_this_file = chunk_content_hashes.len();
         for (idx, (((kind, name, ls, le, body), (emb_opt, was_reused)), content_hash)) in chunks.into_iter().zip(embed_results.into_iter()).zip(chunk_content_hashes.into_iter()).enumerate() {
             let v = match emb_opt {
                 Some(v) => v,
@@ -1193,6 +1195,29 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
             let rec = ChunkRecord { key, kind, name, ls, le, emb: v, content_hash };
             file_fully_persisted &= write_chunk(libsql_ok, &db_path, fp, &rec, &body);
             records.push(rec);
+        }
+        // Telemetry only, no behavior change: this loop has no elapsed-check
+        // guard (a real, measured latency defect -- see the row this
+        // instruments, index-resumable-partial-file-so-chunk-writes-can-be-
+        // budget-bounded -- passes measured 4x over index.wall_budget_ms).
+        // Adding a naive elapsed-check abort here would create the exact
+        // manifest/code_chunks disagreement bug already fixed once this
+        // session (a manifest asserting a file is fully indexed while
+        // code_chunks holds only a partial write) -- the safe fix needs a
+        // resumable chunk-cursor in the manifest schema first, a real design
+        // task, not a one-line guard. This event measures the ACTUAL
+        // frequency/severity of long single-file chunk-write passes so that
+        // design work is informed by real numbers rather than the two
+        // convergence-run measurements already on record.
+        let chunk_write_loop_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(chunk_write_loop_started);
+        if chunk_write_loop_ms > 2000 {
+            crate::wasm_dispatch::emit_event("code_index_unbounded_chunk_write_loop_slow", json!({
+                "path": fp,
+                "chunks_in_file": chunks_in_this_file,
+                "loop_ms": chunk_write_loop_ms,
+                "wall_budget_ms": index_wall_budget_ms,
+                "note": "no elapsed-check guard exists inside this loop by design -- see index-resumable-partial-file-so-chunk-writes-can-be-budget-bounded for why a naive guard would be unsafe",
+            }));
         }
         if file_fully_persisted {
             // compute_commit_overview shells out to git. It sits after the last
