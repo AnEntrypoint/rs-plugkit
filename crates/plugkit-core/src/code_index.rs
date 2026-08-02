@@ -1226,6 +1226,34 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
             removed_files += 1;
         }
     }
+    // Orphan sweep: a process kill between a file's chunk-table DELETE+INSERT
+    // and its manifest write (fv_put, further below in the main loop) leaves
+    // chunk rows with no corresponding manifest entry. The loop above cannot
+    // see these -- it walks `prior` (the manifest map), so a path with chunks
+    // but NO manifest is invisible to it by construction. This sweep instead
+    // walks the chunks TABLE directly for any path absent from both the
+    // current file set and the manifest map, which is the only way to catch
+    // an orphan that a normal re-index pass over that same path would
+    // otherwise silently clean up on next encounter (code_index.rs's
+    // per-file DELETE-before-INSERT already handles the case where the file
+    // gets touched again) -- this closes the gap for a file that never gets
+    // touched again (deleted from disk before its next index pass).
+    if libsql_ok {
+        let chunk_paths = chunk_rows_by_path(&db_path);
+        let mut orphan_chunk_files = 0u32;
+        for path in chunk_paths.keys() {
+            if !prior.contains_key(path) && !files_set.contains(path.as_str()) {
+                let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[path.as_str()]);
+                orphan_chunk_files += 1;
+            }
+        }
+        if orphan_chunk_files > 0 {
+            crate::wasm_dispatch::emit_event("code_index_orphan_chunks_swept", json!({
+                "orphan_chunk_files": orphan_chunk_files,
+                "reason": "chunk rows present with no manifest entry and not in current file set -- a process kill between chunk write and manifest write for a file since removed from disk",
+            }));
+        }
+    }
     // A partial pass MUST still persist what it converged, or the digest is
     // never written at all on any tree big enough to exceed the wall budget --
     // and a missing digest is treated as stale, so the very next dispatch
