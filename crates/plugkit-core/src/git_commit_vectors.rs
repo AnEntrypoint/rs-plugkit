@@ -115,9 +115,16 @@ pub fn sync_incremental() -> Result<Value, String> {
 }
 
 pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
+    // Clock starts BEFORE ensure_schema_cfg and the git log preamble, not
+    // after -- both were previously unbudgeted, and while ensure_schema_cfg
+    // is memoized (SCHEMA_ENSURED) so every call after the first is cheap, a
+    // large repo's `git log -n 500` shortstat walk and any genuinely first-run
+    // schema creation are real costs that should count against this pass's
+    // own budget rather than being invisible to every downstream elapsed-time
+    // check in this function.
+    let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     ensure_schema_cfg(cfg)?;
     let db_path = shared_db_path();
-    let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let log = crate::wasm_dispatch::git_call(
         &format!("log --format=%x00%H%x00%s%x1e -n {}", LOG_WINDOW),
         None,
