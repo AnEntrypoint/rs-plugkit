@@ -344,7 +344,16 @@ fn recover_and_retry<F>(op: F) -> Result<Value, String>
 where
     F: Fn() -> Result<Value, String>,
 {
-    match op() {
+    // Busy first: transient lock contention from a concurrent session against
+    // the same shared db (see libsql_wasm::retry_on_busy for why this is a
+    // bounded re-dispatch loop, not a spin-wait). Only once that is
+    // exhausted -- i.e. the error is genuinely not a lock, or three full
+    // busy-timeout cycles all still saw the lock held -- fall through to the
+    // existing Corrupt-only destructive recovery below. A busy database must
+    // never take the malformed path: recover_malformed_shared_db() deletes
+    // and recreates the file, which would destroy a perfectly healthy store
+    // that just happened to be locked by another process's in-flight write.
+    match crate::libsql_wasm::retry_on_busy(&op) {
         Err(e) if crate::shared_db::is_malformed(&e) => {
             if crate::shared_db::recover_malformed_shared_db() {
                 op()

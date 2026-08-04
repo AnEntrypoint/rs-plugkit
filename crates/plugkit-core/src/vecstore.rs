@@ -53,7 +53,15 @@ pub enum EmbeddingColumn {
 
 pub fn embedding_col_at(db_name: &str, table: &str) -> EmbeddingColumn {
     let sql = format!("SELECT type FROM pragma_table_info('{}') WHERE name = 'embedding'", table);
-    let rows = match libsql_query(db_name, &sql) {
+    // This probe used to have NO retry at all: a single SQLITE_BUSY from a
+    // concurrent session against the shared db (see libsql_wasm::retry_on_busy
+    // for why WAL never actually engages under this wasm32-wasi-vfs build)
+    // fell straight to Unknown, on both the schema-mismatch check that gates
+    // whether ensure_schema_cfg drops/recreates the table AND the ordinary
+    // read path that logs embed_col_probe_failed on every call while the lock
+    // was held. Retrying Busy here first turns a transient concurrent-write
+    // window into a slower-but-correct probe instead of a false Unknown.
+    let rows = match crate::libsql_wasm::retry_on_busy(|| libsql_query(db_name, &sql)) {
         Ok(r) => r,
         Err(e) => {
             crate::wasm_dispatch::emit_event("embed_col_probe_failed", json!({
