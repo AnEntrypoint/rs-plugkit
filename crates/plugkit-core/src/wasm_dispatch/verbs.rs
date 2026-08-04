@@ -1996,6 +1996,166 @@ fn body_cwd(body: &Value) -> Option<&str> {
         .or_else(|| body.get("repo").and_then(|v| v.as_str()))
 }
 
+// Async-host git protocol, mirroring host_fetch's pending-token shape: a host
+// whose git engine cannot block the wasm call (thebird's browser host driving
+// isomorphic-git on the wasm's own main thread) answers host_git with
+// {"pending":true,"token"} and parks the terminal {"stdout","stderr",
+// "exit_code"} JSON string in kv ns "outbox" under that token. Waiting inside
+// this dispatch would deadlock that host -- the wasm IS the event loop its
+// git engine needs -- so completion is observed by a LATER dispatch: git_poll
+// consumes the outbox entry, records it as the parked step's result, and
+// re-enters the originating verb, which replays already-finished steps from
+// the plan and either parks the next op or produces its terminal result. The
+// agent-visible loop is therefore uniform: dispatch a git verb, then git_poll
+// {token} until a non-pending envelope comes back -- that envelope IS the
+// verb's real result, identical in shape to what a sync host returns inline.
+// Sync hosts (agentplug-runner, the node wrapper) return terminal results
+// from host_git directly, so no plan is ever persisted there and every verb
+// behaves exactly as it did before this machinery existed.
+const GIT_ASYNC_NS: &str = "git_async";
+const GIT_OUTBOX_NS: &str = "outbox";
+
+struct GitAsyncPlan {
+    id: String,
+    verb: String,
+    body: Value,
+    calls: usize,
+    results: serde_json::Map<String, Value>,
+    persisted: bool,
+}
+
+fn git_async_plan_new(verb: &str, body: &Value) -> GitAsyncPlan {
+    thread_local! {
+        static PLAN_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    let seq = PLAN_SEQ.with(|c| { let n = c.get(); c.set(n + 1); n });
+    let now = unsafe { host_now_ms() };
+    GitAsyncPlan {
+        id: format!("gitplan-{}-{}", now, seq),
+        verb: verb.to_string(),
+        body: body.clone(),
+        calls: 0,
+        results: serde_json::Map::new(),
+        persisted: false,
+    }
+}
+
+fn git_async_plan_load(id: &str) -> Option<GitAsyncPlan> {
+    let raw = super::host_abi::host_kv_read(GIT_ASYNC_NS, id)?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    Some(GitAsyncPlan {
+        id: id.to_string(),
+        verb: v.get("verb")?.as_str()?.to_string(),
+        body: v.get("body").cloned().unwrap_or(json!({})),
+        calls: 0,
+        results: v.get("results").and_then(|x| x.as_object()).cloned().unwrap_or_default(),
+        persisted: true,
+    })
+}
+
+fn git_async_kv_put(ns: &str, key: &str, val: &str) {
+    unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32); }
+}
+
+fn git_async_kv_delete(ns: &str, key: &str) {
+    unsafe { host_kv_delete(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32); }
+}
+
+fn git_async_plan_persist(plan: &GitAsyncPlan) {
+    let s = json!({
+        "verb": plan.verb,
+        "body": plan.body,
+        "results": plan.results,
+    }).to_string();
+    git_async_kv_put(GIT_ASYNC_NS, &plan.id, &s);
+}
+
+fn git_async_plan_forget(plan: &GitAsyncPlan) {
+    if plan.persisted { git_async_kv_delete(GIT_ASYNC_NS, &plan.id); }
+}
+
+fn git_async_pending_envelope(verb: &str, token: &str, plan: &str) -> u64 {
+    err_json(verb, json!({
+        "error": "async git host parked this op; dispatch git_poll {token} until a non-pending envelope comes back -- that envelope IS this verb's terminal result",
+        "pending": true,
+        "token": token,
+        "plan": plan,
+        "next_dispatch_hint": "git_poll",
+    }))
+}
+
+/// One git op inside an async-aware verb. Steps are addressed by call order,
+/// so a verb re-entered after a poll replays its already-finished ops from the
+/// plan (identical call sequence = identical indices) and only ever executes
+/// the first not-yet-finished op against the host. Err(_) carries a packed
+/// response the verb must return untouched: the parked pending envelope.
+fn git_step(plan: &mut GitAsyncPlan, argv: &[&str], cwd: Option<&str>) -> Result<Value, u64> {
+    let idx = plan.calls;
+    plan.calls += 1;
+    if let Some(v) = plan.results.get(&idx.to_string()) {
+        return Ok(v.clone());
+    }
+    let r = super::host_abi::git_call_argv_async(argv, cwd);
+    if let Some(token) = super::host_abi::git_pending_token(&r) {
+        git_async_plan_persist(plan);
+        git_async_kv_put(GIT_ASYNC_NS, &format!("tok:{}", token), &plan.id);
+        return Err(git_async_pending_envelope(&plan.verb, &token, &plan.id));
+    }
+    plan.results.insert(idx.to_string(), r.clone());
+    Ok(r)
+}
+
+fn git_async_entry(verb: &str, body: &Value, run: impl FnOnce(&Value, &mut GitAsyncPlan) -> Result<u64, u64>) -> u64 {
+    let mut plan = body.get("_plan").and_then(|x| x.as_str()).and_then(git_async_plan_load)
+        .unwrap_or_else(|| git_async_plan_new(verb, body));
+    match run(body, &mut plan) {
+        Ok(packed) => { git_async_plan_forget(&plan); packed }
+        Err(parked) => parked,
+    }
+}
+
+fn git_async_reenter(verb: &str, body: &Value) -> u64 {
+    match verb {
+        "git_status" => git_status(body),
+        "git_add" => git_add(body),
+        "git_commit" => git_commit(body),
+        "git_log" => git_log(body),
+        "git_diff" => git_diff(body),
+        _ => err("git_poll", "parked plan names a verb with no async-resume support"),
+    }
+}
+
+fn git_poll(body: &Value) -> u64 {
+    let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
+    if token.is_empty() { return err("git_poll", "token required"); }
+    let raw = super::host_abi::host_kv_read(GIT_OUTBOX_NS, token);
+    let Some(raw) = raw else {
+        return err_json("git_poll", json!({
+            "error": "no result parked under this token yet -- the async host is still driving the op; poll again",
+            "pending": true,
+            "token": token,
+            "next_dispatch_hint": "git_poll",
+        }));
+    };
+    git_async_kv_delete(GIT_OUTBOX_NS, token);
+    let result: Value = serde_json::from_str(&raw)
+        .unwrap_or(json!({ "stdout": raw, "stderr": "", "exit_code": 0 }));
+    let mapping_key = format!("tok:{}", token);
+    let Some(plan_id) = super::host_abi::host_kv_read(GIT_ASYNC_NS, &mapping_key) else {
+        return ok("git_poll", json!({ "token": token, "result": result }));
+    };
+    git_async_kv_delete(GIT_ASYNC_NS, &mapping_key);
+    let Some(mut plan) = git_async_plan_load(&plan_id) else {
+        return err("git_poll", "plan state missing for parked token -- cannot resume the parked verb");
+    };
+    let parked_idx = plan.results.len();
+    plan.results.insert(parked_idx.to_string(), result);
+    git_async_plan_persist(&plan);
+    let mut resumed = plan.body.clone();
+    if let Some(m) = resumed.as_object_mut() { m.insert("_plan".to_string(), json!(plan.id)); }
+    git_async_reenter(&plan.verb, &resumed)
+}
+
 fn run_git_checked(argv: &[&str], cwd: Option<&str>, verb: &str, fallback: &str) -> Result<Value, u64> {
     let r = git_call_argv(argv, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -2006,31 +2166,34 @@ fn run_git_checked(argv: &[&str], cwd: Option<&str>, verb: &str, fallback: &str)
 }
 
 fn git_status(body: &Value) -> u64 {
-    let cwd = body_cwd(body);
-    let porcelain = git_porcelain_in(cwd);
-    let mut modified: Vec<String> = vec![];
-    let mut untracked: Vec<String> = vec![];
-    let mut deleted: Vec<String> = vec![];
-    let mut staged: Vec<String> = vec![];
-    for line in porcelain.lines() {
-        if line.len() < 3 { continue; }
-        let xy = &line[..2];
-        let path = line[3..].trim().to_string();
-        let x = xy.chars().nth(0).unwrap_or(' ');
-        let y = xy.chars().nth(1).unwrap_or(' ');
-        if xy == "??" { untracked.push(path); continue; }
-        if x != ' ' && x != '?' { staged.push(path.clone()); }
-        if y == 'M' || x == 'M' { modified.push(path.clone()); }
-        if y == 'D' || x == 'D' { deleted.push(path.clone()); }
-    }
-    let dirty = !porcelain.trim().is_empty();
-    ok("git_status", json!({
-        "dirty": dirty,
-        "modified": modified,
-        "untracked": untracked,
-        "deleted": deleted,
-        "staged": staged,
-    }))
+    git_async_entry("git_status", body, |body, plan| {
+        let cwd = body_cwd(body);
+        let r = git_step(plan, &["status", "--porcelain"], cwd)?;
+        let porcelain = super::host_abi::porcelain_or_dirty(r);
+        let mut modified: Vec<String> = vec![];
+        let mut untracked: Vec<String> = vec![];
+        let mut deleted: Vec<String> = vec![];
+        let mut staged: Vec<String> = vec![];
+        for line in porcelain.lines() {
+            if line.len() < 3 { continue; }
+            let xy = &line[..2];
+            let path = line[3..].trim().to_string();
+            let x = xy.chars().nth(0).unwrap_or(' ');
+            let y = xy.chars().nth(1).unwrap_or(' ');
+            if xy == "??" { untracked.push(path); continue; }
+            if x != ' ' && x != '?' { staged.push(path.clone()); }
+            if y == 'M' || x == 'M' { modified.push(path.clone()); }
+            if y == 'D' || x == 'D' { deleted.push(path.clone()); }
+        }
+        let dirty = !porcelain.trim().is_empty();
+        Ok(ok("git_status", json!({
+            "dirty": dirty,
+            "modified": modified,
+            "untracked": untracked,
+            "deleted": deleted,
+            "staged": staged,
+        })))
+    })
 }
 
 fn branch_status(body: &Value) -> u64 {
@@ -2212,25 +2375,27 @@ fn git_push(body: &Value) -> u64 {
 }
 
 fn git_add(body: &Value) -> u64 {
-    let repo = body.get("repo").and_then(|v| v.as_str());
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
-    let paths: Vec<String> = body.get("paths")
-        .or_else(|| body.get("files"))
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    let mut argv: Vec<&str> = vec!["add"];
-    if paths.is_empty() {
-        argv.push("-A");
-    } else {
-        for p in &paths { argv.push(p.as_str()); }
-    }
-    let r = git_call_argv(&argv, cwd);
-    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    if code != 0 {
-        return err("git_add", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("git add failed"));
-    }
-    ok("git_add", json!({ "staged": if paths.is_empty() { vec!["-A".to_string()] } else { paths } }))
+    git_async_entry("git_add", body, |body, plan| {
+        let repo = body.get("repo").and_then(|v| v.as_str());
+        let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
+        let paths: Vec<String> = body.get("paths")
+            .or_else(|| body.get("files"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let mut argv: Vec<&str> = vec!["add"];
+        if paths.is_empty() {
+            argv.push("-A");
+        } else {
+            for p in &paths { argv.push(p.as_str()); }
+        }
+        let r = git_step(plan, &argv, cwd)?;
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 {
+            return Ok(err("git_add", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("git add failed")));
+        }
+        Ok(ok("git_add", json!({ "staged": if paths.is_empty() { vec!["-A".to_string()] } else { paths } })))
+    })
 }
 
 fn bundle_prd_commit_comments(cwd: Option<&str>, message: &str) -> String {
@@ -2247,48 +2412,56 @@ fn bundle_prd_commit_comments(cwd: Option<&str>, message: &str) -> String {
 }
 
 fn git_commit(body: &Value) -> u64 {
-    let repo = body.get("repo").and_then(|v| v.as_str());
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
-    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
-    if message.is_empty() {
-        return err("git_commit", "message required");
-    }
-    let allow_empty = body.get("allow_empty").and_then(|v| v.as_bool()).unwrap_or(false);
-    if git_porcelain_in(cwd).trim().is_empty() && !allow_empty {
-        return ok("git_commit", json!({ "nothing_to_commit": true }));
-    }
-    let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-    // `no_add: true` commits exactly what a prior git_add already staged,
-    // without a second blanket `git add -A` sweeping in every OTHER file that
-    // has changed on disk since -- including another session's still-in-flight
-    // unstaged edit on a shared/concurrently-driven repo. Default stays `-A`
-    // for the common single-session convenience-commit case; a caller that
-    // explicitly staged specific paths via git_add is the one asking to opt
-    // out of the blanket sweep.
-    let no_add = body.get("no_add").and_then(|v| v.as_bool()).unwrap_or(false);
-    if !no_add {
-        let _ = git_call_argv(&["add", "-A"], cwd);
-    }
-    let bundled_message = bundle_prd_commit_comments(cwd, message);
-    let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
-    if allow_empty { argv.push("--allow-empty"); }
-    let r = git_call_argv(&argv, cwd);
-    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    if code != 0 {
-        let serr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
-        let sout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-        if sout.contains("nothing to commit") || serr.contains("nothing to commit") {
-            return ok("git_commit", json!({ "nothing_to_commit": true }));
+    git_async_entry("git_commit", body, |body, plan| {
+        let repo = body.get("repo").and_then(|v| v.as_str());
+        let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
+        let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if message.is_empty() {
+            return Ok(err("git_commit", "message required"));
         }
-        return err("git_commit", if serr.is_empty() { sout } else { serr });
-    }
-    let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-    if head_after.is_empty() || head_after == head_before {
-        return err("git_commit", "commit reported success (exit 0) but HEAD did not move -- refusing to claim committed:true without a real new sha");
-    }
-    let sha = head_after[..head_after.len().min(10)].to_string();
-    let summary = message.lines().next().unwrap_or("").to_string();
-    ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary }))
+        let allow_empty = body.get("allow_empty").and_then(|v| v.as_bool()).unwrap_or(false);
+        let status_r = git_step(plan, &["status", "--porcelain"], cwd)?;
+        let porcelain = super::host_abi::porcelain_or_dirty(status_r);
+        if porcelain.trim().is_empty() && !allow_empty {
+            return Ok(ok("git_commit", json!({ "nothing_to_commit": true })));
+        }
+        let head_r = git_step(plan, &["rev-parse", "HEAD"], cwd)?;
+        let head_before = head_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        // `no_add: true` commits exactly what a prior git_add already staged,
+        // without a second blanket `git add -A` sweeping in every OTHER file that
+        // has changed on disk since -- including another session's still-in-flight
+        // unstaged edit on a shared/concurrently-driven repo. Default stays `-A`
+        // for the common single-session convenience-commit case; a caller that
+        // explicitly staged specific paths via git_add is the one asking to opt
+        // out of the blanket sweep. The body (and therefore no_add) is part of
+        // the persisted plan, so the step sequence stays deterministic across
+        // async re-entries -- step indices are by call order and never drift.
+        let no_add = body.get("no_add").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !no_add {
+            let _ = git_step(plan, &["add", "-A"], cwd)?;
+        }
+        let bundled_message = bundle_prd_commit_comments(cwd, message);
+        let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
+        if allow_empty { argv.push("--allow-empty"); }
+        let r = git_step(plan, &argv, cwd)?;
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 {
+            let serr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+            let sout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+            if sout.contains("nothing to commit") || serr.contains("nothing to commit") {
+                return Ok(ok("git_commit", json!({ "nothing_to_commit": true })));
+            }
+            return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
+        }
+        let after_r = git_step(plan, &["rev-parse", "HEAD"], cwd)?;
+        let head_after = after_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        if head_after.is_empty() || head_after == head_before {
+            return Ok(err("git_commit", "commit reported success (exit 0) but HEAD did not move -- refusing to claim committed:true without a real new sha"));
+        }
+        let sha = head_after[..head_after.len().min(10)].to_string();
+        let summary = message.lines().next().unwrap_or("").to_string();
+        Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary })))
+    })
 }
 
 fn git_finalize(body: &Value) -> u64 {
@@ -2475,63 +2648,67 @@ fn git_finalize(body: &Value) -> u64 {
 }
 
 fn git_log(body: &Value) -> u64 {
-    let cwd = body_cwd(body);
-    let count = body.get("limit").and_then(|v| v.as_u64())
-        .or_else(|| body.get("count").and_then(|v| v.as_u64()))
-        .unwrap_or(10);
-    let nflag = format!("-{}", count);
-    let range = body.get("range").and_then(|v| v.as_str())
-        .or_else(|| body.get("ref").and_then(|v| v.as_str()))
-        .unwrap_or("").trim();
-    let mut argv: Vec<&str> = vec!["log", &nflag, "--oneline", "--no-color"];
-    if !range.is_empty() { argv.push(range); }
-    let r = git_call_argv(&argv, cwd);
-    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    if code != 0 {
-        let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
-        return err_json("git_log", json!({
-            "error": stderr,
-            "range": range,
-            "hint": "git rejected the range; check both endpoints exist locally (a remote-tracking ref may need git_fetch first)"
-        }));
-    }
-    let out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-    let commits: Vec<Value> = out.lines().filter(|l| !l.is_empty()).map(|l| {
-        let mut it = l.splitn(2, ' ');
-        let sha = it.next().unwrap_or("").to_string();
-        let subject = it.next().unwrap_or("").to_string();
-        json!({ "sha": sha, "subject": subject })
-    }).collect();
-    ok("git_log", json!({ "commits": commits }))
+    git_async_entry("git_log", body, |body, plan| {
+        let cwd = body_cwd(body);
+        let count = body.get("limit").and_then(|v| v.as_u64())
+            .or_else(|| body.get("count").and_then(|v| v.as_u64()))
+            .unwrap_or(10);
+        let nflag = format!("-{}", count);
+        let range = body.get("range").and_then(|v| v.as_str())
+            .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+            .unwrap_or("").trim();
+        let mut argv: Vec<&str> = vec!["log", &nflag, "--oneline", "--no-color"];
+        if !range.is_empty() { argv.push(range); }
+        let r = git_step(plan, &argv, cwd)?;
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 {
+            let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+            return Ok(err_json("git_log", json!({
+                "error": stderr,
+                "range": range,
+                "hint": "git rejected the range; check both endpoints exist locally (a remote-tracking ref may need git_fetch first)"
+            })));
+        }
+        let out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+        let commits: Vec<Value> = out.lines().filter(|l| !l.is_empty()).map(|l| {
+            let mut it = l.splitn(2, ' ');
+            let sha = it.next().unwrap_or("").to_string();
+            let subject = it.next().unwrap_or("").to_string();
+            json!({ "sha": sha, "subject": subject })
+        }).collect();
+        Ok(ok("git_log", json!({ "commits": commits })))
+    })
 }
 
 fn git_diff(body: &Value) -> u64 {
-    let cwd = body_cwd(body);
-    let staged = body.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
-    let path = body.get("path").and_then(|v| v.as_str());
-    let range = body.get("range").and_then(|v| v.as_str())
-        .or_else(|| body.get("ref").and_then(|v| v.as_str()))
-        .unwrap_or("").trim();
-    let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
-    let mut argv: Vec<&str> = vec!["diff", "--no-color"];
-    if staged { argv.push("--staged"); }
-    if stat { argv.push("--stat"); }
-    if !range.is_empty() { argv.push(range); }
-    if let Some(p) = path { argv.push("--"); argv.push(p); }
-    let r = git_call_argv(&argv, cwd);
-    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    if code != 0 {
-        let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
-        return err_json("git_diff", json!({
-            "error": stderr,
-            "range": range,
-            "hint": "git rejected the range; an empty diff must never be inferred from a rejected argument -- check both endpoints exist locally"
-        }));
-    }
-    let mut diff = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let truncated = diff.len() > 60000;
-    if truncated { diff.truncate(60000); }
-    ok("git_diff", json!({ "diff": diff, "truncated": truncated, "range": range }))
+    git_async_entry("git_diff", body, |body, plan| {
+        let cwd = body_cwd(body);
+        let staged = body.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
+        let path = body.get("path").and_then(|v| v.as_str());
+        let range = body.get("range").and_then(|v| v.as_str())
+            .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+            .unwrap_or("").trim();
+        let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut argv: Vec<&str> = vec!["diff", "--no-color"];
+        if staged { argv.push("--staged"); }
+        if stat { argv.push("--stat"); }
+        if !range.is_empty() { argv.push(range); }
+        if let Some(p) = path { argv.push("--"); argv.push(p); }
+        let r = git_step(plan, &argv, cwd)?;
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 {
+            let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+            return Ok(err_json("git_diff", json!({
+                "error": stderr,
+                "range": range,
+                "hint": "git rejected the range; an empty diff must never be inferred from a rejected argument -- check both endpoints exist locally"
+            })));
+        }
+        let mut diff = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let truncated = diff.len() > 60000;
+        if truncated { diff.truncate(60000); }
+        Ok(ok("git_diff", json!({ "diff": diff, "truncated": truncated, "range": range })))
+    })
 }
 
 fn git_show(body: &Value) -> u64 {
@@ -3137,6 +3314,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_rm" => git_rm(&body),
         "git_revert" => git_revert(&body),
         "git_reset" => git_reset(&body),
+        "git_poll" => git_poll(&body),
         "forget" => forget(&body),
         "learn" => err_coded("learn", ERR_CODE_RETIRED_VERB, "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index)"),
         "discipline" => discipline(&body),

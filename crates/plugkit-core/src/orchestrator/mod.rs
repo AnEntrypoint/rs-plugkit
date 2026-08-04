@@ -35,8 +35,43 @@ fn parse_toplevel_common_dir(out: &str) -> Option<PathBuf> {
 #[cfg(target_arch = "wasm32")]
 fn git_common_dir_project_root_once() -> Option<PathBuf> {
     let v = crate::wasm_dispatch::git_call("rev-parse --show-toplevel --git-common-dir", None);
+    if v.get("async_parked").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return fs_walk_project_root();
+    }
     let out = v.get("stdout").and_then(|x| x.as_str())?;
     parse_toplevel_common_dir(out)
+}
+
+/// Root resolution for hosts that park `git rev-parse` under the async
+/// pending-token protocol instead of answering inline: the git probe above
+/// can never succeed there, but host_fs_* IS synchronous on every host, and
+/// the question rev-parse answers is only "which ancestor of the cwd holds
+/// the .git entry". Walk up probing that entry (`.git` itself for gitfile
+/// worktrees, `.git/HEAD` for the common directory form). Returns None when
+/// no ancestor holds one -- resolve_project_root_with_retry's deliberate
+/// refuse-to-mis-root panic still fires for the genuinely repoless case,
+/// exactly as a real git failure produces it on sync hosts. The walk's
+/// result lands in the same cwd-keyed PROJECT_ROOT_CACHE the git path feeds,
+/// so the parked-rev-parse probe happens at most once per cwd per process.
+#[cfg(target_arch = "wasm32")]
+fn fs_walk_project_root() -> Option<PathBuf> {
+    let cwd = current_cwd_string();
+    let mut dir = cwd.trim_end_matches(['/', '\\']).to_string();
+    if dir.is_empty() { dir = "/".to_string(); }
+    loop {
+        let base = if dir == "/" { String::new() } else { dir.clone() };
+        if crate::wasm_dispatch::host_exists(&format!("{base}/.git"))
+            || crate::wasm_dispatch::host_exists(&format!("{base}/.git/HEAD"))
+        {
+            return Some(PathBuf::from(if base.is_empty() { "/".to_string() } else { base }));
+        }
+        if dir == "/" || dir.is_empty() { return None; }
+        dir = match dir.rfind('/') {
+            Some(0) => "/".to_string(),
+            Some(i) => dir[..i].to_string(),
+            None => String::new(),
+        };
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -39,7 +39,7 @@ Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir`, `kv`/`kv_get`/
 `codesearch`, `memorize`/`memorize-prune`, `health`, `filter`, the full git
 verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`,
 `git_add`, `git_commit`, `git_finalize`, `git_push`, `git_checkout`,
-`git_fetch`, `git_rm`, `git_revert`, `git_reset`), plus `ci-status` (real
+`git_fetch`, `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
 GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
 `prd-status`, `mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
 `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/
@@ -53,6 +53,20 @@ automatically, so a caller does not need a separate CI-poll-then-marker-write
 round trip. On a non-green or unresolvable result, the response's
 `next_dispatch` field names `ci-status` so the caller can re-check once CI
 finishes.
+
+Async git hosts use a pending-token protocol shaped like `host_fetch`'s. A
+host that cannot block the wasm call (a browser driving isomorphic-git on the
+wasm's own thread) answers `host_git` with `{"pending": true, "token"}` and
+parks the terminal `{"stdout", "stderr", "exit_code"}` JSON string in kv ns
+`outbox` under that token. The async-aware git verbs (`git_status`, `git_add`,
+`git_commit`, `git_log`, `git_diff`) return a pending envelope carrying the
+token. The caller dispatches `git_poll {token}` until a non-pending envelope
+comes back; that envelope is the verb's terminal result. `git_poll` consumes
+the outbox entry, records the finished step in a kv-persisted plan (ns
+`git_async`), and re-enters the parked verb, so compound verbs like
+`git_commit` resume across dispatches with no caller-side state. Sync hosts
+return terminal results inline from `host_git`, persist no plan, and see no
+behavior change.
 
 ## FSM graph
 
