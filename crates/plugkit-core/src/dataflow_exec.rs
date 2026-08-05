@@ -103,13 +103,18 @@ fn dispatch_gm_internal(verb: &str, body: &Value) -> Value {
             let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
             let cfg = crate::ragconfig::RagConfig::resolved();
             let mut corpus = crate::code_index::FusionCorpus::load();
-            let ids = corpus.bm25_rank_cfg(query, k, &cfg.scoring);
-            json!({ "ids": ids })
+            let ranked = corpus.bm25_rank_cfg(query, k, &cfg.scoring);
+            let ids: Vec<&str> = ranked.iter().map(|(key, _)| key.as_str()).collect();
+            let scored: Vec<Value> = ranked.iter().map(|(key, score)| json!({ "key": key, "score": score })).collect();
+            json!({ "ids": ids, "scored": scored })
         }
         "git_commit_rank" => {
             let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-            json!({ "commits": crate::code_index::git_commit_rank(query, limit) })
+            let ranked = crate::code_index::git_commit_rank(query, limit);
+            let hashes: Vec<&str> = ranked.iter().map(|(hash, _, _)| hash.as_str()).collect();
+            let commits: Vec<Value> = ranked.iter().map(|(hash, message, score)| json!({ "hash": hash, "message": message, "score": score })).collect();
+            json!({ "commits": hashes, "commit_details": commits })
         }
         "search_with_recency" => {
             let embedding = body.get("embedding").and_then(|e| e.get("embedding")).cloned().unwrap_or(Value::Null);
@@ -195,6 +200,14 @@ fn run_fuse(fuse: &FuseNode, state: &RunState) -> Value {
                 "ids": fused.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
                 "scored": fused.into_iter().map(|(id, score)| json!({"id": id, "score": score})).collect::<Vec<_>>(),
             })
+        }
+        "present_both" => {
+            let mut obj = serde_json::Map::new();
+            for src in &fuse.sources {
+                let out = state.outputs.get(src).cloned().unwrap_or(Value::Null);
+                obj.insert(src.clone(), out);
+            }
+            Value::Object(obj)
         }
         other => json!({ "ok": false, "error": format!("unknown fuse strategy: {other}") }),
     }

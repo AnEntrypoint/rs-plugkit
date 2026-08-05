@@ -1281,8 +1281,12 @@ fn codesearch(body: &Value) -> u64 {
     } else {
         vec_ids
     };
-    let bm25_ids = corpus.bm25_rank_cfg(query, cand_k as usize, &cfg.scoring);
-    let commits = crate::code_index::git_commit_rank(query, 10);
+    let bm25_ranked = corpus.bm25_rank_cfg(query, cand_k as usize, &cfg.scoring);
+    let bm25_ids: Vec<String> = bm25_ranked.iter().map(|(key, _)| key.clone()).collect();
+    let commit_ranked = crate::code_index::git_commit_rank(query, 10);
+    let commits: Vec<Value> = commit_ranked.iter()
+        .map(|(hash, message, score)| json!({ "hash": hash, "message": message, "score": score }))
+        .collect();
     let build_hit = |corpus: &mut crate::code_index::FusionCorpus, key: &str, score: Option<f64>, fallback_text: Option<&str>| -> Value {
         let text = corpus.text_for_key(key)
             .or_else(|| fallback_text.map(String::from))
@@ -1295,27 +1299,17 @@ fn codesearch(body: &Value) -> u64 {
         if let Some(ov) = corpus.overview_for_key(key) { obj.insert("overview".to_string(), json!(ov)); }
         Value::Object(obj)
     };
-    let vector_top10: Vec<Value> = vector_hits.as_array()
+    let vector_ranked: Vec<Value> = vector_hits.as_array()
         .filter(|a| !a.is_empty())
-        .map(|a| a.iter().take(10).cloned().collect())
-        .or_else(|| vec_hits.as_array().filter(|a| !a.is_empty()).map(|a| a.iter().take(10).cloned().collect()))
-        .unwrap_or_else(|| vec_ids.iter().take(10).map(|key| build_hit(&mut corpus, key, None, None)).collect());
-    let bm25_top10: Vec<Value> = bm25_ids.iter().take(10).map(|key| build_hit(&mut corpus, key, None, None)).collect();
+        .map(|a| a.iter().take(k as usize).cloned().collect())
+        .or_else(|| vec_hits.as_array().filter(|a| !a.is_empty()).map(|a| a.iter().take(k as usize).cloned().collect()))
+        .unwrap_or_else(|| vec_ids.iter().take(k as usize).map(|key| build_hit(&mut corpus, key, None, None)).collect());
+    let bm25_ranked_response: Vec<Value> = bm25_ranked.iter().take(k as usize)
+        .map(|(key, score)| build_hit(&mut corpus, key, Some(*score), None))
+        .collect();
     if !vec_ids.is_empty() || !bm25_ids.is_empty() {
-        let lists = vec![vec_ids, bm25_ids];
-        let weights = [cfg.scoring.fusion_vector_list_weight, cfg.scoring.fusion_identifier_boost];
-        let fused = rs_search::fusion::fuse_n_cfg(&lists, &weights, query, cfg.scoring.fusion_rrf_k);
-        let hits: Vec<Value> = fused.into_iter().take(k as usize).map(|(key, score)| {
-            let fallback = vec_hits.as_array().and_then(|a| {
-                a.iter().find(|h| h.get("key").and_then(|x| x.as_str()) == Some(key.as_str()))
-                    .and_then(|h| h.get("text").and_then(|t| t.as_str()))
-            });
-            build_hit(&mut corpus, &key, Some(score), fallback)
-        }).collect();
-        let vector_hits_response = vector_top10.clone();
         return ok("codesearch", json!({
-            "mode": "fusion", "hits": hits, "commits": commits, "vector_hits": vector_hits_response,
-            "vector_top10": vector_top10, "bm25_top10": bm25_top10,
+            "mode": "dual", "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response, "commits": commits,
         }));
     }
     let ns = cfg.namespaces.code.as_str();
@@ -1330,7 +1324,7 @@ fn codesearch(body: &Value) -> u64 {
         }
         return codesearch(&retry);
     }
-    let vec_unavailable = vector_top10.is_empty();
+    let vec_unavailable = vector_ranked.is_empty();
     let kv_empty_now = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
 
     if vec_unavailable {
@@ -1349,8 +1343,7 @@ fn codesearch(body: &Value) -> u64 {
 
     ok("codesearch", json!({
         "mode": "fallback_kv", "degraded": vec_unavailable,
-        "hits": hits, "commits": commits, "vector_hits": vector_top10.clone(),
-        "vector_top10": vector_top10, "bm25_top10": bm25_top10,
+        "hits": hits, "commits": commits, "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response,
     }))
 }
 

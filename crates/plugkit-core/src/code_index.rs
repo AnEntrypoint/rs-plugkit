@@ -1620,11 +1620,11 @@ impl FusionCorpus {
         Some(format!("{}:{}:{} {}\n{}", path, ls, le, name, body_trunc))
     }
 
-    pub fn bm25_rank(&mut self, query: &str, k: usize) -> Vec<String> {
+    pub fn bm25_rank(&mut self, query: &str, k: usize) -> Vec<(String, f64)> {
         self.bm25_rank_cfg(query, k, &crate::ragconfig::RagConfig::resolved().scoring)
     }
 
-    pub fn bm25_rank_cfg(&mut self, query: &str, k: usize, scoring: &crate::ragconfig::ScoringConfig) -> Vec<String> {
+    pub fn bm25_rank_cfg(&mut self, query: &str, k: usize, scoring: &crate::ragconfig::ScoringConfig) -> Vec<(String, f64)> {
         let k1 = scoring.bm25_k1_term_frequency_saturation;
         let b = scoring.bm25_b_document_length_normalization;
         let q_tokens = rs_search::tokenize::tokenize(query);
@@ -1663,7 +1663,7 @@ impl FusionCorpus {
             if score > 0.0 { scored.push((*i, score)); }
         }
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().take(k).map(|(i, _)| self.metas[i].key.clone()).collect()
+        scored.into_iter().take(k).map(|(i, s)| (self.metas[i].key.clone(), s)).collect()
     }
 }
 
@@ -1678,43 +1678,48 @@ fn term_freqs(text: &str) -> std::collections::HashMap<String, u32> {
     out
 }
 
-fn git_commit_rank_fallback(query: &str, k: usize) -> Vec<String> {
+fn git_commit_rank_fallback(query: &str, k: usize) -> Vec<(String, String, f64)> {
     let q_tokens = rs_search::tokenize::tokenize(query);
     if q_tokens.is_empty() { return Vec::new(); }
-    let log = crate::wasm_dispatch::git_call("log --format=%H --name-only -n 100 --no-decorate", None);
+    let log = crate::wasm_dispatch::git_call("log --format=%x00%H%x00%s -n 100 --name-only --no-decorate", None);
     let stdout = log.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-    let mut commits: Vec<(String, f64)> = Vec::new();
+    let mut commits: Vec<(String, String, f64)> = Vec::new();
     let mut cur_hash: Option<String> = None;
+    let mut cur_subject = String::new();
     let mut cur_score = 0.0f64;
-    let flush = |commits: &mut Vec<(String, f64)>, hash: Option<String>, score: f64| {
+    let flush = |commits: &mut Vec<(String, String, f64)>, hash: Option<String>, subject: String, score: f64| {
         if let Some(h) = hash {
-            if score > 0.0 { commits.push((h, score)); }
+            if score > 0.0 { commits.push((h, subject, score)); }
         }
     };
     for line in stdout.lines() {
         let t = line.trim();
         if t.is_empty() { continue; }
-        if t.len() == 40 && t.chars().all(|c| c.is_ascii_hexdigit()) {
-            flush(&mut commits, cur_hash.take(), cur_score);
-            cur_hash = Some(t.to_string());
+        if let Some(rest) = t.strip_prefix('\u{0}') {
+            flush(&mut commits, cur_hash.take(), std::mem::take(&mut cur_subject), cur_score);
             cur_score = 0.0;
+            let mut parts = rest.splitn(2, '\u{0}');
+            cur_hash = parts.next().map(|s| s.to_string());
+            cur_subject = parts.next().unwrap_or("").to_string();
+            let stoks = rs_search::tokenize::tokenize(&cur_subject);
+            cur_score += q_tokens.iter().filter(|q| stoks.contains(q)).count() as f64 * 2.0;
         } else if cur_hash.is_some() {
             let ftoks = rs_search::tokenize::tokenize(t);
             cur_score += q_tokens.iter().filter(|q| ftoks.contains(q)).count() as f64;
         }
     }
-    flush(&mut commits, cur_hash.take(), cur_score);
-    commits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    commits.into_iter().take(k).map(|(h, _)| h).collect()
+    flush(&mut commits, cur_hash.take(), cur_subject, cur_score);
+    commits.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    commits.into_iter().take(k).collect()
 }
 
-pub fn git_commit_rank(query: &str, k: usize) -> Vec<String> {
+pub fn git_commit_rank(query: &str, k: usize) -> Vec<(String, String, f64)> {
     let _ = crate::git_commit_vectors::sync_incremental();
     let embedding = embed_text_json_query(query);
     if let Some(emb) = embedding {
         if let Ok(hits) = crate::git_commit_vectors::search(&emb, k) {
             if !hits.is_empty() {
-                return hits.into_iter().map(|(hash, _, _)| hash).collect();
+                return hits;
             }
         }
     }

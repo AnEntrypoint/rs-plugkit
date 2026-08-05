@@ -44,16 +44,10 @@ pub struct InputMapping {
     pub fields: std::collections::BTreeMap<String, Value>,
 }
 
-/// A merge step: combine named upstream steps' outputs via a registered
-/// fusion strategy. `rrf_fuse` is the only strategy wired today (the existing
-/// `rs_search::fusion::fuse_n_cfg` codesearch already calls directly), named
-/// so a future strategy is an additive registry entry, not a schema change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FuseNode {
     pub id: String,
     pub strategy: String,
-    /// Upstream step ids to fuse, in priority order (first = highest weight
-    /// for strategies that honor per-list weighting).
     pub sources: Vec<String>,
     #[serde(default)]
     pub params: std::collections::BTreeMap<String, Value>,
@@ -261,10 +255,6 @@ pub fn pipeline_for(entry_point: &str) -> Option<Pipeline> {
 fn default_document() -> DataflowDocument {
     let mut pipelines = std::collections::BTreeMap::new();
 
-    // codesearch: embed_query -> {rssearch_vector_hits, vec_search_local} (via
-    // the single vector_search step, which itself already tries both and
-    // falls back internally) -> bm25_rank -> git_commit_rank (independent,
-    // feeds the response but not the fuse) -> rrf_fuse(vector, bm25).
     pipelines.insert(
         "codesearch".to_string(),
         Pipeline {
@@ -302,13 +292,13 @@ fn default_document() -> DataflowDocument {
                 },
             ],
             fuse: vec![FuseNode {
-                id: "fused".to_string(),
-                strategy: "rrf_fuse".to_string(),
-                sources: vec!["vector_search".to_string(), "bm25".to_string()],
+                id: "presented".to_string(),
+                strategy: "present_both".to_string(),
+                sources: vec!["vector_search".to_string(), "bm25".to_string(), "commits".to_string()],
                 params: std::collections::BTreeMap::new(),
             }],
             conditions: vec![],
-            output: "fused".to_string(),
+            output: "presented".to_string(),
         },
     );
 
