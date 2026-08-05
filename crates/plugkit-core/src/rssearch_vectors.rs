@@ -515,13 +515,6 @@ fn host_kv_query_raw(namespace: &str, query: &str) -> Value {
 }
 
 
-/// How many distinct row-write failures the migration reports individually
-/// before falling back to the aggregate count. Bounded so one systematically
-/// broken namespace cannot flood the event stream, and independent of the
-/// unrelated skip counters so a malformed row early in the loop cannot
-/// suppress the reporting of genuine write failures after it.
-const MIGRATE_REPORTED_FAILURES: u32 = 5;
-
 /// Namespaces confirmed fully migrated this process, so `rssearch_vector_hits`
 /// (called on every vector query) can skip straight past this entire function
 /// without paying `host_kv_query_raw`'s full flat-namespace scan just to
@@ -619,7 +612,7 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
         match write_cfg(namespace, key, &text, &embedding, now_ms, cfg) {
             Ok(()) => migrated += 1,
             Err(e) => {
-                if write_failures < MIGRATE_REPORTED_FAILURES {
+                if (write_failures as usize) < cfg.bulk_embed.rssearch_migrate_reported_failures {
                     crate::wasm_dispatch::emit_event("rssearch_vectors_migrate_row_failed", json!({
                         "namespace": namespace,
                         "key": key,

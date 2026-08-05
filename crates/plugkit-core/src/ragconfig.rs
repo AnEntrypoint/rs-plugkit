@@ -278,6 +278,18 @@ impl Default for MemoryMdTableNames {
 pub struct BulkEmbedBudgetConfig {
     pub flat_json_migration_budget_ms: u64,
     pub git_commit_embed_budget_ms: u64,
+    pub git_commit_min_embeds_per_pass: usize,
+    pub git_commit_diff_char_cap: usize,
+    pub git_commit_log_window: usize,
+    pub git_commit_max_consecutive_embed_failures: usize,
+    /// How many distinct row-write failures a flat-json migration reports
+    /// individually before falling back to the aggregate count. Bounded so
+    /// one systematically broken namespace cannot flood the event stream,
+    /// and independent of the unrelated skip counters so a malformed row
+    /// early in the loop cannot suppress reporting of genuine write
+    /// failures after it.
+    pub rssearch_migrate_reported_failures: usize,
+    pub max_subbatch_items: usize,
 }
 
 impl Default for BulkEmbedBudgetConfig {
@@ -285,6 +297,12 @@ impl Default for BulkEmbedBudgetConfig {
         BulkEmbedBudgetConfig {
             flat_json_migration_budget_ms: 2000,
             git_commit_embed_budget_ms: 30000,
+            git_commit_min_embeds_per_pass: 8,
+            git_commit_diff_char_cap: 4000,
+            git_commit_log_window: 500,
+            git_commit_max_consecutive_embed_failures: 5,
+            rssearch_migrate_reported_failures: 5,
+            max_subbatch_items: 32,
         }
     }
 }
@@ -648,7 +666,7 @@ impl RagConfig {
         append_present_strings_or_record_problem("index", "extra_skip_dirs", &mut cfg.index.extra_skip_dirs_appended_to_builtins_never_replacing, &mut problems);
         append_present_strings_or_record_problem("index", "extra_skip_file_suffixes", &mut cfg.index.extra_skip_file_suffixes_appended_to_builtins_never_replacing, &mut problems);
         append_present_strings_or_record_problem("index", "force_include_path_substrings", &mut cfg.index.force_include_path_substrings_overriding_every_skip, &mut problems);
-        overwrite_present_usize_or_record_problem("index", "prune_enumeration_file_cap", &mut cfg.index.prune_enumeration_file_cap, &mut problems);
+        overwrite_present_usize_or_record_problem("index", "prune_enumeration_cap", &mut cfg.index.prune_enumeration_file_cap, &mut problems);
         overwrite_present_usize_or_record_problem("index", "digest_max_files", &mut cfg.index.digest_max_files, &mut problems);
         overwrite_present_usize_or_record_problem("index", "prune_pass_file_limit_floor", &mut cfg.index.prune_pass_file_limit_floor, &mut problems);
         overwrite_present_usize_or_record_problem("index", "prune_pass_file_limit_ceiling", &mut cfg.index.prune_pass_file_limit_ceiling, &mut problems);
@@ -661,10 +679,17 @@ impl RagConfig {
         overwrite_present_u64_or_record_problem("memory_sync", "rekey_rows_deadline_ms", &mut cfg.memory_sync.rekey_rows_deadline_ms, &mut problems);
         overwrite_present_usize_or_record_problem("memory_sync", "rekey_batch_max", &mut cfg.memory_sync.rekey_batch_max, &mut problems);
         overwrite_present_usize_or_record_problem("memory_sync", "rename_batch_chunk", &mut cfg.memory_sync.rename_batch_chunk, &mut problems);
-        overwrite_present_usize_or_record_problem("embed_cache", "query_cache_capacity", &mut cfg.embed_cache.query_cache_capacity, &mut problems);
-        overwrite_present_usize_or_record_problem("embed_cache", "plain_cache_max_text_bytes", &mut cfg.embed_cache.plain_cache_max_text_bytes, &mut problems);
-        overwrite_present_u64_or_record_problem("bulk_embed", "flat_json_migration_budget_ms", &mut cfg.bulk_embed.flat_json_migration_budget_ms, &mut problems);
-        overwrite_present_u64_or_record_problem("bulk_embed", "git_commit_embed_budget_ms", &mut cfg.bulk_embed.git_commit_embed_budget_ms, &mut problems);
+        overwrite_present_usize_or_record_problem("embed", "query_cache_cap_entries", &mut cfg.embed_cache.query_cache_capacity, &mut problems);
+        overwrite_present_i64_or_record_problem("embed", "query_cache_ttl_ms", &mut cfg.embed_cache.query_cache_ttl_ms, &mut problems);
+        overwrite_present_usize_or_record_problem("embed", "plain_cache_max_text", &mut cfg.embed_cache.plain_cache_max_text_bytes, &mut problems);
+        overwrite_present_u64_or_record_problem("rssearch", "migrate_budget_ms", &mut cfg.bulk_embed.flat_json_migration_budget_ms, &mut problems);
+        overwrite_present_usize_or_record_problem("rssearch", "migrate_reported_failures", &mut cfg.bulk_embed.rssearch_migrate_reported_failures, &mut problems);
+        overwrite_present_u64_or_record_problem("git_commits", "embed_budget_ms", &mut cfg.bulk_embed.git_commit_embed_budget_ms, &mut problems);
+        overwrite_present_usize_or_record_problem("git_commits", "min_embeds_per_pass", &mut cfg.bulk_embed.git_commit_min_embeds_per_pass, &mut problems);
+        overwrite_present_usize_or_record_problem("git_commits", "diff_char_cap", &mut cfg.bulk_embed.git_commit_diff_char_cap, &mut problems);
+        overwrite_present_usize_or_record_problem("git_commits", "log_window", &mut cfg.bulk_embed.git_commit_log_window, &mut problems);
+        overwrite_present_usize_or_record_problem("git_commits", "max_consecutive_embed_failures", &mut cfg.bulk_embed.git_commit_max_consecutive_embed_failures, &mut problems);
+        overwrite_present_usize_or_record_problem("embed", "max_subbatch_items", &mut cfg.bulk_embed.max_subbatch_items, &mut problems);
         overwrite_present_string_or_record_problem("memory_md_tables", "meta", &mut cfg.memory_md_tables.meta, &mut problems);
         overwrite_present_string_or_record_problem("memory_md_tables", "files", &mut cfg.memory_md_tables.files, &mut problems);
         overwrite_present_string_or_record_problem("db_path", "state_root_dir", &mut cfg.db_path.state_root_dir, &mut problems);

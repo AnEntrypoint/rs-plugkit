@@ -7,10 +7,6 @@ use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shar
 use crate::vecns::{self, QueryBudget, VecTableSpec};
 use crate::wasm_dispatch::plugin_call;
 
-const MIN_EMBEDS_PER_PASS: u32 = 8;
-const DIFF_CHAR_CAP: usize = 4000;
-const LOG_WINDOW: usize = 500;
-
 /// See `rssearch_vectors::default_cfg` -- constructed per call, never cached,
 /// because the plugin instance is shared across concurrently-active projects.
 fn default_cfg() -> RagConfig {
@@ -92,7 +88,7 @@ fn parse_log_entries(stdout: &str) -> Vec<(String, String)> {
     out
 }
 
-fn commit_diff_text(hash: &str) -> String {
+fn commit_diff_text(hash: &str, cfg: &RagConfig) -> String {
     let v = crate::wasm_dispatch::git_call_argv(
         &["show", "--no-color", "--stat=200", "-p", "--first-parent", hash],
         None,
@@ -106,8 +102,9 @@ fn commit_diff_text(hash: &str) -> String {
         .filter(|l| !l.starts_with("Binary files "))
         .collect::<Vec<_>>()
         .join("\n");
-    if filtered.len() > DIFF_CHAR_CAP {
-        filtered.chars().take(DIFF_CHAR_CAP).collect()
+    let diff_char_cap = cfg.bulk_embed.git_commit_diff_char_cap;
+    if filtered.len() > diff_char_cap {
+        filtered.chars().take(diff_char_cap).collect()
     } else {
         filtered
     }
@@ -129,7 +126,7 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
     ensure_schema_cfg(cfg)?;
     let db_path = shared_db_path();
     let log = crate::wasm_dispatch::git_call(
-        &format!("log --format=%x00%H%x00%s%x1e -n {}", LOG_WINDOW),
+        &format!("log --format=%x00%H%x00%s%x1e -n {}", cfg.bulk_embed.git_commit_log_window),
         None,
     );
     let ok = log.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
@@ -175,21 +172,22 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
     let mut embedded = 0u32;
     let mut deferred = 0u32;
     let mut skipped = 0u32;
-    /// A run this long means the embedder is down, not that one commit is odd.
-    /// Small on purpose: the whole cost of being wrong is one extra pass, while
-    /// the cost of continuing through a dead embedder is a wedged daemon.
-    const MAX_CONSECUTIVE_EMBED_FAILURES: u32 = 5;
-    let mut consecutive_embed_failures: u32 = 0;
-    let embed_budget_ms = crate::ragconfig::RagConfig::resolved().bulk_embed.git_commit_embed_budget_ms;
+    // A run this long means the embedder is down, not that one commit is odd.
+    // Small on purpose: the whole cost of being wrong is one extra pass, while
+    // the cost of continuing through a dead embedder is a wedged daemon.
+    let max_consecutive_embed_failures = cfg.bulk_embed.git_commit_max_consecutive_embed_failures;
+    let mut consecutive_embed_failures: usize = 0;
+    let embed_budget_ms = cfg.bulk_embed.git_commit_embed_budget_ms;
+    let min_embeds_per_pass = cfg.bulk_embed.git_commit_min_embeds_per_pass as u32;
     for (hash, subject) in &entries {
         if present.contains(hash) { continue; }
         if Some(hash.as_str()) == watermark.as_deref() { continue; }
         let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        if elapsed > embed_budget_ms && embedded >= MIN_EMBEDS_PER_PASS {
+        if elapsed > embed_budget_ms && embedded >= min_embeds_per_pass {
             deferred += 1;
             continue;
         }
-        let diff = commit_diff_text(hash);
+        let diff = commit_diff_text(hash, cfg);
         let text = if diff.is_empty() {
             subject.clone()
         } else {
@@ -230,7 +228,7 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
                     "detail": e.message,
                     "consecutive": consecutive_embed_failures,
                 }));
-                if consecutive_embed_failures >= MAX_CONSECUTIVE_EMBED_FAILURES {
+                if consecutive_embed_failures >= max_consecutive_embed_failures {
                     crate::wasm_dispatch::emit_event("git_commit_embed_circuit_open", json!({
                         "consecutive": consecutive_embed_failures,
                         "reason": "the embedder failed on every one of the last N commits, so it is down rather than tripping on one input; abandoning this sync pass. The next pass resumes from the same cursor.",

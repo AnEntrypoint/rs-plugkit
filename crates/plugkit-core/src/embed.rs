@@ -521,18 +521,18 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
         per_item_mask.push(mask);
     }
 
-    const MAX_SUBBATCH_ITEMS: usize = 32;
-    const MAX_SUBBATCH_ITEMS_TIMES_MAX_LEN_BUDGET: usize = 32 * 512;
+    let max_subbatch_items = crate::ragconfig::RagConfig::resolved().bulk_embed.max_subbatch_items;
+    let max_subbatch_items_times_max_len_budget = max_subbatch_items * MAX_TOKENS;
 
     let n = per_item_ids.len();
     let mut start = 0usize;
     while start < n {
         let mut end = start;
         let mut sub_max_len = 1usize;
-        while end < n && (end - start) < MAX_SUBBATCH_ITEMS {
+        while end < n && (end - start) < max_subbatch_items {
             let candidate_max_len = sub_max_len.max(per_item_ids[end].len().max(1));
             let candidate_items = end - start + 1;
-            if candidate_items * candidate_max_len > MAX_SUBBATCH_ITEMS_TIMES_MAX_LEN_BUDGET && candidate_items > 1 {
+            if candidate_items * candidate_max_len > max_subbatch_items_times_max_len_budget && candidate_items > 1 {
                 break;
             }
             sub_max_len = candidate_max_len;
