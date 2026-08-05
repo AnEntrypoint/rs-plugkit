@@ -26,11 +26,6 @@ pub struct GateDef {
     pub hook: Option<String>,
     #[serde(default)]
     pub hook_mode: HookMode,
-    /// The verb a caller should dispatch to clear this gate. Previously the
-    /// gate->recovery-verb mapping lived only as inline with_next calls in
-    /// Rust, so a project defining its own gate in fsm/graph.json could state
-    /// the denial message but not how to recover from it -- leaving the most
-    /// actionable half of a denial unexpressible in config.
     #[serde(default)]
     pub next_dispatch: Option<String>,
     pub message: String,
@@ -63,29 +58,13 @@ pub struct Policy {
     pub deny_shell_git: bool,
     #[serde(default = "default_gate_repeat_escalate_threshold")]
     pub gate_repeat_escalate_threshold: u64,
-    /// Two denials of the same verb closer together than this are one burst,
-    /// not two attempts -- a caller that re-dispatches immediately after a
-    /// denial should not have that counted as a fresh retry.
-    /// Which residual checks run, and in what order. The order is load-bearing:
-    /// each check short-circuits the scan, so the first one that trips is the
-    /// only one a caller is told about. Listing them here lets a project drop a
-    /// check it does not want (a repo with no browser surface) or reorder them
-    /// so the most actionable residual surfaces first, instead of that being a
-    /// straight-line sequence in Rust.
-    /// Phase names that are not real FSM states but still resolve to prose --
-    /// ENTRY/ORCHESTRATOR for the pre-phase surface, BROWSER for the browser
-    /// witness prose. They were matched as string literals in four places, so a
-    /// project could add a state to its graph but never a pseudo-phase, and
-    /// renaming one meant editing Rust. Maps pseudo-phase name -> prose key.
     #[serde(default = "default_pseudo_phases")]
     pub pseudo_phases: Vec<(String, String)>,
-    #[serde(default = "default_residual_checks")]
+    #[serde(default = "default_residual_checks_ordered_by_priority")]
     pub residual_checks: Vec<String>,
     #[serde(default = "default_long_gap_same_burst_ms")]
     pub long_gap_same_burst_ms: u64,
-    /// Retries of the same verb, across separate bursts, before the denial
-    /// escalates from a plain refusal to the recovery guidance.
-    #[serde(default = "default_long_gap_retry_escalate_after")]
+    #[serde(default = "default_long_gap_retry_bursts_before_escalate")]
     pub long_gap_retry_escalate_after: u32,
     #[serde(default = "default_hook_timeout_ms")]
     pub hook_timeout_ms: u64,
@@ -155,12 +134,12 @@ fn default_pseudo_phases() -> Vec<(String, String)> {
     ]
 }
 
-fn default_residual_checks() -> Vec<String> {
+fn default_residual_checks_ordered_by_priority() -> Vec<String> {
     vec!["prd-open".to_string(), "browser-open".to_string(), "tasks-running".to_string(), "dirty-tree".to_string()]
 }
 
 fn default_long_gap_same_burst_ms() -> u64 { 5_000 }
-fn default_long_gap_retry_escalate_after() -> u32 { 2 }
+fn default_long_gap_retry_bursts_before_escalate() -> u32 { 2 }
 fn default_terminal_phase() -> String { "COMPLETE".to_string() }
 fn default_mutables_default_status() -> String { "unknown".to_string() }
 fn default_mutables_witness_status() -> String { "witnessed".to_string() }
@@ -189,9 +168,9 @@ impl Default for Policy {
             reject_duplicate_witness: default_reject_duplicate_witness(),
             initial_phase: default_initial_phase(),
             pseudo_phases: default_pseudo_phases(),
-            residual_checks: default_residual_checks(),
+            residual_checks: default_residual_checks_ordered_by_priority(),
             long_gap_same_burst_ms: default_long_gap_same_burst_ms(),
-            long_gap_retry_escalate_after: default_long_gap_retry_escalate_after(),
+            long_gap_retry_escalate_after: default_long_gap_retry_bursts_before_escalate(),
             terminal_phase: default_terminal_phase(),
             mutables_default_status: default_mutables_default_status(),
             mutables_witness_status: default_mutables_witness_status(),

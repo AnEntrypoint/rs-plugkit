@@ -72,10 +72,7 @@ pub fn recreate_shared_db(path: &str) -> Result<(), String> {
     shared_ensure_open(path)
 }
 
-/// Gates deletion of the shared database, so it classifies on the numeric
-/// SQLITE_CORRUPT/SQLITE_NOTADB the plugin reports rather than on a phrase
-/// that any message quoting it would also match.
-pub fn is_malformed(err: &str) -> bool {
+pub fn is_malformed_by_sqlite_error_code(err: &str) -> bool {
     crate::libsql_wasm::classify_error(err) == crate::libsql_wasm::LibsqlErrorKind::Corrupt
 }
 
@@ -97,32 +94,40 @@ pub fn recover_malformed_shared_db() -> bool {
 
 pub fn shared_exec(sql: &str) -> Result<(), String> {
     let path = shared_db_path();
-    let resp = call_libsql_plugin("libsql", "exec", json!({ "db": SHARED_DB, "path": path, "sql": sql }));
-    plugin_ok(&resp)
+    crate::libsql_wasm::retry_on_busy(|| {
+        let resp = call_libsql_plugin("libsql", "exec", json!({ "db": SHARED_DB, "path": &path, "sql": sql }));
+        plugin_ok(&resp)
+    })
 }
 
 pub fn shared_query(sql: &str) -> Result<Value, String> {
     let path = shared_db_path();
-    let resp = call_libsql_plugin("libsql", "query", json!({ "db": SHARED_DB, "path": path, "sql": sql }));
-    plugin_rows(resp)
+    crate::libsql_wasm::retry_on_busy(|| {
+        let resp = call_libsql_plugin("libsql", "query", json!({ "db": SHARED_DB, "path": &path, "sql": sql }));
+        plugin_rows(resp)
+    })
 }
 
 pub fn shared_exec_params(sql: &str, params: &[&str]) -> Result<(), String> {
     let path = shared_db_path();
-    let resp = call_libsql_plugin(
-        "libsql",
-        "exec_params",
-        json!({ "db": SHARED_DB, "path": path, "sql": sql, "params": params }),
-    );
-    plugin_ok(&resp)
+    crate::libsql_wasm::retry_on_busy(|| {
+        let resp = call_libsql_plugin(
+            "libsql",
+            "exec_params",
+            json!({ "db": SHARED_DB, "path": &path, "sql": sql, "params": params }),
+        );
+        plugin_ok(&resp)
+    })
 }
 
 pub fn shared_query_params(sql: &str, params: &[&str]) -> Result<Value, String> {
     let path = shared_db_path();
-    let resp = call_libsql_plugin(
-        "libsql",
-        "query_params",
-        json!({ "db": SHARED_DB, "path": path, "sql": sql, "params": params }),
-    );
-    plugin_rows(resp)
+    crate::libsql_wasm::retry_on_busy(|| {
+        let resp = call_libsql_plugin(
+            "libsql",
+            "query_params",
+            json!({ "db": SHARED_DB, "path": &path, "sql": sql, "params": params }),
+        );
+        plugin_rows(resp)
+    })
 }

@@ -312,7 +312,7 @@ fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>, Vec<(String, String)
 }
 
 fn is_malformed(err: &str) -> bool {
-    crate::shared_db::is_malformed(err)
+    crate::shared_db::is_malformed_by_sqlite_error_code(err)
 }
 
 fn is_shadow_row(err: &str) -> bool {

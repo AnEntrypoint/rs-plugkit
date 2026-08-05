@@ -1752,7 +1752,7 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
     );
     match libsql_wasm::query_params(&db_path, &sql, &[&qlit, &qlit]) {
         Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows }),
-        Err(e) if crate::shared_db::is_malformed(&e) && crate::shared_db::recover_malformed_shared_db() => {
+        Err(e) if crate::shared_db::is_malformed_by_sqlite_error_code(&e) && crate::shared_db::recover_malformed_shared_db() => {
             let _ = ensure_schema();
             match libsql_wasm::query_params(&db_path, &sql, &[&qlit, &qlit]) {
                 Ok(rows) => json!({ "ok": true, "mode": "vector_top_k_after_recover", "recovered_from": e, "rows": rows }),

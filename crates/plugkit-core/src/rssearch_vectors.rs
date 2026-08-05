@@ -354,7 +354,7 @@ where
     // and recreates the file, which would destroy a perfectly healthy store
     // that just happened to be locked by another process's in-flight write.
     match crate::libsql_wasm::retry_on_busy(&op) {
-        Err(e) if crate::shared_db::is_malformed(&e) => {
+        Err(e) if crate::shared_db::is_malformed_by_sqlite_error_code(&e) => {
             if crate::shared_db::recover_malformed_shared_db() {
                 op()
             } else {
