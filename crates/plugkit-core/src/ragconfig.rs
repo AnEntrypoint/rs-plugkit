@@ -41,6 +41,11 @@ pub struct ScoringConfig {
     pub bm25_b_document_length_normalization: f64,
     pub fusion_rrf_k: f64,
     pub fusion_identifier_boost: f64,
+    /// RRF fusion weight for the vector-search result list, paired against
+    /// `fusion_identifier_boost` for the BM25 list. Both lists were fused at
+    /// fixed weights ([1.0, fusion_identifier_boost]) with no way to shift
+    /// the balance toward semantic vs lexical matches -- this is that knob.
+    pub fusion_vector_list_weight: f64,
 }
 
 impl Default for ScoringConfig {
@@ -54,6 +59,7 @@ impl Default for ScoringConfig {
             bm25_b_document_length_normalization: 0.75,
             fusion_rrf_k: rs_search::fusion::RRF_K,
             fusion_identifier_boost: rs_search::fusion::IDENTIFIER_BOOST,
+            fusion_vector_list_weight: 1.0,
         }
     }
 }
@@ -698,6 +704,7 @@ impl RagConfig {
         overwrite_present_f64_or_record_problem("scoring", "bm25_b", &mut cfg.scoring.bm25_b_document_length_normalization, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "fusion_rrf_k", &mut cfg.scoring.fusion_rrf_k, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "fusion_identifier_boost", &mut cfg.scoring.fusion_identifier_boost, &mut problems);
+        overwrite_present_f64_or_record_problem("scoring", "fusion_vector_list_weight", &mut cfg.scoring.fusion_vector_list_weight, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "recency_floor", &mut cfg.scoring.recency_floor, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "cos_floor", &mut cfg.scoring.cos_floor_applied_before_recency_rescue, &mut problems);
         overwrite_present_f64_or_record_problem("scoring", "dedup_jaccard_threshold", &mut cfg.scoring.dedup_jaccard_near_duplicate_threshold, &mut problems);
@@ -869,6 +876,12 @@ impl RagConfig {
             return Err(format!(
                 "ragconfig: scoring.fusion_identifier_boost {} must be non-negative; it multiplies the BM25 list's RRF contribution for identifier-shaped queries and a negative value would penalize BM25 matches instead of boosting them",
                 self.scoring.fusion_identifier_boost
+            ));
+        }
+        if !(self.scoring.fusion_vector_list_weight >= 0.0) {
+            return Err(format!(
+                "ragconfig: scoring.fusion_vector_list_weight {} must be non-negative; it multiplies the vector-search list's RRF contribution and a negative value would penalize vector matches instead of weighting them",
+                self.scoring.fusion_vector_list_weight
             ));
         }
         if !(0.0..=1.0).contains(&self.scoring.bm25_b_document_length_normalization) {

@@ -1303,7 +1303,7 @@ fn codesearch(body: &Value) -> u64 {
     let bm25_top10: Vec<Value> = bm25_ids.iter().take(10).map(|key| build_hit(&mut corpus, key, None, None)).collect();
     if !vec_ids.is_empty() || !bm25_ids.is_empty() {
         let lists = vec![vec_ids, bm25_ids];
-        let weights = [1.0, cfg.scoring.fusion_identifier_boost];
+        let weights = [cfg.scoring.fusion_vector_list_weight, cfg.scoring.fusion_identifier_boost];
         let fused = rs_search::fusion::fuse_n_cfg(&lists, &weights, query, cfg.scoring.fusion_rrf_k);
         let hits: Vec<Value> = fused.into_iter().take(k as usize).map(|(key, score)| {
             let fallback = vec_hits.as_array().and_then(|a| {

@@ -187,7 +187,7 @@ fn run_fuse(fuse: &FuseNode, state: &RunState) -> Value {
                 .sources
                 .iter()
                 .enumerate()
-                .map(|(i, _)| if i == 0 { 1.0 } else { cfg.scoring.fusion_identifier_boost })
+                .map(|(i, _)| if i == 0 { cfg.scoring.fusion_vector_list_weight } else { cfg.scoring.fusion_identifier_boost })
                 .collect();
             let query = state.request.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let fused = rs_search::fusion::fuse_n_cfg(&lists, &weights, query, cfg.scoring.fusion_rrf_k);
