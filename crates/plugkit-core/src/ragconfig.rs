@@ -41,10 +41,6 @@ pub struct ScoringConfig {
     pub bm25_b_document_length_normalization: f64,
     pub fusion_rrf_k: f64,
     pub fusion_identifier_boost: f64,
-    /// RRF fusion weight for the vector-search result list, paired against
-    /// `fusion_identifier_boost` for the BM25 list. Both lists were fused at
-    /// fixed weights ([1.0, fusion_identifier_boost]) with no way to shift
-    /// the balance toward semantic vs lexical matches -- this is that knob.
     pub fusion_vector_list_weight: f64,
 }
 
@@ -288,12 +284,6 @@ pub struct BulkEmbedBudgetConfig {
     pub git_commit_diff_char_cap: usize,
     pub git_commit_log_window: usize,
     pub git_commit_max_consecutive_embed_failures: usize,
-    /// How many distinct row-write failures a flat-json migration reports
-    /// individually before falling back to the aggregate count. Bounded so
-    /// one systematically broken namespace cannot flood the event stream,
-    /// and independent of the unrelated skip counters so a malformed row
-    /// early in the loop cannot suppress reporting of genuine write
-    /// failures after it.
     pub rssearch_migrate_reported_failures: usize,
     pub max_subbatch_items: usize,
 }

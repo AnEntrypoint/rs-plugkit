@@ -172,9 +172,6 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
     let mut embedded = 0u32;
     let mut deferred = 0u32;
     let mut skipped = 0u32;
-    // A run this long means the embedder is down, not that one commit is odd.
-    // Small on purpose: the whole cost of being wrong is one extra pass, while
-    // the cost of continuing through a dead embedder is a wedged daemon.
     let max_consecutive_embed_failures = cfg.bulk_embed.git_commit_max_consecutive_embed_failures;
     let mut consecutive_embed_failures: usize = 0;
     let embed_budget_ms = cfg.bulk_embed.git_commit_embed_budget_ms;
