@@ -159,6 +159,23 @@ fn lang_for_ext(ext: &str) -> Option<&'static str> {
         ".php" | ".phtml" => Some("php"),
         ".hs" | ".lhs" => Some("haskell"),
         ".jl" => Some("julia"),
+        ".yaml" | ".yml" => Some("yaml"),
+        ".toml" => Some("toml"),
+        ".sql" => Some("sql"),
+        ".lua" => Some("lua"),
+        ".kt" | ".kts" => Some("kotlin"),
+        ".swift" => Some("swift"),
+        ".zig" => Some("zig"),
+        ".ex" | ".exs" => Some("elixir"),
+        ".scala" | ".sc" => Some("scala"),
+        ".pl" | ".pm" => Some("perl"),
+        ".r" => Some("r"),
+        ".m" | ".mm" => Some("objc"),
+        ".xml" => Some("xml"),
+        ".ini" | ".cfg" | ".conf" => Some("toml"),
+        ".dockerfile" => Some("dockerfile"),
+        ".graphql" | ".gql" => Some("graphql"),
+        ".proto" => Some("proto"),
         _ => None,
     }
 }
@@ -1724,6 +1741,41 @@ pub fn git_commit_rank(query: &str, k: usize) -> Vec<(String, String, f64)> {
         }
     }
     git_commit_rank_fallback(query, k)
+}
+
+fn glob_match_simple(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti, mut star, mut match_i) = (0usize, 0usize, None::<usize>, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1; ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi); match_i = ti; pi += 1;
+        } else if let Some(sp) = star {
+            pi = sp + 1; match_i += 1; ti = match_i;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' { pi += 1; }
+    pi == p.len()
+}
+
+pub fn search_filenames(pattern: &str, k: usize, cfg: &crate::ragconfig::RagConfig) -> Value {
+    let needle = pattern.to_lowercase();
+    let is_glob = needle.contains('*') || needle.contains('?');
+    let full_files = collect_files(".", cfg.index.digest_max_files.max(20000), &cfg.index);
+    let hits: Vec<Value> = full_files.iter()
+        .filter(|p| {
+            let lp = p.to_lowercase();
+            if is_glob { glob_match_simple(&needle, &lp) || glob_match_simple(&needle, lp.rsplit('/').next().unwrap_or(&lp)) }
+            else { lp.contains(&needle) }
+        })
+        .take(k)
+        .map(|p| json!({ "path": p }))
+        .collect();
+    json!({ "ok": true, "mode": "filename", "hits": hits, "scanned": full_files.len() })
 }
 
 pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value {

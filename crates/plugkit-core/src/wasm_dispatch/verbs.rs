@@ -1398,6 +1398,10 @@ fn codesearch(body: &Value) -> u64 {
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_k as u64) as u32;
     if query.is_empty() { return err("codesearch", "query required"); }
+    if body.get("mode").and_then(|v| v.as_str()) == Some("filename") {
+        let out = crate::code_index::search_filenames(query, k as usize, &cfg);
+        return ok("codesearch", out);
+    }
     let (_dataflow_doc, dataflow_tier, dataflow_path) = crate::dataflow::document_detailed();
     if dataflow_tier != crate::dataflow::DataflowTier::CompiledDefault {
         if let Some(pipeline) = crate::dataflow::pipeline_for("codesearch") {
