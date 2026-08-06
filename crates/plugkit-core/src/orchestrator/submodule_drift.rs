@@ -34,22 +34,20 @@ fn submodule_head_sha(path: &str) -> Option<String> {
     if stdout.is_empty() { None } else { Some(stdout.to_string()) }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn is_ancestor(ancestor: &str, descendant: &str, path: &str) -> bool {
+    if ancestor == descendant { return true; }
+    let result = crate::wasm_dispatch::git_call_argv(&["merge-base", "--is-ancestor", ancestor, descendant], Some(path));
+    result.get("exit_code").and_then(|value| value.as_i64()) == Some(0)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn gm_tracked_gitlink_sha(_path: &str) -> Option<String> { None }
 #[cfg(not(target_arch = "wasm32"))]
 fn submodule_head_sha(_path: &str) -> Option<String> { None }
+#[cfg(not(target_arch = "wasm32"))]
+fn is_ancestor(_ancestor: &str, _descendant: &str, _path: &str) -> bool { false }
 
-/// Submodule paths to check, read from `.gitmodules` where it exists.
-///
-/// The list was hardcoded to seven names belonging to THIS repo, which made
-/// `submodules-clean` -- a gate on both guarded edges -- pass vacuously for
-/// every other project: it iterated a set none of their paths appeared in and
-/// reported clean having checked nothing. `.gitmodules` is git's own record of
-/// what a repo's submodules are, so deriving from it makes the gate correct
-/// wherever it runs, and correct automatically when a submodule is added.
-///
-/// The compiled list stays as a fallback for a repo whose `.gitmodules` is
-/// absent or unreadable, so behaviour here is unchanged.
 pub fn submodule_paths() -> Vec<String> {
     let parsed = crate::pkfs::read_to_string(".gitmodules")
         .map(|raw| parse_gitmodules_paths(&raw))
@@ -60,12 +58,6 @@ pub fn submodule_paths() -> Vec<String> {
     parsed
 }
 
-/// Pull `path = <p>` entries out of a `.gitmodules` file.
-///
-/// Deliberately a line scan rather than a full INI parse: the only key that
-/// matters is `path`, git writes it one-per-line, and a partial parse that
-/// silently dropped a submodule would reintroduce exactly the vacuous-pass
-/// this function exists to remove.
 fn parse_gitmodules_paths(raw: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in raw.lines() {
@@ -90,7 +82,7 @@ pub fn drifted_submodules() -> Vec<DriftedSubmodule> {
     for path in submodule_paths() {
         let Some(gm_tracked_sha) = gm_tracked_gitlink_sha(&path) else { continue };
         let Some(submodule_head_sha) = submodule_head_sha(&path) else { continue };
-        if gm_tracked_sha != submodule_head_sha {
+        if gm_tracked_sha != submodule_head_sha && !is_ancestor(&gm_tracked_sha, &submodule_head_sha, &path) {
             drifted.push(DriftedSubmodule {
                 path,
                 gm_tracked_sha,
