@@ -64,6 +64,9 @@ pub mod git_commit_vectors;
 pub mod memory_md;
 
 #[cfg(target_arch = "wasm32")]
+pub mod tencentdb_memory;
+
+#[cfg(target_arch = "wasm32")]
 pub mod mediator;
 
 /// The generalized cache abstraction (see module docs): namespaced get/put/

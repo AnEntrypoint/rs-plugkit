@@ -860,6 +860,13 @@ fn recall(body: &Value) -> u64 {
     let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_limit as u64) as u32;
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or(&cfg.namespaces.default);
     if query.is_empty() { return err("recall", "query required"); }
+    if crate::tencentdb_memory::namespace_is_routed(namespace) {
+        let embedding = embed_query(query);
+        return match crate::tencentdb_memory::recall(&embedding, namespace, limit as usize) {
+            Ok(v) => ok("recall", v),
+            Err(e) => err("recall", &e),
+        };
+    }
     let (_dataflow_doc, dataflow_tier, dataflow_path) = crate::dataflow::document_detailed();
     if dataflow_tier != crate::dataflow::DataflowTier::CompiledDefault {
         if let Some(pipeline) = crate::dataflow::pipeline_for("recall") {
@@ -1017,6 +1024,23 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
         .unwrap_or_else(|| raw.trim().to_string());
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if text.is_empty() { return err("memorize", "text required"); }
+    // Router: memory.tencentdb_backend.enabled + this namespace listed in its
+    // `namespaces` array opts a namespace into the file-pointer/lean-index
+    // backend instead of the default md-corpus/rssearch_vectors path below.
+    // Disabled by default -- see gm.config.json's memory.tencentdb_backend
+    // block and docs/gm-memory-tencentdb-design.md for the full rationale.
+    if crate::tencentdb_memory::namespace_is_routed(namespace) {
+        let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("l0");
+        let emb = match embed_passage(text.as_str()) {
+            Some(e) => e,
+            None => return err("memorize", "embed failed; refusing to write a text-only memory with no vector (un-vector-recallable orphan)"),
+        };
+        let now_ms = unsafe { host_now_ms() } as i64;
+        return match crate::tencentdb_memory::write(namespace, kind, text.as_str(), &emb, now_ms) {
+            Ok(v) => ok("memorize", v),
+            Err(e) => err("memorize", &e),
+        };
+    }
     let text = text.as_str();
     check_sigil_ignored(text, namespace);
     let content_hash = crate::hash::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
@@ -1124,6 +1148,25 @@ fn memorize_prune(body: &Value) -> u64 {
     }
     if let Some(arr) = body.get("keys").and_then(|v| v.as_array()) {
         for v in arr { if let Some(s) = v.as_str() { keys.push(s.to_string()); } }
+    }
+    if !keys.is_empty() && crate::tencentdb_memory::namespace_is_routed(namespace) {
+        let mut deleted = Vec::new();
+        let mut not_found = Vec::new();
+        for key in &keys {
+            match crate::tencentdb_memory::delete(namespace, key) {
+                Ok(true) => deleted.push(key.clone()),
+                Ok(false) => not_found.push(key.clone()),
+                Err(e) => {
+                    emit_event("tencentdb_memory_prune_error", json!({"key": key, "namespace": namespace, "error": e}));
+                    not_found.push(key.clone());
+                }
+            }
+        }
+        let mut resp = json!({"namespace": namespace, "deleted": deleted, "mode": "explicit-key"});
+        if !not_found.is_empty() {
+            resp["not_found"] = json!(not_found);
+        }
+        return ok("memorize-prune", resp);
     }
     if !keys.is_empty() {
         let vec_ns = format!("{}-vec", namespace);
