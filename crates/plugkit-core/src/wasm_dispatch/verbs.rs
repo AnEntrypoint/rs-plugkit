@@ -3053,6 +3053,38 @@ fn ci_status_token() -> Option<String> {
     None
 }
 
+/// Parses a GitHub API `YYYY-MM-DDTHH:MM:SSZ` UTC timestamp into unix epoch
+/// seconds without a chrono dependency -- GitHub Actions API always emits
+/// this exact fixed-width format for `updated_at`/`created_at`.
+fn chrono_to_epoch_secs(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 20 || b[19] != b'Z' { return None; }
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    let month: i64 = s.get(5..7)?.parse().ok()?;
+    let day: i64 = s.get(8..10)?.parse().ok()?;
+    let hour: i64 = s.get(11..13)?.parse().ok()?;
+    let min: i64 = s.get(14..16)?.parse().ok()?;
+    let sec: i64 = s.get(17..19)?.parse().ok()?;
+    let is_leap = |y: i64| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days_in_month = |y: i64, m: i64| -> i64 {
+        match m {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 => if is_leap(y) { 29 } else { 28 },
+            _ => 0,
+        }
+    };
+    let mut days: i64 = 0;
+    if year >= 1970 {
+        for y in 1970..year { days += if is_leap(y) { 366 } else { 365 }; }
+    } else {
+        for y in year..1970 { days -= if is_leap(y) { 366 } else { 365 }; }
+    }
+    for m in 1..month { days += days_in_month(year, m); }
+    days += day - 1;
+    Some(days * 86400 + hour * 3600 + min * 60 + sec)
+}
+
 fn ci_status_conclusion_to_status(conclusion: &str, gh_status: &str) -> &'static str {
     if gh_status != "completed" {
         return "pending";
@@ -3132,6 +3164,8 @@ fn ci_status_value(body: &Value) -> Result<Value, Value> {
             },
         }));
     }
+    const STALE_IN_PROGRESS_RUN_GRACE_SECS: i64 = 900;
+    let now_secs = unsafe { host_now_ms() } as i64 / 1000;
     let mut overall = "success";
     let mut failed_jobs: Vec<Value> = vec![];
     let mut run_url: Option<String> = None;
@@ -3140,15 +3174,26 @@ fn ci_status_value(body: &Value) -> Result<Value, Value> {
     for run in &runs {
         let gh_status = run.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let conclusion = run.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
-        let per_run_status = ci_status_conclusion_to_status(conclusion, gh_status);
+        let mut per_run_status = ci_status_conclusion_to_status(conclusion, gh_status);
         let html_url = run.get("html_url").and_then(|v| v.as_str()).map(String::from);
         if run_url.is_none() { run_url = html_url.clone(); }
+        let mut stale = false;
+        if per_run_status == "pending" {
+            let updated_epoch = run.get("updated_at").and_then(|v| v.as_str())
+                .and_then(|s| chrono_to_epoch_secs(s));
+            if let Some(updated) = updated_epoch {
+                if now_secs.saturating_sub(updated) >= STALE_IN_PROGRESS_RUN_GRACE_SECS {
+                    per_run_status = "failure";
+                    stale = true;
+                }
+            }
+        }
         if per_run_status == "pending" { any_pending = true; }
         if per_run_status == "failure" {
             any_failure = true;
             failed_jobs.push(json!({
                 "name": run.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                "conclusion": conclusion,
+                "conclusion": if stale { "stale_in_progress" } else { conclusion },
                 "run_url": html_url,
             }));
         }
