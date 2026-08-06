@@ -42,7 +42,48 @@ on:
         required: false
 
 jobs:
+  bump:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.crate_dir }}
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      sha: ${{ steps.bump.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.publisher_token }}
+          fetch-depth: 0
+
+      - name: Auto-bump patch version BEFORE build
+        id: bump
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.publisher_token }}
+        run: |
+          set -e
+          git config user.name "gm-bot"
+          git config user.email "noreply@github.com"
+          git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+          CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"//;s/"//')
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$NEW_VERSION\"/}" Cargo.toml
+          git add Cargo.toml
+          git commit -m "chore: auto-bump version to $NEW_VERSION [skip ci]"
+          git fetch origin main
+          if ! git rebase origin/main; then
+            echo "::error::Rebase onto origin/main hit a real conflict; refusing to auto-resolve with -X theirs (would silently discard concurrent main changes)."
+            git rebase --abort
+            exit 1
+          fi
+          git push origin HEAD:main
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: bump
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -50,6 +91,8 @@ jobs:
         working-directory: ${{ inputs.crate_dir }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.bump.outputs.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -81,11 +124,6 @@ jobs:
           printf '%s\n' "$BUILD_COMMAND" > /tmp/build_command.sh
           bash /tmp/build_command.sh
 
-      - name: Read version
-        id: ver
-        shell: bash
-        run: echo "version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *\"//;s/\"//')" >> "$GITHUB_OUTPUT"
-
       - name: Stage release assets with checksum
         shell: bash
         run: |
@@ -97,7 +135,7 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.publisher_token }}
-          VER: ${{ steps.ver.outputs.version }}
+          VER: ${{ needs.bump.outputs.version }}
           REPO: ${{ inputs.release_repo }}
           TITLE_PREFIX: ${{ inputs.release_title_prefix }}
           SHA: ${{ github.sha }}
@@ -123,7 +161,7 @@ jobs:
       - name: Create npm mirror package structure
         if: inputs.npm_package_name != ''
         env:
-          VER: ${{ steps.ver.outputs.version }}
+          VER: ${{ needs.bump.outputs.version }}
           PKG_NAME: ${{ inputs.npm_package_name }}
           BASENAME: ${{ inputs.published_asset_basename }}
           REPO: ${{ inputs.release_repo }}
@@ -153,7 +191,7 @@ jobs:
         if: inputs.npm_package_name != ''
         env:
           NODE_AUTH_TOKEN: ${{ secrets.npm_token }}
-          VER: ${{ steps.ver.outputs.version }}
+          VER: ${{ needs.bump.outputs.version }}
           PKG_NAME: ${{ inputs.npm_package_name }}
         working-directory: ${{ inputs.crate_dir }}
         shell: bash
