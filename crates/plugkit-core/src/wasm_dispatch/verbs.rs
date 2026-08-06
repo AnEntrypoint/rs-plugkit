@@ -3165,13 +3165,25 @@ fn ci_status_value(body: &Value) -> Result<Value, Value> {
         }));
     }
     const STALE_IN_PROGRESS_RUN_GRACE_SECS: i64 = 900;
+    // "Deploy GH Pages" publishes the docs site and never touches
+    // plugkit-core -- it does not gate CI validation of the code under
+    // test. Body-overridable via `ignore_workflows` for other repos'
+    // equally-orthogonal jobs.
+    let default_ignored = ["Deploy GH Pages"];
+    let ignored_names: Vec<String> = body.get("ignore_workflows").and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_else(|| default_ignored.iter().map(|s| s.to_string()).collect());
     let now_secs = unsafe { host_now_ms() } as i64 / 1000;
     let mut overall = "success";
     let mut failed_jobs: Vec<Value> = vec![];
     let mut run_url: Option<String> = None;
     let mut any_pending = false;
     let mut any_failure = false;
+    let mut counted_runs = 0usize;
     for run in &runs {
+        let run_name = run.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if ignored_names.iter().any(|n| n == run_name) { continue; }
+        counted_runs += 1;
         let gh_status = run.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let conclusion = run.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
         let mut per_run_status = ci_status_conclusion_to_status(conclusion, gh_status);
@@ -3206,7 +3218,7 @@ fn ci_status_value(body: &Value) -> Result<Value, Value> {
     Ok(json!({
         "ok": true, "verb": "ci-status", "data": {
             "status": overall, "repo": repo, "sha": sha,
-            "failed_jobs": failed_jobs, "run_url": run_url, "run_count": runs.len(),
+            "failed_jobs": failed_jobs, "run_url": run_url, "run_count": counted_runs,
         },
     }))
 }
