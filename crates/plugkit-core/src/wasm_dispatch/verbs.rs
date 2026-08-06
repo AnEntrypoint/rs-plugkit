@@ -1144,6 +1144,13 @@ fn memorize_retention(body: &Value) -> u64 {
 /// path (row counts per table, embedding_meta fingerprint) without reading
 /// full content -- used by the migration script's dry-run summary and to
 /// confirm a path is genuinely a TencentDB store before a full read.
+///
+/// L2 scenes and L3 personas are NOT in `vectors.db` at all (file-backed,
+/// see `tencentdb_compat::read_l2_scenes`/`read_l3_persona` module docs), so
+/// an optional `data_dir` body field (the TencentDB data directory that
+/// holds `scene_blocks/` and `persona.md` alongside `vectors.db`) reports
+/// their counts too when present -- omitting it keeps the response
+/// SQLite-only, unchanged for a caller that only cares about `vectors.db`.
 fn tencentdb_compat_probe(body: &Value) -> u64 {
     let path = match body.get("vectors_db_path").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p,
@@ -1152,7 +1159,19 @@ fn tencentdb_compat_probe(body: &Value) -> u64 {
     match crate::tencentdb_compat::probe(path) {
         Ok(counts) => {
             let embedding_meta = crate::tencentdb_compat::read_embedding_meta(path).ok();
-            ok("tencentdb-compat-probe", json!({"path": path, "counts": counts, "embedding_meta": embedding_meta}))
+            let mut resp = json!({"path": path, "counts": counts, "embedding_meta": embedding_meta});
+            if let Some(data_dir) = body.get("data_dir").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                let scene_count = crate::tencentdb_compat::read_l2_scenes(data_dir, u64::MAX)
+                    .ok()
+                    .and_then(|v| v.as_array().map(|a| a.len()))
+                    .unwrap_or(0);
+                let persona = crate::tencentdb_compat::read_l3_persona(data_dir);
+                resp["file_counts"] = json!({
+                    "l2_scenes": scene_count,
+                    "l3_persona_exists": persona.get("exists").cloned().unwrap_or(Value::Bool(false)),
+                });
+            }
+            ok("tencentdb-compat-probe", resp)
         }
         Err(e) => err("tencentdb-compat-probe", &e),
     }

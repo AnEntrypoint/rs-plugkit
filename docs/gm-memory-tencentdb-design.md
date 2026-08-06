@@ -158,6 +158,33 @@ inline in the index row) -> `memorize-prune` (index row marked deleted,
 file removed from disk). Full CRUD round trip confirmed against the actual
 compiled artifact, not a mock or a narrated claim.
 
+## Decision 6: L2 scene / L3 persona authority — file, not SQLite
+
+Resolved by direct read of the vendored `MemoryCore` source
+(`vendor/tencentdb-agent-memory`), not inference: neither L2 scenes nor L3
+personas have a SQLite table at all.
+
+- **L2 scenes**: `scene_blocks/*.md` files, META-delimited
+  (`-----META-START-----`/`-----META-END-----` wrapping `created`/`updated`/
+  `summary`/`heat`, then free-text content — `scene-format.ts::parseSceneBlock`).
+  `.metadata/scene_index.json` is explicitly a rebuildable INDEX over these
+  files, not an alternate content source: `scene-index.ts::syncSceneIndex`
+  regenerates it by re-scanning `scene_blocks/`.
+- **L3 persona**: a single `persona.md` file
+  (`StoragePaths.persona = "persona.md"`, `core/storage/types.ts:250`) — one
+  per data directory, no query/filter surface.
+
+Grepped both modules for `sqlite`/`DatabaseSync`/`vectors_db`: zero hits in
+either. Implemented as `tencentdb_compat::read_l2_scenes`/`read_l3_persona`,
+reading files directly via `pkfs` (no `host_exec_js`/Node shell-out needed —
+that mechanism stays reserved for the actual `node:sqlite` reads L0/L1/skills
+require). `tencentdb-compat-probe` takes an optional `data_dir` body field
+reporting `file_counts.{l2_scenes,l3_persona_exists}` alongside the existing
+SQLite counts, independently of whether the SQLite probe itself succeeds —
+live-verified by dispatching with a nonexistent `vectors_db_path` (SQLite
+counts genuinely failed) and confirming `file_counts` still populated
+correctly, proving the two data sources are properly decoupled.
+
 ## Open items tracked as their own PRD rows, not resolved here
 
 - The prd.yml lost-update bug discovered mid-session (separate root cause,
@@ -166,6 +193,3 @@ compiled artifact, not a mock or a narrated claim.
 - The gm.db partial-sync starvation on the 892-file corpus (self-healing by
   design; only needs a fix if convergence proves too slow in practice,
   verified empirically, not assumed).
-- Whether L2 (scene) and L3 (persona) TencentDB content is authoritative in
-  the SQLite row or the on-disk `.md` file it also writes — must be resolved
-  before the compat module's schema is finalized for those two asset kinds.

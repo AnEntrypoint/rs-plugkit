@@ -25,6 +25,91 @@
 
 use serde_json::{json, Value};
 
+/// META-delimited scene-block markdown format, exactly as
+/// `MemoryCore/src/core/scene/scene-format.ts::parseSceneBlock` writes and
+/// reads it -- plain-text delimiters wrapping `key: value` lines, followed
+/// by free-text content. Ported directly rather than shelled to Node since
+/// this is plain-file parsing, not a SQLite query -- `host_exec_js` stays
+/// reserved for the actual `node:sqlite` reads below.
+const SCENE_META_START: &str = "-----META-START-----";
+const SCENE_META_END: &str = "-----META-END-----";
+
+fn parse_scene_block(raw: &str, filename: &str) -> Value {
+    let start = raw.find(SCENE_META_START);
+    let end = raw.find(SCENE_META_END);
+    let (start, end) = match (start, end) {
+        (Some(s), Some(e)) if e > s => (s, e),
+        _ => {
+            return json!({
+                "filename": filename,
+                "meta": {"created": "", "updated": "", "summary": "", "heat": 0},
+                "content": raw.trim(),
+            });
+        }
+    };
+    let meta_block = &raw[start + SCENE_META_START.len()..end];
+    let content = raw[end + SCENE_META_END.len()..].trim();
+    let field = |name: &str| -> String {
+        meta_block
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&format!("{}:", name)))
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    };
+    let heat: i64 = field("heat").parse().unwrap_or(0);
+    json!({
+        "filename": filename,
+        "meta": {
+            "created": field("created"),
+            "updated": field("updated"),
+            "summary": field("summary"),
+            "heat": heat,
+        },
+        "content": content,
+    })
+}
+
+/// Read L2 scene-block content directly from `scene_blocks/*.md` under a
+/// TencentDB Agent Memory data directory -- these files, not any SQLite
+/// table, are the authoritative content source. `.metadata/scene_index.json`
+/// (not read here) is explicitly a rebuildable INDEX over these same files
+/// (`scene-index.ts::syncSceneIndex` regenerates it by re-scanning
+/// `scene_blocks/`), confirmed by direct read of the vendored source with no
+/// SQLite/DatabaseSync reference anywhere in the scene module.
+pub fn read_l2_scenes(data_dir: &str, limit: u64) -> Result<Value, String> {
+    let dir = format!("{}/scene_blocks", data_dir.trim_end_matches('/'));
+    let listing = crate::pkfs::readdir(&dir);
+    let mut filenames: Vec<String> = listing
+        .as_ref()
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    filenames.retain(|n| n.ends_with(".md"));
+    filenames.sort();
+    filenames.truncate(limit as usize);
+
+    let mut out = Vec::with_capacity(filenames.len());
+    for name in &filenames {
+        let path = format!("{}/{}", dir, name);
+        if let Some(content) = crate::pkfs::read_to_string(&path) {
+            out.push(parse_scene_block(&content, name));
+        }
+    }
+    Ok(Value::Array(out))
+}
+
+/// Read L3 persona content: a single `persona.md` file
+/// (`StoragePaths.persona = "persona.md"` in
+/// `MemoryCore/src/core/storage/types.ts`), not a SQLite row -- unlike L1/L2
+/// there is exactly one persona per data directory, no query/filter surface.
+pub fn read_l3_persona(data_dir: &str) -> Value {
+    let path = format!("{}/persona.md", data_dir.trim_end_matches('/'));
+    match crate::pkfs::read_to_string(&path) {
+        Some(content) => json!({"exists": true, "content": content}),
+        None => json!({"exists": false, "content": ""}),
+    }
+}
+
 /// Read L1 records (structured/summarized memories) from a real
 /// `vectors.db`. Returns the raw rows as JSON objects matching
 /// `l1_records`'s column names exactly -- callers translate into whatever
