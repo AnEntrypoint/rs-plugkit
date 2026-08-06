@@ -8,5 +8,9 @@
   status: completed
 - id: fix-config-resolve-cache-race
   title: Fix config.rs RESOLVE_CACHE single-slot TOCTOU under shared multi-project daemon
-  witness: 'config.rs:554 RESOLVE_CACHE is Mutex<Option<ResolveCacheEntryScopedToOneProjectRootNeverGlobal>>, single-slot keyed by cwd/root with a 2s TTL -- same vulnerable shape as the already-fixed PROJECT_ROOT_CACHE/ROOT_CACHE: a concurrent dispatch from a different project sharing the daemon can clobber this project''s cached config resolution between check and use. TTL bounds staleness within one project''s own re-reads but does not prevent a different project''s write from evicting this entry mid-flight. Fix to per-cwd HashMap.'
-  status: pending
+  witness: Converted config.rs RESOLVE_CACHE from Mutex<Option<ResolveCacheEntryScopedToOneProjectRootNeverGlobal>> to Mutex<Option<HashMap<String, ResolveCacheEntry>>>, keyed per-cwd. resolve_forced's invalidation narrowed from clearing the whole cache to removing only the calling project's own key. cargo check -p rs-plugkit passed clean. Pushed as commit 815ea143, Build and Release CI workflows both green (gh run list -R AnEntrypoint/rs-plugkit --commit 815ea1435bafd35eae2a1f2319f36db35d2d7052).
+  status: completed
+- id: fix-ragconfig-resolved-cache-race
+  title: Fix ragconfig.rs RESOLVED_CACHE single-slot TOCTOU under shared multi-project daemon
+  witness: Converted ragconfig.rs RESOLVED_CACHE from Mutex<Option<ResolvedEntryScopedToOneProjectRootNeverGlobal>> to Mutex<Option<HashMap<String, ResolvedEntry>>>, keyed per-cwd. cargo check -p rs-plugkit passed clean. Pushed as commit 815ea143, Build and Release CI workflows both green (gh run list -R AnEntrypoint/rs-plugkit --commit 815ea1435bafd35eae2a1f2319f36db35d2d7052).
+  status: completed
