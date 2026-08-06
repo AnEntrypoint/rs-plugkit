@@ -1158,6 +1158,46 @@ fn tencentdb_compat_probe(body: &Value) -> u64 {
     }
 }
 
+/// Batch-moves each `(source_path, archive_path)` pair via a single
+/// `host_exec_js` dispatch (same `renameSync` pattern `memory_md.rs`'s
+/// private `rename_batch` already uses for its tmp-file promotion), creating
+/// every archive parent dir first. Returns the count that actually moved --
+/// a source missing by the time this runs (raced by something else) or a
+/// destination collision handled by `fs.renameSync`'s own overwrite
+/// semantics is not treated as an error, since archiving is best-effort
+/// cleanup riding on an already-successful import, never the primary write.
+fn archive_batch(pairs: &[(String, String)]) -> usize {
+    if pairs.is_empty() {
+        return 0;
+    }
+    let list: Vec<Value> = pairs.iter().map(|(s, a)| json!({ "s": s, "a": a })).collect();
+    let payload = match serde_json::to_string(&Value::Array(list)) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let code = format!(
+        "const fs=require('fs');const path=require('path');const pairs={};let n=0;for(const x of pairs){{try{{fs.mkdirSync(path.dirname(x.a),{{recursive:true}});fs.renameSync(x.s,x.a);n++;}}catch(e){{}}}}process.stdout.write('archived:'+n);",
+        payload
+    );
+    let opts = "{\"timeoutMs\":30000}";
+    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    let out = crate::wasm_dispatch::unpack_to_string_pub(packed).unwrap_or_default();
+    let parsed: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+    parsed
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.strip_prefix("archived:"))
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+/// `.gm/memories-archive-tencentdb/<namespace>/<filename>` -- namespace-
+/// prefixed subdirs avoid a cross-namespace key collision entirely (two
+/// namespaces can share a key; their archived files never share a path).
+fn archive_path_for(source_namespace: &str, filename: &str) -> String {
+    format!(".gm/memories-archive-tencentdb/{}/{}", source_namespace, filename)
+}
+
 /// Migrates gm's own native memories (`.gm/memories/<key>.md`, default
 /// `memory_md`/`rssearch_vectors` store) into the `tencentdb_backend`
 /// pointer-only store for a namespace already routed to it. Source content
@@ -1171,6 +1211,13 @@ fn tencentdb_compat_probe(body: &Value) -> u64 {
 /// separate "import a real external TencentDB Agent Memory vectors.db"
 /// direction and intentionally do not share this code path (different
 /// content shape, different embedding provenance).
+///
+/// `archive_source` (body field, default false) opts into moving each
+/// successfully-imported source `.md` file to
+/// `.gm/memories-archive-tencentdb/<source_namespace>/<filename>` after its
+/// write lands -- default stays a pure one-way copy (SKILL.md's documented
+/// safety guarantee: the old backend keeps working for any namespace not
+/// also switched over) so existing callers see zero behavior change.
 fn tencentdb_memory_import(body: &Value) -> u64 {
     let source_namespace = match body.get("source_namespace").and_then(|v| v.as_str()) {
         Some(n) if !n.is_empty() => n,
@@ -1208,7 +1255,7 @@ fn tencentdb_memory_import(body: &Value) -> u64 {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
-    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut entries: Vec<(String, String, String)> = Vec::new();
     for name in &filenames {
         if !name.ends_with(".md") {
             continue;
@@ -1219,7 +1266,7 @@ fn tencentdb_memory_import(body: &Value) -> u64 {
             None => continue,
         };
         if let Some(doc) = crate::memory_md::parse(&content) {
-            entries.push((doc.key, doc.text));
+            entries.push((doc.key, doc.text, path));
         }
     }
     if entries.is_empty() {
@@ -1256,22 +1303,32 @@ fn tencentdb_memory_import(body: &Value) -> u64 {
         );
     }
 
+    let archive_source = body.get("archive_source").and_then(Value::as_bool).unwrap_or(false);
+
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
     let mut imported = 0u32;
     let mut failed: Vec<String> = Vec::new();
-    for (key, text) in &entries {
+    let mut to_archive: Vec<(String, String)> = Vec::new();
+    for (key, text, source_path) in &entries {
         let embedding = match crate::embed::embed_text_json_passage(text) {
             Some(v) => v,
             None => { failed.push(key.clone()); continue; }
         };
         match crate::tencentdb_memory::write_cfg(dest_namespace, kind, text, &embedding, now_ms, &cfg) {
-            Ok(_) => imported += 1,
+            Ok(_) => {
+                imported += 1;
+                if archive_source {
+                    let filename = source_path.rsplit('/').next().unwrap_or(key).to_string();
+                    to_archive.push((source_path.clone(), archive_path_for(source_namespace, &filename)));
+                }
+            }
             Err(e) => {
                 emit_event("tencentdb_memory_import_row_error", json!({"key": key, "namespace": dest_namespace, "error": e}));
                 failed.push(key.clone());
             }
         }
     }
+    let archived = if archive_source { archive_batch(&to_archive) } else { 0 };
     ok(
         "tencentdb-memory-import",
         json!({
@@ -1279,6 +1336,7 @@ fn tencentdb_memory_import(body: &Value) -> u64 {
             "dest_namespace": dest_namespace,
             "kind": kind,
             "imported": imported,
+            "archived": archived,
             "failed": failed.len(),
             "failed_keys": failed,
         }),
