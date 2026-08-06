@@ -11,13 +11,7 @@ pub fn anchor(path: &str) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
-struct RootEntryScopedToOneCwdNeverGlobal {
-    cwd: String,
-    root: String,
-}
-
-#[cfg(target_arch = "wasm32")]
-static ROOT_CACHE: std::sync::Mutex<Option<RootEntryScopedToOneCwdNeverGlobal>> =
+static ROOT_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> =
     std::sync::Mutex::new(None);
 
 #[cfg(target_arch = "wasm32")]
@@ -25,10 +19,8 @@ fn project_root() -> Option<String> {
     let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let cwd = cwd.trim_end_matches(['/', '\\']).to_string();
     if let Ok(cache) = ROOT_CACHE.lock() {
-        if let Some(entry) = cache.as_ref() {
-            if entry.cwd == cwd {
-                return Some(entry.root.clone());
-            }
+        if let Some(root) = cache.as_ref().and_then(|m| m.get(&cwd)) {
+            return Some(root.clone());
         }
     }
     let root = match git_toplevel() {
@@ -37,7 +29,7 @@ fn project_root() -> Option<String> {
         None => cwd.clone(),
     };
     if let Ok(mut cache) = ROOT_CACHE.lock() {
-        *cache = Some(RootEntryScopedToOneCwdNeverGlobal { cwd, root: root.clone() });
+        cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd, root.clone());
     }
     Some(root)
 }

@@ -110,35 +110,30 @@ fn current_cwd_string() -> String {
     }
 }
 
-struct ProjectRootCacheEntryScopedToOneCwdNeverGlobal {
-    cwd: String,
-    root: PathBuf,
-}
-
-static PROJECT_ROOT_CACHE: std::sync::Mutex<Option<ProjectRootCacheEntryScopedToOneCwdNeverGlobal>> =
+static PROJECT_ROOT_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, PathBuf>>> =
     std::sync::Mutex::new(None);
 
 /// `git rev-parse --show-toplevel --git-common-dir` shells a subprocess (wasm:
 /// via the host git bridge, native: a real `git` child process) on every call.
 /// The project root cannot change within a process's lifetime for a fixed cwd,
 /// so this is cached exactly like `pkfs::project_root`'s `ROOT_CACHE` -- keyed
-/// by cwd (never a bare global), so a legitimate cwd change (a worktree
-/// switch, a different project driving the same shared process) still
-/// resolves fresh rather than serving a stale root for the wrong tree.
+/// by cwd in a map (never a single slot), so concurrent dispatches from
+/// different projects sharing this process never evict each other's cached
+/// root, and a legitimate cwd change (a worktree switch, a different project
+/// driving the same shared process) still resolves fresh rather than serving
+/// a stale root for the wrong tree.
 fn resolve_project_root_with_retry() -> PathBuf {
     let cwd = current_cwd_string();
     if let Ok(cache) = PROJECT_ROOT_CACHE.lock() {
-        if let Some(entry) = cache.as_ref() {
-            if entry.cwd == cwd {
-                return entry.root.clone();
-            }
+        if let Some(root) = cache.as_ref().and_then(|m| m.get(&cwd)) {
+            return root.clone();
         }
     }
     let mut last_err_attempts = 0u32;
     for attempt in 0..RESOLVE_MAX_ATTEMPTS {
         if let Some(root) = git_common_dir_project_root_once() {
             if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
-                *cache = Some(ProjectRootCacheEntryScopedToOneCwdNeverGlobal { cwd, root: root.clone() });
+                cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd, root.clone());
             }
             return root;
         }

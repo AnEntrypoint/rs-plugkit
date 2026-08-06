@@ -1,0 +1,4 @@
+- id: fix-shared-daemon-project-root-cache-race
+  title: Fix single-slot project-root cache TOCTOU causing cross-project state leakage in shared agentplug-runner daemon
+  witness: rs-plugkit orchestrator/mod.rs PROJECT_ROOT_CACHE and pkfs.rs ROOT_CACHE were single-slot Mutex<Option<Entry>> keyed by last-seen cwd; concurrent dispatches from different projects sharing one agentplug-runner process could clobber each other's cached project root between check and use, causing gm_dir()/state files to resolve to the wrong project mid-dispatch -- observed live as session_owner_before_this_dispatch (a foreign project session id, tencentdb-l2l3-1) appearing in this project's own instruction response despite prd_pending=0 locally. Fixed both caches to per-cwd HashMap so concurrent projects sharing the daemon never evict each other's cached root. cargo check -p rs-plugkit passes clean.
+  status: pending
