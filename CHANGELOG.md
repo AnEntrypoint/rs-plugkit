@@ -1,3 +1,11 @@
+## 2026-08-06 - opt-in TencentDB-Agent-Memory-compatible memory backend
+
+**New `tencentdb_memory` module: file-pointer + lean-index storage for the memory verbs.** `memorize`/`recall`/`memorize-prune`'s explicit-key path now route to this backend when a namespace is opted in via `gm.config.json`'s `memory.tencentdb_backend` (disabled by default). Unlike the default `rssearch_vectors` table, the new `tencentdb_memory_index` table stores only a namespace/kind/key/file_path pointer plus the embedding -- never inline text. Embedding dimension is independently config-driven (default 768), since it cannot share a vector column with the compiled-in 384-dim `bge-small-en-v1.5` embedder the default path uses.
+
+**New `tencentdb_compat` module: read-only interop with real TencentDB Agent Memory `vectors.db` files.** Confirmed via research that no viable Rust/wasm32-wasip1 path exists to a SQLite engine understanding `sqlite-vec`'s `vec0` virtual tables (`rusqlite`/`libsqlite3-sys` have no documented wasm32-wasip1 C-compile support; the `sqlite-vec` crate is FFI bindings over `rusqlite`, same blocker; gm's own libsql vector store uses an incompatible native format). Uses the already-proven `host_exec_js` Node-shelling pattern (same mechanism `memory_md.rs::rename_batch` already uses) to read `l1_records`/`l0_conversations`/`skills`/`embedding_meta` matching `MemoryCore/src/core/store/sqlite.ts`'s schema exactly. New `tencentdb-compat-probe` verb for row-count/embedding-fingerprint diagnostics.
+
+**Confirmed the memory_md sync starvation self-heals correctly.** Live-witnessed against gm's own project: a partial digest (`:partial=652` on an 892-file corpus) converges incrementally across repeated `recall`/`memorize-prune {query}` dispatches (311 -> 312 rows after one forced sync), and plain `recall` (no forced sync) returns correct real results even mid-convergence via its existing keyword/vector fallback tiers. No code change needed -- the `:partial=N` mechanism (already fixed once, per this file's own `memory_md.rs` comment) is working as designed.
+
 ## 2026-05-12 - session_start: kill+respawn watcher when plugkit version changed
 
 `hook/session_start.rs::start_exec_spool` now compares the running watcher's
