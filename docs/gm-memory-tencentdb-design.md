@@ -92,6 +92,72 @@ Tencent's actual schema, uses whatever dimension the source system's
   existing callers. Backend selection is transparent and config-gated,
   default-disabled, so unmodified projects see zero behavior change.
 
+## Decision 5: gm-native memory migration into the tencentdb_backend store
+
+The user's migration-script ask has two distinct directions that were
+conflated at first read:
+
+1. **Importing an external, real TencentDB Agent Memory `vectors.db`** into
+   gm -- this is what `tencentdb-compat-probe` (read-only) and
+   `tencentdb_compat::read_l1_records`/`read_l0_conversations`/`read_skills`
+   are for. Still read-only; a full write-side importer would translate rows
+   into `tencentdb_memory::write_cfg` calls using the *source* embedding
+   (whatever `embedding_meta` reports), not gm's own embedder -- not built
+   yet because no concrete source vectors.db has been available to validate
+   against this session, and building it against zero real data would be
+   unverifiable narrative.
+2. **Migrating gm's OWN native memories** (`.gm/memories/*.md`,
+   `memory_md`/`rssearch_vectors`) into a project's `tencentdb_backend`
+   store, so a project that later opts a namespace into the new backend
+   doesn't lose what was already recalled through the old path. This is the
+   `tencentdb-memory-import` verb (`wasm_dispatch/verbs.rs`): reads
+   `memory_md::flat_kv_entries(source_namespace)`, re-embeds every doc
+   through gm's own `embed::embed_text_json_passage` (fixed 384-dim), and
+   writes via `tencentdb_memory::write_cfg` with an **explicit 384-dim
+   config override** -- never the namespace's resolved
+   `vectors_db_dims` (typically 768), which this content's embeddings
+   cannot satisfy. Refuses if `dest_namespace` isn't actually listed in
+   `memory.tencentdb_backend.namespaces`, so it can't silently write into an
+   unrouted namespace's table.
+
+## Session verification: real bugs found and fixed by an actual end-to-end run
+
+Building `tencentdb-memory-import` and running it for real (release wasm
+built and dispatched directly through `agentplug-runner`, not just
+`cargo check`) surfaced two defects a compile-clean check could not catch:
+
+1. **`flat_kv_entries`/`host_kv_query` is NOT the `.md` memory corpus.** It
+   reads an unrelated discipline-KV JSON store
+   (`.gm/disciplines/<ns>/*.json`, `agentplug-host`'s
+   `kv_namespace_dir`) -- initial `tencentdb-memory-import` used it and
+   silently imported zero docs even with real `.md` files present. Fixed by
+   listing `memory_md::md_dir(ns)` via `pkfs::readdir` and parsing each
+   `.md` file directly with `memory_md::parse`.
+2. **A per-project (not per-namespace) `vectors_db_dims` makes single-table
+   mixed-dim writes unsafe.** `ensure_schema`'s `CREATE TABLE IF NOT EXISTS`
+   is a silent no-op once the table exists at its first-created width;
+   writing gm's native 384-dim embeddings into a namespace already resolved
+   at 768 either corrupts the fixed-width `F32_BLOB` column or (with a
+   dim-suffixed table-name override, the first fix attempted) makes the
+   import permanently unreachable through `recall`'s router, which always
+   queries via the project-resolved (not import-specific) config. Fixed by
+   refusing the import outright unless the destination namespace's
+   resolved `vectors_db_dims` is actually 384 -- a project wanting both
+   externally-embedded (768) and gm-native (384) tencentdb-routed content
+   needs two separate namespaces, each configured at its own dim; there is
+   no mixed-dim support within one namespace/table.
+
+Verified live (scratch git repo, real release wasm built via
+`cargo build --release --target wasm32-wasip1 --no-default-features
+--features slim --lib`, dispatched with `agentplug-runner dispatch gm
+<verb> <body>`): `memorize-fire` into `default` -> `tencentdb-memory-import`
+into a `vectors_db_dims: 384`-configured namespace (1 doc imported) ->
+`recall` against that namespace (real cosine-similarity hit, 0.845,
+correct `file_path`, content lazily read from the pointer file, not stored
+inline in the index row) -> `memorize-prune` (index row marked deleted,
+file removed from disk). Full CRUD round trip confirmed against the actual
+compiled artifact, not a mock or a narrated claim.
+
 ## Open items tracked as their own PRD rows, not resolved here
 
 - The prd.yml lost-update bug discovered mid-session (separate root cause,

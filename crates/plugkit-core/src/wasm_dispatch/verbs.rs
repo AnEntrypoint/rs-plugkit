@@ -1158,6 +1158,133 @@ fn tencentdb_compat_probe(body: &Value) -> u64 {
     }
 }
 
+/// Migrates gm's own native memories (`.gm/memories/<key>.md`, default
+/// `memory_md`/`rssearch_vectors` store) into the `tencentdb_backend`
+/// pointer-only store for a namespace already routed to it. Source content
+/// was embedded (or never embedded at all -- rssearch_vectors is a cache,
+/// not authoritative) through gm's own fixed 384-dim pipeline, so this
+/// re-embeds every doc via `embed_text_json_passage` and writes with an
+/// explicit 384-dim config override -- never the resolved (typically
+/// 768-dim) default config, which this content's embeddings cannot satisfy.
+/// This is the "migrate gm's OWN memories into tencentdb format" direction;
+/// `tencentdb-compat-probe`/`tencentdb_compat::read_l1_records` etc. are the
+/// separate "import a real external TencentDB Agent Memory vectors.db"
+/// direction and intentionally do not share this code path (different
+/// content shape, different embedding provenance).
+fn tencentdb_memory_import(body: &Value) -> u64 {
+    let source_namespace = match body.get("source_namespace").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n,
+        _ => return err("tencentdb-memory-import", "source_namespace required"),
+    };
+    let dest_namespace = body
+        .get("dest_namespace")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(source_namespace);
+    let kind = body.get("kind").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("l1");
+
+    if !crate::tencentdb_memory::namespace_is_routed(dest_namespace) {
+        return err(
+            "tencentdb-memory-import",
+            &format!(
+                "dest_namespace '{}' is not listed in memory.tencentdb_backend.namespaces (or the backend is disabled) -- refusing to import into an unrouted namespace",
+                dest_namespace
+            ),
+        );
+    }
+
+    // flat_kv_entries/host_kv_query reads the UNRELATED discipline-KV JSON
+    // store (`.gm/disciplines/<ns>/*.json`, agentplug-host imports.rs
+    // kv_namespace_dir) -- not gm's real memory corpus. The actual native
+    // memory store is `.md` files under memory_md::md_dir(ns), so list that
+    // directory directly and parse each file with memory_md::parse.
+    let dir = match crate::memory_md::md_dir(source_namespace) {
+        Some(d) => d,
+        None => return err("tencentdb-memory-import", &format!("invalid source_namespace '{}'", source_namespace)),
+    };
+    let listing = crate::pkfs::readdir(&dir);
+    let filenames: Vec<String> = listing
+        .as_ref()
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for name in &filenames {
+        if !name.ends_with(".md") {
+            continue;
+        }
+        let path = format!("{}/{}", dir, name);
+        let content = match crate::pkfs::read_to_string(&path) {
+            Some(c) => c,
+            None => continue,
+        };
+        if let Some(doc) = crate::memory_md::parse(&content) {
+            entries.push((doc.key, doc.text));
+        }
+    }
+    if entries.is_empty() {
+        return ok("tencentdb-memory-import", json!({"source_namespace": source_namespace, "dest_namespace": dest_namespace, "imported": 0, "failed": 0, "reason": "no-source-docs"}));
+    }
+
+    // gm's embedder is compile-time fixed at 384 (vecstore::EXPECTED_EMBED_DIM).
+    // The normal `recall` router always queries dest_namespace through
+    // tencentdb_memory::recall's PROJECT-RESOLVED config (single table/dim
+    // per project, not per-namespace) -- writing 384-dim vectors under a
+    // different table/dim override would make them permanently unreachable
+    // through that router (or, worse, if the override reused the project's
+    // real table name, corrupt its fixed-width F32_BLOB(cfg.dim) column:
+    // libsql vector blobs are fixed-width, and ensure_schema's CREATE TABLE
+    // IF NOT EXISTS is a silent no-op against an already-created table, so
+    // inserting a mismatched-length vector there is undetected until a scan
+    // reads a garbage tail or the column rejects it outright).
+    //
+    // So: refuse up front unless the project has actually configured
+    // vectors_db_dims=384 for this destination (i.e. the operator has
+    // dedicated this namespace to gm-native-embedded content specifically).
+    // A project wanting BOTH externally-embedded (768) and gm-native (384)
+    // tencentdb-routed content needs two distinct namespaces, each with its
+    // own dim -- there is no single-namespace mixed-dim support, by design,
+    // since the table's column width is fixed at first creation.
+    let cfg = crate::tencentdb_memory::resolved_config();
+    if cfg.dim != 384 {
+        return err(
+            "tencentdb-memory-import",
+            &format!(
+                "dest_namespace '{}' resolves to memory.tencentdb_backend.vectors_db_dims={}, but gm's own embedder produces 384-dim vectors -- importing would write vectors the configured table's fixed-width column cannot hold, and they would never be reachable through recall's per-project (not per-namespace) dim config. Configure vectors_db_dims=384 for a namespace dedicated to gm-native memory imports (separate from any namespace holding externally-embedded 768-dim content), then retry.",
+                dest_namespace, cfg.dim
+            ),
+        );
+    }
+
+    let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
+    let mut imported = 0u32;
+    let mut failed: Vec<String> = Vec::new();
+    for (key, text) in &entries {
+        let embedding = match crate::embed::embed_text_json_passage(text) {
+            Some(v) => v,
+            None => { failed.push(key.clone()); continue; }
+        };
+        match crate::tencentdb_memory::write_cfg(dest_namespace, kind, text, &embedding, now_ms, &cfg) {
+            Ok(_) => imported += 1,
+            Err(e) => {
+                emit_event("tencentdb_memory_import_row_error", json!({"key": key, "namespace": dest_namespace, "error": e}));
+                failed.push(key.clone());
+            }
+        }
+    }
+    ok(
+        "tencentdb-memory-import",
+        json!({
+            "source_namespace": source_namespace,
+            "dest_namespace": dest_namespace,
+            "kind": kind,
+            "imported": imported,
+            "failed": failed.len(),
+            "failed_keys": failed,
+        }),
+    )
+}
+
 fn memorize_prune(body: &Value) -> u64 {
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     let mut keys: Vec<String> = Vec::new();
@@ -3341,6 +3468,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "memorize-retention" | "memorize_retention" => memorize_retention(&body),
         "recall" => recall(&body),
         "tencentdb-compat-probe" => tencentdb_compat_probe(&body),
+        "tencentdb-memory-import" => tencentdb_memory_import(&body),
         "python" | "py" => shell_exec(&body, &body_s, "python"),
         "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, &body_s, "bash"),
         "powershell" | "ps1" => shell_exec(&body, &body_s, "powershell"),

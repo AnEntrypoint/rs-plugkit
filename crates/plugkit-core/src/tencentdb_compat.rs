@@ -65,13 +65,30 @@ pub fn read_skills(vectors_db_path: &str, head_only: bool, limit: u64) -> Result
     query_rows(vectors_db_path, &sql)
 }
 
-/// Reads the `embedding_meta` fingerprint row (`{provider, model, dimensions}`)
+/// Reads the `embedding_meta` fingerprint (`{provider, model, dimensions}`)
 /// so a caller can tell what embedding space the source vectors.db's `l1_vec`/
 /// `l0_vec`/`skill_vec` tables actually hold -- required before treating any
 /// embedding column as directly comparable to gm's own.
+///
+/// `embedding_meta` is a key-value table (`key TEXT PRIMARY KEY, value TEXT`),
+/// not a row of named columns: `sqlite.ts::writeEmbeddingMeta` stores a single
+/// row keyed `'embedding_provider_info'` whose `value` is the JSON-encoded
+/// `{provider, model, dimensions}` object. Read that row and parse its value.
 pub fn read_embedding_meta(vectors_db_path: &str) -> Result<Value, String> {
-    let rows = query_rows(vectors_db_path, "SELECT provider, model, dimensions FROM embedding_meta LIMIT 1")?;
-    Ok(rows.as_array().and_then(|a| a.first()).cloned().unwrap_or(Value::Null))
+    let rows = query_rows(
+        vectors_db_path,
+        "SELECT value FROM embedding_meta WHERE key = 'embedding_provider_info' LIMIT 1",
+    )?;
+    let raw = rows
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|row| row.get("value"))
+        .and_then(Value::as_str);
+    match raw {
+        Some(s) => serde_json::from_str(s)
+            .map_err(|e| format!("tencentdb_compat: embedding_meta value not valid JSON: {}", e)),
+        None => Ok(Value::Null),
+    }
 }
 
 /// Row counts across every content-bearing table, used by the migration
