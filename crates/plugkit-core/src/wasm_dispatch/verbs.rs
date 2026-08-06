@@ -1140,6 +1140,24 @@ fn memorize_retention(body: &Value) -> u64 {
     }))
 }
 
+/// Diagnostic/interop verb: probes a real TencentDB Agent Memory `vectors.db`
+/// path (row counts per table, embedding_meta fingerprint) without reading
+/// full content -- used by the migration script's dry-run summary and to
+/// confirm a path is genuinely a TencentDB store before a full read.
+fn tencentdb_compat_probe(body: &Value) -> u64 {
+    let path = match body.get("vectors_db_path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return err("tencentdb-compat-probe", "vectors_db_path required"),
+    };
+    match crate::tencentdb_compat::probe(path) {
+        Ok(counts) => {
+            let embedding_meta = crate::tencentdb_compat::read_embedding_meta(path).ok();
+            ok("tencentdb-compat-probe", json!({"path": path, "counts": counts, "embedding_meta": embedding_meta}))
+        }
+        Err(e) => err("tencentdb-compat-probe", &e),
+    }
+}
+
 fn memorize_prune(body: &Value) -> u64 {
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     let mut keys: Vec<String> = Vec::new();
@@ -3322,6 +3340,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "memorize-vacuum" | "memorize_vacuum" => memorize_vacuum(&body),
         "memorize-retention" | "memorize_retention" => memorize_retention(&body),
         "recall" => recall(&body),
+        "tencentdb-compat-probe" => tencentdb_compat_probe(&body),
         "python" | "py" => shell_exec(&body, &body_s, "python"),
         "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, &body_s, "bash"),
         "powershell" | "ps1" => shell_exec(&body, &body_s, "powershell"),

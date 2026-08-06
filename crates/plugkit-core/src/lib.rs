@@ -67,6 +67,9 @@ pub mod memory_md;
 pub mod tencentdb_memory;
 
 #[cfg(target_arch = "wasm32")]
+pub mod tencentdb_compat;
+
+#[cfg(target_arch = "wasm32")]
 pub mod mediator;
 
 /// The generalized cache abstraction (see module docs): namespaced get/put/
