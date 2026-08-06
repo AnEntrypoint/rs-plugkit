@@ -544,22 +544,21 @@ fn load_repo_tier(
 const RESOLVE_CACHE_TTL_MS: u64 = 2_000;
 
 #[cfg(target_arch = "wasm32")]
-struct ResolveCacheEntryScopedToOneProjectRootNeverGlobal {
-    root: String,
+struct ResolveCacheEntry {
     ts_ms: u64,
     resolution: Resolution,
 }
 
 #[cfg(target_arch = "wasm32")]
-static RESOLVE_CACHE: std::sync::Mutex<Option<ResolveCacheEntryScopedToOneProjectRootNeverGlobal>> = std::sync::Mutex::new(None);
+static RESOLVE_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, ResolveCacheEntry>>> = std::sync::Mutex::new(None);
 
 #[cfg(target_arch = "wasm32")]
 pub fn resolve() -> Resolution {
     let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as u64;
     if let Ok(cache) = RESOLVE_CACHE.lock() {
-        if let Some(entry) = cache.as_ref() {
-            if entry.root == root && now_ms.saturating_sub(entry.ts_ms) < RESOLVE_CACHE_TTL_MS {
+        if let Some(entry) = cache.as_ref().and_then(|m| m.get(&root)) {
+            if now_ms.saturating_sub(entry.ts_ms) < RESOLVE_CACHE_TTL_MS {
                 return entry.resolution.clone();
             }
         }
@@ -579,11 +578,8 @@ pub fn resolve() -> Resolution {
         _ => first_pass,
     };
     if let Ok(mut cache) = RESOLVE_CACHE.lock() {
-        *cache = Some(ResolveCacheEntryScopedToOneProjectRootNeverGlobal {
-            root,
-            ts_ms: now_ms,
-            resolution: resolution.clone(),
-        });
+        cache.get_or_insert_with(std::collections::HashMap::new)
+            .insert(root, ResolveCacheEntry { ts_ms: now_ms, resolution: resolution.clone() });
     }
     resolution
 }
@@ -602,7 +598,9 @@ pub fn resolve_forced(project_root: &str) -> Resolution {
     let forced_fetcher = crate::config_sync::GitRepoFetcher::with_debounce_ms(0);
     let resolution = resolve_with(project_root, &forced_fetcher);
     if let Ok(mut cache) = RESOLVE_CACHE.lock() {
-        *cache = None;
+        if let Some(map) = cache.as_mut() {
+            map.remove(project_root);
+        }
     }
     resolution
 }

@@ -7,13 +7,12 @@ const RESOLVED_CACHE_TTL_MS: u64 = 5_000;
 const HOST_DISPATCH_CALL_DEADLINE_MS: u64 = 40_000;
 const WALL_BUDGET_TAIL_MARGIN_MS: u64 = 10_000;
 
-struct ResolvedEntryScopedToOneProjectRootNeverGlobal {
-    root: String,
+struct ResolvedEntry {
     ts_ms: u64,
     config: RagConfig,
 }
 
-static RESOLVED_CACHE: Mutex<Option<ResolvedEntryScopedToOneProjectRootNeverGlobal>> = Mutex::new(None);
+static RESOLVED_CACHE: Mutex<Option<std::collections::HashMap<String, ResolvedEntry>>> = Mutex::new(None);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VecTableNames {
@@ -777,8 +776,8 @@ impl RagConfig {
         let project_root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
         let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
         if let Ok(cache) = RESOLVED_CACHE.lock() {
-            if let Some(fresh_entry) = cache.as_ref() {
-                if fresh_entry.root == project_root && now_ms.saturating_sub(fresh_entry.ts_ms) < RESOLVED_CACHE_TTL_MS {
+            if let Some(fresh_entry) = cache.as_ref().and_then(|m| m.get(&project_root)) {
+                if now_ms.saturating_sub(fresh_entry.ts_ms) < RESOLVED_CACHE_TTL_MS {
                     return fresh_entry.config.clone();
                 }
             }
@@ -800,11 +799,8 @@ impl RagConfig {
             }
         };
         if let Ok(mut cache) = RESOLVED_CACHE.lock() {
-            *cache = Some(ResolvedEntryScopedToOneProjectRootNeverGlobal {
-                root: project_root,
-                ts_ms: now_ms,
-                config: resolved_config_or_defaults_on_validation_failure.clone(),
-            });
+            cache.get_or_insert_with(std::collections::HashMap::new)
+                .insert(project_root, ResolvedEntry { ts_ms: now_ms, config: resolved_config_or_defaults_on_validation_failure.clone() });
         }
         resolved_config_or_defaults_on_validation_failure
     }
