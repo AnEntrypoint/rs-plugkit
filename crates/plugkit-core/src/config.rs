@@ -61,7 +61,12 @@ impl Config {
     }
 
     pub fn unknown_top_level_keys(&self) -> Vec<String> {
-        const KNOWN: &[&str] = &["version", "instructions", "index", "memory", "cache", "sync", "fsm", "messages", "rag", "scoring"];
+        const KNOWN: &[&str] = &[
+            "version", "instructions", "index", "memory", "memory_sync", "cache", "sync",
+            "fsm", "messages", "rag", "scoring", "embed", "rssearch", "git_commits",
+            "code_chunks", "code_index", "pipeline", "instruction_payload", "browser_witness",
+            "discipline_note", "claim_audit", "db_path", "memory_md_tables", "retention",
+        ];
         let Some(obj) = self.value.as_object() else { return Vec::new() };
         obj.keys()
             .filter(|k| !k.starts_with('_'))
@@ -101,21 +106,6 @@ pub trait RepoFetcher {
     fn refresh(&self, src: &RepoSource) -> Result<(), String>;
 }
 
-/// Parse a single-object source spec (the `{repo, ref?, path?}` shape,
-/// `prose.rs`'s own `.gm/instructions/source.json` schema before this
-/// function existed only understood `path`) and materialize it via the
-/// shared `RepoFetcher`, returning the resolved `RepoSource` (whose
-/// `cache_dir` is where the caller reads real files from) on success.
-///
-/// Distinct from [`resolve_with`]'s repo-tier loading: that path parses a
-/// FULL `gm.config.json` out of the materialized repo and deep-merges
-/// multi-entry arrays, both irrelevant to a caller (like `prose.rs`) that
-/// wants a raw `.md` file from an arbitrary sub-path in the SAME
-/// repo/ref/path schema, not a structured config object. Sharing
-/// `parse_source_entry`/`RepoSource`/`RepoFetcher` here means a
-/// `.gm/instructions/source.json` gains the identical `repo`/`ref`/`path`
-/// validation and git-fetch machinery `.gm/config.source.json` already has,
-/// rather than a second, narrower implementation of the same idea.
 pub fn resolve_prose_repo_source(
     spec_text: &str,
     spec_path: &str,
@@ -433,26 +423,7 @@ fn read_across_publish(path: &str) -> Option<String> {
     None
 }
 
-/// Load ONE already-resolved [`RepoSource`]: refresh it, read its config file.
-///
-/// Every failure after the spec PARSES is a rejection, not a fallthrough --
-/// once a user has declared "my config lives in that repo", quietly running
-/// someone else's config because the fetch failed is worse than stopping.
 fn load_one_repo_source(src: &RepoSource, spec_path: &str, fetcher: &dyn RepoFetcher) -> Load {
-    // A transient refresh failure (offline, a concurrent process holding the
-    // repo's git lock, a momentary network blip) must not discard an already-
-    // materialized cache from a PRIOR successful refresh -- that cache is
-    // real, present-on-disk config a project explicitly opted into, not
-    // nothing. Falling through to a lower tier (or the compiled BuiltinDefault
-    // config, whose fsm.graph key is simply absent) on every transient blip
-    // silently swaps a project's intentionally-configured FSM graph/prose for
-    // an unrelated one mid-session: a phase persisted under the cached graph
-    // (e.g. a custom initial state) stops being a valid state in whatever
-    // tier resolution fell back to, and every subsequent `transition` denies
-    // with "no edge" against a graph the project never even serves stably.
-    // Try the fetch; on failure, read whatever is already cached before
-    // giving up -- only a genuinely empty/never-populated cache degrades this
-    // tier to Rejected/Absent.
     let refresh_err = fetcher.refresh(src).err();
     let cfg_path = src.config_path();
     let Some(text) = read_across_publish(&cfg_path) else {

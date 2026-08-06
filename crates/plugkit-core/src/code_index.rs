@@ -869,7 +869,15 @@ fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: 
         let le = c.le.to_string();
         let body_trunc = truncate_body(body);
         let params: [&str; 7] = [fp, &c.kind, &c.name, &ls, &le, body_trunc, &embedding_lit];
-        if let Err(e) = libsql_wasm::exec_params(db_path, (&insert_chunk_sql()), &params) {
+        let cfg = crate::ragconfig::RagConfig::resolved();
+        let spec = crate::vecns::VecTableSpec::from_names(db_path, &cfg.code_chunks);
+        if let Err(e) = crate::vecns::exec_with_shadow_row_recovery(&spec, &insert_chunk_sql(), &params, |recovery_err| {
+            crate::wasm_dispatch::emit_event("code_index_chunk_shadow_row_recovery", serde_json::json!({
+                "path": fp,
+                "chunk_key": c.key,
+                "error": recovery_err,
+            }));
+        }) {
             persisted = false;
             crate::wasm_dispatch::emit_event("code_index_chunk_insert_failed", serde_json::json!({
                 "path": fp,

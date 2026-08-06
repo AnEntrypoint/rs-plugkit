@@ -271,11 +271,6 @@ impl Default for MemoryMdTableNames {
     }
 }
 
-/// Wall budgets for the two background passes that embed in bulk: migrating a
-/// namespace off the legacy flat-JSON store, and vectorizing git commits.
-/// Both stop early when the budget runs out and resume on a later call, so a
-/// budget too small for a large repo means the pass never finishes -- and,
-/// like the memory sync, never signals that it did not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BulkEmbedBudgetConfig {
     pub flat_json_migration_budget_ms: u64,
