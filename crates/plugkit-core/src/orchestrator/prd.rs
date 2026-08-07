@@ -61,20 +61,18 @@ pub fn drain_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)>
         drained.clear();
         if let Some(seq) = doc.as_sequence_mut() {
             seq.retain(|item| {
-                if let Some(map) = item.as_mapping() {
-                    let status = map.get(&Value::String("status".to_string())).and_then(|v| v.as_str()).unwrap_or("");
-                    let comment = map.get(&Value::String("commit_comment".to_string())).and_then(|v| v.as_str());
-                    if !status_is_open(status) {
-                        if let Some(c) = comment {
-                            if !c.trim().is_empty() {
-                                let id = map.get(&Value::String("id".to_string())).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                drained.push((id, c.trim().to_string()));
-                                return false;
-                            }
-                        }
-                    }
+                let Some(map) = item.as_mapping() else { return true };
+                let status = map.get(&Value::String("status".to_string())).and_then(|v| v.as_str()).unwrap_or("");
+                if status_is_open(status) {
+                    return true;
                 }
-                true
+                let id = map.get(&Value::String("id".to_string())).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let comment = map.get(&Value::String("commit_comment".to_string())).and_then(|v| v.as_str())
+                    .map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+                if let Some(c) = comment {
+                    drained.push((id, c));
+                }
+                false
             });
         }
         cas::CasOutcome::Write(doc, ())
