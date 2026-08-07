@@ -27,6 +27,21 @@ fn gm_tracked_gitlink_sha(path: &str) -> Option<String> {
 
 #[cfg(target_arch = "wasm32")]
 fn submodule_head_sha(path: &str) -> Option<String> {
+    // An uninitialized/not-yet-cloned submodule directory has no `.git`
+    // entry (file or dir) of its own. Run `git rev-parse HEAD` with cwd set
+    // to that directory anyway and git silently walks UP to the enclosing
+    // parent repo instead of erroring — exit code 0, but the "submodule
+    // HEAD" returned is actually the PARENT repo's HEAD. Comparing that
+    // against the parent's own recorded gitlink SHA for the submodule then
+    // spuriously flags drift on every dispatch from a repo whose vendored
+    // submodules were never `git submodule update --init`'d locally (e.g.
+    // a workspace that vendors sources via a script rather than real git
+    // submodule checkout). Guard explicitly: no `.git` inside `path` means
+    // "not actually a checked-out submodule here," not "drifted" — skip it
+    // the same way a missing gitlink entry is skipped.
+    if !crate::pkfs::exists(&format!("{}/.git", path)) {
+        return None;
+    }
     let result = crate::wasm_dispatch::git_call_argv(&["rev-parse", "HEAD"], Some(path));
     let exit_code = result.get("exit_code").and_then(|value| value.as_i64()).unwrap_or(1);
     if exit_code != 0 { return None; }

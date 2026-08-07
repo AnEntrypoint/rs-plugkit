@@ -620,7 +620,7 @@ fn default_graph() -> Graph {
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
                 next_dispatch: None,
-                message: "transition rejected: submodule pointer drift -- one or more of gm's tracked submodule gitlinks (agentplug, rs-plugkit, rs-codeinsight, rs-search, agentplug-bert, agentplug-libsql, agentplug-treesitter) no longer match that submodule's own real HEAD. `git add <drifted-path>` for each, then git_commit/git_finalize to update gm's own pointer before re-attempting.".into(),
+                message: "transition rejected: submodule pointer drift -- one or more of this repo's tracked submodule gitlinks no longer match that submodule's own real checked-out HEAD (dispatch `submodule-check` to see which paths and their recorded-vs-actual SHAs). `git add <drifted-path>` for each, then git_commit/git_finalize to update this repo's own pointer before re-attempting. A submodule directory with no `.git` of its own (never `git submodule update --init`'d) is not drift and is skipped automatically.".into(),
             },
             GateDef {
                 name: "no-synthetic-test-files".into(),
