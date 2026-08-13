@@ -1,0 +1,3591 @@
+use serde_json::{json, Value};
+use super::host_abi::{
+    host_fs_readdir, host_fetch, host_kv_get, host_kv_put, host_kv_delete, host_kv_query,
+    host_exec_js, host_now_ms, host_env_get, host_browser_exec, host_oxi_exec,
+    pack, read_str, unpack_to_string, unpack_to_value,
+    git_call, git_call_argv, host_read, plugin_call as call_plugin,
+};
+use super::events::{emit_event, log_deviation_push, install_panic_hook};
+use crate::orchestrator::yaml_util::base64_decode;
+
+pub fn plugin_ok(resp: &Value) -> bool {
+    resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+pub const PLUGIN_FAIL_UNKNOWN_PLUGIN: &str = "unknown_plugin";
+pub const PLUGIN_FAIL_NOT_LOADED: &str = "plugin_not_loaded_yet";
+pub const PLUGIN_FAIL_DEADLINE: &str = "deadline_exceeded";
+pub const PLUGIN_FAIL_MALFORMED: &str = "malformed_response";
+pub const PLUGIN_FAIL_HOST_EMPTY: &str = "host_returned_empty";
+pub const PLUGIN_FAIL_PLUGIN_ERROR: &str = "plugin_error";
+pub const PLUGIN_FAIL_HOST_LOST_RESPONSE_RETRYABLE: &str = "plugin_response_lost";
+
+fn text_names_deadline_exceeded(low: &str) -> bool {
+    (low.contains("deadline") && low.contains("exceed"))
+        || (low.contains(" exceeded ") && low.contains("executing verb"))
+}
+
+fn text_names_unknown_plugin(low: &str) -> bool {
+    low.contains("unknown plugin") || low.contains("not registered")
+}
+
+fn text_names_response_lost(low: &str) -> bool {
+    low.contains("plugin_response_lost") || low.contains("never reached the guest")
+}
+
+pub fn plugin_failure_code(resp: &Value) -> &'static str {
+    if resp.is_null() { return PLUGIN_FAIL_HOST_EMPTY; }
+    if let Value::String(raw) = resp {
+        let low = raw.to_ascii_lowercase();
+        if text_names_response_lost(&low) { return PLUGIN_FAIL_HOST_LOST_RESPONSE_RETRYABLE; }
+        if text_names_deadline_exceeded(&low) { return PLUGIN_FAIL_DEADLINE; }
+        if text_names_unknown_plugin(&low) { return PLUGIN_FAIL_UNKNOWN_PLUGIN; }
+        return PLUGIN_FAIL_MALFORMED;
+    }
+    let raw_err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    let low = raw_err.to_ascii_lowercase();
+    if low == PLUGIN_FAIL_UNKNOWN_PLUGIN || text_names_unknown_plugin(&low) {
+        return PLUGIN_FAIL_UNKNOWN_PLUGIN;
+    }
+    if low == PLUGIN_FAIL_NOT_LOADED || low.contains("not loaded") { return PLUGIN_FAIL_NOT_LOADED; }
+    if text_names_response_lost(&low) { return PLUGIN_FAIL_HOST_LOST_RESPONSE_RETRYABLE; }
+    if text_names_deadline_exceeded(&low) { return PLUGIN_FAIL_DEADLINE; }
+    PLUGIN_FAIL_PLUGIN_ERROR
+}
+
+fn plugin_error_message_or_bare_string_fallback(resp: &Value, message_when_shape_unrecognized: &str) -> String {
+    match resp {
+        Value::String(raw) => raw.clone(),
+        Value::Null => "host_plugin_call returned no bytes".to_string(),
+        _ => resp.get("error").and_then(|v| v.as_str()).unwrap_or(message_when_shape_unrecognized).to_string(),
+    }
+}
+
+pub fn plugin_error_detail(resp: &Value, message_when_shape_unrecognized: &str) -> Value {
+    let code = plugin_failure_code(resp);
+    let message = plugin_error_message_or_bare_string_fallback(resp, message_when_shape_unrecognized);
+    let mut detail = json!({
+        "error": message,
+        "plugin_failure": code,
+        "retryable": code == PLUGIN_FAIL_NOT_LOADED
+            || code == PLUGIN_FAIL_DEADLINE
+            || code == PLUGIN_FAIL_HOST_LOST_RESPONSE_RETRYABLE,
+    });
+    if let Some(p) = resp.get("plugin").and_then(|v| v.as_str()) {
+        detail["plugin"] = json!(p);
+    }
+    detail
+}
+
+fn plugin_error(resp: &Value, message_when_shape_unrecognized: &str) -> String {
+    let code = plugin_failure_code(resp);
+    let message = plugin_error_message_or_bare_string_fallback(resp, message_when_shape_unrecognized);
+    format!("[{}] {}", code, message)
+}
+
+fn err_plugin(verb: &str, resp: &Value, fallback: &str) -> u64 {
+    err_json(verb, plugin_error_detail(resp, fallback))
+}
+
+pub fn vec_search_local(embedding: &Value, namespace: &str, k: u32) -> Value {
+    let (hits, _) = rssearch_vector_hits(embedding, namespace, k, false);
+    hits
+}
+
+pub fn embed_query(query: &str) -> Value {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        emit_event("embed_query_failed", json!({ "reason": "empty query after trim" }));
+        return Value::Null;
+    }
+    let resp = call_plugin("bert", "embed", &json!({ "text": query, "kind": "query" }));
+    if !plugin_ok(&resp) {
+        emit_event("embed_query_failed", json!({
+            "reason": "bert plugin call failed",
+            "error": plugin_error(&resp, "no error field on bert response"),
+            "plugin_failure": plugin_failure_code(&resp),
+            "query_len": query.len(),
+        }));
+        return Value::Null;
+    }
+    match resp.get("embedding") {
+        Some(v) if !v.is_null() => v.clone(),
+        _ => {
+            emit_event("embed_query_failed", json!({
+                "reason": "bert responded ok but carried no embedding field",
+                "query_len": query.len(),
+            }));
+            Value::Null
+        }
+    }
+}
+
+fn embed_passage(text: &str) -> Option<Value> {
+    let resp = call_plugin("bert", "embed", &json!({ "text": text, "kind": "passage" }));
+    if !plugin_ok(&resp) {
+        emit_event("embed_passage_failed", json!({
+            "reason": "bert plugin call failed",
+            "error": plugin_error(&resp, "no error field on bert response"),
+            "plugin_failure": plugin_failure_code(&resp),
+            "text_len": text.len(),
+        }));
+        return None;
+    }
+    match resp.get("embedding") {
+        Some(v) if !v.is_null() => Some(v.clone()),
+        _ => {
+            emit_event("embed_passage_failed", json!({
+                "reason": "bert responded ok but carried no embedding field",
+                "plugin_failure": PLUGIN_FAIL_MALFORMED,
+                "text_len": text.len(),
+            }));
+            None
+        }
+    }
+}
+
+pub const BROWSER_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
+pub const ERR_CODE_FAILED: &str = "failed";
+pub const ERR_CODE_RETIRED_VERB: &str = "retired_verb";
+pub const ERR_CODE_UNSUPPORTED: &str = "unsupported_by_design";
+pub const ERR_CODE_UNKNOWN_VERB: &str = "unknown_verb";
+pub const ERR_CODE_INVALID_ARGS: &str = "invalid_args";
+pub const ERR_CODE_PANIC: &str = "panic";
+pub const ERR_CODE_GATE_DENIED: &str = "gate_denied";
+
+fn shared_store_contract() -> Value {
+    json!({
+        "identity": "the resolved file path IS the identity -- libsql routes by path alone and ignores the `db` handle name for any real file (that field is consulted only for :memory:), so two callers naming the same file share one store and two projects with different files cannot collide",
+        "isolation": "none beyond the path. There is no per-plugin namespace and no ownership claim; any plugin handed the path reaches the whole store, including tables another plugin created.",
+        "locking": "the WASI VFS has no OS file locking and serializes with a <db>.lock DIRECTORY. It is created before a write and removed after, so an unclean exit leaves it behind and every later write returns SQLITE_BUSY forever -- no holder to find, no timeout that expires it, survives reboots. A locked error now names the directory and the remedy.",
+        "busy_timeout_ms": 8000,
+        "busy_timeout_ceiling_rule": "must stay well under the host dispatch deadline (40s). A wait that outlives the epoch budget TRAPS the instance instead of returning a reportable SQLITE_BUSY, and a trap carries no error text -- contention then looks like a crash.",
+        "journal_mode": "WAL where the conversion succeeds. It needs an exclusive lock, so it is attempted once per process per path and memoized only on a verified read-back -- PRAGMA journal_mode=WAL returns OK while silently doing nothing when it cannot take the lock.",
+        "aggregate_hazard": "an UNFILTERED aggregate over an F32_BLOB vector table answers 0 even when the table is full. Count with a predicate, or with SUM over a GROUP BY subquery, or against the <table>_vec_shadow companion. A bare COUNT(*) reporting 0 is not evidence of an empty store.",
+    })
+}
+
+fn persisted_paths_compatibility_surface_report() -> Value {
+    let paths = [
+        ".gm/turn-state.json",
+        ".gm/prd.yml",
+        ".gm/mutables.yml",
+        ".gm/residual-check-fired",
+        ".gm/claim-audit-fired",
+        ".gm/last-instruction-ts",
+        ".gm/exec-spool/.ci-validated",
+        ".gm/exec-spool/.turn-browser-edits.json",
+        ".gm/exec-spool/.turn-browser-witnessed",
+        ".gm/exec-spool/.gate-deviation-repeats.json",
+    ];
+    let live: Vec<Value> = paths
+        .iter()
+        .map(|p| json!({ "path": p, "exists": crate::pkfs::exists(p) }))
+        .collect();
+    json!({
+        "note": "these paths are a compatibility surface -- a reader outside this crate depends on each staying where it is",
+        "paths": live,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Capability {
+    ProjectPath,
+    EnvAllowlist,
+    KvNamespace,
+    Unguarded,
+}
+
+impl Capability {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Capability::ProjectPath => "path_within_project",
+            Capability::EnvAllowlist => "env_get",
+            Capability::KvNamespace => "kv_put",
+            Capability::Unguarded => "unguarded",
+        }
+    }
+}
+
+const VERB_CAPABILITIES: &[(&str, Capability)] = &[
+    ("fs_read", Capability::ProjectPath),
+    ("fs_write", Capability::ProjectPath),
+    ("fs_stat", Capability::ProjectPath),
+    ("fs_readdir", Capability::ProjectPath),
+    ("scan_deps", Capability::ProjectPath),
+    ("env_get", Capability::EnvAllowlist),
+    ("kv_put", Capability::KvNamespace),
+    ("fetch", Capability::Unguarded),
+    ("exec_js", Capability::Unguarded),
+    ("browser", Capability::Unguarded),
+    ("cdp", Capability::Unguarded),
+];
+
+pub fn guard_for(verb: &str) -> Option<Capability> {
+    VERB_CAPABILITIES.iter().find(|(v, _)| *v == verb).map(|(_, c)| *c)
+}
+
+fn verbs_with_capability(cap: Capability) -> Vec<&'static str> {
+    VERB_CAPABILITIES.iter().filter(|(_, c)| *c == cap).map(|(v, _)| *v).collect()
+}
+
+fn guarded_verb_is_dispatchable(verb: &str) -> bool {
+    matches!(
+        verb,
+        "fs_read" | "fs_write" | "fs_stat" | "fs_readdir" | "scan_deps"
+            | "env_get" | "kv_put" | "fetch" | "exec_js" | "browser" | "cdp"
+    )
+}
+
+fn capability_conformance() -> Value {
+    let undispatchable: Vec<&str> = VERB_CAPABILITIES
+        .iter()
+        .map(|(v, _)| *v)
+        .filter(|v| !guarded_verb_is_dispatchable(v))
+        .collect();
+    json!({
+        "declared_verbs": VERB_CAPABILITIES.len(),
+        "undispatchable": undispatchable,
+        "conformant": undispatchable.is_empty(),
+        "note": "A non-empty `undispatchable` means the capability table names a verb dispatch cannot reach -- the published guard surface would be describing protection over nothing.",
+    })
+}
+
+fn guard_surface_report() -> Value {
+    json!({
+        "path_within_project": {
+            "rejects": ["any .. segment", "absolute paths", "paths containing a drive colon"],
+            "applied_to": verbs_with_capability(Capability::ProjectPath),
+        },
+        "env_get": {
+            "applied_to": verbs_with_capability(Capability::EnvAllowlist),
+            "allowed_exact": ENV_GET_ALLOWED_EXACT,
+            "allowed_prefixes": ENV_GET_ALLOWED_PREFIXES,
+        },
+        "kv_put": {
+            "applied_to": verbs_with_capability(Capability::KvNamespace),
+            "allowed_namespaces": kv_put_allowed_namespaces(),
+        },
+        "conformance": capability_conformance(),
+        "unguarded": {
+            "verbs": verbs_with_capability(Capability::Unguarded),
+            "note": "These reach the network, a Node process, and a real browser with no allowlist of their own. That is deliberate -- they exist to run arbitrary caller-supplied work -- but it means the trust boundary for them is the CALLER, not this layer.",
+        },
+    })
+}
+
+fn plugin_response_envelope_contract() -> Value {
+    json!({
+        "shape": "flat: {ok: bool, <payload-field>: ...} -- NOT wrapped under `data` the way a gm verb response is",
+        "failure": "{ok: false, error: string}; a missing `error` on a failed response is classified by plugin_failure_code",
+        "hazards": {
+            "unfiltered_aggregate_on_vector_table": "DRIVER-SPECIFIC, measured under node:sqlite and NOT reproducing through the agentplug-libsql wasm plugin (2026-08-02: bare COUNT(*) on rssearch_vectors answers 278 there, matching the predicated form exactly). Under node:sqlite an UNFILTERED aggregate over a libsql F32_BLOB vector table answers 0 even when the table is full. Measured on this repo's store: `SELECT COUNT(*) FROM rssearch_vectors` returns 0, and the subquery form without a WHERE also returns 0 -- but the same aggregate WITH any predicate returns 755, reconciling exactly against 428 live plus 327 tombstoned rows. The missing predicate is the trigger, not the aggregate. The query verbs pass SQL through untouched, so nothing stops a caller reading that 0 as an empty knowledgebase and acting on it (dropping the table, re-indexing, reporting data loss). Always count with a predicate, or count the <table>_vec_shadow companion. PRAGMA integrity_check is separately unreliable on these tables -- it fails with `unknown function: libsql_vector_idx()`, which is not corruption.",
+        },
+        "payload_field_by_verb": {
+            "bert.embed": "embedding (plus `dim`); takes {text, kind} where kind=\"query\" selects the query conditioning, anything else is treated as a passage",
+            "bert.embed_batch": "embeddings (array, one per input); takes {texts}",
+            "libsql.query": "rows",
+            "libsql.query_params": "rows",
+            "libsql.serialize": "bytes_b64 (also mirrored as `data` for older callers; `bytes_b64` is the contract field)",
+            "libsql.list_dbs": "dbs (always empty: connections are no longer tracked by name)",
+            "libsql.open/close/begin/commit/rollback": "ACCEPTED BUT INERT -- every exec/query is its own open-operate-close cycle, so these are no-ops kept only so existing callers do not break. A caller must not assume begin/commit gives it a transaction.",
+            "treesitter.parse": "nodes (plus `lang`, null when neither ext nor lang resolves -- an unresolved language is ok:true with an empty nodes array, NOT an error)",
+            "treesitter.extract_chunks": "chunks (plus `lang`)",
+            "treesitter.lang_for_ext": "lang (null when the extension is unrecognized)",
+        },
+    })
+}
+
+fn effective_config_report() -> Value {
+    let resolution = crate::config::resolve();
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    json!({
+        "tier": resolution.tier.as_str(),
+        "why": resolution.why,
+        "version": resolution.config.version,
+        "rejected_tiers": resolution.rejected,
+        "embed_dim": cfg.dim(),
+        "tables": {
+            "rssearch": cfg.rssearch.table,
+            "code_chunks": cfg.code_chunks.table,
+            "git_commits": cfg.git_commits.table,
+            "memory_md_meta": cfg.memory_md_tables.meta,
+            "memory_md_files": cfg.memory_md_tables.files,
+        },
+        "scoring": {
+            "half_life_ms": cfg.scoring.half_life_ms,
+            "recency_floor": cfg.scoring.recency_floor,
+            "cos_floor": cfg.scoring.cos_floor_applied_before_recency_rescue,
+            "fusion_rrf_k": cfg.scoring.fusion_rrf_k,
+            "fusion_identifier_boost": cfg.scoring.fusion_identifier_boost,
+            "bm25_k1": cfg.scoring.bm25_k1_term_frequency_saturation,
+            "bm25_b": cfg.scoring.bm25_b_document_length_normalization,
+            "dedup_jaccard": cfg.scoring.dedup_jaccard_near_duplicate_threshold,
+        },
+        "bulk_embed": {
+            "flat_json_migration_budget_ms": cfg.bulk_embed.flat_json_migration_budget_ms,
+            "git_commit_embed_budget_ms": cfg.bulk_embed.git_commit_embed_budget_ms,
+        },
+        "guards": guard_surface_report(),
+        "persisted_paths": persisted_paths_compatibility_surface_report(),
+        "shared_store_contract": shared_store_contract(),
+        "pipeline": {
+            "ttl_ms": cfg.pipeline.ttl_ms,
+            "summarize_threshold": cfg.pipeline.summarize_threshold,
+            "summarize_target_chars": cfg.pipeline.summarize_target_chars,
+            "summarize_max_summary_chars": cfg.pipeline.summarize_max_summary_chars,
+            "summarize_input_char_cap": cfg.pipeline.summarize_input_char_cap,
+            "summarize_preserve": cfg.pipeline.summarize_preserve,
+        },
+        "db_path": {
+            "state_root_dir": cfg.db_path.state_root_dir,
+            "db_filename": cfg.db_path.db_filename,
+            "resolved": crate::code_index::project_db_path(None),
+        },
+        "embed_cache": {
+            "query_cache_capacity": cfg.embed_cache.query_cache_capacity,
+            "query_cache_ttl_ms": cfg.embed_cache.query_cache_ttl_ms,
+            "plain_cache_max_text_bytes": cfg.embed_cache.plain_cache_max_text_bytes,
+        },
+        "memory_sync": {
+            "embed_budget_ms": cfg.memory_sync.embed_budget_ms,
+            "total_budget_ms": cfg.memory_sync.total_budget_ms,
+            "rekey_rows_deadline_ms": cfg.memory_sync.rekey_rows_deadline_ms,
+            "shadow_abort_threshold": cfg.memory_sync.shadow_abort_threshold,
+            "rekey_batch_max": cfg.memory_sync.rekey_batch_max,
+            "rename_batch_chunk": cfg.memory_sync.rename_batch_chunk,
+        },
+        "index": {
+            "wall_budget_ms": cfg.index.wall_budget_ms,
+            "max_file_bytes": cfg.index.max_file_bytes,
+            "split_chunk_above_bytes": cfg.index.split_chunk_above_bytes,
+            "max_chunks_per_file_per_pass": cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only,
+            "pessimistic_ms_per_chunk": cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound,
+            "prune_enumeration_file_cap": cfg.index.prune_enumeration_file_cap,
+            "digest_max_files": cfg.index.digest_max_files,
+            "prune_pass_file_limit_floor": cfg.index.prune_pass_file_limit_floor,
+            "prune_pass_file_limit_ceiling": cfg.index.prune_pass_file_limit_ceiling,
+        },
+        "budget": {
+            "default_limit": cfg.budget.default_limit,
+            "default_k": cfg.budget.default_k,
+            "pool_multiplier": cfg.budget.pool_multiplier,
+            "pool_floor": cfg.budget.pool_floor,
+        },
+    })
+}
+
+fn next_dispatch_hint_for(verb: &str) -> Value {
+    if verb == "instruction" { Value::Null } else { json!("instruction") }
+}
+
+fn err(verb: &str, reason: &str) -> u64 {
+    err_coded(verb, ERR_CODE_FAILED, reason)
+}
+
+fn err_coded(verb: &str, code: &str, reason: &str) -> u64 {
+    pack(json!({
+        "ok": false,
+        "verb": verb,
+        "error": reason,
+        "error_code": code,
+        "next_dispatch_hint": next_dispatch_hint_for(verb),
+    }).to_string())
+}
+
+fn err_json(verb: &str, detail: Value) -> u64 {
+    let mut obj = json!({
+        "ok": false,
+        "verb": verb,
+        "error_code": ERR_CODE_FAILED,
+        "next_dispatch_hint": next_dispatch_hint_for(verb),
+    });
+    if let Some(map) = detail.as_object() {
+        for (k, v) in map {
+            obj[k] = v.clone();
+        }
+    }
+    pack(obj.to_string())
+}
+
+fn ok(verb: &str, data: Value) -> u64 {
+    pack(json!({ "ok": true, "verb": verb, "data": data, "next_dispatch_hint": next_dispatch_hint_for(verb) }).to_string())
+}
+
+fn path_within_project(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    !normalized.split('/').any(|seg| seg == "..")
+        && !normalized.starts_with('/')
+        && !normalized.contains(':')
+}
+
+fn fs_read(body: &Value) -> u64 {
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if path.is_empty() { return err("fs_read", "path required"); }
+    if !path_within_project(path) {
+        return err("fs_read", "path must be relative and within the project");
+    }
+    match host_read(path) {
+        Some(s) => ok("fs_read", Value::String(s)),
+        None => err("fs_read", "not found or empty"),
+    }
+}
+
+fn fs_write(body: &Value) -> u64 {
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let data = body.get("content").and_then(|v| v.as_str())
+        .or_else(|| body.get("data").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    if path.is_empty() { return err("fs_write", "path required"); }
+    if !path_within_project(path) {
+        return err("fs_write", "path must be relative and within the project");
+    }
+    if super::host_abi::host_write(path, data) { ok("fs_write", json!({ "bytes": data.len() })) } else { err("fs_write", "write failed") }
+}
+
+fn fs_readdir(body: &Value) -> u64 {
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    if !path_within_project(path) {
+        return err("fs_readdir", "path must be relative and within the project");
+    }
+    let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
+    let v = unpack_to_value(packed);
+    if v.is_null() { return err("fs_readdir", "empty"); }
+    ok("fs_readdir", v)
+}
+
+fn fs_stat(body: &Value) -> u64 {
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if path.is_empty() { return err("fs_stat", "path required"); }
+    if !path_within_project(path) {
+        return err("fs_stat", "path must be relative and within the project");
+    }
+    match super::host_abi::host_stat(path) {
+        Some(v) if !v.is_null() => ok("fs_stat", v),
+        _ => err("fs_stat", "not found"),
+    }
+}
+
+fn scan_deps(body: &Value) -> u64 {
+    let root = body.get("root").and_then(|v| v.as_str()).unwrap_or(".");
+    if !path_within_project(root) {
+        return err("scan_deps", "root must be relative and within the project");
+    }
+    ok("scan_deps", crate::scan_deps::scan_deps(body))
+}
+
+pub const FETCH_DEFAULT_TIMEOUT_MS: u64 = 30_000;
+pub const FETCH_MAX_TIMEOUT_MS: u64 = 300_000;
+
+fn fetch(body: &Value) -> u64 {
+    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    if url.is_empty() { return err("fetch", "url required"); }
+    if let Err(reason) = crate::config_path::validate_fetch_url(url) {
+        return err_coded("fetch", ERR_CODE_INVALID_ARGS, &reason);
+    }
+    let has_explicit_timeout = body.get("timeoutMs").is_some()
+        || body.get("opts").and_then(|o| o.get("timeoutMs")).is_some();
+    let timeout_ms = if has_explicit_timeout {
+        match crate::validation::validate_timeout_ms(body, true) {
+            Ok(n) if n > FETCH_MAX_TIMEOUT_MS => {
+                return err_json("fetch", json!({
+                    "error": "timeoutMs above ceiling",
+                    "max": FETCH_MAX_TIMEOUT_MS,
+                    "received": n,
+                }));
+            }
+            Ok(n) => n,
+            Err(detail) => return err_json("fetch", detail),
+        }
+    } else {
+        FETCH_DEFAULT_TIMEOUT_MS
+    };
+    let mut opts_obj = body.get("opts").cloned().unwrap_or_else(|| json!({}));
+    if let Some(map) = opts_obj.as_object_mut() {
+        map.insert("timeoutMs".to_string(), json!(timeout_ms));
+    } else {
+        opts_obj = json!({"timeoutMs": timeout_ms});
+    }
+    let opts = opts_obj.to_string();
+    let packed = unsafe { host_fetch(url.as_ptr(), url.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    let v = unpack_to_value(packed);
+    if v.is_null() { return err("fetch", "host_fetch empty"); }
+    let transport_completed = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    if transport_completed { ok("fetch", v) } else { err_json("fetch", v) }
+}
+
+const ENV_GET_ALLOWED_EXACT: &[&str] = &["CLAUDE_PROJECT_DIR", "GITHUB_TOKEN", "GH_TOKEN"];
+const ENV_GET_ALLOWED_PREFIXES: &[&str] = &["PLUGKIT_", "GM_"];
+
+fn env_get_allowed(key: &str) -> bool {
+    ENV_GET_ALLOWED_EXACT.contains(&key)
+        || ENV_GET_ALLOWED_PREFIXES.iter().any(|p| key.starts_with(p))
+}
+
+fn env_get(body: &Value) -> u64 {
+    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    if key.is_empty() { return err("env_get", "key required"); }
+    if !env_get_allowed(key) {
+        return err("env_get", "key not on env_get allowlist");
+    }
+    let packed = unsafe { host_env_get(key.as_ptr(), key.len() as u32) };
+    match unpack_to_string(packed) {
+        Some(s) => ok("env_get", Value::String(s)),
+        None => ok("env_get", Value::Null),
+    }
+}
+
+fn lang(body: &Value) -> u64 {
+    let project_dir = body.get("projectDir").and_then(|v| v.as_str()).unwrap_or("");
+    let command = body.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    if project_dir.is_empty() { return err("lang", "projectDir required"); }
+    if command.is_empty() { return err("lang", "command required"); }
+    let timeout_ms = body.get("timeoutMs").and_then(|v| v.as_u64()).unwrap_or(35000);
+    let runner_js = format!(
+        r#"(async () => {{
+  const fs = require('fs');
+  const path = require('path');
+  const projectDir = {project_dir};
+  const command = {command};
+  const code = {code};
+  const langDir = path.join(projectDir, 'lang');
+  if (!fs.existsSync(langDir)) {{ process.stdout.write(JSON.stringify({{ok:false, error:'no-lang-dir', langDir}})); return; }}
+  const files = fs.readdirSync(langDir).filter(f => f.endsWith('.js') && f !== 'loader.js');
+  const plugins = files.reduce((acc, f) => {{
+    try {{
+      const p = require(path.join(langDir, f));
+      if (p && typeof p.id === 'string' && p.exec && p.exec.match instanceof RegExp && typeof p.exec.run === 'function') acc.push(p);
+    }} catch (_) {{}}
+    return acc;
+  }}, []);
+  const plugin = plugins.find(p => p.exec.match.test(command));
+  if (!plugin) {{ process.stdout.write(JSON.stringify({{ok:false, error:'no-plugin-matched', command, available: plugins.map(p => p.id)}})); return; }}
+  const t0 = Date.now();
+  let timer = null;
+  try {{
+    const out = await Promise.race([
+      Promise.resolve(plugin.exec.run(code, projectDir)),
+      new Promise((_, rej) => {{ timer = setTimeout(() => rej(new Error('plugin-timeout')), {inner_timeout}); }})
+    ]);
+    process.stdout.write(JSON.stringify({{ok:true, plugin_id: plugin.id, output: String(out), ms: Date.now() - t0}}));
+  }} catch (e) {{
+    process.stdout.write(JSON.stringify({{ok:false, error: String(e && e.message || e), plugin_id: plugin.id, ms: Date.now() - t0}}));
+  }} finally {{
+    if (timer) clearTimeout(timer);
+  }}
+}})().catch(e => {{ process.stdout.write(JSON.stringify({{ok:false, error: String(e && e.message || e)}})); }})"#,
+        project_dir = serde_json::to_string(project_dir).unwrap_or_else(|_| "\"\"".to_string()),
+        command = serde_json::to_string(command).unwrap_or_else(|_| "\"\"".to_string()),
+        code = serde_json::to_string(code).unwrap_or_else(|_| "\"\"".to_string()),
+        inner_timeout = timeout_ms.saturating_sub(2000).max(1000),
+    );
+    let opts = json!({"timeoutMs": timeout_ms}).to_string();
+    let packed = unsafe { host_exec_js(runner_js.as_ptr(), runner_js.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    match unpack_to_string(packed) {
+        Some(s) => {
+            let envelope: Value = serde_json::from_str(&s).unwrap_or(Value::Null);
+            if envelope.is_null() {
+                return err("lang", "host_exec_js returned non-JSON");
+            }
+            let stdout = envelope.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+            let exit_code = envelope.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let timed_out = envelope.get("timed_out").and_then(|v| v.as_bool()).unwrap_or(false);
+            if timed_out { return err("lang", "host_exec_js timed out"); }
+            if exit_code != 0 {
+                let stderr = envelope.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+                return err_json("lang", json!({"error":"runner exit non-zero","exit_code":exit_code,"stderr":stderr,"stdout":stdout}));
+            }
+            let inner: Value = serde_json::from_str(stdout).unwrap_or_else(|_| Value::String(stdout.to_string()));
+            ok("lang", inner)
+        }
+        None => err("lang", "host_exec_js returned empty"),
+    }
+}
+
+fn exec_js(body: &Value, body_s: &str) -> u64 {
+    let code = body.get("code").and_then(|v| v.as_str()).map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| body_s.to_string());
+    if code.is_empty() { return err("exec_js", "code required (provide raw code as body or JSON {code: ...})"); }
+    let timeout_ms = match crate::validation::validate_timeout_ms(body, true) {
+        Ok(n) => n,
+        Err(detail) => return err_json("exec_js", detail),
+    };
+    let mut opts_obj = body.get("opts").cloned().unwrap_or_else(|| json!({}));
+    if let Some(map) = opts_obj.as_object_mut() {
+        map.insert("timeoutMs".to_string(), json!(timeout_ms));
+    } else {
+        opts_obj = json!({"timeoutMs": timeout_ms});
+    }
+    let opts = opts_obj.to_string();
+    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    match unpack_to_string(packed) {
+        Some(s) => ok("exec_js", Value::String(s)),
+        None => ok("exec_js", Value::Null),
+    }
+}
+
+fn kv_get(body: &Value) -> u64 {
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    if key.is_empty() { return err("kv_get", "key required"); }
+    let packed = unsafe { host_kv_get(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32) };
+    match unpack_to_string(packed) {
+        Some(s) => ok("kv_get", Value::String(s)),
+        None => ok("kv_get", Value::Null),
+    }
+}
+
+const KV_PUT_ALLOWED_NAMESPACES: &[&str] = &["default", "session", "config", "cache", "user"];
+
+fn kv_put_allowed_namespaces() -> Vec<String> {
+    let mut all: Vec<String> = KV_PUT_ALLOWED_NAMESPACES.iter().map(|s| s.to_string()).collect();
+    for extra in &crate::ragconfig::RagConfig::resolved().namespaces.kv_put_extra {
+        if !all.iter().any(|a| a == extra) {
+            all.push(extra.clone());
+        }
+    }
+    all
+}
+
+fn kv_put_namespace_permitted(ns: &str) -> bool {
+    kv_put_allowed_namespaces().iter().any(|a| a == ns)
+}
+
+fn kv_put(body: &Value) -> u64 {
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let val = body.get("value").and_then(|v| v.as_str()).unwrap_or("");
+    if key.is_empty() { return err("kv_put", "key required"); }
+    if !kv_put_namespace_permitted(ns) {
+        return err(
+            "kv_put",
+            &format!("namespace not permitted; allowed: {}", kv_put_allowed_namespaces().join(", ")),
+        );
+    }
+    let rc = unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
+    if rc != 0 { ok("kv_put", json!({"bytes": val.len()})) } else { err("kv_put", "put failed") }
+}
+
+fn kv_query(body: &Value) -> u64 {
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    let q = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, q.as_ptr(), q.len() as u32) };
+    let v = unpack_to_value(packed);
+    ok("kv_query", v)
+}
+
+fn discipline_fanout_namespaces_unioned_from_enabled_txt_and_config(base: &str) -> Vec<String> {
+    let mut out = vec![base.to_string()];
+    let push_unique_nonblank_noncomment = |name: &str, out: &mut Vec<String>| {
+        let name = name.trim();
+        if !name.is_empty() && !name.starts_with('#') && !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    };
+    if let Some(content) = host_read(".gm/disciplines/enabled.txt") {
+        for line in content.lines() {
+            push_unique_nonblank_noncomment(line, &mut out);
+        }
+    }
+    for name in &crate::ragconfig::RagConfig::resolved().namespaces.discipline_fanout {
+        push_unique_nonblank_noncomment(name, &mut out);
+    }
+    out
+}
+
+pub const EMBED_UNAVAILABLE: &str = "query embedding unavailable -- the bert embedder failed, so no vector search was attempted";
+
+pub fn query_embedding_unusable(query_embedding: &Value) -> bool {
+    match query_embedding {
+        Value::Null => true,
+        Value::Array(a) => a.is_empty(),
+        _ => true,
+    }
+}
+
+fn rssearch_vector_hits(query_embedding: &Value, namespace: &str, limit: u32, do_sync: bool) -> (Value, Option<Vec<String>>) {
+    if query_embedding_unusable(query_embedding) {
+        emit_event("rssearch_vector_hits_skipped", json!({
+            "namespace": namespace,
+            "reason": EMBED_UNAVAILABLE,
+        }));
+        return (json!({ "error": EMBED_UNAVAILABLE }), None);
+    }
+    let namespaces = discipline_fanout_namespaces_unioned_from_enabled_txt_and_config(namespace);
+    let now_ms = unsafe { host_now_ms() } as i64;
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    let mut memory_namespaces: Vec<String> = Vec::new();
+    for ns in &namespaces {
+        if cfg.namespaces.is_code(ns) {
+            if let Err(e) = crate::rssearch_vectors::migrate_namespace_from_flat_json_cfg(ns, now_ms, &cfg) {
+                emit_event("rssearch_vectors_migration_failed", json!({ "namespace": ns, "error": e }));
+            }
+        } else {
+            if do_sync {
+                let _ = crate::memory_md::export_flat_json(ns, now_ms);
+            }
+            memory_namespaces.push(ns.clone());
+        }
+    }
+    let sync_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let converged = if memory_namespaces.is_empty() {
+        false
+    } else if do_sync {
+        let sync = crate::memory_md::sync_index(&memory_namespaces, now_ms);
+        sync.get("converged").and_then(|v| v.as_bool()).unwrap_or(false)
+    } else if !crate::memory_md::has_stored_digest(&memory_namespaces) {
+        let fresh_clone_never_synced_sync = crate::memory_md::sync_index(&memory_namespaces, now_ms);
+        emit_event("recall_first_touch_sync", json!({
+            "namespaces": memory_namespaces,
+            "result": fresh_clone_never_synced_sync,
+        }));
+        fresh_clone_never_synced_sync.get("converged").and_then(|v| v.as_bool()).unwrap_or(false)
+    } else {
+        crate::memory_md::has_stored_digest(&memory_namespaces)
+    };
+    let search_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    emit_event("recall_vector_phase_timing", json!({
+        "sync_ms": search_started_ms - sync_started_ms,
+        "did_sync": do_sync,
+        "namespaces": namespaces.len(),
+    }));
+    let hits = match crate::rssearch_vectors::search_with_recency_cfg(query_embedding, &namespaces, limit as usize, now_ms, &cfg) {
+        Ok(hits) => {
+            emit_event("recall_vector_phase_timing", json!({
+                "search_ms": unsafe { crate::wasm_dispatch::host_now_ms() } - search_started_ms,
+                "outcome": "ok",
+            }));
+            hits
+        }
+        Err(e) => {
+            emit_event("rssearch_vector_hits_failed", json!({
+                "namespace": namespace, "error": e,
+                "search_ms": unsafe { crate::wasm_dispatch::host_now_ms() } - search_started_ms,
+                "reason": "search_with_recency failed even after malformed-db recovery attempt",
+            }));
+            json!({ "error": e })
+        }
+    };
+    (hits, if converged { Some(memory_namespaces) } else { None })
+}
+
+const READ_PATH_MUST_NOT_TRIGGER_CORPUS_SYNC: bool = false;
+
+pub fn memory_recall_backend(query_embedding: &Value, namespace: &str, limit: u32) -> Option<Value> {
+    if query_embedding_unusable(query_embedding) {
+        return None;
+    }
+    let (_, mem_ns) = rssearch_vector_hits(query_embedding, namespace, limit, READ_PATH_MUST_NOT_TRIGGER_CORPUS_SYNC);
+    let mem_ns = mem_ns?;
+    let now_ms = unsafe { host_now_ms() } as i64;
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    crate::rssearch_vectors::search_memory_hits_cfg(query_embedding, &mem_ns, limit as usize, now_ms, &cfg)
+        .ok()
+        .filter(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
+}
+
+fn recall(body: &Value) -> u64 {
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_limit as u64) as u32;
+    let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or(&cfg.namespaces.default);
+    if query.is_empty() { return err("recall", "query required"); }
+    if crate::tencentdb_memory::namespace_is_routed(namespace) {
+        let embedding = embed_query(query);
+        return match crate::tencentdb_memory::recall(&embedding, namespace, limit as usize) {
+            Ok(v) => ok("recall", v),
+            Err(e) => err("recall", &e),
+        };
+    }
+    let (_dataflow_doc, dataflow_tier, dataflow_path) = crate::dataflow::document_detailed();
+    if dataflow_tier != crate::dataflow::DataflowTier::CompiledDefault {
+        if let Some(pipeline) = crate::dataflow::pipeline_for("recall") {
+            emit_event("dataflow_pipeline_override_used", json!({
+                "entry_point": "recall", "tier": dataflow_tier.as_str(), "path": dataflow_path,
+            }));
+            let mut request = body.clone();
+            if let Some(obj) = request.as_object_mut() {
+                obj.insert("namespaces".to_string(), json!([namespace]));
+                obj.insert("limit".to_string(), json!(limit));
+            }
+            let out = crate::dataflow_exec::run(&pipeline, request);
+            return ok("recall", out);
+        }
+    }
+    check_sigil_ignored(query, namespace);
+    let derived_query = query.to_string();
+    let embedding = embed_query(query);
+    let (vector_hits, mem_ns) = rssearch_vector_hits(&embedding, namespace, limit, READ_PATH_MUST_NOT_TRIGGER_CORPUS_SYNC);
+    if let Some(mem_ns) = &mem_ns {
+        let now_ms = unsafe { host_now_ms() } as i64;
+        if let Ok(md_hits) = crate::rssearch_vectors::search_memory_hits_cfg(&embedding, mem_ns, limit as usize, now_ms, &cfg) {
+            if md_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+                return ok("recall", json!({
+                    "mode": "vector_top_k",
+                    "namespace": namespace,
+                    "derived_query": derived_query,
+                    "hits": md_hits,
+                    "vector_hits": vector_hits,
+                }));
+            }
+        }
+    }
+    let vec_hits = vec_search_local(&embedding, namespace, limit);
+    if !vec_hits.is_null() && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+        let annotated = annotate_hits_with_score(vec_hits);
+        return ok("recall", json!({
+            "mode": "vector_top_k",
+            "namespace": namespace,
+            "derived_query": derived_query,
+            "hits": annotated,
+            "vector_hits": vector_hits,
+        }));
+    }
+    let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, query.as_ptr(), query.len() as u32) };
+    let kv_hits = unpack_to_value(packed);
+    let annotated = annotate_hits_with_score(kv_hits);
+
+    let embed_failed = query_embedding_unusable(&embedding);
+    let vec_err = vector_hits
+        .get("error")
+        .and_then(|e| e.as_str())
+        .map(|s| s.to_string());
+    let degraded = embed_failed || vec_err.is_some();
+    let empty = annotated.as_array().map(|a| a.is_empty()).unwrap_or(true);
+
+    if degraded {
+        emit_event("recall_degraded", json!({
+            "namespace": namespace,
+            "embed_failed": embed_failed,
+            "vec_err": vec_err,
+            "kv_hits": annotated.as_array().map(|a| a.len()).unwrap_or(0),
+        }));
+    }
+
+    if degraded && empty {
+        return err(
+            "recall",
+            &format!(
+                "semantic retrieval unavailable (embedder failed{}) and the keyword fallback matched nothing -- this is NOT an empty-knowledgebase result",
+                vec_err.map(|e| format!(": {}", e)).unwrap_or_default()
+            ),
+        );
+    }
+
+    ok("recall", json!({
+        "mode": "fallback_like",
+        "degraded": degraded,
+        "namespace": namespace,
+        "derived_query": derived_query,
+        "hits": annotated,
+        "vector_hits": vector_hits,
+    }))
+}
+
+const DIAGNOSTIC_EVENT_COOLDOWN_MS: i64 = 5 * 60 * 1000;
+static RECALL_SCORE_UNAVAILABLE_LAST_FIRED_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static SIGIL_IGNORED_LAST_FIRED_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn diagnostic_event_should_fire(last_fired: &std::sync::atomic::AtomicI64) -> bool {
+    let now = unsafe { host_now_ms() } as i64;
+    let prev = last_fired.load(std::sync::atomic::Ordering::Relaxed);
+    if now.saturating_sub(prev) < DIAGNOSTIC_EVENT_COOLDOWN_MS {
+        return false;
+    }
+    last_fired.compare_exchange(prev, now, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok()
+}
+
+fn annotate_hits_with_score(v: Value) -> Value {
+    let arr = match v {
+        Value::Array(a) => a,
+        other => return other,
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    let mut any_missing = false;
+    for hit in arr {
+        match hit {
+            Value::Object(mut map) => {
+                if !map.contains_key("score") {
+                    map.insert("score".to_string(), Value::Null);
+                    any_missing = true;
+                }
+                out.push(Value::Object(map));
+            }
+            other => {
+                any_missing = true;
+                out.push(json!({ "value": other, "score": Value::Null }));
+            }
+        }
+    }
+    if any_missing && diagnostic_event_should_fire(&RECALL_SCORE_UNAVAILABLE_LAST_FIRED_MS) {
+        emit_event("recall_score_unavailable", json!({
+            "reason": "host_vec_search return shape elides per-hit score",
+        }));
+    }
+    Value::Array(out)
+}
+
+fn check_sigil_ignored(text: &str, namespace: &str) {
+    if namespace != "default" { return; }
+    let sigil = extract_sigil(text);
+    if let Some(s) = sigil {
+        if diagnostic_event_should_fire(&SIGIL_IGNORED_LAST_FIRED_MS) {
+            emit_event("discipline_sigil_ignored", json!({
+                "sigil": s,
+                "fallback_namespace": "default",
+            }));
+        }
+    }
+}
+
+fn extract_sigil(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    let first_tok = trimmed.split_whitespace().next()?;
+    let rest = first_tok.strip_prefix('@')?;
+    let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+    if name.is_empty() { return None; }
+    Some(format!("@{}", name))
+}
+
+fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
+    let text = body.get("text").and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| body.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| raw.trim().to_string());
+    let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    if text.is_empty() { return err("memorize", "text required"); }
+    if crate::tencentdb_memory::namespace_is_routed(namespace) {
+        let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("l0");
+        let emb = match embed_passage(text.as_str()) {
+            Some(e) => e,
+            None => return err("memorize", "embed failed; refusing to write a text-only memory with no vector (un-vector-recallable orphan)"),
+        };
+        let now_ms = unsafe { host_now_ms() } as i64;
+        return match crate::tencentdb_memory::write(namespace, kind, text.as_str(), &emb, now_ms) {
+            Ok(v) => ok("memorize", v),
+            Err(e) => err("memorize", &e),
+        };
+    }
+    let text = text.as_str();
+    check_sigil_ignored(text, namespace);
+    let content_hash = crate::hash::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
+    let key = format!("mem-{:016x}-{}", content_hash, text.len());
+    let flat_dedup = super::host_abi::host_kv_read(namespace, &key)
+        .map(|existing| existing == text)
+        .unwrap_or(false);
+    if flat_dedup || crate::memory_md::memory_text_matches(namespace, &key, text) {
+        let md_path = memory_md_write_path(namespace, &key, text);
+        return ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true, "deduped": true, "md_file": md_path}));
+    }
+    let emb = match embed_passage(text) {
+        Some(e) => e,
+        None => return err("memorize", "embed failed; refusing to write a text-only memory with no vector (un-vector-recallable orphan)"),
+    };
+    let md_path = memory_md_write_path(namespace, &key, text);
+    if md_path.is_none() {
+        return err("memorize", "memory md write failed; the md corpus is the durable store, refusing an unbacked memory");
+    }
+    let now_ms = unsafe { host_now_ms() } as i64;
+    if let Err(e) = crate::rssearch_vectors::write(namespace, &key, text, &emb, now_ms) {
+        emit_event("rssearch_vectors_write_failed", json!({
+            "key": key,
+            "namespace": namespace,
+            "error": e,
+        }));
+    }
+    ok("memorize", json!({"namespace": namespace, "key": key, "bytes": text.len(), "embedded": true, "md_file": md_path}))
+}
+
+fn memory_md_write_path(namespace: &str, key: &str, text: &str) -> Option<String> {
+    let now_ms = unsafe { host_now_ms() } as i64;
+    match crate::memory_md::write_memory(namespace, key, text, now_ms) {
+        crate::memory_md::WriteOutcome::Created(p)
+        | crate::memory_md::WriteOutcome::Updated(p)
+        | crate::memory_md::WriteOutcome::Deduped(p) => Some(p),
+        crate::memory_md::WriteOutcome::Invalid(reason) => {
+            emit_event("memory_md_write_invalid", json!({
+                "key": key, "namespace": namespace, "reason": reason,
+            }));
+            None
+        }
+        crate::memory_md::WriteOutcome::Failed(_) => None,
+    }
+}
+
+fn memorize_vacuum(body: &Value) -> u64 {
+    let namespace = body.get("namespace").and_then(|v| v.as_str());
+    match crate::rssearch_vectors::vacuum_tombstones(namespace) {
+        Ok(n) => ok("memorize-vacuum", json!({
+            "namespace": namespace,
+            "rows_reclaimed": n,
+            "note": if n == 0 { "no soft-deleted rows to reclaim" } else { "tombstoned rows hard-deleted; the vector index no longer carries them" },
+        })),
+        Err(e) => err("memorize-vacuum", &e),
+    }
+}
+
+fn memorize_retention(body: &Value) -> u64 {
+    let namespace = body.get("namespace").and_then(|v| v.as_str());
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    let census = match crate::rssearch_vectors::tombstone_census(namespace) {
+        Ok(c) => c,
+        Err(e) => return err("memorize-retention", &e),
+    };
+    let due = crate::rssearch_vectors::retention_reclaim_due(&census, &cfg);
+    let apply = body.get("apply").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let reclaimed = if apply && due {
+        match crate::rssearch_vectors::vacuum_tombstones(namespace) {
+            Ok(n) => Some(n),
+            Err(e) => return err("memorize-retention", &e),
+        }
+    } else {
+        None
+    };
+
+    ok("memorize-retention", json!({
+        "namespace": namespace,
+        "live": census.live,
+        "tombstoned": census.tombstoned,
+        "tombstone_ratio": census.tombstone_ratio(),
+        "would_reclaim": census.tombstoned,
+        "reclaim_due": due,
+        "auto_vacuum_enabled": cfg.retention.auto_vacuum_enabled,
+        "thresholds": {
+            "tombstone_ratio_threshold": cfg.retention.tombstone_ratio_threshold,
+            "tombstone_count_threshold": cfg.retention.tombstone_count_threshold,
+        },
+        "applied": reclaimed.is_some(),
+        "rows_reclaimed": reclaimed,
+        "note": "Report-only unless `apply:true` AND a threshold is crossed. Reclaims space from rows ALREADY tombstoned by an agent's own prune -- it never tombstones a live row, so no memory is deleted that was not already judged unwanted.",
+    }))
+}
+
+fn tencentdb_compat_probe(body: &Value) -> u64 {
+    let path = match body.get("vectors_db_path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return err("tencentdb-compat-probe", "vectors_db_path required"),
+    };
+    match crate::tencentdb_compat::probe(path) {
+        Ok(counts) => {
+            let embedding_fingerprint = crate::tencentdb_compat::read_embedding_provider_fingerprint(path).ok();
+            let mut resp = json!({"path": path, "counts": counts, "embedding_meta": embedding_fingerprint});
+            if let Some(data_dir) = body.get("data_dir").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                let scene_block_count = crate::tencentdb_compat::read_l2_scene_block_files(data_dir, u64::MAX)
+                    .ok()
+                    .and_then(|v| v.as_array().map(|a| a.len()))
+                    .unwrap_or(0);
+                let persona_file = crate::tencentdb_compat::read_l3_persona_file(data_dir);
+                resp["file_counts"] = json!({
+                    "l2_scenes": scene_block_count,
+                    "l3_persona_exists": persona_file.get("exists").cloned().unwrap_or(Value::Bool(false)),
+                });
+            }
+            let skills_limit = body.get("skills_limit").and_then(Value::as_u64).unwrap_or(1000);
+            match crate::tencentdb_compat::read_skills_summary(path, skills_limit) {
+                Ok(summary) => resp["skills"] = summary,
+                Err(e) => resp["skills_error"] = json!(e),
+            }
+            if let Some(skill_id) = body.get("skill_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                match crate::tencentdb_compat::read_skill_version_history(path, skill_id) {
+                    Ok(versions) => resp["skill_versions"] = versions,
+                    Err(e) => resp["skill_versions_error"] = json!(e),
+                }
+            }
+            ok("tencentdb-compat-probe", resp)
+        }
+        Err(e) => err("tencentdb-compat-probe", &e),
+    }
+}
+
+fn archive_batch_best_effort_count_moved(pairs: &[(String, String)]) -> usize {
+    if pairs.is_empty() {
+        return 0;
+    }
+    let list: Vec<Value> = pairs.iter().map(|(s, a)| json!({ "s": s, "a": a })).collect();
+    let payload = match serde_json::to_string(&Value::Array(list)) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let code = format!(
+        "const fs=require('fs');const path=require('path');const pairs={};let n=0;for(const x of pairs){{try{{fs.mkdirSync(path.dirname(x.a),{{recursive:true}});fs.renameSync(x.s,x.a);n++;}}catch(e){{}}}}process.stdout.write('archived:'+n);",
+        payload
+    );
+    let opts = "{\"timeoutMs\":30000}";
+    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    let out = crate::wasm_dispatch::unpack_to_string_pub(packed).unwrap_or_default();
+    let parsed: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+    parsed
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.strip_prefix("archived:"))
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+fn namespace_prefixed_archive_path(source_namespace: &str, filename: &str) -> String {
+    format!(".gm/memories-archive-tencentdb/{}/{}", source_namespace, filename)
+}
+
+const GM_NATIVE_EMBEDDER_FIXED_DIM: usize = 384;
+
+fn reject_if_dest_namespace_dim_not_384(dest_namespace: &str, resolved_dim: usize) -> Option<u64> {
+    if resolved_dim == GM_NATIVE_EMBEDDER_FIXED_DIM {
+        return None;
+    }
+    Some(err(
+        "tencentdb-memory-import",
+        &format!(
+            "dest_namespace '{}' resolves to memory.tencentdb_backend.vectors_db_dims={}, but gm's own embedder produces 384-dim vectors -- importing would write vectors the configured table's fixed-width column cannot hold, and they would never be reachable through recall's per-project (not per-namespace) dim config. Configure vectors_db_dims=384 for a namespace dedicated to gm-native memory imports (separate from any namespace holding externally-embedded 768-dim content), then retry.",
+            dest_namespace, resolved_dim
+        ),
+    ))
+}
+
+fn native_memory_md_corpus_entries(source_namespace: &str) -> Option<Vec<(String, String, String)>> {
+    let dir = crate::memory_md::md_dir(source_namespace)?;
+    let listing = crate::pkfs::readdir(&dir);
+    let filenames: Vec<String> = listing
+        .as_ref()
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let mut entries: Vec<(String, String, String)> = Vec::new();
+    for name in &filenames {
+        if !name.ends_with(".md") {
+            continue;
+        }
+        let path = format!("{}/{}", dir, name);
+        let content = match crate::pkfs::read_to_string(&path) {
+            Some(c) => c,
+            None => continue,
+        };
+        if let Some(doc) = crate::memory_md::parse(&content) {
+            entries.push((doc.key, doc.text, path));
+        }
+    }
+    Some(entries)
+}
+
+fn tencentdb_memory_import_gm_native_memories_reembedded_384dim(body: &Value) -> u64 {
+    let source_namespace = match body.get("source_namespace").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n,
+        _ => return err("tencentdb-memory-import", "source_namespace required"),
+    };
+    let dest_namespace = body
+        .get("dest_namespace")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(source_namespace);
+    let kind = body.get("kind").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("l1");
+
+    if !crate::tencentdb_memory::namespace_is_routed(dest_namespace) {
+        return err(
+            "tencentdb-memory-import",
+            &format!(
+                "dest_namespace '{}' is not listed in memory.tencentdb_backend.namespaces (or the backend is disabled) -- refusing to import into an unrouted namespace",
+                dest_namespace
+            ),
+        );
+    }
+
+    let entries = match native_memory_md_corpus_entries(source_namespace) {
+        Some(e) => e,
+        None => return err("tencentdb-memory-import", &format!("invalid source_namespace '{}'", source_namespace)),
+    };
+    if entries.is_empty() {
+        return ok("tencentdb-memory-import", json!({"source_namespace": source_namespace, "dest_namespace": dest_namespace, "imported": 0, "failed": 0, "reason": "no-source-docs"}));
+    }
+
+    let cfg = crate::tencentdb_memory::resolved_config();
+    if let Some(mismatch) = reject_if_dest_namespace_dim_not_384(dest_namespace, cfg.dim) {
+        return mismatch;
+    }
+
+    let archive_source = body.get("archive_source").and_then(Value::as_bool).unwrap_or(false);
+
+    let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
+    let mut imported = 0u32;
+    let mut failed: Vec<String> = Vec::new();
+    let mut to_archive: Vec<(String, String)> = Vec::new();
+    for (key, text, source_path) in &entries {
+        let embedding = match crate::embed::embed_text_json_passage(text) {
+            Some(v) => v,
+            None => { failed.push(key.clone()); continue; }
+        };
+        match crate::tencentdb_memory::write_cfg(dest_namespace, kind, text, &embedding, now_ms, &cfg) {
+            Ok(_) => {
+                imported += 1;
+                if archive_source {
+                    let filename = source_path.rsplit('/').next().unwrap_or(key).to_string();
+                    to_archive.push((source_path.clone(), namespace_prefixed_archive_path(source_namespace, &filename)));
+                }
+            }
+            Err(e) => {
+                emit_event("tencentdb_memory_import_row_error", json!({"key": key, "namespace": dest_namespace, "error": e}));
+                failed.push(key.clone());
+            }
+        }
+    }
+    let archived = if archive_source { archive_batch_best_effort_count_moved(&to_archive) } else { 0 };
+    ok(
+        "tencentdb-memory-import",
+        json!({
+            "source_namespace": source_namespace,
+            "dest_namespace": dest_namespace,
+            "kind": kind,
+            "imported": imported,
+            "archived": archived,
+            "failed": failed.len(),
+            "failed_keys": failed,
+        }),
+    )
+}
+
+fn mark_deleted_index_first_before_file_removal_to_close_resurrection_window(namespace: &str, key: &str) -> bool {
+    match crate::rssearch_vectors::mark_deleted_reporting_match(namespace, key) {
+        Ok(v) => v,
+        Err(e) => {
+            emit_event("memory.prune_index_error", json!({"key": key, "namespace": namespace, "error": e}));
+            false
+        }
+    }
+}
+
+fn memorize_prune(body: &Value) -> u64 {
+    let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    let mut keys: Vec<String> = Vec::new();
+    if let Some(k) = body.get("key").and_then(|v| v.as_str()) {
+        if !k.is_empty() { keys.push(k.to_string()); }
+    }
+    if let Some(arr) = body.get("keys").and_then(|v| v.as_array()) {
+        for v in arr { if let Some(s) = v.as_str() { keys.push(s.to_string()); } }
+    }
+    if !keys.is_empty() && crate::tencentdb_memory::namespace_is_routed(namespace) {
+        let mut deleted = Vec::new();
+        let mut not_found = Vec::new();
+        for key in &keys {
+            match crate::tencentdb_memory::delete_index_first_then_file(namespace, key) {
+                Ok(true) => deleted.push(key.clone()),
+                Ok(false) => not_found.push(key.clone()),
+                Err(e) => {
+                    emit_event("tencentdb_memory_prune_error", json!({"key": key, "namespace": namespace, "error": e}));
+                    not_found.push(key.clone());
+                }
+            }
+        }
+        let mut resp = json!({"namespace": namespace, "deleted": deleted, "mode": "explicit-key"});
+        if !not_found.is_empty() {
+            resp["not_found"] = json!(not_found);
+        }
+        return ok("memorize-prune", resp);
+    }
+    if !keys.is_empty() {
+        let vec_ns = format!("{}-vec", namespace);
+        let mut deleted = Vec::new();
+        let mut not_found = Vec::new();
+        for key in &keys {
+            let idx_marked = mark_deleted_index_first_before_file_removal_to_close_resurrection_window(namespace, key);
+            let flat_rc = unsafe { host_kv_delete(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
+            let _ = unsafe { host_kv_delete(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32) };
+            let md_deleted = crate::memory_md::delete_memory(namespace, key);
+            if flat_rc != 0 || md_deleted || idx_marked {
+                deleted.push(key.clone());
+                emit_event("memory.pruned", json!({"key": key, "namespace": namespace, "mode": "explicit-key", "md_deleted": md_deleted, "index_marked": idx_marked}));
+            } else {
+                not_found.push(key.clone());
+                emit_event("memory.prune-miss", json!({"key": key, "namespace": namespace, "mode": "explicit-key"}));
+            }
+        }
+        let mut resp = json!({"namespace": namespace, "deleted": deleted, "mode": "explicit-key"});
+        if !not_found.is_empty() {
+            resp["not_found"] = json!(not_found);
+            resp["note"] = json!("Keys in not_found did not exist in this namespace -- nothing was pruned for them. The key is likely under a different namespace (pass {namespace:<the recall hit's namespace>}) or the key string did not match exactly. Re-run memorize-prune {query} to get live candidates with their exact keys + namespaces.");
+        }
+        return ok("memorize-prune", resp);
+    }
+    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    if query.is_empty() {
+        return err("memorize-prune", "provide `key`/`keys` to delete, or `query` to list prune candidates");
+    }
+    let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
+    let embedding = embed_query(query);
+    if query_embedding_unusable(&embedding) {
+        emit_event("memorize_prune_degraded", json!({
+            "namespace": namespace,
+            "reason": EMBED_UNAVAILABLE,
+        }));
+        return err(
+            "memorize-prune",
+            "semantic retrieval unavailable (the embedder failed) so no prune candidates could be ranked -- this is NOT an empty-namespace result, and deleting on the strength of it would prune memories that were never searched",
+        );
+    }
+    if crate::tencentdb_memory::namespace_is_routed(namespace) {
+        return match crate::tencentdb_memory::recall(&embedding, namespace, k as usize) {
+            Ok(v) => {
+                let mut resp = v;
+                if let Some(obj) = resp.as_object_mut() {
+                    obj.insert("mode".to_string(), json!("review"));
+                }
+                ok("memorize-prune", resp)
+            }
+            Err(e) => err("memorize-prune", &e),
+        };
+    }
+    let (vector_candidates, _) = rssearch_vector_hits(&embedding, namespace, k, true);
+    let candidates = vec_search_local(&embedding, namespace, k);
+    ok("memorize-prune", json!({
+        "namespace": namespace,
+        "mode": "review",
+        "candidates": candidates,
+        "vector_candidates": vector_candidates,
+        "note": "Review-only: re-dispatch memorize-prune with {keys:[...]} naming the stale ones to delete. Pruning is agent-judged, never auto-similarity-deleted. candidates falls back to the libsql rssearch_vectors result when host_vec_search is unimplemented (both native runtimes stub it).",
+    }))
+}
+
+fn codesearch(body: &Value) -> u64 {
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_k as u64) as u32;
+    if query.is_empty() { return err("codesearch", "query required"); }
+    if body.get("mode").and_then(|v| v.as_str()) == Some("filename") {
+        let out = crate::code_index::search_filenames(query, k as usize, &cfg);
+        return ok("codesearch", out);
+    }
+    let (_dataflow_doc, dataflow_tier, dataflow_path) = crate::dataflow::document_detailed();
+    if dataflow_tier != crate::dataflow::DataflowTier::CompiledDefault {
+        if let Some(pipeline) = crate::dataflow::pipeline_for("codesearch") {
+            emit_event("dataflow_pipeline_override_used", json!({
+                "entry_point": "codesearch", "tier": dataflow_tier.as_str(), "path": dataflow_path,
+            }));
+            let cand_k = cfg.budget.pool(k as usize).max(50) as u32;
+            let mut request = body.clone();
+            if let Some(obj) = request.as_object_mut() {
+                obj.insert("code_namespace".to_string(), json!(cfg.namespaces.code));
+                obj.insert("k".to_string(), json!(k));
+                obj.insert("cand_k".to_string(), json!(cand_k));
+            }
+            let out = crate::dataflow_exec::run(&pipeline, request);
+            return ok("codesearch", out);
+        }
+    }
+    if body.get("rebuild").and_then(|v| v.as_bool()).unwrap_or(false)
+        && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let cleared = crate::code_index::clear_codeinsight_full_cfg(&cfg);
+        emit_event("codeinsight_rebuild", json!({ "reason": "explicit-rebuild", "keys_cleared": cleared }));
+        let _ = crate::code_index::index(".", 500);
+        let mut retry = body.clone();
+        if let Some(obj) = retry.as_object_mut() {
+            obj.insert("auto_indexed".to_string(), Value::Bool(true));
+            obj.insert("rebuild".to_string(), Value::Bool(false));
+        }
+        return codesearch(&retry);
+    }
+    let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !already_indexed {
+        let stored = crate::code_index::stored_digest();
+        let current = crate::code_index::current_digest();
+        let stale = match &stored { Some(s) => s != &current, None => true };
+        if stale {
+            let reason = if stored.is_none() { "digest-absent" } else { "digest-mismatch" };
+            emit_event("codeinsight_rebuild", json!({ "reason": reason, "stored_then_current": current }));
+            let _ = crate::code_index::index(".", 500);
+            let mut retry = body.clone();
+            if let Some(obj) = retry.as_object_mut() {
+                obj.insert("auto_indexed".to_string(), Value::Bool(true));
+            }
+            return codesearch(&retry);
+        }
+    }
+    let cand_k = cfg.budget.pool(k as usize).max(50) as u32;
+    let embedding = embed_query(query);
+    let code_ns = cfg.namespaces.code.as_str();
+    let (vector_hits, _) = rssearch_vector_hits(&embedding, code_ns, k, false);
+    let vec_hits = vec_search_local(&embedding, code_ns, cand_k);
+    let vec_ids: Vec<String> = vec_hits.as_array().map(|a| {
+        a.iter().filter_map(|h| h.get("key").and_then(|x| x.as_str()).map(String::from)).collect()
+    }).unwrap_or_default();
+    let mut corpus = crate::code_index::FusionCorpus::load();
+    let vec_ids: Vec<String> = if vec_ids.is_empty() {
+        let vres = crate::code_index::search(query, cand_k as usize, Some(&embedding));
+        vres.get("rows")
+            .and_then(|r| r.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| {
+                        let path = r.get("path").and_then(|v| v.as_str())?;
+                        let ls = r.get("line_start").and_then(|v| v.as_u64())? as usize;
+                        corpus.key_for_path_line(path, ls)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        vec_ids
+    };
+    let bm25_ranked = corpus.bm25_rank_cfg(query, cand_k as usize, &cfg.scoring);
+    let bm25_ids: Vec<String> = bm25_ranked.iter().map(|(key, _)| key.clone()).collect();
+    let commit_ranked = crate::code_index::git_commit_rank(query, 10);
+    let commits: Vec<Value> = commit_ranked.iter()
+        .map(|(hash, message, score)| json!({ "hash": hash, "message": message, "score": score }))
+        .collect();
+    let build_hit = |corpus: &mut crate::code_index::FusionCorpus, key: &str, score: Option<f64>, fallback_text: Option<&str>| -> Value {
+        let text = corpus.text_for_key(key)
+            .or_else(|| fallback_text.map(String::from))
+            .unwrap_or_default();
+        let mut obj = serde_json::Map::new();
+        obj.insert("key".to_string(), json!(key));
+        obj.insert("text".to_string(), json!(text));
+        if let Some(s) = score { obj.insert("score".to_string(), json!(s)); }
+        if let Some(sym) = corpus.symbol_for_key(key) { obj.insert("symbol".to_string(), sym); }
+        if let Some(ov) = corpus.overview_for_key(key) { obj.insert("overview".to_string(), json!(ov)); }
+        Value::Object(obj)
+    };
+    let vector_ranked: Vec<Value> = vector_hits.as_array()
+        .filter(|a| !a.is_empty())
+        .map(|a| a.iter().take(k as usize).cloned().collect())
+        .or_else(|| vec_hits.as_array().filter(|a| !a.is_empty()).map(|a| a.iter().take(k as usize).cloned().collect()))
+        .unwrap_or_else(|| vec_ids.iter().take(k as usize).map(|key| build_hit(&mut corpus, key, None, None)).collect());
+    let bm25_ranked_response: Vec<Value> = bm25_ranked.iter().take(k as usize)
+        .map(|(key, score)| build_hit(&mut corpus, key, Some(*score), None))
+        .collect();
+    if !vec_ids.is_empty() || !bm25_ids.is_empty() {
+        return ok("codesearch", json!({
+            "mode": "dual", "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response, "commits": commits,
+        }));
+    }
+    let ns = cfg.namespaces.code.as_str();
+    let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, query.as_ptr(), query.len() as u32) };
+    let hits = unpack_to_value(packed);
+    let kv_empty = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
+    if kv_empty && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let _ = crate::code_index::index(".", 500);
+        let mut retry = body.clone();
+        if let Some(obj) = retry.as_object_mut() {
+            obj.insert("auto_indexed".to_string(), Value::Bool(true));
+        }
+        return codesearch(&retry);
+    }
+    let vec_unavailable = vector_ranked.is_empty();
+    let kv_empty_now = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
+
+    if vec_unavailable {
+        emit_event("codesearch_degraded", json!({
+            "namespace": cfg.namespaces.code,
+            "kv_hits": hits.as_array().map(|a| a.len()).unwrap_or(0),
+        }));
+    }
+
+    if vec_unavailable && kv_empty_now {
+        return err(
+            "codesearch",
+            "semantic retrieval unavailable (no vector hits and the embedder produced nothing) and the keyword fallback matched nothing -- this is NOT an empty-index result",
+        );
+    }
+
+    ok("codesearch", json!({
+        "mode": "fallback_kv", "degraded": vec_unavailable,
+        "hits": hits, "commits": commits, "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response,
+    }))
+}
+
+const LIFECYCLE_STALE_WARN_MS: u64 = 30 * 60 * 1000;
+
+fn lifecycle_liveness() -> Value {
+    let log = match crate::wasm_dispatch::host_read(".gm/exec-spool/.watcher.log") {
+        Some(l) => l,
+        None => return json!({ "last_event_age_ms": null, "note": "no .watcher.log yet -- expected on a brand-new project with no dispatches fired" }),
+    };
+    let last_evt_line = log.lines().rev().find_map(|l| l.strip_prefix("evt: "));
+    let Some(line) = last_evt_line else {
+        return json!({ "last_event_age_ms": null, "note": "watcher.log exists but contains no evt: lines -- the lifecycle-event pipe may be dead (see the 2026-07-22 gm-log outage incident this check targets)" });
+    };
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return json!({ "last_event_age_ms": null, "note": "last evt: line in watcher.log failed to parse as JSON" });
+    };
+    let Some(ts) = v.get("ts").and_then(|t| t.as_u64()) else {
+        return json!({ "last_event_age_ms": null, "note": "last evt: line has no ts field" });
+    };
+    let now = unsafe { host_now_ms() };
+    let age_ms = now.saturating_sub(ts);
+    json!({
+        "last_event_age_ms": age_ms,
+        "last_event": v.get("event").cloned().unwrap_or(Value::Null),
+        "stale": age_ms > LIFECYCLE_STALE_WARN_MS,
+    })
+}
+
+fn health_probe_recall() -> Value {
+    let probe = json!({ "query": "health check probe query", "limit": 1 });
+    let packed = recall(&probe);
+    let v = unpack_to_value(packed);
+    let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    json!({ "ok": ok, "error": if ok { Value::Null } else { v.get("error").cloned().unwrap_or(Value::Null) } })
+}
+
+fn health_probe_codesearch() -> Value {
+    let probe = json!({ "query": "health check probe query", "k": 1 });
+    let packed = codesearch(&probe);
+    let v = unpack_to_value(packed);
+    let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    json!({ "ok": ok, "error": if ok { Value::Null } else { v.get("error").cloned().unwrap_or(Value::Null) } })
+}
+
+fn health(_body: &Value) -> u64 {
+    let now = unsafe { host_now_ms() };
+    let subsystems: Vec<Value> = crate::mediator::all_verbs_by_subsystem()
+        .into_iter()
+        .map(|(sub, verbs)| json!({ "subsystem": sub.as_str(), "verbs": verbs }))
+        .collect();
+    let aliases: Vec<Value> = crate::mediator::alias_table()
+        .into_iter()
+        .map(|(alias, canonical, lang_preserved)| json!({
+            "alias": alias,
+            "canonical": canonical,
+            "lang_preserved": lang_preserved,
+        }))
+        .collect();
+    fn project_gm_json_pinned_version() -> Value {
+        match crate::wasm_dispatch::host_read("gm.json")
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v.get("plugkitVersion").and_then(|p| p.as_str().map(String::from)))
+        {
+            Some(tag) => Value::String(tag),
+            None => Value::Null,
+        }
+    }
+
+    let recall_health = health_probe_recall();
+    let codesearch_health = health_probe_codesearch();
+    let subsystems_healthy = recall_health.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
+        && codesearch_health.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+
+    ok("health", json!({
+        "ok": subsystems_healthy,
+        "version": env!("CARGO_PKG_VERSION"),
+        "crate_version": env!("CARGO_PKG_VERSION"),
+        "source_sha": env!("PLUGKIT_SOURCE_SHA"),
+        "loaded_module_is_compiled_version_above_not_project_pin": true,
+        "project_gm_json_pinned_version": project_gm_json_pinned_version(),
+        "now": now,
+        "imports": super::host_abi::HOST_IMPORTS,
+        "imports_count": super::host_abi::HOST_IMPORTS.len(),
+        "effective_config": effective_config_report(),
+        "plugin_response_envelope": plugin_response_envelope_contract(),
+        "subsystems": subsystems,
+        "subsystem_probes": { "recall": recall_health, "codesearch": codesearch_health },
+        "verb_aliases": aliases,
+        "error_codes": [
+            ERR_CODE_FAILED, ERR_CODE_RETIRED_VERB, ERR_CODE_UNSUPPORTED,
+            ERR_CODE_UNKNOWN_VERB, ERR_CODE_INVALID_ARGS, ERR_CODE_PANIC, ERR_CODE_GATE_DENIED,
+        ],
+        "plugin_failure_codes": [
+            PLUGIN_FAIL_UNKNOWN_PLUGIN, PLUGIN_FAIL_NOT_LOADED, PLUGIN_FAIL_DEADLINE,
+            PLUGIN_FAIL_MALFORMED, PLUGIN_FAIL_HOST_EMPTY, PLUGIN_FAIL_PLUGIN_ERROR,
+            PLUGIN_FAIL_HOST_LOST_RESPONSE_RETRYABLE,
+        ],
+        "lifecycle_liveness": lifecycle_liveness()
+    }))
+}
+
+fn status(body: &Value) -> u64 {
+    let task_id = body.get("taskId").and_then(|v| v.as_u64()).unwrap_or(0);
+    if task_id == 0 { return err("status", "taskId required"); }
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("outbox");
+    let key = format!("{}", task_id);
+    let packed = unsafe { host_kv_get(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32) };
+    match unpack_to_string(packed) {
+        Some(s) => ok("status", serde_json::from_str(&s).unwrap_or(Value::String(s))),
+        None => err("status", "task not found"),
+    }
+}
+
+fn close(body: &Value) -> u64 {
+    let task_id = body.get("taskId").and_then(|v| v.as_u64()).unwrap_or(0);
+    if task_id == 0 { return err("close", "taskId required"); }
+    let key = format!("{}", task_id);
+    let rc = unsafe { host_kv_put("outbox".as_ptr(), 6, key.as_ptr(), key.len() as u32, "closed".as_ptr(), 6) };
+    if rc != 0 { ok("close", json!({ "taskId": task_id })) } else { err("close", "close failed") }
+}
+
+fn forget(body: &Value) -> u64 {
+    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    if key.is_empty() { return err("forget", "key required"); }
+    let rc = unsafe { host_kv_delete(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32) };
+    if rc == 0 { ok("forget", json!({ "namespace": ns, "key": key })) } else { err("forget", "delete failed") }
+}
+
+const ROUTER_MODELS: &[&str] = &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"];
+
+const ROUTE_BUCKET_CAPS: &[u64] = &[1000, 4000, 16000, 64000];
+
+fn bucket_for_tokens(n: u64) -> u8 {
+    for (i, &cap) in ROUTE_BUCKET_CAPS.iter().enumerate() {
+        if n <= cap {
+            return i as u8;
+        }
+    }
+    4
+}
+
+pub fn route_hint(prompt: &str, estimated_tokens: u64) -> Value {
+    if prompt.trim().is_empty() { return Value::Null; }
+    serde_json::json!({
+        "model": ROUTER_MODELS[0],
+        "context_bucket": bucket_for_tokens(estimated_tokens),
+        "temperature": 0.7f32,
+        "top_p": 0.9f32,
+        "confidence": 0.5f32,
+        "algo": "rule",
+        "exploration": false,
+    })
+}
+
+fn discipline(body: &Value) -> u64 {
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    match action {
+        "list" => {
+            let packed = unsafe { host_kv_query("disciplines".as_ptr(), 11, "".as_ptr(), 0) };
+            ok("discipline", unpack_to_value(packed))
+        }
+        "get" => {
+            if name.is_empty() { return err("discipline", "name required for get"); }
+            let packed = unsafe { host_kv_get("disciplines".as_ptr(), 11, name.as_ptr(), name.len() as u32) };
+            match unpack_to_string(packed) {
+                Some(s) => ok("discipline", serde_json::from_str(&s).unwrap_or(Value::String(s))),
+                None => err("discipline", "not found"),
+            }
+        }
+        _ => err("discipline", "unknown action"),
+    }
+}
+
+fn shell_exec(body: &Value, body_s: &str, lang: &str) -> u64 {
+    let code = body.get("code").and_then(|v| v.as_str()).map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| body_s.to_string());
+    if code.is_empty() { return err(lang, "code required (provide raw code as body or JSON {code: ...})"); }
+    let timeout_ms = match crate::validation::validate_timeout_ms(body, false) {
+        Ok(n) => n,
+        Err(detail) => return err_json(lang, detail),
+    };
+    let opts = json!({ "lang": lang, "timeoutMs": timeout_ms }).to_string();
+    let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    match unpack_to_string(packed) {
+        Some(s) => ok(lang, Value::String(s)),
+        None => ok(lang, json!({ "note": "emulated via thebird host_exec_js", "lang": lang })),
+    }
+}
+
+fn browser_page_health_or_none_for_session_management_body(v: &Value) -> Option<bool> {
+    let debug = v.get("debug")?;
+    let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    let page_errors_empty = debug.get("pageErrors").and_then(|a| a.as_array()).map(|a| a.is_empty()).unwrap_or(true);
+    let console_clean = debug.get("console").and_then(|a| a.as_array())
+        .map(|entries| !entries.iter().any(|e| {
+            e.get("level").and_then(|l| l.as_str()).map(|l| l.eq_ignore_ascii_case("error")).unwrap_or(false)
+        }))
+        .unwrap_or(true);
+    Some(ok && page_errors_empty && console_clean)
+}
+
+fn record_app_loads_witness_from_response(cwd: &str, v: &Value) {
+    let Some(healthy) = browser_page_health_or_none_for_session_management_body(v) else { return };
+    let detail = if healthy {
+        "browser dispatch reached the page with ok:true, zero pageErrors, zero console error-level lines".to_string()
+    } else {
+        let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+        let page_err_count = v.get("debug").and_then(|d| d.get("pageErrors")).and_then(|a| a.as_array()).map(|a| a.len()).unwrap_or(0);
+        format!("browser dispatch unhealthy: ok={ok}, pageErrors={page_err_count}")
+    };
+    crate::browser_witness::record_app_loads_witness_unconditional_on_edits(cwd, healthy, &detail);
+}
+
+const BROWSER_SUPPORTED_BODY_SHAPES: &str = "sessionId=<id>\\n<shape>, session new, session list, session close <id>, session reset <id>, <bare https:// URL>, url=<url>\\n<expr>, timeout=<ms>\\n<expr>, dom=<selector>\\n<expr>, or a bare JS expression";
+
+fn browser_default_oxibrowser_headless_engine(body: &Value, body_s: &str) -> u64 {
+    let envelope_code = body.get("code").or_else(|| body.get("body"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    let code = match envelope_code {
+        Some(c) => c,
+        None if body.is_object() => return err_json("browser", json!({
+            "error": "browser takes a plain-text body, never a JSON object. The supplied JSON object carries neither a `code` nor a `body` string field, so there is no script to run.",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
+            "received_keys": body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+            "note": "for real-Chrome/playwright-style capabilities this verb does not yet cover, use the cdp verb instead",
+        })),
+        None => body_s.to_string(),
+    };
+    if code.trim().is_empty() { return err_json("browser", json!({
+        "error": "browser body is empty -- provide one of the supported plain-text shapes",
+        "error_code": ERR_CODE_INVALID_ARGS,
+        "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
+        "note": "for real-Chrome/playwright-style capabilities this verb does not yet cover, use the cdp verb instead",
+    })); }
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+    let explicit_sid = body.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let session_id = if !explicit_sid.is_empty() {
+        explicit_sid
+    } else if let Some(dispatch_sid) = super::events::current_dispatch_session_id().filter(|s| !s.trim().is_empty()) {
+        dispatch_sid
+    } else {
+        host_read(".gm/exec-spool/.session-current").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_default()
+    };
+    let timeout_ms = match body.get("timeoutMs") {
+        None | Some(Value::Null) => BROWSER_DEFAULT_TIMEOUT_MS,
+        Some(raw) => match raw.as_u64() {
+            Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
+            Some(n) => return err_json("browser", json!({
+                "error": "timeoutMs below floor",
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "min": crate::validation::MIN_TIMEOUT_MS,
+                "received": n,
+            })),
+            None => return err_json("browser", json!({
+                "error": "timeoutMs must be a positive integer number of milliseconds -- a string, float or negative value is rejected rather than silently falling back to the default budget",
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "min": crate::validation::MIN_TIMEOUT_MS,
+                "received": raw.clone(),
+            })),
+        },
+    };
+    let envelope = json!({ "body": code, "timeoutMs": timeout_ms }).to_string();
+    let packed = unsafe { host_oxi_exec(
+        envelope.as_ptr(), envelope.len() as u32,
+        cwd.as_ptr(), cwd.len() as u32,
+        session_id.as_ptr(), session_id.len() as u32,
+    ) };
+    match unpack_to_string(packed) {
+        Some(s) => {
+            let v: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
+            let transport_ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
+                && !v.get("timed_out").and_then(|b| b.as_bool()).unwrap_or(false)
+                && v.get("exit_code").and_then(|n| n.as_i64()).map(|c| c == 0).unwrap_or(true);
+            let mut v = v;
+            if transport_ok {
+                let witnessed = crate::browser_witness::witness_all_pending_edits_by_rehashing_current_content(&cwd);
+                if witnessed > 0 {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("witness_marked".to_string(), json!(witnessed));
+                    }
+                }
+                record_app_loads_witness_from_response(cwd, &v);
+                ok("browser", v)
+            } else {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("witness_skipped_transport_failure".to_string(), json!(true));
+                    obj.insert("note".to_string(), json!("browser (oxibrowser) dispatch failed transport-level checks -- if this is a capability oxibrowser does not support, retry via the cdp verb (real Chrome, playwright-style)"));
+                }
+                record_app_loads_witness_from_response(cwd, &v);
+                err_json("browser", v)
+            }
+        }
+        None => err_json("browser", json!({
+            "error": "host_oxi_exec returned empty -- the oxibrowser host produced no bytes at all (NOT a script that returned undefined). Check .status.json ts freshness and reboot if stale, or re-dispatch. If oxibrowser cannot handle this workload, use the cdp verb (real Chrome) instead.",
+            "error_code": ERR_CODE_FAILED,
+            "timeout_ms": timeout_ms,
+            "session_id": session_id,
+            "retryable": true,
+            "note": "for real-Chrome/playwright-style capabilities, use the cdp verb instead",
+        })),
+    }
+}
+
+fn cdp_real_chrome_escape_hatch(body: &Value, body_s: &str) -> u64 {
+    let envelope_code = body.get("code").or_else(|| body.get("body"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    let code = match envelope_code {
+        Some(c) => c,
+        None if body.is_object() => return err_json("cdp", json!({
+            "error": "cdp takes a plain-text body, never a JSON object. The supplied JSON object carries neither a `code` nor a `body` string field, so there is no script to run; evaluating the raw JSON text as JavaScript would launch a Chrome instance only to fail with an opaque SyntaxError.",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
+            "received_keys": body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+        })),
+        None => body_s.to_string(),
+    };
+    if code.trim().is_empty() { return err_json("cdp", json!({
+        "error": "cdp body is empty -- provide one of the supported plain-text shapes",
+        "error_code": ERR_CODE_INVALID_ARGS,
+        "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
+    })); }
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+    let explicit_sid = body.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let session_id = if !explicit_sid.is_empty() {
+        explicit_sid
+    } else if let Some(dispatch_sid) = super::events::current_dispatch_session_id().filter(|s| !s.trim().is_empty()) {
+        dispatch_sid
+    } else {
+        host_read(".gm/exec-spool/.session-current").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_default()
+    };
+    let timeout_ms = match body.get("timeoutMs") {
+        None | Some(Value::Null) => BROWSER_DEFAULT_TIMEOUT_MS,
+        Some(raw) => match raw.as_u64() {
+            Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
+            Some(n) => return err_json("cdp", json!({
+                "error": "timeoutMs below floor",
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "min": crate::validation::MIN_TIMEOUT_MS,
+                "received": n,
+            })),
+            None => return err_json("cdp", json!({
+                "error": "timeoutMs must be a positive integer number of milliseconds -- a string, float or negative value is rejected rather than silently falling back to the default budget",
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "min": crate::validation::MIN_TIMEOUT_MS,
+                "received": raw.clone(),
+            })),
+        },
+    };
+    let envelope = json!({ "body": code, "timeoutMs": timeout_ms }).to_string();
+    let packed = unsafe { host_browser_exec(
+        envelope.as_ptr(), envelope.len() as u32,
+        cwd.as_ptr(), cwd.len() as u32,
+        session_id.as_ptr(), session_id.len() as u32,
+    ) };
+    match unpack_to_string(packed) {
+        Some(s) => {
+            let v: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
+            let transport_ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
+                && !v.get("timed_out").and_then(|b| b.as_bool()).unwrap_or(false)
+                && v.get("exit_code").and_then(|n| n.as_i64()).map(|c| c == 0).unwrap_or(true);
+            let mut v = v;
+            if transport_ok {
+                let witnessed = crate::browser_witness::witness_all_pending_edits_by_rehashing_current_content(&cwd);
+                if witnessed > 0 {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("witness_marked".to_string(), json!(witnessed));
+                    }
+                }
+                record_app_loads_witness_from_response(cwd, &v);
+                ok("cdp", v)
+            } else {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("witness_skipped_transport_failure".to_string(), json!(true));
+                }
+                record_app_loads_witness_from_response(cwd, &v);
+                err_json("cdp", v)
+            }
+        }
+        None => err_json("cdp", json!({
+            "error": "host_browser_exec returned empty -- the cdp host produced no bytes at all (NOT a script that returned undefined). Two known causes: (1) a genuinely dead/crashed daemon worker -- check .status.json ts freshness and reboot if stale; (2) the host DID produce a real response but the wasm-to-guest write failed on a wasmtime epoch-interruption deadline mid-handoff (agentplug daemon.log line 'write_guest_bytes: ... hit the epoch deadline ... returning 0') -- in that case Chrome may have launched and even completed the dispatch, but the result never reached this response. Either way the fix is the same: re-dispatch.",
+            "error_code": ERR_CODE_FAILED,
+            "timeout_ms": timeout_ms,
+            "session_id": session_id,
+            "retryable": true,
+        })),
+    }
+}
+
+fn db_display_label_not_identity(body: &Value) -> String {
+    body.get("db_name").or_else(|| body.get("db")).and_then(|v| v.as_str()).unwrap_or("main").to_string()
+}
+
+fn db_identity_path(body: &Value) -> String {
+    match body.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => crate::code_index::project_db_path(None),
+    }
+}
+
+fn sql_open(body: &Value) -> u64 {
+    let path = db_identity_path(body);
+    let name = db_display_label_not_identity(body);
+    let resp = call_plugin("libsql", "open", &json!({ "db": name, "path": path }));
+    if plugin_ok(&resp) {
+        ok("sql_open", json!({ "path": path, "db_name": name }))
+    } else {
+        err_plugin("sql_open", &resp, "open failed")
+    }
+}
+
+fn sql_close(body: &Value) -> u64 {
+    let name = db_display_label_not_identity(body);
+    let path = db_identity_path(body);
+    let resp = call_plugin("libsql", "close", &json!({ "db": name, "path": path }));
+    if plugin_ok(&resp) {
+        ok("sql_close", json!({ "db_name": name }))
+    } else {
+        err_plugin("sql_close", &resp, "close failed")
+    }
+}
+
+fn sql_list_dbs(_body: &Value) -> u64 {
+    let resp = call_plugin("libsql", "list_dbs", &json!({}));
+    let names = resp.get("dbs").cloned().unwrap_or_else(|| json!([]));
+    ok("sql_list_dbs", json!({ "dbs": names }))
+}
+
+fn sql_exec(body: &Value) -> u64 {
+    let sql = match body.get("sql").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return err("sql_exec", "missing sql"),
+    };
+    let name = db_display_label_not_identity(body);
+    let path = db_identity_path(body);
+    let resp = call_plugin("libsql", "exec", &json!({ "db": name, "path": path, "sql": sql }));
+    if plugin_ok(&resp) {
+        ok("sql_exec", json!({}))
+    } else {
+        err_plugin("sql_exec", &resp, "exec failed")
+    }
+}
+
+fn sql_query(body: &Value) -> u64 {
+    let sql = match body.get("sql").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return err("sql_query", "missing sql"),
+    };
+    let name = db_display_label_not_identity(body);
+    let path = db_identity_path(body);
+    let resp = call_plugin("libsql", "query", &json!({ "db": name, "path": path, "sql": sql }));
+    if plugin_ok(&resp) {
+        let rows = resp.get("rows").cloned().unwrap_or_else(|| json!([]));
+        ok("sql_query", json!({ "rows": rows }))
+    } else {
+        err_plugin("sql_query", &resp, "query failed")
+    }
+}
+
+fn apply_cache_budget_overrides_from(cfg: &mut crate::cache::CacheConfig, source: &Value) {
+    if let Some(n) = source.get("max_entries_per_namespace").and_then(|v| v.as_u64()) {
+        cfg.max_entries_per_namespace = n as usize;
+    }
+    if let Some(n) = source.get("max_bytes_per_namespace").and_then(|v| v.as_u64()) {
+        cfg.max_bytes_per_namespace = n as usize;
+    }
+    if let Some(n) = source.get("max_value_bytes").and_then(|v| v.as_u64()) {
+        cfg.max_value_bytes = n as usize;
+    }
+    if let Some(n) = source.get("default_ttl_ms").and_then(|v| v.as_i64()) {
+        cfg.default_ttl_ms = Some(n);
+    }
+}
+
+fn cache_cfg_from_defaults_then_vendored_config_then_this_call_body(body: &Value) -> crate::cache::CacheConfig {
+    let mut cfg = crate::cache::DEFAULTS;
+    let resolved = crate::config::resolve().config.value;
+    if let Some(vendored_cache_section) = resolved.get("cache") {
+        apply_cache_budget_overrides_from(&mut cfg, vendored_cache_section);
+    }
+    apply_cache_budget_overrides_from(&mut cfg, body);
+    cfg
+}
+
+fn cache_err_with_machine_readable_kind(verb: &str, e: crate::cache::CacheError) -> u64 {
+    err_json(verb, json!({ "error": e.message(), "error_kind": e.kind() }))
+}
+
+fn cache_get(body: &Value) -> u64 {
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let cfg = cache_cfg_from_defaults_then_vendored_config_then_this_call_body(body);
+    match crate::cache::get(&cfg, ns, key) {
+        Ok(Some(entry)) => ok("cache_get", json!({ "hit": true, "entry": entry.to_json() })),
+        Ok(None) => ok("cache_get", json!({ "hit": false, "namespace": ns, "key": key })),
+        Err(e) => cache_err_with_machine_readable_kind("cache_get", e),
+    }
+}
+
+fn cache_put(body: &Value) -> u64 {
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let value = match body.get("value") {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) if !v.is_null() => v.to_string(),
+        _ => return err("cache_put", "value required"),
+    };
+    let ttl = body.get("ttl_ms").and_then(|v| v.as_i64());
+    let cfg = cache_cfg_from_defaults_then_vendored_config_then_this_call_body(body);
+    match crate::cache::put(&cfg, ns, key, &value, ttl) {
+        Ok(hash) => ok("cache_put", json!({ "content_hash": hash, "bytes": value.len() })),
+        Err(e) => cache_err_with_machine_readable_kind("cache_put", e),
+    }
+}
+
+fn cache_invalidate(body: &Value) -> u64 {
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+    let cfg = cache_cfg_from_defaults_then_vendored_config_then_this_call_body(body);
+    match body.get("key").and_then(|v| v.as_str()).filter(|k| !k.is_empty()) {
+        Some(key) => match crate::cache::invalidate(&cfg, ns, key) {
+            Ok(existed) => ok("cache_invalidate", json!({ "removed": existed })),
+            Err(e) => cache_err_with_machine_readable_kind("cache_invalidate", e),
+        },
+        None => match crate::cache::invalidate_namespace(&cfg, ns) {
+            Ok(n) => ok("cache_invalidate", json!({ "removed": n, "namespace": ns })),
+            Err(e) => cache_err_with_machine_readable_kind("cache_invalidate", e),
+        },
+    }
+}
+
+fn config_sync_now_force_immediate_refresh(_body: &Value) -> u64 {
+    let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let r = crate::config::resolve_forced(&root);
+    let mut payload = r.to_json();
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("forced".to_string(), json!(true));
+    }
+    ok("config-sync-now", payload)
+}
+
+fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u64 {
+    let r = crate::config::resolve();
+    let mut payload = r.to_json();
+
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("unknown_keys".to_string(), json!(r.config.unknown_top_level_keys()));
+        match crate::ragconfig::RagConfig::from_value(&r.config.value) {
+            Ok(rag) => {
+                let mut rag_effective = json!({
+                    "embed_dim": rag.embed.dim,
+                    "default_namespace": rag.namespaces.default,
+                    "recall_default_limit": rag.budget.default_limit,
+                    "recall_pool_multiplier": rag.budget.pool_multiplier,
+                    "recall_pool_floor": rag.budget.pool_floor,
+                    "recall_default_k": rag.budget.default_k,
+                    "index_wall_budget_ms": rag.index.wall_budget_ms,
+                    "index_max_file_bytes": rag.index.max_file_bytes,
+                    "index_max_chunks_per_file_per_pass": rag.index.max_chunks_embedded_per_file_per_pass_count_bound_only,
+                    "index_pessimistic_ms_per_chunk": rag.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound,
+                    "index_extra_skip_dirs": rag.index.extra_skip_dirs_appended_to_builtins_never_replacing,
+                    "index_extra_skip_file_suffixes": rag.index.extra_skip_file_suffixes_appended_to_builtins_never_replacing,
+                    "index_force_include_path_substrings": rag.index.force_include_path_substrings_overriding_every_skip,
+                    "scoring_bm25_k1": rag.scoring.bm25_k1_term_frequency_saturation,
+                    "scoring_bm25_b": rag.scoring.bm25_b_document_length_normalization,
+                    "scoring_recency_floor": rag.scoring.recency_floor,
+                    "scoring_cos_floor": rag.scoring.cos_floor_applied_before_recency_rescue,
+                    "scoring_dedup_jaccard_threshold": rag.scoring.dedup_jaccard_near_duplicate_threshold,
+                    "scoring_half_life_ms": rag.scoring.half_life_ms,
+                    "scoring_fusion_rrf_k": rag.scoring.fusion_rrf_k,
+                    "scoring_fusion_identifier_boost": rag.scoring.fusion_identifier_boost,
+                    "pipeline_ttl_ms": rag.pipeline.ttl_ms,
+                    "pipeline_summarize_threshold": rag.pipeline.summarize_threshold,
+                    "pipeline_max_result_bytes": rag.pipeline.max_result_bytes_advertised_and_enforced_by_one_field,
+                    "pipeline_max_attempts": rag.pipeline.max_attempts,
+                });
+                if let Some(rag_obj) = rag_effective.as_object_mut() {
+                    rag_obj.insert("rssearch_table".to_string(), json!(rag.rssearch.table));
+                    rag_obj.insert("rssearch_index".to_string(), json!(rag.rssearch.index));
+                    rag_obj.insert("git_commits_table".to_string(), json!(rag.git_commits.table));
+                    rag_obj.insert("git_commits_index".to_string(), json!(rag.git_commits.index));
+                    rag_obj.insert("code_chunks_table".to_string(), json!(rag.code_chunks.table));
+                    rag_obj.insert("code_chunks_index".to_string(), json!(rag.code_chunks.index));
+                    rag_obj.insert("instruction_payload_ready_wave_limit".to_string(), json!(rag.instruction_payload.ready_wave_limit));
+                    rag_obj.insert("instruction_payload_instruction_recall_hits".to_string(), json!(rag.instruction_payload.instruction_recall_hits));
+                    rag_obj.insert("instruction_payload_transition_recall_hits".to_string(), json!(rag.instruction_payload.transition_recall_hits));
+                    rag_obj.insert("instruction_payload_prompt_excerpt_chars".to_string(), json!(rag.instruction_payload.prompt_excerpt_chars));
+                    rag_obj.insert("instruction_payload_max_marker_age_ms".to_string(), json!(rag.instruction_payload.max_marker_age_ms));
+                    rag_obj.insert("instruction_payload_orient_noun_limit".to_string(), json!(rag.instruction_payload.orient_noun_limit));
+                    rag_obj.insert("browser_witness_always_extensions".to_string(), json!(rag.browser_witness.always_browser_extensions_regardless_of_directory));
+                    rag_obj.insert("browser_witness_conditional_extensions".to_string(), json!(rag.browser_witness.conditional_extensions_only_under_browser_dir_prefixes));
+                    rag_obj.insert("browser_witness_dir_prefixes".to_string(), json!(rag.browser_witness.browser_dir_prefixes_normalized_slash_lowercase));
+                    rag_obj.insert("discipline_note_max_name_len".to_string(), json!(rag.discipline_note.max_name_len_hard_refuse_not_truncate));
+                    rag_obj.insert("discipline_note_max_text_len".to_string(), json!(rag.discipline_note.max_text_len_hard_refuse_not_truncate));
+                    rag_obj.insert("discipline_note_active_policies_instruction_limit".to_string(), json!(rag.discipline_note.active_policies_surfaced_in_instruction_payload_limit));
+                    rag_obj.insert("claim_audit_shipped_markers".to_string(), json!(rag.claim_audit.shipped_claim_markers_matched_case_insensitive_substring));
+                    rag_obj.insert("claim_audit_scan_paths".to_string(), json!(rag.claim_audit.scan_paths_relative_to_project_root_missing_is_skip_not_error));
+                }
+                obj.insert("rag_effective".to_string(), rag_effective);
+            }
+            Err(reason) => {
+                obj.insert("rag_effective".to_string(), Value::Null);
+                obj.insert("rag_rejected".to_string(), Value::String(reason));
+            }
+        }
+    }
+    ok("config_resolve", payload)
+}
+
+fn dataflow_resolve(_body: &Value) -> u64 {
+    let (doc, tier, path) = crate::dataflow::document_detailed();
+    let pipelines: serde_json::Map<String, Value> = doc
+        .pipelines
+        .iter()
+        .map(|(name, p)| {
+            (
+                name.clone(),
+                json!({
+                    "steps": p.steps.iter().map(|s| json!({"id": s.id, "plugin": s.plugin, "verb": s.verb})).collect::<Vec<_>>(),
+                    "fuse": p.fuse.iter().map(|f| json!({"id": f.id, "strategy": f.strategy, "sources": f.sources})).collect::<Vec<_>>(),
+                    "output": p.output,
+                }),
+            )
+        })
+        .collect();
+    ok("dataflow_resolve", json!({
+        "tier": tier.as_str(),
+        "path": path,
+        "schema_version": doc.schema_version,
+        "pipelines": Value::Object(pipelines),
+    }))
+}
+
+fn cache_stats(body: &Value) -> u64 {
+    let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+    let cfg = cache_cfg_from_defaults_then_vendored_config_then_this_call_body(body);
+    match crate::cache::stats(&cfg, ns) {
+        Ok((entries, bytes)) => ok("cache_stats", json!({
+            "namespace": ns,
+            "entries": entries,
+            "bytes": bytes,
+            "max_entries_per_namespace": cfg.max_entries_per_namespace,
+            "max_bytes_per_namespace": cfg.max_bytes_per_namespace,
+            "max_value_bytes": cfg.max_value_bytes,
+            "default_ttl_ms": cfg.default_ttl_ms,
+        })),
+        Err(e) => cache_err_with_machine_readable_kind("cache_stats", e),
+    }
+}
+
+fn sql_smoke() -> u64 {
+    let owned_path = crate::libsql_wasm::absolute_db_path(".sql-smoke.db");
+    let path = owned_path.as_str();
+    let mut log: Vec<Value> = Vec::new();
+    let _ = call_plugin("libsql", "exec", &json!({ "path": path, "sql": "DROP TABLE IF EXISTS memos" }));
+    let open_resp = call_plugin("libsql", "open", &json!({ "path": path }));
+    log.push(json!({ "step": "open", "result": if plugin_ok(&open_resp) { Value::Null } else { Value::String(plugin_error(&open_resp, "open failed")) } }));
+    let create_resp = call_plugin("libsql", "exec", &json!({ "path": path, "sql": "CREATE TABLE memos (id INTEGER PRIMARY KEY, text TEXT, emb F32_BLOB(4))" }));
+    log.push(json!({ "step": "create_table", "result": if plugin_ok(&create_resp) { Value::Null } else { Value::String(plugin_error(&create_resp, "exec failed")) } }));
+    let insert_resp = call_plugin("libsql", "exec", &json!({ "path": path, "sql": "INSERT INTO memos(text, emb) VALUES ('hello', vector('[0.1,0.2,0.3,0.4]'))" }));
+    log.push(json!({ "step": "insert", "result": if plugin_ok(&insert_resp) { Value::Null } else { Value::String(plugin_error(&insert_resp, "exec failed")) } }));
+    let index_resp = call_plugin("libsql", "exec", &json!({ "path": path, "sql": "CREATE INDEX memos_idx ON memos(libsql_vector_idx(emb, 'metric=cosine'))" }));
+    log.push(json!({ "step": "create_index", "result": if plugin_ok(&index_resp) { Value::Null } else { Value::String(plugin_error(&index_resp, "exec failed")) } }));
+    let query_resp = call_plugin("libsql", "query", &json!({ "path": path, "sql": "SELECT id, text, vector_distance_cos(emb, vector('[0.1,0.2,0.3,0.4]')) AS d FROM vector_top_k('memos_idx', vector('[0.1,0.2,0.3,0.4]'), 5) JOIN memos ON memos.rowid = id" }));
+    log.push(json!({ "step": "vector_top_k", "rows": resp_rows_or_null(&query_resp) }));
+    let _ = call_plugin("libsql", "exec", &json!({ "path": path, "sql": "DROP TABLE IF EXISTS memos" }));
+    let _ = call_plugin("libsql", "close", &json!({ "path": path }));
+    let version_resp = call_plugin("libsql", "version", &json!({}));
+    let libsql_version = version_resp.get("version").cloned().unwrap_or(Value::Null);
+    let failures: Vec<Value> = log.iter()
+        .filter(|s| s.get("result").map(|r| !r.is_null()).unwrap_or(false))
+        .cloned()
+        .collect();
+    let all_ok = failures.is_empty();
+    pack(json!({ "ok": all_ok, "smoke": log, "failures": failures, "libsql_version": libsql_version }).to_string())
+}
+
+fn resp_rows_or_null(resp: &Value) -> Value {
+    if plugin_ok(resp) { resp.get("rows").cloned().unwrap_or(Value::Null) } else { Value::Null }
+}
+
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    base64_decode(s.trim()).ok()
+}
+
+fn sql_serialize(body: &Value) -> u64 {
+    let name = db_display_label_not_identity(body);
+    let path = db_identity_path(body);
+    let resp = call_plugin("libsql", "serialize", &json!({ "db": name, "path": path }));
+    if !plugin_ok(&resp) {
+        return err_plugin("sql_serialize", &resp, "serialize failed");
+    }
+    let bytes_b64 = match resp.get("bytes_b64").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return err("sql_serialize", "plugin response missing bytes_b64"),
+    };
+    let size = resp.get("size").and_then(|v| v.as_u64())
+        .unwrap_or_else(|| b64_decode(&bytes_b64).map(|b| b.len() as u64).unwrap_or(0));
+    ok("sql_serialize", json!({ "bytes_b64": bytes_b64, "size": size, "db_name": name }))
+}
+
+fn sql_deserialize(body: &Value) -> u64 {
+    let s = match body.get("bytes_b64").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return err("sql_deserialize", "missing bytes_b64"),
+    };
+    let bytes = match b64_decode(s) { Some(b) => b, None => return err("sql_deserialize", "invalid base64") };
+    let size = bytes.len();
+    let name = db_display_label_not_identity(body);
+    let path = db_identity_path(body);
+    let resp = call_plugin("libsql", "deserialize", &json!({ "db": name, "path": path, "bytes_b64": s }));
+    if plugin_ok(&resp) {
+        ok("sql_deserialize", json!({ "restored": size, "db_name": name }))
+    } else {
+        err_plugin("sql_deserialize", &resp, "deserialize failed")
+    }
+}
+
+fn codeinsight_index(body: &Value) -> u64 {
+    let root = body.get("root").and_then(|v| v.as_str()).unwrap_or(".");
+    let max_files = body.get("max_files").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+    pack(crate::code_index::index(root, max_files).to_string())
+}
+
+fn body_cwd(body: &Value) -> Option<&str> {
+    body.get("cwd").and_then(|v| v.as_str())
+        .or_else(|| body.get("repo").and_then(|v| v.as_str()))
+}
+
+const GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS: &str = "git_async";
+const GIT_PENDING_RESULT_OUTBOX_NS: &str = "outbox";
+
+struct GitPendingTokenReplayPlan {
+    id: String,
+    verb: String,
+    body: Value,
+    calls: usize,
+    results: serde_json::Map<String, Value>,
+    persisted: bool,
+}
+
+fn git_async_plan_new(verb: &str, body: &Value) -> GitPendingTokenReplayPlan {
+    thread_local! {
+        static PLAN_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    let seq = PLAN_SEQ.with(|c| { let n = c.get(); c.set(n + 1); n });
+    let now = unsafe { host_now_ms() };
+    GitPendingTokenReplayPlan {
+        id: format!("gitplan-{}-{}", now, seq),
+        verb: verb.to_string(),
+        body: body.clone(),
+        calls: 0,
+        results: serde_json::Map::new(),
+        persisted: false,
+    }
+}
+
+fn git_async_plan_load(id: &str) -> Option<GitPendingTokenReplayPlan> {
+    let raw = super::host_abi::host_kv_read(GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS, id)?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    Some(GitPendingTokenReplayPlan {
+        id: id.to_string(),
+        verb: v.get("verb")?.as_str()?.to_string(),
+        body: v.get("body").cloned().unwrap_or(json!({})),
+        calls: 0,
+        results: v.get("results").and_then(|x| x.as_object()).cloned().unwrap_or_default(),
+        persisted: true,
+    })
+}
+
+fn git_async_kv_put(ns: &str, key: &str, val: &str) {
+    unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32); }
+}
+
+fn git_async_kv_delete(ns: &str, key: &str) {
+    unsafe { host_kv_delete(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32); }
+}
+
+fn git_async_plan_persist(plan: &GitPendingTokenReplayPlan) {
+    let s = json!({
+        "verb": plan.verb,
+        "body": plan.body,
+        "results": plan.results,
+    }).to_string();
+    git_async_kv_put(GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS, &plan.id, &s);
+}
+
+fn git_async_plan_forget(plan: &GitPendingTokenReplayPlan) {
+    if plan.persisted { git_async_kv_delete(GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS, &plan.id); }
+}
+
+fn git_async_pending_envelope(verb: &str, token: &str, plan: &str) -> u64 {
+    err_json(verb, json!({
+        "error": "async git host parked this op; dispatch git_poll {token} until a non-pending envelope comes back -- that envelope IS this verb's terminal result",
+        "pending": true,
+        "token": token,
+        "plan": plan,
+        "next_dispatch_hint": "git_poll",
+    }))
+}
+
+fn git_step_replayed_by_call_order(plan: &mut GitPendingTokenReplayPlan, argv: &[&str], cwd: Option<&str>) -> Result<Value, u64> {
+    let idx = plan.calls;
+    plan.calls += 1;
+    if let Some(v) = plan.results.get(&idx.to_string()) {
+        return Ok(v.clone());
+    }
+    let r = super::host_abi::git_call_argv_async(argv, cwd);
+    if let Some(token) = super::host_abi::git_pending_token(&r) {
+        git_async_plan_persist(plan);
+        git_async_kv_put(GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS, &format!("tok:{}", token), &plan.id);
+        return Err(git_async_pending_envelope(&plan.verb, &token, &plan.id));
+    }
+    plan.results.insert(idx.to_string(), r.clone());
+    Ok(r)
+}
+
+fn git_async_entry(verb: &str, body: &Value, run: impl FnOnce(&Value, &mut GitPendingTokenReplayPlan) -> Result<u64, u64>) -> u64 {
+    let mut plan = body.get("_plan").and_then(|x| x.as_str()).and_then(git_async_plan_load)
+        .unwrap_or_else(|| git_async_plan_new(verb, body));
+    match run(body, &mut plan) {
+        Ok(packed) => { git_async_plan_forget(&plan); packed }
+        Err(parked) => parked,
+    }
+}
+
+fn git_async_reenter(verb: &str, body: &Value) -> u64 {
+    match verb {
+        "git_status" => git_status(body),
+        "git_add" => git_add(body),
+        "git_commit" => git_commit(body),
+        "git_log" => git_log(body),
+        "git_diff" => git_diff(body),
+        _ => err("git_poll", "parked plan names a verb with no async-resume support"),
+    }
+}
+
+fn git_poll(body: &Value) -> u64 {
+    let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
+    if token.is_empty() { return err("git_poll", "token required"); }
+    let raw = super::host_abi::host_kv_read(GIT_PENDING_RESULT_OUTBOX_NS, token);
+    let Some(raw) = raw else {
+        return err_json("git_poll", json!({
+            "error": "no result parked under this token yet -- the async host is still driving the op; poll again",
+            "pending": true,
+            "token": token,
+            "next_dispatch_hint": "git_poll",
+        }));
+    };
+    git_async_kv_delete(GIT_PENDING_RESULT_OUTBOX_NS, token);
+    let result: Value = serde_json::from_str(&raw)
+        .unwrap_or(json!({ "stdout": raw, "stderr": "", "exit_code": 0 }));
+    let mapping_key = format!("tok:{}", token);
+    let Some(plan_id) = super::host_abi::host_kv_read(GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS, &mapping_key) else {
+        return ok("git_poll", json!({ "token": token, "result": result }));
+    };
+    git_async_kv_delete(GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS, &mapping_key);
+    let Some(mut plan) = git_async_plan_load(&plan_id) else {
+        return err("git_poll", "plan state missing for parked token -- cannot resume the parked verb");
+    };
+    let parked_idx = plan.results.len();
+    plan.results.insert(parked_idx.to_string(), result);
+    git_async_plan_persist(&plan);
+    let mut resumed = plan.body.clone();
+    if let Some(m) = resumed.as_object_mut() { m.insert("_plan".to_string(), json!(plan.id)); }
+    git_async_reenter(&plan.verb, &resumed)
+}
+
+fn run_git_checked(argv: &[&str], cwd: Option<&str>, verb: &str, fallback: &str) -> Result<Value, u64> {
+    let r = git_call_argv(argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 0 {
+        return Err(err(verb, r.get("stderr").and_then(|x| x.as_str()).unwrap_or(fallback)));
+    }
+    Ok(r)
+}
+
+fn git_status(body: &Value) -> u64 {
+    git_async_entry("git_status", body, |body, plan| {
+        let cwd = body_cwd(body);
+        let r = git_step_replayed_by_call_order(plan, &["status", "--porcelain"], cwd)?;
+        let porcelain = super::host_abi::porcelain_or_dirty(r);
+        let mut modified: Vec<String> = vec![];
+        let mut untracked: Vec<String> = vec![];
+        let mut deleted: Vec<String> = vec![];
+        let mut staged: Vec<String> = vec![];
+        for line in porcelain.lines() {
+            if line.len() < 3 { continue; }
+            let xy = &line[..2];
+            let path = line[3..].trim().to_string();
+            let x = xy.chars().nth(0).unwrap_or(' ');
+            let y = xy.chars().nth(1).unwrap_or(' ');
+            if xy == "??" { untracked.push(path); continue; }
+            if x != ' ' && x != '?' { staged.push(path.clone()); }
+            if y == 'M' || x == 'M' { modified.push(path.clone()); }
+            if y == 'D' || x == 'D' { deleted.push(path.clone()); }
+        }
+        let dirty = !porcelain.trim().is_empty();
+        Ok(ok("git_status", json!({
+            "dirty": dirty,
+            "modified": modified,
+            "untracked": untracked,
+            "deleted": deleted,
+            "staged": staged,
+        })))
+    })
+}
+
+fn branch_status(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let branch = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
+    if branch.is_empty() {
+        return err("branch_status", "unable to determine branch");
+    }
+    let remote = exec_git_in(cwd, &format!("config --get branch.{}.remote", branch)).trim().to_string();
+    let remote = if remote.is_empty() { "origin".to_string() } else { remote };
+    if !body.get("no_fetch").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let _ = exec_git_in(cwd, &format!("fetch {} {}", remote, branch));
+    }
+    let counts = exec_git_in(cwd, &format!("rev-list --left-right --count {}/{}...HEAD", remote, branch));
+    let counts = counts.trim();
+    let mut behind: u64 = 0;
+    let mut ahead: u64 = 0;
+    let parts: Vec<&str> = counts.split_whitespace().collect();
+    if parts.len() == 2 {
+        behind = parts[0].parse().unwrap_or(0);
+        ahead = parts[1].parse().unwrap_or(0);
+    }
+    ok("branch_status", json!({
+        "branch": branch,
+        "ahead": ahead,
+        "behind": behind,
+        "remote": remote,
+    }))
+}
+
+fn resolve_ref(cwd: Option<&str>, refspec: &str) -> Option<String> {
+    let sha = exec_git_in(cwd, &format!("rev-parse {}", refspec)).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
+fn verify_push_landed(cwd: Option<&str>, branch: &str, local_head: &str, remote_before: Option<&str>) -> Result<(String, bool), String> {
+    let _ = git_call_argv(&["fetch", "origin", branch], cwd);
+    let remote_after = resolve_ref(cwd, &format!("origin/{}", branch));
+    let remote_after = match remote_after {
+        Some(s) => s,
+        None => return Err(format!("could not resolve origin/{} after push -- remote-tracking ref missing", branch)),
+    };
+    if remote_after != local_head {
+        return Err(format!(
+            "push claimed success but origin/{} ({}) does not match local HEAD ({}) after fetch -- remote did not actually advance to this commit",
+            branch, remote_after, local_head
+        ));
+    }
+    let already_current = remote_before.map(|b| b == local_head).unwrap_or(false);
+    Ok((remote_after, already_current))
+}
+
+fn git_push(body: &Value) -> u64 {
+    let repo = body_cwd(body).map(String::from);
+    let explicit_branch = body.get("branch").and_then(|v| v.as_str()).map(String::from);
+    let current_branch = exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD").trim().to_string();
+    let branch = explicit_branch.clone().unwrap_or_else(|| {
+        if current_branch == "HEAD" { "main".to_string() } else { current_branch.clone() }
+    });
+    if branch.is_empty() {
+        return err("git_push", "unable to determine branch");
+    }
+    if explicit_branch.is_none() && current_branch != "main" && current_branch != "HEAD" {
+        log_deviation_push("push-non-main-branch", &current_branch);
+        return pack(json!({
+            "ok": false,
+            "verb": "git_push",
+            "gate_denied": true,
+            "repo": repo,
+            "branch": current_branch,
+            "reason": format!(
+                "current checkout is on branch '{}', not 'main' -- project rule is direct-push to main always, never a branch. This is likely a worktree checked out on a non-main ref. Pass explicit {{\"branch\":\"main\"}} to push to main from this worktree (git_push pushes HEAD to that ref), or {{\"branch\":\"{}\"}} if a non-main push is genuinely intended.",
+                current_branch, current_branch
+            ),
+            "next_dispatch": "instruction",
+            "next_dispatch_hint": "instruction",
+            "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
+        }).to_string());
+    }
+    let porcelain = git_porcelain_in(repo.as_deref());
+    if !porcelain.trim().is_empty() {
+        log_deviation_push("push-dirty", &branch);
+        let porcelain_preview: String = porcelain.lines().take(8).collect::<Vec<_>>().join("\n");
+        let more = if porcelain.lines().count() > 8 { format!("\n... +{} more", porcelain.lines().count() - 8) } else { String::new() };
+        return pack(json!({
+            "ok": false,
+            "verb": "git_push",
+            "gate_denied": true,
+            "repo": repo,
+            "branch": branch,
+            "porcelain": porcelain_preview.clone() + &more,
+            "reason": format!(
+                "worktree dirty in {} -- commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice. Porcelain:\n{}{}",
+                repo.as_deref().unwrap_or("cwd"), branch, porcelain_preview, more
+            ),
+            "next_dispatch": "instruction",
+            "next_dispatch_hint": "instruction",
+            "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
+            "next_action_hint": "Read porcelain field, decide stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. Do NOT retry git_push with the same dirty tree -- the gate will deny again.",
+        }).to_string());
+    }
+    let local_head_before = exec_git_in(repo.as_deref(), "rev-parse HEAD").trim().to_string();
+    if local_head_before.is_empty() {
+        return err("git_push", "could not resolve local HEAD before push -- refusing to proceed without a known starting point");
+    }
+    let _ = git_call_argv(&["fetch", "origin", &branch], repo.as_deref());
+    let remote_before = resolve_ref(repo.as_deref(), &format!("origin/{}", branch));
+    let (mut push_out, mut push_succeeded) = exec_git_push_in(repo.as_deref(), &branch);
+    let mut attempts = 0u32;
+    let mut rebased = false;
+    while !push_succeeded && attempts < 3 {
+        attempts += 1;
+        let rebase_out = exec_git_in(repo.as_deref(), &format!("pull --rebase origin {}", branch));
+        if rebase_failed(&rebase_out) || !git_porcelain_in(repo.as_deref()).trim().is_empty() {
+            let _ = exec_git_in(repo.as_deref(), "rebase --abort");
+            log_deviation_push("push-rebase-conflict", &branch);
+            return pack(json!({
+                "ok": false,
+                "verb": "git_push",
+                "gate_denied": true,
+                "repo": repo,
+                "branch": branch,
+                "reason": format!(
+                    "push rejected (remote moved); pull --rebase origin {} conflicted and was aborted -- worktree could not be cleanly replayed onto origin. Resolve manually. Rebase output:\n{}",
+                    branch, rebase_out
+                ),
+                "next_dispatch": "instruction",
+            }).to_string());
+        }
+        rebased = true;
+        let (out, ok_now) = exec_git_push_in(repo.as_deref(), &branch);
+        push_out = out;
+        push_succeeded = ok_now;
+    }
+    if !push_succeeded {
+        log_deviation_push("push-remote-outpaces", &branch);
+        return pack(json!({
+            "ok": false,
+            "verb": "git_push",
+            "gate_denied": true,
+            "repo": repo,
+            "branch": branch,
+            "reason": format!(
+                "push to {} failed (non-zero exit_code) after {} rebase-retries -- remote is moving faster than the push can land, or a real error occurred. Re-dispatch git_push after the remote settles. Last output:\n{}",
+                branch, attempts, push_out
+            ),
+            "next_dispatch": "instruction",
+        }).to_string());
+    }
+    let local_head_after = exec_git_in(repo.as_deref(), "rev-parse HEAD").trim().to_string();
+    match verify_push_landed(repo.as_deref(), &branch, &local_head_after, remote_before.as_deref()) {
+        Err(reason) => {
+            log_deviation_push("push-claimed-success-unverified", &branch);
+            pack(json!({
+                "ok": false,
+                "verb": "git_push",
+                "verification_failed": true,
+                "repo": repo,
+                "branch": branch,
+                "local_head": local_head_after,
+                "remote_before": remote_before,
+                "subprocess_output": push_out,
+                "reason": reason,
+                "next_dispatch": "instruction",
+            }).to_string())
+        }
+        Ok((remote_sha, already_current)) => ok("git_push", json!({
+            "branch": branch,
+            "repo": repo,
+            "output": push_out,
+            "rebased": rebased,
+            "rebase_retries": attempts,
+            "remote_advanced": !already_current,
+            "already_current": already_current,
+            "remote_sha": remote_sha,
+            "local_head": local_head_after,
+        })),
+    }
+}
+
+fn git_add(body: &Value) -> u64 {
+    git_async_entry("git_add", body, |body, plan| {
+        let repo = body.get("repo").and_then(|v| v.as_str());
+        let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
+        let paths: Vec<String> = body.get("paths")
+            .or_else(|| body.get("files"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let mut argv: Vec<&str> = vec!["add"];
+        if paths.is_empty() {
+            argv.push("-A");
+        } else {
+            for p in &paths { argv.push(p.as_str()); }
+        }
+        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 {
+            return Ok(err("git_add", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("git add failed")));
+        }
+        Ok(ok("git_add", json!({ "staged": if paths.is_empty() { vec!["-A".to_string()] } else { paths } })))
+    })
+}
+
+fn bundle_prd_commit_comments(cwd: Option<&str>, message: &str) -> String {
+    let notes = crate::orchestrator::prd::drain_pending_commit_comments(cwd);
+    if notes.is_empty() {
+        return message.to_string();
+    }
+    let mut out = message.to_string();
+    out.push_str("\n\nResolved PRD rows:\n");
+    for (id, comment) in &notes {
+        out.push_str(&format!("- {}: {}\n", id, comment));
+    }
+    out
+}
+
+fn git_commit(body: &Value) -> u64 {
+    git_async_entry("git_commit", body, |body, plan| {
+        let repo = body.get("repo").and_then(|v| v.as_str());
+        let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
+        let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if message.is_empty() {
+            return Ok(err("git_commit", "message required"));
+        }
+        let allow_empty = body.get("allow_empty").and_then(|v| v.as_bool()).unwrap_or(false);
+        let status_r = git_step_replayed_by_call_order(plan, &["status", "--porcelain"], cwd)?;
+        let porcelain = super::host_abi::porcelain_or_dirty(status_r);
+        if porcelain.trim().is_empty() && !allow_empty {
+            return Ok(ok("git_commit", json!({ "nothing_to_commit": true })));
+        }
+        let head_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
+        let head_before = head_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let skip_blanket_add_because_caller_already_staged_via_git_add = body.get("no_add").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !skip_blanket_add_because_caller_already_staged_via_git_add {
+            let _ = git_step_replayed_by_call_order(plan, &["add", "-A"], cwd)?;
+        }
+        let bundled_message = bundle_prd_commit_comments(cwd, message);
+        let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
+        if allow_empty { argv.push("--allow-empty"); }
+        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 {
+            let serr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+            let sout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+            if sout.contains("nothing to commit") || serr.contains("nothing to commit") {
+                return Ok(ok("git_commit", json!({ "nothing_to_commit": true })));
+            }
+            return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
+        }
+        let after_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
+        let head_after = after_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        if head_after.is_empty() || head_after == head_before {
+            return Ok(err("git_commit", "commit reported success (exit 0) but HEAD did not move -- refusing to claim committed:true without a real new sha"));
+        }
+        let sha = head_after[..head_after.len().min(10)].to_string();
+        let summary = message.lines().next().unwrap_or("").to_string();
+        Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary })))
+    })
+}
+
+fn check_ci_status_and_write_validated_marker_if_green(repo_cwd: Option<&str>, head_sha: &str) -> (Value, bool) {
+    let ci_check = ci_status_value(&json!({ "cwd": repo_cwd, "sha": head_sha }));
+    match &ci_check {
+        Ok(v) => {
+            let status = v.get("data").and_then(|d| d.get("status")).and_then(|s| s.as_str()).unwrap_or("unknown");
+            let written = if (status == "success" || status == "no_applicable_workflow") && !head_sha.is_empty() {
+                let marker = json!({ "head_sha": head_sha, "reason": status }).to_string();
+                crate::pkfs::write(".gm/exec-spool/.ci-validated", &marker)
+            } else {
+                false
+            };
+            (v.get("data").cloned().unwrap_or(Value::Null), written)
+        }
+        Err(e) => (e.clone(), false),
+    }
+}
+
+fn git_finalize(body: &Value) -> u64 {
+    let repo = body_cwd(body).map(String::from);
+    let cwd = repo.clone();
+    let cwd_ref = cwd.as_deref();
+    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let mut steps: Vec<Value> = vec![];
+    let mut committed = false;
+    let mut sha = String::new();
+    let mut summary = String::new();
+    let head_before_any_commit = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
+
+    let dirty = !git_porcelain_in(cwd_ref).trim().is_empty();
+    if dirty {
+        if message.is_empty() {
+            return err("git_finalize", "worktree dirty but no commit message provided -- pass {message}");
+        }
+        let _ = git_call_argv(&["add", "-A"], cwd_ref);
+        let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
+        let cr = git_call_argv(&["commit", "-m", bundled_message.as_str()], cwd_ref);
+        let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if ccode != 0 {
+            let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+            let sout = cr.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+            if !(sout.contains("nothing to commit") || serr.contains("nothing to commit")) {
+                return err("git_finalize", &format!("commit failed: {}", if serr.is_empty() { sout } else { serr }));
+            }
+        } else {
+            let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
+            if head_after.is_empty() || head_after == head_before_any_commit {
+                return err("git_finalize", "commit reported success (exit 0) but HEAD did not move -- refusing to claim committed:true without a real new sha");
+            }
+            committed = true;
+            sha = head_after[..head_after.len().min(10)].to_string();
+            summary = message.lines().next().unwrap_or("").to_string();
+            emit_event("git.commit", json!({ "sha": sha, "summary": summary, "repo": repo }));
+            steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
+        }
+    } else {
+        let pending_notes = crate::orchestrator::prd::peek_pending_commit_comments(cwd_ref);
+        if !pending_notes.is_empty() {
+            let flush_message = if message.is_empty() { "chore: flush resolved PRD notes".to_string() } else { message.clone() };
+            let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
+            let _ = git_call_argv(&["add", "-A"], cwd_ref);
+            let cr = git_call_argv(&["commit", "--allow-empty", "-m", bundled_message.as_str()], cwd_ref);
+            let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+            let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
+            if ccode == 0 && !head_after.is_empty() && head_after != head_before_any_commit {
+                committed = true;
+                sha = head_after[..head_after.len().min(10)].to_string();
+                summary = bundled_message.lines().next().unwrap_or("").to_string();
+                steps.push(json!({ "step": "commit", "sha": sha, "summary": summary, "flushed_pending_prd_notes": true }));
+            }
+        }
+    }
+
+    if !committed {
+        let ahead_result = git_call("rev-list --count @{u}..HEAD", cwd_ref);
+        let ahead_code = ahead_result.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        let ahead_stderr = ahead_result.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+        let no_upstream = ahead_code != 0 && (ahead_stderr.contains("no upstream") || ahead_stderr.contains("unknown revision") || ahead_stderr.contains("@{u}"));
+        let ahead_n: u64 = ahead_result.get("stdout").and_then(|x| x.as_str()).unwrap_or("0").trim().parse().unwrap_or(0);
+        if !dirty && !no_upstream && ahead_n == 0 {
+            return ok("git_finalize", json!({
+                "nothing_to_commit": true,
+                "committed": false,
+                "pushed": false,
+                "steps": [{"step": "commit", "nothing_to_commit": true}],
+            }));
+        }
+        sha = head_before_any_commit[..head_before_any_commit.len().min(10)].to_string();
+        summary = exec_git_in(cwd_ref, "log -1 --pretty=%s").trim().to_string();
+        steps.push(json!({
+            "step": "commit",
+            "nothing_new_to_commit": true,
+            "already_ahead_of_upstream": true,
+            "sha": sha,
+            "summary": summary,
+            "no_upstream": no_upstream,
+        }));
+    }
+
+    let mut leftover = git_porcelain_in(cwd_ref);
+    let dirty_only_from_concurrent_writer_on_just_committed_files =
+        committed && !leftover.trim().is_empty() && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref));
+    if dirty_only_from_concurrent_writer_on_just_committed_files {
+        leftover = git_porcelain_in(cwd_ref);
+        if !leftover.trim().is_empty() && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref)) {
+            let _ = git_call_argv(&["add", "-A"], cwd_ref);
+            let amend = git_call_argv(&["commit", "--amend", "--no-edit"], cwd_ref);
+            if amend.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0 {
+                let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
+                sha = head_after[..head_after.len().min(10)].to_string();
+                steps.push(json!({
+                    "step": "absorb_concurrent_write",
+                    "sha": sha,
+                    "note": "a file this dispatch committed was rewritten by a concurrent writer before the porcelain probe; amended rather than refusing the push",
+                }));
+            }
+            leftover = git_porcelain_in(cwd_ref);
+        }
+    }
+    if !leftover.trim().is_empty() {
+        return err("git_finalize", &format!("worktree still dirty after commit (untriaged residual) -- refusing push. Porcelain:\n{}", leftover.lines().take(8).collect::<Vec<_>>().join("\n")));
+    }
+
+    let push_resp_packed = git_push(body);
+    let push_resp = unpack_to_value(push_resp_packed);
+    let pushed = push_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !pushed {
+        return pack(json!({
+            "ok": false,
+            "verb": "git_finalize",
+            "committed": committed,
+            "pushed": false,
+            "sha": sha,
+            "steps": steps,
+            "push_result": push_resp,
+            "reason": "commit landed (or nothing to commit) but push was refused -- read push_result.reason",
+            "next_dispatch": "instruction",
+        }).to_string());
+    }
+    emit_event("git.push", json!({ "repo": repo, "sha": sha }));
+    let push_data = push_resp.get("data");
+    let branch = push_data.and_then(|d| d.get("branch")).and_then(|b| b.as_str()).unwrap_or("").to_string();
+    let remote_advanced = push_data.and_then(|d| d.get("remote_advanced")).and_then(|b| b.as_bool()).unwrap_or(false);
+    let already_current = push_data.and_then(|d| d.get("already_current")).and_then(|b| b.as_bool()).unwrap_or(false);
+    let remote_sha = push_data.and_then(|d| d.get("remote_sha")).and_then(|s| s.as_str()).unwrap_or("").to_string();
+    steps.push(json!({ "step": "push", "branch": branch, "remote_advanced": remote_advanced, "already_current": already_current }));
+
+    let head_sha = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
+    let (ci_status_summary, ci_validated_written) = check_ci_status_and_write_validated_marker_if_green(repo.as_deref(), &head_sha);
+    steps.push(json!({ "step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written }));
+
+    ok("git_finalize", json!({
+        "committed": committed,
+        "pushed": true,
+        "sha": sha,
+        "summary": summary,
+        "branch": branch,
+        "remote_advanced": remote_advanced,
+        "already_current": already_current,
+        "remote_sha": remote_sha,
+        "steps": steps,
+        "ci_validated_marker_written": ci_validated_written,
+        "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
+    }))
+}
+
+fn git_log(body: &Value) -> u64 {
+    git_async_entry("git_log", body, |body, plan| {
+        let cwd = body_cwd(body);
+        let count = body.get("limit").and_then(|v| v.as_u64())
+            .or_else(|| body.get("count").and_then(|v| v.as_u64()))
+            .unwrap_or(10);
+        let nflag = format!("-{}", count);
+        let range = body.get("range").and_then(|v| v.as_str())
+            .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+            .unwrap_or("").trim();
+        let mut argv: Vec<&str> = vec!["log", &nflag, "--oneline", "--no-color"];
+        if !range.is_empty() { argv.push(range); }
+        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 {
+            let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+            return Ok(err_json("git_log", json!({
+                "error": stderr,
+                "range": range,
+                "hint": "git rejected the range; check both endpoints exist locally (a remote-tracking ref may need git_fetch first)"
+            })));
+        }
+        let out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+        let commits: Vec<Value> = out.lines().filter(|l| !l.is_empty()).map(|l| {
+            let mut it = l.splitn(2, ' ');
+            let sha = it.next().unwrap_or("").to_string();
+            let subject = it.next().unwrap_or("").to_string();
+            json!({ "sha": sha, "subject": subject })
+        }).collect();
+        Ok(ok("git_log", json!({ "commits": commits })))
+    })
+}
+
+fn git_diff(body: &Value) -> u64 {
+    git_async_entry("git_diff", body, |body, plan| {
+        let cwd = body_cwd(body);
+        let staged = body.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
+        let path = body.get("path").and_then(|v| v.as_str());
+        let range = body.get("range").and_then(|v| v.as_str())
+            .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+            .unwrap_or("").trim();
+        let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut argv: Vec<&str> = vec!["diff", "--no-color"];
+        if staged { argv.push("--staged"); }
+        if stat { argv.push("--stat"); }
+        if !range.is_empty() { argv.push(range); }
+        if let Some(p) = path { argv.push("--"); argv.push(p); }
+        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 {
+            let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+            return Ok(err_json("git_diff", json!({
+                "error": stderr,
+                "range": range,
+                "hint": "git rejected the range; an empty diff must never be inferred from a rejected argument -- check both endpoints exist locally"
+            })));
+        }
+        let mut diff = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let truncated = diff.len() > 60000;
+        if truncated { diff.truncate(60000); }
+        Ok(ok("git_diff", json!({ "diff": diff, "truncated": truncated, "range": range })))
+    })
+}
+
+fn git_show(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
+    let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut argv: Vec<&str> = vec!["show", "--no-color"];
+    if stat { argv.push("--stat"); }
+    argv.push(refspec);
+    let r = git_call_argv(&argv, cwd);
+    let mut out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if out.len() > 60000 { out.truncate(60000); }
+    ok("git_show", json!({ "output": out }))
+}
+
+fn git_fetch(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let remote = body.get("remote").and_then(|v| v.as_str()).unwrap_or("origin");
+    let r = git_call_argv(&["fetch", remote], cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let out = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 { return err("git_fetch", &out); }
+    ok("git_fetch", json!({ "remote": remote, "output": out }))
+}
+
+fn ci_status_resolve_repo_preferring_unambiguous_github_repo_field(body: &Value, cwd: Option<&str>) -> Result<String, u64> {
+    if let Some(explicit) = body.get("github_repo").and_then(|v| v.as_str())
+        .or_else(|| body.get("repo").and_then(|v| v.as_str()))
+    {
+        let explicit = explicit.trim();
+        if !explicit.is_empty() {
+            return Ok(explicit.to_string());
+        }
+    }
+    let url = exec_git_in(cwd, "config --get remote.origin.url").trim().to_string();
+    if url.is_empty() {
+        return Err(err("ci-status", "github_repo required (pass {github_repo:\"owner/name\"} or run inside a checkout with an origin remote) -- github_repo is preferred over the also-accepted repo field, which means a filesystem cwd path on git_finalize/git_push and every other git_* verb"));
+    }
+    let trimmed = url.trim_end_matches(".git");
+    let owner_name = trimmed
+        .rsplit_once('/')
+        .and_then(|(rest, name)| rest.rsplit_once(['/', ':']).map(|(_, owner)| format!("{}/{}", owner, name)));
+    match owner_name {
+        Some(s) if s.contains('/') => Ok(s),
+        _ => Err(err("ci-status", &format!("could not parse owner/name from origin remote url: {}", url))),
+    }
+}
+
+fn ci_status_resolve_sha(body: &Value, cwd: Option<&str>) -> Result<String, u64> {
+    let requested = body.get("sha").and_then(|v| v.as_str())
+        .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+        .unwrap_or("latest").trim();
+    if requested.is_empty() || requested.eq_ignore_ascii_case("latest") {
+        let sha = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+        if sha.is_empty() {
+            return Err(err("ci-status", "sha not provided and unable to resolve local HEAD"));
+        }
+        return Ok(sha);
+    }
+    Ok(requested.to_string())
+}
+
+fn ci_status_token() -> Option<String> {
+    if let Some(s) = unpack_to_string(unsafe { host_env_get(b"GITHUB_TOKEN".as_ptr(), 12) }) {
+        if !s.is_empty() { return Some(s); }
+    }
+    if let Some(s) = unpack_to_string(unsafe { host_env_get(b"GH_TOKEN".as_ptr(), 8) }) {
+        if !s.is_empty() { return Some(s); }
+    }
+    None
+}
+
+fn parse_github_fixed_width_utc_timestamp_to_epoch_secs(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 20 || b[19] != b'Z' { return None; }
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    let month: i64 = s.get(5..7)?.parse().ok()?;
+    let day: i64 = s.get(8..10)?.parse().ok()?;
+    let hour: i64 = s.get(11..13)?.parse().ok()?;
+    let min: i64 = s.get(14..16)?.parse().ok()?;
+    let sec: i64 = s.get(17..19)?.parse().ok()?;
+    let is_leap = |y: i64| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days_in_month = |y: i64, m: i64| -> i64 {
+        match m {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 => if is_leap(y) { 29 } else { 28 },
+            _ => 0,
+        }
+    };
+    let mut days: i64 = 0;
+    if year >= 1970 {
+        for y in 1970..year { days += if is_leap(y) { 366 } else { 365 }; }
+    } else {
+        for y in year..1970 { days -= if is_leap(y) { 366 } else { 365 }; }
+    }
+    for m in 1..month { days += days_in_month(year, m); }
+    days += day - 1;
+    Some(days * 86400 + hour * 3600 + min * 60 + sec)
+}
+
+fn ci_status_conclusion_to_status(conclusion: &str, gh_status: &str) -> &'static str {
+    if gh_status != "completed" {
+        return "pending";
+    }
+    match conclusion {
+        "success" => "success",
+        "failure" | "timed_out" | "cancelled" | "action_required" | "startup_failure" => "failure",
+        _ => "unknown",
+    }
+}
+
+fn ci_status_value(body: &Value) -> Result<Value, Value> {
+    let cwd = body_cwd(body);
+    let repo = ci_status_resolve_repo_preferring_unambiguous_github_repo_field(body, cwd).map_err(|packed| unpack_to_value(packed))?;
+    let sha = ci_status_resolve_sha(body, cwd).map_err(|packed| unpack_to_value(packed))?;
+    let url = format!("https://api.github.com/repos/{}/actions/runs?head_sha={}&per_page=20", repo, sha);
+    if let Err(reason) = crate::config_path::validate_fetch_url(&url) {
+        return Err(json!({ "ok": false, "verb": "ci-status", "error": reason, "error_code": ERR_CODE_INVALID_ARGS }));
+    }
+    let token = body.get("token").and_then(|v| v.as_str()).map(String::from).or_else(ci_status_token);
+    let mut headers = json!({
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "plugkit-ci-status",
+    });
+    if let Some(t) = &token {
+        headers["Authorization"] = json!(format!("Bearer {}", t));
+    }
+    let opts = json!({ "timeoutMs": FETCH_DEFAULT_TIMEOUT_MS, "headers": headers }).to_string();
+    let packed = unsafe { host_fetch(url.as_ptr(), url.len() as u32, opts.as_ptr(), opts.len() as u32) };
+    let resp = unpack_to_value(packed);
+    if resp.is_null() {
+        return Err(json!({ "ok": false, "verb": "ci-status", "error": "host_fetch empty" }));
+    }
+    let body_text = resp.get("body").and_then(|v| v.as_str())
+        .or_else(|| resp.get("text").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let status_code = resp.get("status").and_then(|v| v.as_i64())
+        .or_else(|| resp.get("statusCode").and_then(|v| v.as_i64()))
+        .unwrap_or(0);
+    if status_code != 200 {
+        return Err(json!({
+            "ok": false, "verb": "ci-status",
+            "error": format!("GitHub Actions API returned HTTP {}", status_code),
+            "repo": repo, "sha": sha, "response": body_text,
+        }));
+    }
+    let parsed: Value = serde_json::from_str(body_text).unwrap_or(Value::Null);
+    let runs = parsed.get("workflow_runs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if runs.is_empty() {
+        const NO_APPLICABLE_WORKFLOW_GRACE_SECS: i64 = 120;
+        let commit_epoch_secs = crate::wasm_dispatch::git_call(&format!("log -1 --format=%ct {}", sha), cwd)
+            .get("stdout").and_then(|v| v.as_str())
+            .and_then(|s| s.trim().parse::<i64>().ok());
+        let now_secs = unsafe { host_now_ms() } as i64 / 1000;
+        let commit_age_secs = commit_epoch_secs.map(|ts| now_secs.saturating_sub(ts));
+        if commit_age_secs.is_some_and(|age| age >= NO_APPLICABLE_WORKFLOW_GRACE_SECS) {
+            return Ok(json!({
+                "ok": true, "verb": "ci-status", "data": {
+                    "status": "no_applicable_workflow", "repo": repo, "sha": sha,
+                    "failed_jobs": [], "run_url": Value::Null,
+                    "reason": format!("zero workflow runs appeared for this sha after {}s -- a genuinely triggered workflow starts within seconds of the push, so this sha's changed paths did not match any workflow trigger (e.g. paths-ignore). Treated as a legitimate pass-through, not a pending/failed run.", commit_age_secs.unwrap()),
+                },
+            }));
+        }
+        return Ok(json!({
+            "ok": true, "verb": "ci-status", "data": {
+                "status": "unknown", "repo": repo, "sha": sha,
+                "failed_jobs": [], "run_url": Value::Null,
+                "reason": "no workflow runs found for this sha yet",
+            },
+        }));
+    }
+    const STALE_IN_PROGRESS_RUN_GRACE_SECS: i64 = 900;
+    let default_ignored_workflows_orthogonal_to_code_under_test = ["Deploy GH Pages"];
+    let ignored_names: Vec<String> = body.get("ignore_workflows").and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_else(|| default_ignored_workflows_orthogonal_to_code_under_test.iter().map(|s| s.to_string()).collect());
+    let now_secs = unsafe { host_now_ms() } as i64 / 1000;
+    let mut overall = "success";
+    let mut failed_jobs: Vec<Value> = vec![];
+    let mut run_url: Option<String> = None;
+    let mut any_pending = false;
+    let mut any_failure = false;
+    let mut counted_runs = 0usize;
+    for run in &runs {
+        let run_name = run.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if ignored_names.iter().any(|n| n == run_name) { continue; }
+        counted_runs += 1;
+        let gh_status = run.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let conclusion = run.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
+        let mut per_run_status = ci_status_conclusion_to_status(conclusion, gh_status);
+        let html_url = run.get("html_url").and_then(|v| v.as_str()).map(String::from);
+        if run_url.is_none() { run_url = html_url.clone(); }
+        let mut stale = false;
+        if per_run_status == "pending" {
+            let updated_epoch = run.get("updated_at").and_then(|v| v.as_str())
+                .and_then(|s| parse_github_fixed_width_utc_timestamp_to_epoch_secs(s));
+            if let Some(updated) = updated_epoch {
+                if now_secs.saturating_sub(updated) >= STALE_IN_PROGRESS_RUN_GRACE_SECS {
+                    per_run_status = "failure";
+                    stale = true;
+                }
+            }
+        }
+        if per_run_status == "pending" { any_pending = true; }
+        if per_run_status == "failure" {
+            any_failure = true;
+            failed_jobs.push(json!({
+                "name": run.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                "conclusion": if stale { "stale_in_progress" } else { conclusion },
+                "run_url": html_url,
+            }));
+        }
+    }
+    if any_failure {
+        overall = "failure";
+    } else if any_pending {
+        overall = "pending";
+    }
+    Ok(json!({
+        "ok": true, "verb": "ci-status", "data": {
+            "status": overall, "repo": repo, "sha": sha,
+            "failed_jobs": failed_jobs, "run_url": run_url, "run_count": counted_runs,
+        },
+    }))
+}
+
+fn ci_status(body: &Value) -> u64 {
+    match ci_status_value(body) {
+        Ok(v) => pack(v.to_string()),
+        Err(v) => pack(v.to_string()),
+    }
+}
+
+fn git_branch(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let current = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
+    let listing = exec_git_in(cwd, "branch --no-color");
+    let branches: Vec<String> = listing.lines()
+        .map(|l| l.trim_start_matches('*').trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    ok("git_branch", json!({ "current": current, "branches": branches }))
+}
+
+fn git_checkout(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if refspec.is_empty() { return err("git_checkout", "ref required"); }
+    let create = body.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
+    let argv: Vec<&str> = if create { vec!["checkout", "-b", refspec] } else { vec!["checkout", refspec] };
+    if let Err(e) = run_git_checked(&argv, cwd, "git_checkout", "checkout failed") { return e; }
+    ok("git_checkout", json!({ "checked_out": refspec, "created": create }))
+}
+
+fn git_merge(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if refspec.is_empty() { return err("git_merge", "ref required"); }
+    let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    let ff_only = body.get("ff_only").and_then(|v| v.as_bool()).unwrap_or(false);
+    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let mut argv: Vec<&str> = vec!["merge", "--no-edit"];
+    if ff_only { argv.push("--ff-only"); }
+    if !message.is_empty() { argv.push("-m"); argv.push(message); }
+    argv.push(refspec);
+    let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let out = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 {
+        let conflicts: Vec<String> = exec_git_in(cwd, "diff --name-only --diff-filter=U")
+            .lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        return err_json("git_merge", json!({
+            "error": out,
+            "conflicted": !conflicts.is_empty(),
+            "conflicts": conflicts,
+            "head": head_before,
+            "hint": "resolve each conflicted path, git_add them, then git_commit; or git_merge_abort to restore the pre-merge HEAD"
+        }));
+    }
+    let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    ok("git_merge", json!({
+        "merged": refspec,
+        "head_before": head_before,
+        "head_after": head_after,
+        "already_up_to_date": head_before == head_after,
+        "fast_forward": out.contains("Fast-forward"),
+        "output": out
+    }))
+}
+
+fn git_merge_abort(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    if let Err(e) = run_git_checked(&["merge", "--abort"], cwd, "git_merge_abort", "merge abort failed") { return e; }
+    ok("git_merge_abort", json!({ "aborted": true, "head": exec_git_in(cwd, "rev-parse HEAD").trim() }))
+}
+
+fn git_branch_delete(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let name = body.get("branch").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if name.is_empty() { return err("git_branch_delete", "branch required"); }
+    let remote = body.get("remote").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    if remote {
+        let remote_name = body.get("remote_name").and_then(|v| v.as_str()).unwrap_or("origin");
+        let r = git_call_argv(&["push", remote_name, "--delete", name], cwd);
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        let out = format!("{}{}",
+            r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+            r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+        if code != 0 { return err("git_branch_delete", &out); }
+        return ok("git_branch_delete", json!({ "deleted": name, "scope": "remote", "remote": remote_name, "output": out }));
+    }
+    let flag = if force { "-D" } else { "-d" };
+    let r = git_call_argv(&["branch", flag, name], cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let out = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 {
+        return err_json("git_branch_delete", json!({
+            "error": out,
+            "unmerged_guard": !force && out.contains("not fully merged"),
+            "hint": "git refused because the branch holds commits reachable from nowhere else; merge it first, or pass force true only if that work is genuinely disposable"
+        }));
+    }
+    ok("git_branch_delete", json!({ "deleted": name, "scope": "local", "forced": force, "output": out }))
+}
+
+fn git_rm(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let paths: Vec<String> = body.get("paths").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if paths.is_empty() { return err("git_rm", "paths required"); }
+    let cached = body.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut argv: Vec<&str> = vec!["rm"];
+    if cached { argv.push("--cached"); }
+    argv.push("-r");
+    for p in &paths { argv.push(p.as_str()); }
+    if let Err(e) = run_git_checked(&argv, cwd, "git_rm", "git rm failed") { return e; }
+    ok("git_rm", json!({ "removed": paths, "cached": cached }))
+}
+
+fn git_revert(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    if let Some(arr) = body.get("paths").and_then(|v| v.as_array()) {
+        let paths: Vec<String> = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        if paths.is_empty() { return err("git_revert", "paths empty"); }
+        let mut argv: Vec<&str> = vec!["checkout", "--"];
+        for p in &paths { argv.push(p.as_str()); }
+        if let Err(e) = run_git_checked(&argv, cwd, "git_revert", "discard failed") { return e; }
+        return ok("git_revert", json!({ "discarded": paths }));
+    }
+    if let Some(refspec) = body.get("ref").and_then(|v| v.as_str()) {
+        if let Err(e) = run_git_checked(&["revert", "--no-edit", refspec], cwd, "git_revert", "revert failed") { return e; }
+        return ok("git_revert", json!({ "reverted": refspec }));
+    }
+    err("git_revert", "pass {paths:[...]} to discard working changes or {ref} to revert a commit")
+}
+
+fn git_reset(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
+    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("mixed");
+    let mode_flag = match mode {
+        "soft" => "--soft",
+        "hard" => "--hard",
+        _ => "--mixed",
+    };
+    if let Err(e) = run_git_checked(&["reset", mode_flag, refspec], cwd, "git_reset", "reset failed") { return e; }
+    ok("git_reset", json!({ "reset_to": refspec, "mode": mode }))
+}
+
+fn rebase_failed(out: &str) -> bool {
+    let l = out.to_lowercase();
+    l.contains("conflict") || l.contains("could not apply") || l.contains("error:")
+        || l.contains("needs merge") || l.contains("automatic merge failed")
+}
+
+fn exec_git_in(repo: Option<&str>, args: &str) -> String {
+    let v = git_call(args, repo);
+    v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+fn git_porcelain_in(repo: Option<&str>) -> String {
+    super::host_abi::porcelain_or_dirty(git_call("status --porcelain", repo))
+}
+
+fn files_in_commit(repo: Option<&str>) -> Vec<String> {
+    exec_git_in(repo, "show --name-only --pretty=format: HEAD")
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+fn porcelain_dirty_paths_all_within_committed_set(porcelain: &str, committed: &[String]) -> bool {
+    if committed.is_empty() {
+        return false;
+    }
+    let mut any = false;
+    for line in porcelain.lines() {
+        let path = line.get(3..).unwrap_or("").trim().trim_matches('"');
+        if path.is_empty() {
+            continue;
+        }
+        any = true;
+        let normalized = path.replace('\\', "/");
+        if !committed.iter().any(|c| c.replace('\\', "/") == normalized) {
+            return false;
+        }
+    }
+    any
+}
+
+fn exec_git_push_in(repo: Option<&str>, branch: &str) -> (String, bool) {
+    let v = git_call(&format!("push origin HEAD:{}", branch), repo);
+    let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+    let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1);
+    (format!("{}{}", stdout, stderr), exit_code == 0)
+}
+
+fn filter(body: &Value, raw: &str) -> u64 {
+    let (data, err_msg) = crate::filter::dispatch(body, raw);
+    match err_msg {
+        Some(e) => err("filter", &e),
+        None => ok("filter", data),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
+    install_panic_hook();
+    let dispatched_verb = read_str(verb_ptr as *const u8, verb_len);
+    #[cfg(target_arch = "wasm32")]
+    let panic_start_ms = unsafe { host_now_ms() };
+    let result = std::panic::catch_unwind(|| {
+        dispatch_verb_inner(verb_ptr, verb_len, body_ptr, body_len)
+    });
+    match result {
+        Ok(packed) => packed,
+        Err(payload) => {
+            let msg = payload.downcast_ref::<&str>().map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panic during dispatch".to_string());
+            let attributed = if dispatched_verb.is_empty() { "dispatch_verb" } else { dispatched_verb.as_str() };
+            #[cfg(target_arch = "wasm32")]
+            {
+                let ms = unsafe { host_now_ms() }.saturating_sub(panic_start_ms);
+                emit_event("dispatch.end", serde_json::json!({
+                    "verb": attributed,
+                    "ms": ms,
+                    "panicked": true,
+                    "error_code": ERR_CODE_PANIC,
+                }));
+            }
+            err_json(attributed, json!({
+                "error": msg,
+                "error_code": ERR_CODE_PANIC,
+                "panicked": true,
+                "boundary": "dispatch_verb catch_unwind",
+            }))
+        }
+    }
+}
+
+fn request_fingerprint(verb: &str, body_s: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    verb.hash(&mut hasher);
+    body_s.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn verb_body_must_be_json(verb: &str) -> bool {
+    !matches!(
+        verb,
+        "browser" | "cdp"
+            | "exec_js" | "nodejs" | "javascript" | "node" | "js"
+            | "python" | "py"
+            | "bash" | "sh" | "shell" | "zsh"
+            | "powershell" | "ps1"
+    )
+}
+
+fn stamp_request_identity(mut value: Value, fingerprint: &str, body_parse_failed: bool, dispatch_id: Option<&str>) -> u64 {
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("request_fingerprint".to_string(), json!(fingerprint));
+        if body_parse_failed {
+            obj.insert("body_parse_error".to_string(), json!(true));
+        }
+        if let Some(id) = dispatch_id {
+            obj.insert("dispatch_id".to_string(), json!(id));
+        }
+    }
+    pack(value.to_string())
+}
+
+fn extract_session_id_from_plain_text_body(body_s: &str) -> Option<String> {
+    let trimmed = body_s.trim_start();
+    for prefix in ["sessionId=", "session_id="] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let id = rest.split('\n').next().unwrap_or("").trim();
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+            break;
+        }
+    }
+    None
+}
+
+fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
+    let verb = read_str(verb_ptr as *const u8, verb_len);
+    let body_s = read_str(body_ptr as *const u8, body_len);
+    let fingerprint = request_fingerprint(&verb, &body_s);
+    let body_parse_failed = verb_body_must_be_json(&verb)
+        && !body_s.is_empty()
+        && serde_json::from_str::<Value>(&body_s).is_err();
+    let body: Value = if body_s.is_empty() { Value::Null } else {
+        serde_json::from_str(&body_s).unwrap_or(Value::Null)
+    };
+    let dispatch_session_id = body.get("sessionId").and_then(|v| v.as_str())
+        .or_else(|| body.get("session_id").and_then(|v| v.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| extract_session_id_from_plain_text_body(&body_s));
+    super::events::set_dispatch_session_id(dispatch_session_id);
+    let result_packed = dispatch_gated_verb(&verb, &body, &body_s);
+    super::events::set_dispatch_session_id(None);
+    let result_value = super::host_abi::unpack_to_value(result_packed);
+    #[cfg(target_arch = "wasm32")]
+    let dispatch_id = {
+        let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+        let exit_code = if result_value.get("ok").and_then(|v| v.as_bool()).unwrap_or(true) { 0 } else { 1 };
+        Some(crate::dispatch_ledger::record(cwd, &verb, &fingerprint, exit_code))
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let dispatch_id: Option<String> = None;
+    stamp_request_identity(result_value, &fingerprint, body_parse_failed, dispatch_id.as_deref())
+}
+
+fn callers(body: &Value) -> u64 {
+    let symbol = body.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+    if symbol.is_empty() { return err("callers", "symbol required"); }
+    ok("callers", crate::code_index::callers_of(symbol))
+}
+
+fn callees(body: &Value) -> u64 {
+    let symbol = body.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+    if symbol.is_empty() { return err("callees", "symbol required"); }
+    ok("callees", crate::code_index::callees_of(symbol))
+}
+
+fn impact(body: &Value) -> u64 {
+    let symbol = body.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+    if symbol.is_empty() { return err("impact", "symbol required"); }
+    let max_depth = body.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    ok("impact", crate::code_index::impact_of(symbol, max_depth))
+}
+
+fn reject_if_project_root_unresolvable_before_gm_dir_panics(verb: &str) -> Option<u64> {
+    if crate::orchestrator::project_root_resolvable() {
+        return None;
+    }
+    Some(err_json(verb, json!({
+        "error": crate::orchestrator::project_root_unresolvable_reason(),
+        "error_code": "project_root_unresolvable",
+    })))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb: &str) {
+    if crate::orchestrator::fsm::graph().policy.longgap_refresh_verbs.iter().any(|v| v == verb) {
+        let now = unsafe { host_now_ms() };
+        let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-instruction-ts"), &now.to_string());
+    }
+}
+
+fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    let dispatch_start_ms = unsafe { host_now_ms() };
+    let gate = crate::gates::check_dispatch(verb, body);
+    if !gate.allowed {
+        return pack(gate.to_denial_json(verb).to_string());
+    }
+    let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+    crate::browser_witness::record_from_body(cwd_for_witness, body);
+    if crate::orchestrator::is_orchestrator_verb(verb) {
+        if let Some(unresolvable) = reject_if_project_root_unresolvable_before_gm_dir_panics(verb) {
+            return unresolvable;
+        }
+        let (out, err_msg, code) = crate::orchestrator::dispatch(verb, "", body_s);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let ms = unsafe { host_now_ms() }.saturating_sub(dispatch_start_ms);
+            emit_event("dispatch.end", serde_json::json!({ "verb": verb, "ms": ms }));
+            restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb);
+        }
+        if code == 0 {
+            let data: Value = serde_json::from_str(&out).unwrap_or(Value::String(out));
+            return ok(verb, data);
+        }
+        return err_json(verb, json!({ "error": err_msg, "stdout": out, "exitCode": code }));
+    }
+    let body = body.clone();
+    let body_s = body_s.to_string();
+    let result = match verb {
+        "fs_read" => fs_read(&body),
+        "fs_write" => fs_write(&body),
+        "fs_readdir" => fs_readdir(&body),
+        "fs_stat" => fs_stat(&body),
+        "scan_deps" | "scan-deps" => scan_deps(&body),
+        "fetch" => fetch(&body),
+        "env_get" => env_get(&body),
+        "kv_get" => kv_get(&body),
+        "kv_put" => kv_put(&body),
+        "kv_query" => kv_query(&body),
+        "exec_js" | "nodejs" | "javascript" | "node" | "js" => exec_js(&body, &body_s),
+        "lang" => lang(&body),
+        "browser" => browser_default_oxibrowser_headless_engine(&body, &body_s),
+        "cdp" => cdp_real_chrome_escape_hatch(&body, &body_s),
+        "health" => health(&body),
+        "config_resolve" => config_resolve_report_winning_tier_and_any_rejected_tier(&body),
+        "config-sync-now" => config_sync_now_force_immediate_refresh(&body),
+        "dataflow_resolve" => dataflow_resolve(&body),
+        "sql_open" => sql_open(&body),
+        "sql_close" => sql_close(&body),
+        "sql_list_dbs" => sql_list_dbs(&body),
+        "sql_exec" => sql_exec(&body),
+        "sql_query" => sql_query(&body),
+        "sql_smoke" => sql_smoke(),
+        "sql_serialize" => sql_serialize(&body),
+        "sql_deserialize" => sql_deserialize(&body),
+        "cache_get" => cache_get(&body),
+        "cache_put" => cache_put(&body),
+        "cache_invalidate" => cache_invalidate(&body),
+        "cache_stats" => cache_stats(&body),
+        "codeinsight_index" => codeinsight_index(&body),
+        "codesearch" => codesearch(&body),
+        "callers" => callers(&body),
+        "callees" => callees(&body),
+        "impact" => impact(&body),
+        "memorize" => memorize_with_raw(&body, &body_s),
+        "memorize-prune" | "memorize_prune" => memorize_prune(&body),
+        "memorize-vacuum" | "memorize_vacuum" => memorize_vacuum(&body),
+        "memorize-retention" | "memorize_retention" => memorize_retention(&body),
+        "recall" => recall(&body),
+        "tencentdb-compat-probe" => tencentdb_compat_probe(&body),
+        "tencentdb-memory-import" => tencentdb_memory_import_gm_native_memories_reembedded_384dim(&body),
+        "python" | "py" => shell_exec(&body, &body_s, "python"),
+        "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, &body_s, "bash"),
+        "powershell" | "ps1" => shell_exec(&body, &body_s, "powershell"),
+        "ssh" => shell_exec(&body, &body_s, "ssh"),
+        "go" | "rust" | "c" | "cpp" | "java" | "deno" => shell_exec(&body, &body_s, &verb),
+        "status" => status(&body),
+        "wait" | "sleep" => err_coded(&verb, ERR_CODE_UNSUPPORTED, "verb not supported: wasm has no real timer/async-sleep primitive here; use exec:sleep (bash `sleep N`, JS setTimeout via exec_js, or PowerShell Start-Sleep) for an actual wait"),
+        "close" => close(&body),
+        "filter" => filter(&body, &body_s),
+        "git_status" => git_status(&body),
+        "branch_status" => branch_status(&body),
+        "git_push" => git_push(&body),
+        "git_add" => git_add(&body),
+        "git_commit" => git_commit(&body),
+        "git_finalize" => git_finalize(&body),
+        "git_log" => git_log(&body),
+        "git_diff" => git_diff(&body),
+        "git_show" => git_show(&body),
+        "git_fetch" => git_fetch(&body),
+        "ci-status" | "ci_status" => ci_status(&body),
+        "git_branch" => git_branch(&body),
+        "git_checkout" => git_checkout(&body),
+        "git_merge" => git_merge(&body),
+        "git_merge_abort" => git_merge_abort(&body),
+        "git_branch_delete" => git_branch_delete(&body),
+        "git_rm" => git_rm(&body),
+        "git_revert" => git_revert(&body),
+        "git_reset" => git_reset(&body),
+        "git_poll" => git_poll(&body),
+        "forget" => forget(&body),
+        "learn" => err_coded("learn", ERR_CODE_RETIRED_VERB, "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index)"),
+        "discipline" => discipline(&body),
+        "" => err_coded("", ERR_CODE_INVALID_ARGS, "verb required"),
+        _ => err_coded(&verb, ERR_CODE_UNKNOWN_VERB, "unknown verb"),
+    };
+    #[cfg(target_arch = "wasm32")]
+    {
+        let ms = unsafe { host_now_ms() }.saturating_sub(dispatch_start_ms);
+        emit_event("dispatch.end", serde_json::json!({ "verb": verb, "ms": ms }));
+    }
+    result
+}
