@@ -106,7 +106,7 @@ fn default_longgap_exempt_verbs() -> Vec<String> {
 }
 fn default_true() -> bool { true }
 fn default_longgap_refresh_verbs() -> Vec<String> {
-    ["instruction", "transition", "phase-status", "prd-add", "prd-resolve", "prd-list",
+    ["instruction", "transition", "phase-status", "prd-add", "prd-resolve", "prd-list", "prd-defer",
      "mutable-add", "mutable-resolve", "mutable-list"]
         .iter().map(|s| s.to_string()).collect()
 }

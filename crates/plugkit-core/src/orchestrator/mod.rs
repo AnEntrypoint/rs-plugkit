@@ -204,7 +204,7 @@ pub fn gm_dir() -> PathBuf {
 pub const ORCHESTRATOR_VERBS: &[&str] = &[
     "transition", "mutable-resolve", "mutable-add", "mutable-list",
     "memorize-fire", "discipline-note", "phase-status", "residual-scan", "auto-recall",
-    "instruction", "prd-add", "prd-resolve", "prd-list",
+    "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
     "task-spawn", "task-list", "task-stop", "task-output",
     "memorize-continue", "fsm-vendor", "fsm-validate", "fsm-propose-override", "claim-audit", "submodule-check",
 ];
@@ -252,7 +252,7 @@ fn verb_has_dispatch_arm(verb: &str) -> bool {
         verb,
         "transition" | "mutable-resolve" | "mutable-add" | "mutable-list"
             | "memorize-fire" | "discipline-note" | "phase-status" | "residual-scan"
-            | "auto-recall" | "instruction" | "prd-add" | "prd-resolve" | "prd-list"
+            | "auto-recall" | "instruction" | "prd-add" | "prd-resolve" | "prd-list" | "prd-defer"
             | "task-spawn" | "task-list" | "task-stop" | "task-output"
             | "memorize-continue" | "fsm-vendor" | "fsm-validate" | "fsm-propose-override"
             | "claim-audit" | "submodule-check"
@@ -283,6 +283,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "prd-add" => prd::handle_add(content),
         "prd-resolve" => prd::handle_resolve(content),
         "prd-list" => prd::handle_list(content),
+        "prd-defer" => prd::handle_defer(content),
         "task-spawn" => task::handle_spawn(content),
         "task-list" => task::handle_list(content),
         "task-stop" => task::handle_stop(content),

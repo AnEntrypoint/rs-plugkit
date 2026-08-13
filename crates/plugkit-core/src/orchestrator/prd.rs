@@ -271,6 +271,85 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     (serde_json::json!({ key: id }).to_string(), String::new(), 0)
 }
 
+/// Mark an EXISTING, already-tracked PRD row `blockedBy: ["external"]` so residual-scan's
+/// `status_is_open(...) && !blocked_external` check (residual.rs) stops treating it as an
+/// open row blocking CONSOLIDATE -- without resolving it, which would falsely claim the work
+/// is done. `handle_add` already lets a NEW row carry `blockedBy` at creation time, gated by
+/// `defer_marker_in_text`'s deviation check; this closes the matching gap for a row that was
+/// only discovered to be genuinely cross-session/out-of-reach AFTER it was already added (the
+/// common case: a session inherits an open row from a prior session, investigates it, and
+/// confirms it is real, correctly-scoped, but requires its own dedicated session -- e.g. a
+/// flaky multiplayer/networking repro that is out of scope for the current fix). Same
+/// deviation gate as handle_add: `reason` must name the actual concrete reach path, not bare
+/// deferral language, so this cannot become a second "declare it externally blocked" exit.
+pub fn handle_defer(content: &str) -> (String, String, i32) {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return (String::new(), "missing body: {\"id\": \"<prd-item-id>\", \"reason\": \"<why this is genuinely out of reach this session, and what session/path would resolve it>\"}".to_string(), 1);
+    }
+    let v: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return (String::new(), "parse failed: body must be JSON {\"id\":..,\"reason\":..}".to_string(), 1),
+    };
+    let id_target = match v.get("id").or_else(|| v.get("prd_id")).or_else(|| v.get("slug")).and_then(|s| s.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => return (String::new(), "missing `id`".to_string(), 1),
+    };
+    let reason = match v.get("reason").or_else(|| v.get("witness_evidence")).and_then(|s| s.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => return (String::new(), "missing `reason`: name why this row is genuinely out of reach this session and what would resolve it -- bare deferral language is rejected, same as prd-add".to_string(), 1),
+    };
+    if let Some(marker) = defer_marker_in_text(&reason) {
+        let err = format!(
+            "prd-defer refused: deferral language detected ('{}'). Same rule as prd-add's own gate -- name the concrete reason this is genuinely cross-session/out-of-reach (e.g. 'flaky multiplayer repro needs its own dedicated debugging session, unrelated to this session's rendering-pipeline fix'), not bare 'later'/'next session' phrasing with no substance.",
+            marker
+        );
+        return (String::new(), err, 1);
+    }
+    let path = prd_path();
+    let path_s = path.to_string_lossy().to_string();
+    if !pkfs::exists(&path_s) {
+        return (String::new(), format!("{} does not exist", path.display()), 1);
+    }
+    let policy = super::fsm::graph().policy;
+    let outcome = cas::cas_retry_write(&path_s, policy.cas_max_attempts, "prd-defer", |mut doc: Value| {
+        let mut found = false;
+        if let Some(seq) = doc.as_sequence_mut() {
+            for item in seq.iter_mut() {
+                if let Some(map) = item.as_mapping_mut() {
+                    if map.get(&Value::String("id".to_string())).and_then(|v| v.as_str()) == Some(&id_target) {
+                        map.insert(
+                            Value::String("blockedBy".to_string()),
+                            Value::Sequence(vec![Value::String("external".to_string())]),
+                        );
+                        map.insert(Value::String("deferReason".to_string()), Value::String(reason.clone()));
+                        found = true;
+                    }
+                }
+            }
+        }
+        if !found {
+            let body = serde_json::json!({
+                "error": format!("prd id not found: {}", id_target),
+                "deviation_kind": "prd-defer-unknown-id",
+                "deviation_severity": "deny",
+                "prd_id": id_target,
+            }).to_string();
+            return cas::CasOutcome::Abort(body, format!("prd id not found: {}", id_target), 1);
+        }
+        cas::CasOutcome::Write(doc, ())
+    });
+    match outcome {
+        Ok(()) => {
+            invalidate_residual_marker();
+            #[cfg(target_arch = "wasm32")]
+            crate::wasm_dispatch::emit_event("prd.deferred", serde_json::json!({ "id": id_target, "reason": reason }));
+            (serde_json::json!({ "deferred": id_target, "blockedBy": ["external"] }).to_string(), String::new(), 0)
+        }
+        Err((out, err, rc)) => (out, err, rc),
+    }
+}
+
 fn parse_resolve_target(trimmed: &str) -> (String, Option<String>, Option<String>, Option<String>, Option<String>) {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         let id = v.get("id")
