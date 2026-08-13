@@ -1,0 +1,364 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+    paths-ignore: ['**.md', '!crates/plugkit-core/src/orchestrator/instructions/prose/**.md', 'docs/**', 'LICENSE', '.gitignore']
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      sha: ${{ steps.bump.outputs.sha }}
+    steps:
+      - name: Checkout rs-plugkit
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.PUBLISHER_TOKEN }}
+          fetch-depth: 0
+
+      - name: Auto-bump rs-plugkit patch version BEFORE build
+        id: bump
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
+        run: |
+          git config user.name "gm-bot"
+          git config user.email "noreply@github.com"
+          git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+          CURRENT=$(grep '^version' crates/plugkit-core/Cargo.toml | head -1 | sed 's/.*= *"//;s/"//')
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+          sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$NEW_VERSION\"/}" crates/plugkit-core/Cargo.toml
+          git add crates/plugkit-core/Cargo.toml
+          if git diff --cached --quiet; then
+            echo "No version change needed"
+            echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore: auto-bump version to $NEW_VERSION [skip ci]"
+            git fetch origin main
+            if ! git rebase origin/main; then
+              echo "::error::Rebase onto origin/main hit a real conflict; refusing to auto-resolve with -X theirs (would silently discard concurrent main changes)."
+              git rebase --abort
+              exit 1
+            fi
+            git push origin HEAD:main
+            echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: bump
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.bump.outputs.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Pin embedded source SHA to the exact checked-out commit
+        shell: bash
+        run: echo "PLUGKIT_BUILD_SHA=${{ needs.bump.outputs.sha }}" >> "$GITHUB_ENV"
+
+      - name: Install wasi-sdk (clang + sysroot for tree-sitter C grammars)
+        run: |
+          WASI_VERSION=24
+          WASI_VERSION_FULL=${WASI_VERSION}.0
+          curl -sL -o wasi-sdk.tar.gz "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_VERSION}/wasi-sdk-${WASI_VERSION_FULL}-x86_64-linux.tar.gz"
+          mkdir -p $HOME/wasi-sdk
+          tar -xzf wasi-sdk.tar.gz -C $HOME/wasi-sdk --strip-components=1
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk" >> $GITHUB_ENV
+          echo "CC_wasm32_wasip1=$HOME/wasi-sdk/bin/clang" >> $GITHUB_ENV
+          echo "AR_wasm32_wasip1=$HOME/wasi-sdk/bin/llvm-ar" >> $GITHUB_ENV
+          echo "CFLAGS_wasm32_wasip1=--sysroot=$HOME/wasi-sdk/share/wasi-sysroot -DLONGDOUBLE_TYPE=double -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_MAX_MMAP_SIZE=0 -DSQLITE_DEFAULT_MMAP_SIZE=0 -DSQLITE_THREADSAFE=0 -DSQLITE_TEMP_STORE=3 -DHAVE_FDATASYNC=0 -DHAVE_POSIX_FALLOCATE=0 -DHAVE_PREAD=0 -DHAVE_PWRITE=0 -DPROT_READ=1 -DPROT_WRITE=2 -DMAP_SHARED=1 -DMAP_FAILED=((void*)-1) -DMAP_PRIVATE=2 -Wno-error=implicit-function-declaration -Wno-error=int-conversion" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          key: release-wasm32-wasip1-v2
+          cache-on-failure: false
+
+      - name: Fetch embedding weights (BGE-small-en-v1.5 F32 safetensors + tokenizer)
+        shell: bash
+        run: bash scripts/fetch-weights.sh
+
+      - name: Force fresh compile of the rs-plugkit crate (defeat stale-cache artifact)
+        shell: bash
+        run: |
+          # rust-cache restores target/ under a constant key, which can carry a stale
+          # rs_plugkit.wasm and incremental fingerprints. If cargo judges the crate
+          # unchanged after restore, it skips recompiling and the next step cp's the
+          # cached (stale) wasm — so a pushed source change is absent from the published
+          # artifact despite green CI. Remove the cached output wasm and force the top
+          # crate to rebuild so the artifact always reflects this commit's source.
+          rm -f target/wasm32-wasip1/release/rs_plugkit.wasm || true
+          cargo clean --release --target wasm32-wasip1 -p rs-plugkit || true
+
+      - name: Build WASM (fat -- wasm-embedded safetensors fallback)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --release --target wasm32-wasip1 --no-default-features --lib 2>&1 | tee /tmp/wasm-build.log || {
+            echo "::group::last 80 lines of build output"
+            tail -80 /tmp/wasm-build.log
+            echo "::endgroup::"
+            echo "::group::all error lines (rustc + C)"
+            grep -iE 'error' /tmp/wasm-build.log | head -60
+            echo "::endgroup::"
+            grep -iE 'error\[E[0-9]+\]|^error:|error: use of undeclared|error: unknown type|undefined symbol|cannot find' /tmp/wasm-build.log | head -12 | while IFS= read -r line; do echo "::error::${line:0:300}"; done
+            exit 1
+          }
+
+      - name: Verify fat WASM was produced fresh this run
+        shell: bash
+        run: |
+          test -f "target/wasm32-wasip1/release/rs_plugkit.wasm" || { echo "rs_plugkit.wasm not built"; exit 1; }
+
+      - name: Verify fat WASM embeds the exact built commit SHA
+        shell: bash
+        run: |
+          if ! grep -a -q "$PLUGKIT_BUILD_SHA" "target/wasm32-wasip1/release/rs_plugkit.wasm"; then
+            echo "::error::Built fat wasm does not contain source SHA $PLUGKIT_BUILD_SHA -- artifact does not correspond to the commit it claims to be built from, refusing to publish"
+            exit 1
+          fi
+          echo "Confirmed: fat wasm embeds source SHA $PLUGKIT_BUILD_SHA"
+
+      - name: Rename fat WASM binary
+        shell: bash
+        run: |
+          cp "target/wasm32-wasip1/release/rs_plugkit.wasm" "plugkit.wasm"
+
+      - name: Upload fat WASM artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: plugkit.wasm
+          path: plugkit.wasm
+
+      - name: Force fresh compile for slim build (defeat stale-cache artifact)
+        shell: bash
+        run: |
+          rm -f target/wasm32-wasip1/release/rs_plugkit.wasm || true
+          cargo clean --release --target wasm32-wasip1 -p rs-plugkit || true
+
+      - name: Build WASM (slim -- no embedded safetensors, requires host_vec_embed)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --release --target wasm32-wasip1 --no-default-features --features slim --lib 2>&1 | tee /tmp/wasm-slim-build.log || {
+            echo "::group::last 80 lines of build output"
+            tail -80 /tmp/wasm-slim-build.log
+            echo "::endgroup::"
+            echo "::group::all error lines (rustc + C)"
+            grep -iE 'error' /tmp/wasm-slim-build.log | head -60
+            echo "::endgroup::"
+            grep -iE 'error\[E[0-9]+\]|^error:|error: use of undeclared|error: unknown type|undefined symbol|cannot find' /tmp/wasm-slim-build.log | head -12 | while IFS= read -r line; do echo "::error::${line:0:300}"; done
+            exit 1
+          }
+
+      - name: Verify slim WASM was produced fresh this run
+        shell: bash
+        run: |
+          test -f "target/wasm32-wasip1/release/rs_plugkit.wasm" || { echo "rs_plugkit.wasm (slim) not built"; exit 1; }
+
+      - name: Verify slim WASM embeds the exact built commit SHA
+        shell: bash
+        run: |
+          if ! grep -a -q "$PLUGKIT_BUILD_SHA" "target/wasm32-wasip1/release/rs_plugkit.wasm"; then
+            echo "::error::Built slim wasm does not contain source SHA $PLUGKIT_BUILD_SHA -- artifact does not correspond to the commit it claims to be built from, refusing to publish"
+            exit 1
+          fi
+          echo "Confirmed: slim wasm embeds source SHA $PLUGKIT_BUILD_SHA"
+
+      - name: Verify slim artifact is genuinely smaller (no embedded safetensors)
+        shell: bash
+        run: |
+          fat_size=$(stat -c%s plugkit.wasm)
+          slim_size=$(stat -c%s target/wasm32-wasip1/release/rs_plugkit.wasm)
+          echo "fat=${fat_size} slim=${slim_size}"
+          if [ "$slim_size" -ge "$fat_size" ]; then
+            echo "::error::slim build (${slim_size} bytes) is not smaller than fat build (${fat_size} bytes) -- the slim feature is not actually excluding the embedded safetensors, refusing to publish a mislabeled artifact"
+            exit 1
+          fi
+
+      - name: Rename slim WASM binary
+        shell: bash
+        run: |
+          cp "target/wasm32-wasip1/release/rs_plugkit.wasm" "plugkit-slim.wasm"
+
+      - name: Upload slim WASM artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: plugkit-slim.wasm
+          path: plugkit-slim.wasm
+
+  publish-binaries:
+    needs: [bump, build]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download fat WASM artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: plugkit.wasm
+          path: bins/
+
+      - name: Download slim WASM artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: plugkit-slim.wasm
+          path: bins/
+
+      - name: Stage release assets
+        id: stage
+        shell: bash
+        env:
+          VER: ${{ needs.bump.outputs.version }}
+        run: |
+          set -e
+          mkdir -p release-assets
+          cp bins/plugkit.wasm release-assets/
+          cp bins/plugkit-slim.wasm release-assets/
+          cd release-assets
+          sha256sum plugkit.wasm | sed 's/ \*/  /' > plugkit.wasm.sha256
+          sha256sum plugkit-slim.wasm | sed 's/ \*/  /' > plugkit-slim.wasm.sha256
+          echo "$VER" > plugkit.wasm.version
+          ls -la
+          cat plugkit.wasm.sha256
+          cat plugkit-slim.wasm.sha256
+
+      - name: Upload to plugkit-bin Release
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
+          VER: ${{ needs.bump.outputs.version }}
+          BUILT_SHA: ${{ needs.bump.outputs.sha }}
+        run: |
+          set -e
+          if ! gh release view "v$VER" --repo AnEntrypoint/plugkit-bin >/dev/null 2>&1; then
+            gh release create "v$VER" \
+              --repo AnEntrypoint/plugkit-bin \
+              --title "plugkit v$VER (WASM)" \
+              --notes "Auto-published WASM-only build from rs-plugkit CI at $BUILT_SHA"
+          fi
+          gh release upload "v$VER" \
+            --repo AnEntrypoint/plugkit-bin \
+            --clobber \
+            release-assets/plugkit.wasm \
+            release-assets/plugkit.wasm.sha256 \
+            release-assets/plugkit.wasm.version \
+            release-assets/plugkit-slim.wasm \
+            release-assets/plugkit-slim.wasm.sha256
+
+      - name: Setup Node.js for npm publish
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Create npm package structure
+        env:
+          VER: ${{ needs.bump.outputs.version }}
+        run: |
+          set -e
+          mkdir -p npm-pkg
+          cat > npm-pkg/package.json <<'EOF'
+          {
+            "name": "plugkit-wasm",
+            "version": "VERSION_PLACEHOLDER",
+            "description": "WASM distribution of plugkit - CLI entry point and spool dispatcher for gm",
+            "main": "plugkit.wasm",
+            "types": "plugkit.d.ts",
+            "repository": {
+              "type": "git",
+              "url": "https://github.com/AnEntrypoint/rs-plugkit.git"
+            },
+            "keywords": ["plugkit", "wasm", "gm", "spool", "dispatcher"],
+            "author": "AnEntrypoint",
+            "license": "MIT",
+            "engines": {
+              "node": ">=18.0.0"
+            }
+          }
+          EOF
+          sed -i "s/VERSION_PLACEHOLDER/$VER/" npm-pkg/package.json
+          cp release-assets/plugkit.wasm npm-pkg/
+          cp release-assets/plugkit.wasm.sha256 npm-pkg/
+          cat > npm-pkg/plugkit.d.ts <<'EOF'
+          declare const plugkitWasm: WebAssembly.Module;
+          export = plugkitWasm;
+          EOF
+          ls -la npm-pkg/
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VER: ${{ needs.bump.outputs.version }}
+        run: |
+          set -e
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "::error::NPM_TOKEN not set; cannot publish plugkit-wasm@$VER"
+            exit 1
+          fi
+          cd npm-pkg
+          if npm view "plugkit-wasm@$VER" version >/dev/null 2>&1; then
+            echo "plugkit-wasm@$VER already published; skipping"
+            exit 0
+          fi
+          if npm publish --access public 2>npm-publish-err.log; then
+            echo "plugkit-wasm@$VER published to npm"
+          else
+            ERR=$(cat npm-publish-err.log | tr '\n' ' ' | head -c 400)
+            echo "::error title=npm publish failed for plugkit-wasm@$VER::$ERR"
+            cat npm-publish-err.log
+            exit 1
+          fi
+
+      - name: Bump gm metadata (best-effort -- gm's own bootstrap resolves the latest plugkit-bin release at runtime regardless of these committed values)
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
+          VER: ${{ needs.bump.outputs.version }}
+        run: |
+          set -e
+          git config --global user.name "rs-plugkit-bot"
+          git config --global user.email "noreply@github.com"
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/AnEntrypoint/gm.git" gm-src
+          cd gm-src
+          echo "$VER" > bin/plugkit.version
+          cp ../release-assets/plugkit.wasm.sha256 bin/plugkit.wasm.sha256 2>/dev/null || \
+            curl -sL "https://github.com/AnEntrypoint/plugkit-bin/releases/download/v${VER}/plugkit.wasm.sha256" -o bin/plugkit.wasm.sha256
+          cp ../release-assets/plugkit-slim.wasm.sha256 bin/plugkit-slim.wasm.sha256 2>/dev/null || \
+            curl -sL "https://github.com/AnEntrypoint/plugkit-bin/releases/download/v${VER}/plugkit-slim.wasm.sha256" -o bin/plugkit-slim.wasm.sha256
+          echo "$VER" > gm-plugkit/plugkit.version
+          cp bin/plugkit-slim.wasm.sha256 gm-plugkit/plugkit-slim.wasm.sha256
+          jq --arg v "$VER" '.plugkitVersion = $v' gm.json > /tmp/gm.json
+          mv /tmp/gm.json gm.json
+          git add gm.json bin/plugkit.version bin/plugkit.wasm.sha256 bin/plugkit-slim.wasm.sha256 gm-plugkit/plugkit.version gm-plugkit/plugkit-slim.wasm.sha256
+          if git diff --cached --quiet; then
+            echo "No metadata changes"
+            exit 0
+          fi
+          git commit -m "chore: bump plugkitVersion to $VER (WASM)"
+          for i in 1 2 3 4 5; do
+            if git push origin main; then
+              echo "Pushed metadata bump on attempt $i"
+              exit 0
+            fi
+            echo "Push attempt $i failed; rebasing"
+            git pull --rebase origin main || true
+          done
+          echo "metadata push did not land after 5 attempts -- non-fatal, gm's own bootstrap resolves latest at runtime independent of this commit" >&2
+          exit 0

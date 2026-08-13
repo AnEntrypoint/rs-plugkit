@@ -1,0 +1,250 @@
+use serde_yaml::Value;
+use super::cas;
+use super::gm_dir;
+use super::memorize;
+use super::yaml_util::{invalidate_residual_marker, levenshtein, yaml_to_json};
+use crate::pkfs;
+
+pub fn mutables_path() -> std::path::PathBuf {
+    gm_dir().join("mutables.yml")
+}
+
+pub fn handle_add(content: &str) -> (String, String, i32) {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return (String::new(), "missing body".to_string(), 1);
+    }
+    let new_item: Value = match serde_yaml::from_str::<Value>(trimmed) {
+        Ok(v) => v,
+        Err(_) => match serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .and_then(|j| serde_yaml::to_value(j).ok()) {
+            Some(v) => v,
+            None => return (String::new(), "parse failed".to_string(), 1),
+        },
+    };
+    let map = match new_item.as_mapping() {
+        Some(m) => m.clone(),
+        None => return (String::new(), "item must be a mapping".to_string(), 1),
+    };
+    let id = map.get(&Value::String("id".to_string()))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("mut-{}", crate::orchestrator::state::now_ms()));
+    let path = mutables_path();
+    let path_s = path.to_string_lossy().to_string();
+    let policy = super::fsm::graph().policy;
+
+    let outcome = cas::cas_retry_write(&path_s, policy.cas_max_attempts, "mutable-add", |mut doc: Value| {
+        if let Some(seq) = doc.as_sequence_mut() {
+            let mut new_with_id = map.clone();
+            new_with_id.insert(Value::String("id".to_string()), Value::String(id.clone()));
+            if !new_with_id.contains_key(&Value::String("status".to_string())) {
+                new_with_id.insert(Value::String("status".to_string()), Value::String(policy.mutables_default_status.clone()));
+            }
+            seq.push(Value::Mapping(new_with_id));
+        } else {
+            return cas::CasOutcome::Abort(String::new(), "mutables.yml is not a sequence".to_string(), 1);
+        }
+        cas::CasOutcome::Write(doc, ())
+    });
+    if let Err((out, err, rc)) = outcome {
+        return (out, err, rc);
+    }
+    invalidate_residual_marker();
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm_dispatch::emit_event("mutable.added", serde_json::json!({ "id": id }));
+    (serde_json::json!({ "added": id }).to_string(), String::new(), 0)
+}
+
+pub fn handle_list(_content: &str) -> (String, String, i32) {
+    let path = mutables_path();
+    let path_s = path.to_string_lossy().to_string();
+    if !pkfs::exists(&path_s) {
+        return (serde_json::json!({ "items": [] }).to_string(), String::new(), 0);
+    }
+    let raw = pkfs::read_to_string(&path_s).unwrap_or_default();
+    let doc: Value = match serde_yaml::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => return (String::new(), format!("parse failed: {}", e), 1),
+    };
+    let items: Vec<serde_json::Value> = doc.as_sequence().map(|seq| {
+        seq.iter().filter_map(|v| {
+            let m = v.as_mapping()?;
+            let mut out = serde_json::Map::new();
+            for (k, val) in m {
+                if let Some(ks) = k.as_str() {
+                    out.insert(ks.to_string(), yaml_to_json(val));
+                }
+            }
+            Some(serde_json::Value::Object(out))
+        }).collect()
+    }).unwrap_or_default();
+    (serde_json::json!({ "items": items }).to_string(), String::new(), 0)
+}
+
+pub fn pending_detailed() -> Vec<serde_json::Value> {
+    let path = mutables_path();
+    let path_s = path.to_string_lossy().to_string();
+    if !pkfs::exists(&path_s) {
+        return Vec::new();
+    }
+    let raw = match pkfs::read_to_string(&path_s) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let doc: Value = match serde_yaml::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    let policy = super::fsm::graph().policy;
+    let resolved_statuses = policy.mutables_resolved_statuses;
+    if let Some(seq) = doc.as_sequence() {
+        for item in seq {
+            let status = item.get("status").and_then(|v| v.as_str()).unwrap_or(&policy.mutables_default_status);
+            if !resolved_statuses.iter().any(|s| s == status) {
+                if let Some(m) = item.as_mapping() {
+                    let mut obj = serde_json::Map::new();
+                    for (k, v) in m {
+                        if let Some(ks) = k.as_str() {
+                            obj.insert(ks.to_string(), yaml_to_json(v));
+                        }
+                    }
+                    out.push(serde_json::Value::Object(obj));
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn handle_resolve(content: &str) -> (String, String, i32) {
+    let raw_trimmed = content.trim();
+    if raw_trimmed.is_empty() {
+        return (String::new(), "missing mutable id in body".to_string(), 1);
+    }
+
+    let (id_str, inline_evidence): (String, Option<String>) = match serde_json::from_str::<serde_json::Value>(raw_trimmed) {
+        Ok(serde_json::Value::Object(map)) => {
+            let id = map.get("mutable_id")
+                .or_else(|| map.get("id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| raw_trimmed.to_string());
+            let evidence = map.get("witness_evidence")
+                .or_else(|| map.get("evidence"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
+            (id, evidence)
+        }
+        Ok(serde_json::Value::String(s)) => (s, None),
+        _ => (raw_trimmed.to_string(), None),
+    };
+    let trimmed = id_str.as_str();
+
+    let path = mutables_path();
+    let path_s = path.to_string_lossy().to_string();
+    if !pkfs::exists(&path_s) {
+        return (String::new(), format!("{} does not exist", path.display()), 1);
+    }
+    let policy = super::fsm::graph().policy;
+
+    let outcome = cas::cas_retry_write(&path_s, policy.cas_max_attempts, "mutable-resolve", |mut doc: Value| {
+        let mut found_id = false;
+        let mut resolved_id: Option<String> = None;
+        let mut resolved_evidence: Option<String> = None;
+
+        if let Some(seq) = doc.as_sequence_mut() {
+            for item in seq.iter_mut() {
+                if let Some(map) = item.as_mapping_mut() {
+                    let id_match = map
+                        .get(&Value::String("id".to_string()))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s == trimmed)
+                        .unwrap_or(false);
+                    if id_match {
+                        found_id = true;
+                        let row_evidence: Option<String> = map
+                            .get(&Value::String("witness_evidence".to_string()))
+                            .and_then(|v| v.as_str())
+                            .or_else(|| {
+                                map.get(&Value::String("evidence".to_string()))
+                                    .and_then(|v| v.as_str())
+                            })
+                            .map(|s| s.to_string())
+                            .filter(|s| !s.trim().is_empty());
+                        let row_had_evidence = row_evidence.is_some();
+                        let evidence = row_evidence.or_else(|| inline_evidence.clone()).unwrap_or_default();
+                        if policy.mutables_require_witness_evidence && evidence.trim().is_empty() {
+                            let msg = format!(
+                                "Refused: mutable {} cannot be witnessed without evidence. Pass {{\"mutable_id\":\"{}\",\"witness_evidence\":\"<concrete proof>\"}} in the body, or add evidence to the .gm/mutables.yml row first.",
+                                trimmed, trimmed
+                            );
+                            return cas::CasOutcome::Abort(String::new(), msg, 1);
+                        }
+                        if !row_had_evidence && !evidence.trim().is_empty() {
+                            map.insert(
+                                Value::String("witness_evidence".to_string()),
+                                Value::String(evidence.clone()),
+                            );
+                        }
+                        map.insert(
+                            Value::String("status".to_string()),
+                            Value::String(policy.mutables_witness_status.clone()),
+                        );
+                        resolved_id = Some(trimmed.to_string());
+                        resolved_evidence = Some(evidence);
+                    }
+                }
+            }
+        }
+
+        if !found_id {
+            let mut candidates: Vec<(String, usize)> = Vec::new();
+            if let Some(seq) = doc.as_sequence() {
+                for item in seq.iter() {
+                    if let Some(id) = item
+                        .as_mapping()
+                        .and_then(|m| m.get(&Value::String("id".to_string())))
+                        .and_then(|v| v.as_str())
+                    {
+                        let d = levenshtein(trimmed, id);
+                        candidates.push((id.to_string(), d));
+                    }
+                }
+            }
+            candidates.sort_by_key(|c| c.1);
+            let hint = if candidates.is_empty() {
+                String::from(" (no mutables in file)")
+            } else {
+                let near: Vec<String> = candidates.iter().take(3).map(|c| c.0.clone()).collect();
+                format!(" -- did you mean one of: {}", near.join(", "))
+            };
+            return cas::CasOutcome::Abort(String::new(), format!("mutable id not found: {}{}", trimmed, hint), 1);
+        }
+
+        cas::CasOutcome::Write(doc, (resolved_id, resolved_evidence))
+    });
+    let (resolved_id, resolved_evidence) = match outcome {
+        Ok(v) => v,
+        Err((out, err, rc)) => return (out, err, rc),
+    };
+
+    let evidence_body = resolved_evidence.clone().unwrap_or_else(|| format!("mutable {} resolved", trimmed));
+    let memo = format!(
+        "## Resolved mutable: {}\n\n{}\n",
+        resolved_id.as_deref().unwrap_or(""),
+        evidence_body
+    );
+    let memo_path = memorize::fire(&memo).unwrap_or_default();
+
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm_dispatch::emit_event("mutable.resolved", serde_json::json!({ "id": resolved_id }));
+    let payload = serde_json::json!({
+        "resolved": resolved_id,
+        "memorize_spool": memo_path,
+    });
+    (payload.to_string(), String::new(), 0)
+}

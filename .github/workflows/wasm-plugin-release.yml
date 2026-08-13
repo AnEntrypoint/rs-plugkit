@@ -1,0 +1,214 @@
+name: Reusable wasm-plugin build and release
+
+on:
+  workflow_call:
+    inputs:
+      crate_dir:
+        required: false
+        type: string
+        default: '.'
+      wasm_artifact_name:
+        required: true
+        type: string
+      published_asset_basename:
+        required: true
+        type: string
+      release_repo:
+        required: true
+        type: string
+      release_title_prefix:
+        required: true
+        type: string
+      pre_build_steps:
+        required: false
+        type: string
+        default: ''
+      build_env:
+        required: false
+        type: string
+        default: ''
+      build_command:
+        required: false
+        type: string
+        default: 'cargo build --release --target wasm32-wasip1'
+      npm_package_name:
+        required: false
+        type: string
+        default: ''
+    secrets:
+      publisher_token:
+        required: true
+      npm_token:
+        required: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.crate_dir }}
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      sha: ${{ steps.bump.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.publisher_token }}
+          fetch-depth: 0
+
+      - name: Auto-bump patch version BEFORE build
+        id: bump
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.publisher_token }}
+        run: |
+          set -e
+          git config user.name "gm-bot"
+          git config user.email "noreply@github.com"
+          git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+          CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"//;s/"//')
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$NEW_VERSION\"/}" Cargo.toml
+          git add Cargo.toml
+          git commit -m "chore: auto-bump version to $NEW_VERSION [skip ci]"
+          git fetch origin main
+          if ! git rebase origin/main; then
+            echo "::error::Rebase onto origin/main hit a real conflict; refusing to auto-resolve with -X theirs (would silently discard concurrent main changes)."
+            git rebase --abort
+            exit 1
+          fi
+          git push origin HEAD:main
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: bump
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ${{ inputs.crate_dir }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.bump.outputs.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.crate_dir }} -> target
+
+      - name: Pre-build steps
+        if: inputs.pre_build_steps != ''
+        shell: bash
+        env:
+          STEP_SCRIPT: ${{ inputs.pre_build_steps }}
+        run: |
+          printf '%s\n' "$STEP_SCRIPT" > /tmp/pre_build_steps.sh
+          bash /tmp/pre_build_steps.sh
+
+      - name: Build
+        shell: bash
+        env:
+          BUILD_ENV_SCRIPT: ${{ inputs.build_env }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: |
+          printf '%s\n' "$BUILD_ENV_SCRIPT" > /tmp/build_env.sh
+          set -a
+          source /tmp/build_env.sh
+          set +a
+          printf '%s\n' "$BUILD_COMMAND" > /tmp/build_command.sh
+          bash /tmp/build_command.sh
+
+      - name: Stage release assets with checksum
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp "target/wasm32-wasip1/release/${{ inputs.wasm_artifact_name }}" "release-assets/${{ inputs.published_asset_basename }}.wasm"
+          cd release-assets
+          sha256sum "${{ inputs.published_asset_basename }}.wasm" | sed 's/ \*/  /' > "${{ inputs.published_asset_basename }}.wasm.sha256"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.publisher_token }}
+          VER: ${{ needs.bump.outputs.version }}
+          REPO: ${{ inputs.release_repo }}
+          TITLE_PREFIX: ${{ inputs.release_title_prefix }}
+          SHA: ${{ github.sha }}
+        working-directory: ${{ inputs.crate_dir }}
+        shell: bash
+        run: |
+          set -e
+          if ! gh release view "v$VER" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "v$VER" \
+              --repo "$REPO" \
+              --title "$TITLE_PREFIX v$VER" \
+              --notes "Auto-published from CI at $SHA"
+          fi
+          gh release upload "v$VER" --repo "$REPO" --clobber release-assets/*
+
+      - name: Setup Node.js for npm mirror publish
+        if: inputs.npm_package_name != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Create npm mirror package structure
+        if: inputs.npm_package_name != ''
+        env:
+          VER: ${{ needs.bump.outputs.version }}
+          PKG_NAME: ${{ inputs.npm_package_name }}
+          BASENAME: ${{ inputs.published_asset_basename }}
+          REPO: ${{ inputs.release_repo }}
+        working-directory: ${{ inputs.crate_dir }}
+        shell: bash
+        run: |
+          set -e
+          mkdir -p npm-mirror-pkg
+          cat > npm-mirror-pkg/package.json <<EOF
+          {
+            "name": "$PKG_NAME",
+            "version": "$VER",
+            "description": "npm mirror of the $BASENAME wasm plugin release, for environments where GitHub Releases egress is blocked",
+            "main": "$BASENAME.wasm",
+            "repository": { "type": "git", "url": "https://github.com/$REPO.git" },
+            "keywords": ["gm", "plugkit", "wasm", "plugin"],
+            "author": "AnEntrypoint",
+            "license": "MIT",
+            "engines": { "node": ">=18.0.0" }
+          }
+          EOF
+          cp "release-assets/$BASENAME.wasm" npm-mirror-pkg/
+          cp "release-assets/$BASENAME.wasm.sha256" npm-mirror-pkg/
+          ls -la npm-mirror-pkg/
+
+      - name: Publish npm mirror
+        if: inputs.npm_package_name != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.npm_token }}
+          VER: ${{ needs.bump.outputs.version }}
+          PKG_NAME: ${{ inputs.npm_package_name }}
+        working-directory: ${{ inputs.crate_dir }}
+        shell: bash
+        run: |
+          set -e
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "::warning::npm_token not set; skipping npm mirror publish for $PKG_NAME@$VER (GitHub release above already succeeded, this is best-effort redundancy only)"
+            exit 0
+          fi
+          cd npm-mirror-pkg
+          if npm view "$PKG_NAME@$VER" version >/dev/null 2>&1; then
+            echo "$PKG_NAME@$VER already published; skipping"
+            exit 0
+          fi
+          if npm publish --access public 2>npm-publish-err.log; then
+            echo "$PKG_NAME@$VER published to npm as a distribution mirror"
+          else
+            ERR=$(cat npm-publish-err.log | tr '\n' ' ' | head -c 400)
+            echo "::warning title=npm mirror publish failed for $PKG_NAME@$VER::$ERR (GitHub release above already succeeded, this is best-effort redundancy only)"
+          fi

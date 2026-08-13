@@ -1,0 +1,53 @@
+[package]
+name = "rs-plugkit"
+version = "0.1.1220"
+edition.workspace = true
+
+[lib]
+name = "rs_plugkit"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Excludes the embed.rs wasm-side safetensors fallback (the ~133MB
+# include_bytes! payload) from the build. Only valid for consumers that
+# implement host_vec_embed themselves (agentplug-runner does, via a
+# native candle path) -- a slim build loaded by a host WITHOUT
+# host_vec_embed has no embedding capability at all, by design: this is
+# an explicit opt-in trade, not a silent capability loss.
+slim = []
+
+[dependencies]
+serde_json = "1"
+serde_yaml = "0.9"
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# REVERTED from 0.11 back to 0.8 (2026-07-17): candle-core 0.11.0 fails to
+# compile for wasm32-wasip1 with default-features=false -- a genuine
+# upstream bug (131x error[E0433] "cannot find type CurrentCpuF16/
+# CurrentCpuBF16 in this scope" in candle-core-0.11.0/src/cpu/mod.rs, a
+# cfg-gated SIMD dispatch type alias that isn't defined for this target,
+# confirmed via live CI: rs-plugkit Build workflow run 29571585368).
+# Reverting to the known-good 0.8 pin per this project's own
+# regression-first-revert-second discipline; a follow-up bump is tracked
+# separately once a safe target version is identified (research pending
+# on whether a later 0.11.x patch or an intermediate 0.9/0.10 fixes it).
+candle-core = { version = "0.8", default-features = false }
+candle-nn = { version = "0.8", default-features = false }
+candle-transformers = { version = "0.8", default-features = false }
+# Direct dependency purely to reach gemm::set_wasm_simd128() -- candle-core
+# 0.8.x pulls gemm 0.17.x transitively (Cargo unifies the version, no
+# duplicate build) but does not itself call set_wasm_simd128(), so gemm's
+# runtime SIMD dispatch gate defaults closed on wasm32 regardless of the
+# -C target-feature=+simd128 rustflag -- this direct dependency plus the
+# set_wasm_simd128(true) call in embed.rs::init_ctx is the real fix (see
+# that file's comment for the full root-cause explanation).
+gemm = { version = "0.17", default-features = false }
+tokenizers = { version = "0.23", default-features = false, features = ["unstable_wasm"] }
+getrandom = { version = "0.2", features = ["custom"] }
+rs-search = { git = "https://github.com/AnEntrypoint/rs-search.git", package = "rs-search", default-features = false }
+
+[target.wasm32-wasip1.dependencies]
+ignore = "0.4.30"
