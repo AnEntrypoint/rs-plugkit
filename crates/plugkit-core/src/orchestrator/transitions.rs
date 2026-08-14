@@ -28,7 +28,11 @@ fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
         ("residual-scan-fired", "true once `residual-scan` has been dispatched in this stop window (the .gm/residual-check-fired marker is present AND non-empty -- it is invalidated by truncation)", residual_scan_fired as PredicateFn),
         ("prd-all-closed", "true when .gm/prd.yml has zero rows with an open status (pending/in-progress, not completed)", pred_prd_all_closed),
         ("mutables-all-resolved", "true when .gm/mutables.yml has zero rows still in unknown/pending status", pred_mutables_all_resolved),
-        ("mutables-all-typed", "true when every row in .gm/mutables.yml carries an obligation_kind field set to one of precondition/invariant/postcondition/resource-bound/type-shape. An empty mutables.yml passes vacuously. Emits no deviation; the gate message names the offending row.", pred_mutables_all_typed as PredicateFn),
+        ("mutables-all-typed", "true when every PENDING row in .gm/mutables.yml tagged with a PROVE-kind obligation_kind (precondition/invariant/postcondition/resource-bound/type-shape) has a valid kind AND every id in its depends_on is already resolved. Resolved rows and rows tagged with a different phase's kind never block this gate. The gate message names the specific blocking row and reason.", pred_mutables_all_typed as PredicateFn),
+        ("state-obligations-ready", "true when every PENDING row tagged with a STATE-kind obligation_kind (totality/ownership/replay/effect-boundary) is validly typed and dependency-resolved. Same DAG mechanics as mutables-all-typed, scoped to STATE's own obligation kinds.", pred_state_obligations_ready as PredicateFn),
+        ("conc-obligations-ready", "true when every PENDING row tagged with a CONC-kind obligation_kind (happens-before/disjointness/contention) is validly typed and dependency-resolved.", pred_conc_obligations_ready as PredicateFn),
+        ("sec-obligations-ready", "true when every PENDING row tagged with a SEC-kind obligation_kind (secrets/injection/identity-authority/message-timing) is validly typed and dependency-resolved.", pred_sec_obligations_ready as PredicateFn),
+        ("res-obligations-ready", "true when every PENDING row tagged with a RES-kind obligation_kind (exception-model/partial-failure/degradation/crucible) is validly typed and dependency-resolved.", pred_res_obligations_ready as PredicateFn),
         ("worktree-clean", "true when `git status --porcelain` is empty -- no uncommitted/unpushed delta", pred_worktree_clean),
         ("ci-validated-fresh", "true when .gm/exec-spool/.ci-validated exists and its head_sha matches the current `git rev-parse HEAD` -- a witnessed-green CI run for the exact pushed commit", ci_validation_fresh as PredicateFn),
         ("browser-witness-coverage", "true when every client-side file edited this session (per .gm/exec-spool/.turn-browser-edits.json) has a matching entry in .gm/exec-spool/.turn-browser-witnessed with the same content hash", pred_browser_witness_coverage),
@@ -51,6 +55,10 @@ fn pred_remote_hook_refused() -> bool { false }
 fn pred_prd_all_closed() -> bool { !prd_has_open_items() }
 fn pred_mutables_all_resolved() -> bool { mutables::pending_detailed().is_empty() }
 fn pred_mutables_all_typed() -> bool { mutables::all_typed() }
+fn pred_state_obligations_ready() -> bool { mutables::state_obligations_ready() }
+fn pred_conc_obligations_ready() -> bool { mutables::conc_obligations_ready() }
+fn pred_sec_obligations_ready() -> bool { mutables::sec_obligations_ready() }
+fn pred_res_obligations_ready() -> bool { mutables::res_obligations_ready() }
 fn pred_worktree_clean() -> bool { !worktree_dirty() }
 fn pred_browser_witness_coverage() -> bool { check_browser_witness_coverage_for_cwd("").is_empty() }
 #[cfg(target_arch = "wasm32")]
@@ -572,8 +580,25 @@ fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, S
     None
 }
 
+fn obligation_dag_gate_kinds(predicate_name: &str) -> Option<&'static [&'static str]> {
+    match predicate_name {
+        "mutables-all-typed" => Some(mutables::PROVE_OBLIGATION_KINDS),
+        "state-obligations-ready" => Some(mutables::STATE_OBLIGATION_KINDS),
+        "conc-obligations-ready" => Some(mutables::CONC_OBLIGATION_KINDS),
+        "sec-obligations-ready" => Some(mutables::SEC_OBLIGATION_KINDS),
+        "res-obligations-ready" => Some(mutables::RES_OBLIGATION_KINDS),
+        _ => None,
+    }
+}
+
 fn hook_denial_detail_or_none_if_predicate_caused_it(g: &GateDef) -> Option<String> {
     if matches!(g.hook_mode, HookMode::PredicateOnly) {
+        if let Some(predicate_name) = g.predicate.as_deref() {
+            if let Some(kinds) = obligation_dag_gate_kinds(predicate_name) {
+                let msg = mutables::obligations_blocker_message(kinds);
+                return if msg.is_empty() { None } else { Some(msg) };
+            }
+        }
         return None;
     }
     let hook_path = g.hook.as_deref()?;
@@ -605,6 +630,10 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
                     "prd-all-closed" => "prd-resolve",
                     "mutables-all-resolved" => "mutable-resolve",
                     "mutables-all-typed" => "mutable-add",
+                    "state-obligations-ready" => "mutable-add",
+                    "conc-obligations-ready" => "mutable-add",
+                    "sec-obligations-ready" => "mutable-add",
+                    "res-obligations-ready" => "mutable-add",
                     "worktree-clean" => "git_finalize",
                     "ci-validated-fresh" => "ci-status",
                     "browser-witness-coverage" => "browser",
