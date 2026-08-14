@@ -9,6 +9,45 @@ pub fn mutables_path() -> std::path::PathBuf {
     gm_dir().join("mutables.yml")
 }
 
+fn extract_depends_on(map: &serde_yaml::Mapping) -> Vec<String> {
+    map.get(&Value::String("depends_on".to_string()))
+        .and_then(|v| v.as_sequence())
+        .map(|seq| seq.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default()
+}
+
+fn find_cycle(start_id: &str, deps: &std::collections::HashMap<String, Vec<String>>) -> Option<Vec<String>> {
+    let mut path: Vec<String> = vec![start_id.to_string()];
+    let mut on_path: std::collections::HashSet<String> = std::collections::HashSet::new();
+    on_path.insert(start_id.to_string());
+
+    fn walk(
+        node: &str,
+        deps: &std::collections::HashMap<String, Vec<String>>,
+        path: &mut Vec<String>,
+        on_path: &mut std::collections::HashSet<String>,
+    ) -> Option<Vec<String>> {
+        let Some(children) = deps.get(node) else { return None };
+        for child in children {
+            if on_path.contains(child) {
+                let mut cycle = path.clone();
+                cycle.push(child.clone());
+                return Some(cycle);
+            }
+            path.push(child.clone());
+            on_path.insert(child.clone());
+            if let Some(c) = walk(child, deps, path, on_path) {
+                return Some(c);
+            }
+            path.pop();
+            on_path.remove(child);
+        }
+        None
+    }
+
+    walk(start_id, deps, &mut path, &mut on_path)
+}
+
 pub fn handle_add(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -31,11 +70,32 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("mut-{}", crate::orchestrator::state::now_ms()));
+    let new_depends_on = extract_depends_on(&map);
     let path = mutables_path();
     let path_s = path.to_string_lossy().to_string();
     let policy = super::fsm::graph().policy;
 
     let outcome = cas::cas_retry_write(&path_s, policy.cas_max_attempts, "mutable-add", |mut doc: Value| {
+        if !new_depends_on.is_empty() {
+            let mut deps: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            if let Some(seq) = doc.as_sequence() {
+                for item in seq {
+                    if let Some(m) = item.as_mapping() {
+                        if let Some(existing_id) = m.get(&Value::String("id".to_string())).and_then(|v| v.as_str()) {
+                            deps.insert(existing_id.to_string(), extract_depends_on(m));
+                        }
+                    }
+                }
+            }
+            deps.insert(id.clone(), new_depends_on.clone());
+            if let Some(cycle) = find_cycle(&id, &deps) {
+                return cas::CasOutcome::Abort(
+                    String::new(),
+                    format!("mutable-add rejected: depends_on introduces a cycle: {}", cycle.join(" -> ")),
+                    1,
+                );
+            }
+        }
         if let Some(seq) = doc.as_sequence_mut() {
             let mut new_with_id = map.clone();
             new_with_id.insert(Value::String("id".to_string()), Value::String(id.clone()));
@@ -83,15 +143,73 @@ pub fn handle_list(_content: &str) -> (String, String, i32) {
     (serde_json::json!({ "items": items }).to_string(), String::new(), 0)
 }
 
-const VALID_OBLIGATION_KINDS: &[&str] = &["precondition", "invariant", "postcondition", "resource-bound", "type-shape"];
+pub const PROVE_OBLIGATION_KINDS: &[&str] = &["precondition", "invariant", "postcondition", "resource-bound", "type-shape"];
+pub const STATE_OBLIGATION_KINDS: &[&str] = &["totality", "ownership", "replay", "effect-boundary"];
+pub const CONC_OBLIGATION_KINDS: &[&str] = &["happens-before", "disjointness", "contention"];
+pub const SEC_OBLIGATION_KINDS: &[&str] = &["secrets", "injection", "identity-authority", "message-timing"];
+pub const RES_OBLIGATION_KINDS: &[&str] = &["exception-model", "partial-failure", "degradation", "crucible"];
+
+pub fn all_obligation_kinds() -> Vec<&'static str> {
+    PROVE_OBLIGATION_KINDS.iter()
+        .chain(STATE_OBLIGATION_KINDS.iter())
+        .chain(CONC_OBLIGATION_KINDS.iter())
+        .chain(SEC_OBLIGATION_KINDS.iter())
+        .chain(RES_OBLIGATION_KINDS.iter())
+        .copied()
+        .collect()
+}
 
 pub fn all_typed() -> bool {
-    pending_detailed().iter().all(|item| {
-        item.get("obligation_kind")
-            .and_then(|v| v.as_str())
-            .map(|k| VALID_OBLIGATION_KINDS.contains(&k))
-            .unwrap_or(false)
-    })
+    obligations_ready(PROVE_OBLIGATION_KINDS).is_ok()
+}
+
+pub fn obligations_ready(kinds: &[&str]) -> Result<(), Vec<String>> {
+    let pending = pending_detailed();
+    let pending_ids: std::collections::HashSet<String> = pending.iter()
+        .filter_map(|item| item.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+    let unclassified_rows_belong_to_prove = kinds == PROVE_OBLIGATION_KINDS;
+
+    let mut blockers = Vec::new();
+    for item in &pending {
+        let obligation_kind = item.get("obligation_kind").and_then(|v| v.as_str());
+        let in_scope = match obligation_kind {
+            Some(k) => kinds.contains(&k),
+            None => unclassified_rows_belong_to_prove,
+        };
+        if !in_scope {
+            continue;
+        }
+        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("<no-id>");
+        match obligation_kind {
+            None => blockers.push(format!("{} has no obligation_kind", id)),
+            Some(k) if !all_obligation_kinds().contains(&k) => {
+                blockers.push(format!("{} has unrecognized obligation_kind '{}'", id, k));
+            }
+            _ => {}
+        }
+        let depends_on = item.get("depends_on")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let unresolved_deps: Vec<&str> = depends_on.iter().filter(|d| pending_ids.contains(**d)).copied().collect();
+        if !unresolved_deps.is_empty() {
+            blockers.push(format!("{} blocked on unresolved depends_on: {}", id, unresolved_deps.join(", ")));
+        }
+    }
+    if blockers.is_empty() { Ok(()) } else { Err(blockers) }
+}
+
+pub fn state_obligations_ready() -> bool { obligations_ready(STATE_OBLIGATION_KINDS).is_ok() }
+pub fn conc_obligations_ready() -> bool { obligations_ready(CONC_OBLIGATION_KINDS).is_ok() }
+pub fn sec_obligations_ready() -> bool { obligations_ready(SEC_OBLIGATION_KINDS).is_ok() }
+pub fn res_obligations_ready() -> bool { obligations_ready(RES_OBLIGATION_KINDS).is_ok() }
+
+pub fn obligations_blocker_message(kinds: &[&str]) -> String {
+    match obligations_ready(kinds) {
+        Ok(()) => String::new(),
+        Err(blockers) => blockers.join("; "),
+    }
 }
 
 pub fn pending_detailed() -> Vec<serde_json::Value> {
@@ -136,7 +254,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         return (String::new(), "missing mutable id in body".to_string(), 1);
     }
 
-    let (id_str, inline_evidence): (String, Option<String>) = match serde_json::from_str::<serde_json::Value>(raw_trimmed) {
+    let (id_str, inline_evidence, measured_value): (String, Option<String>, Option<f64>) = match serde_json::from_str::<serde_json::Value>(raw_trimmed) {
         Ok(serde_json::Value::Object(map)) => {
             let id = map.get("mutable_id")
                 .or_else(|| map.get("id"))
@@ -148,10 +266,11 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| s.to_string());
-            (id, evidence)
+            let measured = map.get("measured_value").and_then(|v| v.as_f64());
+            (id, evidence, measured)
         }
-        Ok(serde_json::Value::String(s)) => (s, None),
-        _ => (raw_trimmed.to_string(), None),
+        Ok(serde_json::Value::String(s)) => (s, None, None),
+        _ => (raw_trimmed.to_string(), None, None),
     };
     let trimmed = id_str.as_str();
 
@@ -167,6 +286,21 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         let mut resolved_id: Option<String> = None;
         let mut resolved_evidence: Option<String> = None;
 
+        let resolved_statuses = policy.mutables_resolved_statuses.clone();
+        let mut unresolved_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(seq) = doc.as_sequence() {
+            for item in seq {
+                if let Some(m) = item.as_mapping() {
+                    let status = m.get(&Value::String("status".to_string())).and_then(|v| v.as_str()).unwrap_or(&policy.mutables_default_status);
+                    if !resolved_statuses.iter().any(|s| s == status) {
+                        if let Some(iid) = m.get(&Value::String("id".to_string())).and_then(|v| v.as_str()) {
+                            unresolved_ids.insert(iid.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(seq) = doc.as_sequence_mut() {
             for item in seq.iter_mut() {
                 if let Some(map) = item.as_mapping_mut() {
@@ -176,6 +310,37 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                         .map(|s| s == trimmed)
                         .unwrap_or(false);
                     if id_match {
+                        let depends_on = extract_depends_on(map);
+                        let blockers: Vec<&String> = depends_on.iter()
+                            .filter(|d| unresolved_ids.contains(*d) && d.as_str() != trimmed)
+                            .collect();
+                        if !blockers.is_empty() {
+                            let names: Vec<String> = blockers.into_iter().cloned().collect();
+                            return cas::CasOutcome::Abort(
+                                String::new(),
+                                format!(
+                                    "mutable-resolve refused: {} depends_on unresolved id(s): {} -- resolve those first.",
+                                    trimmed, names.join(", ")
+                                ),
+                                1,
+                            );
+                        }
+                        let row_kind = map.get(&Value::String("obligation_kind".to_string())).and_then(|v| v.as_str());
+                        let row_bound = map.get(&Value::String("bound".to_string())).and_then(|v| v.as_f64());
+                        if row_kind == Some("resource-bound") {
+                            if let (Some(bound), Some(measured)) = (row_bound, measured_value) {
+                                if measured > bound {
+                                    return cas::CasOutcome::Abort(
+                                        String::new(),
+                                        format!(
+                                            "mutable-resolve refused: {} is a resource-bound obligation with bound={}, but measured_value={} exceeds it -- the claim does not hold, resolve with a corrected implementation or a corrected bound.",
+                                            trimmed, bound, measured
+                                        ),
+                                        1,
+                                    );
+                                }
+                            }
+                        }
                         found_id = true;
                         let row_evidence: Option<String> = map
                             .get(&Value::String("witness_evidence".to_string()))
