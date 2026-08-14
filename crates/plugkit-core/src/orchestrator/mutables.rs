@@ -83,6 +83,17 @@ pub fn handle_list(_content: &str) -> (String, String, i32) {
     (serde_json::json!({ "items": items }).to_string(), String::new(), 0)
 }
 
+const VALID_OBLIGATION_KINDS: &[&str] = &["precondition", "invariant", "postcondition", "resource-bound", "type-shape"];
+
+pub fn all_typed() -> bool {
+    pending_detailed().iter().all(|item| {
+        item.get("obligation_kind")
+            .and_then(|v| v.as_str())
+            .map(|k| VALID_OBLIGATION_KINDS.contains(&k))
+            .unwrap_or(false)
+    })
+}
+
 pub fn pending_detailed() -> Vec<serde_json::Value> {
     let path = mutables_path();
     let path_s = path.to_string_lossy().to_string();

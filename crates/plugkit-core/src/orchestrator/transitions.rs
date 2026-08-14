@@ -28,6 +28,7 @@ fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
         ("residual-scan-fired", "true once `residual-scan` has been dispatched in this stop window (the .gm/residual-check-fired marker is present AND non-empty -- it is invalidated by truncation)", residual_scan_fired as PredicateFn),
         ("prd-all-closed", "true when .gm/prd.yml has zero rows with an open status (pending/in-progress, not completed)", pred_prd_all_closed),
         ("mutables-all-resolved", "true when .gm/mutables.yml has zero rows still in unknown/pending status", pred_mutables_all_resolved),
+        ("mutables-all-typed", "true when every row in .gm/mutables.yml carries an obligation_kind field set to one of precondition/invariant/postcondition/resource-bound/type-shape. An empty mutables.yml passes vacuously. Emits no deviation; the gate message names the offending row.", pred_mutables_all_typed as PredicateFn),
         ("worktree-clean", "true when `git status --porcelain` is empty -- no uncommitted/unpushed delta", pred_worktree_clean),
         ("ci-validated-fresh", "true when .gm/exec-spool/.ci-validated exists and its head_sha matches the current `git rev-parse HEAD` -- a witnessed-green CI run for the exact pushed commit", ci_validation_fresh as PredicateFn),
         ("browser-witness-coverage", "true when every client-side file edited this session (per .gm/exec-spool/.turn-browser-edits.json) has a matching entry in .gm/exec-spool/.turn-browser-witnessed with the same content hash", pred_browser_witness_coverage),
@@ -49,6 +50,7 @@ fn pred_remote_hook_refused() -> bool { false }
 
 fn pred_prd_all_closed() -> bool { !prd_has_open_items() }
 fn pred_mutables_all_resolved() -> bool { mutables::pending_detailed().is_empty() }
+fn pred_mutables_all_typed() -> bool { mutables::all_typed() }
 fn pred_worktree_clean() -> bool { !worktree_dirty() }
 fn pred_browser_witness_coverage() -> bool { check_browser_witness_coverage_for_cwd("").is_empty() }
 #[cfg(target_arch = "wasm32")]
@@ -602,6 +604,7 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
                     "residual-scan-fired" => "residual-scan",
                     "prd-all-closed" => "prd-resolve",
                     "mutables-all-resolved" => "mutable-resolve",
+                    "mutables-all-typed" => "mutable-add",
                     "worktree-clean" => "git_finalize",
                     "ci-validated-fresh" => "ci-status",
                     "browser-witness-coverage" => "browser",
