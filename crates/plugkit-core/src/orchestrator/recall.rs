@@ -35,6 +35,14 @@ fn emit_recall(query: &str, hits: &serde_json::Value, mode: &str, namespace: &st
     let arr = hits.as_array();
     let n_hits = arr.map(|a| a.len()).unwrap_or(0);
     let top_score = arr.and_then(|a| a.first()).and_then(|r| r.get("score")).and_then(|d| d.as_f64());
+    let hit_keys: Vec<serde_json::Value> = arr
+        .map(|a| {
+            a.iter()
+                .filter_map(|h| h.get("key").and_then(|k| k.as_str()))
+                .map(|k| serde_json::Value::String(k.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut fields = serde_json::Map::new();
     fields.insert("sub".to_string(), serde_json::Value::String("memory".to_string()));
     fields.insert("query".to_string(), serde_json::Value::String(query.chars().take(200).collect::<String>()));
@@ -42,6 +50,7 @@ fn emit_recall(query: &str, hits: &serde_json::Value, mode: &str, namespace: &st
     fields.insert("mode".to_string(), serde_json::Value::String(mode.to_string()));
     fields.insert("n_hits".to_string(), serde_json::Value::Number(serde_json::Number::from(n_hits as u64)));
     fields.insert("namespace".to_string(), serde_json::Value::String(namespace.to_string()));
+    fields.insert("hit_keys".to_string(), serde_json::Value::Array(hit_keys));
     if let Some(s) = top_score { if let Some(num) = serde_json::Number::from_f64(s) { fields.insert("top_score".to_string(), serde_json::Value::Number(num)); } }
     crate::wasm_dispatch::emit_event("recall", serde_json::Value::Object(fields));
 }
