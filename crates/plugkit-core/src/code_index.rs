@@ -1099,10 +1099,30 @@ pub fn index(root: &str, max_files: usize) -> Value {
     index_cfg(root, max_files, &crate::ragconfig::RagConfig::resolved())
 }
 
+/// Same as [`index`], but always runs the likely-orphaned-symbol scan
+/// regardless of `index.likely_orphaned_symbol_scan_enabled` -- the config
+/// flag defaults off because the scan is O(candidates) extra queries and
+/// this codepath also backs the always-on `codeinsight_overview` hot path
+/// fired on every `instruction` dispatch; an explicit opt-in dispatch
+/// (`codeinsight_index {"dead_code": true}`) is the correct place to pay
+/// that cost on demand, matching `scan_deps`'s `{"full": true}` pattern --
+/// cheap by default, exhaustive when actually asked for.
+pub fn index_with_dead_code(root: &str, max_files: usize, limit: usize) -> Value {
+    let mut out = index_cfg_impl(root, max_files, &crate::ragconfig::RagConfig::resolved(), true, limit);
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("dead_code_scan_forced".to_string(), json!(true));
+    }
+    out
+}
+
 /// Same as [`index`], with the knowledgebase config supplied explicitly --
 /// matching the `_cfg` convention every other config-aware entry point in this
 /// module already follows.
 pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig) -> Value {
+    index_cfg_impl(root, max_files, cfg, cfg.index.likely_orphaned_symbol_scan_enabled, 20)
+}
+
+fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig, include_dead_code: bool, orphan_scan_limit: usize) -> Value {
     let db_path = project_db_path(None);
     let libsql_err = ensure_schema_at(&db_path).err().map(|e| e.to_string());
     let libsql_ok = libsql_err.is_none();
@@ -1554,6 +1574,11 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
         "treesitter_failures": treesitter_failures,
         "kvvec_cleared_dim_mismatch": kvvec_cleared,
         "by_language": langs,
+        "likely_orphaned": if include_dead_code {
+            likely_orphaned_symbols(&db_path, orphan_scan_limit)
+        } else {
+            Value::Array(Vec::new())
+        },
     })
 }
 

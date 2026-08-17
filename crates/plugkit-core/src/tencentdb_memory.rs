@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
+use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params};
 
 const DEFAULT_DATA_DIR: &str = ".gm/tencentdb-memory";
 const DEFAULT_DIM: usize = 768;
@@ -211,9 +211,4 @@ pub fn delete_cfg(namespace: &str, key: &str, cfg: &TencentBackendConfig) -> Res
         let _ = crate::pkfs::exists(&p) && crate::wasm_dispatch::host_remove_file_never_directory(&p);
     }
     Ok(existed)
-}
-
-#[allow(dead_code)]
-fn assert_shared_db_symbol_used() -> &'static str {
-    SHARED_DB
 }
