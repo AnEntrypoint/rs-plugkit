@@ -612,6 +612,25 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
     if let Some(text) = pkfs::read_to_string(&p1) {
         match parse_config(&text, &p1) {
             Load::Accepted(config) => {
+                // A ProjectVendored win means every lower tier's own refresh() call is
+                // skipped by the early-return pattern below -- which also means a lower
+                // tier's own record_change() (fired from inside config_sync's refresh,
+                // triggered only by that tier's fetcher actually running) never fires for
+                // a tier this project has overridden and therefore never revisits. An
+                // upstream default drifting behind an override is then permanently
+                // invisible: nothing ever checks it again. Calling the lower tiers' own
+                // load functions here for their side effect (the refresh, and therefore
+                // any record_change it triggers) -- while still discarding their returned
+                // config and keeping this ProjectVendored tier as the actual winner --
+                // is what lets "your override shadows a setting that has since changed
+                // upstream" surface through the exact same config_changed/drain_for_session
+                // delivery-once path every other config-source change already uses,
+                // instead of needing a second parallel notification mechanism.
+                let _ = load_repo_tier(&join(project_root, SOURCE_SPEC_REL), join(project_root, SOURCE_CACHE_REL), fetcher, Tier::ProjectRepoSpec.as_str());
+                if let Some(home) = home_dir() {
+                    let _ = load_repo_tier(&join(&home, SOURCE_SPEC_REL), join(&home, SOURCE_CACHE_REL), fetcher, Tier::UserRepoSpec.as_str());
+                }
+                let _ = load_implicit_default_repo_tier(project_root, fetcher);
                 return Resolution {
                     config,
                     tier: Tier::ProjectVendored,
