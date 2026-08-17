@@ -228,11 +228,17 @@ fn scan_one_file(path: &str) -> Option<Result<FileFinding, BlockedRead>> {
     }
     let text = match crate::wasm_dispatch::host_read(path) {
         Some(t) => t,
-        // A blocked/failed read on a file that DOES stat successfully (so
-        // it exists and has a known size) is itself evidence -- an AV
-        // quarantine denying read access on a file it already flagged is
-        // exactly the symptom that first surfaced the real incident this
-        // scanner guards against. Never silently skip it.
+        // host_read's ptr/len packing (host_abi.rs unpack_to_string) returns
+        // None for BOTH a failed read and a successful read of a genuinely
+        // empty file (l == 0 is ambiguous between the two) -- size == 0 was
+        // already confirmed via the stat call above, so this branch is a
+        // real empty file, not a blocked read; nothing to scan, correctly
+        // clean. Any size > 0 landing here IS the real blocked-read case:
+        // stat proved bytes exist but the read still came back empty/failed
+        // -- an AV quarantine denying access to a file it already flagged
+        // is exactly the symptom that first surfaced the real incident this
+        // scanner guards against, so that case is never silently skipped.
+        None if size == 0 => return None,
         None => return Some(Err(BlockedRead { path: path.to_string(), reason: "read failed after successful stat".into() })),
     };
     let lines = text.lines().count().max(1) as u64;
