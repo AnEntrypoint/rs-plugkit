@@ -197,17 +197,6 @@ pub enum Capability {
     Unguarded,
 }
 
-impl Capability {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Capability::ProjectPath => "path_within_project",
-            Capability::EnvAllowlist => "env_get",
-            Capability::KvNamespace => "kv_put",
-            Capability::Unguarded => "unguarded",
-        }
-    }
-}
-
 const VERB_CAPABILITIES: &[(&str, Capability)] = &[
     ("fs_read", Capability::ProjectPath),
     ("fs_write", Capability::ProjectPath),
@@ -221,10 +210,6 @@ const VERB_CAPABILITIES: &[(&str, Capability)] = &[
     ("browser", Capability::Unguarded),
     ("cdp", Capability::Unguarded),
 ];
-
-pub fn guard_for(verb: &str) -> Option<Capability> {
-    VERB_CAPABILITIES.iter().find(|(v, _)| *v == verb).map(|(_, c)| *c)
-}
 
 fn verbs_with_capability(cap: Capability) -> Vec<&'static str> {
     VERB_CAPABILITIES.iter().filter(|(_, c)| *c == cap).map(|(v, _)| *v).collect()
@@ -2217,6 +2202,10 @@ fn sql_deserialize(body: &Value) -> u64 {
 fn codeinsight_index(body: &Value) -> u64 {
     let root = body.get("root").and_then(|v| v.as_str()).unwrap_or(".");
     let max_files = body.get("max_files").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+    if body.get("dead_code").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let limit = body.get("dead_code_limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+        return pack(crate::code_index::index_with_dead_code(root, max_files, limit).to_string());
+    }
     pack(crate::code_index::index(root, max_files).to_string())
 }
 
