@@ -2648,6 +2648,7 @@ fn git_commit(body: &Value) -> u64 {
         }
         let sha = head_after[..head_after.len().min(10)].to_string();
         let summary = message.lines().next().unwrap_or("").to_string();
+        emit_event("git_commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary }));
         Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary })))
     })
 }
@@ -2703,7 +2704,7 @@ fn git_finalize(body: &Value) -> u64 {
             committed = true;
             sha = head_after[..head_after.len().min(10)].to_string();
             summary = message.lines().next().unwrap_or("").to_string();
-            emit_event("git.commit", json!({ "sha": sha, "summary": summary, "repo": repo }));
+            emit_event("git.commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary, "repo": repo }));
             steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
         }
     } else {
@@ -2719,6 +2720,7 @@ fn git_finalize(body: &Value) -> u64 {
                 committed = true;
                 sha = head_after[..head_after.len().min(10)].to_string();
                 summary = bundled_message.lines().next().unwrap_or("").to_string();
+                emit_event("git.commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary, "repo": repo, "flushed_pending_prd_notes": true }));
                 steps.push(json!({ "step": "commit", "sha": sha, "summary": summary, "flushed_pending_prd_notes": true }));
             }
         }
