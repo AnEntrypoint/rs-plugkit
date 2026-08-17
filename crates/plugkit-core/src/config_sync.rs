@@ -517,6 +517,10 @@ fn refresh_locked(
         });
     }
 
+    // Captured BEFORE fetch_to overwrites the checkout in place -- this is the only point
+    // a before/after diff is possible, since the checkout holds just one commit at a time.
+    let pre_fetch_config_text = crate::pkfs::read_to_string(&src.config_path());
+
     let outcome = fetch_to(src, &remote);
 
     if let Err(e) = outcome {
@@ -539,7 +543,7 @@ fn refresh_locked(
         &src.tier_label,
         have_local.as_deref().unwrap_or(""),
         live.as_deref().unwrap_or(&remote),
-        &changed_config_paths(src),
+        &changed_config_paths(src, pre_fetch_config_text.as_deref()),
     );
 
     Ok(SyncOutcome {
@@ -555,8 +559,35 @@ fn refresh_locked(
 /// rather than a full `git diff --name-only`: the roster exists to tell an agent
 /// WHICH config moved, and a diff of an entire config repo would bury that in
 /// unrelated files. A key-level old->new diff is a separate, finer row.
-fn changed_config_paths(src: &RepoSource) -> Vec<String> {
-    vec![src.config_path()]
+/// Names the actual top-level config keys that changed value, when the source resolves
+/// to a real `gm.config.json`-shaped document both before and after the fetch -- falls back
+/// to the bare file path when either side is missing/unparseable/not an object (a fresh
+/// tier with no prior checkout, a non-JSON prose/fsm source, or a malformed file), since a
+/// diff needs two comparable JSON objects to say anything more specific than "it changed".
+fn changed_config_paths(src: &RepoSource, pre_fetch_text: Option<&str>) -> Vec<String> {
+    let path = src.config_path();
+    let Some(pre_text) = pre_fetch_text else { return vec![path] };
+    let Some(post_text) = crate::pkfs::read_to_string(&path) else { return vec![path] };
+    let (Ok(serde_json::Value::Object(pre)), Ok(serde_json::Value::Object(post))) = (
+        serde_json::from_str::<serde_json::Value>(&pre_text),
+        serde_json::from_str::<serde_json::Value>(&post_text),
+    ) else {
+        return vec![path];
+    };
+    let mut keys: Vec<String> = Vec::new();
+    for (k, post_v) in post.iter() {
+        match pre.get(k) {
+            Some(pre_v) if pre_v == post_v => {}
+            Some(_) => keys.push(format!("{k} (changed)")),
+            None => keys.push(format!("{k} (added)")),
+        }
+    }
+    for k in pre.keys() {
+        if !post.contains_key(k) {
+            keys.push(format!("{k} (removed)"));
+        }
+    }
+    if keys.is_empty() { vec![path] } else { keys }
 }
 
 /// The [`RepoFetcher`] `config.rs` resolves through.
