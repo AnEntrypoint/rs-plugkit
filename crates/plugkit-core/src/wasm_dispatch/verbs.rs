@@ -2649,8 +2649,35 @@ fn git_commit(body: &Value) -> u64 {
         let sha = head_after[..head_after.len().min(10)].to_string();
         let summary = message.lines().next().unwrap_or("").to_string();
         emit_event("git_commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary }));
+        record_commit_in_liqology(&summary, &head_after);
         Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary })))
     })
+}
+
+// Best-effort: feeds every real commit into liqology's memory-relevance
+// tracker (record verb) so the plugin accumulates real interaction history
+// instead of sitting built-but-uncalled. A commit is the closest real
+// signal to a completed interaction available at this point -- the same
+// text embeds both input and output since git_commit has no separate
+// input/output split to offer, matching liqology's own memory-loop example
+// convention for this case. Never blocks or fails the commit itself: a
+// liqology-unavailable/embed-failed/plugin-error outcome is only logged.
+fn record_commit_in_liqology(summary: &str, sha_full: &str) {
+    let Some(embedding) = crate::embed::embed_text(summary) else {
+        emit_event("liqology_record_skipped", json!({ "reason": "embed_failed", "sha_full": sha_full }));
+        return;
+    };
+    let resp = call_plugin(
+        "liqology",
+        "record",
+        &json!({ "input_embedding": embedding, "output_embedding": embedding }),
+    );
+    if !plugin_ok(&resp) {
+        emit_event("liqology_record_skipped", json!({
+            "reason": plugin_failure_code(&resp),
+            "sha_full": sha_full,
+        }));
+    }
 }
 
 fn check_ci_status_and_write_validated_marker_if_green(repo_cwd: Option<&str>, head_sha: &str) -> (Value, bool) {
@@ -2705,6 +2732,7 @@ fn git_finalize(body: &Value) -> u64 {
             sha = head_after[..head_after.len().min(10)].to_string();
             summary = message.lines().next().unwrap_or("").to_string();
             emit_event("git.commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary, "repo": repo }));
+            record_commit_in_liqology(&summary, &head_after);
             steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
         }
     } else {
@@ -2721,6 +2749,7 @@ fn git_finalize(body: &Value) -> u64 {
                 sha = head_after[..head_after.len().min(10)].to_string();
                 summary = bundled_message.lines().next().unwrap_or("").to_string();
                 emit_event("git.commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary, "repo": repo, "flushed_pending_prd_notes": true }));
+                record_commit_in_liqology(&summary, &head_after);
                 steps.push(json!({ "step": "commit", "sha": sha, "summary": summary, "flushed_pending_prd_notes": true }));
             }
         }
