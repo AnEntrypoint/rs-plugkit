@@ -222,11 +222,48 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     let _ = pkfs::write(&marker_s, &format!("{}:{}", fired_sid, fired_at_ms));
 
     let message = crate::prose::resolve_and_mark("residual/imperative", RESIDUAL_IMPERATIVE_DEFAULT);
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "scan": "fired",
         "marker": marker.display().to_string(),
         "imperative": message,
         "checks": ["worktree-clean", "remote-pushed", "prd-empty", "mutables-witnessed"],
     });
+    if let Some(finding) = liqology_stale_memory_finding() {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("liqology_stale_memory".to_string(), finding);
+        }
+    }
     (payload.to_string(), String::new(), 0)
+}
+
+// Observability only, never blocking -- residual-scan surfaces this finding
+// when meaningful (a real, non-trivial fraction of liqology's tracked
+// entries would be pruned under its current policy), absent otherwise
+// (empty/small/healthy store). liqology's own store never gets auto-pruned
+// from here; that stays the agent's explicit tune_policy/record-driven call.
+#[cfg(target_arch = "wasm32")]
+fn liqology_stale_memory_finding() -> Option<serde_json::Value> {
+    let resp = crate::wasm_dispatch::plugin_call("liqology", "prune_report", &serde_json::json!({}));
+    if !crate::wasm_dispatch::plugin_ok(&resp) {
+        return None;
+    }
+    let would_evict = resp.get("would_evict_ids").and_then(|v| v.as_array())?;
+    let retained = resp.get("retained_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    if would_evict.is_empty() || retained == 0 {
+        return None;
+    }
+    let evict_count = would_evict.len() as u64;
+    if evict_count * 3 < retained {
+        return None;
+    }
+    Some(serde_json::json!({
+        "would_evict_count": evict_count,
+        "retained_count": retained,
+        "note": "a third or more of liqology's tracked interaction history would be pruned under its current policy -- dispatch host_plugin_call(liqology, prune_report/tune_policy) to review",
+    }))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn liqology_stale_memory_finding() -> Option<serde_json::Value> {
+    None
 }
