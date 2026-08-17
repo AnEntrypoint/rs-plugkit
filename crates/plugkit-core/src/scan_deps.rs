@@ -1,15 +1,18 @@
 // scan_deps.rs -- supply-chain scan for the "HiddenSpawn"-class obfuscated
-// dropper (confirmed across 17+ separately-compromised repos, 2026-08). See
-// lib.rs's module doc for the incident summary. Detects two structural
-// properties, not any one incident's specific literal values (which are
-// trivial for an attacker to rotate and are deliberately not hardcoded as
-// the primary detector):
+// dropper (confirmed across 17+ separately-compromised repos, 2026-08, plus
+// a live 2026-08-17 incident across 4 of this account's own repos -- see
+// the memorize store for the full incident). See lib.rs's module doc for
+// the incident summary. Detects three structural properties, not any one
+// incident's specific literal values (which are trivial for an attacker to
+// rotate and are deliberately not hardcoded as the primary detector):
 //
 //   1. size-ratio: a file whose byte size is wildly disproportionate to its
 //      line count. The payload is appended as one extremely long line,
 //      often whitespace-padded to push it off-screen in a normal editor/
 //      diff view -- this survives any change to the payload's own content
-//      because it is a property of HOW it hides.
+//      because it is a property of HOW it hides. ALONE this only produces
+//      a "warn", not a "fail" -- a legitimate minified bundle has the same
+//      shape, so size-ratio by itself is not conclusive.
 //   2. escape-density: a dense run (4+ in a row) of \uXXXX escapes that
 //      decode to something identifier-shaped (letters/digits/underscore,
 //      starting with a letter). Real code contains at most one or two
@@ -20,6 +23,16 @@
 //      looser check produced a real false positive on a legitimate escaped
 //      CSS-selector-punctuation string (",./:") found live during
 //      verification of an earlier prototype of this scanner.
+//   3. hex-obfuscator-identifier density: 10+ occurrences of the
+//      `_0x[0-9a-fA-F]{4,6}` naming pattern javascript-obfuscator.io (and
+//      its forks) generates for every renamed symbol. Added after a live
+//      incident where this exact malware family shipped in a NUMERIC
+//      opaque-predicate variant (module names resolved via
+//      `_0x47c78c(0x1be)`-style string-table indirection) that used zero
+//      \uXXXX escapes -- check 2 alone missed it entirely, and it scored
+//      only a dismissible size-ratio "warn". No legitimate hand-written or
+//      standard-minifier (terser/esbuild/webpack) output uses this naming
+//      convention, so density alone is a reliable positive signal.
 //
 // SCOPE: git-tracked source is scanned in full every call (fast -- a real
 // repo's own source is at most a few hundred files). node_modules, if
@@ -146,6 +159,41 @@ fn is_identifier_shaped(s: &str) -> bool {
     rest_ok && chars.count() + 1 >= 3
 }
 
+const HEX_IDENT_DENSITY_THRESHOLD: usize = 10;
+
+/// Count `_0x[0-9a-fA-F]{4,6}` identifiers -- the signature naming scheme
+/// javascript-obfuscator.io (and forks/clones of it) generates for every
+/// renamed variable/function. A dense run of these is a distinct tell from
+/// the \uXXXX-escape check above: the same HiddenSpawn payload family also
+/// ships in a numeric-opaque-predicate obfuscation style that uses zero
+/// \uXXXX escapes (module names resolved via `_0x47c78c(0x1be)`-style
+/// string-table indirection instead), which the escape-density check alone
+/// cannot see -- confirmed live when this exact variant scored only a
+/// size-ratio `warn` (dismissible as "probably a legitimate minified
+/// bundle") and was missed on a first pass. Real hand-written or standard-
+/// minifier output (terser, esbuild, webpack) never uses this `_0x`+hex
+/// naming convention -- it is unique to this obfuscator family, so a dense
+/// run is a reliable positive signal on its own, no decode step needed.
+fn count_hex_obfuscator_idents(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut count = 0usize;
+    let mut i = 0usize;
+    while i + 3 < bytes.len() {
+        if &bytes[i..i + 3] != b"_0x" {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 3;
+        while j < bytes.len() && bytes[j].is_ascii_hexdigit() { j += 1; }
+        let hex_len = j - (i + 3);
+        if (4..=6).contains(&hex_len) {
+            count += 1;
+        }
+        i = j;
+    }
+    count
+}
+
 #[derive(Clone)]
 struct FileFinding {
     path: String,
@@ -192,14 +240,21 @@ fn scan_one_file(path: &str) -> Option<Result<FileFinding, BlockedRead>> {
     let ratio = bytes / lines;
     let oversized = ratio > SIZE_RATIO_THRESHOLD;
     let escape_hits = find_suspicious_escapes(&text);
-    if !oversized && escape_hits.is_empty() { return None; }
-    let severity = if !escape_hits.is_empty() { "fail" } else { "warn" };
+    let hex_ident_count = count_hex_obfuscator_idents(&text);
+    let hex_obfuscated = hex_ident_count >= HEX_IDENT_DENSITY_THRESHOLD;
+    if !oversized && escape_hits.is_empty() && !hex_obfuscated { return None; }
+    let severity = if !escape_hits.is_empty() || hex_obfuscated { "fail" } else { "warn" };
+    let note = if hex_obfuscated && escape_hits.is_empty() {
+        Some(format!("{hex_ident_count} _0x-hex obfuscator-style identifiers"))
+    } else {
+        None
+    };
     Some(Ok(FileFinding {
         path: path.to_string(),
         severity,
         ratio: Some(ratio),
         escape_hits: escape_hits.into_iter().take(5).collect(),
-        note: None,
+        note,
     }))
 }
 
@@ -416,7 +471,7 @@ pub fn scan_deps(body: &Value) -> Value {
         "warnCount": warnings.len(),
         "blockedCount": blocked.len(),
         "failing": failing.iter().map(|f| json!({
-            "path": f.path, "ratio": f.ratio, "escapeHits": f.escape_hits,
+            "path": f.path, "ratio": f.ratio, "escapeHits": f.escape_hits, "note": f.note,
         })).collect::<Vec<_>>(),
         "warnings": warnings.iter().map(|f| json!({
             "path": f.path, "ratio": f.ratio, "note": f.note,
