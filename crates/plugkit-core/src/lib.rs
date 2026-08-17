@@ -216,10 +216,32 @@ mod wasm_hooks {
         true
     }
 
+    fn bash_search_token(cmd: &str) -> Option<&'static str> {
+        let is_find = |t: &str| t == "find" || t.ends_with("/find") || t.ends_with("\\find");
+        let is_grep = |t: &str| {
+            t == "grep" || t == "rg" || t == "ripgrep"
+                || t.ends_with("/grep") || t.ends_with("\\grep")
+                || t.ends_with("/rg") || t.ends_with("\\rg")
+        };
+        cmd.split([';', '\n', '|', '&'])
+            .map(|s| s.trim_start())
+            .find_map(|s| {
+                let first = s.split_whitespace().next().unwrap_or("");
+                if is_find(first) { Some("find") } else if is_grep(first) { Some("grep") } else { None }
+            })
+    }
+
     pub fn pre_tool_use(input: &Value) -> Value {
         let tool_name = input.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-        if tool_name == "Grep" || tool_name == "Glob" {
-            let fired = signal_platform_search_drift(tool_name);
+        let bash_hit = if tool_name == "Bash" {
+            let cmd = input.get("tool_input").and_then(|v| v.get("command")).and_then(|v| v.as_str()).unwrap_or("");
+            bash_search_token(cmd)
+        } else {
+            None
+        };
+        if tool_name == "Grep" || tool_name == "Glob" || bash_hit.is_some() {
+            let signal_name = bash_hit.unwrap_or(tool_name);
+            let fired = signal_platform_search_drift(signal_name);
             let promoted = crate::orchestrator::deviations::effective_severity("platform-search-drift")
                 == crate::orchestrator::deviations::Severity::Deny;
             if fired && promoted {
@@ -228,7 +250,7 @@ mod wasm_hooks {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
-                        "permissionDecisionReason": format!("platform-search-drift: `{}` during an in-flight chain, and this project's policy.deviation_severity promotes this kind to deny. codesearch/recall are the discovery surfaces; platform search is exploration outside the spool.", tool_name)
+                        "permissionDecisionReason": format!("platform-search-drift: `{}` during an in-flight chain, and this project's policy.deviation_severity promotes this kind to deny. codesearch/recall are the discovery surfaces; platform search (including a Bash find/grep/rg invocation) is exploration outside the spool. Use the codesearch verb instead.", signal_name)
                     }
                 });
             }

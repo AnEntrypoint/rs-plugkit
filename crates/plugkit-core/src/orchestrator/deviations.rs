@@ -107,8 +107,8 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
     ),
     (
         "platform-search-drift",
-        "a platform Grep/Glob fired during an in-flight chain -- codesearch/recall are the discovery surfaces; platform search is exploration outside the spool",
-        Severity::Log,
+        "a platform Grep/Glob tool call, or a Bash invocation of find/grep, fired during an in-flight chain -- codesearch/recall are the discovery surfaces; platform search is exploration outside the spool",
+        Severity::Deny,
     ),
     (
         "spool-poll",
