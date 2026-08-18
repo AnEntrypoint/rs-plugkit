@@ -103,12 +103,12 @@ pub fn clear_codeinsight_full_cfg(cfg: &crate::ragconfig::RagConfig) -> u32 {
     cleared
 }
 
-fn clear_codeinsight_if_dim_mismatch() -> bool {
-    clear_codeinsight_if_dim_mismatch_cfg(&crate::ragconfig::RagConfig::default())
+fn clear_codeinsight_if_dim_mismatch(project_path: Option<&str>) -> bool {
+    clear_codeinsight_if_dim_mismatch_cfg(&crate::ragconfig::RagConfig::default(), project_path)
 }
 
-fn clear_codeinsight_if_dim_mismatch_cfg(cfg: &crate::ragconfig::RagConfig) -> bool {
-    let vec_ns = cfg.namespaces.vec_namespace(&cfg.namespaces.code);
+fn clear_codeinsight_if_dim_mismatch_cfg(cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> bool {
+    let vec_ns = format!("{}{}", cfg.namespaces.vec_namespace(&cfg.namespaces.code), root_ns_suffix(project_path));
     let vec_rows = fv_query(&vec_ns, "");
     let rows = match vec_rows.as_array() {
         Some(r) if !r.is_empty() => r,
@@ -313,8 +313,23 @@ fn project_db_filename(project_path: Option<&str>) -> String {
     }
 }
 
+/// Live at `<project_path>/.gm/gm.db`, not a crc32-hashed file inside the
+/// CURRENT project's own `.gm/` -- a cache under the target folder's own
+/// `.gm/` is reusable by any other project/session that later points at that
+/// same folder, matching how the current project's own index is reusable.
+/// `project_db_filename`'s crc32-hash naming stays live for callers that pass
+/// a project_path but want the digest/memorize-style co-located cache
+/// (memorize_at_finalize et al.) -- only code_index's own db path resolution
+/// moved to the per-root `.gm/` layout.
 pub(crate) fn project_db_path(project_path: Option<&str>) -> String {
-    libsql_wasm::absolute_db_path(&project_db_filename(project_path))
+    match project_path {
+        Some(p) if !p.is_empty() => {
+            let root = p.trim_end_matches(['/', '\\']);
+            let cfg = crate::ragconfig::RagConfig::resolved();
+            format!("{}/{}/{}", root, cfg.db_path.state_root_dir, cfg.db_path.db_filename)
+        }
+        _ => libsql_wasm::absolute_db_path(&project_db_filename(None)),
+    }
 }
 
 fn crc32(s: &str) -> u32 {
@@ -756,12 +771,39 @@ fn indexing_pipeline_namespace_config_unthreaded_default() -> crate::ragconfig::
     crate::ragconfig::NamespaceConfig::default()
 }
 
+/// KV namespaces (manifest/code/vec) live in a host-side store keyed by
+/// namespace string alone, independent of the libsql db path -- so a
+/// per-root db path fix without a matching namespace salt would still mix
+/// every root's manifests/embeddings into the same KV rows. `project_path`
+/// salts the namespace with the same crc32 tag `project_db_filename` uses,
+/// keeping the default (no project_path) namespace byte-identical to the
+/// pre-existing behaviour.
+fn root_ns_suffix(project_path: Option<&str>) -> String {
+    match project_path {
+        Some(p) if !p.is_empty() => format!("__root{:x}", crc32(p)),
+        _ => String::new(),
+    }
+}
+
+fn manifest_ns_for(project_path: Option<&str>) -> String {
+    format!("{}{}", indexing_pipeline_namespace_config_unthreaded_default().manifest_namespace(), root_ns_suffix(project_path))
+}
+
+fn code_ns_for(project_path: Option<&str>) -> String {
+    format!("{}{}", indexing_pipeline_namespace_config_unthreaded_default().code, root_ns_suffix(project_path))
+}
+
+fn code_vec_ns_for(project_path: Option<&str>) -> String {
+    let ns = indexing_pipeline_namespace_config_unthreaded_default();
+    format!("{}{}", ns.vec_namespace(&ns.code), root_ns_suffix(project_path))
+}
+
 fn manifest_ns() -> String {
-    indexing_pipeline_namespace_config_unthreaded_default().manifest_namespace()
+    manifest_ns_for(None)
 }
 
 fn code_ns() -> String {
-    indexing_pipeline_namespace_config_unthreaded_default().code
+    code_ns_for(None)
 }
 
 fn code_vec_ns() -> String {
@@ -972,9 +1014,9 @@ fn purge_stale_manifest_row(row_key: &str, val: &str) {
     fv_delete(&manifest_ns(), row_key);
 }
 
-fn load_manifests() -> std::collections::HashMap<String, FileManifest> {
+fn load_manifests(project_path: Option<&str>) -> std::collections::HashMap<String, FileManifest> {
     let mut out = std::collections::HashMap::new();
-    let rows = fv_query(&manifest_ns(), "");
+    let rows = fv_query(&manifest_ns_for(project_path), "");
     if let Some(arr) = rows.as_array() {
         for row in arr {
             let val = match row.get("value").and_then(|v| v.as_str()) { Some(v) => v, None => continue };
@@ -1055,7 +1097,7 @@ fn truncate_for_embed(body: &str) -> &str {
 /// this result let that manifest claim a chunk the insert had rejected, so the
 /// manifest and code_chunks disagreed permanently and the file re-processed on
 /// every pass with nothing surfaced.
-fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: &str) -> bool {
+fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: &str, project_path: Option<&str>) -> bool {
     let mut persisted = true;
     if libsql_ok {
         let embedding_lit = vec_to_json_literal(&c.emb);
@@ -1084,19 +1126,27 @@ fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: 
         }
     }
     let emb_json = serde_json::json!({ "embedding": c.emb }).to_string();
-    fv_put(&code_ns(), &c.key, &emb_json);
+    fv_put(&code_ns_for(project_path), &c.key, &emb_json);
     persisted
 }
 
-fn delete_chunk_keys(chunks: &[ChunkRecord]) {
+fn delete_chunk_keys(chunks: &[ChunkRecord], project_path: Option<&str>) {
     for c in chunks {
-        fv_delete(&code_ns(), &c.key);
-        fv_delete(&code_vec_ns(), &c.key);
+        fv_delete(&code_ns_for(project_path), &c.key);
+        fv_delete(&code_vec_ns_for(project_path), &c.key);
     }
 }
 
 pub fn index(root: &str, max_files: usize) -> Value {
     index_cfg(root, max_files, &crate::ragconfig::RagConfig::resolved())
+}
+
+/// Same as [`index`], targeting an explicit project root -- its manifest,
+/// chunk, and digest state live under `<project_path>/.gm/gm.db` and a
+/// crc32-salted KV namespace, isolated from the current project's own index
+/// so indexing a submodule/sibling never mixes into or overwrites it.
+pub fn index_at(root: &str, max_files: usize, project_path: &str) -> Value {
+    index_cfg_impl(root, max_files, &crate::ragconfig::RagConfig::resolved(), false, 20, Some(project_path))
 }
 
 /// Same as [`index`], but always runs the likely-orphaned-symbol scan
@@ -1108,7 +1158,7 @@ pub fn index(root: &str, max_files: usize) -> Value {
 /// that cost on demand, matching `scan_deps`'s `{"full": true}` pattern --
 /// cheap by default, exhaustive when actually asked for.
 pub fn index_with_dead_code(root: &str, max_files: usize, limit: usize) -> Value {
-    let mut out = index_cfg_impl(root, max_files, &crate::ragconfig::RagConfig::resolved(), true, limit);
+    let mut out = index_cfg_impl(root, max_files, &crate::ragconfig::RagConfig::resolved(), true, limit, None);
     if let Some(obj) = out.as_object_mut() {
         obj.insert("dead_code_scan_forced".to_string(), json!(true));
     }
@@ -1119,27 +1169,27 @@ pub fn index_with_dead_code(root: &str, max_files: usize, limit: usize) -> Value
 /// matching the `_cfg` convention every other config-aware entry point in this
 /// module already follows.
 pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig) -> Value {
-    index_cfg_impl(root, max_files, cfg, cfg.index.likely_orphaned_symbol_scan_enabled, 20)
+    index_cfg_impl(root, max_files, cfg, cfg.index.likely_orphaned_symbol_scan_enabled, 20, None)
 }
 
-fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig, include_dead_code: bool, orphan_scan_limit: usize) -> Value {
-    let db_path = project_db_path(None);
+fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig, include_dead_code: bool, orphan_scan_limit: usize, project_path: Option<&str>) -> Value {
+    let db_path = project_db_path(project_path);
     let libsql_err = ensure_schema_at(&db_path).err().map(|e| e.to_string());
     let libsql_ok = libsql_err.is_none();
     if let Some(e) = &libsql_err {
         let msg = format!("code_index: libsql unavailable at {} -- {} (digest will not persist and chunk reads return empty)", db_path, e);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     }
-    let kvvec_cleared = clear_codeinsight_if_dim_mismatch();
+    let kvvec_cleared = clear_codeinsight_if_dim_mismatch(project_path);
     if kvvec_cleared {
-        let rows = fv_query(&manifest_ns(), "");
+        let rows = fv_query(&manifest_ns_for(project_path), "");
         if let Some(arr) = rows.as_array() {
             for row in arr {
-                if let Some(k) = row.get("key").and_then(|k| k.as_str()) { fv_delete(&manifest_ns(), k); }
+                if let Some(k) = row.get("key").and_then(|k| k.as_str()) { fv_delete(&manifest_ns_for(project_path), k); }
             }
         }
     }
-    let prior = load_manifests();
+    let prior = load_manifests(project_path);
     // Hoisted out of the per-file loop: one GROUP BY instead of one full
     // open/query/close per file (see chunk_rows_by_path).
     let chunk_counts = if libsql_ok {
@@ -1290,12 +1340,12 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                 let mut all_persisted = true;
                 for c in &m.chunks {
                     let body = slice_lines(&content, c.ls, c.le);
-                    all_persisted &= write_chunk(libsql_ok, &db_path, fp, c, &body);
+                    all_persisted &= write_chunk(libsql_ok, &db_path, fp, c, &body, project_path);
                     chunked += 1;
                     reused += 1;
                 }
                 if !all_persisted {
-                    fv_delete(&manifest_ns(), fp);
+                    fv_delete(&manifest_ns_for(project_path), fp);
                 }
                 reused_files += 1;
                 continue;
@@ -1303,7 +1353,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             if libsql_ok {
                 let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
             }
-            delete_chunk_keys(&m.chunks);
+            delete_chunk_keys(&m.chunks, project_path);
             delete_call_edges_for_path(fp);
         } else if libsql_ok {
             let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
@@ -1437,7 +1487,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             }
             let key = format!("ci-{:x}-{:x}-{}", path_hash, file_hash, idx);
             let rec = ChunkRecord { key, kind, name, ls, le, emb: v, content_hash };
-            file_fully_persisted &= write_chunk(libsql_ok, &db_path, fp, &rec, &body);
+            file_fully_persisted &= write_chunk(libsql_ok, &db_path, fp, &rec, &body, project_path);
             records.push(rec);
         }
         // Telemetry only, no behavior change: this loop has no elapsed-check
@@ -1480,9 +1530,9 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             } else {
                 compute_commit_overview(fp)
             };
-            fv_put(&manifest_ns(), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, file_size, &commit_overview, &records));
+            fv_put(&manifest_ns_for(project_path), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, file_size, &commit_overview, &records));
         } else {
-            fv_delete(&manifest_ns(), fp);
+            fv_delete(&manifest_ns_for(project_path), fp);
         }
     }
 
@@ -1490,9 +1540,9 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     let mut removed_files = 0;
     for (fp, m) in &prior {
         if !seen.contains(fp) && !files_set.contains(fp.as_str()) {
-            delete_chunk_keys(&m.chunks);
+            delete_chunk_keys(&m.chunks, project_path);
             delete_call_edges_for_path(fp);
-            fv_delete(&manifest_ns(), fp);
+            fv_delete(&manifest_ns_for(project_path), fp);
             removed_files += 1;
         }
     }
@@ -1539,7 +1589,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     // partial keeps the distinction visible rather than pretending convergence.
     if deferred_files == 0 {
         let digest = digest_from_entries(digest_entries);
-        store_digest(&digest);
+        store_digest_at(&digest, project_path);
         let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} removed_files={} skipped_no_embed={} digest={}", indexed, chunked, embedded, reused, reused_files, removed_files, skipped_no_embed, digest);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     } else {
@@ -1550,7 +1600,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         // continues -- but the file now EXISTS, which stops the
         // never-stored/always-reindex loop that starved this cache entirely.
         let partial_digest = format!("{}:partial={}", digest_from_entries(digest_entries), deferred_files);
-        store_digest(&partial_digest);
+        store_digest_at(&partial_digest, project_path);
         let msg = format!("code_index: partial pass (wall budget) files_indexed={} deferred_files={} embedded={} reused={} removed_files={} -- partial digest stored, next call resumes", indexed, deferred_files, embedded, reused, removed_files);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
         crate::wasm_dispatch::emit_event("codeinsight_index_partial", json!({
@@ -1623,12 +1673,21 @@ pub fn current_digest() -> String {
     current_digest_cfg(&crate::ragconfig::RagConfig::resolved())
 }
 
+pub fn current_digest_at(project_path: &str) -> String {
+    current_digest_cfg_at(&crate::ragconfig::RagConfig::resolved(), Some(project_path))
+}
+
 /// Same as [`current_digest`] with explicit config. The file-size cap MUST match
 /// the indexer own, or the digest counts files the index skips and the two can
 /// never agree -- the same class of mismatch that made the stored digest
 /// permanently unequal to the computed one.
 pub fn current_digest_cfg(cfg: &crate::ragconfig::RagConfig) -> String {
-    let files = collect_files(".", cfg.index.digest_max_files, &cfg.index);
+    current_digest_cfg_at(cfg, None)
+}
+
+pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> String {
+    let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
+    let files = collect_files(root, cfg.index.digest_max_files, &cfg.index);
     let mut entries: Vec<(String, u32)> = Vec::new();
     for raw_fp in &files {
         let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();
@@ -1647,15 +1706,30 @@ pub fn current_digest_cfg(cfg: &crate::ragconfig::RagConfig) -> String {
     digest_from_entries(entries)
 }
 
+fn digest_path_for(project_path: Option<&str>) -> String {
+    match project_path {
+        Some(p) if !p.is_empty() => format!("{}/{}", p.trim_end_matches(['/', '\\']), DIGEST_PATH),
+        _ => DIGEST_PATH.to_string(),
+    }
+}
+
 pub fn stored_digest() -> Option<String> {
-    crate::wasm_dispatch::host_read(DIGEST_PATH)
+    stored_digest_at(None)
+}
+
+pub fn stored_digest_at(project_path: Option<&str>) -> Option<String> {
+    crate::wasm_dispatch::host_read(&digest_path_for(project_path))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
 pub fn store_digest(digest: &str) {
-    let _ = crate::wasm_dispatch::host_write(DIGEST_PATH, digest);
-    fv_delete(&code_ns(), "__digest__");
+    store_digest_at(digest, None)
+}
+
+pub fn store_digest_at(digest: &str, project_path: Option<&str>) {
+    let _ = crate::wasm_dispatch::host_write(&digest_path_for(project_path), digest);
+    fv_delete(&code_ns_for(project_path), "__digest__");
 }
 
 pub fn overview() -> Value {
@@ -1797,7 +1871,7 @@ impl FusionCorpus {
         let mut overview_by_path = std::collections::HashMap::new();
         let mut index_by_key = std::collections::HashMap::new();
         let mut index_by_path_line = std::collections::HashMap::new();
-        for (fp, m) in load_manifests() {
+        for (fp, m) in load_manifests(None) {
             if let Some(ov) = &m.commit_overview {
                 overview_by_path.insert(fp.clone(), ov.clone());
             }
@@ -1996,9 +2070,14 @@ fn glob_match_simple(pattern: &str, text: &str) -> bool {
 }
 
 pub fn search_filenames(pattern: &str, k: usize, cfg: &crate::ragconfig::RagConfig) -> Value {
+    search_filenames_at(pattern, k, cfg, None)
+}
+
+pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> Value {
     let needle = pattern.to_lowercase();
     let is_glob = needle.contains('*') || needle.contains('?');
-    let full_files = collect_files(".", cfg.index.digest_max_files.max(20000), &cfg.index);
+    let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
+    let full_files = collect_files(root, cfg.index.digest_max_files.max(20000), &cfg.index);
     let hits: Vec<Value> = full_files.iter()
         .filter(|p| {
             let lp = p.to_lowercase();
@@ -2012,8 +2091,12 @@ pub fn search_filenames(pattern: &str, k: usize, cfg: &crate::ragconfig::RagConf
 }
 
 pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value {
-    if let Err(e) = ensure_schema() { return json!({ "ok": false, "error": e }); }
-    let db_path = project_db_path(None);
+    search_at(query, k, inline_embedding, None)
+}
+
+pub fn search_at(query: &str, k: usize, inline_embedding: Option<&Value>, project_path: Option<&str>) -> Value {
+    if let Err(e) = ensure_schema_for(project_path) { return json!({ "ok": false, "error": e }); }
+    let db_path = project_db_path(project_path);
     let qvec = match inline_embedding.and_then(json_to_f32_vec).or_else(|| embed_text(query)) {
         Some(v) => v,
         None => {
@@ -2038,7 +2121,7 @@ pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value 
     match libsql_wasm::query_params(&db_path, &sql, &[&qlit, &qlit]) {
         Ok(rows) => json!({ "ok": true, "mode": "vector_top_k", "rows": rows }),
         Err(e) if crate::shared_db::is_malformed_by_sqlite_error_code(&e) && crate::shared_db::recover_malformed_shared_db() => {
-            let _ = ensure_schema();
+            let _ = ensure_schema_for(project_path);
             match libsql_wasm::query_params(&db_path, &sql, &[&qlit, &qlit]) {
                 Ok(rows) => json!({ "ok": true, "mode": "vector_top_k_after_recover", "recovered_from": e, "rows": rows }),
                 Err(e2) => json!({ "ok": false, "mode": "recovered_but_still_failing", "vec_err": e, "retry_err": e2 }),
