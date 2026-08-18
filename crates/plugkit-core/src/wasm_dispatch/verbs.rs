@@ -1331,11 +1331,57 @@ fn memorize_prune(body: &Value) -> u64 {
     }))
 }
 
+/// Cross-project entry: `codesearch {root|projectPath, query, ...}` against a
+/// submodule or sibling repo, e.g. `C:/dev/liqology`. Its index/cache lives at
+/// `<root>/.gm/gm.db` plus a crc32-salted KV namespace -- isolated from and
+/// reusable independent of the current project's own index (see
+/// `code_index::project_db_path`/`root_ns_suffix`). Deliberately bypasses the
+/// cwd-only fusion/BM25/dataflow-pipeline machinery the default path uses:
+/// that machinery is inherently tied to the current project's own db and
+/// threading it through every root would risk mixing state across projects;
+/// filename+semantic search alone already covers the actual failure mode
+/// (falling back to `find`/Grep/Glob because codesearch could not reach a
+/// submodule at all).
+fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
+    if body.get("mode").and_then(|v| v.as_str()) == Some("filename") {
+        let out = crate::code_index::search_filenames_at(query, k as usize, cfg, Some(root));
+        return ok("codesearch", out);
+    }
+    let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !already_indexed {
+        let stored = crate::code_index::stored_digest_at(Some(root));
+        let current = crate::code_index::current_digest_at(root);
+        let stale = match &stored { Some(s) => s != &current, None => true };
+        if stale {
+            let reason = if stored.is_none() { "digest-absent" } else { "digest-mismatch" };
+            emit_event("codeinsight_rebuild", json!({ "reason": reason, "root": root, "stored_then_current": current }));
+            let _ = crate::code_index::index_at(root, 500, root);
+            let mut retry = body.clone();
+            if let Some(obj) = retry.as_object_mut() {
+                obj.insert("auto_indexed".to_string(), Value::Bool(true));
+            }
+            return codesearch_at_root(&retry, root, query, k, cfg);
+        }
+    }
+    let embedding = embed_query(query);
+    let vres = crate::code_index::search_at(query, k as usize, Some(&embedding), Some(root));
+    let hits = vres.get("rows").cloned().unwrap_or_else(|| json!([]));
+    ok("codesearch", json!({
+        "mode": "root_scoped", "root": root, "vector_hits": hits, "degraded": vres.get("degraded").cloned().unwrap_or(json!(false)),
+    }))
+}
+
 fn codesearch(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_k as u64) as u32;
     if query.is_empty() { return err("codesearch", "query required"); }
+    let root = body.get("root").and_then(|v| v.as_str())
+        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty());
+    if let Some(root) = root {
+        return codesearch_at_root(body, root, query, k, &cfg);
+    }
     if body.get("mode").and_then(|v| v.as_str()) == Some("filename") {
         let out = crate::code_index::search_filenames(query, k as usize, &cfg);
         return ok("codesearch", out);
@@ -2200,13 +2246,19 @@ fn sql_deserialize(body: &Value) -> u64 {
 }
 
 fn codeinsight_index(body: &Value) -> u64 {
-    let root = body.get("root").and_then(|v| v.as_str()).unwrap_or(".");
+    let root = body.get("root").and_then(|v| v.as_str())
+        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty());
     let max_files = body.get("max_files").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
     if body.get("dead_code").and_then(|v| v.as_bool()).unwrap_or(false) {
         let limit = body.get("dead_code_limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
-        return pack(crate::code_index::index_with_dead_code(root, max_files, limit).to_string());
+        return pack(crate::code_index::index_with_dead_code(root.unwrap_or("."), max_files, limit).to_string());
     }
-    pack(crate::code_index::index(root, max_files).to_string())
+    let out = match root {
+        Some(r) => crate::code_index::index_at(r, max_files, r),
+        None => crate::code_index::index(".", max_files),
+    };
+    pack(out.to_string())
 }
 
 fn body_cwd(body: &Value) -> Option<&str> {
