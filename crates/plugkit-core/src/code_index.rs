@@ -854,9 +854,26 @@ struct FileManifest {
     size: Option<u64>,
     commit_overview: Option<String>,
     chunks: Vec<ChunkRecord>,
+    /// Count of chunks this file produced that failed to embed on the pass
+    /// that wrote this manifest (embedder unavailable/erroring), and so are
+    /// NOT represented in `chunks` at all -- `chunks.len() == 0` is
+    /// structurally identical whether a file legitimately has no indexable
+    /// content or every one of its chunks failed to embed. Without this
+    /// field, a transient embedder outage poisons the cache permanently: the
+    /// stat-only and hash-match reuse fast paths only compare `chunks.len()`
+    /// against the live `chunk_rows(fp)` count (both 0, so they "match"),
+    /// and file_hash never changes for unedited content, so the file is
+    /// "reused" as fully-indexed-with-zero-chunks on every subsequent pass
+    /// forever, even after the embedder recovers. >0 forces both fast paths
+    /// to fall through to a full re-chunk+re-embed instead. Absent on
+    /// manifests written before this field existed, defaulting to 0 (an
+    /// older row is trusted once, same as every other optional field here --
+    /// it was written when embed failures weren't tracked, not necessarily
+    /// when there were none).
+    skipped_no_embed: u32,
 }
 
-fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, size: u64, commit_overview: &Option<String>, chunks: &[ChunkRecord]) -> String {
+fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, size: u64, commit_overview: &Option<String>, chunks: &[ChunkRecord], skipped_no_embed: u32) -> String {
     let arr: Vec<Value> = chunks.iter().map(|c| json!({
         "key": c.key,
         "kind": c.kind,
@@ -866,7 +883,7 @@ fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, size: 
         "emb": c.emb,
         "ch": c.content_hash,
     })).collect();
-    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "digest_hash": digest_hash, "mtime_ms": mtime_ms, "size": size, "commit_overview": commit_overview, "chunks": arr }).to_string()
+    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "digest_hash": digest_hash, "mtime_ms": mtime_ms, "size": size, "commit_overview": commit_overview, "chunks": arr, "skipped_no_embed": skipped_no_embed }).to_string()
 }
 
 fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
@@ -916,7 +933,8 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
         let content_hash = c.get("ch").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
         chunks.push(ChunkRecord { key, kind, name, ls, le, emb, content_hash });
     }
-    Some((fp, FileManifest { hash, digest_hash, mtime_ms, size, commit_overview, chunks }))
+    let skipped_no_embed = parsed.get("skipped_no_embed").and_then(|s| s.as_u64()).unwrap_or(0) as u32;
+    Some((fp, FileManifest { hash, digest_hash, mtime_ms, size, commit_overview, chunks, skipped_no_embed }))
 }
 
 /// Whether a path lives inside a submodule, so per-file git history is skipped.
@@ -1283,7 +1301,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                 // predating this guard.
                 let size_matches = m.size.is_none() || stat_size == m.size;
                 if let (Some(mtime), Some(dh)) = (stat_mtime, m.digest_hash) {
-                    if mtime == m.mtime_ms && size_matches && libsql_ok && chunk_rows(fp) == m.chunks.len() {
+                    if mtime == m.mtime_ms && size_matches && m.skipped_no_embed == 0 && libsql_ok && chunk_rows(fp) == m.chunks.len() {
                         seen.insert(fp.clone());
                         indexed += 1;
                         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
@@ -1327,7 +1345,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         digest_entries.push((fp.clone(), file_digest_hash));
 
         if let Some(m) = prior.get(fp) {
-            if m.hash == file_hash {
+            if m.hash == file_hash && m.skipped_no_embed == 0 {
                 if libsql_ok && chunk_rows(fp) == m.chunks.len() {
                     chunked += m.chunks.len() as i32;
                     reused += m.chunks.len() as i32;
@@ -1467,6 +1485,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
 
         let mut records: Vec<ChunkRecord> = Vec::new();
         let mut file_fully_persisted = true;
+        let mut file_skipped_no_embed: u32 = 0;
         let chunk_write_loop_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let chunks_in_this_file = chunk_content_hashes.len();
         for (idx, (((kind, name, ls, le, body), (emb_opt, was_reused)), content_hash)) in chunks.into_iter().zip(embed_results.into_iter()).zip(chunk_content_hashes.into_iter()).enumerate() {
@@ -1474,6 +1493,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                 Some(v) => v,
                 None => {
                     skipped_no_embed += 1;
+                    file_skipped_no_embed += 1;
                     let msg = format!("code_index: embed failed for {}:{} ({}); skipping chunk to avoid NULL-embedding row", fp, ls, name);
                     let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
                     continue;
@@ -1530,7 +1550,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             } else {
                 compute_commit_overview(fp)
             };
-            fv_put(&manifest_ns_for(project_path), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, file_size, &commit_overview, &records));
+            fv_put(&manifest_ns_for(project_path), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, file_size, &commit_overview, &records, file_skipped_no_embed));
         } else {
             fv_delete(&manifest_ns_for(project_path), fp);
         }
