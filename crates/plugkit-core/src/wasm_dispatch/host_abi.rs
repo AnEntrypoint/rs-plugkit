@@ -15,6 +15,7 @@ host_abi_extern_block_and_host_imports_list_from_one_declaration! {
     fn host_cwd() -> u64;
     fn host_fs_read(path_ptr: *const u8, path_len: u32) -> u64;
     fn host_fs_write(path_ptr: *const u8, path_len: u32, data_ptr: *const u8, data_len: u32) -> u32;
+    fn host_fs_cas_write(path_ptr: *const u8, path_len: u32, expected_ptr: *const u8, expected_len: u32, data_ptr: *const u8, data_len: u32) -> u32;
     fn host_fs_remove(path_ptr: *const u8, path_len: u32) -> u32;
     fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
     fn host_fs_stat(path_ptr: *const u8, path_len: u32) -> u64;
@@ -202,6 +203,25 @@ pub fn host_read(path: &str) -> Option<String> {
 pub fn host_write(path: &str, data: &str) -> bool {
     let rc = unsafe { host_fs_write(path.as_ptr(), path.len() as u32, data.as_ptr(), data.len() as u32) };
     rc != 0
+}
+
+/// Atomically writes `data` iff the file's current content equals
+/// `expected`, in one host-side critical section -- unlike a plain
+/// host_read + host_write pair, which leaves a window where another
+/// concurrent writer can land between the two calls and get silently
+/// clobbered. See agentplug-host's atomic_cas_write_locked for the host
+/// side of this contract. Returns the raw host status code: 1 = swapped,
+/// 2 = mismatch (caller should re-read and retry), anything else = I/O
+/// error. Translated into pkfs::CasWriteOutcome by pkfs::cas_write, which
+/// (unlike this wasm32-only module) also compiles under a native target.
+pub fn host_cas_write(path: &str, expected: &str, data: &str) -> u32 {
+    unsafe {
+        host_fs_cas_write(
+            path.as_ptr(), path.len() as u32,
+            expected.as_ptr(), expected.len() as u32,
+            data.as_ptr(), data.len() as u32,
+        )
+    }
 }
 
 pub fn host_stat(path: &str) -> Option<Value> {
