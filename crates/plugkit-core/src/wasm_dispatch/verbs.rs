@@ -1789,11 +1789,12 @@ fn serp_default_oxibrowser_headless_engine(body: &Value, body_s: &str) -> u64 {
             })),
         },
     };
-    let envelope = json!({ "body": code, "timeoutMs": timeout_ms }).to_string();
+    let opts = json!({ "timeoutMs": timeout_ms }).to_string();
     let packed = unsafe { host_oxi_exec(
-        envelope.as_ptr(), envelope.len() as u32,
+        code.as_ptr(), code.len() as u32,
         cwd.as_ptr(), cwd.len() as u32,
         session_id.as_ptr(), session_id.len() as u32,
+        opts.as_ptr(), opts.len() as u32,
     ) };
     match unpack_to_string(packed) {
         Some(s) => {
@@ -1883,17 +1884,16 @@ fn browser_lightpanda_or_steel_cdp_engine(body: &Value, body_s: &str) -> u64 {
     // The browser and cdp verbs share ONE host-import (host_browser_exec) and
     // ONE agentplug-side driver (browser::run) -- both are real-Chrome-family
     // CDP-over-port dispatch, differing only in which engine answers the
-    // port. Threading an "engine" field through the same JSON envelope the
-    // cdp verb already sends (rather than adding a second host-import) means
-    // zero wasm ABI surface growth: the #[link(wasm_import_module="env")]
-    // extern block and its HOST_IMPORTS entry stay exactly as they are: The
-    // agentplug host reads this field to pick spawn-lightpanda vs
-    // dial-steel-endpoint vs the cdp verb's spawn-chrome default.
-    let envelope = json!({ "body": code, "timeoutMs": timeout_ms, "engine": "lightpanda" }).to_string();
+    // port. The "engine" field rides in the small opts param (never inside
+    // the raw code body), so the agentplug host reads it to pick
+    // spawn-lightpanda vs dial-steel-endpoint vs the cdp verb's
+    // spawn-chrome default, without JSON-escaping the caller's raw JS.
+    let opts = json!({ "timeoutMs": timeout_ms, "engine": "lightpanda" }).to_string();
     let packed = unsafe { host_browser_exec(
-        envelope.as_ptr(), envelope.len() as u32,
+        code.as_ptr(), code.len() as u32,
         cwd.as_ptr(), cwd.len() as u32,
         session_id.as_ptr(), session_id.len() as u32,
+        opts.as_ptr(), opts.len() as u32,
     ) };
     match unpack_to_string(packed) {
         Some(s) => {
@@ -1984,11 +1984,12 @@ fn cdp_real_chrome_escape_hatch(body: &Value, body_s: &str) -> u64 {
     // host's default for a missing/unrecognized engine field is ALSO chrome
     // (see browser_engine::select_engine), so this is belt-and-suspenders
     // preserving cdp's exact prior behavior, not a functional dependency.
-    let envelope = json!({ "body": code, "timeoutMs": timeout_ms, "engine": "chrome" }).to_string();
+    let opts = json!({ "timeoutMs": timeout_ms, "engine": "chrome" }).to_string();
     let packed = unsafe { host_browser_exec(
-        envelope.as_ptr(), envelope.len() as u32,
+        code.as_ptr(), code.len() as u32,
         cwd.as_ptr(), cwd.len() as u32,
         session_id.as_ptr(), session_id.len() as u32,
+        opts.as_ptr(), opts.len() as u32,
     ) };
     match unpack_to_string(packed) {
         Some(s) => {

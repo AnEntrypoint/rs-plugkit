@@ -30,8 +30,8 @@ host_abi_extern_block_and_host_imports_list_from_one_declaration! {
     fn host_now_ms() -> u64;
     fn host_env_get(key_ptr: *const u8, key_len: u32) -> u64;
     fn host_random_fill(ptr: *mut u8, len: u32) -> u32;
-    fn host_browser_exec(body_ptr: *const u8, body_len: u32, cwd_ptr: *const u8, cwd_len: u32, session_id_ptr: *const u8, session_id_len: u32) -> u64;
-    fn host_oxi_exec(body_ptr: *const u8, body_len: u32, cwd_ptr: *const u8, cwd_len: u32, session_id_ptr: *const u8, session_id_len: u32) -> u64;
+    fn host_browser_exec(body_ptr: *const u8, body_len: u32, cwd_ptr: *const u8, cwd_len: u32, session_id_ptr: *const u8, session_id_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
+    fn host_oxi_exec(body_ptr: *const u8, body_len: u32, cwd_ptr: *const u8, cwd_len: u32, session_id_ptr: *const u8, session_id_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
     fn host_task_proc(action_ptr: *const u8, action_len: u32, params_ptr: *const u8, params_len: u32) -> u64;
     fn host_git(args_ptr: *const u8, args_len: u32, cwd_ptr: *const u8, cwd_len: u32) -> u64;
     fn host_plugin_call(plugin_ptr: *const u8, plugin_len: u32, verb_ptr: *const u8, verb_len: u32, body_ptr: *const u8, body_len: u32) -> u64;
