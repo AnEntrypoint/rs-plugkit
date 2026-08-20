@@ -61,6 +61,24 @@ pub fn write(path: &str, data: &str) -> bool {
     crate::wasm_dispatch::host_write(&anchor(path), data)
 }
 
+pub enum CasWriteOutcome {
+    Swapped,
+    Mismatch,
+    IoError,
+}
+
+/// Atomic compare-and-swap write: succeeds only if the file's current
+/// content still equals `expected` at the moment the host checks, in one
+/// locked host-side critical section -- see host_abi::host_cas_write.
+#[cfg(target_arch = "wasm32")]
+pub fn cas_write(path: &str, expected: &str, data: &str) -> CasWriteOutcome {
+    match crate::wasm_dispatch::host_cas_write(&anchor(path), expected, data) {
+        1 => CasWriteOutcome::Swapped,
+        2 => CasWriteOutcome::Mismatch,
+        _ => CasWriteOutcome::IoError,
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 pub fn exists(path: &str) -> bool {
     crate::wasm_dispatch::host_exists(&anchor(path))
@@ -85,6 +103,8 @@ pub fn stat(path: &str) -> Option<serde_json::Value> {
 pub fn read_to_string(_path: &str) -> Option<String> { None }
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write(_path: &str, _data: &str) -> bool { false }
+#[cfg(not(target_arch = "wasm32"))]
+pub fn cas_write(_path: &str, _expected: &str, _data: &str) -> CasWriteOutcome { CasWriteOutcome::IoError }
 #[cfg(not(target_arch = "wasm32"))]
 pub fn exists(_path: &str) -> bool { false }
 #[cfg(not(target_arch = "wasm32"))]

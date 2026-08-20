@@ -14,6 +14,7 @@ pub use host_abi::{
     unpack_to_value_pub, unpack_to_string_pub, pack_ptr_len_pub,
     host_read, host_write, host_stat, host_exists, host_remove_file_never_directory,
     host_kv_read, host_cwd_string,
+    host_cas_write,
 };
 pub(crate) use events::{current_dispatch_session_id, emit_event};
 pub use verbs::{memory_recall_backend, route_hint, vec_search_local, embed_query};
