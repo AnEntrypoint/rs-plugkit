@@ -207,6 +207,7 @@ const VERB_CAPABILITIES: &[(&str, Capability)] = &[
     ("kv_put", Capability::KvNamespace),
     ("fetch", Capability::Unguarded),
     ("exec_js", Capability::Unguarded),
+    ("serp", Capability::Unguarded),
     ("browser", Capability::Unguarded),
     ("cdp", Capability::Unguarded),
 ];
@@ -219,7 +220,7 @@ fn guarded_verb_is_dispatchable(verb: &str) -> bool {
     matches!(
         verb,
         "fs_read" | "fs_write" | "fs_stat" | "fs_readdir" | "scan_deps"
-            | "env_get" | "kv_put" | "fetch" | "exec_js" | "browser" | "cdp"
+            | "env_get" | "kv_put" | "fetch" | "exec_js" | "serp" | "browser" | "cdp"
     )
 }
 
@@ -1739,27 +1740,27 @@ fn record_app_loads_witness_from_response(cwd: &str, v: &Value) {
 
 const BROWSER_SUPPORTED_BODY_SHAPES: &str = "sessionId=<id>\\n<shape>, session new, session list, session close <id>, session reset <id>, <bare https:// URL>, url=<url>\\n<expr>, timeout=<ms>\\n<expr>, dom=<selector>\\n<expr>, or a bare JS expression";
 
-fn browser_default_oxibrowser_headless_engine(body: &Value, body_s: &str) -> u64 {
+fn serp_default_oxibrowser_headless_engine(body: &Value, body_s: &str) -> u64 {
     let envelope_code = body.get("code").or_else(|| body.get("body"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
     let code = match envelope_code {
         Some(c) => c,
-        None if body.is_object() => return err_json("browser", json!({
-            "error": "browser takes a plain-text body, never a JSON object. The supplied JSON object carries neither a `code` nor a `body` string field, so there is no script to run.",
+        None if body.is_object() => return err_json("serp", json!({
+            "error": "serp takes a plain-text body, never a JSON object. The supplied JSON object carries neither a `code` nor a `body` string field, so there is no script to run.",
             "error_code": ERR_CODE_INVALID_ARGS,
             "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
             "received_keys": body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
-            "note": "for real-Chrome/playwright-style capabilities this verb does not yet cover, use the cdp verb instead",
+            "note": "for real-Chrome/playwright-style capabilities this verb does not yet cover, use the cdp verb (or the browser verb for lightpanda/steel CDP) instead",
         })),
         None => body_s.to_string(),
     };
-    if code.trim().is_empty() { return err_json("browser", json!({
-        "error": "browser body is empty -- provide one of the supported plain-text shapes",
+    if code.trim().is_empty() { return err_json("serp", json!({
+        "error": "serp body is empty -- provide one of the supported plain-text shapes",
         "error_code": ERR_CODE_INVALID_ARGS,
         "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
-        "note": "for real-Chrome/playwright-style capabilities this verb does not yet cover, use the cdp verb instead",
+        "note": "for real-Chrome/playwright-style capabilities this verb does not yet cover, use the cdp verb (or the browser verb for lightpanda/steel CDP) instead",
     })); }
     let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
     let explicit_sid = body.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
@@ -1774,13 +1775,13 @@ fn browser_default_oxibrowser_headless_engine(body: &Value, body_s: &str) -> u64
         None | Some(Value::Null) => BROWSER_DEFAULT_TIMEOUT_MS,
         Some(raw) => match raw.as_u64() {
             Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
-            Some(n) => return err_json("browser", json!({
+            Some(n) => return err_json("serp", json!({
                 "error": "timeoutMs below floor",
                 "error_code": ERR_CODE_INVALID_ARGS,
                 "min": crate::validation::MIN_TIMEOUT_MS,
                 "received": n,
             })),
-            None => return err_json("browser", json!({
+            None => return err_json("serp", json!({
                 "error": "timeoutMs must be a positive integer number of milliseconds -- a string, float or negative value is rejected rather than silently falling back to the default budget",
                 "error_code": ERR_CODE_INVALID_ARGS,
                 "min": crate::validation::MIN_TIMEOUT_MS,
@@ -1809,18 +1810,118 @@ fn browser_default_oxibrowser_headless_engine(body: &Value, body_s: &str) -> u64
                     }
                 }
                 record_app_loads_witness_from_response(cwd, &v);
+                ok("serp", v)
+            } else {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("witness_skipped_transport_failure".to_string(), json!(true));
+                    obj.insert("note".to_string(), json!("serp (oxibrowser) dispatch failed transport-level checks -- if this is a capability oxibrowser does not support, retry via the cdp verb (real Chrome, playwright-style) or the browser verb (lightpanda/steel CDP)"));
+                }
+                record_app_loads_witness_from_response(cwd, &v);
+                err_json("serp", v)
+            }
+        }
+        None => err_json("serp", json!({
+            "error": "host_oxi_exec returned empty -- the oxibrowser host produced no bytes at all (NOT a script that returned undefined). Check .status.json ts freshness and reboot if stale, or re-dispatch. If oxibrowser cannot handle this workload, use the cdp verb (real Chrome) or the browser verb (lightpanda/steel CDP) instead.",
+            "error_code": ERR_CODE_FAILED,
+            "timeout_ms": timeout_ms,
+            "session_id": session_id,
+            "retryable": true,
+            "note": "for real-Chrome/playwright-style capabilities, use the cdp verb or the browser verb instead",
+        })),
+    }
+}
+
+fn browser_lightpanda_or_steel_cdp_engine(body: &Value, body_s: &str) -> u64 {
+    let envelope_code = body.get("code").or_else(|| body.get("body"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    let code = match envelope_code {
+        Some(c) => c,
+        None if body.is_object() => return err_json("browser", json!({
+            "error": "browser takes a plain-text body, never a JSON object. The supplied JSON object carries neither a `code` nor a `body` string field, so there is no script to run.",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
+            "received_keys": body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+            "note": "browser dials lightpanda (default) or steel-browser (when configured) over CDP; for the in-process pure-Rust engine use the serp verb, for a real Chrome escape hatch use cdp",
+        })),
+        None => body_s.to_string(),
+    };
+    if code.trim().is_empty() { return err_json("browser", json!({
+        "error": "browser body is empty -- provide one of the supported plain-text shapes",
+        "error_code": ERR_CODE_INVALID_ARGS,
+        "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
+        "note": "browser dials lightpanda (default) or steel-browser (when configured) over CDP; for the in-process pure-Rust engine use the serp verb, for a real Chrome escape hatch use cdp",
+    })); }
+    let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+    let explicit_sid = body.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let session_id = if !explicit_sid.is_empty() {
+        explicit_sid
+    } else if let Some(dispatch_sid) = super::events::current_dispatch_session_id().filter(|s| !s.trim().is_empty()) {
+        dispatch_sid
+    } else {
+        host_read(".gm/exec-spool/.session-current").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_default()
+    };
+    let timeout_ms = match body.get("timeoutMs") {
+        None | Some(Value::Null) => BROWSER_DEFAULT_TIMEOUT_MS,
+        Some(raw) => match raw.as_u64() {
+            Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
+            Some(n) => return err_json("browser", json!({
+                "error": "timeoutMs below floor",
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "min": crate::validation::MIN_TIMEOUT_MS,
+                "received": n,
+            })),
+            None => return err_json("browser", json!({
+                "error": "timeoutMs must be a positive integer number of milliseconds -- a string, float or negative value is rejected rather than silently falling back to the default budget",
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "min": crate::validation::MIN_TIMEOUT_MS,
+                "received": raw.clone(),
+            })),
+        },
+    };
+    // The browser and cdp verbs share ONE host-import (host_browser_exec) and
+    // ONE agentplug-side driver (browser::run) -- both are real-Chrome-family
+    // CDP-over-port dispatch, differing only in which engine answers the
+    // port. Threading an "engine" field through the same JSON envelope the
+    // cdp verb already sends (rather than adding a second host-import) means
+    // zero wasm ABI surface growth: the #[link(wasm_import_module="env")]
+    // extern block and its HOST_IMPORTS entry stay exactly as they are: The
+    // agentplug host reads this field to pick spawn-lightpanda vs
+    // dial-steel-endpoint vs the cdp verb's spawn-chrome default.
+    let envelope = json!({ "body": code, "timeoutMs": timeout_ms, "engine": "lightpanda" }).to_string();
+    let packed = unsafe { host_browser_exec(
+        envelope.as_ptr(), envelope.len() as u32,
+        cwd.as_ptr(), cwd.len() as u32,
+        session_id.as_ptr(), session_id.len() as u32,
+    ) };
+    match unpack_to_string(packed) {
+        Some(s) => {
+            let v: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
+            let transport_ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
+                && !v.get("timed_out").and_then(|b| b.as_bool()).unwrap_or(false)
+                && v.get("exit_code").and_then(|n| n.as_i64()).map(|c| c == 0).unwrap_or(true);
+            let mut v = v;
+            if transport_ok {
+                let witnessed = crate::browser_witness::witness_all_pending_edits_by_rehashing_current_content(&cwd);
+                if witnessed > 0 {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("witness_marked".to_string(), json!(witnessed));
+                    }
+                }
+                record_app_loads_witness_from_response(cwd, &v);
                 ok("browser", v)
             } else {
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("witness_skipped_transport_failure".to_string(), json!(true));
-                    obj.insert("note".to_string(), json!("browser (oxibrowser) dispatch failed transport-level checks -- if this is a capability oxibrowser does not support, retry via the cdp verb (real Chrome, playwright-style)"));
+                    obj.insert("note".to_string(), json!("browser (lightpanda/steel) dispatch failed transport-level checks -- if lightpanda is unavailable on this platform (no native Windows binary, WSL2/Docker required), configure steel-browser or fall back to the cdp verb (real Chrome)"));
                 }
                 record_app_loads_witness_from_response(cwd, &v);
                 err_json("browser", v)
             }
         }
         None => err_json("browser", json!({
-            "error": "host_oxi_exec returned empty -- the oxibrowser host produced no bytes at all (NOT a script that returned undefined). Check .status.json ts freshness and reboot if stale, or re-dispatch. If oxibrowser cannot handle this workload, use the cdp verb (real Chrome) instead.",
+            "error": "host_browser_exec returned empty for the browser verb -- the lightpanda/steel host produced no bytes at all (NOT a script that returned undefined). Check .status.json ts freshness and reboot if stale, or re-dispatch. If neither lightpanda nor steel-browser is reachable, use the cdp verb (real Chrome) instead.",
             "error_code": ERR_CODE_FAILED,
             "timeout_ms": timeout_ms,
             "session_id": session_id,
@@ -1877,7 +1978,13 @@ fn cdp_real_chrome_escape_hatch(body: &Value, body_s: &str) -> u64 {
             })),
         },
     };
-    let envelope = json!({ "body": code, "timeoutMs": timeout_ms }).to_string();
+    // Explicit "engine":"chrome" (rather than relying on field-absence) keeps
+    // cdp's own dispatch self-describing on the same shared envelope the
+    // browser verb now also sends over host_browser_exec -- the agentplug
+    // host's default for a missing/unrecognized engine field is ALSO chrome
+    // (see browser_engine::select_engine), so this is belt-and-suspenders
+    // preserving cdp's exact prior behavior, not a functional dependency.
+    let envelope = json!({ "body": code, "timeoutMs": timeout_ms, "engine": "chrome" }).to_string();
     let packed = unsafe { host_browser_exec(
         envelope.as_ptr(), envelope.len() as u32,
         cwd.as_ptr(), cwd.len() as u32,
@@ -3446,7 +3553,7 @@ fn request_fingerprint(verb: &str, body_s: &str) -> String {
 fn verb_body_must_be_json(verb: &str) -> bool {
     !matches!(
         verb,
-        "browser" | "cdp"
+        "serp" | "browser" | "cdp"
             | "exec_js" | "nodejs" | "javascript" | "node" | "js"
             | "python" | "py"
             | "bash" | "sh" | "shell" | "zsh"
@@ -3589,7 +3696,8 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "kv_query" => kv_query(&body),
         "exec_js" | "nodejs" | "javascript" | "node" | "js" => exec_js(&body, &body_s),
         "lang" => lang(&body),
-        "browser" => browser_default_oxibrowser_headless_engine(&body, &body_s),
+        "serp" => serp_default_oxibrowser_headless_engine(&body, &body_s),
+        "browser" => browser_lightpanda_or_steel_cdp_engine(&body, &body_s),
         "cdp" => cdp_real_chrome_escape_hatch(&body, &body_s),
         "health" => health(&body),
         "config_resolve" => config_resolve_report_winning_tier_and_any_rejected_tier(&body),
