@@ -15,6 +15,44 @@ fn policy_path(discipline: &str) -> std::path::PathBuf {
     gm_dir().join("disciplines").join(discipline).join("policy.md")
 }
 
+fn requires_path(discipline: &str) -> std::path::PathBuf {
+    gm_dir().join("disciplines").join(discipline).join("requires.json")
+}
+
+/// A discipline's coeffect specification: names of other enabled disciplines
+/// it depends on. Absent `requires.json` means no declared dependency (the
+/// discipline always activates, matching prior behavior). `default` and any
+/// name it lists are treated as always-satisfied roots.
+fn declared_requires(discipline: &str) -> Vec<String> {
+    let path = requires_path(discipline);
+    let path_s = path.to_string_lossy().to_string();
+    match pkfs::read_to_string(&path_s) {
+        Some(text) => serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("requires").cloned())
+            .and_then(|v| v.as_array().cloned())
+            .map(|arr| {
+                arr.into_iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+/// Reactive-coeffect satisfaction: a discipline activates only when every
+/// name in its declared `requires` is itself an enabled discipline with a
+/// non-empty policy. `enabled_names` is the full activation-eligible set
+/// (already includes "default"); this never recurses beyond one hop, so a
+/// requires-cycle simply leaves every disc in it unsatisfied rather than
+/// looping.
+fn requires_satisfied(discipline: &str, enabled_names: &[String]) -> bool {
+    declared_requires(discipline)
+        .iter()
+        .all(|dep| enabled_names.iter().any(|n| n == dep))
+}
+
 pub fn handle(content: &str) -> (String, String, i32) {
     let parsed: Option<serde_json::Value> = serde_json::from_str(content).ok();
     let (discipline, text) = match &parsed {
@@ -117,8 +155,11 @@ pub fn active_policies() -> serde_json::Value {
     }
 
     let mut out: Vec<serde_json::Value> = Vec::new();
-    for name in names {
-        let path = policy_path(&name);
+    for name in &names {
+        if !requires_satisfied(name, &names) {
+            continue;
+        }
+        let path = policy_path(name);
         let path_s = path.to_string_lossy().to_string();
         if let Some(text) = pkfs::read_to_string(&path_s) {
             if text.trim().is_empty() {
