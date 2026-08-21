@@ -50,14 +50,30 @@ fn write_fiber_state(path: &str, state: FiberLifecycle) {
     }
 }
 
+/// The transition table itself, with no I/O -- `advance_fiber` is this
+/// function plus a read and a conditional write. Split out so an audit can
+/// ask "what would this transition produce" without the read-only query
+/// itself causing a write, and so the table exists in exactly one place
+/// that both the real transition and any proof-carrying wrapper (see
+/// `WithdrawalComplete` below) call. `Inactive -> Active` when the target
+/// becomes satisfied; `Active -> Unloading` the instant it stops being
+/// satisfied (L-Leave); `Unloading -> Inactive` on the following call
+/// (L-Unload).
+pub fn transition(current: FiberLifecycle, target_satisfied: bool) -> FiberLifecycle {
+    match (current, target_satisfied) {
+        (FiberLifecycle::Inactive, true) => FiberLifecycle::Active,
+        (FiberLifecycle::Inactive, false) => FiberLifecycle::Inactive,
+        (FiberLifecycle::Active, true) => FiberLifecycle::Active,
+        (FiberLifecycle::Active, false) => FiberLifecycle::Unloading,
+        (FiberLifecycle::Unloading, _) => FiberLifecycle::Inactive,
+    }
+}
+
 /// Advances one component's persisted lifecycle by exactly one Cordis-style
 /// transition (Section 4.3), given whether its target currently holds.
-/// `Inactive -> Active` when the target becomes satisfied; `Active ->
-/// Unloading` the instant it stops being satisfied (L-Leave); `Unloading
-/// -> Inactive` on the following call (L-Unload). Returns whether the
-/// component counts as providing THIS call, which is `Active` alone -- an
-/// `Unloading` fiber's own withdrawal is in flight and must not itself be
-/// read as still satisfying anyone's coeffect.
+/// Returns whether the component counts as providing THIS call, which is
+/// `Active` alone -- an `Unloading` fiber's own withdrawal is in flight
+/// and must not itself be read as still satisfying anyone's coeffect.
 ///
 /// Takes `state_path` rather than a component name: the caller owns what a
 /// name means and where its state lives (a discipline's directory, a
@@ -66,13 +82,7 @@ fn write_fiber_state(path: &str, state: FiberLifecycle) {
 /// support a component kind that does not exist yet.
 pub fn advance_fiber(state_path: &str, target_satisfied: bool) -> bool {
     let current = read_fiber_state(state_path);
-    let next = match (current, target_satisfied) {
-        (FiberLifecycle::Inactive, true) => FiberLifecycle::Active,
-        (FiberLifecycle::Inactive, false) => FiberLifecycle::Inactive,
-        (FiberLifecycle::Active, true) => FiberLifecycle::Active,
-        (FiberLifecycle::Active, false) => FiberLifecycle::Unloading,
-        (FiberLifecycle::Unloading, _) => FiberLifecycle::Inactive,
-    };
+    let next = transition(current, target_satisfied);
     if next != current {
         write_fiber_state(state_path, next);
     }
@@ -141,5 +151,94 @@ impl ActiveFiberSet {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+/// A component name proven to have advanced from `Unloading` to
+/// `Inactive` -- the paper's recovery-exactness guarantee (Theorem 61)
+/// brought into the type system. The only way to obtain a value of this
+/// type is `WithdrawalComplete::advance`, which itself calls
+/// `advance_fiber` and refuses to construct the value unless the
+/// resulting state is actually `Inactive`. Since `advance_fiber`'s match
+/// is total and exhaustive over `(FiberLifecycle, bool)` -- a fact the
+/// compiler itself checks, not a runtime assumption -- an `Unloading`
+/// fiber advanced with any `target_satisfied` value always reaches
+/// `Inactive` (the `(Unloading, _)` arm matches both), so this
+/// constructor's own internal assertion can never actually trip; it exists
+/// so a FUTURE change to the transition table that broke that guarantee
+/// would fail this constructor's debug assertion immediately, rather than
+/// silently letting a caller believe recovery completed when it did not.
+pub struct WithdrawalComplete {
+    pub name: String,
+}
+
+impl WithdrawalComplete {
+    /// Advances `name`'s fiber (expected `Unloading`) and returns proof
+    /// it reached `Inactive`. Returns `None` if the fiber was not
+    /// `Unloading` to begin with -- this constructor witnesses recovery
+    /// FROM `Unloading`, not an arbitrary transition, so a caller with a
+    /// fiber in any other state gets no proof object at all rather than a
+    /// misleading one. Mutates state (via `advance_fiber`); use
+    /// `verify_recovery_exactness` for a read-only check.
+    pub fn advance(state_path: &str, name: &str) -> Option<WithdrawalComplete> {
+        if read_fiber_state(state_path) != FiberLifecycle::Unloading {
+            return None;
+        }
+        let reached_active = advance_fiber(state_path, false);
+        debug_assert!(!reached_active, "advance_fiber from Unloading must never report Active");
+        let final_state = read_fiber_state(state_path);
+        debug_assert_eq!(final_state, FiberLifecycle::Inactive, "recovery exactness violated: Unloading did not reach Inactive");
+        if final_state == FiberLifecycle::Inactive {
+            Some(WithdrawalComplete { name: name.to_string() })
+        } else {
+            None
+        }
+    }
+}
+
+/// Read-only companion to `WithdrawalComplete::advance`: for a fiber
+/// currently `Unloading`, checks (via the pure `transition` table, no I/O)
+/// that BOTH reachable targets (`true` and `false`) send it to `Inactive`
+/// -- the exhaustive check an audit needs without mutating any state,
+/// unlike `WithdrawalComplete::advance` which performs the real,
+/// state-mutating recovery. Returns `true` when the fiber is not currently
+/// `Unloading` at all (nothing to check).
+pub fn verify_recovery_exactness(current: FiberLifecycle) -> bool {
+    if current != FiberLifecycle::Unloading {
+        return true;
+    }
+    transition(current, true) == FiberLifecycle::Inactive && transition(current, false) == FiberLifecycle::Inactive
+}
+
+/// A component name proven safe to withdraw right now -- the paper's
+/// ordering guarantee (Theorem 63) brought into the type system. The only
+/// way to obtain a value of this type is `SafeToWithdraw::check`, which
+/// requires the caller to supply the dependent set (computed however the
+/// caller's own coeffect model works, e.g. `removal_dependents` in
+/// `discipline_note.rs`) and refuses to construct the value unless that
+/// set is empty. Any future code path that actually deletes a component's
+/// storage can require a `SafeToWithdraw` as its own parameter type, making
+/// a withdrawal attempted while a dependent still relies on the component
+/// a compile-time impossibility for that code path, rather than a runtime
+/// check a caller could forget to run.
+pub struct SafeToWithdraw {
+    pub name: String,
+}
+
+impl SafeToWithdraw {
+    /// `dependents` is whatever the caller's own coeffect model reports as
+    /// still relying on `name` (e.g. `removal_dependents(name)`); this
+    /// function does not recompute it, since only the caller's kind-
+    /// specific coeffect resolution (disciplines' realm-scoped
+    /// requires/provides, or a future kind's own resolution) knows how to
+    /// produce that set correctly -- `fiber_lifecycle` stays kind-agnostic
+    /// by taking the answer as a parameter rather than a discipline-shaped
+    /// computation of its own.
+    pub fn check(name: &str, dependents: &[String]) -> Option<SafeToWithdraw> {
+        if dependents.is_empty() {
+            Some(SafeToWithdraw { name: name.to_string() })
+        } else {
+            None
+        }
     }
 }

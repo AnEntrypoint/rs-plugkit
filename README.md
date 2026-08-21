@@ -32,8 +32,8 @@ read and writes `out/<N>.json` (metadata) alongside `out/<N>.out`/`.err` for
 process-execution verbs.
 
 Orchestrator verbs: `instruction`, `transition`, `transition-revert`,
-`discipline-check-removal`, `discipline-audit`, `phase-status`, `mutable-resolve`,
-`memorize-fire`, `residual-scan`, `auto-recall`.
+`discipline-check-removal`, `discipline-audit`, `memory-namespace-audit`,
+`phase-status`, `mutable-resolve`, `memorize-fire`, `residual-scan`, `auto-recall`.
 
 `transition-revert` pops the most recent entry off `TurnState.phase_history`
 (a LIFO accumulator every `transition` call appends to) and restores the
@@ -122,6 +122,37 @@ an unrelated dependent into withdrawal it should not have entered for
 another full dispatch. Live-verified via a standalone rustc trace modeling
 both the single-pass (buggy, forces the dependent to `Unloading`
 prematurely) and two-phase (correct, dependent stays `Active`) orderings.
+
+Recovery exactness (Theorem 61) and ordering (Theorem 63) are also
+brought into the type system, alongside preservation's `ActiveFiberSet`:
+`fiber_lifecycle::WithdrawalComplete::advance` is the only way to obtain
+proof a fiber reached `Inactive` from `Unloading` (it performs the real,
+state-mutating recovery and refuses to construct otherwise);
+`verify_recovery_exactness` is its read-only companion, checking the pure
+`transition` table exhaustively over both reachable targets without
+mutating anything, used by `discipline-audit`. `fiber_lifecycle::SafeToWithdraw::check`
+is the only way to obtain proof a component has no dependents, taking the
+caller's own coeffect-resolved dependent set as a parameter (kept
+kind-agnostic by NOT recomputing it) -- any future code path that
+actually deletes a component's storage can require a `SafeToWithdraw` as
+its own parameter type, making an out-of-order deletion a compile error
+for that path rather than a runtime check a caller could skip.
+`discipline-audit`'s ordering check now obtains this same proof object
+rather than a parallel hand-rolled equivalent.
+
+`orchestrator/memory_component.rs` is a THIRD component kind
+instantiated using `fiber_lifecycle`'s existing public API
+(`read_fiber_state`/`advance_fiber`/`ActiveFiberSet`) with zero new
+infrastructure added to `fiber_lifecycle.rs` -- gm's memory-namespace
+subsystem (`.gm/memories/`, `memory_md.rs`) read as a Cordis component,
+independently of disciplines and sibling wasm plugins. A namespace's
+coeffect specification is an optional `.gm/memories-manifest/<ns>.json`'s
+`depends_on` array (other namespaces whose content it assumes exists);
+its provision is always its own name. `memory-namespace-audit` advances
+every known namespace's fiber and reports which reached `Active`,
+exercising the same machinery `discipline-audit` exercises for
+disciplines, proving the module serves a caller nobody anticipated when
+it was written.
 
 Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir`, `scan_deps`
 (supply-chain scan for the HiddenSpawn-class obfuscated-dropper pattern:
