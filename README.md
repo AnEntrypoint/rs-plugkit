@@ -106,6 +106,23 @@ security sandbox. `requires_satisfied`/`removal_dependents`/
 `requires.json` with no `realm` field resolves in the default (empty
 string) realm, matching every discipline written before isolation existed.
 
+`requires_satisfied` checks a candidate provider's own fiber state
+(`Active`, not merely enabled) before counting its `provides` as
+satisfying a dependency -- the other half of Theorem 63's ordering
+guarantee: a provider mid-withdrawal (`Unloading`) must not be read as
+still available, even though it stays nameable by `removal_dependents`
+for one more dispatch. `active_policies` computes every discipline's
+`target_satisfied` in one snapshot pass BEFORE advancing any fiber, then
+advances all of them in a second pass -- a single combined loop would let
+an earlier discipline's own `advance_fiber` call mutate its
+`fiber-state.json` mid-iteration, so a later discipline's
+`requires_satisfied` check could see a provider as already `Unloading`
+even though it was `Active` when the dispatch began, incorrectly forcing
+an unrelated dependent into withdrawal it should not have entered for
+another full dispatch. Live-verified via a standalone rustc trace modeling
+both the single-pass (buggy, forces the dependent to `Unloading`
+prematurely) and two-phase (correct, dependent stays `Active`) orderings.
+
 Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir`, `scan_deps`
 (supply-chain scan for the HiddenSpawn-class obfuscated-dropper pattern:
 size/line-ratio disproportion + dense `\uXXXX`-escape-run detection across
