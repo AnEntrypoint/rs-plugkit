@@ -45,6 +45,7 @@ fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
         ("no-secrets-in-diff", "true when the working diff introduces no line matching a high-confidence secret shape (AWS-style access key id, a private-key PEM header, a bearer/API token assigned to a literal string of plausible entropy, a database URL with an inline password). Heuristic and diff-scoped, not a substitute for a dedicated secret scanner -- catches the common accidental-commit shape. Emits deviation.secret-in-diff naming the offending lines (redacted) when it fails.", pred_no_secrets_in_diff as PredicateFn),
         ("no-unchecked-panics-in-diff", "true when new Rust/JS/TS lines in the working diff introduce no bare unwrap()/expect()/panic!() outside a test-only-configured Rust module or *.test.* path, and no JS/TS line that throws without a paired catch reachable in the same function body scope (best-effort, brace-balance heuristic). Exception model requires every raised error handled or explicitly propagated, never left to crash the process uncaught. Emits deviation.unchecked-panic naming the offending lines when it fails.", pred_no_unchecked_panics_in_diff as PredicateFn),
         ("no-hedge-language-in-diff", "true when prose files (*.md) touched in the working diff introduce no hedge/deferral phrase ('todo later', 'in a future session', 'for now we', 'as a stopgap', 'good enough for now', 'left as an exercise', 'out of scope for this'). Decisive commitment forbids shipping a hedge in place of a decision. Emits deviation.hedge-language naming the offending lines when it fails.", pred_no_hedge_language_in_diff as PredicateFn),
+        ("split-context-swept", "true when the working diff touches at most one file, OR .gm/exec-spool/.split-context-swept exists with a head_sha matching the current `git rev-parse HEAD` -- a witnessed independent-Agent adversarial review for the exact pushed multi-file commit. A self-reviewed multi-file diff has not been adversarially swept.", split_context_swept as PredicateFn),
         ("no-graphical-symbols-in-diff", "true when new lines in the working diff introduce no decorative non-ASCII glyph (arrows, box-drawing, stars, bullets, checks/crosses, emoji) outside a binary/frozen-changelog/icon-font exemption path. Matches AGENTS.md's own no-graphical-symbols discipline as a real gate instead of an on-sight-only rule. Emits deviation.graphical-symbol naming the offending lines when it fails.", pred_no_graphical_symbols_in_diff as PredicateFn),
         ("idempotent-dispatch-replay-safe", "true when the most recent N dispatch audit-tuples (id, hash, ts) for the current stop window contain no exact-duplicate (id, hash) pair recorded as two DIFFERENT outcomes -- a same-input dispatch replayed must reach the same result (f-compose-f-equals-f), never a second, different mutation applied on top of the first. Emits deviation.non-idempotent-replay naming the conflicting tuples when it fails.", pred_idempotent_dispatch_replay_safe as PredicateFn),
     ]
@@ -415,6 +416,42 @@ fn ci_validation_fresh() -> bool {
 }
 #[cfg(not(target_arch = "wasm32"))]
 fn ci_validation_fresh() -> bool { true }
+
+#[cfg(target_arch = "wasm32")]
+fn working_diff_touched_file_count() -> usize {
+    let porcelain_count = {
+        let raw = crate::wasm_dispatch::git_porcelain();
+        raw.lines().filter(|l| !l.trim().is_empty()).count()
+    };
+    if porcelain_count > 0 { return porcelain_count; }
+    let raw = crate::wasm_dispatch::git_call("show --name-only --format=", None);
+    raw.get("stdout").and_then(|s| s.as_str()).unwrap_or("")
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count()
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn working_diff_touched_file_count() -> usize { 0 }
+
+#[cfg(target_arch = "wasm32")]
+fn split_context_swept() -> bool {
+    if working_diff_touched_file_count() <= 1 { return true; }
+    let raw = crate::pkfs::read_to_string(".gm/exec-spool/.split-context-swept").unwrap_or_default();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() { return false; }
+    let current_head = crate::wasm_dispatch::git_call("rev-parse HEAD", None)
+        .get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    if current_head.is_empty() { return false; }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(v) => {
+            let marker_sha = v.get("head_sha").and_then(|s| s.as_str()).unwrap_or("");
+            !marker_sha.is_empty() && marker_sha == current_head
+        }
+        Err(_) => false,
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn split_context_swept() -> bool { true }
 
 #[cfg(target_arch = "wasm32")]
 fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {

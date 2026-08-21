@@ -534,7 +534,7 @@ fn default_graph() -> Graph {
             Edge { from: "CONC".into(), to: "SEC".into(), gates: vec![] },
             Edge { from: "SEC".into(), to: "RES".into(), gates: vec!["no-secrets-in-diff".into()] },
             Edge { from: "RES".into(), to: "DECIDE".into(), gates: vec!["no-unchecked-panics-in-diff".into()] },
-            Edge { from: "DECIDE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into(), "worktree-clean".into(), "residual-scan-fired".into(), "ci-validated-fresh".into(), "browser-witness-coverage".into(), "app-loads-witnessed".into(), "submodules-clean".into(), "claim-audit-clean".into(), "no-hedge-language-in-diff".into()] },
+            Edge { from: "DECIDE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into(), "worktree-clean".into(), "residual-scan-fired".into(), "ci-validated-fresh".into(), "browser-witness-coverage".into(), "app-loads-witnessed".into(), "submodules-clean".into(), "claim-audit-clean".into(), "no-hedge-language-in-diff".into(), "split-context-swept".into()] },
             Edge { from: "PROVE".into(), to: "SPECIFY".into(), gates: vec![] },
             Edge { from: "EMIT".into(), to: "SPECIFY".into(), gates: vec![] },
             Edge { from: "STATE".into(), to: "EMIT".into(), gates: vec![] },
@@ -613,6 +613,14 @@ fn default_graph() -> Graph {
                 hook_mode: HookMode::PredicateOnly,
                 next_dispatch: None,
                 message: "transition rejected: claim-audit not fired in this stop window, or a prior fire found a stale claim -- dispatch `claim-audit` to scan AGENTS.md for shipped/validated/fixed claims referencing a commit hash and verify each hash actually exists in this repo's git log; resolve any stale finding before re-attempting.".into(),
+            },
+            GateDef {
+                name: "split-context-swept".into(),
+                predicate: Some("split-context-swept".into()),
+                hook: None,
+                hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
+                message: "transition rejected: this diff touches more than one file and has not been adversarially swept by an independent reviewer -- dispatch one or more Agent reviewers (blind to the implementer's own reasoning, prompted only to refute) against the diff, then fs_write .gm/exec-spool/.split-context-swept with {\"head_sha\":\"<git rev-parse HEAD>\"} and re-attempt.".into(),
             },
             GateDef {
                 name: "submodules-clean".into(),
