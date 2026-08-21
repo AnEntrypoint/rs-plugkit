@@ -19,6 +19,39 @@ fn requires_path(discipline: &str) -> std::path::PathBuf {
     gm_dir().join("disciplines").join(discipline).join("requires.json")
 }
 
+/// A discipline read as a Cordis component: the coeffect specification (d),
+/// the provision (p), and the effect witness (e). Unifies what
+/// `declared_requires`/`declared_provides`/`policy.md` otherwise track as
+/// three independently-read files, giving one canonical place that asserts
+/// a discipline IS a component in the paper's sense (Definition 43: a
+/// component over a context is the triple (d, p, e)) rather than three
+/// files that happen to correspond.
+pub struct Component {
+    pub name: String,
+    /// d: the coeffect specification -- capability keys this component
+    /// requires from the environment.
+    pub requires: Vec<String>,
+    /// p: the provision -- capability keys this component supplies.
+    pub provides: Vec<String>,
+    /// e: whether this component's effect (its policy.md, the text the
+    /// runtime surfaces/removes as the discipline activates/deactivates)
+    /// is currently non-empty, i.e. whether it has an effect to contribute
+    /// at all.
+    pub has_effect: bool,
+}
+
+impl Component {
+    pub fn read(name: &str) -> Component {
+        let policy_text = pkfs::read_to_string(&policy_path(name).to_string_lossy().to_string());
+        Component {
+            name: name.to_string(),
+            requires: declared_requires(name),
+            provides: declared_provides(name),
+            has_effect: policy_text.map(|t| !t.trim().is_empty()).unwrap_or(false),
+        }
+    }
+}
+
 /// Reads a string array field out of a discipline's `requires.json`. `field`
 /// is `"requires"` or `"provides"`; both share one manifest file since a
 /// discipline's coeffect specification (what it needs) and provision (what
@@ -161,7 +194,10 @@ pub fn handle(content: &str) -> (String, String, i32) {
     (payload.to_string(), String::new(), 0)
 }
 
-pub fn active_policies() -> serde_json::Value {
+/// The names currently in `enabled.txt`, "default" always first. Shared by
+/// `active_policies` and the withdrawal guard so both read the same
+/// activation-eligible set.
+fn enabled_names() -> Vec<String> {
     let mut names: Vec<String> = vec!["default".to_string()];
     let enabled_path = gm_dir().join("disciplines").join("enabled.txt");
     let enabled_s = enabled_path.to_string_lossy().to_string();
@@ -173,6 +209,58 @@ pub fn active_policies() -> serde_json::Value {
             }
         }
     }
+    names
+}
+
+/// Withdrawal-ordering guard (paper Section 4.3.1, Theorem 63): a
+/// discipline may be safely disabled/removed from `enabled.txt` only once
+/// no other currently-enabled, requires-satisfied discipline still resolves
+/// a dependency to one of its declared `provides`. Names every dependent
+/// still relying on it, mirroring `relied_n(gamma)` -- the caller (a human
+/// or `handle_check_removal`) decides whether to disable anyway, but is
+/// never left guessing which dependent would break.
+pub fn removal_dependents(discipline: &str) -> Vec<String> {
+    let names = enabled_names();
+    if !names.iter().any(|n| n == discipline) {
+        return Vec::new();
+    }
+    let provided = declared_provides(discipline);
+    names
+        .iter()
+        .filter(|n| n.as_str() != discipline)
+        .filter(|n| requires_satisfied(n, &names))
+        .filter(|n| {
+            declared_requires(n)
+                .iter()
+                .any(|dep| provided.iter().any(|cap| cap == dep))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Verb entry point for `discipline-check-removal`: reports whether a
+/// discipline is safe to disable right now, and names every dependent that
+/// would lose a satisfied requirement if it were.
+pub fn handle_check_removal(content: &str) -> (String, String, i32) {
+    let discipline = serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|v| v.get("discipline").and_then(|x| x.as_str()).map(|s| s.to_string()))
+        .unwrap_or_default();
+    if discipline.is_empty() {
+        return (String::new(), "discipline-check-removal refused: discipline name required".to_string(), 1);
+    }
+    let dependents = removal_dependents(&discipline);
+    let payload = serde_json::json!({
+        "ok": true,
+        "discipline": discipline,
+        "safe_to_remove": dependents.is_empty(),
+        "dependents": dependents,
+    });
+    (payload.to_string(), String::new(), 0)
+}
+
+pub fn active_policies() -> serde_json::Value {
+    let names = enabled_names();
 
     let mut out: Vec<serde_json::Value> = Vec::new();
     for name in &names {
