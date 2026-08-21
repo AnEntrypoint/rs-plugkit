@@ -84,6 +84,28 @@ a capability no known discipline (enabled or not) ever `provides` is
 flagged as dangling, distinguishing a typo/stale reference from a live
 dependency merely waiting on its provider being enabled.
 
+`orchestrator/fiber_lifecycle.rs` factors `FiberLifecycle`/`advance_fiber`/
+`read_fiber_state` out of `discipline_note.rs` into a kind-agnostic module:
+any component family with a name and a state-file path can call these same
+two functions rather than reimplementing the transition table, so
+disciplines are the first caller and not a special case the module was
+written around. The same file's `ActiveFiberSet` brings preservation
+(Theorem 59) into the type system rather than checking it afterward: its
+only public constructor refuses a colliding insert outright, so a value of
+`ActiveFiberSet` can only ever hold a preservation-satisfying set --
+`audit_preservation` reports exactly the inserts that were refused, rather
+than running a separate scan alongside a set that could already be wrong.
+
+A discipline's `requires.json` also accepts a `realm` field (paper Section
+3.2.3, Definition 28-29's coeffect isolation): two disciplines in
+different realms providing the same bare capability name do not satisfy
+each other's `requires` and do not collide for preservation purposes --
+real multi-tenant isolation at the discipline-name grain, without a
+security sandbox. `requires_satisfied`/`removal_dependents`/
+`audit_preservation` all resolve within the consumer's own realm; a
+`requires.json` with no `realm` field resolves in the default (empty
+string) realm, matching every discipline written before isolation existed.
+
 Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir`, `scan_deps`
 (supply-chain scan for the HiddenSpawn-class obfuscated-dropper pattern:
 size/line-ratio disproportion + dense `\uXXXX`-escape-run detection across

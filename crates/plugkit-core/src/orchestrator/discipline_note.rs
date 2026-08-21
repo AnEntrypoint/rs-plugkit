@@ -1,6 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use super::fiber_lifecycle::{self, ActiveFiberSet, FiberLifecycle};
 use super::gm_dir;
 use crate::pkfs;
 
@@ -24,73 +25,26 @@ fn fiber_state_path(discipline: &str) -> std::path::PathBuf {
     gm_dir().join("disciplines").join(discipline).join("fiber-state.json")
 }
 
-/// A discipline's persisted lifecycle state (paper Section 4.3, Definition
-/// 49). gm has no async load step for a discipline -- reading policy.md is
-/// synchronous, so there is no analogue of `Reloading`'s in-flight window --
-/// leaving three reachable states: `Inactive` (never activated, or fully
-/// withdrawn), `Active` (currently providing), and `Unloading` (target
-/// unsatisfied or removed from `enabled.txt`, but the previous dispatch's
-/// dependents have not yet had a chance to observe the loss). This mirrors
-/// L-Leave/L-Unload's split (Section 4.3.1): a fiber stops providing (drops
-/// out of the coeffect context) the moment it enters `Unloading`, but the
-/// fiber itself, and hence `removal_dependents`'s ability to name it as a
-/// still-present-but-leaving provider, persists one more dispatch before the
-/// state collapses to `Inactive`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FiberLifecycle {
-    Inactive,
-    Active,
-    Unloading,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FiberState {
-    state: FiberLifecycle,
-    #[serde(default)]
-    updated_at_ms: u128,
-}
-
-fn read_fiber_state(discipline: &str) -> FiberState {
-    let path = fiber_state_path(discipline).to_string_lossy().to_string();
-    pkfs::read_to_string(&path)
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(FiberState { state: FiberLifecycle::Inactive, updated_at_ms: 0 })
-}
-
-fn write_fiber_state(discipline: &str, state: FiberLifecycle) {
-    let path = fiber_state_path(discipline).to_string_lossy().to_string();
-    let body = FiberState { state, updated_at_ms: super::state::now_ms() };
-    if let Ok(text) = serde_json::to_string(&body) {
-        let _ = pkfs::write(&path, &text);
-    }
+/// A discipline's persisted lifecycle uses `fiber_lifecycle`'s kind-agnostic
+/// `FiberLifecycle`/`advance_fiber`/`read_fiber_state`, keyed by this
+/// discipline's own `fiber-state.json` path. Disciplines are the first
+/// caller of that generic module, not a special case it was written
+/// around -- a second component kind (e.g. sibling wasm plugins, which
+/// agentplug's own `PluginFiberLifecycle` currently duplicates rather than
+/// sharing this module across the repo boundary) would call these same
+/// two functions with its own path, never copy this file.
+fn read_fiber_state(discipline: &str) -> FiberLifecycle {
+    fiber_lifecycle::read_fiber_state(&fiber_state_path(discipline).to_string_lossy())
 }
 
 /// Advances one discipline's persisted lifecycle by exactly one Cordis-style
-/// transition, given whether its target (requires-satisfied and still
-/// enabled) currently holds. Mirrors L-Begin/L-Leave/L-Unload (Section
-/// 4.3): `Inactive` -> `Active` when the target becomes satisfied;
-/// `Active` -> `Unloading` the instant it stops being satisfied (this is
-/// L-Leave -- the fiber records the decision to deactivate without yet
-/// discarding it, so `removal_dependents` still sees it as present-but-
-/// leaving for one more dispatch); `Unloading` -> `Inactive` on the
-/// following dispatch (L-Unload -- the withdrawal completes). Returns
-/// whether the discipline counts as providing THIS dispatch, which is
-/// `Active` alone -- an `Unloading` fiber's own withdrawal is in flight and
-/// must not itself be read as still satisfying anyone's `requires`.
+/// transition (Section 4.3), given whether its target (requires-satisfied
+/// and still enabled) currently holds. See `fiber_lifecycle::advance_fiber`
+/// for the transition table and its correspondence to L-Begin/L-Leave/
+/// L-Unload. Returns whether the discipline counts as providing THIS
+/// dispatch, which is `Active` alone.
 fn advance_fiber(discipline: &str, target_satisfied: bool) -> bool {
-    let current = read_fiber_state(discipline).state;
-    let next = match (current, target_satisfied) {
-        (FiberLifecycle::Inactive, true) => FiberLifecycle::Active,
-        (FiberLifecycle::Inactive, false) => FiberLifecycle::Inactive,
-        (FiberLifecycle::Active, true) => FiberLifecycle::Active,
-        (FiberLifecycle::Active, false) => FiberLifecycle::Unloading,
-        (FiberLifecycle::Unloading, _) => FiberLifecycle::Inactive,
-    };
-    if next != current {
-        write_fiber_state(discipline, next);
-    }
-    next == FiberLifecycle::Active
+    fiber_lifecycle::advance_fiber(&fiber_state_path(discipline).to_string_lossy(), target_satisfied)
 }
 
 /// A discipline read as a Cordis component: the coeffect specification (d),
@@ -116,6 +70,10 @@ pub struct Component {
     /// as-is without advancing it -- a caller wanting the transition side
     /// effect calls `advance_fiber` (via `active_policies`) instead.
     pub lifecycle: FiberLifecycle,
+    /// The coeffect isolation realm (Section 3.2.3) this component's
+    /// `requires`/`provides` resolve within -- empty string is the
+    /// default realm.
+    pub realm: String,
 }
 
 impl Component {
@@ -126,7 +84,8 @@ impl Component {
             requires: declared_requires(name),
             provides: declared_provides(name),
             has_effect: policy_text.map(|t| !t.trim().is_empty()).unwrap_or(false),
-            lifecycle: read_fiber_state(name).state,
+            lifecycle: read_fiber_state(name),
+            realm: declared_realm(name),
         }
     }
 }
@@ -158,6 +117,24 @@ fn declared_requires(discipline: &str) -> Vec<String> {
     declared_field(discipline, "requires")
 }
 
+/// A discipline's coeffect isolation realm (paper Section 3.2.3, Definition
+/// 28-29): the realm table entry a discipline names for itself. Absent
+/// `realm` means the discipline resolves in the default realm (empty
+/// string), matching every discipline written before isolation existed.
+/// This is one realm per discipline rather than the paper's per-key realm
+/// table (`rho: K -> R`), a deliberate reduction: a discipline's own
+/// capabilities are one small, cohesive set, so realm-scoping the whole
+/// discipline is the natural grain here, not scoping individual keys
+/// within it.
+fn declared_realm(discipline: &str) -> String {
+    let path = requires_path(discipline);
+    let path_s = path.to_string_lossy().to_string();
+    pkfs::read_to_string(&path_s)
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v.get("realm").and_then(|r| r.as_str()).map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
 /// The capability keys a discipline supplies. A discipline with no
 /// `provides` field (or no `requires.json` at all) implicitly provides
 /// exactly its own name, so a bare-name `requires` entry written before
@@ -172,15 +149,24 @@ fn declared_provides(discipline: &str) -> Vec<String> {
 }
 
 /// Reactive-coeffect satisfaction: a discipline activates only when every
-/// name in its declared `requires` is a capability some enabled discipline's
-/// `provides` supplies. `enabled_names` is the full activation-eligible set
-/// (already includes "default"); this never recurses beyond one hop, so a
+/// name in its declared `requires` is a capability some enabled discipline
+/// IN THE SAME ISOLATION REALM provides (paper Section 3.2.3): the same
+/// capability name provided by a discipline in a different realm does not
+/// satisfy this one's dependency, and does not collide with it for
+/// preservation purposes either -- two disciplines in different realms
+/// providing "storage" are providing two logically independent
+/// capabilities that merely share a name, real isolation rather than
+/// coincidental non-collision. `enabled_names` is the full
+/// activation-eligible set (already includes "default", which resolves in
+/// the default realm); this never recurses beyond one hop, so a
 /// requires-cycle simply leaves every disc in it unsatisfied rather than
 /// looping.
 fn requires_satisfied(discipline: &str, enabled_names: &[String]) -> bool {
+    let realm = declared_realm(discipline);
     declared_requires(discipline).iter().all(|dep| {
         enabled_names
             .iter()
+            .filter(|n| declared_realm(n) == realm)
             .any(|n| declared_provides(n).iter().any(|cap| cap == dep))
     })
 }
@@ -304,14 +290,20 @@ pub fn removal_dependents(discipline: &str) -> Vec<String> {
         return Vec::new();
     }
     let provided = declared_provides(discipline);
+    let realm = declared_realm(discipline);
     names
         .iter()
         .filter(|n| n.as_str() != discipline)
+        // only a same-realm dependent can actually be relying on this
+        // discipline's provision (Section 3.2.3): a different-realm
+        // discipline naming the same capability string resolves against
+        // its OWN realm's provider, never against this one.
+        .filter(|n| declared_realm(n) == realm)
         // only a fiber that has actually reached Active counts as a real
         // dependent -- one still Inactive (e.g. its own requires is not yet
         // satisfied for an unrelated reason) is not currently relying on
         // anything, so its withdrawal is not blocked by this discipline.
-        .filter(|n| read_fiber_state(n).state == FiberLifecycle::Active)
+        .filter(|n| read_fiber_state(n) == FiberLifecycle::Active)
         .filter(|n| requires_satisfied(n, &names))
         .filter(|n| {
             declared_requires(n)
@@ -334,7 +326,7 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
         return (String::new(), "discipline-check-removal refused: discipline name required".to_string(), 1);
     }
     let dependents = removal_dependents(&discipline);
-    let lifecycle = read_fiber_state(&discipline).state;
+    let lifecycle = read_fiber_state(&discipline);
     let all_known = all_known_discipline_dirs();
     let dangling = dangling_requires(&discipline, &all_known);
     let payload = serde_json::json!({
@@ -432,25 +424,35 @@ struct MetatheoryViolation {
     detail: String,
 }
 
+/// Builds an `ActiveFiberSet` from the currently-`Active` disciplines,
+/// reporting a violation for any that `insert` refuses. Preservation
+/// (Theorem 59) is therefore checked by construction: the set itself
+/// cannot contain two colliding providers, so what this function reports
+/// is exactly the set of components that FAILED to join it -- the type's
+/// own invariant is the check, not a separate nested-loop scan run
+/// alongside it.
 fn audit_preservation(all: &[String]) -> Vec<MetatheoryViolation> {
     let mut violations = Vec::new();
-    let active: Vec<&String> = all
-        .iter()
-        .filter(|n| read_fiber_state(n).state == FiberLifecycle::Active)
-        .collect();
-    for (i, a) in active.iter().enumerate() {
-        for b in active.iter().skip(i + 1) {
-            let a_provides = declared_provides(a);
-            let b_provides = declared_provides(b);
-            for cap in &a_provides {
-                if b_provides.contains(cap) {
-                    violations.push(MetatheoryViolation {
-                        theorem: "preservation (Theorem 59, disjoint provisions)",
-                        discipline: format!("{} vs {}", a, b),
-                        detail: format!("both Active and both provide {:?}", cap),
-                    });
-                }
-            }
+    let mut set = ActiveFiberSet::new();
+    for name in all {
+        if read_fiber_state(name) != FiberLifecycle::Active {
+            continue;
+        }
+        // Qualify each capability by realm before inserting: two
+        // disciplines in different realms providing the same bare
+        // capability name are providing two logically independent
+        // capabilities (Section 3.2.3), so they must not collide here.
+        let realm = declared_realm(name);
+        let qualified: Vec<String> = declared_provides(name)
+            .into_iter()
+            .map(|cap| format!("{realm}\0{cap}"))
+            .collect();
+        if let Err(v) = set.insert(name, &qualified) {
+            violations.push(MetatheoryViolation {
+                theorem: "preservation (Theorem 59, disjoint provisions)",
+                discipline: format!("{} vs {}", v.incoming, v.existing),
+                detail: format!("both Active, same realm, and both provide {:?}", v.capability.split('\0').nth(1).unwrap_or(&v.capability)),
+            });
         }
     }
     violations
@@ -459,7 +461,7 @@ fn audit_preservation(all: &[String]) -> Vec<MetatheoryViolation> {
 fn audit_recovery_exactness(all: &[String]) -> Vec<MetatheoryViolation> {
     let mut violations = Vec::new();
     for name in all {
-        if read_fiber_state(name).state == FiberLifecycle::Unloading {
+        if read_fiber_state(name) == FiberLifecycle::Unloading {
             let mut probe = FiberLifecycle::Unloading;
             probe = match (probe, false) {
                 (FiberLifecycle::Unloading, _) => FiberLifecycle::Inactive,
@@ -481,7 +483,7 @@ fn audit_ordering(all: &[String]) -> Vec<MetatheoryViolation> {
     let mut violations = Vec::new();
     let enabled = enabled_names();
     for name in all {
-        if enabled.iter().any(|n| n == name) && read_fiber_state(name).state == FiberLifecycle::Active {
+        if enabled.iter().any(|n| n == name) && read_fiber_state(name) == FiberLifecycle::Active {
             continue;
         }
         // A non-enabled or non-Active discipline provides nothing to
@@ -490,7 +492,7 @@ fn audit_ordering(all: &[String]) -> Vec<MetatheoryViolation> {
         // itself be the violation: a "dependent" of a fiber that isn't
         // actually providing.
         let dependents = removal_dependents(name);
-        if !dependents.is_empty() && read_fiber_state(name).state != FiberLifecycle::Active {
+        if !dependents.is_empty() && read_fiber_state(name) != FiberLifecycle::Active {
             violations.push(MetatheoryViolation {
                 theorem: "ordering (Theorem 63)",
                 discipline: name.clone(),

@@ -8,6 +8,7 @@ pub mod cas;
 pub mod mutables;
 pub mod memorize;
 pub mod discipline_note;
+pub mod fiber_lifecycle;
 pub mod config_notify;
 pub mod residual;
 pub mod recall;
