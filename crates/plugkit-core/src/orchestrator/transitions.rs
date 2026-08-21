@@ -780,3 +780,16 @@ pub fn handle(content: &str) -> (String, String, i32) {
         Err(e) => (String::new(), format!("write state failed: {}", e), 1),
     }
 }
+
+/// Reverts the most recent phase transition. Body is ignored (no fields
+/// take arguments); each dispatch pops exactly one history entry, so
+/// reverting a multi-step reshaping means dispatching this once per step.
+pub fn handle_revert(_content: &str) -> (String, String, i32) {
+    match super::state::revert_last_transition() {
+        Ok(s) => {
+            let payload = serde_json::json!({ "phase": s.phase.as_str() });
+            (payload.to_string(), String::new(), 0)
+        }
+        Err(e) => (String::new(), format!("transition-revert failed: {}", e), 1),
+    }
+}
