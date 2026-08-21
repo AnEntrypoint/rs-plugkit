@@ -590,22 +590,38 @@ fn lang(body: &Value) -> u64 {
     }
 }
 
+const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "timeoutMs=<ms>\\n<code>, or bare code (only when the caller's own timeout floor already applies, e.g. via a wrapping shell verb)";
+
 fn exec_js(body: &Value, body_s: &str) -> u64 {
-    let code = body.get("code").and_then(|v| v.as_str()).map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| body_s.to_string());
-    if code.is_empty() { return err("exec_js", "code required (provide raw code as body or JSON {code: ...})"); }
-    let timeout_ms = match crate::validation::validate_timeout_ms(body, true) {
-        Ok(n) => n,
-        Err(detail) => return err_json("exec_js", detail),
-    };
-    let mut opts_obj = body.get("opts").cloned().unwrap_or_else(|| json!({}));
-    if let Some(map) = opts_obj.as_object_mut() {
-        map.insert("timeoutMs".to_string(), json!(timeout_ms));
-    } else {
-        opts_obj = json!({"timeoutMs": timeout_ms});
+    if body.is_object() {
+        return err_json("exec_js", json!({
+            "error": "exec_js takes a plain-text body, never a JSON object. Send the raw code itself as the dispatch body, with an optional leading timeoutMs=<ms> line.",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
+            "received_keys": body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+        }));
     }
-    let opts = opts_obj.to_string();
+    let (prefix_timeout_ms, code) = strip_timeout_ms_prefix_directive(body_s);
+    if code.trim().is_empty() { return err_json("exec_js", json!({
+        "error": "exec_js body is empty -- provide raw code as the dispatch body",
+        "error_code": ERR_CODE_INVALID_ARGS,
+        "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
+    })); }
+    let timeout_ms = match prefix_timeout_ms {
+        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
+        Some(n) => return err_json("exec_js", json!({
+            "error": "timeoutMs below floor",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "min": crate::validation::MIN_TIMEOUT_MS,
+            "received": n,
+        })),
+        None => return err_json("exec_js", json!({
+            "error": "missing timeoutMs -- prefix the body with a timeoutMs=<ms> line naming a positive integer millisecond budget",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
+        })),
+    };
+    let opts = json!({"timeoutMs": timeout_ms}).to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok("exec_js", Value::String(s)),
@@ -1698,13 +1714,32 @@ fn discipline(body: &Value) -> u64 {
 }
 
 fn shell_exec(body: &Value, body_s: &str, lang: &str) -> u64 {
-    let code = body.get("code").and_then(|v| v.as_str()).map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| body_s.to_string());
-    if code.is_empty() { return err(lang, "code required (provide raw code as body or JSON {code: ...})"); }
-    let timeout_ms = match crate::validation::validate_timeout_ms(body, false) {
-        Ok(n) => n,
-        Err(detail) => return err_json(lang, detail),
+    if body.is_object() {
+        return err_json(lang, json!({
+            "error": format!("{lang} takes a plain-text body, never a JSON object. Send the raw command/script itself as the dispatch body, with an optional leading timeoutMs=<ms> line."),
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "supported_shapes": "timeoutMs=<ms>\\n<command>, or bare command text",
+            "received_keys": body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+        }));
+    }
+    let (prefix_timeout_ms, code) = strip_timeout_ms_prefix_directive(body_s);
+    if code.trim().is_empty() { return err_json(lang, json!({
+        "error": format!("{lang} body is empty -- provide a raw command/script as the dispatch body"),
+        "error_code": ERR_CODE_INVALID_ARGS,
+    })); }
+    let timeout_ms = match prefix_timeout_ms {
+        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
+        Some(n) => return err_json(lang, json!({
+            "error": "timeoutMs below floor",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "min": crate::validation::MIN_TIMEOUT_MS,
+            "received": n,
+        })),
+        None => return err_json(lang, json!({
+            "error": "missing timeoutMs -- prefix the body with a timeoutMs=<ms> line naming a positive integer millisecond budget",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "supported_shapes": "timeoutMs=<ms>\\n<command>, or bare command text",
+        })),
     };
     let opts = json!({ "lang": lang, "timeoutMs": timeout_ms }).to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
@@ -1738,7 +1773,7 @@ fn record_app_loads_witness_from_response(cwd: &str, v: &Value) {
     crate::browser_witness::record_app_loads_witness_unconditional_on_edits(cwd, healthy, &detail);
 }
 
-const BROWSER_SUPPORTED_BODY_SHAPES: &str = "sessionId=<id>\\n<shape>, session new, session list, session close <id>, session reset <id>, <bare https:// URL>, url=<url>\\n<expr>, timeout=<ms>\\n<expr>, dom=<selector>\\n<expr>, or a bare JS expression";
+const BROWSER_SUPPORTED_BODY_SHAPES: &str = "sessionId=<id>\\n<expr> (optional session-routing prefix, stacks with the rest), or a bare JS expression to evaluate";
 
 fn serp_default_oxibrowser_headless_engine(body: &Value, body_s: &str) -> u64 {
     let envelope_code = body.get("code").or_else(|| body.get("body"))
@@ -3587,6 +3622,20 @@ fn extract_session_id_from_plain_text_body(body_s: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn strip_timeout_ms_prefix_directive(body_s: &str) -> (Option<u64>, &str) {
+    let trimmed = body_s.trim_start();
+    for prefix in ["timeoutMs=", "timeout_ms="] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let (value_line, remainder) = rest.split_once('\n').unwrap_or((rest, ""));
+            if let Ok(n) = value_line.trim().parse::<u64>() {
+                return (Some(n), remainder);
+            }
+            break;
+        }
+    }
+    (None, body_s)
 }
 
 fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
