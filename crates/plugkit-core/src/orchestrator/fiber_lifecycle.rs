@@ -225,6 +225,44 @@ pub struct SafeToWithdraw {
     pub name: String,
 }
 
+/// Confluence (Theorem 73): whatever order a set of independent fibers'
+/// targets are evaluated in, the resulting set of `Active` names answers
+/// only to the fixed inputs (each fiber's own `target_satisfied`), never
+/// to the evaluation order. `targets` pairs each fiber's name with the
+/// target it should transition against, computed ONCE from a fixed
+/// snapshot (the caller's job, e.g. `discipline_note.rs::active_policies`'s
+/// two-phase pass) -- this function then transitions every fiber twice,
+/// once processing `targets` in its given order and once in reverse,
+/// starting both runs from the SAME `initial_states`, and asserts the two
+/// runs reach the same final `Active` set. Kind-agnostic like every other
+/// function here: it takes fiber names and pre-computed targets, never
+/// reading or writing persisted state itself, so it can check any
+/// caller's fiber set without touching real files.
+pub fn check_confluence(initial_states: &[(String, FiberLifecycle)], targets: &[(String, bool)]) -> bool {
+    let run = |order: &[(String, bool)]| -> Vec<String> {
+        let mut states: Vec<(String, FiberLifecycle)> = initial_states.to_vec();
+        for (name, target) in order {
+            if let Some(entry) = states.iter_mut().find(|(n, _)| n == name) {
+                entry.1 = transition(entry.1, *target);
+            }
+        }
+        let mut active: Vec<String> = states
+            .into_iter()
+            .filter(|(_, s)| *s == FiberLifecycle::Active)
+            .map(|(n, _)| n)
+            .collect();
+        active.sort();
+        active
+    };
+
+    let forward = run(targets);
+    let mut reversed = targets.to_vec();
+    reversed.reverse();
+    let backward = run(&reversed);
+
+    forward == backward
+}
+
 impl SafeToWithdraw {
     /// `dependents` is whatever the caller's own coeffect model reports as
     /// still relying on `name` (e.g. `removal_dependents(name)`); this
