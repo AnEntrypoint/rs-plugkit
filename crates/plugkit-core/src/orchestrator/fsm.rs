@@ -119,7 +119,7 @@ fn default_hook_timeout_ms() -> u64 { 15_000 }
 fn default_longgap_threshold_ms() -> u64 { 300_000 }
 fn default_require_witness_evidence() -> bool { true }
 fn default_prd_closed_statuses() -> Vec<String> {
-    ["done", "complete", "completed"].iter().map(|s| s.to_string()).collect()
+    ["done", "complete", "completed", "resolved"].iter().map(|s| s.to_string()).collect()
 }
 fn default_mutables_resolved_statuses() -> Vec<String> {
     ["witnessed", "resolved"].iter().map(|s| s.to_string()).collect()
