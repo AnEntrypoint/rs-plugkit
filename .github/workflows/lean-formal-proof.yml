@@ -1,0 +1,22 @@
+name: Lean formal proof (CordisCalculus)
+
+on:
+  push:
+    paths:
+      - "formal/**"
+  pull_request:
+    paths:
+      - "formal/**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: formal
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: formal
