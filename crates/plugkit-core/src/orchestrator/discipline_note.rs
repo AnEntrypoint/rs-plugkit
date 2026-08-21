@@ -5,6 +5,24 @@ use super::fiber_lifecycle::{self, ActiveFiberSet, FiberLifecycle, SafeToWithdra
 use super::gm_dir;
 use crate::pkfs;
 
+fn audit_confluence(all: &[String]) -> Vec<MetatheoryViolation> {
+    let enabled = enabled_names();
+    let initial_states: Vec<(String, FiberLifecycle)> =
+        all.iter().map(|n| (n.clone(), read_fiber_state(n))).collect();
+    let targets: Vec<(String, bool)> = all
+        .iter()
+        .map(|n| (n.clone(), enabled.iter().any(|e| e == n) && requires_satisfied(n, &enabled)))
+        .collect();
+    if !fiber_lifecycle::check_confluence(&initial_states, &targets) {
+        return vec![MetatheoryViolation {
+            theorem: "confluence (Theorem 73)",
+            discipline: "(whole discipline set)".to_string(),
+            detail: "forward and reverse evaluation order reached different Active sets from the same initial states and targets".to_string(),
+        }];
+    }
+    Vec::new()
+}
+
 fn note_cfg() -> crate::ragconfig::DisciplineNoteConfig {
     crate::ragconfig::RagConfig::resolved().discipline_note
 }
@@ -550,10 +568,11 @@ pub fn handle_audit(_content: &str) -> (String, String, i32) {
     violations.extend(audit_ordering(&all));
     violations.extend(audit_progress());
     violations.extend(audit_dangling_requires(&all));
+    violations.extend(audit_confluence(&all));
     let ok = violations.is_empty();
     let payload = serde_json::json!({
         "ok": ok,
-        "theorems_checked": ["preservation", "recovery_exactness", "ordering", "progress", "access_control"],
+        "theorems_checked": ["preservation", "recovery_exactness", "ordering", "progress", "access_control", "confluence"],
         "disciplines_checked": all.len(),
         "violations": violations,
     });
