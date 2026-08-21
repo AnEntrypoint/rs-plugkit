@@ -9,6 +9,7 @@ pub mod mutables;
 pub mod memorize;
 pub mod discipline_note;
 pub mod fiber_lifecycle;
+pub mod memory_component;
 pub mod config_notify;
 pub mod residual;
 pub mod recall;
@@ -204,7 +205,7 @@ pub fn gm_dir() -> PathBuf {
 /// verb that drifted.
 pub const ORCHESTRATOR_VERBS: &[&str] = &[
     "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list",
-    "memorize-fire", "discipline-note", "discipline-check-removal", "discipline-audit", "phase-status", "residual-scan", "auto-recall",
+    "memorize-fire", "discipline-note", "discipline-check-removal", "discipline-audit", "memory-namespace-audit", "phase-status", "residual-scan", "auto-recall",
     "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
     "task-spawn", "task-list", "task-stop", "task-output",
     "memorize-continue", "fsm-vendor", "fsm-validate", "fsm-propose-override", "claim-audit", "submodule-check",
@@ -250,7 +251,7 @@ fn verb_has_dispatch_arm(verb: &str) -> bool {
     matches!(
         verb,
         "transition" | "transition-revert" | "mutable-resolve" | "mutable-add" | "mutable-list"
-            | "memorize-fire" | "discipline-note" | "discipline-check-removal" | "discipline-audit" | "phase-status" | "residual-scan"
+            | "memorize-fire" | "discipline-note" | "discipline-check-removal" | "discipline-audit" | "memory-namespace-audit" | "phase-status" | "residual-scan"
             | "auto-recall" | "instruction" | "prd-add" | "prd-resolve" | "prd-list" | "prd-defer"
             | "task-spawn" | "task-list" | "task-stop" | "task-output"
             | "memorize-continue" | "fsm-vendor" | "fsm-validate" | "fsm-propose-override"
@@ -276,6 +277,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "discipline-note" => discipline_note::handle(content),
         "discipline-check-removal" => discipline_note::handle_check_removal(content),
         "discipline-audit" => discipline_note::handle_audit(content),
+        "memory-namespace-audit" => memory_component::handle_audit(content),
         "phase-status" => state::handle_status(),
         "residual-scan" => residual::handle_scan(content),
         "claim-audit" => claim_audit::handle_audit(content),

@@ -1,7 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use serde::Serialize;
-use super::fiber_lifecycle::{self, ActiveFiberSet, FiberLifecycle};
+use super::fiber_lifecycle::{self, ActiveFiberSet, FiberLifecycle, SafeToWithdraw};
 use super::gm_dir;
 use crate::pkfs;
 
@@ -472,19 +472,13 @@ fn audit_preservation(all: &[String]) -> Vec<MetatheoryViolation> {
 fn audit_recovery_exactness(all: &[String]) -> Vec<MetatheoryViolation> {
     let mut violations = Vec::new();
     for name in all {
-        if read_fiber_state(name) == FiberLifecycle::Unloading {
-            let mut probe = FiberLifecycle::Unloading;
-            probe = match (probe, false) {
-                (FiberLifecycle::Unloading, _) => FiberLifecycle::Inactive,
-                _ => probe,
-            };
-            if probe != FiberLifecycle::Inactive {
-                violations.push(MetatheoryViolation {
-                    theorem: "recovery exactness (Theorem 61)",
-                    discipline: name.clone(),
-                    detail: "Unloading did not reach Inactive under a false target".to_string(),
-                });
-            }
+        let current = read_fiber_state(name);
+        if !fiber_lifecycle::verify_recovery_exactness(current) {
+            violations.push(MetatheoryViolation {
+                theorem: "recovery exactness (Theorem 61)",
+                discipline: name.clone(),
+                detail: "Unloading did not reach Inactive under every reachable target".to_string(),
+            });
         }
     }
     violations
@@ -499,11 +493,15 @@ fn audit_ordering(all: &[String]) -> Vec<MetatheoryViolation> {
         }
         // A non-enabled or non-Active discipline provides nothing to
         // dependents by construction (active_policies only surfaces
-        // Active fibers), so removal_dependents naming anyone here would
-        // itself be the violation: a "dependent" of a fiber that isn't
-        // actually providing.
+        // Active fibers), so failing to obtain a SafeToWithdraw proof
+        // here IS the violation: a "dependent" of a fiber that isn't
+        // actually providing. SafeToWithdraw::check is the same
+        // proof-carrying constructor a real withdrawal path would have to
+        // satisfy, so this audit checks the actual gate future removal
+        // code would be structurally required to pass, not a parallel
+        // hand-rolled equivalent of it.
         let dependents = removal_dependents(name);
-        if !dependents.is_empty() && read_fiber_state(name) != FiberLifecycle::Active {
+        if SafeToWithdraw::check(name, &dependents).is_none() {
             violations.push(MetatheoryViolation {
                 theorem: "ordering (Theorem 63)",
                 discipline: name.clone(),
