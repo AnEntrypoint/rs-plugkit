@@ -33,7 +33,8 @@ process-execution verbs.
 
 Orchestrator verbs: `instruction`, `transition`, `transition-revert`,
 `discipline-check-removal`, `discipline-audit`, `memory-namespace-audit`,
-`phase-status`, `mutable-resolve`, `memorize-fire`, `residual-scan`, `auto-recall`.
+`codeinsight-namespace-audit`, `phase-status`, `mutable-resolve`,
+`memorize-fire`, `residual-scan`, `auto-recall`.
 
 `transition-revert` pops the most recent entry off `TurnState.phase_history`
 (a LIFO accumulator every `transition` call appends to) and restores the
@@ -153,6 +154,32 @@ every known namespace's fiber and reports which reached `Active`,
 exercising the same machinery `discipline-audit` exercises for
 disciplines, proving the module serves a caller nobody anticipated when
 it was written.
+
+`orchestrator/codeinsight_component.rs` is a FOURTH component kind,
+chosen adversarially rather than to confirm the pattern already worked:
+its substance (`code_index.rs`'s codeinsight/manifest/vec namespaces)
+lives in a libsql database (`shared_db.rs`), not a filesystem tree like
+disciplines/memory-namespaces or a wasm binary like sibling plugins. It
+still fits `fiber_lifecycle`'s existing public API with zero changes to
+that file (confirmed by `git diff --stat` showing no modification to
+`fiber_lifecycle.rs` across this instantiation) -- a component's
+fiber-state is always a small filesystem sidecar fact entirely separate
+from where its substance actually lives, which is why the storage
+backend of a component's own data is invisible to `fiber_lifecycle` by
+construction. `codeinsight-namespace-audit` is the dispatchable entry
+point.
+
+`fiber_lifecycle::check_confluence` brings Theorem 73 (confluence) into a
+live check rather than unproven prose: given a fixed set of initial fiber
+states and pre-computed targets, it runs the same transitions once in
+the given order and once reversed, from the same starting states, and
+asserts the two runs reach the same `Active` set. `discipline-audit`'s
+`audit_confluence` calls this over the live discipline set every audit.
+Confluence holds structurally here because each fiber's transition
+depends only on its own current state and its own target, never on
+another fiber's -- live-verified via a standalone rustc trace including
+a case with a repeated target on one fiber, confirming the check is a
+real (non-vacuous) test rather than one that always trivially passes.
 
 Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir`, `scan_deps`
 (supply-chain scan for the HiddenSpawn-class obfuscated-dropper pattern:
