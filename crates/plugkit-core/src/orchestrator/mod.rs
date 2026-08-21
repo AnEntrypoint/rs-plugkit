@@ -244,9 +244,7 @@ fn handle_memorize_continue(_content: &str) -> (String, String, i32) {
     ("{\"ok\":false,\"error\":\"memorize-continue requires wasm32\"}".to_string(), String::new(), 1)
 }
 
-/// Mirrors the arms of  below. Kept adjacent so the two are edited
-/// together, and cross-checked against ORCHESTRATOR_VERBS on every dispatch in
-/// a debug build by debug_assert_verb_sets_agree.
+#[cfg(debug_assertions)]
 fn verb_has_dispatch_arm(verb: &str) -> bool {
     matches!(
         verb,
