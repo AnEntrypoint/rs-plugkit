@@ -127,7 +127,11 @@ fn prd_has_open_items() -> bool {
     let Some(items) = v.get("items").and_then(|v| v.as_array()) else { return false };
     items.iter().any(|it| {
         let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-        prd::status_is_open(status)
+        let blocked_external = it.get("blockedBy")
+            .and_then(|v| v.as_array())
+            .map(|seq| seq.iter().any(|x| x.as_str() == Some("external")))
+            .unwrap_or(false);
+        prd::status_is_open(status) && !blocked_external
     })
 }
 

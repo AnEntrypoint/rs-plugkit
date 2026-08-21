@@ -16,10 +16,17 @@ pub fn cas_retry_write<T>(
     loop {
         attempt += 1;
         let before_raw = if pkfs::exists(path_s) { pkfs::read_to_string(path_s).unwrap_or_default() } else { String::new() };
-        let doc: Value = if before_raw.is_empty() {
+        let doc: Value = if before_raw.trim().is_empty() {
             Value::Sequence(vec![])
         } else {
-            serde_yaml::from_str(&before_raw).unwrap_or(Value::Sequence(vec![]))
+            match serde_yaml::from_str(&before_raw) {
+                Ok(v) => v,
+                Err(e) => return Err((
+                    String::new(),
+                    format!("{} refused: {} contains non-empty content that failed to parse as YAML ({}) -- writing would silently discard it, so the write is aborted instead. Inspect and repair the file by hand.", verb_label, path_s, e),
+                    1,
+                )),
+            }
         };
 
         let (new_doc, result) = match modify(doc) {
@@ -29,15 +36,6 @@ pub fn cas_retry_write<T>(
 
         let new_raw = serde_yaml::to_string(&new_doc).unwrap_or_default();
 
-        // A plain read-then-write pair (even with a recheck read right
-        // before the write) leaves a window between the recheck and the
-        // write itself where a concurrent writer can land and get
-        // silently clobbered -- the recheck only re-validates what THIS
-        // caller last saw, not what is true at the instant of the write.
-        // host_cas_write closes that window by doing the "is `before_raw`
-        // still current" check and the write in one host-side locked
-        // critical section, so a lost update is detected unconditionally
-        // rather than only when the timing happens to expose it.
         match pkfs::cas_write(path_s, &before_raw, &new_raw) {
             pkfs::CasWriteOutcome::Swapped => return Ok(result),
             pkfs::CasWriteOutcome::Mismatch => {
