@@ -34,6 +34,7 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/git-block-counter.json",
     ".gm/disciplines/codeinsight/",
     ".gm/disciplines/codeinsight-vec/",
+    ".gm/disciplines/*/fiber-state.json",
     ".gm/instructions-source-cache/",
     ".gm/config-source-cache/",
     ".gm/config-source-cache.*",
