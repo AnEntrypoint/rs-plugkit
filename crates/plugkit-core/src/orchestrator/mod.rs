@@ -202,7 +202,7 @@ pub fn gm_dir() -> PathBuf {
 /// runs on every orchestrator dispatch in a debug build and names the exact
 /// verb that drifted.
 pub const ORCHESTRATOR_VERBS: &[&str] = &[
-    "transition", "mutable-resolve", "mutable-add", "mutable-list",
+    "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list",
     "memorize-fire", "discipline-note", "phase-status", "residual-scan", "auto-recall",
     "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
     "task-spawn", "task-list", "task-stop", "task-output",
@@ -248,7 +248,7 @@ fn handle_memorize_continue(_content: &str) -> (String, String, i32) {
 fn verb_has_dispatch_arm(verb: &str) -> bool {
     matches!(
         verb,
-        "transition" | "mutable-resolve" | "mutable-add" | "mutable-list"
+        "transition" | "transition-revert" | "mutable-resolve" | "mutable-add" | "mutable-list"
             | "memorize-fire" | "discipline-note" | "phase-status" | "residual-scan"
             | "auto-recall" | "instruction" | "prd-add" | "prd-resolve" | "prd-list" | "prd-defer"
             | "task-spawn" | "task-list" | "task-stop" | "task-output"
@@ -267,6 +267,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
     debug_assert_verb_sets_agree();
     match verb {
         "transition" => transitions::handle(content),
+        "transition-revert" => transitions::handle_revert(content),
         "mutable-resolve" => mutables::handle_resolve(content),
         "mutable-add" => mutables::handle_add(content),
         "mutable-list" => mutables::handle_list(content),

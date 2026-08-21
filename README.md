@@ -31,8 +31,17 @@ Callers write request JSON to `.gm/exec-spool/in/<verb>/<N>.txt` (or
 read and writes `out/<N>.json` (metadata) alongside `out/<N>.out`/`.err` for
 process-execution verbs.
 
-Orchestrator verbs: `instruction`, `transition`, `phase-status`,
-`mutable-resolve`, `memorize-fire`, `residual-scan`, `auto-recall`.
+Orchestrator verbs: `instruction`, `transition`, `transition-revert`,
+`phase-status`, `mutable-resolve`, `memorize-fire`, `residual-scan`,
+`auto-recall`.
+
+`transition-revert` pops the most recent entry off `TurnState.phase_history`
+(a LIFO accumulator every `transition` call appends to) and restores the
+phase it recorded, one step at a time -- the accumulator/inverse pairing a
+Cordis-style revertible effect gives a state transformation, applied to gm's
+own phase graph so a feedback-edge re-entry (e.g. DECIDE->SPECIFY) can be
+undone precisely rather than only via the separately-tracked
+mutables.yml/prd.yml side state.
 
 Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir`, `scan_deps`
 (supply-chain scan for the HiddenSpawn-class obfuscated-dropper pattern:

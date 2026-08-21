@@ -44,6 +44,19 @@ impl std::fmt::Display for Phase {
     }
 }
 
+/// One phase transition, recorded as an accumulator entry so a feedback-edge
+/// re-entry (e.g. DECIDE->SPECIFY) can be reverted precisely instead of only
+/// via the separately-tracked mutables.yml/prd.yml side state. Mirrors the
+/// Cordis effect-context accumulator: each transition composes an inverse
+/// (its own `from` phase) onto a LIFO history, so `transition-revert` pops
+/// the last entry and restores the phase it recorded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseTransitionEntry {
+    pub from: String,
+    pub to: String,
+    pub ts_ms: u128,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnState {
     pub phase: Phase,
@@ -54,6 +67,8 @@ pub struct TurnState {
     pub pending_step_id: Option<String>,
     #[serde(default)]
     pub pending_step_deadline_ms: Option<u128>,
+    #[serde(default)]
+    pub phase_history: Vec<PhaseTransitionEntry>,
 }
 
 impl Default for TurnState {
@@ -65,6 +80,7 @@ impl Default for TurnState {
             updated_at_ms: now_ms(),
             pending_step_id: None,
             pending_step_deadline_ms: None,
+            phase_history: Vec::new(),
         }
     }
 }
@@ -157,6 +173,7 @@ fn default_state_for_graph(g: &super::fsm::Graph) -> TurnState {
         updated_at_ms: now_ms(),
         pending_step_id: None,
         pending_step_deadline_ms: None,
+        phase_history: Vec::new(),
     }
 }
 
@@ -186,6 +203,11 @@ pub fn set_phase_with_session(phase: Phase, last_skill: Option<String>, session_
 /// this dispatch.
 pub fn set_phase_with_session_with_graph(phase: Phase, last_skill: Option<String>, session_id: Option<String>, g: &super::fsm::Graph) -> Result<TurnState, std::io::Error> {
     let mut s = read_state_with_graph(g);
+    let from = s.phase.as_str().to_string();
+    let to = phase.as_str().to_string();
+    if from != to {
+        s.phase_history.push(PhaseTransitionEntry { from, to, ts_ms: now_ms() });
+    }
     s.phase = phase;
     if last_skill.is_some() {
         s.last_skill = last_skill;
@@ -196,6 +218,25 @@ pub fn set_phase_with_session_with_graph(phase: Phase, last_skill: Option<String
     s.updated_at_ms = now_ms();
     write_state(&s)?;
     Ok(s)
+}
+
+/// Reverts the most recent recorded transition, restoring the phase it
+/// moved from. Pops the LIFO history exactly once, mirroring how a Cordis
+/// accumulator's inverse recovers one effect at a time -- never a bulk
+/// rewind, so a caller reverting N transitions dispatches this N times and
+/// observes each intermediate phase.
+pub fn revert_last_transition() -> Result<TurnState, std::io::Error> {
+    let g = super::fsm::graph();
+    let mut s = read_state_with_graph(&g);
+    match s.phase_history.pop() {
+        Some(entry) => {
+            s.phase = Phase::parse(&entry.from).unwrap_or(initial_phase());
+            s.updated_at_ms = now_ms();
+            write_state(&s)?;
+            Ok(s)
+        }
+        None => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no recorded transition to revert")),
+    }
 }
 
 pub fn handle_status() -> (String, String, i32) {
