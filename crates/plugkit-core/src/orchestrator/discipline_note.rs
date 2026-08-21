@@ -19,17 +19,18 @@ fn requires_path(discipline: &str) -> std::path::PathBuf {
     gm_dir().join("disciplines").join(discipline).join("requires.json")
 }
 
-/// A discipline's coeffect specification: names of other enabled disciplines
-/// it depends on. Absent `requires.json` means no declared dependency (the
-/// discipline always activates, matching prior behavior). `default` and any
-/// name it lists are treated as always-satisfied roots.
-fn declared_requires(discipline: &str) -> Vec<String> {
+/// Reads a string array field out of a discipline's `requires.json`. `field`
+/// is `"requires"` or `"provides"`; both share one manifest file since a
+/// discipline's coeffect specification (what it needs) and provision (what
+/// it supplies) are two views of the same interface (paper Definition 43:
+/// a component is (d, p, e), specification and provision paired).
+fn declared_field(discipline: &str, field: &str) -> Vec<String> {
     let path = requires_path(discipline);
     let path_s = path.to_string_lossy().to_string();
     match pkfs::read_to_string(&path_s) {
         Some(text) => serde_json::from_str::<serde_json::Value>(&text)
             .ok()
-            .and_then(|v| v.get("requires").cloned())
+            .and_then(|v| v.get(field).cloned())
             .and_then(|v| v.as_array().cloned())
             .map(|arr| {
                 arr.into_iter()
@@ -41,16 +42,35 @@ fn declared_requires(discipline: &str) -> Vec<String> {
     }
 }
 
+fn declared_requires(discipline: &str) -> Vec<String> {
+    declared_field(discipline, "requires")
+}
+
+/// The capability keys a discipline supplies. A discipline with no
+/// `provides` field (or no `requires.json` at all) implicitly provides
+/// exactly its own name, so a bare-name `requires` entry written before
+/// this field existed keeps resolving the same way.
+fn declared_provides(discipline: &str) -> Vec<String> {
+    let explicit = declared_field(discipline, "provides");
+    if explicit.is_empty() {
+        vec![discipline.to_string()]
+    } else {
+        explicit
+    }
+}
+
 /// Reactive-coeffect satisfaction: a discipline activates only when every
-/// name in its declared `requires` is itself an enabled discipline with a
-/// non-empty policy. `enabled_names` is the full activation-eligible set
+/// name in its declared `requires` is a capability some enabled discipline's
+/// `provides` supplies. `enabled_names` is the full activation-eligible set
 /// (already includes "default"); this never recurses beyond one hop, so a
 /// requires-cycle simply leaves every disc in it unsatisfied rather than
 /// looping.
 fn requires_satisfied(discipline: &str, enabled_names: &[String]) -> bool {
-    declared_requires(discipline)
-        .iter()
-        .all(|dep| enabled_names.iter().any(|n| n == dep))
+    declared_requires(discipline).iter().all(|dep| {
+        enabled_names
+            .iter()
+            .any(|n| declared_provides(n).iter().any(|cap| cap == dep))
+    })
 }
 
 pub fn handle(content: &str) -> (String, String, i32) {
