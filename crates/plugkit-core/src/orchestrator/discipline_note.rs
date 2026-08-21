@@ -167,6 +167,17 @@ fn requires_satisfied(discipline: &str, enabled_names: &[String]) -> bool {
         enabled_names
             .iter()
             .filter(|n| declared_realm(n) == realm)
+            // Theorem 63's other half: a provider mid-withdrawal
+            // (Unloading) must not be read as still satisfying anyone's
+            // requires, even though it remains nameable by
+            // removal_dependents for one more dispatch (that naming is
+            // what lets a NEW consumer's activation attempt still see it
+            // as departing, not what lets an EXISTING or new consumer
+            // treat it as available). Checking Active here, rather than
+            // mere enabled-ness, is what prevents a fresh activation
+            // attempt from resolving against a fiber that is itself on
+            // its way out.
+            .filter(|n| read_fiber_state(n) == FiberLifecycle::Active)
             .any(|n| declared_provides(n).iter().any(|cap| cap == dep))
     })
 }
@@ -555,10 +566,26 @@ pub fn active_policies() -> serde_json::Value {
     let enabled = enabled_names();
     let all = all_known_discipline_dirs();
 
+    // Two-phase pass, not one loop: every `target_satisfied` is computed
+    // from the fiber states as they stood at the START of this dispatch,
+    // before ANY of them advances. A single combined loop would let an
+    // earlier name's own advance_fiber call mutate its fiber-state.json
+    // mid-iteration, so a later name's requires_satisfied check (which
+    // reads read_fiber_state fresh) could see a provider as already
+    // Unloading even though it was Active when this dispatch began --
+    // exactly the iteration-order hazard Theorem 63's atomicity assumes
+    // away. Computing every target first mirrors the paper's dispatch
+    // being one atomic step from the orchestrator's view (Section 4):
+    // every fiber's target this dispatch answers to one consistent
+    // snapshot of the others, never a partially-advanced one.
+    let targets: Vec<bool> = all
+        .iter()
+        .map(|name| enabled.iter().any(|n| n == name) && requires_satisfied(name, &enabled))
+        .collect();
+
     let mut out: Vec<serde_json::Value> = Vec::new();
-    for name in &all {
-        let target_satisfied = enabled.iter().any(|n| n == name) && requires_satisfied(name, &enabled);
-        let is_active = advance_fiber(name, target_satisfied);
+    for (name, target_satisfied) in all.iter().zip(targets.iter()) {
+        let is_active = advance_fiber(name, *target_satisfied);
         if !is_active {
             continue;
         }
