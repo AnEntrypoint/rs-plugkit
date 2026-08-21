@@ -1,5 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 
+use serde::{Deserialize, Serialize};
 use super::gm_dir;
 use crate::pkfs;
 
@@ -17,6 +18,79 @@ fn policy_path(discipline: &str) -> std::path::PathBuf {
 
 fn requires_path(discipline: &str) -> std::path::PathBuf {
     gm_dir().join("disciplines").join(discipline).join("requires.json")
+}
+
+fn fiber_state_path(discipline: &str) -> std::path::PathBuf {
+    gm_dir().join("disciplines").join(discipline).join("fiber-state.json")
+}
+
+/// A discipline's persisted lifecycle state (paper Section 4.3, Definition
+/// 49). gm has no async load step for a discipline -- reading policy.md is
+/// synchronous, so there is no analogue of `Reloading`'s in-flight window --
+/// leaving three reachable states: `Inactive` (never activated, or fully
+/// withdrawn), `Active` (currently providing), and `Unloading` (target
+/// unsatisfied or removed from `enabled.txt`, but the previous dispatch's
+/// dependents have not yet had a chance to observe the loss). This mirrors
+/// L-Leave/L-Unload's split (Section 4.3.1): a fiber stops providing (drops
+/// out of the coeffect context) the moment it enters `Unloading`, but the
+/// fiber itself, and hence `removal_dependents`'s ability to name it as a
+/// still-present-but-leaving provider, persists one more dispatch before the
+/// state collapses to `Inactive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FiberLifecycle {
+    Inactive,
+    Active,
+    Unloading,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FiberState {
+    state: FiberLifecycle,
+    #[serde(default)]
+    updated_at_ms: u128,
+}
+
+fn read_fiber_state(discipline: &str) -> FiberState {
+    let path = fiber_state_path(discipline).to_string_lossy().to_string();
+    pkfs::read_to_string(&path)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(FiberState { state: FiberLifecycle::Inactive, updated_at_ms: 0 })
+}
+
+fn write_fiber_state(discipline: &str, state: FiberLifecycle) {
+    let path = fiber_state_path(discipline).to_string_lossy().to_string();
+    let body = FiberState { state, updated_at_ms: super::state::now_ms() };
+    if let Ok(text) = serde_json::to_string(&body) {
+        let _ = pkfs::write(&path, &text);
+    }
+}
+
+/// Advances one discipline's persisted lifecycle by exactly one Cordis-style
+/// transition, given whether its target (requires-satisfied and still
+/// enabled) currently holds. Mirrors L-Begin/L-Leave/L-Unload (Section
+/// 4.3): `Inactive` -> `Active` when the target becomes satisfied;
+/// `Active` -> `Unloading` the instant it stops being satisfied (this is
+/// L-Leave -- the fiber records the decision to deactivate without yet
+/// discarding it, so `removal_dependents` still sees it as present-but-
+/// leaving for one more dispatch); `Unloading` -> `Inactive` on the
+/// following dispatch (L-Unload -- the withdrawal completes). Returns
+/// whether the discipline counts as providing THIS dispatch, which is
+/// `Active` alone -- an `Unloading` fiber's own withdrawal is in flight and
+/// must not itself be read as still satisfying anyone's `requires`.
+fn advance_fiber(discipline: &str, target_satisfied: bool) -> bool {
+    let current = read_fiber_state(discipline).state;
+    let next = match (current, target_satisfied) {
+        (FiberLifecycle::Inactive, true) => FiberLifecycle::Active,
+        (FiberLifecycle::Inactive, false) => FiberLifecycle::Inactive,
+        (FiberLifecycle::Active, true) => FiberLifecycle::Active,
+        (FiberLifecycle::Active, false) => FiberLifecycle::Unloading,
+        (FiberLifecycle::Unloading, _) => FiberLifecycle::Inactive,
+    };
+    if next != current {
+        write_fiber_state(discipline, next);
+    }
+    next == FiberLifecycle::Active
 }
 
 /// A discipline read as a Cordis component: the coeffect specification (d),
@@ -38,6 +112,10 @@ pub struct Component {
     /// is currently non-empty, i.e. whether it has an effect to contribute
     /// at all.
     pub has_effect: bool,
+    /// theta: the persisted lifecycle state (Definition 44/49), read
+    /// as-is without advancing it -- a caller wanting the transition side
+    /// effect calls `advance_fiber` (via `active_policies`) instead.
+    pub lifecycle: FiberLifecycle,
 }
 
 impl Component {
@@ -48,6 +126,7 @@ impl Component {
             requires: declared_requires(name),
             provides: declared_provides(name),
             has_effect: policy_text.map(|t| !t.trim().is_empty()).unwrap_or(false),
+            lifecycle: read_fiber_state(name).state,
         }
     }
 }
@@ -228,6 +307,11 @@ pub fn removal_dependents(discipline: &str) -> Vec<String> {
     names
         .iter()
         .filter(|n| n.as_str() != discipline)
+        // only a fiber that has actually reached Active counts as a real
+        // dependent -- one still Inactive (e.g. its own requires is not yet
+        // satisfied for an unrelated reason) is not currently relying on
+        // anything, so its withdrawal is not blocked by this discipline.
+        .filter(|n| read_fiber_state(n).state == FiberLifecycle::Active)
         .filter(|n| requires_satisfied(n, &names))
         .filter(|n| {
             declared_requires(n)
@@ -250,21 +334,62 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
         return (String::new(), "discipline-check-removal refused: discipline name required".to_string(), 1);
     }
     let dependents = removal_dependents(&discipline);
+    let lifecycle = read_fiber_state(&discipline).state;
     let payload = serde_json::json!({
         "ok": true,
         "discipline": discipline,
+        "lifecycle": lifecycle,
         "safe_to_remove": dependents.is_empty(),
         "dependents": dependents,
     });
     (payload.to_string(), String::new(), 0)
 }
 
+/// Every discipline this project has ever recorded a fiber state or a
+/// policy directory for -- the union of `enabled_names()` (activation
+/// candidates) with any name whose `.gm/disciplines/<name>/` directory
+/// already exists but is no longer enabled. A name freshly removed from
+/// `enabled.txt` still needs its `advance_fiber` called with
+/// `target_satisfied=false` so an `Active` fiber transitions to
+/// `Unloading` rather than being silently forgotten (which would leave a
+/// stale `Active` fiber-state.json behind forever, undetected by
+/// `removal_dependents` since that walks `enabled_names()` alone).
+fn all_known_discipline_dirs() -> Vec<String> {
+    let base = gm_dir().join("disciplines").to_string_lossy().to_string();
+    let mut out: Vec<String> = enabled_names();
+    if let Some(serde_json::Value::Array(entries)) = pkfs::readdir(&base) {
+        for entry in entries {
+            let name = entry
+                .get("name")
+                .and_then(|n| n.as_str())
+                .or_else(|| entry.as_str());
+            let Some(name) = name else { continue };
+            if !name.chars().all(valid_name_char) || out.iter().any(|n| n == name) {
+                continue;
+            }
+            // enabled.txt itself is a file in this directory, not a
+            // discipline; a real discipline dir has a policy.md or
+            // requires.json under it, which enabled.txt cannot.
+            let has_policy = pkfs::exists(&policy_path(name).to_string_lossy().to_string());
+            let has_requires = pkfs::exists(&requires_path(name).to_string_lossy().to_string());
+            let has_fiber_state = pkfs::exists(&fiber_state_path(name).to_string_lossy().to_string());
+            if has_policy || has_requires || has_fiber_state {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
 pub fn active_policies() -> serde_json::Value {
-    let names = enabled_names();
+    let enabled = enabled_names();
+    let all = all_known_discipline_dirs();
 
     let mut out: Vec<serde_json::Value> = Vec::new();
-    for name in &names {
-        if !requires_satisfied(name, &names) {
+    for name in &all {
+        let target_satisfied = enabled.iter().any(|n| n == name) && requires_satisfied(name, &enabled);
+        let is_active = advance_fiber(name, target_satisfied);
+        if !is_active {
             continue;
         }
         let path = policy_path(name);
