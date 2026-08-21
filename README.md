@@ -57,6 +57,19 @@ provides, and whether its policy.md carries a non-empty effect -- so the
 requires/provides/policy files are read through one canonical struct instead
 of three independently-read files that happen to correspond.
 
+Each discipline also carries a persisted `.gm/disciplines/<name>/fiber-state.json`
+(`FiberLifecycle`: `Inactive`/`Active`/`Unloading`), advanced by exactly one
+transition per `active_policies()` call via `advance_fiber`. This is the
+paper's fiber lifecycle (Section 4.3, Definition 49) reduced to gm's
+substrate, which has no async load step: `Inactive -> Active` on first
+satisfaction, `Active -> Unloading` the instant satisfaction is lost
+(L-Leave -- the fiber stops providing but is still named as present-but-
+leaving), `Unloading -> Inactive` on the following dispatch (L-Unload --
+withdrawal completes). `removal_dependents` only counts a discipline whose
+own fiber has reached `Active` as a real dependent, so the withdrawal
+guard is grounded in actually-observed activation state rather than a
+one-shot recompute of whether requires happens to be satisfiable.
+
 Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir`, `scan_deps`
 (supply-chain scan for the HiddenSpawn-class obfuscated-dropper pattern:
 size/line-ratio disproportion + dense `\uXXXX`-escape-run detection across
