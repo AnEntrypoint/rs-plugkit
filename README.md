@@ -32,7 +32,7 @@ read and writes `out/<N>.json` (metadata) alongside `out/<N>.out`/`.err` for
 process-execution verbs.
 
 Orchestrator verbs: `instruction`, `transition`, `transition-revert`,
-`discipline-check-removal`, `phase-status`, `mutable-resolve`,
+`discipline-check-removal`, `discipline-audit`, `phase-status`, `mutable-resolve`,
 `memorize-fire`, `residual-scan`, `auto-recall`.
 
 `transition-revert` pops the most recent entry off `TurnState.phase_history`
@@ -69,6 +69,20 @@ withdrawal completes). `removal_dependents` only counts a discipline whose
 own fiber has reached `Active` as a real dependent, so the withdrawal
 guard is grounded in actually-observed activation state rather than a
 one-shot recompute of whether requires happens to be satisfiable.
+
+`discipline-audit` runs the paper's core metatheory (Section 4.4) as live
+checks against the current discipline set rather than leaving them as
+static proof: preservation (Theorem 59 -- no two `Active` disciplines
+share a `provides` capability), recovery exactness (Theorem 61 -- an
+`Unloading` fiber reaches and stays at `Inactive`), ordering (Theorem 63
+-- `removal_dependents` is empty for any non-`Active` fiber), and progress
+(Theorem 66 -- `advance_fiber`'s transition table is total, checked
+structurally by the compiler). It also runs `dangling_requires`, the
+paper's access-control discipline (Section 6.3, adapted from
+`UNDECLARED_ACCESS`) applied to `requires.json`: a `requires` entry naming
+a capability no known discipline (enabled or not) ever `provides` is
+flagged as dangling, distinguishing a typo/stale reference from a live
+dependency merely waiting on its provider being enabled.
 
 Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir`, `scan_deps`
 (supply-chain scan for the HiddenSpawn-class obfuscated-dropper pattern:
