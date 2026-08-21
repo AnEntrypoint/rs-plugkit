@@ -113,4 +113,24 @@ def unload (r : Registry) (name : String) : Option Registry :=
     else none
   | none => none
 
+/-- Reading back the entry a state-update just wrote: mapping `upd` onto
+the fiber named `name` (leaving every other entry untouched, the shape
+every one of `retire`/`reload`/`unload`'s own `List.map` calls uses) and
+then looking `name` up again yields exactly `upd` applied to whatever
+`name` was bound to before -- proved by plain structural induction on
+the list, the base case for every "the rule did what it claimed" lemma
+below. -/
+theorem find_map_update (r : List (String × Fiber)) (name : String) (upd : Fiber → Fiber) :
+    Registry.find (r.map (fun p => if p.1 == name then (p.1, upd p.2) else p)) name
+      = (Registry.find r name).map upd := by
+  induction r with
+  | nil => rfl
+  | cons hd tl ih =>
+    unfold Registry.find at *
+    simp only [List.map_cons, List.find?_cons]
+    by_cases hc : hd.1 == name
+    · simp only [hc, if_true, Option.map_some]
+    · simp only [hc, Bool.false_eq_true, if_false]
+      exact ih
+
 end Registry
