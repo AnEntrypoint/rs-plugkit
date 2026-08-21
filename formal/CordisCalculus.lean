@@ -1,2 +1,6 @@
 import CordisCalculus.Basic
 import CordisCalculus.Preservation
+import CordisCalculus.Ordering
+import CordisCalculus.Recovery
+import CordisCalculus.Progress
+import CordisCalculus.Confluence
