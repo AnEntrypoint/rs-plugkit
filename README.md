@@ -32,8 +32,8 @@ read and writes `out/<N>.json` (metadata) alongside `out/<N>.out`/`.err` for
 process-execution verbs.
 
 Orchestrator verbs: `instruction`, `transition`, `transition-revert`,
-`phase-status`, `mutable-resolve`, `memorize-fire`, `residual-scan`,
-`auto-recall`.
+`discipline-check-removal`, `phase-status`, `mutable-resolve`,
+`memorize-fire`, `residual-scan`, `auto-recall`.
 
 `transition-revert` pops the most recent entry off `TurnState.phase_history`
 (a LIFO accumulator every `transition` call appends to) and restores the
@@ -42,6 +42,20 @@ Cordis-style revertible effect gives a state transformation, applied to gm's
 own phase graph so a feedback-edge re-entry (e.g. DECIDE->SPECIFY) can be
 undone precisely rather than only via the separately-tracked
 mutables.yml/prd.yml side state.
+
+`discipline-check-removal` ({"discipline": name}) reports whether disabling
+a discipline right now would break a dependent: `orchestrator/discipline_note.rs`'s
+`removal_dependents` names every other enabled, requires-satisfied
+discipline whose `requires` still resolves to the target's `provides`. This
+is the withdrawal-ordering guard from the Cordis paper's spatial-composability
+theorem (Section 4.3.1) -- a provider's removal should wait on its dependents
+deactivating first; here it surfaces the dependents so the caller (a human
+editing `enabled.txt`, or a future automated deactivation path) can defer
+removal rather than silently breaking a satisfied requirement. `Component`
+(same file) reads a discipline as the paper's (d, p, e) triple -- requires,
+provides, and whether its policy.md carries a non-empty effect -- so the
+requires/provides/policy files are read through one canonical struct instead
+of three independently-read files that happen to correspond.
 
 Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir`, `scan_deps`
 (supply-chain scan for the HiddenSpawn-class obfuscated-dropper pattern:
