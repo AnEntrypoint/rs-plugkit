@@ -58,6 +58,52 @@ project with `agentplug-runner` loaded (see gm's own `AGENTS.md` for the
 spool-dispatch ABI and boot procedure) and reading the actual response
 JSON, never asserting behavior from source reading alone.
 
+## Parser-shaped surfaces need adversarial input, not just hand-picked cases
+
+`orchestrator/fsm.rs`'s `graph.json` parsing, the
+`config.rs`/`config_sync.rs`/`prose.rs` three-tier resolution chain, and
+every `wasm_dispatch` handler's spool-JSON body parsing are parser-shaped.
+Externally-vendorable or caller-supplied input reaches this crate's own
+code at each surface. This is the class of surface a coverage-guided
+fuzzer earns its keep against, in a project that has one.
+
+This crate has no fuzz harness. A standing fuzz target is a test-adjacent
+artifact, and this project's no-test-file rule already excludes it. The
+adversarial-input coverage a fuzzer would otherwise buy comes from a
+live-witnessed batch instead, dispatched at DECIDE against the real verb
+for each surface, never a workaround through an unrelated verb.
+
+For `graph.json`: dispatch `fsm-validate` (`orchestrator/mod.rs` ->
+`fsm_vendor::handle_validate`, which calls `FsmGraph::validate()`
+directly) against a batch of malformed inputs -- an empty graph, a cyclic
+edge set, a graph missing its `gates` array. `fsm-validate` already exists
+and already routes to the real Rust validator; do not reach for `exec_js`
+as a workaround for a surface with its own sanctioned verb.
+
+For the config resolution chain (`config.rs`/`config_sync.rs`/`prose.rs`):
+no dedicated validate-only verb exists yet. Witnessing this surface today
+means constructing a real project-local `gm.config.json` with a deeply
+nested override chain and dispatching an ordinary config-reading verb
+(`instruction`, which resolves config on every call) against it, reading
+the live response for a crash or a silently wrong resolution -- add the
+missing dedicated verb as its own PRD row before treating this half of the
+sweep as covered by more than an ordinary-verb side effect.
+
+For `wasm_dispatch`'s own spool-body parsing: `dispatch_verb_inner` parses
+the body via `serde_json::from_str(&body_s).unwrap_or(Value::Null)` before
+any verb handler runs, so a verb dispatch can only witness this surface if
+the malformed body reaches the spool in the first place -- write a
+malformed `.txt` file directly to `.gm/exec-spool/in/<verb>/<N>.txt` (a
+`Write`-tool action, not an `exec_js` dispatch) and read the resulting
+`out/<N>.json` for a clean-reject versus a silent-wrong-parse.
+
+This is `decide.md`'s existing "degenerate input"/"boundary
+conditions"/"empty/overflow/reentry" sweep classes, named here explicitly
+against `orchestrator/fsm.rs`, `config.rs`, `config_sync.rs`, `prose.rs`,
+and `wasm_dispatch`'s body-parsing entry point. A session touching one of
+these files treats the sweep as covering this crate's own internals, not
+only the target project's code the crate was dispatched against.
+
 ## Adding a verb
 
 1. Add the handler in the relevant `wasm_dispatch/` module.
