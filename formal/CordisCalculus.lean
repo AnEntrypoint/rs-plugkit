@@ -13,3 +13,8 @@ import CordisCalculus.IndependenceNAry
 import CordisCalculus.FailureModel
 import CordisCalculus.Isolation
 import CordisCalculus.Interception
+import CordisCalculus.Iterator
+import CordisCalculus.Transition
+import CordisCalculus.Episode
+import CordisCalculus.RecoveryGeneral
+import CordisCalculus.ResolutionCoherence
