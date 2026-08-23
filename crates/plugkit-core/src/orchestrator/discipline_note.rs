@@ -460,25 +460,103 @@ pub fn removal_dependents(discipline: &str) -> Vec<String> {
 /// Verb entry point for `discipline-check-removal`: reports whether a
 /// discipline is safe to disable right now, and names every dependent that
 /// would lose a satisfied requirement if it were.
+///
+/// `{"remove": true}` additionally performs the actual withdrawal --
+/// rewriting `enabled.txt` with `discipline` dropped -- but ONLY when
+/// `fiber_lifecycle::SafeToWithdraw::check` accepts `removal_dependents`'s
+/// output as empty. This is the enforced counterpart to
+/// `ExtendedRegistry::unload`'s `!self.relied(name)` guard (calculus.rs):
+/// before this, `removal_dependents` was consulted on demand by a caller
+/// who could skip it and edit `enabled.txt` directly, so Theorem 63's
+/// runtime guarantee held only by caller discipline, not construction. Now
+/// the one code path that actually withdraws a discipline via this verb
+/// cannot construct the write without a `SafeToWithdraw` witness, mirroring
+/// `unload`'s `None` refusal on a still-relied fiber rather than a report a
+/// caller could ignore. `enabled.txt` may still be hand-edited outside this
+/// verb (it is an ordinary tracked file); this verb is the sanctioned
+/// removal surface disciplines/gm's own tooling drive through, same as
+/// `git_finalize` being the sanctioned push surface without disabling raw
+/// `git push`.
 pub fn handle_check_removal(content: &str) -> (String, String, i32) {
-    let discipline = serde_json::from_str::<serde_json::Value>(content)
-        .ok()
+    let parsed = serde_json::from_str::<serde_json::Value>(content).ok();
+    let discipline = parsed
+        .as_ref()
         .and_then(|v| v.get("discipline").and_then(|x| x.as_str()).map(|s| s.to_string()))
         .unwrap_or_default();
     if discipline.is_empty() {
         return (String::new(), "discipline-check-removal refused: discipline name required".to_string(), 1);
     }
+    let want_remove = parsed.as_ref().and_then(|v| v.get("remove").and_then(|x| x.as_bool())).unwrap_or(false);
     let dependents = removal_dependents(&discipline);
     let lifecycle = read_fiber_state(&discipline);
     let all_known = all_known_discipline_dirs();
     let dangling = dangling_requires(&discipline, &all_known);
+    let safe = fiber_lifecycle::SafeToWithdraw::check(&discipline, &dependents);
+
+    if !want_remove {
+        let payload = serde_json::json!({
+            "ok": true,
+            "discipline": discipline,
+            "lifecycle": lifecycle,
+            "safe_to_remove": safe.is_some(),
+            "dependents": dependents,
+            "dangling_requires": dangling,
+        });
+        return (payload.to_string(), String::new(), 0);
+    }
+
+    let Some(_witness) = safe else {
+        let payload = serde_json::json!({
+            "ok": false,
+            "discipline": discipline,
+            "lifecycle": lifecycle,
+            "safe_to_remove": false,
+            "dependents": dependents,
+            "dangling_requires": dangling,
+            "removed": false,
+        });
+        return (
+            payload.to_string(),
+            format!(
+                "discipline-check-removal refused: {} is still relied upon by {} -- withdraw the dependent(s) first (Theorem 63 ordering)",
+                discipline,
+                dependents.join(", ")
+            ),
+            1,
+        );
+    };
+
+    let names = enabled_names();
+    if !names.iter().any(|n| n == discipline.as_str()) {
+        let payload = serde_json::json!({
+            "ok": true,
+            "discipline": discipline,
+            "lifecycle": lifecycle,
+            "safe_to_remove": true,
+            "dependents": dependents,
+            "dangling_requires": dangling,
+            "removed": false,
+            "already_absent": true,
+        });
+        return (payload.to_string(), String::new(), 0);
+    }
+
+    let remaining: Vec<&String> = names.iter().filter(|n| n.as_str() != discipline.as_str() && n.as_str() != "default").collect();
+    let new_content = remaining.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
+    let enabled_path = gm_dir().join("disciplines").join("enabled.txt").to_string_lossy().to_string();
+    let write_content = if new_content.is_empty() { String::new() } else { format!("{}\n", new_content) };
+    if !pkfs::write(&enabled_path, &write_content) {
+        return (String::new(), "discipline-check-removal failed: could not write enabled.txt".to_string(), 1);
+    }
+
     let payload = serde_json::json!({
         "ok": true,
         "discipline": discipline,
         "lifecycle": lifecycle,
-        "safe_to_remove": dependents.is_empty(),
+        "safe_to_remove": true,
         "dependents": dependents,
         "dangling_requires": dangling,
+        "removed": true,
     });
     (payload.to_string(), String::new(), 0)
 }

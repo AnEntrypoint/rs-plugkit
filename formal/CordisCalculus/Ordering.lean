@@ -120,20 +120,30 @@ pub fn removal_dependents(discipline: &str) -> Vec<String> {
 }
 ```
 
-This is policy code invoked ON DEMAND by the `discipline-check-removal`
-verb (`handle_check_removal`, discipline_note.rs:346-370) BEFORE a
-withdrawal is attempted -- it never fires `unload` itself, it only reports
-`safe_to_remove: dependents.is_empty()` for a caller (human or agent) to
-act on. This is advisory pre-flight, not an enforcement guard inside the
-transition function -- a genuine architectural asymmetry against this
-file's `unload`/`unload_only_on_lost_target`, which state a property of
-every SUCCESSFUL `unload` call, not a pre-check a caller may skip. This
-gap is real and is not closed by a stronger Lean model of
-`removal_dependents` alone: `removal_dependents`'s absence from the
-transition path itself means Theorem 63's actual runtime guarantee (a
-component is never withdrawn while still relied upon) depends on every
-caller of the underlying deactivation path choosing to consult this
-report first. See part 2 below for where the actual enforced guard lives.
+This was policy code invoked ON DEMAND by the `discipline-check-removal`
+verb (`handle_check_removal`, discipline_note.rs:460-...) BEFORE a
+withdrawal was attempted -- it never fired an actual removal itself, it
+only reported `safe_to_remove: dependents.is_empty()` for a caller (human
+or agent) to act on, an advisory pre-flight a caller could skip.
+
+**Closed (PRD row `cordis-withdrawal-guard-enforce-not-just-advise`):**
+`handle_check_removal` now accepts `{"discipline", "remove": true}` as a
+second mode that performs the actual withdrawal -- rewriting
+`enabled.txt` with `discipline` dropped -- gated by
+`fiber_lifecycle::SafeToWithdraw::check(&discipline, &dependents)`.
+`SafeToWithdraw::check` (fiber_lifecycle.rs:294-300) returns `None` when
+`dependents` is non-empty; `handle_check_removal`'s `remove:true` branch
+pattern-matches that `None` and returns a hard refusal (`ok:false`, exit
+code 1, no write to `enabled.txt`) rather than proceeding, structurally
+the same `Option`-returning refusal shape as `ExtendedRegistry::unload`
+returning `None` when `self.relied(name)` holds (part 2 below). This
+verb is now the sanctioned live-runtime removal surface: the one code
+path that actually withdraws a discipline cannot construct the
+`enabled.txt` write without a `SafeToWithdraw` witness, closing the gap
+this section originally found. `enabled.txt` remains an ordinary tracked
+file a human can still hand-edit outside this verb -- the enforcement is
+at the sanctioned removal surface, the same boundary `git_finalize` draws
+around `git push` without disabling raw `git` everywhere.
 
 **Structural correspondence** (what `removal_dependents` computes, once
 consulted): a name `n` is a "dependent" iff `n != discipline`, `n` shares
@@ -193,27 +203,50 @@ installed fiber's committed view still naming `name`," structurally
 identical in shape to `removal_dependents`'s filter chain (part 1) but
 enforced INSIDE the transition guard rather than reported ahead of one.
 
-**The gap between parts 1 and 2 is the real finding of this correspondence
-pass:** `removal_dependents` (the live discipline-removal path gm actually
-executes) and `ExtendedRegistry::relied`/`unload` (the one Rust
-implementation with a Lean-provable-shaped guard baked directly into the
-transition) are two independent, unconnected implementations of the same
-Definition 50 idea -- `removal_dependents` is never called by
+**The gap between parts 1 and 2, as originally found by this
+correspondence pass:** `removal_dependents` (the live discipline-removal
+path gm actually executes) and `ExtendedRegistry::relied`/`unload` (the
+one Rust implementation with a Lean-provable-shaped guard baked directly
+into the transition) were two independent, unconnected implementations of
+the same Definition 50 idea -- `removal_dependents` was never called by
 `ExtendedRegistry::unload` and vice versa. `ExtendedRegistry` itself
-already carries the doc-commented caveat (calculus.rs:420-426) that it
+still carries the doc-commented caveat (calculus.rs:420-426) that it
 exists for `verify_calculus`'s exhaustive model-check proof obligations,
-not as gm's live runtime path. Closing this gap for real (making
-`discipline-check-removal`'s advisory report the SAME code path as an
-enforced pre-condition on the actual deactivation transition, the way
-`ExtendedRegistry::unload` enforces `relied` inline) is a genuine, reachable
-piece of future work -- recorded as its own PRD row
-(`cordis-withdrawal-guard-enforce-not-just-advise`) rather than claimed
-complete here, since this session's job was the correspondence proof for
-the EXISTING code, not a redesign of gm's discipline-removal call sites.
+not as gm's live runtime path -- that separation is unchanged and
+correct; `ExtendedRegistry` remains the model-checked reference
+implementation, `discipline_note.rs` remains the live runtime path. What
+changed is that the live runtime path's own removal verb now enforces
+the SAME Definition-50-shaped precondition inline (`SafeToWithdraw::check`
+gating the `enabled.txt` write in `remove:true` mode), rather than only
+reporting it. The two implementations are still textually independent
+(no shared function), but both now REFUSE their respective withdrawal
+transition -- `Option::None` from `unload`, `(ok:false, exit 1)` from
+`handle_check_removal`'s `remove:true` branch -- under the identical
+condition (a same-realm, Active, requires-satisfied dependent whose
+declared requires intersects the withdrawing discipline's declared
+provides). Theorem 63's real guarantee now holds in the live runtime path
+by construction for any caller going through the sanctioned verb, not
+merely by caller discipline to consult a report first.
 
-**Live witness (this session):** `Read`/Explore-agent dispatch on
+**Live witness (original session):** `Read`/Explore-agent dispatch on
 `discipline_note.rs:309-370` and `calculus.rs:420-503,705-723` returned
 the function bodies transcribed above verbatim.
+
+**Live witness (enforcement close, `cordis-withdraw-guard-1787470754-24447`):**
+`exec_js` constructed a real two-discipline scenario --
+`.gm/disciplines/enabled.txt` listing a provider discipline and a
+dependent discipline whose `requires.json` names a capability the
+provider's `requires.json` `provides`, with the dependent's
+`fiber-state.json` at `Active` -- then dispatched
+`discipline-check-removal` with `{"discipline":"<provider>","remove":true}`
+against the real spool. The response returned `ok:false`, exit code 1,
+`removed` absent from the payload, and `enabled.txt` unchanged on disk --
+confirming the hard refusal fires. Removing the dependent discipline from
+`enabled.txt` (breaking the reliance) and re-dispatching the identical
+`remove:true` call against the provider then returned `ok:true,
+removed:true`, and `enabled.txt` on disk no longer listed the provider --
+confirming the enforced path performs the real withdrawal once
+`SafeToWithdraw::check` accepts.
 -/
 
 end Registry
