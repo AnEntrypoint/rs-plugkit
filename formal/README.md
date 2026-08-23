@@ -2,8 +2,10 @@
 
 A Lean 4 formalization of the Cordis paper's Section 4.2 base calculus
 (the abstract Registry/Fiber model and its five rules --
-O-Insert/O-Retire/O-Remove/L-Reload/L-Unload), proved directly from the
-paper's own definitions with no dependency on gm's Rust code.
+O-Insert/O-Retire/O-Remove/L-Reload/L-Unload), Section 3.1.3's
+effect-independence framework, and Section 3.3.2's observational
+equivalence, proved directly from the paper's own definitions with no
+dependency on gm's Rust code.
 
 `CordisCalculus/Basic.lean` defines `Registry`, `Fiber`, `wellFormed`
 (Definition 58 clause 2), `satisfied` (Definition 46), and the five
@@ -46,6 +48,31 @@ trusted core (`propext`, `Classical.choice`, `Quot.sound`), with zero
   of order) -- the same argument applies uniformly to every other pair
   of independent rule applications, since each rule reduces to the
   same guard-check-then-map-by-name shape.
+
+- **Definitions 17-21 (effect-independence framework)**,
+  `CordisCalculus/Independence.lean`: `RevertibleEffect`, `InMonoid`
+  (Definition 17's transformation monoid, modeled as an inductive
+  closure predicate since this project has no monoid/group-theory
+  library dependency), `commuting_of_generators_commuting` (Lemma 18:
+  generator-level commutation lifts to the whole monoid), `Independent`
+  (Definition 19's two-clause independence), and
+  `independent_pair_revert_nonlifo_order`/`revertLifo2_correct`
+  (Theorem 20/Corollary 21: two independent effects revert in either
+  LIFO or non-LIFO order and reach the exact same initial state).
+- **Definitions 33-41 (observational equivalence)**,
+  `CordisCalculus/ObservationalEquivalence.lean`: `ObsEquiv` (`~=_A`,
+  the general capability-indexed congruence used throughout Section
+  3.3) and the DISTINCT, narrower `RegistryEquiv` (`~`, used from
+  Theorem 61/Corollary 62 onward, which forgets only registry list-order
+  provenance -- modeled as `List.Perm` rather than list equality).
+  `RegistryEquiv.to_obsEquiv` proves the one-directional containment:
+  `~`-equivalent registries are `~=_A`-equivalent for every capability
+  set `A`. Definition 40/Theorem 42 (commutative keys connecting back
+  to the independence framework) is explicitly scoped out with a
+  one-line reason in the file's own doc comment -- it needs a genuine
+  commutative-key algebraic structure on the coeffect index type, a
+  separate, comparably-sized effort to the two frameworks this file
+  completes.
 
 This complements, rather than replaces, `../crates/plugkit-core/src/orchestrator/calculus.rs`
 (an executable Rust model of the same objects, whose `calculus-model-check`
