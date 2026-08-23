@@ -215,6 +215,7 @@ pub const ORCHESTRATOR_VERBS: &[&str] = &[
     "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
     "task-spawn", "task-list", "task-stop", "task-output",
     "memorize-continue", "fsm-vendor", "fsm-validate", "fsm-propose-override", "claim-audit", "submodule-check",
+    "component-loader-reconcile", "component-loader-hmr",
 ];
 
 
@@ -262,6 +263,7 @@ fn verb_has_dispatch_arm(verb: &str) -> bool {
             | "task-spawn" | "task-list" | "task-stop" | "task-output"
             | "memorize-continue" | "fsm-vendor" | "fsm-validate" | "fsm-propose-override"
             | "claim-audit" | "submodule-check"
+            | "component-loader-reconcile" | "component-loader-hmr"
     )
 }
 
