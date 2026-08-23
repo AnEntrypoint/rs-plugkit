@@ -469,7 +469,7 @@ impl ExtendedRegistry {
     /// (`relied_n`-gated) can reach if `insert` admits a cycle. `insert`
     /// below refuses any insertion that would create one, since nothing
     /// else in this file is positioned to refuse it later.
-    fn would_create_precedence_cycle(&self, name: &str, provides: &BTreeSet<String>) -> bool {
+    fn would_create_precedence_cycle(&self, name: &str, requires: &BTreeSet<String>, provides: &BTreeSet<String>) -> bool {
         let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
         for (n, fiber) in &self.fibers {
             for (m, other) in &self.fibers {
@@ -477,11 +477,15 @@ impl ExtendedRegistry {
                     edges.entry(n.as_str()).or_default().push(m.as_str());
                 }
             }
+            // n (existing) precedes the new fiber when n's provides meets the
+            // new fiber's requires.
+            if !fiber.provides.is_disjoint(requires) {
+                edges.entry(n.as_str()).or_default().push(name);
+            }
+            // the new fiber precedes n (existing) when the new fiber's
+            // provides meets n's requires.
             if !provides.is_disjoint(&fiber.requires) {
                 edges.entry(name).or_default().push(n.as_str());
-            }
-            if !fiber.provides.is_disjoint(&provides.iter().cloned().collect()) {
-                edges.entry(n.as_str()).or_default().push(name);
             }
         }
         let all_names: Vec<&str> = self.fibers.keys().map(|s| s.as_str()).chain(std::iter::once(name)).collect();
@@ -529,7 +533,7 @@ impl ExtendedRegistry {
                 return None;
             }
         }
-        if self.would_create_precedence_cycle(name, &provides) {
+        if self.would_create_precedence_cycle(name, &requires, &provides) {
             return None;
         }
         let mut next = self.clone();
