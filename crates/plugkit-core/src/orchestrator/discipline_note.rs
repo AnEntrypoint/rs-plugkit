@@ -291,7 +291,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
 /// The names currently in `enabled.txt`, "default" always first. Shared by
 /// `active_policies` and the withdrawal guard so both read the same
 /// activation-eligible set.
-fn enabled_names() -> Vec<String> {
+pub fn enabled_names() -> Vec<String> {
     let mut names: Vec<String> = vec!["default".to_string()];
     let enabled_path = gm_dir().join("disciplines").join("enabled.txt");
     let enabled_s = enabled_path.to_string_lossy().to_string();
