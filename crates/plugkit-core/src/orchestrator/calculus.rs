@@ -192,7 +192,19 @@ impl Registry {
     }
 
     /// L-Unload (Section 4.2): an `Active` fiber whose target is no
-    /// longer satisfied, OR that has been retired, deactivates.
+    /// longer satisfied, OR that has been retired, deactivates. This is a
+    /// reduction of the paper's actual premise `target_n(gamma) != omega`
+    /// (the committed view no longer matches the CURRENT target view),
+    /// not a direct transcription -- the reduction is exact only because
+    /// `reload` (below) always sets `omega` to exactly `target_n(gamma)`
+    /// at the moment of commit, so `omega` staying fixed while
+    /// `target_n(gamma)` becomes `bot` (retired-or-unsatisfied, eq. 41)
+    /// is the only way the two-state base calculus's `omega` can ever
+    /// diverge from the live target. A model that let `omega` and
+    /// `target_n` diverge some OTHER way (e.g. re-resolving to a
+    /// DIFFERENT satisfying provider without retiring or losing
+    /// satisfaction first) would need the literal `target_n(gamma) !=
+    /// omega` comparison instead of this shortcut.
     pub fn unload(&self, name: &str) -> Option<Registry> {
         let fiber = self.fibers.get(name)?;
         if fiber.state != LifecycleState::Active {
