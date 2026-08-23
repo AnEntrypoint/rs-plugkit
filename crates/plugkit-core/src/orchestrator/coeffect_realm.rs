@@ -3,6 +3,61 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Scope note: Algorithm 3 (paper Section 5.1.2, `notify(ctx, keys)`) is
+/// deliberately NOT implemented as push-based propagation in this crate.
+/// Algorithm 3 iterates `all_fibers`, tests `key in fiber.inject` against
+/// a same-realm match, and calls `refresh` on each match, so a caller
+/// that installed or withdrew a binding can await exactly the fibers the
+/// change affected. This buys something concrete only in a runtime where
+/// components can activate/deactivate ASYNCHRONOUSLY relative to a
+/// `set`/`get` call -- Definition 26's own text frames `notify_d` against
+/// "diverse control flows" (Section 5.1.3) precisely because the paper's
+/// target runtime is event-driven.
+///
+/// gm's orchestrator has no such runtime. `discipline_note.rs`'s
+/// `active_policies()` is the ONLY call site that reads/advances
+/// discipline fiber state (grep-verified: zero other callers), and it
+/// runs exactly once per `instruction` verb dispatch -- the sole state
+/// -mutating entry point an agent drives. There is no concurrent process,
+/// timer, or background task that can flip a binding's satisfaction
+/// between two `instruction` calls; the state machine only moves when the
+/// agent itself issues the next spool dispatch. Under that constraint,
+/// full re-derivation on every dispatch (`active_policies`'s two-phase
+/// snapshot-then-advance pass) is a correctness-equivalent realization of
+/// Definition 26's reactive invariant ("every coeffect change is
+/// observed"): every state transition IS an `instruction` dispatch, so
+/// every transition is observed by construction, with no notify queue
+/// needed to avoid missing one. A push-based `notify` here would recompute
+/// the identical activate/deactivate classification `active_policies`
+/// already derives fresh each call, at strictly higher implementation
+/// cost (a fiber-to-key subscription index, an event queue, ordering
+/// rules for concurrent notifications) for zero additional correctness:
+/// there is no window in which pull-based re-derivation could observe a
+/// stale satisfaction status that push-based notify would have caught,
+/// because nothing changes outside an `instruction` dispatch's own
+/// two-phase pass.
+///
+/// This divergence does NOT weaken the one thing Algorithm 3 buys beyond
+/// bare re-derivation -- ordering a withdrawal against its dependents
+/// (paper Section 4.3.1, Theorem 63, "the converse fails" paragraph under
+/// Definition 26). `discipline_note.rs::removal_dependents` (the
+/// withdrawal-ordering guard behind the `discipline-check-removal` verb)
+/// enforces that ordering PRE-EMPTIVELY, before `enabled.txt` is ever
+/// mutated, by naming every still-Active same-realm dependent that would
+/// break -- strictly stronger than Algorithm 3's `notify`, which only
+/// detects a broken dependent POST-HOC, after the withdrawal already
+/// happened. Formal correspondence commentary:
+/// `rs-plugkit/formal/CordisCalculus/Isolation.lean`.
+///
+/// Contrast with this crate's genuine scope-outs (cross-process RPC
+/// coeffect propagation, bridge-fiber sandboxing): those diverge because
+/// gm's actual deployment lacks a mechanism the paper's model assumes
+/// (a message bus spanning process boundaries, an OS-level sandbox
+/// primitive). This divergence is the opposite shape -- gm's dispatch
+/// model makes Algorithm 3's own mechanism (queueing which fibers to
+/// notify, for a caller to later await) provably redundant, not
+/// unreachable.
+
 /// Coeffect isolation (paper Section 3.2.3, Definition 28-29): the
 /// realm table `rho : K -> R` (`realm_table` here) plus the dependency
 /// table `sigma : R -> V_r` (`by_realm` here) it resolves into,

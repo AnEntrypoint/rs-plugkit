@@ -13,6 +13,39 @@ as finite association lists (`List (String x String)`), the same
 `List`-as-partial-function encoding `Basic.lean`'s own `Registry` uses,
 so every proof here is a plain structural induction, no external
 library.
+
+## Scope note: Algorithm 3 (reactive `notify`) is not modeled here
+
+`realmOf`'s same-realm resolution is exactly the test Algorithm 3's
+`notify(ctx, keys)` (paper Section 5.1.2) uses to decide whether a
+changed key affects a live fiber: `key in fiber.inject and
+fiber.ctx[@@isolate][key] = ctx[@@isolate][key]`. This file formalizes
+that resolution (`SigmaIso.get`/`realmOf`) but deliberately does not
+formalize `notify` itself as a push-propagation transition, matching
+`coeffect_realm.rs`'s own scope-note doc comment on `RealmTable`.
+
+Definition 26's reactive invariant ("every coeffect change is observed")
+is stated for a runtime where a component's activation can be concurrent
+with, or ordered independently of, the `set`/`get` call that changed its
+dependency -- Section 5.1.3's "diverse control flows" is precisely that
+generality. gm's orchestrator (`discipline_note.rs::active_policies`) has
+exactly one call site, invoked once per `instruction` dispatch, with no
+concurrent mutator between dispatches: the reactive invariant holds
+trivially there because every state transition literally IS the observing
+event, so a `notify` queue recording which fibers to wake adds a
+mechanism with nothing left for it to do. Modeling `notify` as a Lean
+transition would prove a refinement gm's own single-writer dispatch model
+already makes unconditional, not a property this crate's implementation
+still needs to establish.
+
+The one direction Algorithm 3's `notify` strengthens over bare
+re-derivation -- ordering a withdrawal against its still-active dependents
+(the "converse fails" paragraph under Definition 26, resolved by Section
+4.3.1's machinery) -- IS enforced in gm's Rust implementation, by
+`discipline_note.rs::removal_dependents` (the withdrawal-ordering guard
+behind `discipline-check-removal`), pre-emptively rather than post-hoc.
+That guard's own Rust doc comment cites Theorem 63 directly; nothing
+about the divergence documented here weakens it.
 -/
 
 namespace Coeffect
