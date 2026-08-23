@@ -15,6 +15,30 @@
 //! legal rule application (bounded by a small fiber/capability alphabet),
 //! checking the metatheory holds for the whole reachable state space
 //! rather than for whatever state gm happens to be in when audited.
+//!
+//! Explicitly out of scope, and why: the paper's Section 3.1
+//! (Definitions 1-21, revertible effects and the effect-independence
+//! framework -- transformation monoids `M(e)`, Theorem 20/Corollary 21's
+//! arbitrary-order reversion) and Section 3.3.2 (Definitions 33-41,
+//! observational equivalence `~=` and the DISTINCT `~` used from Section
+//! 4.4 onward that forgets only registry provenance) are both about the
+//! SEMANTICS of an effect function `e : Gamma -> Gamma`, i.e. what a real
+//! state transformer does and when two are considered the same
+//! transition. This module (like the base calculus above it) models
+//! every rule at the level Table 1 already reduces effect functions to --
+//! their EFFECT ON THE FIBER'S OWN LIFECYCLE STATE alone, with `e`'s own
+//! computational content elided throughout (see the base-calculus doc
+//! comments on `Fiber`/`insert` for the same elision). A faithful model
+//! of Definitions 1-21/33-41 needs `Gamma` to be a real state type with
+//! real effect functions acting on it, not an abstract fiber-name
+//! registry -- modeling them against THIS module's elided `e` would only
+//! produce vacuous "every abstract effect trivially commutes/is
+//! observationally equivalent" restatements, not a genuine check of the
+//! paper's actual content. A real port would need gm's own effect
+//! surfaces (kv writes, discipline fiber-state transitions) modeled as
+//! concrete `Gamma -> Gamma` functions first; that is a substantially
+//! larger, separate effort than extending this abstract lifecycle model,
+//! and is not attempted here.
 
 use std::collections::{BTreeSet, HashMap};
 
