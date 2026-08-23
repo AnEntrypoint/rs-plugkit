@@ -8,3 +8,5 @@ import CordisCalculus.Confinement
 import CordisCalculus.Independence
 import CordisCalculus.CommutativeKeys
 import CordisCalculus.ObservationalEquivalence
+import CordisCalculus.NamesNodup
+import CordisCalculus.IndependenceNAry

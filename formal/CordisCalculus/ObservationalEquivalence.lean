@@ -140,18 +140,20 @@ whenever `p.1 = q.1` (the implication's premise fails). This project's
 own registries never legally reach a duplicate-named state in the
 first place (`insert`'s own `r.contains name` guard, `Basic.lean`,
 refuses to admit one), so `wellFormed` alone is not strong enough to
-derive `Nodup` on names for an ARBITRARY list; a genuine
-`Registry.namesNodup` invariant -- separate from `wellFormed`, tracking
-that `insert` is the only introduction rule and it always guards
-freshness -- would need to be threaded through every constructor
+derive `Nodup` on names for an ARBITRARY list; `NamesNodup.lean`
+supplies the genuine `Registry.namesNodup` invariant -- separate from
+`wellFormed`, tracking that `insert` is the only introduction rule and
+it always guards freshness -- threaded through every constructor
 (`insert`/`retire`/`remove`/`reload`/`unload`) as its own preserved
-property. That additional invariant is out of scope for THIS
-session's Definitions 33-41 work (it belongs to strengthening
-`Basic.lean`'s own `wellFormed`, a Section 4.2 concern, not a
-Section 3.3.2 one) -- `find_perm_invariant`/`RegistryEquiv.to_obsEquiv`
-below are stated with an explicit `namesNodup` hypothesis instead of
-silently assuming it holds, the well-formedness-hypothesis discipline
-this session's own instruction calls for. -/
+property (`Registry.namesNodup_preservation`), plus the `empty`
+base case (`Registry.empty_namesNodup`) every reachable registry's own
+`namesNodup` derives from. `find_perm_invariant`/`RegistryEquiv.to_obsEquiv`
+below still take `namesNodup` as an explicit hypothesis rather than
+re-deriving it inline (the well-formedness-hypothesis discipline this
+session's own instruction calls for) -- `NamesNodup.lean`'s own
+preservation theorem is what a caller starting from `Registry.empty`
+uses to discharge that hypothesis for any state reached by real rule
+applications. -/
 def namesNodup (g : Registry) : Prop := (g.map Prod.fst).Nodup
 
 theorem wellFormed_unique_name {g : Registry} (hnodup0 : g.namesNodup) {p q : String × Fiber}
@@ -257,27 +259,19 @@ theorem RegistryEquiv.to_obsEquiv {g1 g2 : Registry} (h : RegistryEquiv g1 g2)
   | none => rfl
   | some fiber =>
     exact List.all_congr rfl (fun dep => coeffectContext_mem_perm_invariant h dep)
-/-- Definition 40 (commutative keys): a coeffect-mediated effect
-function built from operations indexed by KEYS that commute pairwise
-(the concrete case Theorem 42 specializes independence to) is exactly
-`Independence.lean`'s `Commuting`/`Independent` machinery applied to
-the family `fun key => opFor key`, with the paper's own "keys commute"
-hypothesis feeding `Lemma 18`'s generator-level commutation check. A
-full formal port of Definition 40/Theorem 42 (co-effect-indexed
-operation families acting on a real `Gamma`, with a commutative-key
-structure on the index type itself) is scoped out of this session
-explicitly, not silently: the paper's own Definition 40 needs a
-genuine partial-commutative-monoid structure on the KEY type (not just
-on the resulting endomorphisms, which `Independence.lean` already
-covers structurally), and building that additional algebraic layer
-faithfully -- rather than a thin restatement that would just re-import
-`Commuting` under a new name with no new content -- is a separate,
-comparably-sized effort to the two frameworks this session completes.
-The connection point for a future session: `Independence.lean`'s
-`Commuting`/`InMonoid`/`Independent` are exactly the target vocabulary
-Theorem 42's conclusion ("coeffect-mediated effect functions built
-from commutative-key operations are independent") would be stated in,
-so no rework of that file is needed to attempt it later. -/
-def commutativeKeysConnectionScopedOut : Unit := ()
+/-- Definition 39/Theorem 40 (commutative keys) closed by
+`CommutativeKeys.lean`: `KeyOp` models a coeffect operation's generator
+shape directly (reads/writes exactly one `String` key), and
+`theorem40_commute`/`keyOp_reads_undisturbed_at_distinct_key` prove
+Theorem 40 (operations at distinct keys are independent)
+unconditionally, over `Independence.lean`'s own `Commuting`/`Independent`
+vocabulary. Theorem 42 (coeffect-mediated effect functions built from
+commutative-key operations are independent) is stated there as
+`theorem42_of_generator_commutation`, taking generator-level commutation
+as an explicit premise -- exactly how the paper's own proof reduces
+Theorem 42 before it ever touches Definition 41's inductive coeffect-
+mediated effect-function family, which this codebase's abstract `Gamma`-
+level model has no counterpart for. -/
+def commutativeKeysConnectionClosedByCommutativeKeysLean : Unit := ()
 
 end Registry
