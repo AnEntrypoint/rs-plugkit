@@ -11,8 +11,13 @@ universally-quantified statement, not a claim about one run.
 -/
 
 /-- A fiber's lifecycle state (paper Definition 44), reduced as
-`fiber_lifecycle.rs` and `calculus.rs` both reduce it: no async load step
-in this model, so `Reloading` collapses into an atomic transition. -/
+`fiber_lifecycle.rs` and `calculus.rs` both reduce it: an atomic
+transition, `Reloading` and `Unloading` collapsed away. Definition 49's
+full four-state space, with both transition-in-progress states present as
+real inhabitants, lives in `Iterator.lean`, and Table 1's ten-rule
+relation over it lives in `Transition.lean`; Theorem 61 and Theorem 64 are
+proved there in their general non-atomic form, this file's two-state space
+being the idealized case those results specialise to. -/
 inductive LifecycleState where
   | inactive
   | active
