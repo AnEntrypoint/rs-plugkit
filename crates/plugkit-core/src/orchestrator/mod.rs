@@ -9,6 +9,8 @@ pub mod mutables;
 pub mod memorize;
 pub mod discipline_note;
 pub mod fiber_lifecycle;
+pub mod coeffect_realm;
+pub mod capability_proxy;
 pub mod memory_component;
 pub mod codeinsight_component;
 pub mod calculus;
@@ -21,6 +23,8 @@ pub mod prd;
 pub mod task;
 pub mod claim_audit;
 pub mod submodule_drift;
+pub mod component_loader;
+pub mod component_loader_dispatch;
 
 use std::path::PathBuf;
 
@@ -207,7 +211,7 @@ pub fn gm_dir() -> PathBuf {
 /// verb that drifted.
 pub const ORCHESTRATOR_VERBS: &[&str] = &[
     "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list",
-    "memorize-fire", "discipline-note", "discipline-check-removal", "discipline-audit", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan", "auto-recall",
+    "memorize-fire", "discipline-note", "discipline-check-removal", "discipline-audit", "capability-resolve", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan", "auto-recall",
     "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
     "task-spawn", "task-list", "task-stop", "task-output",
     "memorize-continue", "fsm-vendor", "fsm-validate", "fsm-propose-override", "claim-audit", "submodule-check",
@@ -253,7 +257,7 @@ fn verb_has_dispatch_arm(verb: &str) -> bool {
     matches!(
         verb,
         "transition" | "transition-revert" | "mutable-resolve" | "mutable-add" | "mutable-list"
-            | "memorize-fire" | "discipline-note" | "discipline-check-removal" | "discipline-audit" | "memory-namespace-audit" | "codeinsight-namespace-audit" | "calculus-model-check" | "phase-status" | "residual-scan"
+            | "memorize-fire" | "discipline-note" | "discipline-check-removal" | "discipline-audit" | "capability-resolve" | "memory-namespace-audit" | "codeinsight-namespace-audit" | "calculus-model-check" | "phase-status" | "residual-scan"
             | "auto-recall" | "instruction" | "prd-add" | "prd-resolve" | "prd-list" | "prd-defer"
             | "task-spawn" | "task-list" | "task-stop" | "task-output"
             | "memorize-continue" | "fsm-vendor" | "fsm-validate" | "fsm-propose-override"
@@ -279,6 +283,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "discipline-note" => discipline_note::handle(content),
         "discipline-check-removal" => discipline_note::handle_check_removal(content),
         "discipline-audit" => discipline_note::handle_audit(content),
+        "capability-resolve" => capability_proxy::handle(content),
         "memory-namespace-audit" => memory_component::handle_audit(content),
         "codeinsight-namespace-audit" => codeinsight_component::handle_audit(content),
         "calculus-model-check" => calculus::handle_model_check(content),
@@ -286,6 +291,8 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "residual-scan" => residual::handle_scan(content),
         "claim-audit" => claim_audit::handle_audit(content),
         "submodule-check" => submodule_drift::handle_check(content),
+        "component-loader-reconcile" => component_loader_dispatch::handle_reconcile(content),
+        "component-loader-hmr" => component_loader_dispatch::handle_hmr(content),
         "auto-recall" => recall::handle_auto_recall(content),
         "instruction" => instructions::handle_instruction(content),
         "prd-add" => prd::handle_add(content),

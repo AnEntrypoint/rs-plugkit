@@ -133,4 +133,90 @@ theorem find_map_update (r : List (String × Fiber)) (name : String) (upd : Fibe
     · simp only [hc, Bool.false_eq_true, if_false]
       exact ih
 
+/-!
+## Correspondence to the Rust runtime (Definition 45/46)
+
+`AGENTS.md` cites `registry.rs::get_active_provider` as the Rust
+implementation of Definition 45's `provider_k(gamma)` and Definition 46's
+`target_n(gamma)`/`quiet(gamma)`. No file named `registry.rs` and no
+function named `get_active_provider` exist in `rs-plugkit` -- a live
+`codesearch`/grep over `crates/plugkit-core/src` for `fn get_active_provider`
+and `registry.rs` returns zero hits (witnessed this session). The real Rust
+locus, confirmed by reading `orchestrator/calculus.rs` directly, is
+`Registry::satisfied` (calculus.rs:107-113) and `Registry::coeffect_context`
+(calculus.rs:91-101):
+
+```rust
+pub fn coeffect_context(&self) -> BTreeSet<String> {
+    let mut ctx = BTreeSet::new();
+    for fiber in self.fibers.values() {
+        if fiber.state == LifecycleState::Active {
+            for cap in &fiber.provides { ctx.insert(cap.clone()); }
+        }
+    }
+    ctx
+}
+
+pub fn satisfied(&self, name: &str) -> bool {
+    let ctx = self.coeffect_context();
+    match self.fibers.get(name) {
+        Some(fiber) => fiber.requires.iter().all(|dep| ctx.contains(dep)),
+        None => false,
+    }
+}
+```
+
+**The correspondence is structural identity, not analogy.** Compare field
+by field against this file's `Registry.coeffectContext` (line 53) and
+`Registry.satisfied` (line 57):
+
+- Rust `Registry.fibers : HashMap<String, Fiber>` vs. Lean `Registry :=
+  List (String x Fiber)` -- an unordered finite map represented two
+  different but observationally-equivalent ways (hash map vs. assoc list);
+  every operation on both sides only ever reads via key lookup
+  (`fibers.get`/`Registry.find`), never relies on iteration order, so the
+  representation choice is immaterial to every theorem below.
+- Rust `coeffect_context` filters `state == Active` then unions `provides`;
+  Lean `coeffectContext` filters `state == active` then `flatMap provides`
+  (a multiset union collapsing to a set union under `List.contains`) --
+  the same two-step filter-then-union, same predicate (`Active` lifecycle
+  state), same source field (`provides`).
+- Rust `satisfied` looks up `name`, returns `false` on miss, else checks
+  `requires.iter().all(|dep| ctx.contains(dep))`; Lean `satisfied` matches
+  `Registry.find`, returns `false` on `none`, else checks
+  `fiber.requires.all (fun dep => ctx.contains dep)` -- identical miss
+  behavior, identical universally-quantified containment check over the
+  identical `requires` field against the identical coeffect context.
+
+This is Definition 46's `target_n(gamma)` (satisfaction, the boolean this
+file's `satisfied` computes) and the coeffect-context half of Definition 45
+(`provider_k` is realized structurally, not as one named function, by this
+same `Active`-filtered `provides` union -- there is no single Rust
+"provider lookup" because gm's discipline system resolves a capability
+`k` to its provider implicitly through `coeffect_context.contains k`,
+exactly as `satisfied`'s own `all (fun dep => ctx.contains dep)` does one
+key at a time). `discipline_note.rs::active_policies` (the
+`Active`-filtered enabled-discipline lookup AGENTS.md also names) is the
+same union read back per-discipline rather than recomputed -- it consumes
+`coeffect_context`'s result, it does not reimplement it.
+
+**Quiescence (`quiet(gamma)`) has no Rust counterpart in the base-calculus
+model, correctly.** `quiet` distinguishes a fiber genuinely at rest from
+one mid-transition (`Reloading`/`Unloading`); `Basic.lean`'s own
+`LifecycleState` (line 16) has only `inactive`/`active` -- no in-flight
+state -- by the same documented reduction `calculus.rs`'s base `Registry`
+uses (mirrored one-for-one above). Quiescence is a real distinction only
+in `ExtendedRegistry` (`calculus.rs:427` onward, three/four-state
+`ExtendedLifecycle`), which this file does not model -- `quiet` is
+correctly absent here, not silently dropped; `cordis-iterator-asynchrony-lean-model`
+(open PRD row) is where that extended state space gets its own Lean
+treatment.
+
+**Live witness (this session):** `grep -rn "fn get_active_provider"
+crates/` over rs-plugkit returned zero matches; `Read` on
+`orchestrator/calculus.rs` lines 91-113 confirmed the `coeffect_context`/
+`satisfied` bodies transcribed above verbatim, matching this file's
+`coeffectContext`/`satisfied` field-for-field as argued.
+-/
+
 end Registry

@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 use super::fiber_lifecycle::{self, ActiveFiberSet, FiberLifecycle, SafeToWithdraw};
+use super::coeffect_realm::{InterceptionContext, MergeKind, RealmTable};
 use super::gm_dir;
 use crate::pkfs;
 
@@ -153,6 +154,112 @@ fn declared_realm(discipline: &str) -> String {
         .unwrap_or_default()
 }
 
+fn requires_json_value(discipline: &str) -> Option<serde_json::Value> {
+    let path = requires_path(discipline);
+    let path_s = path.to_string_lossy().to_string();
+    pkfs::read_to_string(&path_s).and_then(|text| serde_json::from_str(&text).ok())
+}
+
+/// The paper's full per-key isolation realm table (Definition 28's
+/// `rho: K -> R`), read from `requires.json`'s optional `isolation`
+/// object -- `{"<key>": "<realm>"}`. Distinct from `declared_realm`
+/// above (one realm for the whole discipline): this lets a discipline
+/// isolate individual capability KEYS into different realms rather
+/// than the discipline as a whole, the finer grain the paper's own
+/// Definition 28 states. A key absent from this map resolves to its
+/// own name as realm (Definition 28's text), matching
+/// `RealmTable::realm_of`'s default.
+fn declared_isolation(discipline: &str) -> std::collections::BTreeMap<String, String> {
+    requires_json_value(discipline)
+        .and_then(|v| v.get("isolation").cloned())
+        .and_then(|v| v.as_object().cloned())
+        .map(|obj| {
+            obj.into_iter()
+                .filter_map(|(k, v)| v.as_str().map(|r| (k, r.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The paper's per-key interception metadata (Definition 30's
+/// `d in D^inter`, the component-declared metadata `d(k)`), read from
+/// `requires.json`'s optional `interception` object --
+/// `{"<key>": {"metadata": "<value>", "merge": "scalar_overwrite"|"set_union"}}`.
+/// `merge` names the key's `(M_k, +_k, epsilon_k)` monoid shape
+/// (`MergeKind`); absent defaults to `ScalarOverwrite`, matching
+/// `InterceptionContext`'s own default.
+fn declared_interception(discipline: &str) -> std::collections::BTreeMap<String, (String, MergeKind)> {
+    requires_json_value(discipline)
+        .and_then(|v| v.get("interception").cloned())
+        .and_then(|v| v.as_object().cloned())
+        .map(|obj| {
+            obj.into_iter()
+                .filter_map(|(k, v)| {
+                    let metadata = v.get("metadata").and_then(|m| m.as_str()).unwrap_or("").to_string();
+                    let merge = match v.get("merge").and_then(|m| m.as_str()) {
+                        Some("set_union") => MergeKind::SetUnion,
+                        _ => MergeKind::ScalarOverwrite,
+                    };
+                    Some((k, (metadata, merge)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Builds the realm table (Definition 28-29) covering every enabled
+/// discipline's declared per-key isolation, so `requires_satisfied`
+/// can resolve a capability KEY (not merely a whole discipline's
+/// `realm` field) against the realm its provider isolated it into.
+/// Isolation is derived (Definition 27): building this table performs
+/// no effect and carries no precondition, matching `isolate`'s own
+/// no-precondition semantics.
+fn build_realm_table(names: &[String]) -> RealmTable {
+    let mut table = RealmTable::new();
+    for name in names {
+        for (key, realm) in declared_isolation(name) {
+            table.isolate(&key, &realm);
+        }
+    }
+    table
+}
+
+/// Builds the interception context (Definition 30-31) covering every
+/// enabled discipline's declared per-key metadata, folding each
+/// discipline's `(metadata, merge_kind)` into `iota` via `intercept`
+/// in `names` order -- `intercept`'s own merge is associative
+/// (`MergeKind::combine`), so the fold's order affects only which
+/// declaration is "later" under `ScalarOverwrite`'s right-bias, never
+/// whether the fold is well-defined.
+fn build_interception_context(names: &[String]) -> InterceptionContext {
+    let mut ctx = InterceptionContext::new();
+    for name in names {
+        for (key, (metadata, kind)) in declared_interception(name) {
+            ctx.declare_merge_kind(&key, kind);
+            ctx.intercept(&key, &metadata);
+        }
+    }
+    ctx
+}
+
+/// The capability keys a discipline's `requires`/`interception`
+/// declarations touch, qualified by the realm the live realm table
+/// (Definition 28-29) resolves each one into -- the enforcement point
+/// where `Sigma^iso`'s per-key resolution actually changes which
+/// provider a dependency reaches, distinct from `declared_realm`'s
+/// coarser whole-discipline default. A key with no explicit isolation
+/// entry anywhere resolves to its own name (Definition 28), so it is
+/// unaffected and continues to qualify by the discipline-level
+/// `declared_realm` as before.
+fn resolve_key_realm(realm_table: &RealmTable, discipline_realm: &str, key: &str) -> String {
+    let per_key = realm_table.realm_of(key);
+    if per_key.is_empty() || per_key == key {
+        discipline_realm.to_string()
+    } else {
+        per_key
+    }
+}
+
 /// The capability keys a discipline supplies. A discipline with no
 /// `provides` field (or no `requires.json` at all) implicitly provides
 /// exactly its own name, so a bare-name `requires` entry written before
@@ -180,11 +287,18 @@ fn declared_provides(discipline: &str) -> Vec<String> {
 /// requires-cycle simply leaves every disc in it unsatisfied rather than
 /// looping.
 fn requires_satisfied(discipline: &str, enabled_names: &[String]) -> bool {
-    let realm = declared_realm(discipline);
+    let realm_table = build_realm_table(enabled_names);
+    let discipline_realm = declared_realm(discipline);
     declared_requires(discipline).iter().all(|dep| {
+        // Coeffect isolation (Definition 28-29): the realm a dependency
+        // KEY resolves into, not the discipline's own coarse `realm`
+        // field alone -- a key isolated into a different realm than its
+        // declaring discipline's default must match a provider in THAT
+        // realm, never the discipline-level one.
+        let dep_realm = resolve_key_realm(&realm_table, &discipline_realm, dep);
         enabled_names
             .iter()
-            .filter(|n| declared_realm(n) == realm)
+            .filter(|n| resolve_key_realm(&realm_table, &declared_realm(n), dep) == dep_realm)
             // Theorem 63's other half: a provider mid-withdrawal
             // (Unloading) must not be read as still satisfying anyone's
             // requires, even though it remains nameable by
@@ -397,6 +511,10 @@ pub fn dangling_requires(discipline: &str, all_known: &[String]) -> Vec<String> 
 /// `Unloading` rather than being silently forgotten (which would leave a
 /// stale `Active` fiber-state.json behind forever, undetected by
 /// `removal_dependents` since that walks `enabled_names()` alone).
+pub fn all_known_discipline_dirs_pub() -> Vec<String> {
+    all_known_discipline_dirs()
+}
+
 fn all_known_discipline_dirs() -> Vec<String> {
     let base = gm_dir().join("disciplines").to_string_lossy().to_string();
     let mut out: Vec<String> = enabled_names();
@@ -600,6 +718,8 @@ pub fn active_policies() -> serde_json::Value {
         .map(|name| enabled.iter().any(|n| n == name) && requires_satisfied(name, &enabled))
         .collect();
 
+    let interception_ctx = build_interception_context(&enabled);
+
     let mut out: Vec<serde_json::Value> = Vec::new();
     for (name, target_satisfied) in all.iter().zip(targets.iter()) {
         let is_active = advance_fiber(name, *target_satisfied);
@@ -621,11 +741,28 @@ pub fn active_policies() -> serde_json::Value {
                 .rev()
                 .collect::<Vec<_>>()
                 .join("\n");
-            out.push(serde_json::json!({
+            // Coeffect interception (Definition 30-31): each declared
+            // dependency key's resolved metadata --
+            // `d(k) +_k iota(k)`, right-biased so the enclosing
+            // context's interception (installed by any enabled
+            // discipline via its own `interception` block) takes
+            // priority over this discipline's own component-declared
+            // value.
+            let intercepted: serde_json::Map<String, serde_json::Value> = declared_interception(name)
+                .into_iter()
+                .map(|(key, (metadata, _kind))| {
+                    (key.clone(), serde_json::Value::String(interception_ctx.resolve(&key, &metadata)))
+                })
+                .collect();
+            let mut entry = serde_json::json!({
                 "discipline": name,
                 "text": capped,
                 "bytes": text.len(),
-            }));
+            });
+            if !intercepted.is_empty() {
+                entry["intercepted_metadata"] = serde_json::Value::Object(intercepted);
+            }
+            out.push(entry);
         }
     }
     serde_json::Value::Array(out)

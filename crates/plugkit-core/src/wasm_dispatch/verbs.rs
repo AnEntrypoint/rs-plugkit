@@ -636,10 +636,44 @@ fn kv_get(body: &Value) -> u64 {
     if let Some(violation) = confinement_violation(body, ns) {
         return err("kv_get", &violation);
     }
+    if let Some(violation) = capability_access_violation(body, ns) {
+        return violation;
+    }
     let packed = unsafe { host_kv_get(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok("kv_get", Value::String(s)),
         None => ok("kv_get", Value::Null),
+    }
+}
+
+/// Algorithm 6 (Cordis paper Section 5.1.4/6.3) proxy mediation, applied at
+/// the exact point of KV access -- not only at discipline-activation time
+/// the way `active_policies()`/`requires_satisfied` gate policy surfacing.
+/// A caller that names itself via `discipline` (the accessing fiber) and
+/// reads/writes a DIFFERENT discipline's namespace (the coeffect key) goes
+/// through `capability_proxy::resolve`, which raises `INACTIVE_ACCESS`
+/// (declared but the provider is not currently Active) or
+/// `UNDECLARED_ACCESS` (never declared in `requires.json` at all) exactly
+/// as Algorithm 6's `resolve` walk does. Same-namespace access and callers
+/// that omit `discipline` bypass this by construction (see
+/// `confinement_violation`'s own doc comment: an accessor that does not
+/// name itself is not resolving against any fiber's coeffect chain).
+fn capability_access_violation(body: &Value, namespace: &str) -> Option<u64> {
+    let accessor = body.get("discipline").and_then(|v| v.as_str())?;
+    if accessor == namespace {
+        return None;
+    }
+    match crate::orchestrator::capability_proxy::resolve(accessor, namespace) {
+        Ok(_) => None,
+        Err(e) => Some(err_json(
+            "kv_access",
+            json!({
+                "error": e.message(),
+                "error_code": e.code(),
+                "accessor": accessor,
+                "capability": namespace,
+            }),
+        )),
     }
 }
 
@@ -700,6 +734,9 @@ fn kv_put(body: &Value) -> u64 {
     if let Some(violation) = confinement_violation(body, ns) {
         return err("kv_put", &violation);
     }
+    if let Some(violation) = capability_access_violation(body, ns) {
+        return violation;
+    }
     if !kv_put_namespace_permitted(ns) {
         return err(
             "kv_put",
@@ -714,6 +751,9 @@ fn kv_query(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if let Some(violation) = confinement_violation(body, ns) {
         return err("kv_query", &violation);
+    }
+    if let Some(violation) = capability_access_violation(body, ns) {
+        return violation;
     }
     let q = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, q.as_ptr(), q.len() as u32) };
