@@ -92,15 +92,22 @@ pub fn resolve(accessor: &str, key: &str) -> Result<String, ResolveError> {
     // `discipline_note::requires_satisfied` does, but naming the
     // resolved provider rather than returning a bare bool, since Line 4
     // requires returning `fiber.committed[key]` (the binding), not just
-    // whether one exists.
+    // whether one exists. The realm compared is the per-key isolation
+    // realm (Definition 28-29's `rho: K -> R`, `resolve_key_realm`), not
+    // the accessor's bare discipline-level `realm` field -- a `key` the
+    // accessor isolates via `requires.json`'s `isolation` map must match
+    // the provider's OWN per-key realm for that same key, since a
+    // provider can likewise isolate the capability it supplies under a
+    // different realm than its own discipline-level default.
     let enabled = discipline_note::enabled_names();
-    let realm = &accessor_component.realm;
+    let realm_table = discipline_note::build_realm_table(&enabled);
+    let dep_realm = discipline_note::resolve_key_realm(&realm_table, &accessor_component.realm, key);
     let provider = enabled
         .iter()
         .filter(|n| n.as_str() != accessor)
         .filter(|n| {
             let c = Component::read(n);
-            &c.realm == realm
+            discipline_note::resolve_key_realm(&realm_table, &c.realm, key) == dep_realm
         })
         .filter(|n| Component::read(n).lifecycle == FiberLifecycle::Active)
         .find(|n| Component::read(n).provides.iter().any(|cap| cap == key));
@@ -116,7 +123,7 @@ pub fn resolve(accessor: &str, key: &str) -> Result<String, ResolveError> {
         // Active, so the error is actionable (names what to re-enable)
         // rather than merely "nothing provides this."
         None => {
-            let named_provider = all_known_providers_of(key, realm)
+            let named_provider = all_known_providers_of(key, &dep_realm, &realm_table)
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| key.to_string());
@@ -129,12 +136,13 @@ pub fn resolve(accessor: &str, key: &str) -> Result<String, ResolveError> {
     }
 }
 
-fn all_known_providers_of(key: &str, realm: &str) -> Vec<String> {
+fn all_known_providers_of(key: &str, dep_realm: &str, realm_table: &super::coeffect_realm::RealmTable) -> Vec<String> {
     discipline_note::all_known_discipline_dirs_pub()
         .into_iter()
         .filter(|n| {
             let c = Component::read(n);
-            &c.realm == realm && c.provides.iter().any(|cap| cap == key)
+            discipline_note::resolve_key_realm(realm_table, &c.realm, key) == dep_realm
+                && c.provides.iter().any(|cap| cap == key)
         })
         .collect()
 }

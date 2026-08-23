@@ -145,7 +145,7 @@ fn declared_requires(discipline: &str) -> Vec<String> {
 /// capabilities are one small, cohesive set, so realm-scoping the whole
 /// discipline is the natural grain here, not scoping individual keys
 /// within it.
-fn declared_realm(discipline: &str) -> String {
+pub(crate) fn declared_realm(discipline: &str) -> String {
     let path = requires_path(discipline);
     let path_s = path.to_string_lossy().to_string();
     pkfs::read_to_string(&path_s)
@@ -214,7 +214,7 @@ fn declared_interception(discipline: &str) -> std::collections::BTreeMap<String,
 /// Isolation is derived (Definition 27): building this table performs
 /// no effect and carries no precondition, matching `isolate`'s own
 /// no-precondition semantics.
-fn build_realm_table(names: &[String]) -> RealmTable {
+pub(crate) fn build_realm_table(names: &[String]) -> RealmTable {
     let mut table = RealmTable::new();
     for name in names {
         for (key, realm) in declared_isolation(name) {
@@ -251,7 +251,7 @@ fn build_interception_context(names: &[String]) -> InterceptionContext {
 /// entry anywhere resolves to its own name (Definition 28), so it is
 /// unaffected and continues to qualify by the discipline-level
 /// `declared_realm` as before.
-fn resolve_key_realm(realm_table: &RealmTable, discipline_realm: &str, key: &str) -> String {
+pub(crate) fn resolve_key_realm(realm_table: &RealmTable, discipline_realm: &str, key: &str) -> String {
     let per_key = realm_table.realm_of(key);
     if per_key.is_empty() || per_key == key {
         discipline_realm.to_string()
