@@ -456,8 +456,70 @@ impl ExtendedRegistry {
         })
     }
 
+    /// The precedence relation (Definition 65, eq. 60): `n ≺ m` when `n`
+    /// may provide a key `m` declares (`p_n ∩ d_m != empty`). Theorem 66
+    /// (Progress) and Theorem 73 (Confluence) are established ONLY on the
+    /// hypothesis that `≺` is acyclic over the whole registry -- the
+    /// paper states this explicitly as an assumption the rules themselves
+    /// do not enforce ("which is an assumption and not something the
+    /// definition delivers"). A cyclic `≺` (two fibers each requiring a
+    /// key the other provides) admits a registry where two fibers can
+    /// reach mutual `relied_n` and neither `unload` guard ever releases --
+    /// a real permanent-stuck state this model's own `unload`
+    /// (`relied_n`-gated) can reach if `insert` admits a cycle. `insert`
+    /// below refuses any insertion that would create one, since nothing
+    /// else in this file is positioned to refuse it later.
+    fn would_create_precedence_cycle(&self, name: &str, provides: &BTreeSet<String>) -> bool {
+        let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (n, fiber) in &self.fibers {
+            for (m, other) in &self.fibers {
+                if n != m && !fiber.provides.is_disjoint(&other.requires) {
+                    edges.entry(n.as_str()).or_default().push(m.as_str());
+                }
+            }
+            if !provides.is_disjoint(&fiber.requires) {
+                edges.entry(name).or_default().push(n.as_str());
+            }
+            if !fiber.provides.is_disjoint(&provides.iter().cloned().collect()) {
+                edges.entry(n.as_str()).or_default().push(name);
+            }
+        }
+        let all_names: Vec<&str> = self.fibers.keys().map(|s| s.as_str()).chain(std::iter::once(name)).collect();
+        let mut visiting: BTreeSet<&str> = BTreeSet::new();
+        let mut done: BTreeSet<&str> = BTreeSet::new();
+        fn has_cycle<'a>(
+            node: &'a str,
+            edges: &HashMap<&'a str, Vec<&'a str>>,
+            visiting: &mut BTreeSet<&'a str>,
+            done: &mut BTreeSet<&'a str>,
+        ) -> bool {
+            if done.contains(node) {
+                return false;
+            }
+            if visiting.contains(node) {
+                return true;
+            }
+            visiting.insert(node);
+            if let Some(succs) = edges.get(node) {
+                for s in succs {
+                    if has_cycle(s, edges, visiting, done) {
+                        return true;
+                    }
+                }
+            }
+            visiting.remove(node);
+            done.insert(node);
+            false
+        }
+        all_names.iter().any(|n| has_cycle(n, &edges, &mut visiting, &mut done))
+    }
+
     /// O-Insert (Definition 49's reading: `Inactive` in the conclusion is
-    /// `Inactive(bot)`).
+    /// `Inactive(bot)`), extended with the acyclic-`≺` hypothesis
+    /// (Definition 65 / Theorem 66) as an insert-time refusal -- see
+    /// `would_create_precedence_cycle`'s doc comment for why this model
+    /// enforces at insertion what the paper states as an external
+    /// assumption.
     pub fn insert(&self, name: &str, requires: BTreeSet<String>, provides: BTreeSet<String>) -> Option<ExtendedRegistry> {
         if self.fibers.contains_key(name) {
             return None;
@@ -466,6 +528,9 @@ impl ExtendedRegistry {
             if !fiber.provides.is_disjoint(&provides) {
                 return None;
             }
+        }
+        if self.would_create_precedence_cycle(name, &provides) {
+            return None;
         }
         let mut next = self.clone();
         next.fibers.insert(

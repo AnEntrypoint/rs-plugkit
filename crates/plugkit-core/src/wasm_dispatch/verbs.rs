@@ -643,21 +643,23 @@ fn kv_get(body: &Value) -> u64 {
     }
 }
 
-/// Confinement (Cordis paper Definition 48, Section 4.2): a component's
-/// effect writes/reads during its own activation must stay bounded to its
-/// own name -- it may not mutate or read state belonging to a DIFFERENTLY
-/// named, currently-enabled component. `namespace` on `kv_put`/`kv_query`/
-/// `kv_get`/`memorize` was a plain caller-supplied string with no check
-/// against the dispatching component's own identity: any discipline (or any
-/// caller impersonating one) could pass another enabled discipline's name
-/// as `namespace` and write into that discipline's store. This function is
-/// the enforcement point Definition 48 requires but nothing upstream
-/// provided -- it refuses only the confinement-violating case (an explicit
-/// `discipline` field naming one component while `namespace` names a
-/// DIFFERENT, currently-enabled one), leaving every unscoped call (no
-/// `discipline` field, the common case today) unaffected so existing
-/// callers keep working while a caller that DOES declare its identity gets
-/// real enforcement.
+/// A self-declared-identity check inspired by Confinement (Cordis paper
+/// Definition 48, Section 4.2), NOT an enforcement of it. Definition 48
+/// binds a component's OWN effect function -- trusted code the paper's
+/// model assumes runs as that fiber, never as an open dispatch surface a
+/// caller can lie to. gm's spool-dispatch ABI carries no caller identity
+/// a caller cannot simply omit or fabricate (no capability token, no
+/// signed session-to-discipline binding), so this check catches only a
+/// caller that VOLUNTARILY names itself via `discipline` and then
+/// contradicts that name with a mismatched `namespace` -- an accidental
+/// cross-namespace write from well-behaved code, not an adversary. A
+/// caller that wants to violate confinement does so by simply omitting
+/// `discipline`, at which point `claimed` is `None` and this function
+/// returns `None` (no violation) unconditionally: the check is fully
+/// bypassable and offers no security boundary. Genuine enforcement would
+/// need the dispatch ABI itself to carry a caller identity the caller
+/// cannot forge, which does not exist today -- a real capability/token
+/// system is the actual fix, not a stronger version of this function.
 fn confinement_violation(body: &Value, namespace: &str) -> Option<String> {
     let claimed = body.get("discipline").and_then(|v| v.as_str())?;
     if claimed == namespace {
