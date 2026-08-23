@@ -1,19 +1,20 @@
 #![cfg(target_arch = "wasm32")]
 
 //! A direct, gm-independent implementation of the Cordis paper's Section
-//! 4.2 base calculus: an abstract `Registry` of named `Fiber`s, each
-//! carrying a coeffect specification (`requires`) and provision
-//! (`provides`), advanced by the five base rules (O-Insert, O-Retire,
-//! O-Remove, L-Reload, L-Unload). Every metatheory check elsewhere in
-//! this crate (`discipline_note.rs`'s `discipline-audit`) runs over ONE
-//! gm-specific instantiation of the paper's model (disciplines, or
-//! memory/codeinsight namespaces) at its CURRENT state alone. This module
-//! is the calculus itself, with no discipline/plugin/namespace concept
-//! anywhere in it, and `verify_calculus` below exhaustively enumerates
-//! EVERY state reachable from an initial registry under every legal rule
-//! application (bounded by a small fiber/capability alphabet), checking
-//! the metatheory holds for the whole reachable state space rather than
-//! for whatever state gm happens to be in when audited.
+//! 4.2 base calculus (two-state `Registry`/`Fiber` model, five rules) AND
+//! Section 4.3's extended ten-rule, four-state calculus
+//! (`ExtendedRegistry`/`ExtendedFiber`, below the base model in this same
+//! file). Every metatheory check elsewhere in this crate
+//! (`discipline_note.rs`'s `discipline-audit`) runs over ONE gm-specific
+//! instantiation of the paper's BASE model (disciplines, or
+//! memory/codeinsight namespaces) at its CURRENT state alone -- gm's own
+//! fiber kinds reduce cleanly to the two-state model since none of them
+//! yet models multi-step iteration, asynchronous landing, or failure
+//! outcomes (Section 4.3.2-4.3.4). `verify_calculus` below exhaustively
+//! enumerates EVERY state reachable from an initial registry under every
+//! legal rule application (bounded by a small fiber/capability alphabet),
+//! checking the metatheory holds for the whole reachable state space
+//! rather than for whatever state gm happens to be in when audited.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -73,9 +74,10 @@ impl Registry {
         ctx
     }
 
-    /// The satisfaction predicate (Definition 46: `sigma |= d`): every
+    /// The satisfaction predicate (Section 3.2.2, `sigma |= d`): every
     /// capability `name`'s fiber requires is in the current coeffect
-    /// context.
+    /// context. Definition 46 is the target view `target_n(gamma)` built
+    /// on top of this predicate, not the predicate itself.
     pub fn satisfied(&self, name: &str) -> bool {
         let ctx = self.coeffect_context();
         match self.fibers.get(name) {
@@ -326,4 +328,300 @@ pub fn handle_model_check(_content: &str) -> (String, String, i32) {
         "violations": violations.iter().map(|v| serde_json::json!({"theorem": v.theorem, "detail": v.detail})).collect::<Vec<_>>(),
     });
     (payload.to_string(), String::new(), if ok { 0 } else { 1 })
+}
+
+/// Section 4.3's extended lifecycle (Definition 49, eq. 43): the base
+/// two-state `Inactive|Active` is replaced by four states, splitting both
+/// activation and deactivation into a state the fiber occupies while the
+/// transition is under way. `outcome` is the paper's `zeta : {bot} u Xi`
+/// (eq. 43/44): `None` is `bot` (no error), `Some(err)` is a raised error
+/// from the failure layer (Section 4.3.4). This module reduces the
+/// paper's effect iterator (Definition 51, `i : Effect_Gamma^iter*`) to a
+/// caller-supplied `remaining_iterations: u32` counter -- the calculus's
+/// own metatheory (Lemma 54, Table 1) treats the iterator only through
+/// its Maybe(next)/Left(error) outcome shape at each step, never through
+/// what an iteration computes, so a counter models every rule's guard
+/// faithfully (zero remaining = L-Finish next, nonzero = L-Iter next)
+/// without needing the iterator's own computational content, which -- like
+/// the base calculus's effect functions -- has none in this abstract model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExtendedLifecycle {
+    /// Definition 49's `Inactive(zeta)`: `outcome` is `bot` after O-Insert
+    /// or a successful withdrawal, `Some(err)` after L-Raise.
+    Inactive { outcome: Option<&'static str> },
+    /// `Reloading(i, g, omega)`: `remaining_iterations` stands for `i`,
+    /// `committed` for `omega`. No `g` is tracked explicitly -- this
+    /// model's `Fiber::provides`/`requires` play the paper's `g`/`omega`
+    /// role structurally (see `ExtendedFiber` below), matching how the
+    /// base-calculus `calculus.rs` above elides `e`'s computational
+    /// content.
+    Reloading { remaining_iterations: u32, committed: BTreeSet<String> },
+    /// `Active(g, omega)`.
+    Active { committed: BTreeSet<String> },
+    /// `Unloading(g, omega, zeta)`: `outcome` is the `zeta` this
+    /// deactivation is headed for (`None` = ordinary L-Leave-initiated
+    /// withdrawal, `Some(err)` = L-Raise-initiated).
+    Unloading { committed: BTreeSet<String>, outcome: Option<&'static str> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendedFiber {
+    pub requires: BTreeSet<String>,
+    pub provides: BTreeSet<String>,
+    pub state: ExtendedLifecycle,
+}
+
+/// The extended registry (Definition 45, read at the wider state space of
+/// Definition 49). `provider_k(gamma)` (Definition 45) and `target_n(gamma)`
+/// /`quiet(gamma)` (Definition 46, eq. 45's wider reading) are re-derived
+/// here rather than shared with the base `Registry` -- the coeffect
+/// context union (eq. 45's second clause) is now restricted to `Active`
+/// fibers alone, explicitly excluding `Reloading`/`Unloading`, which the
+/// base calculus's two-state model has no way to distinguish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendedRegistry {
+    pub fibers: HashMap<String, ExtendedFiber>,
+}
+
+impl ExtendedRegistry {
+    pub fn empty() -> ExtendedRegistry {
+        ExtendedRegistry { fibers: HashMap::new() }
+    }
+
+    /// eq. 45's `sigma_gamma`, restricted to `Active` per eq. 45's note
+    /// under Definition 49: "a fiber whose transition is under way in
+    /// either direction reads its coeffects through the omega it holds
+    /// and provides none of its own."
+    pub fn coeffect_context(&self) -> BTreeSet<String> {
+        let mut ctx = BTreeSet::new();
+        for fiber in self.fibers.values() {
+            if let ExtendedLifecycle::Active { .. } = fiber.state {
+                for cap in &fiber.provides {
+                    ctx.insert(cap.clone());
+                }
+            }
+        }
+        ctx
+    }
+
+    pub fn satisfied(&self, name: &str) -> bool {
+        let ctx = self.coeffect_context();
+        match self.fibers.get(name) {
+            Some(fiber) => fiber.requires.iter().all(|dep| ctx.contains(dep)),
+            None => false,
+        }
+    }
+
+    /// `installed_n(gamma)` (Definition 49, eq. 44): any state but
+    /// `Inactive`.
+    pub fn installed(&self, name: &str) -> bool {
+        match self.fibers.get(name) {
+            Some(fiber) => !matches!(fiber.state, ExtendedLifecycle::Inactive { .. }),
+            None => false,
+        }
+    }
+
+    /// `target_n(gamma)` (Definition 46), represented as the resolved
+    /// dependency set when defined (`requires` all satisfied and not
+    /// retired-equivalent) or `None` for `bot`. This model has no
+    /// separate retirement flag on `ExtendedFiber` (retirement is
+    /// modeled by driving `requires` to an unsatisfiable set via the
+    /// caller, matching how `O-Retire` in the base calculus only ever
+    /// takes effect through the target view collapsing to `bot`) --
+    /// `target_defined` is the boolean form every rule guard below reads.
+    fn target_defined(&self, name: &str) -> bool {
+        self.fibers.contains_key(name) && self.satisfied(name)
+    }
+
+    /// `relied_n(gamma)` (Definition 50, eq. 46): some OTHER installed
+    /// fiber's committed view resolves a key to `name`. This is the guard
+    /// L-Unload adds beyond the base calculus's L-Unload -- withdrawal
+    /// waits for every dependent's committed view to stop naming this
+    /// fiber, not merely for the target view to change.
+    pub fn relied(&self, name: &str) -> bool {
+        self.fibers.iter().any(|(other_name, other)| {
+            if other_name == name {
+                return false;
+            }
+            if !self.installed(other_name) {
+                return false;
+            }
+            let committed = match &other.state {
+                ExtendedLifecycle::Reloading { committed, .. } => committed,
+                ExtendedLifecycle::Active { committed } => committed,
+                ExtendedLifecycle::Unloading { committed, .. } => committed,
+                ExtendedLifecycle::Inactive { .. } => return false,
+            };
+            committed.contains(name)
+        })
+    }
+
+    /// O-Insert (Definition 49's reading: `Inactive` in the conclusion is
+    /// `Inactive(bot)`).
+    pub fn insert(&self, name: &str, requires: BTreeSet<String>, provides: BTreeSet<String>) -> Option<ExtendedRegistry> {
+        if self.fibers.contains_key(name) {
+            return None;
+        }
+        for fiber in self.fibers.values() {
+            if !fiber.provides.is_disjoint(&provides) {
+                return None;
+            }
+        }
+        let mut next = self.clone();
+        next.fibers.insert(
+            name.to_string(),
+            ExtendedFiber { requires, provides, state: ExtendedLifecycle::Inactive { outcome: None } },
+        );
+        Some(next)
+    }
+
+    /// L-Begin: `Inactive(bot)`, target defined -> `Reloading(e_n, id, omega)`.
+    /// `remaining_iterations` seeds from the caller-supplied iteration
+    /// count (a plain effect function per Section 4.3.2's closing
+    /// paragraph is the degenerate `remaining_iterations = 0` case: "the
+    /// first iteration already yields Nothing").
+    pub fn begin(&self, name: &str, remaining_iterations: u32) -> Option<ExtendedRegistry> {
+        let fiber = self.fibers.get(name)?;
+        if !matches!(fiber.state, ExtendedLifecycle::Inactive { outcome: None }) {
+            return None;
+        }
+        if !self.target_defined(name) {
+            return None;
+        }
+        let omega = fiber.requires.clone();
+        let mut next = self.clone();
+        next.fibers.get_mut(name).unwrap().state =
+            ExtendedLifecycle::Reloading { remaining_iterations, committed: omega };
+        Some(next)
+    }
+
+    /// L-Iter: `Reloading`, target still equals `omega`, iterations
+    /// remain -> stays `Reloading` with one fewer remaining and the same
+    /// `omega` (this model has no per-iteration `g`/`h` composition to
+    /// witness -- see `ExtendedLifecycle`'s doc comment).
+    pub fn iterate(&self, name: &str) -> Option<ExtendedRegistry> {
+        let fiber = self.fibers.get(name)?;
+        let (remaining, committed) = match &fiber.state {
+            ExtendedLifecycle::Reloading { remaining_iterations, committed } if *remaining_iterations > 0 => {
+                (*remaining_iterations, committed.clone())
+            }
+            _ => return None,
+        };
+        if self.target_defined(name) && self.fibers[name].requires != committed {
+            return None;
+        }
+        if !self.target_defined(name) {
+            return None;
+        }
+        let mut next = self.clone();
+        next.fibers.get_mut(name).unwrap().state =
+            ExtendedLifecycle::Reloading { remaining_iterations: remaining - 1, committed };
+        Some(next)
+    }
+
+    /// L-Finish: `Reloading`, target still `omega`, no iterations remain
+    /// -> `Active(g, omega)`.
+    pub fn finish(&self, name: &str) -> Option<ExtendedRegistry> {
+        let fiber = self.fibers.get(name)?;
+        let committed = match &fiber.state {
+            ExtendedLifecycle::Reloading { remaining_iterations: 0, committed } => committed.clone(),
+            _ => return None,
+        };
+        if !self.target_defined(name) || self.fibers[name].requires != committed {
+            return None;
+        }
+        let mut next = self.clone();
+        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Active { committed };
+        Some(next)
+    }
+
+    /// L-Divert: `Reloading`, target has CHANGED from `omega` -> aborts
+    /// into `Unloading(g o h, omega, bot)`, whichever alternative (abort
+    /// mid-iteration vs land one more first) this model collapses into
+    /// the single available transition, since it tracks no per-iteration
+    /// `h` to compose.
+    pub fn divert(&self, name: &str) -> Option<ExtendedRegistry> {
+        let fiber = self.fibers.get(name)?;
+        let committed = match &fiber.state {
+            ExtendedLifecycle::Reloading { committed, .. } => committed.clone(),
+            _ => return None,
+        };
+        let target_changed = !self.target_defined(name) || self.fibers[name].requires != committed;
+        if !target_changed {
+            return None;
+        }
+        let mut next = self.clone();
+        next.fibers.get_mut(name).unwrap().state =
+            ExtendedLifecycle::Unloading { committed, outcome: None };
+        Some(next)
+    }
+
+    /// L-Raise (Section 4.3.4): `Reloading`, the iterator raises ->
+    /// `Unloading(g, omega, xi)`. `error` is the paper's `xi in Xi`.
+    pub fn raise(&self, name: &str, error: &'static str) -> Option<ExtendedRegistry> {
+        let fiber = self.fibers.get(name)?;
+        let committed = match &fiber.state {
+            ExtendedLifecycle::Reloading { committed, .. } => committed.clone(),
+            _ => return None,
+        };
+        let mut next = self.clone();
+        next.fibers.get_mut(name).unwrap().state =
+            ExtendedLifecycle::Unloading { committed, outcome: Some(error) };
+        Some(next)
+    }
+
+    /// L-Leave: `Active`, target no longer equals `omega` -> `Unloading(g, omega, bot)`.
+    pub fn leave(&self, name: &str) -> Option<ExtendedRegistry> {
+        let fiber = self.fibers.get(name)?;
+        let committed = match &fiber.state {
+            ExtendedLifecycle::Active { committed } => committed.clone(),
+            _ => return None,
+        };
+        let target_changed = !self.target_defined(name) || self.fibers[name].requires != committed;
+        if !target_changed {
+            return None;
+        }
+        let mut next = self.clone();
+        next.fibers.get_mut(name).unwrap().state =
+            ExtendedLifecycle::Unloading { committed, outcome: None };
+        Some(next)
+    }
+
+    /// L-Unload: `Unloading`, NOT relied upon -> `Inactive(zeta)`. This is
+    /// the rule Definition 50's guard names: withdrawal waits for every
+    /// dependent's committed view to stop naming this fiber (`relied`
+    /// above), unlike the base calculus's `L-Unload` which has no such
+    /// wait because the base calculus has nowhere for a dependent to be
+    /// mid-teardown.
+    pub fn unload(&self, name: &str) -> Option<ExtendedRegistry> {
+        let fiber = self.fibers.get(name)?;
+        let outcome = match &fiber.state {
+            ExtendedLifecycle::Unloading { outcome, .. } => *outcome,
+            _ => return None,
+        };
+        if self.relied(name) {
+            return None;
+        }
+        let mut next = self.clone();
+        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Inactive { outcome };
+        Some(next)
+    }
+
+    /// O-Retire has no separate representation in this model beyond
+    /// removing the fiber's future eligibility to `begin` -- see
+    /// `target_defined`'s doc comment. `remove` mirrors the base
+    /// calculus's O-Remove: an `Inactive`, non-relied fiber (no committed
+    /// view left naming it) may be dropped.
+    pub fn remove(&self, name: &str) -> Option<ExtendedRegistry> {
+        let fiber = self.fibers.get(name)?;
+        if !matches!(fiber.state, ExtendedLifecycle::Inactive { .. }) {
+            return None;
+        }
+        if self.relied(name) {
+            return None;
+        }
+        let mut next = self.clone();
+        next.fibers.remove(name);
+        Some(next)
+    }
 }
