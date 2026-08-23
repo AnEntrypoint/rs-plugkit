@@ -238,13 +238,14 @@ what state `e.fwd` actually started from, needed because `inv` is
 state-indexed). This is the general n-ary reversal-order machinery:
 `revertLifo2_correct`/`independent_pair_revert_nonlifo_order` above are
 its two n=2 instances (reverting `[e2,e1]`-order vs `[e1,e2]`-order
-against the same forward trajectory). A genuinely order-parametric
+against the same forward trajectory). The genuinely order-parametric
 n-ary statement (Theorem 20's full strength: EVERY permutation, not
-just these two named orders) is left as explicit remaining work -- see
-the PRD row filed this session; the obstruction is that `revertOne`'s
-own state-indexing makes an arbitrary permutation's correctness depend
-on threading the RIGHT intermediate state to each `inv` call, which
-needs a per-permutation state trace, not reproved here for n > 2. -/
+just these two named orders) is `IndependenceNAry.lean`'s
+`corollary21` -- proved there via a `PairwiseFamily`-shaped downward
+induction over a permutation list rather than by generalizing this
+file's own `revertHeadFirst`/state-indexing directly, since the fixed
+per-position state trace this definition tracks does not by itself
+generalize to an arbitrary permutation's own intermediate states. -/
 def revertHeadFirst (effects : List (RevertibleEffect Gamma)) (preStates : List Gamma)
     (finalState : Gamma) : Gamma :=
   match effects, preStates with
