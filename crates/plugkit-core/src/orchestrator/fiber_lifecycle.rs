@@ -18,6 +18,25 @@ use crate::pkfs;
 /// it has a name and a storage location for its state. `discipline_note.rs`
 /// is the first caller; a second component kind would call these same
 /// functions with its own path function, not copy this file.
+///
+/// Identifier fidelity against the paper's own Table 2 (Section 5.1,
+/// theory-to-implementation correspondence): `theta` (Definition 44) maps
+/// to `fiber.state` there and to `FiberLifecycle` here; the paper's
+/// runtime `LOADING`/`FAILED` states are folded into this crate's
+/// `Unloading` reduction rather than kept as separate names, since this
+/// reduction (see above) collapses the paper's four runtime states to
+/// three and has no failure-outcome concept yet (Section 4.3.4, `L-Raise`)
+/// -- see this module's own `advance_fiber`/`transition` for where a
+/// fourth, failure-carrying state would need to land if that gap is ever
+/// closed. `provider_k(gamma)` (Definition 45) has no single named
+/// counterpart in this crate; `discipline_note.rs::active_policies`'s
+/// `Active`-filtered lookup plays that role structurally. `target_n(gamma)`
+/// (Definition 46) corresponds to this module's `target_satisfied`
+/// parameter to `transition`/`advance_fiber`, computed by each caller's
+/// own `requires_satisfied`-shaped function rather than a single shared
+/// `target` function, since gm's coeffect resolution is realm-scoped per
+/// caller (Section 3.2.3) in a way the paper's own `fiber.target` field
+/// (recomputed by `refresh`, Algorithm 5) does not need to distinguish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FiberLifecycle {
