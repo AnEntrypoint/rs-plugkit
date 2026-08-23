@@ -21,11 +21,7 @@ success/failure signal the way `Basic.lean`'s operations are. Mirrors
 
 universe u
 
-/-- Section 4.3.4's error set `Xi`, left abstract by the paper ("Section
-4.3.4 supplies" it without fixing its inhabitants) -- any nonempty type
-of error labels instantiates the theorems below. `calculus.rs` models
-one concrete instantiation (`&'static str`); this file quantifies over
-every `Xi`, matching the paper's own genericity. -/
+section
 variable (Xi : Type u)
 
 /-- Eq. 43's outcome `zeta : {bot} u Xi`, carried by `Unloading` as the
@@ -63,6 +59,8 @@ structure ExtFiber where
   deriving DecidableEq
 
 abbrev ExtRegistry := List (String × ExtFiber Xi)
+
+end
 
 namespace ExtRegistry
 
@@ -213,7 +211,7 @@ theorem find_updateAt (r : ExtRegistry Xi) (name : String) (upd : ExtFiber Xi �
 
 private theorem write_never_failed_helper
     {Xi : Type u} [DecidableEq Xi] (r : ExtRegistry Xi) (name : String)
-    (committed : List String) (newState : ExtLifecycle Xi)
+    (newState : ExtLifecycle Xi)
     (hne : ∀ xi : Xi, newState ≠ .inactive (some xi))
     (r' : ExtRegistry Xi)
     (h : r' = r.updateAt name (fun f => { f with state := newState }))
@@ -239,7 +237,7 @@ theorem begin_never_produces_failed (r r' : ExtRegistry Xi) (name : String) (mor
   split at h
   · split at h
     · injection h with h
-      exact write_never_failed_helper r name _ _ (by simp) r' h.symm fiber hfind
+      exact write_never_failed_helper r name _ (by simp) r' h.symm fiber hfind
     · simp at h
   · simp at h
 
@@ -250,13 +248,11 @@ theorem iter_never_produces_failed (r r' : ExtRegistry Xi) (name : String)
   split at h
   · rename_i origFiber _
     split at h
-    · rename_i committed more heq
-      cases more
+    · rename_i committed heq
+      split at h
+      · injection h with h
+        exact write_never_failed_helper r name _ (by simp) r' h.symm fiber hfind
       · simp at h
-      · split at h
-        · injection h with h
-          exact write_never_failed_helper r name _ _ (by simp) r' h.symm fiber hfind
-        · simp at h
     all_goals simp at h
   · simp at h
 
@@ -267,12 +263,10 @@ theorem finish_never_produces_failed (r r' : ExtRegistry Xi) (name : String)
   split at h
   · rename_i origFiber _
     split at h
-    · rename_i committed more heq
-      cases more
-      · split at h
-        · injection h with h
-          exact write_never_failed_helper r name _ _ (by simp) r' h.symm fiber hfind
-        · simp at h
+    · rename_i committed heq
+      split at h
+      · injection h with h
+        exact write_never_failed_helper r name _ (by simp) r' h.symm fiber hfind
       · simp at h
     all_goals simp at h
   · simp at h
@@ -287,7 +281,7 @@ theorem divert_never_produces_failed (r r' : ExtRegistry Xi) (name : String)
     · rename_i committed more heq
       split at h
       · injection h with h
-        exact write_never_failed_helper r name _ _ (by simp) r' h.symm fiber hfind
+        exact write_never_failed_helper r name _ (by simp) r' h.symm fiber hfind
       · simp at h
     all_goals simp at h
   · simp at h
@@ -302,7 +296,7 @@ theorem leave_never_produces_failed (r r' : ExtRegistry Xi) (name : String)
     · rename_i committed heq
       split at h
       · injection h with h
-        exact write_never_failed_helper r name _ _ (by simp) r' h.symm fiber hfind
+        exact write_never_failed_helper r name _ (by simp) r' h.symm fiber hfind
       · simp at h
     all_goals simp at h
   · simp at h
@@ -330,7 +324,10 @@ theorem unload_failed_requires_prior_error (r r' : ExtRegistry Xi) (name : Strin
       refine ⟨committed, xi, ?_⟩
       have hzeta : zeta = some xi := by injection hxi
       subst hzeta
-      rw [hr2, heq]
+      rw [hr2]
+      congr 1
+      cases origFiber
+      simp_all
     all_goals simp at h
   · simp at h
 
@@ -371,15 +368,19 @@ excludes by definition. -/
 theorem no_reentry_from_failed (r : ExtRegistry Xi) (name : String) (moreIterations : Bool)
     (fiber : ExtFiber Xi) (hfind : r.find name = some fiber) (hfailed : failed fiber) :
     r.begin name moreIterations = none := by
-  unfold begin
-  rw [hfind]
   obtain ⟨xi, hxi⟩ := hfailed
-  rw [hxi]
-  simp
+  unfold ExtRegistry.begin
+  split
+  · rename_i f heq
+    rw [heq] at hfind
+    injection hfind with hfind
+    subst hfind
+    rw [hxi]
+    simp
+  · rfl
 
 /-- A `failed` fiber is never `installed` -- it carries no committed
 view and (per the paper's own remark) "obstructs nothing". -/
-omit [DecidableEq Xi] in
 theorem failed_not_installed (fiber : ExtFiber Xi) (h : failed fiber) : installed fiber = false := by
   obtain ⟨xi, hxi⟩ := h
   unfold installed

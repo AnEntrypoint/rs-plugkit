@@ -11,3 +11,5 @@ import CordisCalculus.ObservationalEquivalence
 import CordisCalculus.NamesNodup
 import CordisCalculus.IndependenceNAry
 import CordisCalculus.FailureModel
+import CordisCalculus.Isolation
+import CordisCalculus.Interception

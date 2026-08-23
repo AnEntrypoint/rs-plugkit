@@ -42,30 +42,49 @@ original table exactly, `set`'s own effect-function inverse. -/
 def restrict (s : Sigma) (k : String) : Sigma :=
   s.filter (fun p => p.1 != k)
 
+/-- A key absent from `s` (per `domMem`) is never found by `find?`
+searching for that same key -- the bridge every proof below needs
+between the `Bool`-valued `domMem`/`any` and `find?`'s own search,
+proved once by structural induction rather than re-derived at each use
+site. -/
+theorem find_none_of_domMem_false (s : Sigma) (k : String) (h : s.domMem k = false) :
+    s.find? (fun p => p.1 == k) = none := by
+  induction s with
+  | nil => rfl
+  | cons hd tl ih =>
+    unfold Sigma.domMem at h
+    simp only [List.any_cons, Bool.or_eq_false_iff] at h
+    simp only [List.find?_cons, h.1]
+    exact ih h.2
+
+/-- `find?` over `s ++ [(k, v)]` where `s` does not itself contain `k`
+locates the appended pair: search fails all the way through `s` (via
+`find_none_of_domMem_false`), then matches the freshly appended entry. -/
+theorem find_append_singleton (s : Sigma) (k v : String) (h : s.domMem k = false) :
+    (s ++ [(k, v)]).find? (fun p => p.1 == k) = some (k, v) := by
+  induction s with
+  | nil => simp
+  | cons hd tl ih =>
+    unfold Sigma.domMem at h
+    simp only [List.any_cons, Bool.or_eq_false_iff] at h
+    simp only [List.cons_append, List.find?_cons, h.1]
+    exact ih h.2
+
 theorem get_set_self (s : Sigma) (k v : String) (h : s.domMem k = false) :
     ∃ s', s.set k v = some s' ∧ s'.get k = some v := by
   refine ⟨s ++ [(k, v)], ?_, ?_⟩
   · unfold Sigma.set
-    rw [h]
+    simp [h]
   · unfold Sigma.get
-    induction s with
-    | nil => simp
-    | cons hd tl ih =>
-      simp only [List.find?_cons, List.append_eq, List.cons_append]
-      unfold Sigma.domMem at h
-      simp only [List.any_cons, Bool.or_eq_false_iff] at h
-      by_cases hc : hd.1 == k
-      · simp [hc] at h
-      · simp only [hc, Bool.false_eq_true, if_false]
-        apply ih
-        simpa using h.2
+    rw [find_append_singleton s k v h]
+    rfl
 
-/-- `restrict` after `set` recovers the original table exactly -- the
-effect-function law Definition 23's `set` states its inverse must
-satisfy (`sigma' . sigma' \ k` restores `sigma`). -/
-theorem restrict_set (s : Sigma) (k v : String) (h : s.domMem k = false) :
-    ∃ s', s.set k v = some s' ∧ s'.restrict k = s := by
-  refine ⟨s ++ [(k, v)], by unfold Sigma.set; rw [h], ?_⟩
+/-- `restrict` over `s ++ [(k, v)]` where `s` does not contain `k`
+drops exactly the appended entry, since `filter`'s predicate `p.1 != k`
+keeps every entry of `s` (none of them equal `k`) and discards the
+appended `(k, v)`. -/
+theorem restrict_append_singleton (s : Sigma) (k v : String) (h : s.domMem k = false) :
+    (s ++ [(k, v)]).restrict k = s := by
   unfold Sigma.restrict
   induction s with
   | nil => simp
@@ -73,12 +92,22 @@ theorem restrict_set (s : Sigma) (k v : String) (h : s.domMem k = false) :
     unfold Sigma.domMem at h
     simp only [List.any_cons, Bool.or_eq_false_iff] at h
     have hne : hd.1 != k := by
-      by_contra hc
-      simp only [ne_eq, bne_iff_ne, not_not] at hc
-      exact absurd (by simp [hc]) (by simpa using h.1)
+      simp only [bne_iff_ne]
+      intro heq
+      rw [heq] at h
+      simp at h
     simp only [List.cons_append, List.filter_cons, hne, if_true]
     congr 1
     exact ih h.2
+
+/-- `restrict` after `set` recovers the original table exactly -- the
+effect-function law Definition 23's `set` states its inverse must
+satisfy (`sigma' . sigma' \ k` restores `sigma`). -/
+theorem restrict_set (s : Sigma) (k v : String) (h : s.domMem k = false) :
+    ∃ s', s.set k v = some s' ∧ s'.restrict k = s := by
+  refine ⟨s ++ [(k, v)], ?_, restrict_append_singleton s k v h⟩
+  unfold Sigma.set
+  simp [h]
 
 end Sigma
 
@@ -95,11 +124,15 @@ structure SigmaIso where
 
 namespace SigmaIso
 
-/-- `rho(k)`: a key outside `dom(rho)` resolves to its own realm
-(Definition 28's own text), matching `coeffect_realm.rs`'s
-`RealmTable::realm_of`. -/
+/-- `rho(k)`, reading the LAST-appended binding for `k` (the most
+recent `isolate` call): `isolate` is a reassignment operation, unlike
+`Sigma.set`'s once-only extension, so resolution must prefer the
+newest entry. `List.find?` over the REVERSED list finds the most
+recently appended entry first. A key outside `dom(rho)` resolves to
+its own realm (Definition 28's own text), matching
+`coeffect_realm.rs`'s `RealmTable::realm_of`. -/
 def realmOf (t : SigmaIso) (k : String) : String :=
-  (t.rho.get k).getD k
+  ((t.rho.reverse.find? (fun p => p.1 == k)).map Prod.snd).getD k
 
 /-- Definition 29 `get`: `get(k)(rho,sigma) = sigma(rho(k))`. -/
 def get (t : SigmaIso) (k : String) : Option String :=
@@ -114,30 +147,18 @@ def set (t : SigmaIso) (k v : String) : Option SigmaIso :=
 
 /-- Definition 29 `isolate(k,r)`: `rho[k -> r]`, inheriting `sigma`
 unchanged -- a *derived* realization (Definition 27): no precondition,
-"a key already isolated is reassigned rather than refused." Modeled by
-appending, then reading via `get` (which uses `List.find?`, taking the
-FIRST match) after `SigmaIso.realmOf` is redefined below to take the
-LAST match, matching genuine reassignment semantics rather than
-Definition 23's extension-only `set`. -/
+"a key already isolated is reassigned rather than refused." -/
 def isolate (t : SigmaIso) (k r : String) : SigmaIso :=
   { t with rho := t.rho ++ [(k, r)] }
 
-/-- `realmOf` must read the LAST-appended binding for `k` (the most
-recent `isolate` call), not the first, since `isolate` is a
-reassignment operation, unlike `Sigma.set`'s once-only extension. This
-redefinition captures that: `List.find?` over the REVERSED list finds
-the most recently appended entry first. -/
-def realmOfLatest (t : SigmaIso) (k : String) : String :=
-  ((t.rho.reverse.find? (fun p => p.1 == k)).map Prod.snd).getD k
-
 /-- Reassigning an already-isolated key changes the realm it resolves
-to on the NEXT `get`/`set` (via `realmOfLatest`), witnessing "a key
-already isolated is reassigned rather than refused" concretely: two
-successive `isolate` calls on the same key leave the SECOND realm as
-the one `realmOfLatest` reports, never an error and never the first. -/
-theorem isolate_reassigns (t : SigmaIso) (k r1 r2 : String) (hne : r1 ≠ r2) :
-    ((t.isolate k r1).isolate k r2).realmOfLatest k = r2 := by
-  unfold SigmaIso.isolate SigmaIso.realmOfLatest
+to on the NEXT `get`/`set`, witnessing "a key already isolated is
+reassigned rather than refused" concretely: two successive `isolate`
+calls on the same key leave the SECOND realm as the one `realmOf`
+reports, never an error and never the first. -/
+theorem isolate_reassigns (t : SigmaIso) (k r1 r2 : String) :
+    ((t.isolate k r1).isolate k r2).realmOf k = r2 := by
+  unfold SigmaIso.isolate SigmaIso.realmOf
   simp only [List.reverse_append, List.reverse_cons, List.reverse_nil, List.nil_append,
     List.cons_append, List.find?_cons]
   simp
@@ -152,21 +173,30 @@ theorem isolate_preserves_sigma (t : SigmaIso) (k r : String) :
 /-- A key with NO isolation entry resolves to its own name, Definition
 28's stated default (`rho(k) = k` for `k \notin dom(rho)`) -- the base
 case every `isolate` call above starts from. -/
-theorem realmOf_default (t : SigmaIso) (k : String) (h : t.rho.domMem k = false) :
+theorem realmOf_default (t : SigmaIso) (k : String) (h : Sigma.domMem t.rho k = false) :
     t.realmOf k = k := by
-  have hget : t.rho.get k = none := by
-    unfold Sigma.get
-    unfold Sigma.domMem at h
-    induction t.rho with
-    | nil => rfl
-    | cons hd tl ih =>
-      simp only [List.any_cons, Bool.or_eq_false_iff] at h
-      have hne : ¬ (hd.1 == k) := by simpa using h.1
-      simp only [List.find?_cons, hne, Bool.false_eq_true, if_false]
-      exact ih h.2
+  have hrev : Sigma.domMem t.rho.reverse k = false := by
+    unfold Sigma.domMem at h ⊢
+    rw [List.any_reverse]
+    exact h
   unfold SigmaIso.realmOf
-  rw [hget]
+  rw [Sigma.find_none_of_domMem_false t.rho.reverse k hrev]
   rfl
+
+/-- Two keys isolated into different realms via `isolate` resolve
+independently: isolating `k1` never disturbs what a DIFFERENT key `k2`
+already resolves to (a real multi-tenant scenario -- isolating a
+capability for one component's realm must not perturb another
+component's already-isolated realm for a different key). -/
+theorem isolate_distinct_keys_independent (t : SigmaIso) (k1 k2 r : String) (hne : k1 ≠ k2) :
+    (t.isolate k1 r).realmOf k2 = t.realmOf k2 := by
+  unfold SigmaIso.isolate SigmaIso.realmOf
+  simp only [List.reverse_append, List.reverse_cons, List.reverse_nil, List.nil_append,
+    List.cons_append, List.find?_cons]
+  have : (k1 == k2) = false := by
+    simp only [beq_eq_false_iff_ne]
+    exact hne
+  simp [this]
 
 end SigmaIso
 

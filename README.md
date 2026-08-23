@@ -34,7 +34,38 @@ process-execution verbs.
 Orchestrator verbs: `instruction`, `transition`, `transition-revert`,
 `discipline-check-removal`, `discipline-audit`, `memory-namespace-audit`,
 `codeinsight-namespace-audit`, `calculus-model-check`, `phase-status`,
-`mutable-resolve`, `memorize-fire`, `residual-scan`, `auto-recall`.
+`mutable-resolve`, `memorize-fire`, `residual-scan`, `auto-recall`,
+`component-loader-reconcile`, `component-loader-hmr`.
+
+`component-loader-reconcile`/`component-loader-hmr`
+(`orchestrator/component_loader.rs`, `orchestrator/component_loader_dispatch.rs`)
+implement the Cordis paper's Section 5.2 Component Loader on top of the same
+kind-agnostic `fiber_lifecycle`/`coeffect_realm` machinery `discipline_note.rs`
+already uses -- `ComponentEntry` is Definition 74's entry record (`id`, `url`,
+`isolate`, `intercept`, `config`, `disabled`), and `component-loader-reconcile`
+(`{previous: [entry...], next: [entry...]}`) diffs two entry lists by `id` and
+dispatches the least-disruptive operation per Section 5.2.1's own bullet list
+(`id`/`url` change -> rebuild; `isolate` change -> Algorithm 7's
+`patch_isolation` realm reassignment; `config` change -> apply; `disabled`
+toggle -> unload/reload), reporting each entry's `ReconcileOp` plus, for a
+realm reassignment, the per-key diff (`old_realm`, `new_realm`, fresh
+`entry_tag`) and the notified-dependent set Algorithm 7's own `notify` line
+computes. `component-loader-hmr` (`{stashed, externals, entries, graph,
+current_sources, next_sources, fail_urls?}`) runs the full three-phase HMR
+engine: Algorithm 8 `classify` (accepted/declined fixed point over the
+caller-supplied import graph, an unresolved import cycle defaulting to
+declined per the algorithm's own line 21), Algorithm 9 `detect` (walks each
+entry's dependency tree via `get_dependencies`, respecting the declined
+boundary, folding a stale entry's tree back into `accepted` as it goes), and
+Algorithm 10 `reload` (invalidates+backs-up the accepted modules, disposes and
+reinstantiates each stale entry, and on ANY import failure unconditionally
+rebuilds every stale entry from `backup` before returning the error -- the
+paper's own transactional guarantee that the system never observes a
+half-reloaded state). `fail_urls` lets a caller deliberately simulate an
+import failure to witness the rollback path in a live dispatch, matching this
+crate's own no-test-file convention (see `AGENTS.md`'s "Parser-shaped
+surfaces need adversarial input" section) for a surface with no standing test
+harness.
 
 `transition-revert` pops the most recent entry off `TurnState.phase_history`
 (a LIFO accumulator every `transition` call appends to) and restores the
