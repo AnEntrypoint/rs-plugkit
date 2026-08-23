@@ -4,3 +4,4 @@ import CordisCalculus.Ordering
 import CordisCalculus.Recovery
 import CordisCalculus.Progress
 import CordisCalculus.Confluence
+import CordisCalculus.Confinement
