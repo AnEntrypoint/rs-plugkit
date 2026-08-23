@@ -18,3 +18,4 @@ import CordisCalculus.Transition
 import CordisCalculus.Episode
 import CordisCalculus.RecoveryGeneral
 import CordisCalculus.ResolutionCoherence
+import CordisCalculus.Correspondence
