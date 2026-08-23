@@ -487,6 +487,13 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
         return (String::new(), "discipline-check-removal refused: discipline name required".to_string(), 1);
     }
     let want_remove = parsed.as_ref().and_then(|v| v.get("remove").and_then(|x| x.as_bool())).unwrap_or(false);
+    if want_remove && discipline == "default" {
+        return (
+            String::new(),
+            "discipline-check-removal refused: \"default\" is a synthetic always-active entry, never a member of enabled.txt, and cannot be removed".to_string(),
+            1,
+        );
+    }
     let dependents = removal_dependents(&discipline);
     let lifecycle = read_fiber_state(&discipline);
     let all_known = all_known_discipline_dirs();
@@ -545,8 +552,27 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
     let new_content = remaining.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
     let enabled_path = gm_dir().join("disciplines").join("enabled.txt").to_string_lossy().to_string();
     let write_content = if new_content.is_empty() { String::new() } else { format!("{}\n", new_content) };
-    if !pkfs::write(&enabled_path, &write_content) {
-        return (String::new(), "discipline-check-removal failed: could not write enabled.txt".to_string(), 1);
+    // Compare-and-swap, not a blind overwrite: `enabled_names()` above read
+    // `enabled.txt` at the START of this dispatch, and this is the ONLY
+    // write to that file this crate performs (it is an ordinary tracked
+    // file a human may also hand-edit). A plain `pkfs::write` here would
+    // silently clobber a concurrent hand-edit or a second concurrent
+    // `remove:true` dispatch racing against this one -- the exact
+    // check-then-act shape AGENTS.md's single-writer-per-surface invariant
+    // forbids. `cas_write` fails closed on a content mismatch instead.
+    let original_content = pkfs::read_to_string(&enabled_path).unwrap_or_default();
+    match pkfs::cas_write(&enabled_path, &original_content, &write_content) {
+        pkfs::CasWriteOutcome::Swapped => {}
+        pkfs::CasWriteOutcome::Mismatch => {
+            return (
+                String::new(),
+                "discipline-check-removal refused: enabled.txt changed concurrently since this dispatch read it -- re-dispatch discipline-check-removal to re-evaluate against the current content".to_string(),
+                1,
+            );
+        }
+        pkfs::CasWriteOutcome::IoError => {
+            return (String::new(), "discipline-check-removal failed: could not write enabled.txt".to_string(), 1);
+        }
     }
 
     let payload = serde_json::json!({
