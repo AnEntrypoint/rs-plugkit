@@ -6,4 +6,5 @@ import CordisCalculus.Progress
 import CordisCalculus.Confluence
 import CordisCalculus.Confinement
 import CordisCalculus.Independence
+import CordisCalculus.CommutativeKeys
 import CordisCalculus.ObservationalEquivalence
