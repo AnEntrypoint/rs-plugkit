@@ -344,7 +344,7 @@ pub fn handle_model_check(_content: &str) -> (String, String, i32) {
 /// faithfully (zero remaining = L-Finish next, nonzero = L-Iter next)
 /// without needing the iterator's own computational content, which -- like
 /// the base calculus's effect functions -- has none in this abstract model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExtendedLifecycle {
     /// Definition 49's `Inactive(zeta)`: `outcome` is `bot` after O-Insert
     /// or a successful withdrawal, `Some(err)` after L-Raise.

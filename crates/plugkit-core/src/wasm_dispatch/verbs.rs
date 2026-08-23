@@ -633,10 +633,44 @@ fn kv_get(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
     if key.is_empty() { return err("kv_get", "key required"); }
+    if let Some(violation) = confinement_violation(body, ns) {
+        return err("kv_get", &violation);
+    }
     let packed = unsafe { host_kv_get(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok("kv_get", Value::String(s)),
         None => ok("kv_get", Value::Null),
+    }
+}
+
+/// Confinement (Cordis paper Definition 48, Section 4.2): a component's
+/// effect writes/reads during its own activation must stay bounded to its
+/// own name -- it may not mutate or read state belonging to a DIFFERENTLY
+/// named, currently-enabled component. `namespace` on `kv_put`/`kv_query`/
+/// `kv_get`/`memorize` was a plain caller-supplied string with no check
+/// against the dispatching component's own identity: any discipline (or any
+/// caller impersonating one) could pass another enabled discipline's name
+/// as `namespace` and write into that discipline's store. This function is
+/// the enforcement point Definition 48 requires but nothing upstream
+/// provided -- it refuses only the confinement-violating case (an explicit
+/// `discipline` field naming one component while `namespace` names a
+/// DIFFERENT, currently-enabled one), leaving every unscoped call (no
+/// `discipline` field, the common case today) unaffected so existing
+/// callers keep working while a caller that DOES declare its identity gets
+/// real enforcement.
+fn confinement_violation(body: &Value, namespace: &str) -> Option<String> {
+    let claimed = body.get("discipline").and_then(|v| v.as_str())?;
+    if claimed == namespace {
+        return None;
+    }
+    let enabled = crate::orchestrator::discipline_note::enabled_names();
+    if enabled.iter().any(|n| n == namespace) {
+        Some(format!(
+            "confinement violation (Cordis Definition 48): component '{}' may not write namespace '{}' belonging to another enabled component",
+            claimed, namespace
+        ))
+    } else {
+        None
     }
 }
 
@@ -661,6 +695,9 @@ fn kv_put(body: &Value) -> u64 {
     let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
     let val = body.get("value").and_then(|v| v.as_str()).unwrap_or("");
     if key.is_empty() { return err("kv_put", "key required"); }
+    if let Some(violation) = confinement_violation(body, ns) {
+        return err("kv_put", &violation);
+    }
     if !kv_put_namespace_permitted(ns) {
         return err(
             "kv_put",
@@ -673,6 +710,9 @@ fn kv_put(body: &Value) -> u64 {
 
 fn kv_query(body: &Value) -> u64 {
     let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    if let Some(violation) = confinement_violation(body, ns) {
+        return err("kv_query", &violation);
+    }
     let q = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, q.as_ptr(), q.len() as u32) };
     let v = unpack_to_value(packed);
@@ -959,6 +999,9 @@ fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
         .unwrap_or_else(|| raw.trim().to_string());
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
     if text.is_empty() { return err("memorize", "text required"); }
+    if let Some(violation) = confinement_violation(body, namespace) {
+        return err("memorize", &violation);
+    }
     if crate::tencentdb_memory::namespace_is_routed(namespace) {
         let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("l0");
         let emb = match embed_passage(text.as_str()) {
