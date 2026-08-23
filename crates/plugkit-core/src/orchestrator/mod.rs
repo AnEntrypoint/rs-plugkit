@@ -219,22 +219,38 @@ pub const ORCHESTRATOR_VERBS: &[&str] = &[
 ];
 
 
-/// Every verb this list advertises must have a real dispatch arm. Checked by
-/// routing each one through the same `verb_has_dispatch_arm` predicate the
-/// match itself is built from, so adding an arm without listing it (or the
-/// reverse) is caught at the first dispatch rather than by a caller.
-#[cfg(debug_assertions)]
-fn debug_assert_verb_sets_agree() {
+/// Every verb this list advertises must have a real dispatch arm, and every
+/// verb with a real dispatch arm must be advertised here. The second
+/// direction is the one that actually shipped two fully-implemented HMR
+/// verbs as unreachable in production: `is_orchestrator_verb` (built from
+/// `ORCHESTRATOR_VERBS`) gates entry to `dispatch()` before its match ever
+/// runs, so a verb present in the match but missing from
+/// `ORCHESTRATOR_VERBS` never reaches its own correct handler --
+/// `unknown_verb` on every call, with no signal that a working handler
+/// exists. Checking only "advertised implies has an arm" (the original
+/// shape of this guard) cannot catch that failure mode at all, since the
+/// missing verb is never iterated in the first place.
+///
+/// Runs unconditionally, in every build profile including release: the
+/// original debug-only guard (and the `verb_has_dispatch_arm` predicate it
+/// called) did not exist in a release wasm at all, so this drift class went
+/// uncaught in production. A `matches!` over ~32 string literals per
+/// dispatch is a negligible per-call cost next to the network/filesystem/db
+/// work every real verb handler already does.
+fn assert_verb_sets_agree() {
     for v in ORCHESTRATOR_VERBS {
-        debug_assert!(
+        assert!(
             verb_has_dispatch_arm(v),
             "ORCHESTRATOR_VERBS advertises {v} but dispatch() has no arm for it"
         );
     }
+    for v in DISPATCH_ARM_VERBS {
+        assert!(
+            ORCHESTRATOR_VERBS.contains(v),
+            "dispatch() has an arm for {v} but ORCHESTRATOR_VERBS does not advertise it -- this verb is unreachable in production"
+        );
+    }
 }
-
-#[cfg(not(debug_assertions))]
-fn debug_assert_verb_sets_agree() {}
 
 pub fn is_orchestrator_verb(verb: &str) -> bool {
     ORCHESTRATOR_VERBS.contains(&verb)
@@ -253,18 +269,23 @@ fn handle_memorize_continue(_content: &str) -> (String, String, i32) {
     ("{\"ok\":false,\"error\":\"memorize-continue requires wasm32\"}".to_string(), String::new(), 1)
 }
 
-#[cfg(debug_assertions)]
+/// The verb literal set the `match` inside `dispatch()` actually handles,
+/// kept as its own const so `assert_verb_sets_agree` can iterate the real
+/// dispatch surface rather than a third hand-maintained copy of it. This is
+/// the same literal set the match arms below list; a verb added to one and
+/// not the other is exactly the drift this guard exists to catch.
+const DISPATCH_ARM_VERBS: &[&str] = &[
+    "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list",
+    "memorize-fire", "discipline-note", "discipline-check-removal", "discipline-audit", "capability-resolve", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan",
+    "auto-recall", "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
+    "task-spawn", "task-list", "task-stop", "task-output",
+    "memorize-continue", "fsm-vendor", "fsm-validate", "fsm-propose-override",
+    "claim-audit", "submodule-check",
+    "component-loader-reconcile", "component-loader-hmr",
+];
+
 fn verb_has_dispatch_arm(verb: &str) -> bool {
-    matches!(
-        verb,
-        "transition" | "transition-revert" | "mutable-resolve" | "mutable-add" | "mutable-list"
-            | "memorize-fire" | "discipline-note" | "discipline-check-removal" | "discipline-audit" | "capability-resolve" | "memory-namespace-audit" | "codeinsight-namespace-audit" | "calculus-model-check" | "phase-status" | "residual-scan"
-            | "auto-recall" | "instruction" | "prd-add" | "prd-resolve" | "prd-list" | "prd-defer"
-            | "task-spawn" | "task-list" | "task-stop" | "task-output"
-            | "memorize-continue" | "fsm-vendor" | "fsm-validate" | "fsm-propose-override"
-            | "claim-audit" | "submodule-check"
-            | "component-loader-reconcile" | "component-loader-hmr"
-    )
+    DISPATCH_ARM_VERBS.contains(&verb)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -274,7 +295,7 @@ pub fn dispatch(verb: &str, _file_id: &str, _content: &str) -> (String, String, 
 
 #[cfg(target_arch = "wasm32")]
 pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i32) {
-    debug_assert_verb_sets_agree();
+    assert_verb_sets_agree();
     match verb {
         "transition" => transitions::handle(content),
         "transition-revert" => transitions::handle_revert(content),
