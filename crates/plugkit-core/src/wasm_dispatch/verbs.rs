@@ -1445,6 +1445,9 @@ fn memorize_prune(body: &Value) -> u64 {
 /// (falling back to `find`/Grep/Glob because codesearch could not reach a
 /// submodule at all).
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
+    if !crate::wasm_dispatch::host_allow_root(root) {
+        return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
+    }
     if body.get("mode").and_then(|v| v.as_str()) == Some("filename") {
         let out = crate::code_index::search_filenames_at(query, k as usize, cfg, Some(root));
         return ok("codesearch", out);

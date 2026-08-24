@@ -13,6 +13,7 @@ macro_rules! host_abi_extern_block_and_host_imports_list_from_one_declaration {
 
 host_abi_extern_block_and_host_imports_list_from_one_declaration! {
     fn host_cwd() -> u64;
+    fn host_fs_allow_root(path_ptr: *const u8, path_len: u32) -> u32;
     fn host_fs_read(path_ptr: *const u8, path_len: u32) -> u64;
     fn host_fs_write(path_ptr: *const u8, path_len: u32, data_ptr: *const u8, data_len: u32) -> u32;
     fn host_fs_cas_write(path_ptr: *const u8, path_len: u32, expected_ptr: *const u8, expected_len: u32, data_ptr: *const u8, data_len: u32) -> u32;
@@ -193,6 +194,16 @@ pub fn pack_ptr_len_pub(ptr: usize, len: usize) -> u64 { pack_ptr_len(ptr, len) 
 pub fn host_cwd_string() -> Option<String> {
     let packed = unsafe { host_cwd() };
     unpack_to_string(packed)
+}
+
+/// Names `root` as an additional filesystem root the host may read/write
+/// from for the rest of this session -- required before `host_read`/
+/// `host_stat`/`host_write`/etc. can reach a path outside the current
+/// project's own cwd or `~/.gm`. Returns true if the host accepted the
+/// root (a real, existing directory).
+pub fn host_allow_root(root: &str) -> bool {
+    let rc = unsafe { host_fs_allow_root(root.as_ptr(), root.len() as u32) };
+    rc != 0
 }
 
 pub fn host_read(path: &str) -> Option<String> {
