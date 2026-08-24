@@ -269,14 +269,15 @@ jobs:
         run: |
           set -e
           base="https://github.com/AnEntrypoint/plugkit-bin/releases/download/v$VER"
-          for name in plugkit.wasm plugkit.wasm.sha256 plugkit.wasm.version plugkit-slim.wasm plugkit-slim.wasm.sha256; do
+          for f in release-assets/*; do
+            name=$(basename "$f")
             code=$(curl -sL -o /dev/null -w '%{http_code}' "$base/$name")
             if [ "$code" != "200" ]; then
               echo "::error::published release v$VER's $name is not fetchable (HTTP $code) -- the upload did not actually land"
               exit 1
             fi
           done
-          echo "[ok] all 5 release assets confirmed fetchable at $base"
+          echo "[ok] all $(ls release-assets | wc -l) release assets confirmed fetchable at $base"
 
       - name: Bump gm metadata (best-effort -- gm's own bootstrap resolves the latest plugkit-bin release at runtime regardless of these committed values)
         env:
