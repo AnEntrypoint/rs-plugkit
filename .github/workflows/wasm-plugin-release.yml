@@ -145,3 +145,22 @@ jobs:
           fi
           gh release upload "v$VER" --repo "$REPO" --clobber release-assets/*
 
+      - name: Verify every uploaded asset is actually fetchable, not just reported as uploaded
+        env:
+          VER: ${{ needs.bump.outputs.version }}
+          REPO: ${{ inputs.release_repo }}
+        working-directory: ${{ inputs.crate_dir }}
+        shell: bash
+        run: |
+          set -e
+          base="https://github.com/$REPO/releases/download/v$VER"
+          for f in release-assets/*; do
+            name=$(basename "$f")
+            code=$(curl -sL -o /dev/null -w '%{http_code}' "$base/$name")
+            if [ "$code" != "200" ]; then
+              echo "::error::published release v$VER's $name is not fetchable (HTTP $code) -- the upload did not actually land"
+              exit 1
+            fi
+          done
+          echo "[ok] all $(ls release-assets | wc -l) release assets confirmed fetchable at $base"
+
