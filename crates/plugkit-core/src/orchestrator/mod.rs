@@ -210,7 +210,7 @@ pub fn gm_dir() -> PathBuf {
 /// runs on every orchestrator dispatch in a debug build and names the exact
 /// verb that drifted.
 pub const ORCHESTRATOR_VERBS: &[&str] = &[
-    "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list",
+    "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list", "mutable-defer",
     "memorize-fire", "discipline-note", "discipline-check-removal", "discipline-audit", "capability-resolve", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan", "auto-recall",
     "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
     "task-spawn", "task-list", "task-stop", "task-output",
@@ -275,7 +275,7 @@ fn handle_memorize_continue(_content: &str) -> (String, String, i32) {
 /// the same literal set the match arms below list; a verb added to one and
 /// not the other is exactly the drift this guard exists to catch.
 const DISPATCH_ARM_VERBS: &[&str] = &[
-    "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list",
+    "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list", "mutable-defer",
     "memorize-fire", "discipline-note", "discipline-check-removal", "discipline-audit", "capability-resolve", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan",
     "auto-recall", "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
     "task-spawn", "task-list", "task-stop", "task-output",
@@ -302,6 +302,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "mutable-resolve" => mutables::handle_resolve(content),
         "mutable-add" => mutables::handle_add(content),
         "mutable-list" => mutables::handle_list(content),
+        "mutable-defer" => mutables::handle_defer(content),
         "memorize-fire" => memorize::handle_fire(content),
         "discipline-note" => discipline_note::handle(content),
         "discipline-check-removal" => discipline_note::handle_check_removal(content),

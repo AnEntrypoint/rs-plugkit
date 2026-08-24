@@ -231,7 +231,11 @@ fn prd_pending_count(items: &[serde_json::Value]) -> usize {
 #[cfg(target_arch = "wasm32")]
 fn item_is_open(it: &serde_json::Value) -> bool {
     let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-    prd::status_is_open(status)
+    let blocked_external = it.get("blockedBy")
+        .and_then(|v| v.as_array())
+        .map(|seq| seq.iter().any(|x| matches!(x.as_str(), Some("external") | Some("out-of-reach"))))
+        .unwrap_or(false);
+    prd::status_is_open(status) && !blocked_external
 }
 
 #[cfg(target_arch = "wasm32")]
