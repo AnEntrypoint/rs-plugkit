@@ -1,7 +1,7 @@
 use serde_yaml::Value;
 use super::cas;
 use super::gm_dir;
-use super::yaml_util::{invalidate_residual_marker, levenshtein, yaml_to_json};
+use super::yaml_util::{defer_marker_in_text, invalidate_residual_marker, levenshtein, yaml_to_json};
 use crate::pkfs;
 
 pub fn prd_path() -> std::path::PathBuf {
@@ -146,35 +146,6 @@ pub fn handle_list(_content: &str) -> (String, String, i32) {
     (serde_json::json!({ "items": items, "count": count }).to_string(), String::new(), 0)
 }
 
-fn defer_marker_in_text(text: &str) -> Option<&'static str> {
-    let lower = text.to_lowercase();
-    const HARD_MARKERS: &[&str] = &[
-        "defer to later", "deferred to later", "deferred for later",
-        "address it next", "address this next", "leave for next",
-        "documented for next", "documented for future",
-        "below criticality", "skip for now", "punt for now",
-        "do later", "fix later", "later pass", "future work",
-    ];
-    for m in HARD_MARKERS {
-        if lower.contains(m) { return Some(m); }
-    }
-    const SOFT_MARKERS: &[&str] = &[
-        "next pass", "next session", "next turn",
-        "future pass", "future session", "future turn",
-    ];
-    let has_soft = SOFT_MARKERS.iter().find(|m| lower.contains(**m)).copied();
-    if let Some(m) = has_soft {
-        const DEFER_CUE: &[&str] = &["defer", "punt", "leave", "save it", "save this",
-            "push to", "kick to", "hold for", "wait for", "do it in", "handle in", "finish in"];
-        const RETRO_CUE: &[&str] = &["quoted", "described", "the phrase", "rejected for",
-            "flagged", "caused by", "deviation", "false-positive", "false positive",
-            "was mine", "self-caught", "tripped", "substring"];
-        let retro = RETRO_CUE.iter().any(|c| lower.contains(c));
-        let defer = DEFER_CUE.iter().any(|c| lower.contains(c));
-        if defer && !retro { return Some(m); }
-    }
-    None
-}
 
 pub fn handle_add(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();

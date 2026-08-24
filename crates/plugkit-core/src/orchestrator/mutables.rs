@@ -212,6 +212,13 @@ pub fn obligations_blocker_message(kinds: &[&str]) -> String {
     }
 }
 
+fn mutable_blocked_external(item: &serde_yaml::Value) -> bool {
+    item.get("blockedBy")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| seq.iter().any(|x| matches!(x.as_str(), Some("external") | Some("out-of-reach"))))
+        .unwrap_or(false)
+}
+
 pub fn pending_detailed() -> Vec<serde_json::Value> {
     let path = mutables_path();
     let path_s = path.to_string_lossy().to_string();
@@ -232,7 +239,7 @@ pub fn pending_detailed() -> Vec<serde_json::Value> {
     if let Some(seq) = doc.as_sequence() {
         for item in seq {
             let status = item.get("status").and_then(|v| v.as_str()).unwrap_or(&policy.mutables_default_status);
-            if !resolved_statuses.iter().any(|s| s == status) {
+            if !resolved_statuses.iter().any(|s| s == status) && !mutable_blocked_external(item) {
                 if let Some(m) = item.as_mapping() {
                     let mut obj = serde_json::Map::new();
                     for (k, v) in m {
@@ -429,4 +436,87 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         "memorize_write": memo_written,
     });
     (payload.to_string(), String::new(), 0)
+}
+
+/// Mark an EXISTING, already-tracked mutable `blockedBy: ["external"]` so
+/// `pending_detailed()` (the `mutables-all-resolved` COMPLETE-gate predicate, and the
+/// `mutables_pending` list surfaced by `instruction`) stops treating it as an open row
+/// blocking CONSOLIDATE -- without resolving it, which would falsely claim the unknown is
+/// answered. Mirrors `prd::handle_defer` exactly: a mutable inherited from a prior,
+/// unrelated session (a cross-session investigation with no fix available this session,
+/// or a one-way-door decision only a human can make -- a credential, a history rewrite,
+/// a product call) has no escape from `mutables-all-resolved` today even though the
+/// equivalent PRD-row case already does via `prd-defer`, which is the exact asymmetry
+/// that made the CONSOLIDATE gate's `prd-all-closed`+`mutables-all-resolved`+
+/// `residual-scan-fired` triple unsatisfiable whenever a session inherited a genuinely
+/// out-of-scope mutable: PRD could be emptied via `prd-defer`, but the mutable had no
+/// matching move and stayed permanently pending. Same deviation gate as prd-defer/
+/// prd-add: `reason` must name the actual concrete reach path, not bare deferral
+/// language, so this cannot become a second "declare it externally blocked" exit.
+pub fn handle_defer(content: &str) -> (String, String, i32) {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return (String::new(), "missing body: {\"id\": \"<mutable-id>\", \"reason\": \"<why this is genuinely out of reach this session, and what session/path would resolve it>\"}".to_string(), 1);
+    }
+    let v: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return (String::new(), "parse failed: body must be JSON {\"id\":..,\"reason\":..}".to_string(), 1),
+    };
+    let id_target = match v.get("id").or_else(|| v.get("mutable_id")).or_else(|| v.get("slug")).and_then(|s| s.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => return (String::new(), "missing `id`".to_string(), 1),
+    };
+    let reason = match v.get("reason").or_else(|| v.get("witness_evidence")).and_then(|s| s.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => return (String::new(), "missing `reason`: name why this row is genuinely out of reach this session and what would resolve it -- bare deferral language is rejected, same as mutable-add/prd-defer".to_string(), 1),
+    };
+    if let Some(marker) = super::yaml_util::defer_marker_in_text(&reason) {
+        let err = format!(
+            "mutable-defer refused: deferral language detected ('{}'). Same rule as prd-defer's own gate -- name the concrete reason this is genuinely cross-session/out-of-reach (e.g. 'flaky multiplayer repro needs its own dedicated debugging session, unrelated to this session's rendering-pipeline fix'), not bare 'later'/'next session' phrasing with no substance.",
+            marker
+        );
+        return (String::new(), err, 1);
+    }
+    let path = mutables_path();
+    let path_s = path.to_string_lossy().to_string();
+    if !pkfs::exists(&path_s) {
+        return (String::new(), format!("{} does not exist", path.display()), 1);
+    }
+    let policy = super::fsm::graph().policy;
+    let outcome = cas::cas_retry_write(&path_s, policy.cas_max_attempts, "mutable-defer", |mut doc: Value| {
+        let mut found = false;
+        if let Some(seq) = doc.as_sequence_mut() {
+            for item in seq.iter_mut() {
+                if let Some(map) = item.as_mapping_mut() {
+                    if map.get(&Value::String("id".to_string())).and_then(|v| v.as_str()) == Some(&id_target) {
+                        map.insert(
+                            Value::String("blockedBy".to_string()),
+                            Value::Sequence(vec![Value::String("external".to_string())]),
+                        );
+                        map.insert(Value::String("deferReason".to_string()), Value::String(reason.clone()));
+                        found = true;
+                    }
+                }
+            }
+        }
+        if !found {
+            let body = serde_json::json!({
+                "error": format!("mutable id not found: {}", id_target),
+                "deviation_kind": "mutable-defer-unknown-id",
+                "deviation_severity": "deny",
+                "mutable_id": id_target,
+            }).to_string();
+            return cas::CasOutcome::Abort(body, format!("mutable id not found: {}", id_target), 1);
+        }
+        cas::CasOutcome::Write(doc, ())
+    });
+    match outcome {
+        Ok(()) => {
+            invalidate_residual_marker();
+            #[cfg(target_arch = "wasm32")]
+            crate::wasm_dispatch::emit_event("mutable.deferred", serde_json::json!({ "id": id_target, "reason": reason }));
+            (serde_json::json!({ "deferred": id_target, "blockedBy": ["external"] }).to_string(), String::new(), 0)
+        }
+        Err((out, err, rc)) => (out, err, rc),
+    }
 }
