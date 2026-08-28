@@ -4,7 +4,7 @@ use serde_json::json;
 use std::sync::Mutex;
 
 const RESOLVED_CACHE_TTL_MS: u64 = 5_000;
-const HOST_DISPATCH_CALL_DEADLINE_MS: u64 = 40_000;
+const HOST_DISPATCH_CALL_DEADLINE_MS: u64 = 120_000;
 const WALL_BUDGET_TAIL_MARGIN_MS: u64 = 10_000;
 
 struct ResolvedEntry {

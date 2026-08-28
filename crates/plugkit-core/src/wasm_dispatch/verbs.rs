@@ -144,7 +144,7 @@ fn embed_passage(text: &str) -> Option<Value> {
     }
 }
 
-pub const BROWSER_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+pub const BROWSER_DEFAULT_TIMEOUT_MS: u64 = 180_000;
 
 pub const ERR_CODE_FAILED: &str = "failed";
 pub const ERR_CODE_RETIRED_VERB: &str = "retired_verb";
@@ -159,8 +159,8 @@ fn shared_store_contract() -> Value {
         "identity": "the resolved file path IS the identity -- libsql routes by path alone and ignores the `db` handle name for any real file (that field is consulted only for :memory:), so two callers naming the same file share one store and two projects with different files cannot collide",
         "isolation": "none beyond the path. There is no per-plugin namespace and no ownership claim; any plugin handed the path reaches the whole store, including tables another plugin created.",
         "locking": "the WASI VFS has no OS file locking and serializes with a <db>.lock DIRECTORY. It is created before a write and removed after, so an unclean exit leaves it behind and every later write returns SQLITE_BUSY forever -- no holder to find, no timeout that expires it, survives reboots. A locked error now names the directory and the remedy.",
-        "busy_timeout_ms": 8000,
-        "busy_timeout_ceiling_rule": "must stay well under the host dispatch deadline (40s). A wait that outlives the epoch budget TRAPS the instance instead of returning a reportable SQLITE_BUSY, and a trap carries no error text -- contention then looks like a crash.",
+        "busy_timeout_ms": 20000,
+        "busy_timeout_ceiling_rule": "must stay well under the host dispatch deadline (120s). A wait that outlives the epoch budget TRAPS the instance instead of returning a reportable SQLITE_BUSY, and a trap carries no error text -- contention then looks like a crash.",
         "journal_mode": "WAL where the conversion succeeds. It needs an exclusive lock, so it is attempted once per process per path and memoized only on a verified read-back -- PRAGMA journal_mode=WAL returns OK while silently doing nothing when it cannot take the lock.",
         "aggregate_hazard": "an UNFILTERED aggregate over an F32_BLOB vector table answers 0 even when the table is full. Count with a predicate, or with SUM over a GROUP BY subquery, or against the <table>_vec_shadow companion. A bare COUNT(*) reporting 0 is not evidence of an empty store.",
     })
@@ -461,8 +461,8 @@ fn scan_deps(body: &Value) -> u64 {
     ok("scan_deps", crate::scan_deps::scan_deps(body))
 }
 
-pub const FETCH_DEFAULT_TIMEOUT_MS: u64 = 30_000;
-pub const FETCH_MAX_TIMEOUT_MS: u64 = 300_000;
+pub const FETCH_DEFAULT_TIMEOUT_MS: u64 = 60_000;
+pub const FETCH_MAX_TIMEOUT_MS: u64 = 600_000;
 
 fn fetch(body: &Value) -> u64 {
     let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
