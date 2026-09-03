@@ -1,0 +1,135 @@
+fn derive_query(prompt: &str) -> String {
+    let stop: &[&str] = &[
+        "the", "a", "an", "to", "of", "in", "on", "for", "and", "or",
+        "is", "are", "was", "were", "be", "been", "being", "do", "does",
+        "did", "have", "has", "had", "i", "you", "we", "they", "it",
+        "this", "that", "these", "those", "with", "from", "as", "at",
+        "by", "but", "if", "then", "so", "can", "could", "would",
+        "should", "will", "shall", "may", "might", "please", "me",
+        "my", "our", "your", "their", "his", "her",
+    ];
+    let mut words: Vec<&str> = prompt
+        .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+        .filter(|w| !w.is_empty())
+        .filter(|w| {
+            let lower = w.to_lowercase();
+            !stop.contains(&lower.as_str())
+        })
+        .collect();
+    words.truncate(6);
+    if words.len() < 2 {
+        return prompt.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+    }
+    words.join(" ")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn rlog(msg: &str) {
+    #[link(wasm_import_module = "env")]
+    extern "C" { fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32; }
+    let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+}
+
+#[cfg(target_arch = "wasm32")]
+fn emit_recall(query: &str, hits: &serde_json::Value, mode: &str, namespace: &str) {
+    let arr = hits.as_array();
+    let n_hits = arr.map(|a| a.len()).unwrap_or(0);
+    let top_score = arr.and_then(|a| a.first()).and_then(|r| r.get("score")).and_then(|d| d.as_f64());
+    let hit_keys: Vec<serde_json::Value> = arr
+        .map(|a| {
+            a.iter()
+                .filter_map(|h| h.get("key").and_then(|k| k.as_str()))
+                .map(|k| serde_json::Value::String(k.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut fields = serde_json::Map::new();
+    fields.insert("sub".to_string(), serde_json::Value::String("memory".to_string()));
+    fields.insert("query".to_string(), serde_json::Value::String(query.chars().take(200).collect::<String>()));
+    fields.insert("hit".to_string(), serde_json::Value::Bool(n_hits > 0));
+    fields.insert("mode".to_string(), serde_json::Value::String(mode.to_string()));
+    fields.insert("n_hits".to_string(), serde_json::Value::Number(serde_json::Number::from(n_hits as u64)));
+    fields.insert("namespace".to_string(), serde_json::Value::String(namespace.to_string()));
+    fields.insert("hit_keys".to_string(), serde_json::Value::Array(hit_keys));
+    if let Some(s) = top_score { if let Some(num) = serde_json::Number::from_f64(s) { fields.insert("top_score".to_string(), serde_json::Value::Number(num)); } }
+    crate::wasm_dispatch::emit_event("recall", serde_json::Value::Object(fields));
+}
+
+pub fn recall_hits(query_text: &str, limit: u32) -> serde_json::Value {
+    recall_hits_reporting_embed_failure(query_text, limit).0
+}
+
+pub fn recall_hits_reporting_embed_failure(query_text: &str, limit: u32) -> (serde_json::Value, bool) {
+    if query_text.trim().is_empty() {
+        return (serde_json::Value::Array(Vec::new()), false);
+    }
+    let query = derive_query(query_text);
+    let embed_input = if query_text.len() <= 512 { query_text } else { &query };
+    let namespace = "default";
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::wasm_dispatch::host_kv_query;
+        rlog(&format!("recall::recall_hits start query_len={} embed_len={} limit={}", query.len(), embed_input.len(), limit));
+        let embedding_opt = crate::embed::embed_text_json_query(embed_input);
+        let embed_failed = embedding_opt.is_none();
+        let embedding = embedding_opt.unwrap_or(serde_json::Value::Null);
+        rlog(&format!("recall::recall_hits embed_done embedded={}", !embedding.is_null()));
+        if embed_failed {
+            crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
+                "step": "recall_hits_embed_query",
+                "query_len": query.len(),
+            }));
+        }
+        if let Some(md_hits) = crate::wasm_dispatch::memory_recall_backend(&embedding, namespace, limit) {
+            rlog("recall::recall_hits done via md-index");
+            emit_recall(&query, &md_hits, "vector_top_k", namespace);
+            return (md_hits, embed_failed);
+        }
+        let vec_hits = crate::wasm_dispatch::vec_search_local(&embedding, namespace, limit);
+        rlog("recall::recall_hits vec_search returned");
+        if !vec_hits.is_null()
+            && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false)
+        {
+            rlog("recall::recall_hits done via vec_search");
+            emit_recall(&query, &vec_hits, "vector_top_k", namespace);
+            return (vec_hits, embed_failed);
+        }
+        let packed = unsafe {
+            host_kv_query(namespace.as_ptr(), namespace.len() as u32,
+                          query.as_ptr(), query.len() as u32)
+        };
+        rlog("recall::recall_hits kv_query returned");
+        let kv_hits = crate::wasm_dispatch::unpack_to_value_pub(packed);
+        let result = if kv_hits.is_null() { serde_json::Value::Array(Vec::new()) } else { kv_hits };
+        let mode = if embed_failed { "kv_query_degraded" } else { "kv_query" };
+        emit_recall(&query, &result, mode, namespace);
+        (result, embed_failed)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (&query, embed_input, namespace, limit);
+        (serde_json::Value::Array(Vec::new()), false)
+    }
+}
+
+pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
+    let prompt = content.trim();
+    if prompt.is_empty() {
+        return (String::new(), "auto-recall requires user prompt as body".to_string(), 1);
+    }
+    let (results, embed_failed) = recall_hits_reporting_embed_failure(prompt, 3);
+    let query = derive_query(prompt);
+    #[cfg(target_arch = "wasm32")]
+    emit_recall(&query, &results, "auto_recall", "default");
+    let payload = serde_json::json!({
+        "query": query,
+        "limit": 3,
+        "results": results,
+        "embed_failed": embed_failed,
+    });
+    if embed_failed {
+        (payload.to_string(), "embedder unavailable; recall results are empty, not exhaustive -- do not treat as a genuine no-hits result".to_string(), 1)
+    } else {
+        (payload.to_string(), String::new(), 0)
+    }
+}
