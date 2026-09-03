@@ -529,7 +529,7 @@ fn default_graph() -> Graph {
         edges: vec![
             Edge { from: "SPECIFY".into(), to: "PROVE".into(), gates: vec![] },
             Edge { from: "PROVE".into(), to: "EMIT".into(), gates: vec!["mutables-all-resolved".into()] },
-            Edge { from: "EMIT".into(), to: "STATE".into(), gates: vec!["no-synthetic-test-files".into(), "no-graphical-symbols-in-diff".into(), "no-admit-deferral-markers".into()] },
+            Edge { from: "EMIT".into(), to: "STATE".into(), gates: vec!["no-synthetic-test-files".into(), "no-scratch-artifacts-in-diff".into(), "no-graphical-symbols-in-diff".into(), "no-admit-deferral-markers".into()] },
             Edge { from: "STATE".into(), to: "CONC".into(), gates: vec!["idempotent-dispatch-replay-safe".into()] },
             Edge { from: "CONC".into(), to: "SEC".into(), gates: vec![] },
             Edge { from: "SEC".into(), to: "RES".into(), gates: vec!["no-secrets-in-diff".into()] },
@@ -637,6 +637,14 @@ fn default_graph() -> Graph {
                 hook_mode: HookMode::PredicateOnly,
                 next_dispatch: None,
                 message: "transition rejected: standing test file(s) introduced in the working diff -- VERIFY doctrine forbids them; verification is a live exec_js/browser witness against real code, never a suite. Remove the file(s) and re-attempt with a live witness.".into(),
+            },
+            GateDef {
+                name: "no-scratch-artifacts-in-diff".into(),
+                predicate: Some("no-scratch-artifacts-in-diff".into()),
+                hook: None,
+                hook_mode: HookMode::PredicateOnly,
+                next_dispatch: None,
+                message: "transition rejected: standing process/scratch file(s) introduced in the working diff -- a verify script, dispatch wrapper, or session-notes file that should have been an exec_js/browser dispatch, run and discarded, never committed. Delete the file(s) (or rename a genuine deliverable off the scratch-naming pattern) and re-attempt.".into(),
             },
             GateDef {
                 name: "no-admit-deferral-markers".into(),
