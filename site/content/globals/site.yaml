@@ -1,0 +1,16 @@
+title: "rs-plugkit"
+tagline: "plugin scaffolding for the rs-* family"
+description: "shared scaffolding so every rs-* plug-in for gm looks and behaves the same."
+repo: "https://github.com/AnEntrypoint/rs-plugkit"
+url: "https://anentrypoint.github.io/rs-plugkit"
+year: 2026
+keywords:
+  - "rust"
+  - "plugins"
+  - "247420"
+  - "anentrypoint"
+accent_from: "#7ee787"
+accent_to: "#56d364"
+glyph: "⌘"
+code: "006"
+category: "gm"
