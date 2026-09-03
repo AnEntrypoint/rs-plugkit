@@ -40,6 +40,7 @@ fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
         ("claim-audit-clean", "true when the claim audit finds no unwitnessed completion claims -- see orchestrator::claim_audit", pred_claim_audit_clean),
         ("submodules-clean", "true when no submodule has drifted from its recorded commit -- see orchestrator::submodule_drift", pred_submodules_clean),
         ("no-synthetic-test-files", "true when the working diff introduces no standing test file (*.test.*, *.spec.*, or a test/tests/__tests__ directory). VERIFY doctrine forbids them: verification is a live exec_js/browser witness against real code, never a suite asserting against mocks. Emits deviation.synthetic-test-file naming the offending paths when it fails.", pred_no_synthetic_test_files as PredicateFn),
+        ("no-scratch-artifacts-in-diff", "true when the working diff (outside .gm/) introduces no standing process/scratch file -- a leading underscore, .tmp-/tmp- prefix, _tmp. infix, gm-dispatch*/gm-recon* wrapper script, *_COMPLETE.md, or HARNESS_*/OPERATION_IMPROVEMENTS* name. These are the exact debris shape of a verify-script or session-notes file that should have been an exec_js/browser dispatch, run and discarded, never committed. Emits deviation.scratch-artifact-in-diff naming the offending paths when it fails.", pred_no_scratch_artifacts_in_diff as PredicateFn),
         ("remote-hook-refused", "always false. Substituted by fsm::graph() for a gate whose ONLY condition was a hook supplied by the compiled-default tier, which never legitimately carries one: the author's condition is genuinely not being evaluated and the edge it guards must not be waved through. Local and source-repo tier hooks both execute normally and never hit this substitution. Vendor the graph (and its hook) into .gm/instructions/fsm/graph.json, or configure source.json, to restore the gate.", pred_remote_hook_refused),
         ("no-admit-deferral-markers", "true when new lines in source files (*.rs/.js/.ts/.py/.go/...) in the working diff introduce no colon-form admit marker (TODO:/FIXME:/XXX:/HACK:), no todo!()/unimplemented!() placeholder macro, and no 'not (yet) implemented' phrase. Source-scoped so the rule's own registry and prose describing it do not self-trip; prose-level deferral is covered by no-hedge-language-in-diff. A marker stands in for a complete proof. Emits deviation.admit-deferral-marker naming the offending lines when it fails.", pred_no_admit_deferral_markers as PredicateFn),
         ("no-secrets-in-diff", "true when the working diff introduces no line matching a high-confidence secret shape (AWS-style access key id, a private-key PEM header, a bearer/API token assigned to a literal string of plausible entropy, a database URL with an inline password). Heuristic and diff-scoped, not a substitute for a dedicated secret scanner -- catches the common accidental-commit shape. Emits deviation.secret-in-diff naming the offending lines (redacted) when it fails.", pred_no_secrets_in_diff as PredicateFn),
@@ -168,6 +169,55 @@ fn synthetic_test_files_added_in_working_diff() -> Vec<String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn synthetic_test_files_added_in_working_diff() -> Vec<String> { vec![] }
+
+#[cfg(target_arch = "wasm32")]
+fn scratch_artifacts_added_in_working_diff() -> Vec<String> {
+    let porcelain = crate::wasm_dispatch::git_porcelain();
+    let mut found = Vec::new();
+    for line in porcelain.lines() {
+        let path = line.get(3..).unwrap_or("").trim();
+        if path.is_empty() {
+            continue;
+        }
+        if path.starts_with(".gm/") {
+            continue;
+        }
+        let lower = path.to_ascii_lowercase();
+        let name = lower.rsplit('/').next().unwrap_or(&lower).to_string();
+        let is_scratch = name.starts_with('_')
+            || name.starts_with(".tmp-")
+            || name.starts_with("tmp-")
+            || name.contains("_tmp.")
+            || name.starts_with("gm-dispatch")
+            || name.starts_with("gm-recon")
+            || name.ends_with("_complete.md")
+            || name.starts_with("harness_")
+            || name.starts_with("operation_improvements");
+        if is_scratch {
+            found.push(path.to_string());
+        }
+    }
+    found
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn scratch_artifacts_added_in_working_diff() -> Vec<String> { vec![] }
+
+#[cfg(target_arch = "wasm32")]
+fn pred_no_scratch_artifacts_in_diff() -> bool {
+    let found = scratch_artifacts_added_in_working_diff();
+    if found.is_empty() {
+        return true;
+    }
+    crate::wasm_dispatch::emit_event("deviation.scratch-artifact-in-diff", serde_json::json!({
+        "files": found,
+        "reason": "AGENTS.md Documentation Policy forbids standing process/scratch files (verify scripts, dispatch wrappers, session-notes markdown) riding into a commit: delete them, replace verify-script content with a live exec_js/browser witness, then re-verify. A filename hitting this gate that is a genuine deliverable should be renamed off the scratch-naming pattern.",
+    }));
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn pred_no_scratch_artifacts_in_diff() -> bool { true }
 
 #[cfg(target_arch = "wasm32")]
 fn pred_no_synthetic_test_files() -> bool {
