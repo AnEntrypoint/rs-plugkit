@@ -1,0 +1,10 @@
+name = "CordisCalculus"
+version = "0.1.0"
+defaultTargets = ["cordiscalculus"]
+
+[[lean_lib]]
+name = "CordisCalculus"
+
+[[lean_exe]]
+name = "cordiscalculus"
+root = "Main"

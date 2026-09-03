@@ -1,0 +1,269 @@
+use super::gm_dir;
+use crate::pkfs;
+
+pub const RESIDUAL_PRD_OPEN_DEFAULT: &str = "PRD still has items; complete or remove them before residual scan.";
+pub const RESIDUAL_BROWSER_OPEN_DEFAULT: &str = "browser sessions still open -- dispatch `browser` with `session list` body to enumerate open ids, then `session close <id>` for each before retrying residual-scan";
+pub const RESIDUAL_TASKS_RUNNING_DEFAULT: &str = "background tasks still running -- wait for completion or kill them via the host_exec_js interface before retrying residual-scan";
+pub const RESIDUAL_DIRTY_TREE_DEFAULT: &str = "worktree dirty -- modified={modified} untracked={untracked} -- commit or revert before residual scan; a push from a dirty tree orphans the unstaged delta";
+pub const RESIDUAL_IMPERATIVE_DEFAULT: &str = "Residual scan. Worktree clean, remote pushed, PRD empty, mutables witnessed -- the four checks. Anything reachable and in-spirit expands the PRD and runs. Out-of-reach is credentials, down service, product decision.";
+
+#[cfg(target_arch = "wasm32")]
+fn porcelain_output() -> String {
+    crate::wasm_dispatch::git_porcelain()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn porcelain_output() -> String {
+    std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+fn count_modified_untracked(porcelain: &str) -> (usize, usize) {
+    let mut modified = 0usize;
+    let mut untracked = 0usize;
+    for line in porcelain.lines() {
+        if line.len() < 2 { continue; }
+        if line.starts_with("??") {
+            untracked += 1;
+        } else {
+            modified += 1;
+        }
+    }
+    (modified, untracked)
+}
+
+fn status_is_open(s: Option<&str>) -> bool {
+    match s {
+        Some(v) => super::prd::status_is_open(v),
+        None => true,
+    }
+}
+
+fn prd_empty_or_missing() -> bool {
+    let prd = gm_dir().join("prd.yml");
+    let ps = prd.to_string_lossy().to_string();
+    if !pkfs::exists(&ps) {
+        return true;
+    }
+    match pkfs::read_to_string(&ps) {
+        Some(content) => {
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                return true;
+            }
+            if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(trimmed) {
+                let items_opt = yaml.as_sequence()
+                    .or_else(|| yaml.get("items").and_then(|v| v.as_sequence()));
+                if let Some(items) = items_opt {
+                    if items.is_empty() {
+                        return true;
+                    }
+                    let any_open = items.iter().any(|item| {
+                        let status = item.get("status").and_then(|v| v.as_str());
+                        let blocked_external = item.get("blockedBy")
+                            .and_then(|v| v.as_sequence())
+                            .map(|seq| seq.iter().any(|x| x.as_str() == Some("external")))
+                            .unwrap_or(false);
+                        status_is_open(status) && !blocked_external
+                    });
+                    return !any_open;
+                }
+            }
+            true
+        }
+        None => true,
+    }
+}
+
+fn browser_sessions_open() -> bool {
+    let current_sid = super::state::read_state().session_id;
+    let candidates = [
+        gm_dir().join("exec-spool").join("browser-sessions.json"),
+        gm_dir().join("browser-sessions.json"),
+    ];
+    for marker in &candidates {
+        let ps = marker.to_string_lossy().to_string();
+        if !pkfs::exists(&ps) { continue; }
+        let Some(s) = pkfs::read_to_string(&ps) else { continue; };
+        let t = s.trim();
+        if t.is_empty() || t == "{}" || t == "[]" { continue; }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(t) else {
+            return true;
+        };
+        match (&current_sid, val.as_object()) {
+            (Some(sid), Some(map)) => {
+                if let Some(entry) = map.get(sid) {
+                    let open = match entry {
+                        serde_json::Value::Array(a) => !a.is_empty(),
+                        serde_json::Value::Null => false,
+                        _ => true,
+                    };
+                    if open { return true; }
+                }
+            }
+            _ => return true,
+        }
+    }
+    false
+}
+
+fn running_tasks_exist() -> bool {
+    super::task::any_running()
+}
+
+/// Shape a skipped-scan result according to the kind's effective severity.
+///
+/// Both residual skips have always returned rc=0 with a `scan: "skipped"` body --
+/// advisory, not refusing. That stays the registry default (Severity::Log), so an
+/// unconfigured project sees byte-identical behaviour. A project that promotes the
+/// kind gets the same body plus a non-empty stderr and rc=1, which is what turns an
+/// advisory skip into a refusal the caller cannot read past.
+fn deviation_scan_result(
+    payload: serde_json::Value,
+    severity: super::deviations::Severity,
+    reason: &str,
+) -> (String, String, i32) {
+    match severity {
+        super::deviations::Severity::Deny => (payload.to_string(), reason.to_string(), 1),
+        super::deviations::Severity::Log => (payload.to_string(), String::new(), 0),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn handle_scan(_content: &str) -> (String, String, i32) {
+    ("{\"ok\":false,\"error\":\"residual-scan requires wasm32\"}".to_string(), String::new(), 1)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn handle_scan(_content: &str) -> (String, String, i32) {
+    let marker = gm_dir().join("residual-check-fired");
+
+    // Each check is gated on Policy.residual_checks. The order is fixed here
+    // because it is load-bearing -- each check short-circuits the scan, so the
+    // first to trip is the only residual reported, and the sequence runs
+    // cheapest-and-most-blocking first. What a project CAN change is which
+    // checks apply: a repo with no browser surface should not be told to close
+    // browser sessions it never opens.
+    let enabled = crate::orchestrator::fsm::graph().policy.residual_checks.clone();
+    let on = |k: &str| enabled.iter().any(|c| c == k);
+
+    if on("prd-open") && !prd_empty_or_missing() {
+        let reason = crate::prose::resolve_and_mark("residual/prd-open", RESIDUAL_PRD_OPEN_DEFAULT);
+        let severity = super::deviations::effective_severity("residual-premature");
+        let payload = serde_json::json!({
+            "scan": "skipped",
+            "reason": reason.clone(),
+            "deviation_kind": "residual-premature",
+            "deviation_severity": severity.as_str(),
+            "next_dispatch": "prd-list",
+            "next_dispatch_hint": "prd-list"
+        });
+        return deviation_scan_result(payload, severity, &reason);
+    }
+
+    if on("browser-open") && browser_sessions_open() {
+        let payload = serde_json::json!({
+            "scan": "skipped",
+            "reason": crate::prose::resolve_and_mark("residual/browser-open", RESIDUAL_BROWSER_OPEN_DEFAULT),
+            "next_dispatch": "browser",
+            "next_dispatch_hint": "browser"
+        });
+        return (payload.to_string(), String::new(), 0);
+    }
+
+    if on("tasks-running") && running_tasks_exist() {
+        let payload = serde_json::json!({
+            "scan": "skipped",
+            "reason": crate::prose::resolve_and_mark("residual/tasks-running", RESIDUAL_TASKS_RUNNING_DEFAULT),
+            "next_dispatch": "phase-status",
+            "next_dispatch_hint": "phase-status"
+        });
+        return (payload.to_string(), String::new(), 0);
+    }
+
+    let porcelain = porcelain_output();
+    if on("dirty-tree") && !porcelain.trim().is_empty() {
+        let (modified, untracked) = count_modified_untracked(&porcelain);
+        let reason = crate::prose::fill_placeholders(
+            "residual/dirty-tree",
+            &crate::prose::resolve_and_mark("residual/dirty-tree", RESIDUAL_DIRTY_TREE_DEFAULT),
+            &[
+                ("modified", modified.to_string()),
+                ("untracked", untracked.to_string()),
+            ],
+        );
+        let severity = super::deviations::effective_severity("residual-dirty-tree");
+        let payload = serde_json::json!({
+            "scan": "skipped",
+            "reason": reason.clone(),
+            "deviation_kind": "residual-dirty-tree",
+            "deviation_severity": severity.as_str(),
+            "modified": modified,
+            "untracked": untracked
+        });
+        return deviation_scan_result(payload, severity, &reason);
+    }
+
+    // Wire format: "<session_id>:<fired_at_ms>", not a bare "fired" sentinel.
+    // A bare existence check cannot distinguish this stop window's own scan
+    // from an arbitrarily old one left over because a hook never ran to
+    // clear it -- the dangerous direction for a COMPLETE gate, since it fails
+    // OPEN (silently allows a transition whose residual scan never actually
+    // ran this window) rather than closed. The reader (transitions.rs's
+    // residual_scan_fired) checks session_id equality first, then a time
+    // bound as the fallback for a dispatch with no session_id attached.
+    let marker_s = marker.to_string_lossy().to_string();
+    let fired_sid = super::state::read_state().session_id.unwrap_or_default();
+    let fired_at_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let _ = pkfs::write(&marker_s, &format!("{}:{}", fired_sid, fired_at_ms));
+
+    let message = crate::prose::resolve_and_mark("residual/imperative", RESIDUAL_IMPERATIVE_DEFAULT);
+    let mut payload = serde_json::json!({
+        "scan": "fired",
+        "marker": marker.display().to_string(),
+        "imperative": message,
+        "checks": ["worktree-clean", "remote-pushed", "prd-empty", "mutables-witnessed"],
+    });
+    if let Some(finding) = liqology_stale_memory_finding() {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("liqology_stale_memory".to_string(), finding);
+        }
+    }
+    (payload.to_string(), String::new(), 0)
+}
+
+// Observability only, never blocking -- residual-scan surfaces this finding
+// when meaningful (a real, non-trivial fraction of liqology's tracked
+// entries would be pruned under its current policy), absent otherwise
+// (empty/small/healthy store). liqology's own store never gets auto-pruned
+// from here; that stays the agent's explicit tune_policy/record-driven call.
+#[cfg(target_arch = "wasm32")]
+fn liqology_stale_memory_finding() -> Option<serde_json::Value> {
+    let resp = crate::wasm_dispatch::plugin_call("liqology", "prune_report", &serde_json::json!({}));
+    if !crate::wasm_dispatch::plugin_ok(&resp) {
+        return None;
+    }
+    let would_evict = resp.get("would_evict_ids").and_then(|v| v.as_array())?;
+    let retained = resp.get("retained_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    if would_evict.is_empty() || retained == 0 {
+        return None;
+    }
+    let evict_count = would_evict.len() as u64;
+    if evict_count * 3 < retained {
+        return None;
+    }
+    Some(serde_json::json!({
+        "would_evict_count": evict_count,
+        "retained_count": retained,
+        "note": "a third or more of liqology's tracked interaction history would be pruned under its current policy -- dispatch host_plugin_call(liqology, prune_report/tune_policy) to review",
+    }))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn liqology_stale_memory_finding() -> Option<serde_json::Value> {
+    None
+}
