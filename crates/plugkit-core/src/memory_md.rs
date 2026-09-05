@@ -319,6 +319,26 @@ fn is_shadow_row(err: &str) -> bool {
     err.contains("shadow row")
 }
 
+pub fn find_body_hash_duplicate(ns: &str, text: &str) -> Option<String> {
+    let normalized = normalize_text(text);
+    let own_key = content_key(ns, &normalized);
+    let rows = crate::shared_db::shared_query_params(
+        &format!("SELECT key, text FROM {} WHERE namespace=?1 AND deleted=0", vector_table()),
+        &[ns],
+    ).ok()?;
+    for row in rows.as_array()? {
+        let key = row.get("key").and_then(|v| v.as_str())?;
+        if key == own_key {
+            continue;
+        }
+        let stored_text = row.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        if normalize_text(stored_text) == normalized {
+            return Some(key.to_string());
+        }
+    }
+    None
+}
+
 pub fn content_key(ns: &str, text: &str) -> String {
     let normalized = normalize_text(text);
     let hash = crate::hash::fnv1a64(format!("{}|{}", ns, normalized).as_bytes());
