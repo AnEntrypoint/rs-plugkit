@@ -21,7 +21,7 @@ task management are native in `agentplug-host`, not implemented in this
 crate at all.
 
 State lives on disk under a project's `.gm/` directory: `prd.yml`,
-`mutables.yml`, `exec-spool/{in,out}/`, `rs-learn.db`, `disciplines/<ns>/`,
+`mutables.yml`, `exec-spool/{in,out}/`, `gm.db`, `disciplines/<ns>/`,
 `code-search/`.
 
 ## Spool dispatch ABI
