@@ -3,11 +3,36 @@ use std::collections::BTreeMap;
 
 pub fn dispatch(body: &Value, raw: &str) -> (Value, Option<String>) {
     let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    let input = body.get("input").and_then(|v| v.as_str())
+    let explicit_input = body.get("input").and_then(|v| v.as_str())
         .or_else(|| body.get("stdout").and_then(|v| v.as_str()))
         .or_else(|| body.get("text").and_then(|v| v.as_str()))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| raw.to_string());
+        .map(|s| s.to_string());
+    // Falling back to `raw` is right when the caller PIPED raw text as the body,
+    // but catastrophic when they sent a structured JSON body and simply forgot
+    // input/stdout/text: filter then greps its own request body and answers
+    // ok:true with meaningless stats (witnessed: a {kind,path,pattern} body
+    // returned lines_matched:1 against the serialized body itself, files:0,
+    // bytes_in exactly the body length). A silent wrong answer is worse than a
+    // refusal, so only fall back to `raw` when the body is NOT a JSON object.
+    // Note `path` is deliberately not consulted anywhere here -- filter is a
+    // stream filter over another dispatch's output, never a file reader.
+    let input = match explicit_input {
+        Some(s) => s,
+        None if body.is_object() => {
+            return (
+                Value::Null,
+                Some(format!(
+                    "filter received a structured body with no text to filter: supply the content as `input` (or `stdout`/`text`). \
+                     filter post-processes the OUTPUT of another dispatch -- it does not read files, so a `path` field is never fetched. \
+                     Fields present were: [{}]",
+                    body.as_object()
+                        .map(|o| o.keys().cloned().collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default()
+                )),
+            );
+        }
+        None => raw.to_string(),
+    };
     match kind {
         "grep" => grep(&input, body),
         "ls" => Ok(ls(&input, body)),
