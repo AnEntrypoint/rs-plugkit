@@ -1,0 +1,40 @@
+name: predicates-md-drift
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/plugkit-core/src/orchestrator/predicate_registry.rs"
+  pull_request:
+    paths:
+      - "crates/plugkit-core/src/orchestrator/predicate_registry.rs"
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: rs-plugkit
+      - uses: actions/checkout@v4
+        with:
+          repository: AnEntrypoint/gm-config
+          path: gm-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: generate predicates.md from the live registry
+        run: |
+          cat > /tmp/gen_driver.rs <<'DRIVER'
+          include!("rs-plugkit/crates/plugkit-core/src/orchestrator/predicate_registry.rs");
+          fn main() {
+              print!("{}", generated_predicates_md());
+          }
+          DRIVER
+          rustc --edition 2021 /tmp/gen_driver.rs -o /tmp/gen_driver
+          /tmp/gen_driver > /tmp/generated-predicates.md
+      - name: diff generated output against gm-config's committed copy
+        run: |
+          if ! diff -u gm-config/fsm/predicates.md /tmp/generated-predicates.md; then
+            echo "::error::gm-config/fsm/predicates.md has drifted from rs-plugkit's predicate_registry.rs. Regenerate it (see the file's own header) and commit the result."
+            exit 1
+          fi
+          echo "predicates.md matches the live registry (no drift)."

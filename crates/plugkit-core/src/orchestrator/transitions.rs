@@ -21,34 +21,51 @@ pub fn known_predicates() -> Vec<(&'static str, &'static str)> {
     predicate_table().iter().map(|(name, desc, _)| (*name, *desc)).collect()
 }
 
+pub fn handle_predicates_md(_content: &str) -> (String, String, i32) {
+    let md = super::predicate_registry::generated_predicates_md();
+    let payload = serde_json::json!({
+        "predicates_md": md,
+        "predicate_count": predicate_table().len(),
+    });
+    (payload.to_string(), String::new(), 0)
+}
+
 type PredicateFn = fn() -> bool;
 
-fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
-    &[
-        ("residual-scan-fired", "true once `residual-scan` has been dispatched in this stop window (the .gm/residual-check-fired marker is present AND non-empty -- it is invalidated by truncation)", residual_scan_fired as PredicateFn),
-        ("prd-all-closed", "true when .gm/prd.yml has zero rows with an open status (pending/in-progress, not completed)", pred_prd_all_closed),
-        ("mutables-all-resolved", "true when .gm/mutables.yml has zero rows still in unknown/pending status", pred_mutables_all_resolved),
-        ("mutables-all-typed", "true when every PENDING row in .gm/mutables.yml tagged with a PROVE-kind obligation_kind (precondition/invariant/postcondition/resource-bound/type-shape) has a valid kind AND every id in its depends_on is already resolved. Resolved rows and rows tagged with a different phase's kind never block this gate. The gate message names the specific blocking row and reason.", pred_mutables_all_typed as PredicateFn),
-        ("state-obligations-ready", "true when every PENDING row tagged with a STATE-kind obligation_kind (totality/ownership/replay/effect-boundary) is validly typed and dependency-resolved. Same DAG mechanics as mutables-all-typed, scoped to STATE's own obligation kinds.", pred_state_obligations_ready as PredicateFn),
-        ("conc-obligations-ready", "true when every PENDING row tagged with a CONC-kind obligation_kind (happens-before/disjointness/contention) is validly typed and dependency-resolved.", pred_conc_obligations_ready as PredicateFn),
-        ("sec-obligations-ready", "true when every PENDING row tagged with a SEC-kind obligation_kind (secrets/injection/identity-authority/message-timing) is validly typed and dependency-resolved.", pred_sec_obligations_ready as PredicateFn),
-        ("res-obligations-ready", "true when every PENDING row tagged with a RES-kind obligation_kind (exception-model/partial-failure/degradation/crucible) is validly typed and dependency-resolved.", pred_res_obligations_ready as PredicateFn),
-        ("worktree-clean", "true when `git status --porcelain` is empty -- no uncommitted/unpushed delta", pred_worktree_clean),
-        ("ci-validated-fresh", "true when .gm/exec-spool/.ci-validated exists and its head_sha matches the current `git rev-parse HEAD` -- a witnessed-green CI run for the exact pushed commit", ci_validation_fresh as PredicateFn),
-        ("browser-witness-coverage", "true when every client-side file edited this session (per .gm/exec-spool/.turn-browser-edits.json) has a matching entry in .gm/exec-spool/.turn-browser-witnessed with the same content hash", pred_browser_witness_coverage),
-        ("app-loads-witnessed", "true when this project has no .gm/browser-config.json (no declared browser entrypoint, nothing to check), OR the most recent `browser` dispatch this stop window recorded a healthy app-loads witness (ok:true, zero pageErrors, zero console error-level lines) in .gm/exec-spool/.app-loads-witnessed.json. Unlike browser-witness-coverage, this check is unconditional -- it does not read .turn-browser-edits.json and is never vacuously satisfied by an empty edit list, so a zero-edit confirmation/audit turn claiming the app is healthy still must dispatch `browser` this turn to prove it.", pred_app_loads_witnessed as PredicateFn),
-        ("claim-audit-clean", "true when the claim audit finds no unwitnessed completion claims -- see orchestrator::claim_audit", pred_claim_audit_clean),
-        ("submodules-clean", "true when no submodule has drifted from its recorded commit -- see orchestrator::submodule_drift", pred_submodules_clean),
-        ("no-synthetic-test-files", "true when the working diff introduces no standing test file (*.test.*, *.spec.*, or a test/tests/__tests__ directory). VERIFY doctrine forbids them: verification is a live exec_js/browser witness against real code, never a suite asserting against mocks. Emits deviation.synthetic-test-file naming the offending paths when it fails.", pred_no_synthetic_test_files as PredicateFn),
-        ("remote-hook-refused", "always false. Substituted by fsm::graph() for a gate whose ONLY condition was a hook supplied by the compiled-default tier, which never legitimately carries one: the author's condition is genuinely not being evaluated and the edge it guards must not be waved through. Local and source-repo tier hooks both execute normally and never hit this substitution. Vendor the graph (and its hook) into .gm/instructions/fsm/graph.json, or configure source.json, to restore the gate.", pred_remote_hook_refused),
-        ("no-admit-deferral-markers", "true when new lines in source files (*.rs/.js/.ts/.py/.go/...) in the working diff introduce no colon-form admit marker (TODO:/FIXME:/XXX:/HACK:), no todo!()/unimplemented!() placeholder macro, and no 'not (yet) implemented' phrase. Source-scoped so the rule's own registry and prose describing it do not self-trip; prose-level deferral is covered by no-hedge-language-in-diff. A marker stands in for a complete proof. Emits deviation.admit-deferral-marker naming the offending lines when it fails.", pred_no_admit_deferral_markers as PredicateFn),
-        ("no-secrets-in-diff", "true when the working diff introduces no line matching a high-confidence secret shape (AWS-style access key id, a private-key PEM header, a bearer/API token assigned to a literal string of plausible entropy, a database URL with an inline password). Heuristic and diff-scoped, not a substitute for a dedicated secret scanner -- catches the common accidental-commit shape. Emits deviation.secret-in-diff naming the offending lines (redacted) when it fails.", pred_no_secrets_in_diff as PredicateFn),
-        ("no-unchecked-panics-in-diff", "true when new Rust/JS/TS lines in the working diff introduce no bare unwrap()/expect()/panic!() outside a test-only-configured Rust module or *.test.* path, and no JS/TS line that throws without a paired catch reachable in the same function body scope (best-effort, brace-balance heuristic). Exception model requires every raised error handled or explicitly propagated, never left to crash the process uncaught. Emits deviation.unchecked-panic naming the offending lines when it fails.", pred_no_unchecked_panics_in_diff as PredicateFn),
-        ("no-hedge-language-in-diff", "true when prose files (*.md) touched in the working diff introduce no hedge/deferral phrase ('todo later', 'in a future session', 'for now we', 'as a stopgap', 'good enough for now', 'left as an exercise', 'out of scope for this'). Decisive commitment forbids shipping a hedge in place of a decision. Emits deviation.hedge-language naming the offending lines when it fails.", pred_no_hedge_language_in_diff as PredicateFn),
-        ("split-context-swept", "true when the working diff touches at most one file, OR .gm/exec-spool/.split-context-swept exists with a head_sha matching the current `git rev-parse HEAD` -- a witnessed independent-Agent adversarial review for the exact pushed multi-file commit. A self-reviewed multi-file diff has not been adversarially swept.", split_context_swept as PredicateFn),
-        ("no-graphical-symbols-in-diff", "true when new lines in the working diff introduce no decorative non-ASCII glyph (arrows, box-drawing, stars, bullets, checks/crosses, emoji) outside a binary/frozen-changelog/icon-font exemption path. Matches AGENTS.md's own no-graphical-symbols discipline as a real gate instead of an on-sight-only rule. Emits deviation.graphical-symbol naming the offending lines when it fails.", pred_no_graphical_symbols_in_diff as PredicateFn),
-        ("idempotent-dispatch-replay-safe", "true when the most recent N dispatch audit-tuples (id, hash, ts) for the current stop window contain no exact-duplicate (id, hash) pair recorded as two DIFFERENT outcomes -- a same-input dispatch replayed must reach the same result (f-compose-f-equals-f), never a second, different mutation applied on top of the first. Emits deviation.non-idempotent-replay naming the conflicting tuples when it fails.", pred_idempotent_dispatch_replay_safe as PredicateFn),
-    ]
+fn predicate_fn_for(name: &str) -> PredicateFn {
+    match name {
+        "residual-scan-fired" => residual_scan_fired as PredicateFn,
+        "prd-all-closed" => pred_prd_all_closed,
+        "mutables-all-resolved" => pred_mutables_all_resolved,
+        "mutables-all-typed" => pred_mutables_all_typed as PredicateFn,
+        "state-obligations-ready" => pred_state_obligations_ready as PredicateFn,
+        "conc-obligations-ready" => pred_conc_obligations_ready as PredicateFn,
+        "sec-obligations-ready" => pred_sec_obligations_ready as PredicateFn,
+        "res-obligations-ready" => pred_res_obligations_ready as PredicateFn,
+        "worktree-clean" => pred_worktree_clean,
+        "ci-validated-fresh" => ci_validation_fresh as PredicateFn,
+        "browser-witness-coverage" => pred_browser_witness_coverage,
+        "app-loads-witnessed" => pred_app_loads_witnessed as PredicateFn,
+        "claim-audit-clean" => pred_claim_audit_clean,
+        "submodules-clean" => pred_submodules_clean,
+        "no-synthetic-test-files" => pred_no_synthetic_test_files as PredicateFn,
+        "remote-hook-refused" => pred_remote_hook_refused,
+        "no-admit-deferral-markers" => pred_no_admit_deferral_markers as PredicateFn,
+        "no-secrets-in-diff" => pred_no_secrets_in_diff as PredicateFn,
+        "no-unchecked-panics-in-diff" => pred_no_unchecked_panics_in_diff as PredicateFn,
+        "no-hedge-language-in-diff" => pred_no_hedge_language_in_diff as PredicateFn,
+        "split-context-swept" => split_context_swept as PredicateFn,
+        "no-graphical-symbols-in-diff" => pred_no_graphical_symbols_in_diff as PredicateFn,
+        "idempotent-dispatch-replay-safe" => pred_idempotent_dispatch_replay_safe as PredicateFn,
+        other => panic!("predicate_registry names a predicate with no matching function: {other}"),
+    }
+}
+
+fn predicate_table() -> Vec<(&'static str, &'static str, PredicateFn)> {
+    super::predicate_registry::PREDICATE_REGISTRY
+        .iter()
+        .map(|(name, desc)| (*name, *desc, predicate_fn_for(name)))
+        .collect()
 }
 
 fn pred_remote_hook_refused() -> bool { false }
