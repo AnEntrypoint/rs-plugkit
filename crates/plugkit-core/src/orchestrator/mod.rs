@@ -3,6 +3,7 @@ pub mod fsm;
 pub mod fsm_vendor;
 pub mod fsm_propose;
 pub mod transitions;
+pub mod predicate_registry;
 pub mod deviations;
 pub mod cas;
 pub mod mutables;
@@ -330,6 +331,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "memorize-continue" => handle_memorize_continue(content),
         "fsm-vendor" => fsm_vendor::handle_vendor(content),
         "fsm-validate" => fsm_vendor::handle_validate(content),
+        "predicates-md" => transitions::handle_predicates_md(content),
         "fsm-propose-override" => fsm_propose::handle_propose(content),
         _ => (format!("Unknown orchestrator verb: {}", verb), String::new(), 1),
     }
