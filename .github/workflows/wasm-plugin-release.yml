@@ -1,0 +1,176 @@
+name: wasm-plugin-release
+
+on:
+  workflow_call:
+    inputs:
+      wasm_artifact_name:
+        required: true
+        type: string
+      published_asset_basename:
+        required: true
+        type: string
+      release_repo:
+        required: true
+        type: string
+      release_title_prefix:
+        required: true
+        type: string
+      crate_dir:
+        required: false
+        type: string
+        default: '.'
+      pre_build_steps:
+        required: false
+        type: string
+        default: ''
+      build_env:
+        required: false
+        type: string
+        default: ''
+      build_command:
+        required: true
+        type: string
+    secrets:
+      publisher_token:
+        required: true
+      release_signing_key:
+        required: true
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.crate_dir }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.publisher_token }}
+          fetch-depth: 0
+
+      - name: Auto-bump patch version BEFORE build
+        id: bump
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.publisher_token }}
+        run: |
+          set -e
+          git config user.name "gm-bot"
+          git config user.email "noreply@github.com"
+          git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
+          CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"//;s/"//')
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+          sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$NEW_VERSION\"/}" Cargo.toml
+          git add Cargo.toml
+          if git diff --cached --quiet; then
+            echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore: auto-bump version to $NEW_VERSION [skip ci]"
+            git push origin HEAD:main
+            echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: bump
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.crate_dir }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Pre-build steps
+        if: inputs.pre_build_steps != ''
+        shell: bash
+        env:
+          STEP_SCRIPT: ${{ inputs.pre_build_steps }}
+        run: |
+          printf '%s\n' "$STEP_SCRIPT" > /tmp/pre_build_steps.sh
+          bash /tmp/pre_build_steps.sh
+
+      - name: Build
+        shell: bash
+        env:
+          BUILD_ENV_SCRIPT: ${{ inputs.build_env }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: |
+          printf '%s\n' "$BUILD_ENV_SCRIPT" > /tmp/build_env.sh
+          set -a
+          source /tmp/build_env.sh
+          set +a
+          printf '%s\n' "$BUILD_COMMAND" > /tmp/build_command.sh
+          bash /tmp/build_command.sh
+
+      - name: Stage release assets with checksum
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp "target/wasm32-wasip1/release/${{ inputs.wasm_artifact_name }}" "release-assets/${{ inputs.published_asset_basename }}.wasm"
+          cd release-assets
+          sha256sum "${{ inputs.published_asset_basename }}.wasm" | sed 's/ \*/  /' > "${{ inputs.published_asset_basename }}.wasm.sha256"
+
+      - name: Sign release assets
+        shell: bash
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.release_signing_key }}
+        run: |
+          set -e
+          if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
+            echo "no release_signing_key secret configured -- refusing to publish an unsigned release" >&2
+            exit 1
+          fi
+          sudo apt-get update -y >/dev/null && sudo apt-get install -y minisign >/dev/null
+          umask 077
+          KEYFILE="$RUNNER_TEMP/release.key"
+          printf '%s' "$RELEASE_SIGNING_KEY" > "$KEYFILE"
+          cd release-assets
+          minisign -S -s "$KEYFILE" -m "${{ inputs.published_asset_basename }}.wasm.sha256" -x "${{ inputs.published_asset_basename }}.wasm.sha256.minisig" </dev/null
+          rm -f "$KEYFILE"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.publisher_token }}
+          VER: ${{ needs.bump.outputs.version }}
+          REPO: ${{ inputs.release_repo }}
+          TITLE_PREFIX: ${{ inputs.release_title_prefix }}
+          SHA: ${{ github.sha }}
+        working-directory: ${{ inputs.crate_dir }}
+        shell: bash
+        run: |
+          set -e
+          if ! gh release view "v$VER" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "v$VER" \
+              --repo "$REPO" \
+              --title "$TITLE_PREFIX v$VER" \
+              --notes "Auto-published from CI at $SHA"
+          fi
+          gh release upload "v$VER" --repo "$REPO" --clobber release-assets/*
+
+      - name: Verify every uploaded asset is actually fetchable, not just reported as uploaded
+        env:
+          VER: ${{ needs.bump.outputs.version }}
+          REPO: ${{ inputs.release_repo }}
+        working-directory: ${{ inputs.crate_dir }}
+        shell: bash
+        run: |
+          set -e
+          base="https://github.com/$REPO/releases/download/v$VER"
+          for f in release-assets/*; do
+            name=$(basename "$f")
+            code=$(curl -sL -o /dev/null -w '%{http_code}' "$base/$name")
+            if [ "$code" != "200" ]; then
+              echo "::error::published release v$VER's $name is not fetchable (HTTP $code) -- the upload did not actually land"
+              exit 1
+            fi
+          done
+          echo "[ok] all $(ls release-assets | wc -l) release assets confirmed fetchable at $base"
