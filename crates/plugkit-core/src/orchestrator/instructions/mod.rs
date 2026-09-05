@@ -1,4 +1,5 @@
 pub mod entry;
+pub mod entry_extended;
 pub mod emit;
 pub mod update_docs;
 pub mod browser;
@@ -139,6 +140,7 @@ pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
         "sec" => sec::TEXT,
         "res" => res::TEXT,
         "decide" => decide::TEXT,
+        "entry-extended" => entry_extended::TEXT,
         _ => entry::TEXT,
     }
 }
@@ -160,9 +162,18 @@ pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
 pub fn has_compiled_default_for_prose_key(key: &str) -> bool {
     matches!(
         key,
-        "emit" | "update_docs" | "browser" | "entry"
+        "emit" | "update_docs" | "browser" | "entry" | "entry-extended"
             | "specify" | "prove" | "state" | "conc" | "sec" | "res" | "decide"
     )
+}
+
+pub fn fnv1a64(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 pub fn get_instruction(phase: &str) -> String {
@@ -460,7 +471,34 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         crate::poll_detect::scan_turn_entry("");
     }
 
-    let instruction = get_instruction(&phase);
+    let requests_entry_extended = prompt_opt
+        .as_deref()
+        .map(|p| p.trim().eq_ignore_ascii_case("entry-extended"))
+        .unwrap_or(false);
+    let instruction = if requests_entry_extended {
+        crate::prose::resolve("entry-extended", entry_extended::TEXT)
+    } else {
+        get_instruction(&phase)
+    };
+
+    let instruction_hash = format!("{:016x}", fnv1a64(&instruction));
+    let prior_instruction_hash = notify_session
+        .as_deref()
+        .and_then(|sid| read_spool_json(&format!(".last-instruction-hash-{sid}.json")).get("hash").and_then(|h| h.as_str()).map(|s| s.to_string()));
+    let instruction_unchanged = !requests_entry_extended
+        && prior_instruction_hash.as_deref() == Some(instruction_hash.as_str());
+    if let Some(sid) = notify_session.as_deref() {
+        let marker = json!({ "hash": instruction_hash, "ts": super::state::now_ms() });
+        let _ = pkfs::write(
+            &super::gm_dir().join("exec-spool").join(format!(".last-instruction-hash-{sid}.json")).to_string_lossy().to_string(),
+            &marker.to_string(),
+        );
+    }
+    let instruction_for_payload = if instruction_unchanged {
+        String::new()
+    } else {
+        instruction.clone()
+    };
 
     let early_next_step_path = super::gm_dir().join("next-step.md");
     let early_next_step_path_s = early_next_step_path.to_string_lossy().to_string();
@@ -554,7 +592,9 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "session_mismatch": session_mismatch,
         "sub_phase": if await_result.is_some() { "AWAIT-RESULT" } else { "" },
         "await_result": await_result,
-        "instruction": instruction,
+        "instruction": instruction_for_payload,
+        "instruction_hash": instruction_hash,
+        "instruction_unchanged": instruction_unchanged,
         "mutables_pending": mutables_pending,
         "mutables_pending_count": mutables_pending_count,
         "epistemic_gap": mutables_pending_count,
