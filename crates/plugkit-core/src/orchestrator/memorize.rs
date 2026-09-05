@@ -34,10 +34,85 @@ fn parsed_kind_or_default(content: &str) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn is_derivable_state(text: &str) -> Option<&'static str> {
+fn strip_sha_shaped_tokens(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|tok| {
+            let cleaned = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            !(cleaned.len() >= 7 && cleaned.len() <= 40
+                && cleaned.chars().all(|c| c.is_ascii_hexdigit())
+                && cleaned.chars().any(|c| c.is_ascii_digit())
+                && cleaned.chars().any(|c| c.is_ascii_alphabetic()))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn strip_version_shaped_tokens(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|tok| {
+            let cleaned = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
+            let digits_dotted = cleaned.strip_prefix('v').unwrap_or(cleaned);
+            let looks_semver = digits_dotted.split('.').count() >= 2
+                && digits_dotted.len() >= 3
+                && digits_dotted.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && digits_dotted.chars().any(|c| c.is_ascii_digit());
+            !looks_semver
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn strip_dated_audit_lines(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let l = line.to_lowercase();
+            let has_date = l.contains("(202") || l.contains("(19")
+                || (l.len() >= 10 && l.as_bytes().windows(10).any(|w| {
+                    w.iter().take(4).all(|c| c.is_ascii_digit())
+                        && w[4] == b'-'
+                        && w[5..7].iter().all(|c| c.is_ascii_digit())
+                        && w[7] == b'-'
+                        && w[8..10].iter().all(|c| c.is_ascii_digit())
+                }));
+            let audit_shaped = l.contains("audit") || l.contains("(fixed)");
+            !(has_date && audit_shaped)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn has_generalizable_residue(text: &str) -> bool {
+    let stripped = strip_dated_audit_lines(&strip_version_shaped_tokens(&strip_sha_shaped_tokens(text)));
+    stripped.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphabetic())).count() >= 8
+}
+
+#[cfg(target_arch = "wasm32")]
+fn has_banned_glyph(text: &str) -> Option<char> {
+    text.chars().find(|c| {
+        if c.is_ascii() { return false; }
+        matches!(*c,
+            '\u{2190}'..='\u{21FF}'
+            | '\u{2500}'..='\u{259F}'
+            | '\u{25A0}'..='\u{25FF}'
+            | '\u{2600}'..='\u{27BF}'
+            | '\u{1F300}'..='\u{1FAFF}'
+            | '\u{2022}' | '\u{2023}' | '\u{2043}'
+            | '\u{2B50}'
+        )
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_derivable_state(text: &str) -> Option<String> {
     let t = text.trim();
     if t.len() > 40 && t.chars().filter(|c| c.is_ascii_hexdigit()).count() == t.len() {
-        return Some("memo is a hex hash; git log is the source of truth");
+        return Some("memo is a hex hash; git log is the source of truth".to_string());
+    }
+    if let Some(glyph) = has_banned_glyph(t) {
+        return Some(format!("memo contains a banned decorative glyph ({:?}); convert to plain ASCII per the glyph-discipline rule", glyph));
     }
     let lower = t.to_lowercase();
     let bad: &[(&str, &str)] = &[
@@ -56,7 +131,10 @@ fn is_derivable_state(text: &str) -> Option<&'static str> {
         ("git blame says", "git blame is derivable from the repo"),
     ];
     for (pat, msg) in bad {
-        if lower.contains(pat) { return Some(msg); }
+        if lower.contains(pat) { return Some(msg.to_string()); }
+    }
+    if !has_generalizable_residue(t) {
+        return Some("memo is sha-only/version-only/dated-audit-only with no generalizable lesson surviving after those tokens/lines are stripped; per the exclusion principle, config-derivable, code-derivable, and state-of-tooling-snapshot content never enters the store".to_string());
     }
     None
 }
@@ -110,6 +188,14 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             "namespace": namespace,
         }));
         return (String::new(), format!("rejected: {} -- memo not stored", reason), 1);
+    }
+    if let Some(dup_key) = crate::memory_md::find_body_hash_duplicate(&namespace, &text) {
+        crate::wasm_dispatch::emit_event("memorize_reject", serde_json::json!({
+            "reason": "byte-identical body already stored under a different key",
+            "duplicate_of": dup_key,
+            "namespace": namespace,
+        }));
+        return (String::new(), format!("rejected: byte-identical to existing memo {} -- memo not stored", dup_key), 1);
     }
     if crate::tencentdb_memory::namespace_is_routed(&namespace) {
         let kind = parsed_kind_or_default(content);
