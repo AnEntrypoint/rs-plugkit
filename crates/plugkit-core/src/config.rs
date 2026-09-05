@@ -14,6 +14,8 @@ pub const SOURCE_CACHE_REL: &str = ".gm/config-source-cache";
 
 pub const DEFAULT_REPO_URL: &str = "https://github.com/AnEntrypoint/gm-config";
 
+pub const DEFAULT_REPO_PINNED_SHA: &str = "993d816b191e551b95f98bf6d1e643587b1a2edc";
+
 pub const DEFAULT_REPO_CACHE_REL: &str = ".gm/config-source-cache-default";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -713,7 +715,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
 fn load_implicit_default_repo_tier(project_root: &str, fetcher: &dyn RepoFetcher) -> Load {
     let src = RepoSource {
         repo: DEFAULT_REPO_URL.to_string(),
-        reference: None,
+        reference: Some(DEFAULT_REPO_PINNED_SHA.to_string()),
         path: String::new(),
         cache_dir: join(project_root, DEFAULT_REPO_CACHE_REL),
         tier_label: Tier::ImplicitDefaultRepo.as_str().to_string(),
@@ -752,7 +754,12 @@ pub fn resolve_and_report(project_root: &str, fetcher: &dyn RepoFetcher) -> Reso
     }
     crate::wasm_dispatch::emit_event(
         "config_resolved",
-        json!({ "tier": r.tier.as_str(), "why": r.why, "version": r.config.version }),
+        json!({
+            "tier": r.tier.as_str(),
+            "why": r.why,
+            "version": r.config.version,
+            "pinned_sha": if r.tier == Tier::ImplicitDefaultRepo { Some(DEFAULT_REPO_PINNED_SHA) } else { None },
+        }),
     );
     r
 }

@@ -492,7 +492,19 @@ pub fn resolve_hook_path(hook: &str) -> Option<String> {
     if crate::pkfs::read_to_string(&local).is_some() {
         return Some(local);
     }
-    let cache_base = crate::config::resolve().cache_dir?;
+    let resolution = crate::config::resolve();
+    if resolution.tier == crate::config::Tier::ImplicitDefaultRepo {
+        crate::wasm_dispatch::emit_event(
+            "fsm_hook_refused_implicit_tier",
+            serde_json::json!({
+                "hook_path": hook,
+                "tier": resolution.tier.as_str(),
+                "reason": "a hook from the implicit-default-repo tier is refused: this tier is the org-wide default gm-config checkout, never explicitly opted into by this project or user. Execution authority over gate hooks requires an explicit .gm/config.source.json or ~/.gm/config.source.json opt-in naming this repo, or vendoring the hook locally at .gm/instructions/hooks/.",
+            }),
+        );
+        return None;
+    }
+    let cache_base = resolution.cache_dir?;
     let remote = format!("{}/hooks/{hook}", cache_base.trim_end_matches(['/', '\\']));
     if crate::pkfs::read_to_string(&remote).is_some() {
         return Some(remote);
