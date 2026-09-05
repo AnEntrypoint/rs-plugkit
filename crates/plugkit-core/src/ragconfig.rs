@@ -502,6 +502,53 @@ impl Default for ClaimAuditConfig {
     }
 }
 
+/// Project-local, NON-TIERED index overrides read from `.gm/index-config.json`.
+///
+/// The tiered config (`.gm/gm.config.json`) cannot carry these for most projects:
+/// `config::resolve_with` returns the project-vendored tier IMMEDIATELY and
+/// discards every lower tier, so a project that wants to change one index
+/// setting silently loses the config-source repo's prose, fsm and messages --
+/// observed live as `config_repo_unreachable` ("the mandatory default prose
+/// source did not resolve") with served prose dropping from 32611 to 25463
+/// chars. Making a one-line indexing tweak cost the whole workflow definition.
+///
+/// This mirrors `.gm/browser-config.json`, which already carries project-local
+/// browser settings outside the tier system for the same reason. Both lists
+/// APPEND to whatever the resolved tier produced; neither can remove a builtin.
+///
+/// The motivating case: rs-plugkit's builtin SKIP_DIRS contains "public", the
+/// right default when public/ is build output, but wrong for a no-build-step
+/// app whose public/js IS the hand-written source -- there the entire frontend
+/// is missing from the index and every frontend query silently returns
+/// unrelated hits instead of an empty result.
+fn apply_project_local_index_overlay(project_root: &str, index: &mut IndexConfig) {
+    let path = if project_root.is_empty() {
+        ".gm/index-config.json".to_string()
+    } else {
+        format!("{}/.gm/index-config.json", project_root.trim_end_matches('/').trim_end_matches('\\'))
+    };
+    let Some(raw) = crate::pkfs::read_to_string(&path) else { return };
+    if raw.trim().is_empty() { return }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        crate::wasm_dispatch::emit_event("index_config_overlay_unparseable", serde_json::json!({
+            "path": path,
+            "effect": "the overlay is being ignored entirely; the resolved tier's index settings stand unchanged",
+        }));
+        return
+    };
+    let append = |key: &str, into: &mut Vec<String>| {
+        let Some(arr) = v.get(key).and_then(|x| x.as_array()) else { return };
+        for s in arr.iter().filter_map(|x| x.as_str()).filter(|s| !s.is_empty()) {
+            if !into.iter().any(|existing| existing == s) {
+                into.push(s.to_string());
+            }
+        }
+    };
+    append("force_include_path_substrings", &mut index.force_include_path_substrings_overriding_every_skip);
+    append("extra_skip_dirs", &mut index.extra_skip_dirs_appended_to_builtins_never_replacing);
+    append("extra_skip_file_suffixes", &mut index.extra_skip_file_suffixes_appended_to_builtins_never_replacing);
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RagConfig {
     pub embed: EmbedDimConfig,
@@ -798,6 +845,8 @@ impl RagConfig {
                 RagConfig::default()
             }
         };
+        let mut resolved_config_or_defaults_on_validation_failure = resolved_config_or_defaults_on_validation_failure;
+        apply_project_local_index_overlay(&project_root, &mut resolved_config_or_defaults_on_validation_failure.index);
         if let Ok(mut cache) = RESOLVED_CACHE.lock() {
             cache.get_or_insert_with(std::collections::HashMap::new)
                 .insert(project_root, ResolvedEntry { ts_ms: now_ms, config: resolved_config_or_defaults_on_validation_failure.clone() });
