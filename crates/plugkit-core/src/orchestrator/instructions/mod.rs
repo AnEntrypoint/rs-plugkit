@@ -355,6 +355,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     let mut session_id_opt: Option<String> = None;
     let mut prompt_opt: Option<String> = None;
+    let mut asserted_instruction_hash: Option<String> = None;
     let raw_phase_opt = if trimmed.is_empty() {
         None
     } else if let Some(stripped) = trimmed.strip_prefix("phase=") {
@@ -365,6 +366,13 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         }
         if let Some(p) = v.get("prompt").and_then(|s| s.as_str()) {
             prompt_opt = Some(p.to_string());
+        }
+        if let Some(h) = v
+            .get("known_instruction_hash")
+            .or_else(|| v.get("instruction_hash"))
+            .and_then(|s| s.as_str())
+        {
+            asserted_instruction_hash = Some(h.trim().to_string());
         }
         if let Some(s) = v.as_str() {
             Some(s.to_string())
@@ -482,10 +490,22 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
 
     let instruction_hash = format!("{:016x}", fnv1a64(&instruction));
+    // The server-side marker records that prose was SENT, never that it
+    // ARRIVED. A dispatch whose out-file never reached the caller (a lost
+    // claim, a client poll timeout, a re-dispatch) still stamped the marker, so
+    // the retry that the caller made precisely because it had no prose was
+    // answered with an empty `instruction` and no way to recover short of
+    // `prompt=entry-extended`. A hash the caller asserts from prose it is
+    // actually holding cannot be wrong in that direction: absent an assertion,
+    // prose is served. The same field is what lets a caller that DOES hold the
+    // prose suppress re-sending tens of kilobytes of it on every dispatch.
     let prior_instruction_hash = notify_session
         .as_deref()
         .and_then(|sid| read_spool_json(&format!(".last-instruction-hash-{sid}.json")).get("hash").and_then(|h| h.as_str()).map(|s| s.to_string()));
     let instruction_unchanged = !requests_entry_extended
+        && asserted_instruction_hash.as_deref() == Some(instruction_hash.as_str());
+    let instruction_suppressible_but_unasserted = !requests_entry_extended
+        && asserted_instruction_hash.is_none()
         && prior_instruction_hash.as_deref() == Some(instruction_hash.as_str());
     if let Some(sid) = notify_session.as_deref() {
         let marker = json!({ "hash": instruction_hash, "ts": super::state::now_ms() });
@@ -595,6 +615,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "instruction": instruction_for_payload,
         "instruction_hash": instruction_hash,
         "instruction_unchanged": instruction_unchanged,
+        "instruction_suppressible_by_asserting_hash": instruction_suppressible_but_unasserted,
         "mutables_pending": mutables_pending,
         "mutables_pending_count": mutables_pending_count,
         "epistemic_gap": mutables_pending_count,

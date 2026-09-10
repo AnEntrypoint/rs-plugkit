@@ -147,6 +147,31 @@ pub fn handle_list(_content: &str) -> (String, String, i32) {
 }
 
 
+/// What `prd-add` actually did to `prd.yml`, distinguished so the response never
+/// claims a row was re-scoped when no prior distinct content was replaced.
+/// `rescoped` previously meant only "a row with this id was present in the doc
+/// this attempt read", which is true of three different situations the caller
+/// needs to tell apart: a genuine reshape of an existing row, a CAS retry
+/// re-reading a doc that already carries this same call's earlier attempt, and a
+/// client re-dispatch of an identical body after the first dispatch's out-file
+/// never reached it. Only the first is a re-scope; comparing the existing row
+/// against the row about to be written separates them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AddOutcome {
+    Added,
+    Rescoped,
+    AlreadyIdentical,
+}
+
+impl AddOutcome {
+    fn response_key(self) -> &'static str {
+        match self {
+            AddOutcome::Rescoped => "rescoped",
+            AddOutcome::Added | AddOutcome::AlreadyIdentical => "added",
+        }
+    }
+}
+
 pub fn handle_add(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -209,13 +234,14 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
 
     let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-add", |mut doc: Value| {
-        let mut upserted = false;
+        let mut add_outcome = AddOutcome::Added;
         if let Some(seq) = doc.as_sequence_mut() {
             let mut new_with_id = item_map.clone();
             new_with_id.insert(Value::String("id".to_string()), Value::String(id.clone()));
             if !new_with_id.contains_key(&Value::String("status".to_string())) {
                 new_with_id.insert(Value::String("status".to_string()), Value::String("pending".to_string()));
             }
+            let new_row = Value::Mapping(new_with_id);
             let existing = seq.iter_mut().find(|it| {
                 it.as_mapping()
                     .and_then(|m| m.get(&Value::String("id".to_string())))
@@ -223,23 +249,41 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                     == Some(id.as_str())
             });
             match existing {
-                Some(slot) => { *slot = Value::Mapping(new_with_id); upserted = true; }
-                None => seq.push(Value::Mapping(new_with_id)),
+                Some(slot) => {
+                    add_outcome = if *slot == new_row {
+                        AddOutcome::AlreadyIdentical
+                    } else {
+                        AddOutcome::Rescoped
+                    };
+                    *slot = new_row;
+                }
+                None => seq.push(new_row),
             }
         } else {
             return cas::CasOutcome::Abort(String::new(), "prd.yml is not a sequence".to_string(), 1);
         }
-        cas::CasOutcome::Write(doc, upserted)
+        cas::CasOutcome::Write(doc, add_outcome)
     });
-    let upserted = match outcome {
+    let add_outcome = match outcome {
         Ok(u) => u,
         Err((out, err, rc)) => return (out, err, rc),
     };
     invalidate_residual_marker();
-    let key = if upserted { "rescoped" } else { "added" };
     #[cfg(target_arch = "wasm32")]
-    crate::wasm_dispatch::emit_event("prd.added", serde_json::json!({ "id": id, "rescoped": upserted }));
-    (serde_json::json!({ key: id }).to_string(), String::new(), 0)
+    crate::wasm_dispatch::emit_event(
+        "prd.added",
+        serde_json::json!({
+            "id": id,
+            "rescoped": add_outcome == AddOutcome::Rescoped,
+            "already_identical": add_outcome == AddOutcome::AlreadyIdentical,
+        }),
+    );
+    let mut response = serde_json::Map::new();
+    response.insert(add_outcome.response_key().to_string(), serde_json::Value::String(id.clone()));
+    if add_outcome == AddOutcome::AlreadyIdentical {
+        response.insert("already_identical".to_string(), serde_json::Value::Bool(true));
+    }
+    (serde_json::Value::Object(response).to_string(), String::new(), 0)
 }
 
 /// Mark an EXISTING, already-tracked PRD row `blockedBy: ["external"]` so residual-scan's

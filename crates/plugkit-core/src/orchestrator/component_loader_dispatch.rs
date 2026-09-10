@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use super::component_loader::{
-    self, ComponentEntry, FiberSwap, Isolate, LoaderState,
+    self, ComponentEntry, FiberSwap,
 };
 use serde_json::Value;
 

@@ -240,6 +240,14 @@ const SKIP_FILE_SUFFIXES: &[&str] = &[
     ".glb", ".gltf", ".vrm", ".fbx", ".blend", ".blend1", ".usdz", ".hf",
     ".uasset", ".umap",
     ".wasm", ".exe", ".dll", ".dylib", ".so", ".o", ".obj", ".a", ".lib",
+    // Rust build artifacts. ".pdb" and ".lib" were already here but ".rlib"
+    // and ".rmeta" were not, and they carry readable symbol names: an
+    // exhaustive literal scan of C:/dev/litebox-main matched "set_times_at"
+    // 10 extra times inside target-myfork/*.rlib/.rmeta/.pdb, which are not
+    // call sites. A sibling build dir whose name is not the literal "target"
+    // (target-myfork here) is not caught by SKIP_DIRS, so the suffix is the
+    // only thing that excludes it.
+    ".rlib", ".rmeta",
     ".pdb", ".class", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa",
     ".hex", ".elf", ".uf2", ".dfu",
     ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp", ".tiff",
@@ -2108,6 +2116,309 @@ pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagC
         .map(|p| json!({ "path": p }))
         .collect();
     json!({ "ok": true, "mode": "filename", "hits": hits, "scanned": full_files.len() })
+}
+
+/// Ceiling on files enumerated for an exhaustive literal/regex scan.
+///
+/// Deliberately NOT `IndexConfig::digest_max_files`, whose default is 2000 --
+/// measured on the real C:/dev/litebox-main workspace, which enumerates 2427
+/// files, so reusing the digest cap would have dropped ~400 files and returned
+/// a confidently wrong "every match" answer. That cap exists to bound a digest
+/// whose own doc comment already concedes it can believe an index converged
+/// when it has not; an exhaustive scan has the opposite contract and cannot
+/// inherit it. A tree larger than this ceiling is reported via
+/// `files_truncated: true`, never silently shortened.
+pub const LITERAL_SCAN_MAX_FILES: usize = 50_000;
+
+/// Per-line text returned with a match, capped so one minified or generated
+/// line cannot dominate the response. A capped line sets `text_truncated`.
+const LITERAL_SCAN_MAX_LINE_BYTES: usize = 512;
+
+/// Largest file an exhaustive scan will read.
+///
+/// Deliberately NOT `IndexConfig::max_file_bytes` (256KB). That bound exists to
+/// cap EMBEDDING cost per file, and a literal scan embeds nothing -- it is one
+/// linear pass over bytes. Witnessed on the real C:/dev/litebox-main workspace:
+/// inheriting the 256KB cap skipped 15 files including
+/// `litebox_shim_linux/src/syscalls/file.rs` and
+/// `litebox_platform_windows_userland/src/lib.rs`, both genuine Rust source a
+/// call-graph trace must cover. Large enough that no plausible hand-written
+/// source file is excluded; a file past it is still reported via
+/// `files_skipped_too_large`, never silently dropped.
+const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// What `scan_literal` was asked for. A struct rather than a long parameter
+/// list so a caller cannot transpose two same-typed flags silently.
+pub struct LiteralScan<'a> {
+    pub pattern: &'a str,
+    pub root: Option<&'a str>,
+    pub regex: bool,
+    pub case_insensitive: bool,
+    pub whole_word: bool,
+    pub path_glob: Option<&'a str>,
+    pub max_matches: usize,
+    pub max_files: usize,
+}
+
+enum LiteralMatcher {
+    Substring { needle: String, case_insensitive: bool, whole_word: bool },
+    Regex(regex::Regex),
+}
+
+fn char_is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn occurrence_is_whole_word(haystack: &str, start: usize, end: usize) -> bool {
+    let bytes = haystack.as_bytes();
+    let before_is_word = start > 0 && char_is_word_byte(bytes[start - 1]);
+    let after_is_word = end < bytes.len() && char_is_word_byte(bytes[end]);
+    !before_is_word && !after_is_word
+}
+
+impl LiteralMatcher {
+    /// Every byte offset pair this matcher hits in one line, not just the
+    /// first -- two call sites on one line are two real call sites, and a
+    /// call-graph trace that reported one would be wrong.
+    fn find_all(&self, line: &str) -> Vec<(usize, usize)> {
+        match self {
+            LiteralMatcher::Substring { needle, case_insensitive, whole_word } => {
+                let (haystack_owned, haystack) = if *case_insensitive {
+                    let lowered = line.to_lowercase();
+                    (Some(lowered), "")
+                } else {
+                    (None, line)
+                };
+                // A lowercased copy can differ in byte length from the
+                // original (e.g. 'İ'), which would make offsets taken in the
+                // copy wrong in the original. Fall back to a char-aligned
+                // scan of the original whenever the lengths disagree.
+                let search_in: &str = match &haystack_owned {
+                    Some(lowered) if lowered.len() == line.len() => lowered.as_str(),
+                    Some(_) => return self.find_all_case_insensitive_unaligned(line, needle, *whole_word),
+                    None => haystack,
+                };
+                let mut out = Vec::new();
+                let mut from = 0usize;
+                while let Some(rel) = search_in[from..].find(needle.as_str()) {
+                    let start = from + rel;
+                    let end = start + needle.len();
+                    if !*whole_word || occurrence_is_whole_word(line, start, end) {
+                        out.push((start, end));
+                    }
+                    from = start + needle.len().max(1);
+                    if from > search_in.len() { break; }
+                }
+                out
+            }
+            LiteralMatcher::Regex(re) => re
+                .find_iter(line)
+                .map(|m| (m.start(), m.end()))
+                .collect(),
+        }
+    }
+
+    fn find_all_case_insensitive_unaligned(&self, line: &str, needle: &str, whole_word: bool) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let nlen = needle.chars().count();
+        if nlen == 0 { return out; }
+        let offsets: Vec<usize> = line.char_indices().map(|(i, _)| i).collect();
+        for (ci, &start) in offsets.iter().enumerate() {
+            let end = offsets.get(ci + nlen).copied().unwrap_or(line.len());
+            if ci + nlen > offsets.len() { break; }
+            let candidate = &line[start..end];
+            if candidate.to_lowercase() == needle
+                && (!whole_word || occurrence_is_whole_word(line, start, end))
+            {
+                out.push((start, end));
+            }
+        }
+        out
+    }
+}
+
+/// Exhaustive literal/regex scan with ripgrep semantics: EVERY match, each
+/// with `path` and `line`, in enumeration order, with no relevance ranking
+/// and no top-k truncation.
+///
+/// Touches none of the retrieval machinery the `dual` mode uses -- no corpus
+/// digest comparison, no `index()` rebuild, no query embedding, no vector
+/// search, no `FusionCorpus`. That is the point, not an optimisation: those
+/// steps are what made a literal question over a large workspace cost minutes
+/// (measured on C:/dev/litebox-main: 120s and 240s timeouts, one ~420s
+/// answer), and an exact-match answer needs none of them. Cost here is one
+/// file walk plus one read per file.
+///
+/// Every bound it hits is disclosed in the response rather than quietly
+/// shortening the answer, because a caller tracing a call graph acts on this
+/// being complete: `files_truncated`, `matches_truncated`, `budget_exhausted`,
+/// `files_skipped_too_large`, `files_skipped_binary` and `files_unreadable`
+/// each mean "this result is NOT the whole tree", and `exhaustive` is true
+/// only when none of them fired.
+pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
+    if req.pattern.is_empty() {
+        return json!({ "ok": false, "error": "pattern required -- an exhaustive scan needs something to match" });
+    }
+    let matcher = if req.regex {
+        match regex::RegexBuilder::new(req.pattern)
+            .case_insensitive(req.case_insensitive)
+            .build()
+        {
+            Ok(re) => LiteralMatcher::Regex(re),
+            // A bad pattern is an error naming the parse failure, never a
+            // silent fall back to substring matching: a caller who asked for
+            // regex and got substring results would read them as regex
+            // results.
+            Err(e) => return json!({
+                "ok": false,
+                "error": format!("mode \"regex\" got an invalid regular expression: {e}"),
+                "pattern": req.pattern,
+            }),
+        }
+    } else {
+        LiteralMatcher::Substring {
+            needle: if req.case_insensitive { req.pattern.to_lowercase() } else { req.pattern.to_string() },
+            case_insensitive: req.case_insensitive,
+            whole_word: req.whole_word,
+        }
+    };
+
+    let root = req.root.filter(|p| !p.is_empty()).unwrap_or(".");
+    let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
+    // Ask for one more than the cap so hitting it is distinguishable from a
+    // tree that happens to be exactly cap-sized.
+    let listed = collect_files(root, file_cap.saturating_add(1), &cfg.index);
+    let files_truncated = listed.len() > file_cap;
+    let files: &[String] = if files_truncated { &listed[..file_cap] } else { &listed[..] };
+
+    let glob_needle = req.path_glob.map(|g| g.to_lowercase());
+    let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let budget_ms = cfg.index.wall_budget_ms;
+
+    let mut matches: Vec<Value> = Vec::new();
+    let mut files_scanned = 0usize;
+    let mut files_with_matches = 0usize;
+    let mut files_skipped_too_large: Vec<String> = Vec::new();
+    let mut files_skipped_binary = 0usize;
+    let mut files_unreadable = 0usize;
+    let mut lines_with_matches = 0usize;
+    let mut matches_truncated = false;
+    let mut budget_exhausted = false;
+
+    for path in files {
+        if unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms) >= budget_ms {
+            budget_exhausted = true;
+            break;
+        }
+        if let Some(glob) = &glob_needle {
+            let lower = path.to_lowercase();
+            let base = lower.rsplit('/').next().unwrap_or(lower.as_str()).to_string();
+            if !glob_match_simple(glob, &lower) && !glob_match_simple(glob, &base) { continue; }
+        }
+        let stat = host_stat(path);
+        if let Some(stat) = &stat {
+            let size = stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+            if size > LITERAL_SCAN_MAX_FILE_BYTES {
+                files_skipped_too_large.push(path.clone());
+                continue;
+            }
+        }
+        let Some(content) = host_read(path) else {
+            // `host_read` returns None for both "could not read" and "not
+            // valid UTF-8", which are different facts about completeness. A
+            // successful stat means the file is there and sized, so the read
+            // failing is a decode failure: binary content, which cannot
+            // contain a text match and is therefore NOT a gap in the answer.
+            // A failed stat is a genuine IO/permission failure, which is.
+            if stat.is_some() { files_skipped_binary += 1 } else { files_unreadable += 1 }
+            continue;
+        };
+        if content.as_bytes().contains(&0u8) { files_skipped_binary += 1; continue; }
+        files_scanned += 1;
+        let mut this_file_matched = false;
+        for (idx, line) in content.lines().enumerate() {
+            let found = matcher.find_all(line);
+            if found.is_empty() { continue; }
+            this_file_matched = true;
+            lines_with_matches += 1;
+            for (start, end) in found {
+                if matches.len() >= req.max_matches { matches_truncated = true; break; }
+                let text_truncated = line.len() > LITERAL_SCAN_MAX_LINE_BYTES;
+                let shown: String = if text_truncated {
+                    line.chars().take(LITERAL_SCAN_MAX_LINE_BYTES).collect()
+                } else {
+                    line.to_string()
+                };
+                let mut hit = serde_json::Map::new();
+                hit.insert("path".to_string(), json!(path));
+                hit.insert("line".to_string(), json!(idx + 1));
+                hit.insert("column".to_string(), json!(start + 1));
+                // `get` rather than a slice index: a case-insensitive search
+                // takes offsets from a lowercased copy of the line, and a
+                // pathological char whose lowercase is the same byte length
+                // but a different boundary would panic on a raw slice.
+                hit.insert("match".to_string(), json!(line.get(start..end).unwrap_or(req.pattern)));
+                hit.insert("text".to_string(), json!(shown.trim_end()));
+                if text_truncated { hit.insert("text_truncated".to_string(), json!(true)); }
+                matches.push(Value::Object(hit));
+            }
+            if matches_truncated { break; }
+        }
+        if this_file_matched { files_with_matches += 1; }
+        if matches_truncated { break; }
+    }
+
+    // `files_skipped_binary` deliberately does NOT void exhaustiveness: a file
+    // that is not text cannot hold a text match, so skipping it leaves the
+    // answer complete. Counting it as a gap would make `exhaustive` false on
+    // essentially every real repo and train the caller to ignore the flag,
+    // which is worse than not having it.
+    let exhaustive = !files_truncated
+        && !matches_truncated
+        && !budget_exhausted
+        && files_skipped_too_large.is_empty()
+        && files_unreadable == 0;
+
+    let mut out = serde_json::Map::new();
+    out.insert("ok".to_string(), json!(true));
+    out.insert("mode".to_string(), json!(if req.regex { "regex" } else { "literal" }));
+    out.insert("pattern".to_string(), json!(req.pattern));
+    out.insert("root".to_string(), json!(root));
+    out.insert("case_insensitive".to_string(), json!(req.case_insensitive));
+    if !req.regex { out.insert("whole_word".to_string(), json!(req.whole_word)); }
+    if let Some(g) = req.path_glob { out.insert("path_glob".to_string(), json!(g)); }
+    out.insert("match_count".to_string(), json!(matches.len()));
+    out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
+    out.insert("files_with_matches".to_string(), json!(files_with_matches));
+    out.insert("files_scanned".to_string(), json!(files_scanned));
+    out.insert("files_listed".to_string(), json!(files.len()));
+    out.insert("elapsed_ms".to_string(), json!(unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms)));
+    out.insert("exhaustive".to_string(), json!(exhaustive));
+    if files_truncated {
+        out.insert("files_truncated".to_string(), json!(true));
+        out.insert("files_truncated_at".to_string(), json!(file_cap));
+    }
+    if matches_truncated {
+        out.insert("matches_truncated".to_string(), json!(true));
+        out.insert("matches_truncated_at".to_string(), json!(req.max_matches));
+    }
+    if budget_exhausted {
+        out.insert("budget_exhausted".to_string(), json!(true));
+        out.insert("budget_ms".to_string(), json!(budget_ms));
+    }
+    if !files_skipped_too_large.is_empty() {
+        out.insert("files_skipped_too_large".to_string(), json!(files_skipped_too_large));
+        out.insert("max_file_bytes".to_string(), json!(cfg.index.max_file_bytes));
+    }
+    if files_skipped_binary > 0 { out.insert("files_skipped_binary".to_string(), json!(files_skipped_binary)); }
+    if files_unreadable > 0 { out.insert("files_unreadable".to_string(), json!(files_unreadable)); }
+    if !exhaustive {
+        out.insert("exhaustive_note".to_string(), json!(
+            "at least one bound fired -- this is NOT every match in the tree; the files_truncated/matches_truncated/budget_exhausted/files_skipped_* fields above name which"
+        ));
+    }
+    out.insert("matches".to_string(), Value::Array(matches));
+    Value::Object(out)
 }
 
 pub fn search(query: &str, k: usize, inline_embedding: Option<&Value>) -> Value {
