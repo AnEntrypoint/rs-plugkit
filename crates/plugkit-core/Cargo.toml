@@ -51,3 +51,10 @@ rs-search = { git = "https://github.com/AnEntrypoint/rs-search.git", package = "
 
 [target.wasm32-wasip1.dependencies]
 ignore = "0.4.30"
+# codesearch's exhaustive `regex` mode (code_index::scan_literal). Already
+# resolved at 1.13.1 in Cargo.lock as an `ignore` transitive, so naming it
+# directly unifies on the same version and adds no second build. Scoped to
+# this target block because wasm32-wasip1 is the only target this crate is
+# ever built for (see .github/workflows/wasm-plugin-release.yml), which is
+# the same reason `ignore` lives here.
+regex = "1"

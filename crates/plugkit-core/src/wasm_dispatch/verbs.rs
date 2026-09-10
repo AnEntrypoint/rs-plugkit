@@ -1476,18 +1476,135 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
     }))
 }
 
+/// Every `mode` codesearch honours. Anything else is an ERROR naming this
+/// list, never a silent downgrade.
+///
+/// Why this list is enforced rather than pattern-matched in place: `mode` used
+/// to be consulted at exactly two sites and only for the literal string
+/// "filename", so every other value -- `"literal"`, `"regex"`, a typo -- fell
+/// through to the dual retrieval path and the response then reported
+/// `mode: "dual"`. The caller's instruction was discarded AND the response
+/// said so in a field the caller had no reason to re-read, which is how a
+/// ranked 10-hit answer got mistaken for an exhaustive one.
+const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
+
+/// Body spellings accepted for "how many results", in precedence order.
+///
+/// `max_results` is here because it was silently ignored: only `k` was ever
+/// read, so `{"max_results": 60}` collapsed to `cfg.budget.default_k` (10) and
+/// the caller saw a 10-hit answer with nothing saying their limit was dropped.
+/// The other spellings are the plausible ways the same intent gets typed; an
+/// unrecognised one must never be ignored, so they are recognised rather than
+/// left to fall through.
+const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit"];
+
+/// Default ceiling on matches an exhaustive scan returns when the caller named
+/// no limit. Generous on purpose -- the contract is "every match" -- and
+/// hitting it is disclosed via `matches_truncated`, never silent.
+const CODESEARCH_LITERAL_DEFAULT_MAX_MATCHES: u64 = 2000;
+
+/// Resolves the result limit, reporting a genuine conflict instead of picking
+/// a winner behind the caller's back. Returns the limit and whether the caller
+/// stated it explicitly (the exhaustive modes need that distinction: an
+/// explicit limit bounds them, an absent one must not silently bound them to
+/// the ranked-retrieval default of 10).
+fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> Result<(u32, bool), String> {
+    let mut seen: Vec<(&str, u64)> = Vec::new();
+    for field in CODESEARCH_LIMIT_FIELDS {
+        if let Some(v) = body.get(*field) {
+            match v.as_u64() {
+                Some(n) if n > 0 => seen.push((field, n)),
+                _ => return Err(format!(
+                    "body field \"{field}\" must be a positive integer result limit, got {v}"
+                )),
+            }
+        }
+    }
+    match seen.first() {
+        None => Ok((cfg.budget.default_k as u32, false)),
+        Some((_, first)) => {
+            if let Some((other, other_n)) = seen.iter().find(|(_, n)| n != first) {
+                let (winner, _) = seen[0];
+                return Err(format!(
+                    "conflicting result limits in one body: \"{winner}\"={first} and \"{other}\"={other_n} -- pass one, not both"
+                ));
+            }
+            Ok((*first as u32, true))
+        }
+    }
+}
+
+/// Exhaustive literal/regex search: ripgrep semantics, every match with
+/// path:line, enumeration order, no relevance ranking, no top-k.
+///
+/// Routed BEFORE the root branch and before every digest/index/embedding step
+/// because it needs none of them -- that bypass is the fix for a literal
+/// question over a large workspace costing minutes (measured on
+/// C:/dev/litebox-main: two 120s/240s timeouts and one ~420s answer, all spent
+/// in the corpus-digest walk, the `index(".", 500)` rebuild it triggered, and
+/// the embedding/fusion passes that follow, none of which an exact-match
+/// answer consults).
+fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ragconfig::RagConfig, explicit_limit: Option<u32>) -> u64 {
+    let root = body.get("root").and_then(|v| v.as_str())
+        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty());
+    if let Some(root) = root {
+        if !crate::wasm_dispatch::host_allow_root(root) {
+            return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
+        }
+    }
+    let max_matches = body.get("max_matches").and_then(|v| v.as_u64())
+        .or_else(|| explicit_limit.map(u64::from))
+        .unwrap_or(CODESEARCH_LITERAL_DEFAULT_MAX_MATCHES) as usize;
+    let scan = crate::code_index::LiteralScan {
+        pattern: query,
+        root,
+        regex,
+        case_insensitive: body.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false),
+        whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
+        path_glob: body.get("path_glob").and_then(|v| v.as_str()).filter(|g| !g.is_empty()),
+        max_matches,
+        max_files: body.get("max_files").and_then(|v| v.as_u64())
+            .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
+    };
+    let out = crate::code_index::scan_literal(&scan, cfg);
+    if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+        return err("codesearch", out.get("error").and_then(|e| e.as_str()).unwrap_or("exhaustive scan failed"));
+    }
+    ok("codesearch", out)
+}
+
 fn codesearch(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
-    let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_k as u64) as u32;
     if query.is_empty() { return err("codesearch", "query required"); }
+    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("dual");
+    if !CODESEARCH_MODES.contains(&mode) {
+        return err("codesearch", &format!(
+            "mode \"{}\" is not a codesearch mode -- valid modes are {}. \
+             \"literal\"/\"regex\" are exhaustive: every match with path:line, no ranking, no top-k. \
+             \"dual\" is ranked BM25+vector retrieval. \"filename\" matches paths only. \
+             An unrecognised mode is refused here rather than served as \"dual\", \
+             which is what used to happen.",
+            mode,
+            CODESEARCH_MODES.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(", "),
+        ));
+    }
+    let (k, limit_was_explicit) = match codesearch_result_limit(body, &cfg) {
+        Ok(v) => v,
+        Err(e) => return err("codesearch", &e),
+    };
+    if mode == "literal" || mode == "regex" {
+        let explicit = if limit_was_explicit { Some(k) } else { None };
+        return codesearch_exhaustive(body, query, mode == "regex", &cfg, explicit);
+    }
     let root = body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
         .filter(|p| !p.is_empty());
     if let Some(root) = root {
         return codesearch_at_root(body, root, query, k, &cfg);
     }
-    if body.get("mode").and_then(|v| v.as_str()) == Some("filename") {
+    if mode == "filename" {
         let out = crate::code_index::search_filenames(query, k as usize, &cfg);
         return ok("codesearch", out);
     }
