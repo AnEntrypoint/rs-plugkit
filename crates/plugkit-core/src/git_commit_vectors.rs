@@ -88,7 +88,55 @@ fn parse_log_entries(stdout: &str) -> Vec<(String, String)> {
     out
 }
 
+/// Cheap pre-flight: `git show --shortstat` counts changes without rendering
+/// any diff text, so it stays fast even for a commit whose full `-p` patch
+/// would be huge (many files, or large binary blobs git cannot line-diff at
+/// all -- those contribute ~0 to the insertion/deletion count but still cost
+/// real time to render as part of a `-p` patch). Returns (files_changed,
+/// churn_lines); `None` on any parse/exec failure, which callers treat as
+/// "unknown size" and let through rather than silently dropping the commit's
+/// text entirely on a shortstat hiccup.
+fn commit_change_scale(hash: &str) -> Option<(usize, usize)> {
+    let v = crate::wasm_dispatch::git_call_argv(
+        &["show", "--no-color", "--shortstat", "--first-parent", "--format=", hash],
+        None,
+    );
+    let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
+    let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if !ok || exit_code != 0 { return None; }
+    let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let line = stdout.lines().find(|l| !l.trim().is_empty())?;
+    let mut files = 0usize;
+    let mut churn = 0usize;
+    for seg in line.split(',') {
+        let seg = seg.trim();
+        if let Some(n) = seg.strip_suffix("file changed").or_else(|| seg.strip_suffix("files changed")) {
+            files = n.trim().parse().unwrap_or(0);
+        } else if let Some(n) = seg.strip_suffix("insertion(+)").or_else(|| seg.strip_suffix("insertions(+)")) {
+            churn += n.trim().parse::<usize>().unwrap_or(0);
+        } else if let Some(n) = seg.strip_suffix("deletion(-)").or_else(|| seg.strip_suffix("deletions(-)")) {
+            churn += n.trim().parse::<usize>().unwrap_or(0);
+        }
+    }
+    Some((files, churn))
+}
+
 fn commit_diff_text(hash: &str, cfg: &RagConfig) -> String {
+    if let Some((files, churn)) = commit_change_scale(hash) {
+        let max_files = cfg.bulk_embed.git_commit_full_diff_max_files;
+        let max_lines = cfg.bulk_embed.git_commit_full_diff_max_changed_lines;
+        if files > max_files || churn > max_lines {
+            crate::wasm_dispatch::emit_event("git_commit_diff_skipped_oversized", json!({
+                "hash": hash,
+                "files_changed": files,
+                "churn_lines": churn,
+                "max_files": max_files,
+                "max_changed_lines": max_lines,
+                "reason": "full -p diff render would be the dominant per-commit cost on a commit this size (or this binary-heavy) -- embedding the subject line alone instead of blocking the whole sync pass on rendering+filtering one oversized patch",
+            }));
+            return String::new();
+        }
+    }
     let v = crate::wasm_dispatch::git_call_argv(
         &["show", "--no-color", "--stat=200", "-p", "--first-parent", hash],
         None,
@@ -176,14 +224,41 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
     let mut consecutive_embed_failures: usize = 0;
     let embed_budget_ms = cfg.bulk_embed.git_commit_embed_budget_ms;
     let min_embeds_per_pass = cfg.bulk_embed.git_commit_min_embeds_per_pass as u32;
+    // Independent of the min_embeds_per_pass floor below: that floor exists so
+    // a pass embeds *something* even under transient budget pressure, but it
+    // has no opinion about how expensive any ONE commit turns out to be.
+    // commit_diff_text's own per-commit size cap (git_commit_full_diff_max_*)
+    // keeps the COMMON case cheap, but this is the backstop for whatever it
+    // still lets through -- once elapsed passes this ceiling, every remaining
+    // commit in the window is deferred unconditionally, so a pathological run
+    // cannot multiply embed_budget_ms's intended ~30s into minutes no matter
+    // how large min_embeds_per_pass's floor is.
+    let hard_ceiling_ms = cfg.bulk_embed.git_commit_sync_hard_ceiling_ms.max(embed_budget_ms);
     for (hash, subject) in &entries {
         if present.contains(hash) { continue; }
         if Some(hash.as_str()) == watermark.as_deref() { continue; }
         let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+        if elapsed > hard_ceiling_ms {
+            deferred += 1;
+            continue;
+        }
         if elapsed > embed_budget_ms && embedded >= min_embeds_per_pass {
             deferred += 1;
             continue;
         }
+        // Silence here (only a start-of-pass embed_generation_recorded event
+        // and this loop's own end-of-pass git_commit_vectors_synced summary)
+        // is exactly what made a real 348s-long pass against a large/messy
+        // repo (C:/dev/guru) indistinguishable from a hang to a caller polling
+        // the spool -- watcher.log had a five-and-a-half-minute gap with zero
+        // events. One event per commit actually processed (not per skip)
+        // keeps this cheap while giving a live progress signal.
+        crate::wasm_dispatch::emit_event("git_commit_vector_progress", json!({
+            "hash": hash,
+            "embedded_so_far": embedded,
+            "elapsed_ms": elapsed,
+            "window": entries.len(),
+        }));
         let diff = commit_diff_text(hash, cfg);
         let text = if diff.is_empty() {
             subject.clone()
