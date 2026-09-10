@@ -278,6 +278,42 @@ pub struct BulkEmbedBudgetConfig {
     pub git_commit_diff_char_cap: usize,
     pub git_commit_log_window: usize,
     pub git_commit_max_consecutive_embed_failures: usize,
+    /// Hard stop for the WHOLE sync_incremental pass, checked before every
+    /// commit regardless of `git_commit_min_embeds_per_pass` -- that floor
+    /// exists so a pass embeds *something* even under transient budget
+    /// pressure, but it has no opinion about how expensive any ONE commit is.
+    /// Live-witnessed against a real messy repo (`C:/dev/guru`, vendored
+    /// sub-git-stores and large binary blobs in its history): 8 commits
+    /// (exactly the floor) took 348s to embed -- ~43s/commit average, because
+    /// `commit_diff_text`'s `git show -p` render cost scales with the
+    /// commit's actual diff size, which the floor's count-based check cannot
+    /// see. Without an elapsed-time ceiling independent of the floor, a run
+    /// of large/binary-heavy commits inside the log window can multiply the
+    /// intended ~30s budget by 10x+ with the daemon emitting zero progress
+    /// events the whole time -- indistinguishable from a hang to any caller
+    /// polling the spool. Set well above `git_commit_embed_budget_ms` so the
+    /// normal case (small commits) never reaches it; it only fires when the
+    /// per-commit cost-capping in `commit_diff_text` (see
+    /// `git_commit_full_diff_max_changed_lines`/`_max_files`) still was not
+    /// enough to keep the floor's 8 commits cheap.
+    pub git_commit_sync_hard_ceiling_ms: u64,
+    /// Above this many changed lines (insertions+deletions from `git show
+    /// --shortstat`), skip the expensive full `-p` diff render for a commit
+    /// and embed its subject line alone instead (same fallback already used
+    /// when a commit's diff is empty). The shortstat probe itself is cheap --
+    /// git counts changes without rendering diff text -- so this bounds the
+    /// dominant per-commit cost (rendering+filtering a potentially huge
+    /// patch) without skipping the commit's own semantic search value
+    /// entirely.
+    pub git_commit_full_diff_max_changed_lines: usize,
+    /// Same cost cap as `git_commit_full_diff_max_changed_lines`, keyed on
+    /// file count instead of line count -- catches a commit that touches many
+    /// files with small text diffs (still expensive to render/filter as one
+    /// patch) and, more importantly, a binary-heavy commit whose changed
+    /// content contributes ~0 to the insertions/deletions count (git cannot
+    /// line-diff binary content) but whose file count and underlying blob
+    /// sizes still make `git show -p` slow.
+    pub git_commit_full_diff_max_files: usize,
     pub rssearch_migrate_reported_failures: usize,
     pub max_subbatch_items: usize,
 }
@@ -291,6 +327,9 @@ impl Default for BulkEmbedBudgetConfig {
             git_commit_diff_char_cap: 4000,
             git_commit_log_window: 500,
             git_commit_max_consecutive_embed_failures: 5,
+            git_commit_sync_hard_ceiling_ms: 90000,
+            git_commit_full_diff_max_changed_lines: 2000,
+            git_commit_full_diff_max_files: 50,
             rssearch_migrate_reported_failures: 5,
             max_subbatch_items: 32,
         }
@@ -726,6 +765,9 @@ impl RagConfig {
         overwrite_present_usize_or_record_problem("git_commits", "diff_char_cap", &mut cfg.bulk_embed.git_commit_diff_char_cap, &mut problems);
         overwrite_present_usize_or_record_problem("git_commits", "log_window", &mut cfg.bulk_embed.git_commit_log_window, &mut problems);
         overwrite_present_usize_or_record_problem("git_commits", "max_consecutive_embed_failures", &mut cfg.bulk_embed.git_commit_max_consecutive_embed_failures, &mut problems);
+        overwrite_present_u64_or_record_problem("git_commits", "sync_hard_ceiling_ms", &mut cfg.bulk_embed.git_commit_sync_hard_ceiling_ms, &mut problems);
+        overwrite_present_usize_or_record_problem("git_commits", "full_diff_max_changed_lines", &mut cfg.bulk_embed.git_commit_full_diff_max_changed_lines, &mut problems);
+        overwrite_present_usize_or_record_problem("git_commits", "full_diff_max_files", &mut cfg.bulk_embed.git_commit_full_diff_max_files, &mut problems);
         overwrite_present_usize_or_record_problem("embed", "max_subbatch_items", &mut cfg.bulk_embed.max_subbatch_items, &mut problems);
         overwrite_present_string_or_record_problem("memory_md_tables", "meta", &mut cfg.memory_md_tables.meta, &mut problems);
         overwrite_present_string_or_record_problem("memory_md_tables", "files", &mut cfg.memory_md_tables.files, &mut problems);
