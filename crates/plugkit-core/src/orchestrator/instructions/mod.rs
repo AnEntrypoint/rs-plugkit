@@ -115,6 +115,28 @@ fn read_spool_json(name: &str) -> serde_json::Value {
     }
 }
 
+/// `agentplug-runner`'s own escalation marker, written once its self-update
+/// path has failed the same target version past its retry budget (see
+/// `record_handoff_failure` in `agentplug-runner/src/daemon.rs`) -- a
+/// machine-wide file, not a per-project one, because the runner binary is
+/// shared across every project this daemon serves. Read directly by absolute
+/// path rather than through `read_spool_json` (which is anchored under this
+/// project's own `.gm/`) since this marker lives at the runner's install
+/// root, resolved the same way on both sides of the wasm/native boundary
+/// (`config::agentplug_home_dir`).
+#[cfg(target_arch = "wasm32")]
+fn read_runner_update_escalation() -> serde_json::Value {
+    let Some(home) = crate::config::agentplug_home_dir() else { return serde_json::Value::Null };
+    let path = format!("{home}/runner-update-escalation.json");
+    if !pkfs::exists(&path) {
+        return serde_json::Value::Null;
+    }
+    match pkfs::read_to_string(&path) {
+        Some(content) => serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::Value::Null),
+        None => serde_json::Value::Null,
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn residual_check_fired_recently() -> bool {
     let marker = super::gm_dir().join("residual-check-fired");
@@ -537,7 +559,14 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
     ilog("instruction::handle post-recall");
 
-    let update_available = read_spool_json(".update-available.json");
+    // Project-local marker takes priority (a future project-scoped writer
+    // names a more specific fix); the runner's own machine-wide escalation
+    // is the fallback -- today the only populated source, since nothing yet
+    // writes the project-local file.
+    let update_available = {
+        let local = read_spool_json(".update-available.json");
+        if local.is_null() { read_runner_update_escalation() } else { local }
+    };
     let config_changed = super::config_notify::drain_for_session(notify_session.as_deref());
     let running_tasks = super::task::live_running_tasks();
     let open_browser_sessions = super::task::open_browser_sessions();
