@@ -375,7 +375,7 @@ fn join(base: &str, rel: &str) -> String {
     }
 }
 
-fn env_var(key: &str) -> Option<String> {
+pub(crate) fn env_var(key: &str) -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {
         let packed = unsafe { crate::wasm_dispatch::host_env_get(key.as_ptr(), key.len() as u32) };
@@ -392,7 +392,20 @@ pub fn user_cache_root() -> Option<String> {
     home_dir().map(|home| join(&home, SOURCE_CACHE_REL))
 }
 
-fn home_dir() -> Option<String> {
+/// `agentplug-runner`'s own install/state directory: `$AGENTPLUG_HOME` if set
+/// (matching `agentplug_host::install::install_dir`'s override, so both sides
+/// of the process boundary agree on one location without sharing code across
+/// the wasm/native split), else `~/.agentplug`.
+pub(crate) fn agentplug_home_dir() -> Option<String> {
+    if let Some(over) = env_var("AGENTPLUG_HOME") {
+        if !over.trim().is_empty() {
+            return Some(over.trim().trim_end_matches(['/', '\\']).to_string());
+        }
+    }
+    home_dir().map(|home| join(&home, ".agentplug"))
+}
+
+pub(crate) fn home_dir() -> Option<String> {
     for key in ["HOME", "USERPROFILE"] {
         if let Some(s) = env_var(key) {
             let t = s.trim().trim_end_matches(['/', '\\']);
