@@ -242,7 +242,7 @@ git-tracked source and a bounded `node_modules` walk), `kv`/`kv_get`/
 `codesearch`, `callers`/`callees`/`impact`, `memorize`/`memorize-prune`, `health`, `filter`, the full git
 verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`,
 `git_add`, `git_commit`, `git_finalize`, `git_push`, `git_checkout`,
-`git_fetch`, `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
+`git_fetch`, `git_pull`, `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
 GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
 `prd-status`, `mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
 `fsm-validate`, `fsm-propose-override`, `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/
