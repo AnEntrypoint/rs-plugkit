@@ -3337,6 +3337,47 @@ fn git_fetch(body: &Value) -> u64 {
     ok("git_fetch", json!({ "remote": remote, "output": out }))
 }
 
+fn git_pull(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let remote = body.get("remote").and_then(|v| v.as_str()).unwrap_or("origin").trim();
+    let branch = body.get("branch").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let ff_only = body.get("ff_only").and_then(|v| v.as_bool()).unwrap_or(false);
+    let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    let mut argv = vec!["pull", "--no-edit", "--no-rebase"];
+    if ff_only { argv.push("--ff-only"); }
+    if !remote.is_empty() { argv.push(remote); }
+    if !branch.is_empty() { argv.push(branch); }
+    let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let output = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    let conflicts: Vec<String> = exec_git_in(cwd, "diff --name-only --diff-filter=U")
+        .lines().map(|line| line.trim().to_string()).filter(|line| !line.is_empty()).collect();
+    if code != 0 {
+        return err_json("git_pull", json!({
+            "error": output,
+            "remote": remote,
+            "branch": if branch.is_empty() { Value::Null } else { json!(branch) },
+            "ff_only": ff_only,
+            "conflicted": !conflicts.is_empty(),
+            "conflicts": conflicts,
+            "head_before": head_before,
+            "hint": "resolve conflicted paths, git_add them, then git_commit; or git_merge_abort to restore the pre-pull HEAD",
+        }));
+    }
+    let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    ok("git_pull", json!({
+        "remote": remote,
+        "branch": if branch.is_empty() { Value::Null } else { json!(branch) },
+        "ff_only": ff_only,
+        "head_before": head_before,
+        "head_after": head_after,
+        "already_up_to_date": head_before == head_after,
+        "output": output,
+    }))
+}
+
 fn ci_status_resolve_repo_preferring_unambiguous_github_repo_field(body: &Value, cwd: Option<&str>) -> Result<String, u64> {
     if let Some(explicit) = body.get("github_repo").and_then(|v| v.as_str())
         .or_else(|| body.get("repo").and_then(|v| v.as_str()))
@@ -4001,6 +4042,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_diff" => git_diff(&body),
         "git_show" => git_show(&body),
         "git_fetch" => git_fetch(&body),
+        "git_pull" => git_pull(&body),
         "ci-status" | "ci_status" => ci_status(&body),
         "git_branch" => git_branch(&body),
         "git_checkout" => git_checkout(&body),
