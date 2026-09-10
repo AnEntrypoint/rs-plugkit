@@ -139,6 +139,248 @@ fn is_derivable_state(text: &str) -> Option<String> {
     None
 }
 
+/// Rows whose text is stored but whose vector could not be computed yet.
+///
+/// Refusing a silent NULL-embedding insert is right -- a row with a zero or
+/// absent vector poisons cosine ranking and reads as a genuine match at
+/// distance 0. But refusing the WHOLE write was the wrong consequence: the
+/// lesson an agent was instructed to persist was discarded, with no record that
+/// it had ever existed, while gm's own graph mandates `memorize-fire` at every
+/// M_RECORD pass. So the text goes to the durable md corpus AND to the flat kv
+/// store (which is exactly what `recall`'s degraded keyword path scans when the
+/// embedder is down), the key is queued here, and the response says plainly that
+/// the row carries no vector. "Stored, vector pending, and said so" replaces
+/// both "stored silently as if fine" and "nothing stored at all".
+#[cfg(target_arch = "wasm32")]
+const EMBED_PENDING_LEDGER_FILE: &str = ".gm/exec-spool/.memorize-embed-pending.json";
+
+/// Bounded so a long embedder outage cannot grow an unbounded file. The md
+/// corpus is the durable store either way; this ledger only tracks which keys
+/// still owe a vector, and the oldest entries are the ones most likely to have
+/// been superseded.
+#[cfg(target_arch = "wasm32")]
+const EMBED_PENDING_LEDGER_MAX_ROWS: usize = 500;
+
+/// How many queued rows one successful `memorize-fire` opportunistically
+/// backfills. A successful fire is direct proof the embedder is up again, so it
+/// is the cheapest possible recovery trigger -- no separate poll, no daemon
+/// timer. Bounded per call so a 500-row backlog cannot turn one fire into a
+/// minutes-long dispatch; `memorize-backfill` drains the rest on demand.
+#[cfg(target_arch = "wasm32")]
+const EMBED_PENDING_DRAIN_PER_SUCCESSFUL_FIRE: usize = 8;
+
+#[cfg(target_arch = "wasm32")]
+fn read_pending_ledger() -> Vec<serde_json::Value> {
+    crate::wasm_dispatch::host_read(EMBED_PENDING_LEDGER_FILE)
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn write_pending_ledger(rows: &[serde_json::Value]) -> bool {
+    let payload = serde_json::Value::Array(rows.to_vec());
+    crate::wasm_dispatch::host_write(EMBED_PENDING_LEDGER_FILE, &payload.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn queue_pending_embedding(
+    namespace: &str,
+    key: &str,
+    kind: &str,
+    text: &str,
+    reason: &str,
+    tencentdb: bool,
+    now_ms: i64,
+) -> usize {
+    let mut rows = read_pending_ledger();
+    rows.retain(|r| {
+        !(r.get("key").and_then(|v| v.as_str()) == Some(key)
+            && r.get("namespace").and_then(|v| v.as_str()) == Some(namespace))
+    });
+    rows.push(serde_json::json!({
+        "namespace": namespace,
+        "key": key,
+        "kind": kind,
+        "text": text,
+        "reason": reason,
+        "tencentdb": tencentdb,
+        "queued_at_ms": now_ms,
+    }));
+    while rows.len() > EMBED_PENDING_LEDGER_MAX_ROWS {
+        rows.remove(0);
+    }
+    let total = rows.len();
+    write_pending_ledger(&rows);
+    total
+}
+
+/// Re-embeds queued rows and promotes each into the vector store, dropping only
+/// the ones that actually succeeded. A row whose embedding still fails stays
+/// queued, so a partial recovery loses nothing.
+#[cfg(target_arch = "wasm32")]
+fn drain_pending_embeddings(max_rows: usize) -> serde_json::Value {
+    let rows = read_pending_ledger();
+    if rows.is_empty() {
+        return serde_json::json!({ "embedded": 0, "still_pending": 0, "attempted": 0 });
+    }
+    let now = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
+    let mut kept: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+    let mut embedded = 0usize;
+    let mut attempted = 0usize;
+    let mut last_error: Option<String> = None;
+    for row in rows {
+        let namespace = row.get("namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+        let key = row.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let text = row.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if key.is_empty() || text.is_empty() || attempted >= max_rows {
+            if !key.is_empty() && !text.is_empty() {
+                kept.push(row);
+            }
+            continue;
+        }
+        attempted += 1;
+        let emb = match crate::embed::embed_text_json(&text) {
+            Some(v) => v,
+            None => {
+                last_error = crate::embed::last_embed_failure();
+                kept.push(row);
+                continue;
+            }
+        };
+        let tencentdb = row.get("tencentdb").and_then(|v| v.as_bool()).unwrap_or(false);
+        let write_result: Result<(), String> = if tencentdb {
+            let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("l0");
+            crate::tencentdb_memory::write(&namespace, kind, &text, &emb, now).map(|_| ())
+        } else {
+            crate::rssearch_vectors::write(&namespace, &key, &text, &emb, now)
+        };
+        match write_result {
+            Ok(()) => embedded += 1,
+            Err(e) => {
+                last_error = Some(e);
+                kept.push(row);
+            }
+        }
+    }
+    let still_pending = kept.len();
+    write_pending_ledger(&kept);
+    if embedded > 0 || still_pending > 0 {
+        crate::wasm_dispatch::emit_event("memorize_embed_backfill", serde_json::json!({
+            "embedded": embedded,
+            "still_pending": still_pending,
+            "attempted": attempted,
+            "last_error": last_error,
+        }));
+    }
+    serde_json::json!({
+        "embedded": embedded,
+        "still_pending": still_pending,
+        "attempted": attempted,
+        "last_error": last_error,
+    })
+}
+
+/// The degraded write: text durable, vector owed, disclosure mandatory.
+#[cfg(target_arch = "wasm32")]
+fn store_without_vector(
+    namespace: &str,
+    key: &str,
+    kind: &str,
+    text: &str,
+    why: &str,
+    tencentdb: bool,
+    now_ms: i64,
+) -> (String, String, i32) {
+    let md_path = match crate::memory_md::write_memory(namespace, key, text, now_ms) {
+        crate::memory_md::WriteOutcome::Created(p)
+        | crate::memory_md::WriteOutcome::Updated(p)
+        | crate::memory_md::WriteOutcome::Deduped(p) => Some(p),
+        crate::memory_md::WriteOutcome::Invalid(reason) => {
+            crate::wasm_dispatch::emit_event("memory_md_write_invalid", serde_json::json!({
+                "key": key, "namespace": namespace, "reason": reason,
+            }));
+            return (String::new(), format!("memorize: md write invalid: {}", reason), 1);
+        }
+        crate::memory_md::WriteOutcome::Failed(p) => {
+            return (String::new(), format!("memorize: md write failed at {}; the md corpus is the durable store, refusing an unbacked memory", p), 1);
+        }
+    };
+    // Deliberately NOT mirrored into the flat kv store. host_kv is libsql-backed,
+    // so the same outage that takes the embedder down leaves the libsql pool with
+    // no instantiated slot -- and the pool's FIFO wait does not deny, it waits, so
+    // the kv write blocks for minutes and still lands nothing. Measured on this
+    // path: a degraded fire that wrote the md file in milliseconds then sat in
+    // host_kv_put long enough that the ledger entry below never got written within
+    // the dispatch. The md corpus is the durable store and `recall`'s md keyword
+    // scan reads it directly, so the kv mirror bought nothing and cost the whole
+    // degraded write.
+    let queued_total = queue_pending_embedding(namespace, key, kind, text, why, tencentdb, now_ms);
+    crate::wasm_dispatch::emit_event("memorize_stored_without_vector", serde_json::json!({
+        "key": key,
+        "namespace": namespace,
+        "reason": why,
+        "pending_total": queued_total,
+        "tencentdb_push_pending": tencentdb,
+    }));
+    let mut payload = serde_json::json!({
+        "ok": true,
+        "key": key,
+        "namespace": namespace,
+        "embedded": false,
+        "vector_pending": true,
+        "vector_missing_reason": why,
+        "stored_without_vector": true,
+        "bytes": text.len(),
+        "md_file": md_path,
+        "recall_mode": "keyword_only",
+        "pending_embedding_rows": queued_total,
+        "pending_ledger": EMBED_PENDING_LEDGER_FILE,
+        "backfill_verb": "memorize-backfill",
+        "disclosure": format!(
+            "STORED WITHOUT A VECTOR. The memo text is durable in the md corpus at {}, and recall's degraded keyword path scans that corpus directly, so this memo is still retrievable by term overlap. It will NOT appear in vector/similarity recall until it is backfilled. Embedder failure: {why}. Dispatch memorize-backfill once the embedder is healthy, or simply fire another memorize-fire -- a successful one drains up to {} queued rows automatically.",
+            md_path.clone().unwrap_or_else(|| "the md corpus".to_string()),
+            EMBED_PENDING_DRAIN_PER_SUCCESSFUL_FIRE
+        ),
+        "agents_drain": agents_drain_obligation(),
+    });
+    if tencentdb {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("tencentdb_push_pending".to_string(), serde_json::json!(true));
+            obj.insert("tencentdb_note".to_string(), serde_json::json!(
+                "this namespace is routed to the tencentdb backend, which requires a vector on insert; the row is held in the local md corpus and pending ledger and is pushed to tencentdb by memorize-backfill once the embedding succeeds"
+            ));
+        }
+    }
+    (payload.to_string(), String::new(), 0)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn handle_backfill(content: &str) -> (String, String, i32) {
+    let body: serde_json::Value = serde_json::from_str(content).unwrap_or(serde_json::Value::Null);
+    let max_rows = body
+        .get("max_rows")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(EMBED_PENDING_LEDGER_MAX_ROWS as u64) as usize;
+    let result = drain_pending_embeddings(max_rows);
+    let embedded = result.get("embedded").and_then(|v| v.as_u64()).unwrap_or(0);
+    let still_pending = result.get("still_pending").and_then(|v| v.as_u64()).unwrap_or(0);
+    let mut payload = result;
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("ok".to_string(), serde_json::json!(true));
+        obj.insert("pending_ledger".to_string(), serde_json::json!(EMBED_PENDING_LEDGER_FILE));
+        obj.insert("summary".to_string(), serde_json::json!(format!(
+            "backfilled {embedded} row(s) into the vector store; {still_pending} still have no vector"
+        )));
+    }
+    (payload.to_string(), String::new(), 0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn handle_backfill(_content: &str) -> (String, String, i32) {
+    ("{\"ok\":false,\"error\":\"memorize-backfill requires wasm32\"}".to_string(), String::new(), 1)
+}
+
 #[cfg(target_arch = "wasm32")]
 pub fn handle_fire(content: &str) -> (String, String, i32) {
     if content.trim().is_empty() {
@@ -202,8 +444,11 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         let emb = match crate::embed::embed_text_json(&text) {
             Some(v) => v,
             None => {
-                let msg = format!("memorize-fire: embed_text failed for tencentdb-routed namespace={}; refusing silent-NULL-embedding insert", namespace);
-                return (String::new(), msg, 1);
+                let why = crate::embed::last_embed_failure().unwrap_or_else(|| "no reason was recorded by the embedder".to_string());
+                let now = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
+                let content_hash = crate::hash::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
+                let key = format!("mem-{:016x}-{}", content_hash, text.len());
+                return store_without_vector(&namespace, &key, &kind, &text, &why, true, now);
             }
         };
         let now = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
@@ -251,14 +496,17 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     let emb_str = match crate::embed::embed_text_json(&text) {
         Some(v) => v.to_string(),
         None => {
-            let msg = format!("memorize: embed_text failed for key={}; refusing silent-NULL-embedding insert", key);
+            let why = crate::embed::last_embed_failure().unwrap_or_else(|| "no reason was recorded by the embedder".to_string());
+            let msg = format!("memorize: embed_text failed for key={}; storing the row WITHOUT a vector rather than dropping the memo -- {}", key, why);
             let _ = unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
             crate::wasm_dispatch::emit_event("memorize_embed_failed", serde_json::json!({
                 "key": key,
                 "namespace": namespace,
-                "error": "embed_text returned None",
+                "error": why,
+                "degraded_to": "stored_without_vector",
             }));
-            return (String::new(), msg, 1);
+            let kind = parsed_kind_or_default(content);
+            return store_without_vector(&namespace, &key, &kind, &text, &why, false, now as i64);
         }
     };
     let md_path = match crate::memory_md::write_memory(&namespace, &key, &text, now as i64) {
@@ -283,7 +531,11 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             "error": e,
         }));
     }
-    let payload = serde_json::json!({
+    // This fire just proved the embedder is healthy, which is the cheapest
+    // possible recovery trigger for rows an earlier outage stored without a
+    // vector -- no poll, no timer, no separate dispatch needed.
+    let backfilled = drain_pending_embeddings(EMBED_PENDING_DRAIN_PER_SUCCESSFUL_FIRE);
+    let mut payload = serde_json::json!({
         "ok": true,
         "key": key,
         "namespace": namespace,
@@ -292,6 +544,11 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         "md_file": md_path,
         "agents_drain": agents_drain_obligation(),
     });
+    if backfilled.get("attempted").and_then(|v| v.as_u64()).unwrap_or(0) > 0 {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("embed_backfill".to_string(), backfilled);
+        }
+    }
     (payload.to_string(), String::new(), 0)
 }
 

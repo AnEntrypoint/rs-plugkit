@@ -16,6 +16,33 @@ extern "C" {
     fn host_vec_embed(text_ptr: *const u8, text_len: u32, out_ptr: *mut f32, out_len: u32) -> i32;
 }
 
+static LAST_EMBED_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn record_embed_failure(reason: String) {
+    elog(&format!("embed::failure {reason}"));
+    if let Ok(mut slot) = LAST_EMBED_FAILURE.lock() {
+        *slot = Some(reason);
+    }
+}
+
+fn clear_embed_failure() {
+    if let Ok(mut slot) = LAST_EMBED_FAILURE.lock() {
+        *slot = None;
+    }
+}
+
+/// Why the most recent `embed_text*` call returned `None`. Every embedding
+/// entry point is `Option`-returning across a dozen call sites, so the reason
+/// cannot ride the return value without rewriting all of them; recording it
+/// here lets the one caller that reports to a human say what actually broke.
+/// Before this, a failed `memorize-fire` could only say "embed_text failed",
+/// naming no provider, no status, no timeout and no retry advice -- a dead end
+/// for the caller and indistinguishable between a missing model, an evicted
+/// bert pool slot, and a dispatch that simply ran out of deadline.
+pub fn last_embed_failure() -> Option<String> {
+    LAST_EMBED_FAILURE.lock().ok().and_then(|slot| slot.clone())
+}
+
 fn try_host_embed(text: &str) -> Option<Vec<f32>> {
     let mut out = vec![0f32; EMBED_DIM];
     let rc = unsafe {
@@ -28,10 +55,75 @@ fn try_host_embed(text: &str) -> Option<Vec<f32>> {
     };
     if rc == EMBED_DIM as i32 {
         l2_normalize(&mut out);
-        Some(out)
-    } else {
-        None
+        return Some(out);
     }
+    // rc was the only evidence this call ever produced and it used to be
+    // discarded outright. The host implements host_vec_embed by dispatching to
+    // the `bert` sibling plugin, so a negative rc is a failure of that dispatch
+    // (bert not loaded for this project, its pool slot evicted or still held by
+    // another dispatch, or its own call deadline exceeded) while a non-negative
+    // rc that is not EMBED_DIM is a width disagreement between the host's
+    // embedder and this build's compiled-in model.
+    let reason = if rc < 0 {
+        format!("host_vec_embed (bert sibling plugin, via the agentplug host) returned rc={rc} for a {}-byte input: the host-side dispatch itself failed -- bert not loaded for this project, its shared pool slot evicted, or its dispatch deadline exceeded. A retry may help once the bert pool is free", text.len())
+    } else {
+        format!("host_vec_embed returned rc={rc} but this build expects exactly {EMBED_DIM} dimensions: the host's embedder and this binary's compiled-in model disagree on width. A retry will NOT help -- the host and plugin builds have to match")
+    };
+    record_embed_failure(reason);
+    None
+}
+
+/// Second, independent route to the same bert model: the generic
+/// `host_plugin_call` sibling dispatch rather than the `host_vec_embed`
+/// convenience import.
+///
+/// The two are not equivalent, and the difference is the whole reason this
+/// exists. The host implements `host_vec_embed` with three bare
+/// `pool.acquire()` attempts 500ms apart and collapses every outcome into a
+/// single `-1`: a cold or evicted bert pool slot, a bert plugin that was never
+/// installed for this project (that branch logs NOTHING host-side), a capability
+/// denial, and a genuine model error are indistinguishable, and a 1.5s retry
+/// budget cannot outlast instantiating a 136MB `bert.wasm`. `host_plugin_call`
+/// goes through the registry's real dispatch path instead -- FIFO pool wait,
+/// reinstantiate-on-evicted-slot retry -- and answers with a structured error
+/// naming `unknown_plugin` / `plugin_not_loaded_yet` / the plugin's own message.
+/// So this both RECOVERS the cases `host_vec_embed` gives up on too early, and
+/// when it cannot, reports why in terms a caller can act on.
+fn try_sibling_plugin_embed(text: &str) -> Option<Vec<f32>> {
+    let resp = crate::wasm_dispatch::plugin_call(
+        "bert",
+        "embed",
+        &serde_json::json!({ "text": text, "kind": "passage" }),
+    );
+    let arr = match resp.get("embedding").and_then(|e| e.as_array()) {
+        Some(a) => a.clone(),
+        None => {
+            let why = match &resp {
+                serde_json::Value::Null => "host_plugin_call returned no bytes".to_string(),
+                serde_json::Value::String(raw) => raw.clone(),
+                v => v
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("bert answered with no embedding field and no error field")
+                    .to_string(),
+            };
+            record_embed_failure(format!(
+                "bert sibling-plugin embed over host_plugin_call also failed for a {}-byte input: {why}. 'unknown_plugin' means bert is not installed for this project at all (check ~/.agentplug/daemon.log for a 'plugin bert failed to compile/install' line -- an install that cannot resolve a release tag leaves the plugin absent); 'plugin_not_loaded_yet'/'evicted' is transient and a retry helps",
+                text.len()
+            ));
+            return None;
+        }
+    };
+    let mut out: Vec<f32> = arr.iter().filter_map(|x| x.as_f64()).map(|x| x as f32).collect();
+    if out.len() != EMBED_DIM {
+        record_embed_failure(format!(
+            "bert sibling-plugin embed returned {} dimensions but this build expects exactly {EMBED_DIM}: the bert plugin's model and this binary's compiled-in width disagree. A retry will NOT help",
+            out.len()
+        ));
+        return None;
+    }
+    l2_normalize(&mut out);
+    Some(out)
 }
 
 fn elog(msg: &str) {
@@ -308,7 +400,10 @@ macro_rules! step {
             Ok(v) => v,
             Err(e) => {
                 let err_s = format!("{}", e);
-                elog(&format!("embed::embed_text step '{}' failed: {}", $label, err_s));
+                record_embed_failure(format!(
+                    "in-wasm embedding forward pass failed at step '{}': {}. A retry will not help unless the input itself changes",
+                    $label, err_s
+                ));
                 crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
                     "step": $label,
                     "error": err_s,
@@ -334,13 +429,29 @@ pub fn embed_text(text: &str) -> Option<Vec<f32>> {
 }
 
 fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
+    clear_embed_failure();
     if let Some(v) = try_host_embed(text) {
         return Some(v);
     }
+    let host_failure = last_embed_failure().unwrap_or_else(|| "host embedder unavailable".to_string());
+    if let Some(v) = try_sibling_plugin_embed(text) {
+        elog("embed::embed_text host_vec_embed was unusable; served by the bert sibling plugin over host_plugin_call instead");
+        crate::wasm_dispatch::emit_event("embed.sibling_plugin_recovered", serde_json::json!({
+            "host_vec_embed_failure": host_failure,
+            "text_len": text.len(),
+        }));
+        clear_embed_failure();
+        return Some(v);
+    }
+    let sibling_failure = last_embed_failure().unwrap_or_else(|| "bert sibling plugin unavailable".to_string());
+    let host_failure = format!("{host_failure}; then {sibling_failure}");
     let c = match ctx() {
         Ok(c) => c,
         Err(e) => {
-            elog(&format!("embed::embed_text ctx() failed: {} (text_len={})", e, text.len()));
+            record_embed_failure(format!(
+                "embedding context init failed ({e}) after the host embedder was unusable ({host_failure}); text_len={}. A retry may help if the failure was transient",
+                text.len()
+            ));
             return None;
         }
     };
@@ -353,10 +464,12 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
                 return run_embed_forward(tokenizer, model, device, text);
             }
         }
-        elog("embed::embed_text host-delegated but host_vec_embed returned non-EMBED_DIM; no wasm fallback available");
+        record_embed_failure(format!(
+            "host-delegated embedding failed ({host_failure}) and no in-wasm fallback is available (slim build, or the lazy weight load itself failed), so nothing can produce a vector for this text"
+        ));
         crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
             "step": "host_delegated_no_fallback",
-            "error": "host_vec_embed returned non-EMBED_DIM; wasm fallback unavailable (slim build, or lazy load itself failed)",
+            "error": host_failure,
         }));
         return None;
     }
@@ -364,14 +477,14 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
     let tokenizer = match c.tokenizer.as_ref() {
         Some(t) => t,
         None => {
-            elog("embed::embed_text tokenizer missing in non-host-delegated ctx");
+            record_embed_failure("tokenizer missing from a non-host-delegated embedding context: the compiled-in tokenizer never loaded. A retry will not help".to_string());
             return None;
         }
     };
     let model = match c.model.as_ref() {
         Some(m) => m,
         None => {
-            elog("embed::embed_text model missing in non-host-delegated ctx");
+            record_embed_failure("model missing from a non-host-delegated embedding context: the compiled-in safetensors never loaded. A retry will not help".to_string());
             return None;
         }
     };
@@ -390,7 +503,10 @@ fn run_embed_forward(tokenizer: &Tokenizer, model: &BertModel, device: &Device, 
     }
     let seq_len = ids.len();
     if seq_len == 0 {
-        elog(&format!("embed::embed_text empty tokenization (text_len={})", text.len()));
+        record_embed_failure(format!(
+            "tokenizing a {}-byte input produced zero tokens, so there is nothing to embed. A retry will not help -- the input carries no tokenizable content",
+            text.len()
+        ));
         return None;
     }
 
@@ -473,7 +589,13 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
 
     let mut still_uncached: Vec<usize> = Vec::new();
     for &i in &uncached_idx {
-        if let Some(v) = try_host_embed(&texts[i]) {
+        // Same two-route attempt as the single-text path: host_vec_embed first,
+        // then the bert sibling plugin over host_plugin_call. Without the second
+        // route, a host_delegated context whose host_vec_embed is down returned
+        // early below with every remaining item still None, so a bulk pass
+        // silently produced no vectors at all.
+        let embedded = try_host_embed(&texts[i]).or_else(|| try_sibling_plugin_embed(&texts[i]));
+        if let Some(v) = embedded {
             let cacheable = texts[i].len() <= plain_cache_max_text();
             if cacheable { cache_put(&PLAIN_CACHE, &texts[i], &v); }
             out[i] = Some(v);
