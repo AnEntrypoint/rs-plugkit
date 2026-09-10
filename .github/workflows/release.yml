@@ -1,0 +1,17 @@
+name: release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    uses: ./.github/workflows/wasm-plugin-release.yml
+    with:
+      wasm_artifact_name: rs_plugkit.wasm
+      published_asset_basename: plugkit-slim
+      release_repo: AnEntrypoint/plugkit-bin
+      release_title_prefix: plugkit
+      build_command: cargo build -p rs-plugkit --release --target wasm32-wasip1 --features slim
+    secrets:
+      publisher_token: ${{ secrets.PUBLISHER_TOKEN }}
+      release_signing_key: ${{ secrets.RELEASE_SIGNING_KEY }}
