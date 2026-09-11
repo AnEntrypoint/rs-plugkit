@@ -1,2 +1,10 @@
 /target
 Cargo.lock
+.gm/exec-spool/.status.json
+.gm/exec-spool/.dispatch-ledger.json
+.gm/exec-spool/.last-gate-fired.json
+.gm/exec-spool/.poll-scan-offset.json
+.gm/exec-spool/.watcher.log
+.gm/config-source-cache-default.0f97d1a3fa2b58cb.sync.json
+.gm/last-dispatch-ts
+.gm/last-instruction-ts
