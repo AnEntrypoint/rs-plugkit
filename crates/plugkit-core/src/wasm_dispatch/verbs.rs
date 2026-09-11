@@ -3146,6 +3146,49 @@ fn git_finalize(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let cwd = repo.clone();
     let cwd_ref = cwd.as_deref();
+    let explicit_source_ref = body.get("rev")
+        .or_else(|| body.get("source_ref"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(String::from);
+    if let Some(source_ref) = explicit_source_ref {
+        let push_resp = unpack_to_value(git_push(body));
+        let pushed = push_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !pushed {
+            return pack(json!({
+                "ok": false,
+                "verb": "git_finalize",
+                "committed": false,
+                "pushed": false,
+                "source_ref": source_ref,
+                "push_result": push_resp,
+                "reason": "isolated-ref publication was refused -- read push_result.reason",
+                "next_dispatch": "instruction",
+            }).to_string());
+        }
+        let push_data = push_resp.get("data").cloned().unwrap_or(Value::Null);
+        let source_sha = push_data.get("source_sha").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let (ci_status_summary, ci_validated_written) = check_ci_status_and_write_validated_marker_if_green(cwd_ref, &source_sha);
+        return ok("git_finalize", json!({
+            "committed": false,
+            "pushed": true,
+            "source_ref": source_ref,
+            "sha": source_sha,
+            "branch": push_data.get("branch").cloned().unwrap_or(Value::Null),
+            "remote_advanced": push_data.get("remote_advanced").cloned().unwrap_or(Value::Null),
+            "already_current": push_data.get("already_current").cloned().unwrap_or(Value::Null),
+            "remote_sha": push_data.get("remote_sha").cloned().unwrap_or(Value::Null),
+            "preserved_dirty_worktree": push_data.get("preserved_dirty_worktree").cloned().unwrap_or(Value::Null),
+            "steps": [
+                {"step": "commit", "skipped": "explicit source_ref publishes an existing commit"},
+                {"step": "push", "branch": push_data.get("branch").cloned().unwrap_or(Value::Null)},
+                {"step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written}
+            ],
+            "ci_validated_marker_written": ci_validated_written,
+            "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
+        }));
+    }
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     let mut steps: Vec<Value> = vec![];
     let mut committed = false;
@@ -3698,6 +3741,53 @@ fn git_merge_abort(body: &Value) -> u64 {
     ok("git_merge_abort", json!({ "aborted": true, "head": exec_git_in(cwd, "rev-parse HEAD").trim() }))
 }
 
+fn git_stash(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let include_untracked = body.get("include_untracked").and_then(|v| v.as_bool()).unwrap_or(true);
+    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("gm shelf").trim();
+    let mut argv = vec!["stash", "push", "--message", message];
+    if include_untracked { argv.push("--include-untracked"); }
+    let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let output = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 { return err("git_stash", &output); }
+    let created = !output.contains("No local changes to save");
+    let stash = if created {
+        exec_git_in(cwd, "stash list -1 --format=%gd").trim().to_string()
+    } else {
+        String::new()
+    };
+    ok("git_stash", json!({
+        "created": created,
+        "stash": if stash.is_empty() { Value::Null } else { json!(stash) },
+        "include_untracked": include_untracked,
+        "output": output
+    }))
+}
+
+fn git_stash_pop(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("stash@{0}").trim();
+    let r = git_call_argv(&["stash", "pop", refspec], cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let output = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 {
+        let conflicts: Vec<String> = exec_git_in(cwd, "diff --name-only --diff-filter=U")
+            .lines().map(|line| line.trim().to_string()).filter(|line| !line.is_empty()).collect();
+        return err_json("git_stash_pop", json!({
+            "error": output,
+            "conflicted": !conflicts.is_empty(),
+            "conflicts": conflicts,
+            "hint": "resolve conflicted paths, git_add them, then git_commit; the stash remains when pop fails"
+        }));
+    }
+    ok("git_stash_pop", json!({ "restored": refspec, "output": output }))
+}
+
 fn git_branch_delete(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let name = body.get("branch").and_then(|v| v.as_str()).unwrap_or("").trim();
@@ -4094,6 +4184,8 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_checkout" => git_checkout(&body),
         "git_merge" => git_merge(&body),
         "git_merge_abort" => git_merge_abort(&body),
+        "git_stash" => git_stash(&body),
+        "git_stash_pop" => git_stash_pop(&body),
         "git_branch_delete" => git_branch_delete(&body),
         "git_rm" => git_rm(&body),
         "git_revert" => git_revert(&body),
