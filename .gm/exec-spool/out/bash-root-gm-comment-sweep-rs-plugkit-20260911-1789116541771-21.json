@@ -1,0 +1,1 @@
+{"data":"{\"duration_ms\":2,\"exit_code\":127,\"ok\":false,\"stderr\":\"/usr/bin/bash: line 1: cargo: command not found\\n\",\"stdout\":\"\",\"timed_out\":false}","dispatch_id":"1789116541996-14-7de46c77ae4b1db8","next_dispatch_hint":"instruction","ok":true,"request_fingerprint":"321e770e593eb651","verb":"bash"}

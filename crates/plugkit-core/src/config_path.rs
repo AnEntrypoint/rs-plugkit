@@ -1,69 +1,9 @@
-//! Path and URL sanitization for every untrusted string the config chain
-//! interpolates into a filesystem path or hands to `git`.
-//!
-//! Three of the chain's inputs are attacker-controlled in the exact sense that
-//! matters -- they arrive from a file the project did not necessarily author:
-//!
-//! - a **prose key**, which `prose::resolve` interpolates into
-//!   `.gm/instructions/{key}.md`. Keys look compile-time-fixed but are not:
-//!   `instructions::get_instruction` reads them from `fsm::graph()` state
-//!   `prose_key` values, and `graph.json` is itself a vendorable artifact the
-//!   `fsm-vendor` verb writes and invites operators to edit.
-//! - a **source-spec `path`**, joined into the instruction/config cache dir.
-//!   Its only prior treatment was `trim_matches('/')`, which leaves `..`
-//!   entirely intact.
-//! - a **repo URL**, passed straight through to `git clone`/`git ls-remote`.
-//!   `git` treats some transports as instructions rather than locations:
-//!   `ext::` runs an arbitrary shell command by design.
-//!
-//! # Why allowlists, not `..`-stripping
-//!
-//! Removing `..` from a component is the classic wrong fix: `....//` collapses
-//! back to `../` under a single-pass strip, and a percent- or
-//! backslash-encoded separator sidesteps a check written against `/`. Every
-//! function here instead states the small set of shapes it ACCEPTS and refuses
-//! everything else, so a novel encoding fails closed rather than sneaking
-//! through a blocklist nobody thought to extend.
-//!
-//! # Why refuse rather than sanitize-and-continue
-//!
-//! A rejected key/path/URL returns `Err` carrying the reason, and the caller
-//! falls through to the next tier with the reason recorded. Silently rewriting
-//! a hostile path into a benign one would serve prose from a location the
-//! author did not name while reporting success -- the same silent-misresolution
-//! failure the whole tiered chain exists to make impossible.
-
-/// Longest accepted prose key or path component.
-/// Not a security boundary on its own -- the character allowlist is -- but a
-/// path a filesystem cannot represent produces an IO error indistinguishable
-/// from "absent", so bounding the length keeps a nonsense key reporting as a
-/// nonsense key.
 const MAX_COMPONENT_LEN: usize = 128;
 
-/// Longest accepted multi-component relative path.
 const MAX_PATH_LEN: usize = 512;
 
-/// Git transports a config repo may name.
-/// `https`/`http` fetch over a URL and cannot name a local executable.
-/// `ssh://` and `git@host:path` are the shapes real private config repos use,
-/// and neither carries a command payload -- the command a git-over-ssh session
-/// runs is chosen by the server, not the URL.
-/// Deliberately ABSENT, each for a concrete reason:
-/// - `ext::` -- documented by git as running an arbitrary command. A config
-///   file naming a repo would become a config file naming a program to run.
-/// - `file://` and bare local paths -- a repo-backed tier exists to fetch from
-///   elsewhere; pointing it at the local disk lets a vendored spec read a
-///   directory the sandbox was never meant to expose, and offers nothing a
-///   tier-1 vendored config does not already do better.
-/// - `ftp`/`ftps` -- deprecated by git, unauthenticated, and no config repo
-///   needs them.
 const ALLOWED_URL_SCHEMES: &[&str] = &["https://", "http://", "ssh://", "git://"];
 
-/// Reject any component that is empty, a traversal step, a Windows drive/UNC
-/// artifact, or contains a separator or control character.
-/// `.` and `..` are refused rather than normalized away: a caller asking for
-/// `..` wants a different directory, and quietly serving it the current one
-/// hides the request instead of answering it.
 fn check_component(component: &str, what: &str) -> Result<(), String> {
     if component.is_empty() {
         return Err(format!("{what}: empty path component"));
@@ -91,15 +31,6 @@ fn check_component(component: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate a prose key for interpolation into `<base>/<key>.md`.
-/// Keys are legitimately hierarchical -- `residual/prd-open`, `gates/dirty-tree`
-/// -- so `/` is a permitted SEPARATOR while being forbidden inside any
-/// component. That distinction is the whole point: it keeps the nesting real
-/// call sites depend on while making `../` unrepresentable.
-/// Backslash is refused outright rather than treated as a separator. On Windows
-/// the OS accepts it as one, so allowing it would create a second syntax for
-/// the same traversal that a `/`-oriented check would miss; every in-tree key
-/// uses `/`, so nothing legitimate is lost.
 pub fn validate_prose_key(key: &str) -> Result<(), String> {
     let what = "prose key";
     if key.is_empty() {
@@ -129,12 +60,6 @@ pub fn validate_prose_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate the `path` field of a repo-source spec: the subdirectory WITHIN a
-/// materialized config/instructions repo that holds the artifacts.
-/// Accepts the empty string (meaning "the repo root"), which is how a spec that
-/// omits the field is already read. Everything else must be a relative path of
-/// safe components -- the same rule as a prose key, because both are joined
-/// into a cache directory the spec must never be able to escape.
 pub fn validate_source_path(path: &str) -> Result<(), String> {
     let what = "source spec `path`";
     let trimmed = path.trim().trim_matches('/');
@@ -198,12 +123,6 @@ pub fn path_contained_within(root: &str, candidate: &str) -> bool {
             .all(|(r, c)| r == c)
 }
 
-/// Validate a git remote URL before any argv carrying it reaches the host.
-/// Two accepted shapes: a scheme from [`ALLOWED_URL_SCHEMES`], or git's
-/// `user@host:path` scp-like syntax. A leading `-` is refused separately from
-/// both, because git would read it as an OPTION rather than a URL -- the
-/// argv-injection variant of this bug, and one an argv array does not prevent
-/// on its own since the string still lands in an option position.
 pub fn validate_repo_url(url: &str) -> Result<(), String> {
     let what = "config repo url";
     let u = url.trim();
@@ -245,33 +164,10 @@ pub fn validate_repo_url(url: &str) -> Result<(), String> {
     ))
 }
 
-/// Transports the `fetch` verb may name.
-/// Narrower than [`ALLOWED_URL_SCHEMES`] on purpose. That list serves `git`,
-/// which legitimately speaks `ssh://` and `git://`; `host_fetch` is an HTTP
-/// client and can do nothing with either, so admitting them would widen the
-/// accepted surface without enabling a single real call.
-/// Deliberately ABSENT, each for a concrete reason:
-/// - `file://` -- the host's fetch implementation would read local disk through
-///   a verb whose whole contract is "reach the network", bypassing the
-///   `path_within_project` containment every fs_* verb applies.
-/// - `data:` and `blob:` -- carry their payload inline, so a caller that can
-///   name one can hand the host arbitrary bytes to interpret as a response.
-/// - schemeless input (`example.com/x`, `//example.com/x`) -- resolution is
-///   left to the host, and a bare `/etc/passwd` or a UNC `\\host\share` reads
-///   as a local location under some resolvers.
 const ALLOWED_FETCH_SCHEMES: &[&str] = &["https://", "http://"];
 
-/// Longest accepted fetch URL.
 const MAX_FETCH_URL_LEN: usize = 2048;
 
-/// Validate a URL before it reaches `host_fetch`.
-/// The scheme allowlist is the substantive check; the control-character,
-/// whitespace and length rules exist because `host_fetch` hands the string to a
-/// URL parser and then to an HTTP client, and a newline inside a URL is the
-/// classic request-splitting primitive.
-/// A host is required to be present and non-empty so that `https://` alone, or
-/// `https:///etc/passwd` (empty authority, which several parsers read as a
-/// local path), is refused rather than passed to the host to interpret.
 pub fn validate_fetch_url(url: &str) -> Result<(), String> {
     let what = "fetch url";
     let u = url.trim();
@@ -314,11 +210,6 @@ pub fn validate_fetch_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Recognise git's scp-like `[user@]host:path` remote syntax.
-/// Requires a `:` that is not part of a scheme (no `//` follows it) and a
-/// non-empty host and path. A Windows drive letter (`C:\repo`) is excluded by
-/// the single-character-host check, so a local path cannot masquerade as an
-/// scp-like remote.
 fn is_scp_like(u: &str) -> bool {
     let Some(colon) = u.find(':') else {
         return false;
