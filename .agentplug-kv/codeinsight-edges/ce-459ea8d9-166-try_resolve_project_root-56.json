@@ -1,0 +1,1 @@
+{"callee_symbol":"try_resolve_project_root","caller_path":"crates/plugkit-core/src/orchestrator/mod.rs","caller_symbol":"project_root_resolvable","line":166}

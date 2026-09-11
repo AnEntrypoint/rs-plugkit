@@ -1,0 +1,1 @@
+{"callee_symbol":"libsql_exec","caller_path":"crates/plugkit-core/src/vecstore.rs","caller_symbol":"drop_table","line":90}

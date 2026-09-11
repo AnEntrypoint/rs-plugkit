@@ -1,0 +1,1 @@
+{"callee_symbol":"drop_if_dim_mismatch_at_cfg","caller_path":"crates/plugkit-core/src/vecstore.rs","caller_symbol":"drop_if_dim_mismatch_at_rag","line":128}

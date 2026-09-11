@@ -1,0 +1,1 @@
+{"callee_symbol":"rssearch_vectors","caller_path":"crates/plugkit-core/src/orchestrator/memorize.rs","caller_symbol":"drain_pending_embeddings","line":256}

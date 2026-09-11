@@ -1,0 +1,1 @@
+{"callee_symbol":"is_ancestor","caller_path":"crates/plugkit-core/src/orchestrator/submodule_drift.rs","caller_symbol":"drifted_submodules","line":100}
