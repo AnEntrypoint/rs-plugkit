@@ -367,7 +367,12 @@ fn walk_package(
             // the walk cost for genuinely huge noise trees (e.g.
             // node_modules/**/test/fixtures with thousands of files) is
             // avoided rather than paid on every scan.
-            if is_noise_dir_segment(&entry) { continue; }
+            // Dependencies are enumerated from the project-root node_modules
+            // roster. Descending through a package's nested node_modules can
+            // follow pnpm workspace links back into that roster and form an
+            // alias cycle; skipping it preserves one scan per package while
+            // the root walk covers every dependency separately.
+            if entry == "node_modules" || is_noise_dir_segment(&entry) { continue; }
             walk_package(&next, budget, visited_directories, r);
         } else {
             r.file_count += 1;
