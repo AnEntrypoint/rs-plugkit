@@ -1,0 +1,1 @@
+{"callee_symbol":"write_fiber_state","caller_path":"crates/plugkit-core/src/orchestrator/fiber_lifecycle.rs","caller_symbol":"advance_fiber","line":106}

@@ -1,0 +1,1 @@
+{"callee_symbol":"fiber_lifecycle","caller_path":"crates/plugkit-core/src/orchestrator/memory_component.rs","caller_symbol":"advance_all_namespaces","line":75}

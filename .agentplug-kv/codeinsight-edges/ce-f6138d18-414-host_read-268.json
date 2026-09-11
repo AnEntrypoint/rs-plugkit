@@ -1,0 +1,1 @@
+{"callee_symbol":"host_read","caller_path":"crates/plugkit-core/src/memory_md.rs","caller_symbol":"scan_manifest","line":414}

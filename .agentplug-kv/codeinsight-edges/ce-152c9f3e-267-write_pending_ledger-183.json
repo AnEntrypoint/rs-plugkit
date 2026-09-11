@@ -1,0 +1,1 @@
+{"callee_symbol":"write_pending_ledger","caller_path":"crates/plugkit-core/src/orchestrator/memorize.rs","caller_symbol":"drain_pending_embeddings","line":267}

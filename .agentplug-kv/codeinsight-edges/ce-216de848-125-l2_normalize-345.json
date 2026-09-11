@@ -1,0 +1,1 @@
+{"callee_symbol":"l2_normalize","caller_path":"crates/plugkit-core/src/embed.rs","caller_symbol":"try_sibling_plugin_embed","line":125}

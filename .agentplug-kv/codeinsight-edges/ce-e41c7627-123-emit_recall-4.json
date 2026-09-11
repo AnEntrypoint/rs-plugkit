@@ -1,0 +1,1 @@
+{"callee_symbol":"emit_recall","caller_path":"crates/plugkit-core/src/orchestrator/recall.rs","caller_symbol":"handle_auto_recall","line":123}

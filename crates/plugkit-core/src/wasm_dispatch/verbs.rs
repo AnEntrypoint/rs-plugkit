@@ -2826,7 +2826,8 @@ fn branch_status(body: &Value) -> u64 {
 }
 
 fn resolve_ref(cwd: Option<&str>, refspec: &str) -> Option<String> {
-    let sha = exec_git_in(cwd, &format!("rev-parse {}", refspec)).trim().to_string();
+    let response = git_call_argv(&["rev-parse", refspec], cwd);
+    let sha = response.get("stdout").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     if sha.is_empty() { None } else { Some(sha) }
 }
 
@@ -2850,6 +2851,12 @@ fn verify_push_landed(cwd: Option<&str>, branch: &str, local_head: &str, remote_
 fn git_push(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let explicit_branch = body.get("branch").and_then(|v| v.as_str()).map(String::from);
+    let explicit_source_ref = body.get("rev")
+        .or_else(|| body.get("source_ref"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(String::from);
     let current_branch = exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD").trim().to_string();
     let branch = explicit_branch.clone().unwrap_or_else(|| {
         if current_branch == "HEAD" { "main".to_string() } else { current_branch.clone() }
@@ -2875,7 +2882,7 @@ fn git_push(body: &Value) -> u64 {
         }).to_string());
     }
     let porcelain = git_porcelain_in(repo.as_deref());
-    if !porcelain.trim().is_empty() {
+    if !porcelain.trim().is_empty() && explicit_source_ref.is_none() {
         log_deviation_push("push-dirty", &branch);
         let porcelain_preview: String = porcelain.lines().take(8).collect::<Vec<_>>().join("\n");
         let more = if porcelain.lines().count() > 8 { format!("\n... +{} more", porcelain.lines().count() - 8) } else { String::new() };
@@ -2896,15 +2903,43 @@ fn git_push(body: &Value) -> u64 {
             "next_action_hint": "Read porcelain field, decide stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. Do NOT retry git_push with the same dirty tree -- the gate will deny again.",
         }).to_string());
     }
-    let local_head_before = exec_git_in(repo.as_deref(), "rev-parse HEAD").trim().to_string();
-    if local_head_before.is_empty() {
-        return err("git_push", "could not resolve local HEAD before push -- refusing to proceed without a known starting point");
+    let source_ref = explicit_source_ref.as_deref().unwrap_or("HEAD");
+    let local_source_before = match resolve_ref(repo.as_deref(), source_ref) {
+        Some(sha) => sha,
+        None => return err("git_push", &format!("could not resolve source ref '{}' before push", source_ref)),
+    };
+    let preserved_dirty_worktree = explicit_source_ref.is_some() && !porcelain.trim().is_empty();
+    if preserved_dirty_worktree {
+        emit_event("git_push_explicit_ref", json!({
+            "repo": repo,
+            "source_ref": source_ref,
+            "source_sha": local_source_before,
+            "branch": branch,
+        }));
     }
     let _ = git_call_argv(&["fetch", "origin", &branch], repo.as_deref());
     let remote_before = resolve_ref(repo.as_deref(), &format!("origin/{}", branch));
-    let (mut push_out, mut push_succeeded) = exec_git_push_in(repo.as_deref(), &branch);
+    let (mut push_out, mut push_succeeded) = exec_git_push_in(repo.as_deref(), source_ref, &branch);
     let mut attempts = 0u32;
     let mut rebased = false;
+    if !push_succeeded && explicit_source_ref.is_some() {
+        log_deviation_push("push-explicit-ref-remote-moved", &branch);
+        return pack(json!({
+            "ok": false,
+            "verb": "git_push",
+            "gate_denied": true,
+            "repo": repo,
+            "branch": branch,
+            "source_ref": source_ref,
+            "source_sha": local_source_before,
+            "preserved_dirty_worktree": preserved_dirty_worktree,
+            "reason": format!(
+                "push of explicit source ref '{}' to {} failed; git_push will not rebase or otherwise mutate a dirty checkout for an isolated-ref publication. Reconcile the remote separately, then retry this exact ref. Output:\n{}",
+                source_ref, branch, push_out
+            ),
+            "next_dispatch": "instruction",
+        }).to_string());
+    }
     while !push_succeeded && attempts < 3 {
         attempts += 1;
         let rebase_out = exec_git_in(repo.as_deref(), &format!("pull --rebase origin {}", branch));
@@ -2925,7 +2960,7 @@ fn git_push(body: &Value) -> u64 {
             }).to_string());
         }
         rebased = true;
-        let (out, ok_now) = exec_git_push_in(repo.as_deref(), &branch);
+        let (out, ok_now) = exec_git_push_in(repo.as_deref(), source_ref, &branch);
         push_out = out;
         push_succeeded = ok_now;
     }
@@ -2944,8 +2979,11 @@ fn git_push(body: &Value) -> u64 {
             "next_dispatch": "instruction",
         }).to_string());
     }
-    let local_head_after = exec_git_in(repo.as_deref(), "rev-parse HEAD").trim().to_string();
-    match verify_push_landed(repo.as_deref(), &branch, &local_head_after, remote_before.as_deref()) {
+    let local_source_after = match resolve_ref(repo.as_deref(), source_ref) {
+        Some(sha) => sha,
+        None => return err("git_push", &format!("source ref '{}' disappeared after push", source_ref)),
+    };
+    match verify_push_landed(repo.as_deref(), &branch, &local_source_after, remote_before.as_deref()) {
         Err(reason) => {
             log_deviation_push("push-claimed-success-unverified", &branch);
             pack(json!({
@@ -2954,7 +2992,8 @@ fn git_push(body: &Value) -> u64 {
                 "verification_failed": true,
                 "repo": repo,
                 "branch": branch,
-                "local_head": local_head_after,
+                "source_ref": source_ref,
+                "source_sha": local_source_after,
                 "remote_before": remote_before,
                 "subprocess_output": push_out,
                 "reason": reason,
@@ -2970,7 +3009,9 @@ fn git_push(body: &Value) -> u64 {
             "remote_advanced": !already_current,
             "already_current": already_current,
             "remote_sha": remote_sha,
-            "local_head": local_head_after,
+            "source_ref": source_ref,
+            "source_sha": local_source_after,
+            "preserved_dirty_worktree": preserved_dirty_worktree,
         })),
     }
 }
@@ -3776,8 +3817,9 @@ fn porcelain_dirty_paths_all_within_committed_set(porcelain: &str, committed: &[
     any
 }
 
-fn exec_git_push_in(repo: Option<&str>, branch: &str) -> (String, bool) {
-    let v = git_call(&format!("push origin HEAD:{}", branch), repo);
+fn exec_git_push_in(repo: Option<&str>, source_ref: &str, branch: &str) -> (String, bool) {
+    let refspec = format!("{}:{}", source_ref, branch);
+    let v = git_call_argv(&["push", "origin", refspec.as_str()], repo);
     let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
     let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
     let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1);

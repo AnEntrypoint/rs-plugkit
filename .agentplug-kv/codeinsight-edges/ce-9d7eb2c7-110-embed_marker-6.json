@@ -1,0 +1,1 @@
+{"callee_symbol":"embed_marker","caller_path":"crates/plugkit-core/src/vecstore.rs","caller_symbol":"drop_if_dim_mismatch_at_cfg","line":110}

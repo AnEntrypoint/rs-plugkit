@@ -1,0 +1,1 @@
+{"callee_symbol":"wasm_dispatch","caller_path":"crates/plugkit-core/src/embed.rs","caller_symbol":"load_wasm_model_uncached","line":278}

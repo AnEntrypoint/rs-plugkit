@@ -1,0 +1,1 @@
+{"callee_symbol":"wasm_dispatch","caller_path":"crates/plugkit-core/src/orchestrator/state.rs","caller_symbol":"dispatch_session_id","line":8}

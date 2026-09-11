@@ -1,0 +1,1 @@
+{"callee_symbol":"serde_json","caller_path":"crates/plugkit-core/src/orchestrator/component_loader.rs","caller_symbol":"write_state","line":329}
