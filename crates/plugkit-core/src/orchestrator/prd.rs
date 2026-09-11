@@ -147,15 +147,6 @@ pub fn handle_list(_content: &str) -> (String, String, i32) {
 }
 
 
-/// What `prd-add` actually did to `prd.yml`, distinguished so the response never
-/// claims a row was re-scoped when no prior distinct content was replaced.
-/// `rescoped` previously meant only "a row with this id was present in the doc
-/// this attempt read", which is true of three different situations the caller
-/// needs to tell apart: a genuine reshape of an existing row, a CAS retry
-/// re-reading a doc that already carries this same call's earlier attempt, and a
-/// client re-dispatch of an identical body after the first dispatch's out-file
-/// never reached it. Only the first is a re-scope; comparing the existing row
-/// against the row about to be written separates them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AddOutcome {
     Added,
@@ -286,17 +277,6 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     (serde_json::Value::Object(response).to_string(), String::new(), 0)
 }
 
-/// Mark an EXISTING, already-tracked PRD row `blockedBy: ["external"]` so residual-scan's
-/// `status_is_open(...) && !blocked_external` check (residual.rs) stops treating it as an
-/// open row blocking CONSOLIDATE -- without resolving it, which would falsely claim the work
-/// is done. `handle_add` already lets a NEW row carry `blockedBy` at creation time, gated by
-/// `defer_marker_in_text`'s deviation check; this closes the matching gap for a row that was
-/// only discovered to be genuinely cross-session/out-of-reach AFTER it was already added (the
-/// common case: a session inherits an open row from a prior session, investigates it, and
-/// confirms it is real, correctly-scoped, but requires its own dedicated session -- e.g. a
-/// flaky multiplayer/networking repro that is out of scope for the current fix). Same
-/// deviation gate as handle_add: `reason` must name the actual concrete reach path, not bare
-/// deferral language, so this cannot become a second "declare it externally blocked" exit.
 pub fn handle_defer(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -481,14 +461,6 @@ fn nearest_known_id(target: &str, known: &[String]) -> Option<String> {
     })
 }
 
-/// Whether a registry kind still refuses, after policy overrides.
-///
-/// These three kinds default to Severity::Deny in the registry, matching the
-/// structural refusal each already performed, so with the default empty override
-/// map this returns true at every call site and behaviour is unchanged. It exists
-/// for the demotion direction: a project whose workflow legitimately resolves rows
-/// without per-row witness text sets the kind to "log" and gets the event without
-/// the refusal, instead of having to disable the whole policy flag.
 fn deviation_refuses(kind: &str) -> bool {
     super::deviations::effective_severity(kind) == super::deviations::Severity::Deny
 }
