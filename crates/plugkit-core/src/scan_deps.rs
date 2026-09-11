@@ -334,8 +334,21 @@ struct PackageWalkResult {
     candidates: Vec<String>,
 }
 
-fn walk_package(dir: &str, budget: usize, r: &mut PackageWalkResult) {
+fn walk_package(
+    dir: &str,
+    budget: usize,
+    visited_directories: &mut std::collections::HashSet<String>,
+    r: &mut PackageWalkResult,
+) {
     if r.file_count >= budget { return; }
+    let Some(stat) = crate::wasm_dispatch::host_stat(dir) else { return };
+    if !stat.get("isDirectory").and_then(|v| v.as_bool()).unwrap_or(false) { return; }
+    let canonical_path = stat
+        .get("canonicalPath")
+        .and_then(|v| v.as_str())
+        .unwrap_or(dir)
+        .to_string();
+    if !visited_directories.insert(canonical_path) { return; }
     for entry in crate::code_index::list_dir(dir) {
         if r.file_count >= budget { return; }
         if entry.starts_with('.') { continue; }
@@ -355,7 +368,7 @@ fn walk_package(dir: &str, budget: usize, r: &mut PackageWalkResult) {
             // node_modules/**/test/fixtures with thousands of files) is
             // avoided rather than paid on every scan.
             if is_noise_dir_segment(&entry) { continue; }
-            walk_package(&next, budget, r);
+            walk_package(&next, budget, visited_directories, r);
         } else {
             r.file_count += 1;
             if let Some(m) = stat.get("mtime_ms").and_then(|v| v.as_f64()) {
@@ -379,6 +392,7 @@ fn scan_node_modules(max_files: usize) -> (Vec<FileFinding>, Vec<BlockedRead>, u
     let mut prior_stamp = load_stamp();
     let mut new_stamp = std::collections::HashMap::new();
     let mut truncated = false;
+    let mut visited_directories = std::collections::HashSet::new();
 
     // Top-level entries: either a plain package dir, or an @scope/ dir
     // whose own children are the real packages -- expand one level for
@@ -401,7 +415,12 @@ fn scan_node_modules(max_files: usize) -> (Vec<FileFinding>, Vec<BlockedRead>, u
     for pkg_dir in package_dirs {
         if scanned >= max_files { truncated = true; break; }
         let mut r = PackageWalkResult { max_mtime: 0.0, total_size: 0, file_count: 0, candidates: Vec::new() };
-        walk_package(&pkg_dir, max_files.saturating_sub(scanned), &mut r);
+        walk_package(
+            &pkg_dir,
+            max_files.saturating_sub(scanned),
+            &mut visited_directories,
+            &mut r,
+        );
         if r.file_count == 0 { continue; }
         let sig = (r.max_mtime, r.total_size);
         new_stamp.insert(pkg_dir.clone(), sig);
