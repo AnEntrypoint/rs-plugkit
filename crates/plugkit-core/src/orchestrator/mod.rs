@@ -29,27 +29,20 @@ pub mod component_loader_dispatch;
 
 use std::path::PathBuf;
 
-fn parse_toplevel_common_dir(out: &str) -> Option<PathBuf> {
-    let mut lines = out.lines();
-    let toplevel = lines.next()?.trim();
-    let common_dir = lines.next()?.trim();
-    if toplevel.is_empty() || common_dir.is_empty() { return None; }
-    let common_path = PathBuf::from(common_dir);
-    if common_path.ends_with(".git") {
-        Some(PathBuf::from(toplevel))
-    } else {
-        common_path.parent().map(|p| p.to_path_buf())
-    }
+fn parse_toplevel(out: &str) -> Option<PathBuf> {
+    let toplevel = out.lines().next()?.trim();
+    if toplevel.is_empty() { return None; }
+    Some(PathBuf::from(toplevel))
 }
 
 #[cfg(target_arch = "wasm32")]
-fn git_common_dir_project_root_once() -> Option<PathBuf> {
-    let v = crate::wasm_dispatch::git_call("rev-parse --show-toplevel --git-common-dir", None);
+fn git_project_root_once() -> Option<PathBuf> {
+    let v = crate::wasm_dispatch::git_call("rev-parse --show-toplevel", None);
     if v.get("async_parked").and_then(|x| x.as_bool()).unwrap_or(false) {
         return fs_walk_project_root();
     }
     let out = v.get("stdout").and_then(|x| x.as_str())?;
-    parse_toplevel_common_dir(out)
+    parse_toplevel(out)
 }
 
 /// Root resolution for hosts that park `git rev-parse` under the async
@@ -85,14 +78,14 @@ fn fs_walk_project_root() -> Option<PathBuf> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn git_common_dir_project_root_once() -> Option<PathBuf> {
+fn git_project_root_once() -> Option<PathBuf> {
     let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
+        .args(["rev-parse", "--show-toplevel"])
         .output()
         .ok()?;
     if !output.status.success() { return None; }
     let out = String::from_utf8_lossy(&output.stdout);
-    parse_toplevel_common_dir(&out)
+    parse_toplevel(&out)
 }
 
 const RESOLVE_MAX_ATTEMPTS: u32 = 5;
@@ -123,7 +116,7 @@ fn current_cwd_string() -> String {
 static PROJECT_ROOT_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, PathBuf>>> =
     std::sync::Mutex::new(None);
 
-/// `git rev-parse --show-toplevel --git-common-dir` shells a subprocess (wasm:
+/// `git rev-parse --show-toplevel` shells a subprocess (wasm:
 /// via the host git bridge, native: a real `git` child process) on every call.
 /// The project root cannot change within a process's lifetime for a fixed cwd,
 /// so this is cached exactly like `pkfs::project_root`'s `ROOT_CACHE` -- keyed
@@ -147,7 +140,7 @@ fn try_resolve_project_root() -> Result<PathBuf, u32> {
     }
     let mut last_err_attempts = 0u32;
     for attempt in 0..RESOLVE_MAX_ATTEMPTS {
-        if let Some(root) = git_common_dir_project_root_once() {
+        if let Some(root) = git_project_root_once() {
             if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
                 cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd, root.clone());
             }
@@ -181,7 +174,7 @@ pub fn project_root_unresolvable_reason() -> String {
     match try_resolve_project_root() {
         Ok(_) => "project root is resolvable".to_string(),
         Err(attempts) => format!(
-            "gm_dir: project root resolution failed after {attempts} attempts via `git rev-parse --show-toplevel --git-common-dir` -- refusing to silently fall back to CLAUDE_PROJECT_DIR/HOME, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory."
+            "gm_dir: project root resolution failed after {attempts} attempts via `git rev-parse --show-toplevel` -- refusing to silently fall back to CLAUDE_PROJECT_DIR/HOME, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory."
         ),
     }
 }
@@ -190,7 +183,7 @@ fn resolve_project_root_with_retry() -> PathBuf {
     match try_resolve_project_root() {
         Ok(root) => root,
         Err(attempts) => panic!(
-            "gm_dir: project root resolution failed after {} attempts via `git rev-parse --show-toplevel --git-common-dir` -- refusing to silently fall back to CLAUDE_PROJECT_DIR/HOME, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory.",
+            "gm_dir: project root resolution failed after {} attempts via `git rev-parse --show-toplevel` -- refusing to silently fall back to CLAUDE_PROJECT_DIR/HOME, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory.",
             attempts
         ),
     }

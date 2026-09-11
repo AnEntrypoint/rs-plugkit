@@ -1,0 +1,1 @@
+{"callee_symbol":"needle_first_occurrence_sits_inside_quoted_string_literal","caller_path":"crates/plugkit-core/src/orchestrator/transitions.rs","caller_symbol":"pred_no_admit_deferral_markers","line":264}

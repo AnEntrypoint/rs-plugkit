@@ -1,0 +1,1 @@
+{"callee_symbol":"serde_json","caller_path":"crates/plugkit-core/src/vecstore.rs","caller_symbol":"vec_to_json_literal","line":43}

@@ -1,0 +1,1 @@
+{"callee_symbol":"worktree_dirty","caller_path":"crates/plugkit-core/src/orchestrator/transitions.rs","caller_symbol":"pred_worktree_clean","line":80}

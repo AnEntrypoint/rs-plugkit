@@ -1,0 +1,1 @@
+{"callee_symbol":"check_browser_witness_coverage_for_cwd","caller_path":"crates/plugkit-core/src/orchestrator/transitions.rs","caller_symbol":"pred_browser_witness_coverage","line":81}

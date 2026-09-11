@@ -1,0 +1,1 @@
+{"callee_symbol":"fsm","caller_path":"crates/plugkit-core/src/orchestrator/transitions.rs","caller_symbol":"residual_scan_marker_matches_current_session_or_is_within_longgap_threshold","line":119}

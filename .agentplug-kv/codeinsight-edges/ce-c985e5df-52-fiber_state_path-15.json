@@ -1,0 +1,1 @@
+{"callee_symbol":"fiber_state_path","caller_path":"crates/plugkit-core/src/orchestrator/codeinsight_component.rs","caller_symbol":"advance_all_roles","line":52}
