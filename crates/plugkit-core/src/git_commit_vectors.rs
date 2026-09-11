@@ -7,9 +7,7 @@ use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shar
 use crate::vecns::{self, QueryBudget, VecTableSpec};
 use crate::wasm_dispatch::plugin_call;
 
-/// See `rssearch_vectors::default_cfg` -- constructed per call, never cached,
-/// because the plugin instance is shared across concurrently-active projects.
-fn default_cfg() -> RagConfig {
+fn resolved_config_for_current_dispatch() -> RagConfig {
     RagConfig::resolved()
 }
 
@@ -22,7 +20,7 @@ fn spec<'a>(path: &'a str, cfg: &'a RagConfig) -> VecTableSpec<'a> {
 }
 
 pub fn ensure_schema() -> Result<(), String> {
-    ensure_schema_cfg(&default_cfg())
+    ensure_schema_cfg(&resolved_config_for_current_dispatch())
 }
 
 static SCHEMA_ENSURED: std::sync::Mutex<Option<std::collections::HashSet<(String, usize)>>> =
@@ -44,17 +42,12 @@ pub fn ensure_schema_cfg(cfg: &RagConfig) -> Result<(), String> {
         }
     }
     shared_ensure_open(&path)?;
-    // Mismatch guard BEFORE the CREATE -- see the identical ordering note in
-    // rssearch_vectors::ensure_schema_cfg. `CREATE TABLE IF NOT EXISTS` will
-    // not widen a surviving column.
     let _ = spec(&path, cfg).drop_if_dim_mismatch_cfg(&cfg.embed);
     shared_exec(&format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE, message TEXT, embedding F32_BLOB({}), updated_at INTEGER, deleted INTEGER NOT NULL DEFAULT 0)",
         cfg.git_commits.table, cfg.dim()
     ))?;
     spec(&path, cfg).ensure_index();
-    // Table-scoped, not the shared/global marker -- same reasoning as the
-    // sibling fix in rssearch_vectors::ensure_schema_cfg.
     crate::embed_marker::record_embed_generation_for_table(&cfg.git_commits.table);
     SCHEMA_ENSURED
         .lock()
@@ -88,15 +81,7 @@ fn parse_log_entries(stdout: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Cheap pre-flight: `git show --shortstat` counts changes without rendering
-/// any diff text, so it stays fast even for a commit whose full `-p` patch
-/// would be huge (many files, or large binary blobs git cannot line-diff at
-/// all -- those contribute ~0 to the insertion/deletion count but still cost
-/// real time to render as part of a `-p` patch). Returns (files_changed,
-/// churn_lines); `None` on any parse/exec failure, which callers treat as
-/// "unknown size" and let through rather than silently dropping the commit's
-/// text entirely on a shortstat hiccup.
-fn commit_change_scale(hash: &str) -> Option<(usize, usize)> {
+fn measure_commit_change_scale_with_shortstat(hash: &str) -> Option<(usize, usize)> {
     let v = crate::wasm_dispatch::git_call_argv(
         &["show", "--no-color", "--shortstat", "--first-parent", "--format=", hash],
         None,
@@ -122,7 +107,7 @@ fn commit_change_scale(hash: &str) -> Option<(usize, usize)> {
 }
 
 fn commit_diff_text(hash: &str, cfg: &RagConfig) -> String {
-    if let Some((files, churn)) = commit_change_scale(hash) {
+    if let Some((files, churn)) = measure_commit_change_scale_with_shortstat(hash) {
         let max_files = cfg.bulk_embed.git_commit_full_diff_max_files;
         let max_lines = cfg.bulk_embed.git_commit_full_diff_max_changed_lines;
         if files > max_files || churn > max_lines {
@@ -159,18 +144,11 @@ fn commit_diff_text(hash: &str, cfg: &RagConfig) -> String {
 }
 
 pub fn sync_incremental() -> Result<Value, String> {
-    sync_incremental_cfg(&default_cfg())
+    sync_incremental_cfg(&resolved_config_for_current_dispatch())
 }
 
 pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
-    // Clock starts BEFORE ensure_schema_cfg and the git log preamble, not
-    // after -- both were previously unbudgeted, and while ensure_schema_cfg
-    // is memoized (SCHEMA_ENSURED) so every call after the first is cheap, a
-    // large repo's `git log -n 500` shortstat walk and any genuinely first-run
-    // schema creation are real costs that should count against this pass's
-    // own budget rather than being invisible to every downstream elapsed-time
-    // check in this function.
-    let started = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let sync_pass_started_before_schema_and_log = unsafe { crate::wasm_dispatch::host_now_ms() };
     ensure_schema_cfg(cfg)?;
     let db_path = shared_db_path();
     let log = crate::wasm_dispatch::git_call(
@@ -224,20 +202,12 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
     let mut consecutive_embed_failures: usize = 0;
     let embed_budget_ms = cfg.bulk_embed.git_commit_embed_budget_ms;
     let min_embeds_per_pass = cfg.bulk_embed.git_commit_min_embeds_per_pass as u32;
-    // Independent of the min_embeds_per_pass floor below: that floor exists so
-    // a pass embeds *something* even under transient budget pressure, but it
-    // has no opinion about how expensive any ONE commit turns out to be.
-    // commit_diff_text's own per-commit size cap (git_commit_full_diff_max_*)
-    // keeps the COMMON case cheap, but this is the backstop for whatever it
-    // still lets through -- once elapsed passes this ceiling, every remaining
-    // commit in the window is deferred unconditionally, so a pathological run
-    // cannot multiply embed_budget_ms's intended ~30s into minutes no matter
-    // how large min_embeds_per_pass's floor is.
     let hard_ceiling_ms = cfg.bulk_embed.git_commit_sync_hard_ceiling_ms.max(embed_budget_ms);
     for (hash, subject) in &entries {
         if present.contains(hash) { continue; }
         if Some(hash.as_str()) == watermark.as_deref() { continue; }
-        let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+        let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }
+            .saturating_sub(sync_pass_started_before_schema_and_log);
         if elapsed > hard_ceiling_ms {
             deferred += 1;
             continue;
@@ -246,13 +216,6 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
             deferred += 1;
             continue;
         }
-        // Silence here (only a start-of-pass embed_generation_recorded event
-        // and this loop's own end-of-pass git_commit_vectors_synced summary)
-        // is exactly what made a real 348s-long pass against a large/messy
-        // repo (C:/dev/guru) indistinguishable from a hang to a caller polling
-        // the spool -- watcher.log had a five-and-a-half-minute gap with zero
-        // events. One event per commit actually processed (not per skip)
-        // keeps this cheap while giving a live progress signal.
         crate::wasm_dispatch::emit_event("git_commit_vector_progress", json!({
             "hash": hash,
             "embedded_so_far": embedded,
@@ -265,19 +228,8 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
         } else {
             format!("{}\n\n{}", subject, diff)
         };
-        // Routed through the versioned plugin ABI rather than a raw
-        // plugin_call, so the distinct failure modes stay distinguishable.
-        // The previous shape collapsed every one of them into an empty vec:
-        // the bert plugin not being registered at all, the plugin crashing
-        // mid-embed, and a genuine empty result were literally the same value,
-        // so a dead embedder was silently counted as "skipped" forever. That
-        // is the same silent-degradation class that made `recall` return
-        // ok:true with zero hits while the embedder was crashed.
         let vec: Vec<f32> = match crate::plugin_abi::call("bert", "embed", &json!({ "text": text })) {
             Ok(data) => {
-                // Reset on success so only a genuine RUN trips the breaker --
-                // scattered failures across a long history are normal and must
-                // not accumulate into a false trip.
                 consecutive_embed_failures = 0;
                 data.get("embedding")
                     .and_then(|v| v.as_array())
@@ -285,15 +237,6 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
                     .unwrap_or_default()
             }
             Err(e) => {
-                // N failures IN A ROW is a different condition from one failure:
-                // one bad commit is skippable, but a run of them means the
-                // embedder itself is down and every remaining call will trap the
-                // same way. Continuing burns real time and memory per commit --
-                // live-witnessed as 167 failures ~90ms apart during a
-                // many-commit session, with the shared daemon reaching 1.3GB RSS
-                // and its heartbeat frozen (no busy_until), un-revivable by
-                // re-registration. Stop the pass instead; the next one retries
-                // from the same cursor, so nothing is lost.
                 consecutive_embed_failures += 1;
                 crate::wasm_dispatch::emit_event("git_commit_embed_failed", json!({
                     "kind": e.kind.as_str(),
@@ -314,10 +257,6 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
             skipped += 1;
             continue;
         }
-        // The bert plugin is a separate wasm module with its own model, so its
-        // output width is not guaranteed to track this store's configured dim.
-        // Skipping here keeps a half-migrated embedder from spraying INSERTs
-        // that libsql rejects one at a time with an opaque blob-size error.
         if vec.len() != cfg.dim() {
             skipped += 1;
             crate::wasm_dispatch::emit_event("git_commit_vector_dim_mismatch", json!({
@@ -351,7 +290,7 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
 }
 
 pub fn search(query_embedding: &Value, limit: usize) -> Result<Vec<(String, String, f64)>, String> {
-    search_cfg(query_embedding, limit, &default_cfg())
+    search_cfg(query_embedding, limit, &resolved_config_for_current_dispatch())
 }
 
 pub fn search_cfg(query_embedding: &Value, limit: usize, cfg: &RagConfig) -> Result<Vec<(String, String, f64)>, String> {
@@ -365,9 +304,6 @@ pub fn search_cfg(query_embedding: &Value, limit: usize, cfg: &RagConfig) -> Res
     let budget = QueryBudget::from_config(&cfg.budget);
     let qlit = vecns::qlit(&qvec);
     let pool = budget.pool(limit);
-    // Unlike the rssearch paths, this one truncates to `limit` in SQL: commit
-    // hits are returned in raw cosine order with no recency reweight or dedup
-    // pass, so nothing downstream can promote a row out of the ANN tail.
     let sql = format!(
         "SELECT r.hash, r.message, vector_distance_cos(r.embedding, vector(?1)) AS distance \
          FROM vector_top_k('{}', vector(?2), {}) AS v JOIN {} AS r ON r.rowid = v.id \

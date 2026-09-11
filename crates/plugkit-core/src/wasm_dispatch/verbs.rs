@@ -1498,11 +1498,6 @@ const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 /// left to fall through.
 const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit"];
 
-/// Default ceiling on matches an exhaustive scan returns when the caller named
-/// no limit. Generous on purpose -- the contract is "every match" -- and
-/// hitting it is disclosed via `matches_truncated`, never silent.
-const CODESEARCH_LITERAL_DEFAULT_MAX_MATCHES: u64 = 2000;
-
 /// Resolves the result limit, reporting a genuine conflict instead of picking
 /// a winner behind the caller's back. Returns the limit and whether the caller
 /// stated it explicitly (the exhaustive modes need that distinction: an
@@ -1553,9 +1548,13 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
             return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
         }
     }
-    let max_matches = body.get("max_matches").and_then(|v| v.as_u64())
-        .or_else(|| explicit_limit.map(u64::from))
-        .unwrap_or(CODESEARCH_LITERAL_DEFAULT_MAX_MATCHES) as usize;
+    let max_matches = match body.get("max_matches") {
+        Some(value) => match value.as_u64() {
+            Some(limit) if limit > 0 => limit as usize,
+            _ => return err("codesearch", "max_matches must be a positive integer"),
+        },
+        None => explicit_limit.map(|limit| limit as usize).unwrap_or(usize::MAX),
+    };
     let scan = crate::code_index::LiteralScan {
         pattern: query,
         root,
