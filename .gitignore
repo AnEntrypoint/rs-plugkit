@@ -1,6 +1,7 @@
 /target
 Cargo.lock
 .gm/exec-spool/
+.gm/config-source-cache-default/
 .gm/config-source-cache-default.0f97d1a3fa2b58cb.sync.json
 .gm/last-dispatch-ts
 .gm/last-instruction-ts

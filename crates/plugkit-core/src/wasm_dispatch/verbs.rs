@@ -489,6 +489,11 @@ fn fetch(body: &Value) -> u64 {
     };
     let mut opts_obj = body.get("opts").cloned().unwrap_or_else(|| json!({}));
     if let Some(map) = opts_obj.as_object_mut() {
+        for key in ["method", "headers", "body"] {
+            if let Some(value) = body.get(key) {
+                map.insert(key.to_string(), value.clone());
+            }
+        }
         map.insert("timeoutMs".to_string(), json!(timeout_ms));
     } else {
         opts_obj = json!({"timeoutMs": timeout_ms});
