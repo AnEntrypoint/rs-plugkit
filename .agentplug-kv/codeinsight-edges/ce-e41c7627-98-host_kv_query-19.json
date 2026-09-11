@@ -1,0 +1,1 @@
+{"callee_symbol":"host_kv_query","caller_path":"crates/plugkit-core/src/orchestrator/recall.rs","caller_symbol":"recall_hits_reporting_embed_failure","line":98}

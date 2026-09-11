@@ -1,0 +1,1 @@
+{"callee_symbol":"affected_dependents","caller_path":"crates/plugkit-core/src/orchestrator/component_loader.rs","caller_symbol":"patch_isolation","line":288}

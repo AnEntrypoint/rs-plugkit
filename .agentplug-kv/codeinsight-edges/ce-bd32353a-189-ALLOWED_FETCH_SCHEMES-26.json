@@ -1,0 +1,1 @@
+{"callee_symbol":"ALLOWED_FETCH_SCHEMES","caller_path":"crates/plugkit-core/src/config_path.rs","caller_symbol":"validate_fetch_url","line":189}

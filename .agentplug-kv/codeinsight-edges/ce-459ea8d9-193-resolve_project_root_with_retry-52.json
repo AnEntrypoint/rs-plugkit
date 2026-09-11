@@ -1,0 +1,1 @@
+{"callee_symbol":"resolve_project_root_with_retry","caller_path":"crates/plugkit-core/src/orchestrator/mod.rs","caller_symbol":"gm_dir","line":193}
