@@ -334,6 +334,22 @@ struct PackageWalkResult {
     candidates: Vec<String>,
 }
 
+fn package_directory_identity(dir: &str) -> Option<String> {
+    let (_, tail) = dir.rsplit_once("node_modules/")?;
+    let segments = tail.split('/').collect::<Vec<_>>();
+    let is_package_root = match segments.as_slice() {
+        [_] => true,
+        [scope, _] => scope.starts_with('@'),
+        _ => false,
+    };
+    if !is_package_root { return None; }
+    let text = crate::wasm_dispatch::host_read(&format!("{dir}/package.json"))?;
+    let manifest = serde_json::from_str::<Value>(&text).ok()?;
+    let name = manifest.get("name")?.as_str()?;
+    let version = manifest.get("version")?.as_str()?;
+    Some(format!("{name}@{version}"))
+}
+
 fn walk_package(
     dir: &str,
     budget: usize,
@@ -343,12 +359,13 @@ fn walk_package(
     if r.file_count >= budget { return; }
     let Some(stat) = crate::wasm_dispatch::host_stat(dir) else { return };
     if !stat.get("isDirectory").and_then(|v| v.as_bool()).unwrap_or(false) { return; }
-    let canonical_path = stat
+    let directory_identity = stat
         .get("canonicalPath")
         .and_then(|v| v.as_str())
-        .unwrap_or(dir)
-        .to_string();
-    if !visited_directories.insert(canonical_path) { return; }
+        .map(ToOwned::to_owned)
+        .or_else(|| package_directory_identity(dir).map(|identity| format!("package:{identity}")))
+        .unwrap_or_else(|| format!("path:{dir}"));
+    if !visited_directories.insert(directory_identity) { return; }
     for entry in crate::code_index::list_dir(dir) {
         if r.file_count >= budget { return; }
         if entry.starts_with('.') { continue; }
@@ -367,12 +384,7 @@ fn walk_package(
             // the walk cost for genuinely huge noise trees (e.g.
             // node_modules/**/test/fixtures with thousands of files) is
             // avoided rather than paid on every scan.
-            // Dependencies are enumerated from the project-root node_modules
-            // roster. Descending through a package's nested node_modules can
-            // follow pnpm workspace links back into that roster and form an
-            // alias cycle; skipping it preserves one scan per package while
-            // the root walk covers every dependency separately.
-            if entry == "node_modules" || is_noise_dir_segment(&entry) { continue; }
+            if is_noise_dir_segment(&entry) { continue; }
             walk_package(&next, budget, visited_directories, r);
         } else {
             r.file_count += 1;
