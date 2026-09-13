@@ -35,7 +35,7 @@ Five phases = scheduling; filter = engine on every candidate, gating witness/wri
 
 ## Spool ABI
 
-Write `in/<lang>/<N>.<ext>` for language stems, `in/<verb>/<N>.txt` for orchestrator + host verbs. The watcher streams `out/<N>.{out,err}` and finalizes `out/<N>.json` synchronously -- read it once it lands. Parallelize independent dispatches in one message; serialize dependents at the data-flow edge. Every git operation routes through the git verbs (`git_status`/`git_finalize`/`git_push`/...), never a raw `git` shell body (gated `deviation.bash-git-bypass`); route every other capability through its verb.
+Write `in/<lang>/<N>.<ext>` for language stems, `in/<verb>/<N>.txt` for orchestrator + host verbs. The watcher streams `out/<verb>-<N>.{out,err}` and finalizes `out/<verb>-<N>.json` synchronously -- read it once it lands. Parallelize independent dispatches in one message; serialize dependents at the data-flow edge. Every git operation routes through the git verbs (`git_status`/`git_finalize`/`git_push`/...), never a raw `git` shell body (gated `deviation.bash-git-bypass`); route every other capability through its verb.
 
 ## SESSION_ID
 

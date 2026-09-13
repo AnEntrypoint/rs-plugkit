@@ -366,12 +366,25 @@ pub(crate) fn list_dir(path: &str) -> Vec<String> {
     let v = unpack_to_value_pub(packed);
     match v {
         Value::Array(arr) => arr.into_iter().filter_map(|x| {
-            if let Some(s) = x.as_str() { return Some(s.to_string()); }
-            x.get("name").or_else(|| x.get("path")).or_else(|| x.get("file"))
-                .and_then(|n| n.as_str()).map(String::from)
+            let entry = if let Some(s) = x.as_str() { s } else {
+                x.get("name").or_else(|| x.get("path")).or_else(|| x.get("file"))
+                    .and_then(|n| n.as_str())?
+            };
+            if !is_safe_readdir_child_name(entry) {
+                return None;
+            }
+            Some(entry.to_string())
         }).collect(),
         _ => Vec::new(),
     }
+}
+
+fn is_safe_readdir_child_name(entry: &str) -> bool {
+    !entry.is_empty()
+        && !entry.starts_with('/')
+        && entry
+            .split('/')
+            .all(|segment| segment != "." && segment != "..")
 }
 
 fn ignore_file_path(root: &str, filename: &str) -> String {
