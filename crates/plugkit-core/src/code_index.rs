@@ -2189,7 +2189,7 @@ pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagC
     let full_files = collect_files(root, cfg.index.digest_max_files.max(20000), &cfg.index);
     let hits: Vec<Value> = full_files.iter()
         .filter(|p| match &glob {
-            Some(g) => g.admits(root, p),
+            Some(g) => g.admits(root, None, p),
             None => p.to_lowercase().contains(&needle),
         })
         .take(k)
@@ -2401,7 +2401,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             break;
         }
         if let Some(glob) = &path_glob {
-            if !glob.admits(root, path) { continue; }
+            if !glob.admits(root, req.scope, path) { continue; }
             files_matching_glob += 1;
         }
         let stat = host_stat(path).filter(|v| !v.is_null());
@@ -2502,7 +2502,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     if glob_matched_no_files {
         out.insert("glob_matched_no_files".to_string(), json!(true));
         out.insert("glob_note".to_string(), json!(format!(
-            "path_glob admitted none of the {} listed files, so zero matches says nothing about the tree -- the glob is matched case-insensitively against each path relative to the root (and against the bare file name when it has no '/'); supported syntax: {}",
+            "path_glob admitted none of the {} listed files, so zero matches says nothing about the tree -- the glob is matched case-insensitively against each path relative to the root, relative to \"path\" when one is given, and against the bare file name when it has no '/'; supported syntax: {}",
             files.len(),
             crate::path_glob::PATH_GLOB_SYNTAX,
         )));
