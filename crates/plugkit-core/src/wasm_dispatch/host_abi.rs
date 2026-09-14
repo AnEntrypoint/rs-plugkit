@@ -61,13 +61,6 @@ pub fn git_call(args: &str, cwd: Option<&str>) -> Value {
     let v = git_call_async(args, cwd);
     match git_pending_token(&v) {
         None => v,
-        // A synchronous call site cannot resume a parked op (only the
-        // git_step/git_poll verb path can), so the bare pending envelope must
-        // never reach one: porcelain_or_dirty defaults ok=true/exit_code=0 on
-        // a shapeless value and would misread {pending,token} as a CLEAN
-        // status -- the canned-fake-clean hazard. Answer with a
-        // terminal-shaped failure that says the parked op still runs
-        // host-side, so no caller can confuse "parked" with "done".
         Some(token) => serde_json::json!({
             "ok": false,
             "async_parked": true,
@@ -78,13 +71,6 @@ pub fn git_call(args: &str, cwd: Option<&str>) -> Value {
     }
 }
 
-/// Raw host_git call with no pending-envelope guard: an async host (one whose
-/// git engine cannot block the wasm call, e.g. a browser driving
-/// isomorphic-git on the wasm's own thread) answers {"pending":true,"token"}
-/// and parks the terminal {"stdout","stderr","exit_code"} JSON string in kv ns
-/// "outbox" under that token -- the same pending-token shape host_fetch uses.
-/// Only the git_step/git_poll verb machinery may call this; every other caller
-/// belongs on git_call.
 pub fn git_call_async(args: &str, cwd: Option<&str>) -> Value {
     let cwd_s = cwd.unwrap_or("");
     let packed = unsafe { host_git(args.as_ptr(), args.len() as u32, cwd_s.as_ptr(), cwd_s.len() as u32) };
@@ -104,15 +90,6 @@ pub(crate) fn porcelain_or_dirty(v: Value) -> String {
     let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
     let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     if !ok || exit_code != 0 {
-        // A bare "?? git-status-failed" gave a caller no way to tell a
-        // real git failure (index.lock held by a concurrent process, a
-        // submodule in a broken state, git not on PATH) from an actual
-        // dirty-tree line -- the whole `git status --porcelain` subprocess
-        // failed, and every diagnostic detail about WHY was discarded.
-        // Every downstream line-parser (git_status's modified/untracked
-        // split, git_push's dirty check) reads this as one "??"-prefixed
-        // untracked-style line, so the real stderr/exit_code now rides
-        // along on that same line instead of vanishing.
         let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
         let detail = if stderr.is_empty() {
             format!("exit_code={exit_code}")
@@ -196,11 +173,6 @@ pub fn host_cwd_string() -> Option<String> {
     unpack_to_string(packed)
 }
 
-/// Names `root` as an additional filesystem root the host may read/write
-/// from for the rest of this session -- required before `host_read`/
-/// `host_stat`/`host_write`/etc. can reach a path outside the current
-/// project's own cwd or `~/.gm`. Returns true if the host accepted the
-/// root (a real, existing directory).
 pub fn host_allow_root(root: &str) -> bool {
     let rc = unsafe { host_fs_allow_root(root.as_ptr(), root.len() as u32) };
     rc != 0
@@ -216,15 +188,6 @@ pub fn host_write(path: &str, data: &str) -> bool {
     rc != 0
 }
 
-/// Atomically writes `data` iff the file's current content equals
-/// `expected`, in one host-side critical section -- unlike a plain
-/// host_read + host_write pair, which leaves a window where another
-/// concurrent writer can land between the two calls and get silently
-/// clobbered. See agentplug-host's atomic_cas_write_locked for the host
-/// side of this contract. Returns the raw host status code: 1 = swapped,
-/// 2 = mismatch (caller should re-read and retry), anything else = I/O
-/// error. Translated into pkfs::CasWriteOutcome by pkfs::cas_write, which
-/// (unlike this wasm32-only module) also compiles under a native target.
 pub fn host_cas_write(path: &str, expected: &str, data: &str) -> u32 {
     unsafe {
         host_fs_cas_write(

@@ -491,14 +491,6 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
         format!("{}/.gm/exec-spool/.turn-browser-witnessed", cwd.trim_end_matches('/').trim_end_matches('\\'))
     };
     let witness_raw = crate::pkfs::read_to_string(&witness_path).unwrap_or_default();
-    // browser_witness.rs::record_witness (the ONLY writer of this file) always writes a
-    // FLAT {file: hash} object -- it has never written a nested "witnessed_hashes" wrapper.
-    // Looking for that wrapper key here meant `.get("witnessed_hashes")` always returned
-    // None on a real .turn-browser-witnessed file, so `witnessed_hashes` was ALWAYS empty
-    // regardless of how many successful browser/cdp/serp dispatches had rewritten the file,
-    // making this predicate permanently unsatisfiable for every previously-edited client
-    // file. Accept the flat object directly, and keep the nested-wrapper shape as a
-    // fallback in case some other writer or a future schema version does use it.
     let witnessed_hashes: serde_json::Map<String, serde_json::Value> = if witness_raw.trim().is_empty() {
         serde_json::Map::new()
     } else {
@@ -812,9 +804,6 @@ pub fn handle(content: &str) -> (String, String, i32) {
     }
 }
 
-/// Reverts the most recent phase transition. Body is ignored (no fields
-/// take arguments); each dispatch pops exactly one history entry, so
-/// reverting a multi-step reshaping means dispatching this once per step.
 pub fn handle_revert(_content: &str) -> (String, String, i32) {
     match super::state::revert_last_transition() {
         Ok(s) => {

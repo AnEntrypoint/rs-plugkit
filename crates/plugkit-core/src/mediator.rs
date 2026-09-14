@@ -35,20 +35,6 @@ pub const EXEC_VERBS: &[&str] = &["exec_js", "lang", "python", "bash", "powershe
 pub const BROWSER_VERBS: &[&str] = &["browser", "cdp"];
 pub const META_VERBS: &[&str] = &["health", "config_resolve", "dataflow_resolve", "status", "close", "filter", "cache_get", "cache_put", "cache_invalidate", "cache_stats", "learn"];
 
-/// The verb alias table, declared instead of being implicit in
-/// `dispatch_verb_inner`'s `|`-joined match arms. Each entry is
-/// (alias, canonical). `health` advertises this so a caller can tell that
-/// `js` and `exec_js` are the same verb without reading the dispatch source.
-///
-/// The `lang_is_preserved` flag records the asymmetry the alias arms encode:
-/// the shell family collapses every alias onto the literal "bash" before
-/// reaching `shell_exec`, while the compiled-language family forwards the
-/// dispatched verb itself, so `rust` and `cpp` survive as the lang argument.
-///
-/// `SELF_LANG_VERBS` is therefore deliberately NOT in this table: those verbs
-/// share one match arm with `go` but are not aliases of it -- each reaches
-/// `shell_exec` as its own lang. Listing them as aliases would claim `rust`
-/// runs as `go`, which is the opposite of what dispatch does.
 pub const VERB_ALIASES: &[(&str, &str)] = &[
     ("nodejs", "exec_js"),
     ("javascript", "exec_js"),

@@ -1,76 +1,18 @@
-//! Tiered resolution of instruction/gate/residual prose.
-//!
-//! Resolution order, first non-empty wins:
-//!
-//! 1. project-vendored `.gm/instructions/<key>.md`
-//! 2. a repo-backed source materialized under `.gm/instructions-source-cache`,
-//!    reached only when `.gm/instructions/source.json` names one
-//! 3. the gm-config repo cache, which is where a project with NO `source.json`
-//!    lands -- the common case, and the tier most easily mistaken for the
-//!    compiled default because both are "nothing local"
-//! 4. the compiled default the caller supplies
-//!
-//! The compiled default cannot fail, so [`resolve`] is total.
-//!
-//! # Why every non-hit is reported
-//!
-//! This chain previously returned `None` identically for "no source configured",
-//! "source.json is malformed", "cache is cold", and "this key is absent from the
-//! repo". Only the first is a normal state; the middle two mean an operator
-//! wrote configuration that is doing nothing, and they were indistinguishable
-//! from success at the call site. [`Outcome`] separates them, and
-//! [`resolve_reporting`] emits the ones that indicate a broken configuration --
-//! a tier that is CONFIGURED but not resolving is the failure mode the whole
-//! tiered design exists to make visible.
-//!
-//! Reporting is emit-only and never changes what is served: a broken tier still
-//! falls through to the next one, because refusing to serve prose would take a
-//! session down over an advisory override.
-//!
-//! # Untrusted inputs
-//!
-//! Both the KEY and the source spec's `path` reach a `format!` that builds a
-//! filesystem path, and neither is authored by this crate -- keys come from
-//! `fsm::graph()` state values (and `graph.json` is a vendorable, operator-
-//! edited artifact), `path` comes from a JSON file that may itself have been
-//! vendored. Both are validated by `config_path` before any interpolation, and
-//! a rejected value is reported and skipped rather than rewritten.
-
 use crate::config_path::{validate_prose_key, validate_source_path};
 use crate::pkfs;
 
-/// Directory holding project-vendored overrides.
 const LOCAL_BASE: &str = ".gm/instructions";
 
-/// Spec file naming a repo-backed prose source.
 const SOURCE_SPEC_PATH: &str = ".gm/instructions/source.json";
 
-/// Where a repo-backed prose source is materialized.
 const SOURCE_CACHE_BASE: &str = ".gm/instructions-source-cache";
 
-/// Which tier answered, or why none did.
-///
-/// Carries the failure REASON rather than a bare bool because the whole point
-/// of separating these is that an operator can act on "your source.json is not
-/// valid JSON" and cannot act on "prose resolved".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// Project-vendored `.gm/instructions/<key>.md` supplied the text.
     LocalOverride,
-    /// The repo-backed cache supplied the text.
     SourceRepo,
-    /// No tier was configured; the compiled default is the intended answer.
     CompiledDefault,
-    /// A tier WAS configured but could not be used. `reason` names the file and
-    /// the specific defect; the compiled default was served anyway.
     Degraded { reason: String },
-    /// gm-config is the mandatory source for this key and it could not be
-    /// reached (no local override, no cached checkout, remote unreachable).
-    /// The compiled default is served as the emergency payload so a dispatch
-    /// still gets usable text, but this Outcome is distinguishable from
-    /// `CompiledDefault` (the normal, healthy "nobody overrode this key"
-    /// case) so a caller can surface the reachability failure loudly instead
-    /// of treating a config outage as ordinary operation.
     ConfigRepoUnreachable { reason: String },
 }
 
@@ -85,23 +27,11 @@ impl Outcome {
         }
     }
 
-    /// True when an operator wrote configuration that is not taking effect.
     pub fn is_degraded(&self) -> bool {
         matches!(self, Outcome::Degraded { .. } | Outcome::ConfigRepoUnreachable { .. })
     }
 }
 
-/// Resolve `key`, reporting any configured-but-broken tier to the watcher log.
-///
-/// The entry point every call site uses. Reporting lives here rather than in
-/// [`resolve_detailed`] so the pure resolution stays side-effect-free and
-/// callable from a harness.
-/// Substitute `{name}` placeholders, reporting a template that lost or invented one.
-///
-/// A vendored message is free text an operator wrote, so it can silently drop a
-/// placeholder the call site fills -- a dirty-tree message without `{modified}`
-/// still reads fine while losing the counts entirely -- or invent one the call
-/// site never supplies, which then renders literally as `{staged}`.
 pub fn fill_placeholders(key: &str, template: &str, values: &[(&str, String)]) -> String {
     let mut out = template.to_string();
     let mut missing: Vec<&str> = Vec::new();
@@ -164,16 +94,6 @@ pub fn resolve(key: &str, default: &str) -> String {
     text
 }
 
-/// One tier's verdict: it answered, it has nothing for this key (fall
-/// through), it is configured but broken (fall through, but the caller must
-/// report it), or the key itself is unusable (terminal -- every remaining
-/// tier interpolates the SAME key into the SAME kind of path, so a key that
-/// escapes tier 1's base also escapes every other tier's; consulting them
-/// would not recover, only delay the identical verdict). `NotConfigured` and
-/// `Miss` both fall through identically -- the distinction only matters to
-/// the `SourceRead` tier that already tracks it for reporting; this enum is
-/// what every tier's fall-through-or-answer shape collapses to at the
-/// chokepoint.
 enum TierResult {
     Answered(String, Outcome),
     FallThrough,
@@ -181,15 +101,6 @@ enum TierResult {
     Terminal(Outcome),
 }
 
-/// Tier 1: project-vendored `.gm/instructions/<key>.md` overrides everything.
-/// `cfg-tier1-project-vendored-precedence`'s own row: unconditional precedence,
-/// already the case here since this tier runs first and returns immediately
-/// on any non-blank hit. The path-escape case is `Terminal`, not a fall-
-/// through degradation, matching the pre-refactor behavior exactly: a key
-/// that fails `path_contained_within` here would fail identically in every
-/// later tier (they all interpolate the same key into a path the same way),
-/// so falling through would only delay an unreachable outcome, not recover
-/// one.
 fn tier1_project_vendored(key: &str) -> TierResult {
     let local_path = format!("{LOCAL_BASE}/{key}.md");
     if !crate::config_path::path_contained_within(LOCAL_BASE, &local_path) {
@@ -203,14 +114,6 @@ fn tier1_project_vendored(key: &str) -> TierResult {
     }
 }
 
-/// Tier 2: an in-project default-settings repo, named by `.gm/instructions/source.json`.
-/// Falls through to tier 3 internally today (`read_from_source_repo` already
-/// chains into `read_from_config_repo` when no `source.json` exists) -- kept
-/// as one function here rather than split further because tier 2 and tier 3
-/// currently share ALL of their cache-reading logic (`read_from_cache_root`);
-/// splitting them at this chokepoint without also giving tier 3 a genuinely
-/// separate cache location would misrepresent two names for one code path as
-/// two independent tiers.
 fn tier2_in_project_repo(key: &str) -> TierResult {
     match read_from_source_repo(key) {
         SourceRead::Hit(text) => TierResult::Answered(text, Outcome::SourceRepo),
@@ -223,27 +126,10 @@ fn tier2_in_project_repo(key: &str) -> TierResult {
     }
 }
 
-/// Tier 3: a user-wide default-settings repo (e.g. `~/.gm-defaults/source.json`),
-/// distinct from tier 2's PROJECT-scoped `source.json`. Genuinely unimplemented,
-/// not a stub standing in for real behavior -- `cfg-tier3-user-wide-repo-spec-
-/// sandbox-escape`'s own row is the blocking prerequisite: gm.wasm's fs sandbox
-/// is rooted at the project cwd (fsm_vendor.rs:134), so reading a home-directory
-/// config needs one of the three named sandbox-escape techniques that row must
-/// choose between (host_env_get+host_fs_read, host_exec_js, or host_plugin_call)
-/// before this tier can read anything. Always falls through so the chokepoint's
-/// existing 3-tier behavior is unchanged until that row lands the real read.
 fn tier3_user_wide_repo(_key: &str) -> TierResult {
     TierResult::FallThrough
 }
 
-/// Resolve without emitting. Returns the text and which tier produced it.
-///
-/// ONE chokepoint, four tiers in strict precedence order, first non-empty
-/// answer wins; the compiled `default` is the answer no tier can fail to
-/// produce. Each `cfg-tier*` row's own scope is exactly the corresponding
-/// `tierN_*` function below -- this function only sequences them, so a tier's
-/// internal behavior can change without touching the other three or any of
-/// this chokepoint's 9 call sites.
 pub fn resolve_detailed(key: &str, default: &str) -> (String, Outcome) {
     if let Err(reason) = validate_prose_key(key) {
         return (default.to_string(), Outcome::Degraded { reason });
@@ -275,10 +161,6 @@ fn report(key: &str, outcome: &Outcome) {
         Outcome::CompiledDefault
             if !crate::orchestrator::instructions::has_compiled_default_for_prose_key(key) =>
         {
-            // No file on disk AND no compiled default: compiled_default_for_prose_key's
-            // `_ => entry::TEXT` fallthrough served ENTRY prose under this key's name.
-            // Indistinguishable from a healthy entry resolve at the call site, which is
-            // how a phase can serve completely wrong prose while looking configured.
             crate::wasm_dispatch::emit_event(
                 "prose_key_has_no_default",
                 serde_json::json!({
@@ -326,8 +208,6 @@ fn report(key: &str, outcome: &Outcome) {
 #[cfg(not(target_arch = "wasm32"))]
 fn report(_key: &str, _outcome: &Outcome) {}
 
-/// Resolve and record which key was most recently served, for the gate-fired
-/// marker other subsystems read.
 pub fn resolve_and_mark(key: &str, default: &str) -> String {
     let text = resolve(key, default);
     let marker = serde_json::json!({ "key": key, "ts": crate::orchestrator::state::now_ms() });
@@ -338,61 +218,20 @@ pub fn resolve_and_mark(key: &str, default: &str) -> String {
     text
 }
 
-/// Read a prose file, normalising the two encodings a hand-edited markdown file
-/// arrives in and treating blank content as absent.
-///
-/// Whitespace-only means "not set", not "serve nothing": an override file
-/// truncated to empty by a failed write would otherwise blank out an
-/// instruction the agent needs, which is a worse failure than ignoring it.
 fn read_clean(path: &str) -> Option<String> {
     let raw = pkfs::read_to_string(path)?;
     let text = raw.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     if text.trim().is_empty() { None } else { Some(text) }
 }
 
-/// The four genuinely distinct results of consulting the repo-backed tier,
-/// which the previous `Option<String>` collapsed into two.
 enum SourceRead {
     Hit(String),
-    /// No `source.json`. The overwhelmingly common case and not a problem.
     NotConfigured,
-    /// Source is configured and readable, but has nothing for this key. Normal
-    /// for a repo that overrides only some keys.
     Miss,
-    /// Source is configured but unusable. An operator must act.
     Broken(String),
-    /// The mandatory gm-config default source itself never resolved (no
-    /// cached checkout anywhere, remote unreachable) -- distinct from
-    /// `Broken`, which describes an EXPLICIT project/user `source.json` an
-    /// operator wrote and misconfigured. This is not a misconfiguration; it
-    /// is the one mandatory dependency being unreachable.
     ConfigRepoUnreachable(String),
 }
 
-/// Read one prose key from the config repo the CONFIG chain already fetches.
-///
-/// This tier has been dead twice on a directory-name disagreement, not a
-/// missing feature. First: `config_sync` clones into `.gm/config-source-cache`
-/// while this module read `.gm/instructions-source-cache`, a path nothing
-/// ever wrote. Second (the implicit-default case, no `source.json`): this
-/// module hardcoded `.gm/config-source-cache`/the user-tier cache, but
-/// `config::resolve()`'s `ImplicitDefaultRepo` tier -- the common,
-/// zero-configuration case that resolves gm-config for every project by
-/// default -- materializes into `.gm/config-source-cache-default` instead, a
-/// third directory this module never read either. Both times the config
-/// chain had a real, live, correctly-fetched checkout while this module
-/// looked at an empty directory and silently served the compiled default
-/// forever. `read_from_config_repo` now calls `config::resolve()` itself and
-/// reads `resolved.cache_dir`, so it always looks at whichever directory the
-/// ACTUALLY-winning tier used, whatever that tier turns out to be.
-///
-/// The layout comes from the repo's own `gm.config.json`: the `instructions`
-/// block declares `dir` (default `prose`) alongside the key inventory, and the
-/// `messages` block declares `gates_dir` and `residual_dir` for the `gates/`
-/// and `residual/` key namespaces, so the repo describes its own shape rather
-/// than this module assuming one. A namespace whose directory is not declared
-/// falls back to `instructions.dir`, which is what every pre-`messages` config
-/// repo relies on.
 pub fn config_repo_text(key: &str) -> Option<String> {
     match read_from_config_repo(key) {
         SourceRead::Hit(text) => Some(text),
@@ -400,12 +239,6 @@ pub fn config_repo_text(key: &str) -> Option<String> {
     }
 }
 
-/// Consults the SAME resolution `config::resolve()` uses for `gm.config.json`
-/// itself, rather than guessing a tier's cache dir from a hardcoded constant.
-/// `config::resolve()` pulls (calls the fetcher, which materializes/refreshes
-/// the winning tier's checkout) before returning, so this is a real pull on
-/// every prose resolution, not a passive read of whatever cache happened to
-/// already exist from an unrelated earlier call this session.
 #[cfg(target_arch = "wasm32")]
 fn read_from_config_repo(key: &str) -> SourceRead {
     let resolved = crate::config::resolve();
@@ -533,16 +366,6 @@ fn read_from_source_repo(key: &str) -> SourceRead {
     }
 }
 
-/// The `{repo, ref?, path?}` schema, sharing `config.rs`'s own
-/// `resolve_prose_repo_source`/`RepoSource`/`GitRepoFetcher` machinery so a
-/// `.gm/instructions/source.json` with a `repo` field gets the identical
-/// git-fetch, ref validation, and debounce discipline `.gm/config.source.json`
-/// already has, instead of `path`-only reads against a cache nothing ever
-/// populates. `resolve_prose_repo_source`'s own `RepoSource.cache_dir` is
-/// per-repo-hashed (see `parse_source_entry`'s `entry_hash`), so two prose
-/// sources naming different repos never collide -- distinct from the legacy
-/// `path`-only tier above, which stays on the single flat `SOURCE_CACHE_BASE`
-/// for backward compatibility with any project already relying on it.
 #[cfg(target_arch = "wasm32")]
 fn read_from_repo_spec_schema(key: &str, cfg_raw: &str) -> SourceRead {
     let fetcher = crate::config_sync::GitRepoFetcher::default();

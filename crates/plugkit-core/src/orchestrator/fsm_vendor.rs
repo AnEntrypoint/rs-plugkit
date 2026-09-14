@@ -362,11 +362,6 @@ fn write_if_absent_or_forced(path: &str, content: &str, force: bool) -> (bool, &
     if !force && existed {
         return (false, "skipped-existing");
     }
-    // force:true overwrites operator-authored config. Back the old content up
-    // first: a vendor pass regenerates from live code, so without this a hand-
-    // tuned graph or gate set is gone with no undo and no copy anywhere.
-    // Identical content is not backed up -- a no-op rewrite should not bury the
-    // one real backup under a stack of copies of itself.
     let mut backed_up = false;
     if force && existed {
         if let Some(prev) = pkfs::read_to_string(path) {
@@ -646,26 +641,11 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
     (payload.to_string(), String::new(), 0)
 }
 
-/// On-demand referential-integrity check of the CURRENTLY-LOADED graph.
-///
-/// `Graph::validate()` already runs at load time, but its findings only reach
-/// an emitted event, and only on the path where an override was parsed -- so a
-/// project running the compiled default graph, or anyone wanting to check a
-/// graph edit BEFORE relying on it, had no way to ask. This verb is that ask.
-///
-/// It reports rather than mutates: a graph that fails validation at load already
-/// falls back to the built-in default (see fsm.rs's `fsm_graph_override_invalid`),
-/// so the useful thing here is naming exactly which problems would trigger that,
-/// including the fail-OPEN case where an edge names a gate that does not exist
-/// and is therefore silently unguarded.
 pub fn handle_validate(_content: &str) -> (String, String, i32) {
     let (graph, tier, source_path) = fsm::graph_detailed();
     let problems = graph.validate();
     let ok = problems.is_empty();
 
-    // Not a "problem" -- the graph is internally consistent -- but a real
-    // guarantee difference against the built-in default, which is exactly what
-    // someone running a validation pass wants to know about.
     let weaker: Vec<Value> = fsm::gates_missing_vs_default(&graph)
         .into_iter()
         .map(|(from, to, missing)| json!({ "from": from, "to": to, "missing_gates": missing }))

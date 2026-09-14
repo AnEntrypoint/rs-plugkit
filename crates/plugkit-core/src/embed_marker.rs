@@ -6,19 +6,6 @@ use crate::wasm_dispatch::{host_cwd_string, host_read, host_write};
 
 const MARKER_REL: &str = ".gm/.embed-generation";
 
-/// Per-table marker files, so each store's own dim-mismatch check answers
-/// against ITS OWN last-recorded generation instead of a single process-wide
-/// value. The single shared `.gm/.embed-generation` file was written ONLY by
-/// code_index.rs::ensure_schema_at_cfg, but drop_if_dim_mismatch_at_cfg is
-/// also called independently by rssearch_vectors.rs and git_commit_vectors.rs
-/// for their OWN separate tables -- once code_index's pass wrote the shared
-/// marker as "current", every OTHER store's later dim-mismatch check read
-/// embed_generation_changed()==false regardless of whether THAT store's own
-/// table had actually been re-checked or re-embedded against the new
-/// generation, a real false-negative that could leave a stale-dimension table
-/// silently un-dropped. Scoping the marker file per table closes that: each
-/// store's own ensure_schema call only ever answers for the table it itself
-/// just verified.
 fn marker_rel_for_table(table: &str) -> String {
     format!("{}.{}", MARKER_REL, table)
 }
@@ -94,9 +81,6 @@ pub fn embed_generation_changed() -> bool {
     embed_generation_state() == EmbedGenerationState::Changed
 }
 
-/// Table-scoped variant: answers for the table's OWN last-recorded
-/// generation rather than the shared process-wide marker. See
-/// `marker_rel_for_table`'s doc comment for why this exists.
 pub fn embed_generation_changed_for_table(table: &str) -> bool {
     embed_generation_state_at(&marker_rel_for_table(table)) == EmbedGenerationState::Changed
 }

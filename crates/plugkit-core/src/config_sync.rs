@@ -1,99 +1,23 @@
-//! Git-backed materialization of repo-sourced config: the [`RepoFetcher`]
-//! implementation `config.rs` declares as a seam and deliberately leaves empty.
-//! [`config::load_repo_tier`] calls `refresh` on the resolution path, which
-//! means this code runs on config reads -- potentially many per session, across
-//! every project sharing the process-wide plugin instance. Everything below is
-//! shaped by that one fact: the common case must cost approximately nothing,
-//! and no failure here may take the session down with it.
-//! # Why a remote probe instead of a fetch
-//! `git fetch` transfers objects. `git ls-remote` transfers one line per ref
-//! and never writes to the object store, so it is the cheap way to answer the
-//! only question a refresh actually asks: "did the remote sha move?" We fetch
-//! ONLY when the answer is yes. On an unchanged remote -- overwhelmingly the
-//! common case, since config repos change rarely and refresh is called often --
-//! the cost is one ref advertisement, not a pack negotiation.
-//! The clone/fetch we do issue is `--depth 1`: config resolution reads a
-//! worktree at one commit and never inspects history, so downloading it would
-//! be pure waste.
-//! # Failure is never fatal, but never silent either
-//! A probe needs the network, and the network is not available in a plane, a
-//! CI sandbox, or a coffee shop. A refresh that failed but has a usable prior
-//! checkout returns `Ok` -- resolution proceeds against the last good copy --
-//! and emits a `config_sync_degraded` event so the staleness is visible in the
-//! watcher log rather than inferred later from confusing config behavior. Only
-//! a failure with NO local copy at all returns `Err`, because at that point
-//! there is genuinely nothing to resolve and `config.rs` must reject the tier
-//! rather than fall through to a lower one (see its `load_repo_tier` docs).
-//! # Backoff
-//! Debounce alone does not protect a dead remote: a 15-minute debounce still
-//! probes a permanently-unreachable host every 15 minutes forever, and each of
-//! those probes blocks a config read for however long the host's git takes to
-//! time out. Consecutive failures therefore extend the retry delay
-//! exponentially ([`BACKOFF_BASE_MS`] doubling up to [`BACKOFF_MAX_MS`]), and
-//! any success resets it. A transient outage costs one slow probe; a dead
-//! remote decays to roughly hourly.
-//! # Concurrency
-//! The plugin instance is shared across concurrently-active projects, and
-//! `config.rs` points every project's USER tier at one shared cache dir under
-//! `$HOME` -- so two projects can genuinely refresh the same source at the same
-//! moment. Two mechanisms cover it:
-//! - **State** is published by write-to-temp + atomic rename, so a concurrent
-//!   reader sees either the old state or the new one, never a half-written
-//!   file. (A plain overwrite can be observed torn, which would look like
-//!   corrupt JSON and silently reset the debounce.)
-//! - **Git work** is guarded by a lock directory whose creation is atomic
-//!   (`mkdir` fails if it exists). A loser does not wait or fail; it proceeds
-//!   with the existing checkout, which is exactly the degraded-but-usable path
-//!   the offline case already takes. A lock older than [`LOCK_STALE_MS`] is
-//!   broken, since a process killed mid-refresh would otherwise wedge the
-//! In-process statics are deliberately NOT used for any of this: they would be
-//! shared across projects that must not share debounce state, and would be
-//! invisible to the separate host processes that can also run this code.
-
 use serde_json::{json, Value};
 
 use crate::config::{RepoFetcher, RepoSource};
 
-/// Minimum spacing between remote probes for one source. A config repo that
-/// changes more often than this is pathological; anything shorter turns a
-/// burst of config reads into a burst of network round-trips.
 const DEFAULT_DEBOUNCE_MS: u64 = 15 * 60 * 1000;
 
-/// First retry delay after a failure, doubled per consecutive failure.
 const BACKOFF_BASE_MS: u64 = 60 * 1000;
 
-/// Ceiling for the exponential backoff. An hour keeps a dead remote from
-/// costing anything measurable while still recovering on its own once the
-/// network returns -- no session restart required.
 const BACKOFF_MAX_MS: u64 = 60 * 60 * 1000;
 
-/// Age past which a lock directory is presumed abandoned. Generous relative to
-/// a shallow clone so a merely-slow refresh is never stolen from, but bounded
-/// so a killed process cannot wedge a source forever.
 const LOCK_STALE_MS: u64 = 10 * 60 * 1000;
 
-/// Outcome of [`ensure_current`], for callers that want more than the
-/// `Result<(), String>` the [`RepoFetcher`] trait can carry.
 #[derive(Debug, Clone)]
 pub struct SyncOutcome {
-    /// Sha now live in the cache dir. `None` only when the checkout is
-    /// unreadable, which for a usable cache should not happen.
     pub sha: Option<String>,
-    /// Whether this call moved the worktree. False for a debounced call, an
-    /// up-to-date probe, or a degraded fall back to the prior copy.
     pub changed: bool,
-    /// True when the remote could not be reached (or git failed) and a prior
-    /// local copy is being served instead. The config is usable but may be
-    /// stale.
     pub degraded: bool,
-    /// Human-readable reason, always populated -- "why did config not update"
-    /// is unanswerable from a bare bool.
     pub detail: String,
 }
 
-/// Persisted per-source sync state. Kept beside the checkout rather than in KV
-/// because it must survive alongside exactly the thing it describes: a cache
-/// dir deleted by hand should not leave stale state claiming a sha is current.
 #[derive(Debug, Clone, Default)]
 struct SyncState {
     last_checked_ms: u64,
@@ -126,10 +50,6 @@ impl SyncState {
         .to_string()
     }
 
-    /// Delay that must elapse before the next probe. Backoff replaces the
-    /// debounce (rather than adding to it) once failures start, and is always
-    /// at least the debounce so a failing source is never probed MORE often
-    /// than a healthy one.
     fn next_probe_delay_ms(&self, debounce_ms: u64) -> u64 {
         if self.consecutive_failures == 0 {
             return debounce_ms;
@@ -144,11 +64,6 @@ fn now_ms() -> u64 {
     crate::orchestrator::state::now_ms() as u64
 }
 
-/// Stable identity for a source, used to name its state file.
-/// Hashed rather than derived from the URL text because a repo URL contains
-/// characters that are illegal or meaningful in a path (`:`, `/`, `@`), and
-/// because two specs differing only in `ref` must not share state -- a probe
-/// result for `main` says nothing about `v2`.
 fn source_key(src: &RepoSource) -> String {
     let ident = format!("{}\u{0}{}", src.repo, src.reference.as_deref().unwrap_or(""));
     format!("{:016x}", crate::hash::fnv1a64(ident.as_bytes()))
@@ -173,10 +88,6 @@ fn read_state(src: &RepoSource) -> SyncState {
     }
 }
 
-/// Publish state by atomic rename.
-/// Two projects can write this concurrently; rename makes each write
-/// all-or-nothing, so the loser's state is simply overwritten by the winner
-/// rather than interleaved into unparseable bytes.
 fn write_state(src: &RepoSource, st: &SyncState) {
     let path = state_path(src);
     let tmp = format!("{}.tmp-{}", path, now_ms());
@@ -188,10 +99,6 @@ fn write_state(src: &RepoSource, st: &SyncState) {
     }
 }
 
-/// `fs.renameSync` via the host's JS escape hatch.
-/// There is no rename in the host ABI (`host_fs_write` overwrites in place,
-/// which is exactly the torn-write this must avoid), so this mirrors the
-/// approach `memory_md.rs::rename_batch` already uses for the same reason.
 fn rename(from: &str, to: &str) -> bool {
     let (Ok(f), Ok(t)) = (serde_json::to_string(from), serde_json::to_string(to)) else {
         return false;
@@ -217,21 +124,6 @@ fn exec_js_stdout(code: &str, timeout_ms: u32) -> Option<String> {
     parsed.get("stdout").and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
-/// Acquire the per-source lock, breaking it if abandoned.
-/// `mkdir` (non-recursive) is the primitive: it fails if the directory exists,
-/// which makes creation an atomic test-and-set across processes. `fs.writeFile`
-/// would not work here -- it succeeds unconditionally and would hand the lock
-/// to every caller at once.
-///
-/// The lock directory's PARENT must exist before that atomic mkdir can ever
-/// succeed or meaningfully fail: a brand-new source's cache root (e.g. a
-/// project's first-ever `.gm/config-source-cache/<hash>/`) has no parent on
-/// disk yet, so a non-recursive `mkdirSync(lockPath)` fails with ENOENT --
-/// indistinguishable from ENOENT on the FOLLOWING probe stat, which the
-/// original code treated identically to "someone else holds it", reporting
-/// `busy` for a lock nobody was ever holding. `mkdirSync(parent,{recursive:
-/// true})` first makes that ENOENT case impossible, so a genuine EEXIST from
-/// the lock mkdir itself is the only remaining reason it can fail.
 fn try_lock(src: &RepoSource) -> bool {
     let path = lock_path(src);
     let Ok(p) = serde_json::to_string(&path) else {
@@ -281,19 +173,12 @@ fn git(argv: &[&str], cwd: Option<&str>) -> Result<String, String> {
     Ok(stdout)
 }
 
-/// Whether the cache dir holds a git checkout we can serve.
-/// Checked via `rev-parse` rather than a bare directory-exists test: a dir left
-/// half-written by an interrupted clone exists but has no HEAD, and serving it
-/// as "the last good copy" would surface an empty config as if it were real.
 fn local_sha(src: &RepoSource) -> Option<String> {
     let out = git(&["rev-parse", "HEAD"], Some(&cache_root(src))).ok()?;
     let s = out.trim().to_string();
     if s.is_empty() { None } else { Some(s) }
 }
 
-/// Ask the remote for one ref's sha without transferring objects.
-/// The ref defaults to `HEAD` (the remote's default branch) when the spec
-/// names none, which matches `RepoSource::reference`'s documented meaning.
 fn probe_remote_sha(src: &RepoSource) -> Result<String, String> {
     let reference = src.reference.as_deref().unwrap_or("HEAD");
     let out = git(&["ls-remote", "--", &src.repo, reference], None)?;
@@ -419,19 +304,7 @@ fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcom
     SyncOutcome { sha, changed: false, degraded: true, detail }
 }
 
-/// Ensure `src.cache_dir` holds an up-to-date checkout, reporting the live sha
-/// and whether this call changed it.
-/// This is the function the config resolver calls. It is safe to call on every
-/// resolution: the debounce and backoff mean the overwhelming majority of calls
-/// do no network work at all.
-/// Returns `Err` ONLY when there is no usable local copy AND the remote could
-/// not supply one -- the single case where `config.rs` must reject the tier
-/// instead of resolving against a stale-but-real config.
 pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome, String> {
-    // Re-checked here even though `config::parse_source_spec` already validated
-    // it, because `RepoSource` is a public struct any caller can construct: the
-    // validation must sit at the boundary where the string actually reaches
-    // git, not only at the one path that happens to build it today.
     crate::config_path::validate_repo_url(&src.repo)?;
 
     let mut st = read_state(src);
@@ -477,8 +350,6 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
     result
 }
 
-/// The refresh body, run under the lock. Split out so every early return still
-/// releases the lock and persists state in [`ensure_current`].
 fn refresh_locked(
     src: &RepoSource,
     st: &mut SyncState,
@@ -517,8 +388,6 @@ fn refresh_locked(
         });
     }
 
-    // Captured BEFORE fetch_to overwrites the checkout in place -- this is the only point
-    // a before/after diff is possible, since the checkout holds just one commit at a time.
     let pre_fetch_config_text = crate::pkfs::read_to_string(&src.config_path());
 
     let outcome = fetch_to(src, &remote);
@@ -554,16 +423,6 @@ fn refresh_locked(
     })
 }
 
-/// Config-relevant files this source supplies, for the change roster.
-/// Deliberately the SPEC's own view (which config file this source resolves to)
-/// rather than a full `git diff --name-only`: the roster exists to tell an agent
-/// WHICH config moved, and a diff of an entire config repo would bury that in
-/// unrelated files. A key-level old->new diff is a separate, finer row.
-/// Names the actual top-level config keys that changed value, when the source resolves
-/// to a real `gm.config.json`-shaped document both before and after the fetch -- falls back
-/// to the bare file path when either side is missing/unparseable/not an object (a fresh
-/// tier with no prior checkout, a non-JSON prose/fsm source, or a malformed file), since a
-/// diff needs two comparable JSON objects to say anything more specific than "it changed".
 fn changed_config_paths(src: &RepoSource, pre_fetch_text: Option<&str>) -> Vec<String> {
     let path = src.config_path();
     let Some(pre_text) = pre_fetch_text else { return vec![path] };
@@ -590,9 +449,6 @@ fn changed_config_paths(src: &RepoSource, pre_fetch_text: Option<&str>) -> Vec<S
     if keys.is_empty() { vec![path] } else { keys }
 }
 
-/// The [`RepoFetcher`] `config.rs` resolves through.
-/// Holds the debounce interval so a caller can tighten it (a config-editing
-/// workflow may want near-immediate pickup) without touching resolution.
 pub struct GitRepoFetcher {
     pub debounce_ms: u64,
 }
