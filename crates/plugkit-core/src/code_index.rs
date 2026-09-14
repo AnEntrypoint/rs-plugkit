@@ -463,16 +463,53 @@ pub(crate) fn collect_files(root: &str, max_files: usize, cfg: &crate::ragconfig
     files
 }
 
+fn scoped_scan_target(root: &str, scope: &str) -> Result<String, String> {
+    let normalized = scope.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    let absolute = normalized.starts_with('/') || (bytes.len() >= 2 && bytes[1] == b':');
+    if absolute {
+        return Err(format!("path '{scope}' must be relative to the search root '{root}' -- pass another project as \"root\", and a location inside it as \"path\""));
+    }
+    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+    if segments.iter().any(|s| *s == "..") {
+        return Err(format!("path '{scope}' may not climb out of the search root with '..'"));
+    }
+    if segments.is_empty() {
+        return Ok(root.to_string());
+    }
+    let joined = segments.join("/");
+    Ok(if root.ends_with('/') { format!("{root}{joined}") } else { format!("{root}/{joined}") })
+}
+
+pub(crate) fn collect_scoped_files(root: &str, scope: &str, max_files: usize, cfg: &crate::ragconfig::IndexConfig) -> Result<Vec<String>, String> {
+    let target = scoped_scan_target(root, scope)?;
+    let Some(stat) = host_stat(&target).filter(|v| !v.is_null()) else {
+        return Err(format!("path '{scope}' does not exist under search root '{root}'"));
+    };
+    if !stat.get("isDirectory").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return Ok(vec![target]);
+    }
+    let gi = load_repo_gitignore(root);
+    let mut files = Vec::new();
+    walk_children(&target, target.len(), max_files, &mut files, &gi, cfg);
+    Ok(files)
+}
+
 fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option<ignore::gitignore::Gitignore>, cfg: &crate::ragconfig::IndexConfig) {
     if files.len() >= max_files { return; }
-    let root_force_included = cfg.is_force_included(root);
-    if !root_force_included
+    if !cfg.is_force_included(root)
         && root.split('/').any(|seg| is_skipped_dir_segment(seg, cfg))
     { return; }
-    for entry in list_dir(root) {
+    walk_children(root, root.len(), max_files, files, gi, cfg);
+}
+
+fn walk_children(dir: &str, walk_base_len: usize, max_files: usize, files: &mut Vec<String>, gi: &Option<ignore::gitignore::Gitignore>, cfg: &crate::ragconfig::IndexConfig) {
+    if files.len() >= max_files { return; }
+    let dir_force_included = cfg.is_force_included(dir);
+    for entry in list_dir(dir) {
         if files.len() >= max_files { return; }
-        let next = if root.ends_with('/') { format!("{}{}", root, entry) } else { format!("{}/{}", root, entry) };
-        let force_included = root_force_included || cfg.is_force_included(&next);
+        let next = if dir.ends_with('/') { format!("{}{}", dir, entry) } else { format!("{}/{}", dir, entry) };
+        let force_included = dir_force_included || cfg.is_force_included(&next);
         if !force_included {
             if is_hidden_segment(&entry) { continue; }
             if is_skipped_filename(&entry, cfg) { continue; }
@@ -483,9 +520,13 @@ fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option
         if !force_included && gitignore_excludes(gi, &next, is_dir_entry) { continue; }
         if !is_dir_entry {
             files.push(next);
-        } else {
-            walk_posix(&next, max_files, files, gi, cfg);
+            continue;
         }
+        let below_walk_base = next.get(walk_base_len..).unwrap_or("");
+        if !cfg.is_force_included(&next) && below_walk_base.split('/').any(|seg| is_skipped_dir_segment(seg, cfg)) {
+            continue;
+        }
+        walk_children(&next, walk_base_len, max_files, files, gi, cfg);
     }
 }
 
@@ -2240,6 +2281,7 @@ pub struct LiteralScan<'a> {
     pub regex: bool,
     pub case_insensitive: bool,
     pub whole_word: bool,
+    pub scope: Option<&'a str>,
     pub path_glob: Option<&'a str>,
     pub max_matches: usize,
     pub max_files: usize,
@@ -2372,7 +2414,13 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     // Ask for one more than the cap so hitting it is distinguishable from a
     // tree that happens to be exactly cap-sized.
-    let listed = collect_files(root, file_cap.saturating_add(1), &cfg.index);
+    let listed = match req.scope {
+        None => collect_files(root, file_cap.saturating_add(1), &cfg.index),
+        Some(scope) => match collect_scoped_files(root, scope, file_cap.saturating_add(1), &cfg.index) {
+            Ok(files) => files,
+            Err(e) => return json!({ "ok": false, "error": e, "path": scope, "root": root }),
+        },
+    };
     let files_truncated = listed.len() > file_cap;
     let files: &[String] = if files_truncated { &listed[..file_cap] } else { &listed[..] };
 
@@ -2471,6 +2519,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     out.insert("root".to_string(), json!(root));
     out.insert("case_insensitive".to_string(), json!(req.case_insensitive));
     if !req.regex { out.insert("whole_word".to_string(), json!(req.whole_word)); }
+    if let Some(s) = req.scope { out.insert("path".to_string(), json!(s)); }
     if let Some(g) = req.path_glob { out.insert("path_glob".to_string(), json!(g)); }
     out.insert("match_count".to_string(), json!(matches.len()));
     out.insert("lines_with_matches".to_string(), json!(lines_with_matches));

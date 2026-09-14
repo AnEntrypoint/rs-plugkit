@@ -571,6 +571,18 @@ fn due_for_full_text(streak: u64, first_at: u64) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
+const DEFAULT_AGENTS_MD_DRAIN_THRESHOLD_BYTES: u64 = 30 * 1024;
+
+#[cfg(target_arch = "wasm32")]
+fn agents_md_drain_threshold_bytes() -> u64 {
+    crate::config::resolve().config.value
+        .pointer("/memory/agents_md_drain_threshold_bytes")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_AGENTS_MD_DRAIN_THRESHOLD_BYTES)
+}
+
+#[cfg(target_arch = "wasm32")]
 fn agents_drain_obligation() -> serde_json::Value {
     let text = match crate::wasm_dispatch::host_read("AGENTS.md") {
         Some(t) => t,
@@ -584,20 +596,22 @@ fn agents_drain_obligation() -> serde_json::Value {
     let prior_bytes = prior.as_ref().and_then(|v| v.get("agents_bytes")).and_then(|v| v.as_u64());
     let prior_streak = prior.as_ref().and_then(|v| v.get("flat_streak")).and_then(|v| v.as_u64()).unwrap_or(0);
 
+    let drain_threshold_bytes = agents_md_drain_threshold_bytes();
+    let over_threshold = bytes as u64 > drain_threshold_bytes;
     let dropped = prior_bytes.map(|p| (bytes as u64) < p).unwrap_or(false);
-    let flat_streak: u64 = if dropped { 0 } else { prior_streak + 1 };
+    let flat_streak: u64 = if dropped || !over_threshold { 0 } else { prior_streak + 1 };
 
     let new_state = serde_json::json!({ "agents_bytes": bytes as u64, "flat_streak": flat_streak });
     let _ = crate::wasm_dispatch::host_write(AGENTS_DRAIN_STATE_FILE, &new_state.to_string());
 
-    let warn_active = flat_streak >= FLAT_STREAK_WARN_THRESHOLD as u64;
+    let warn_active = over_threshold && flat_streak >= FLAT_STREAK_WARN_THRESHOLD as u64;
     let warn_due_full = warn_active && due_for_full_text(flat_streak, FLAT_STREAK_WARN_THRESHOLD as u64);
-    let instruction_due_full = due_for_full_text(flat_streak, 1);
+    let instruction_due_full = over_threshold && due_for_full_text(flat_streak, 1);
 
     let back_pressure_warning: Option<String> = if warn_due_full {
         Some(format!(
-            "AGENTS.md byte count has not dropped across the last {} memorize-fire calls this session (currently {} bytes) -- the drain obligation has been skipped repeatedly, not merely absent this one turn. If genuinely nothing is eligible to drain, that is fine; if something detail-heavy/single-crate/single-platform is sitting in AGENTS.md, drain it THIS turn.",
-            flat_streak, bytes
+            "AGENTS.md byte count has not dropped across the last {} memorize-fire calls this session (currently {} bytes, over the {}-byte drain threshold) -- the drain obligation has been skipped repeatedly, not merely absent this one turn. If genuinely nothing is eligible to drain, that is fine; if something detail-heavy/single-crate/single-platform is sitting in AGENTS.md, drain it THIS turn.",
+            flat_streak, bytes, drain_threshold_bytes
         ))
     } else if warn_active {
         Some(format!(
@@ -617,6 +631,8 @@ fn agents_drain_obligation() -> serde_json::Value {
     serde_json::json!({
         "agents_bytes": bytes,
         "agents_lines": lines,
+        "drain_threshold_bytes": drain_threshold_bytes,
+        "over_threshold": over_threshold,
         "dropped_since_last_fire": dropped,
         "flat_streak": flat_streak,
         "back_pressure_warning": back_pressure_warning,

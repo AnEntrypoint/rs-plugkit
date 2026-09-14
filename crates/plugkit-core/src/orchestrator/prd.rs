@@ -59,7 +59,9 @@ pub fn drain_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)>
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
     let _ = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-drain-commit-comments", |mut doc: Value| {
         drained.clear();
+        let mut closed_rows_removed = 0usize;
         if let Some(seq) = doc.as_sequence_mut() {
+            let before = seq.len();
             seq.retain(|item| {
                 let Some(map) = item.as_mapping() else { return true };
                 let status = map.get(&Value::String("status".to_string())).and_then(|v| v.as_str()).unwrap_or("");
@@ -74,6 +76,10 @@ pub fn drain_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)>
                 }
                 false
             });
+            closed_rows_removed = before - seq.len();
+        }
+        if closed_rows_removed == 0 {
+            return cas::CasOutcome::Abort(String::new(), "no closed PRD rows to drain".to_string(), 0);
         }
         cas::CasOutcome::Write(doc, ())
     });
