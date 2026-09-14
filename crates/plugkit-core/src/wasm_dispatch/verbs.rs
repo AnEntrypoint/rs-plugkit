@@ -1447,11 +1447,8 @@ fn memorize_prune(body: &Value) -> u64 {
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
     if !crate::wasm_dispatch::host_allow_root(root) {
         return err("codesearch", &format!(
-            "root '{root}' is not a directory the host will grant access to -- a root for mode \"dual\"/\"filename\" must be a project (exists and carries .git, .gm, package.json, Cargo.toml, go.mod, or pyproject.toml), because it gets its own index at <root>/.gm/gm.db. To search a subdirectory, use mode \"literal\" or \"regex\": they accept a subdirectory as \"root\" or, equivalently, the project as \"root\" plus the subdirectory as \"path\"."
+            "root '{root}' is not a directory the host will grant access to -- a root for mode \"dual\" must be a project (exists and carries .git, .gm, package.json, Cargo.toml, go.mod, or pyproject.toml), because it gets its own index at <root>/.gm/gm.db. To search a subdirectory, use mode \"literal\", \"regex\" or \"filename\": they accept a subdirectory as \"root\" or, equivalently, the project as \"root\" plus the subdirectory as \"path\"."
         ));
-    }
-    if body.get("mode").and_then(|v| v.as_str()) == Some("filename") {
-        return codesearch_scan_result(crate::code_index::search_filenames_at(query, k as usize, cfg, Some(root)), "filename search failed");
     }
     let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
     if !already_indexed {
@@ -1611,25 +1608,9 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
             CODESEARCH_EXHAUSTIVE_FIELDS.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", "),
         ));
     }
-    let requested_root = body.get("root").and_then(|v| v.as_str())
-        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
-        .map(str::trim)
-        .filter(|p| !p.is_empty());
-    let (root, root_implied_scope) = match requested_root {
-        None => (None, None),
-        Some(r) => match resolve_exhaustive_scan_root(r) {
-            Ok(resolved) => resolved,
-            Err(e) => return err("codesearch", &e),
-        },
-    };
-    let explicit_scope = match codesearch_optional_str(body, "path") {
-        Ok(s) => s,
+    let (root, combined_scope) = match resolve_scan_target(body) {
+        Ok(target) => target,
         Err(e) => return err("codesearch", &e),
-    };
-    let combined_scope: Option<String> = match (root_implied_scope, explicit_scope) {
-        (Some(implied), Some(explicit)) => Some(format!("{}/{}", implied.trim_end_matches('/'), explicit)),
-        (Some(implied), None) => Some(implied),
-        (None, explicit) => explicit.map(String::from),
     };
     let root = root.as_deref();
     let scope = combined_scope.as_deref();
@@ -1660,6 +1641,61 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
     };
     codesearch_scan_result(crate::code_index::scan_literal(&scan, cfg), "exhaustive scan failed")
+}
+
+fn resolve_scan_target(body: &Value) -> Result<(Option<String>, Option<String>), String> {
+    let requested_root = body.get("root").and_then(|v| v.as_str())
+        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    let (root, root_implied_scope) = match requested_root {
+        None => (None, None),
+        Some(r) => resolve_exhaustive_scan_root(r)?,
+    };
+    let explicit_scope = codesearch_optional_str(body, "path")?;
+    let combined_scope = match (root_implied_scope, explicit_scope) {
+        (Some(implied), Some(explicit)) => Some(format!("{}/{}", implied.trim_end_matches('/'), explicit)),
+        (Some(implied), None) => Some(implied),
+        (None, explicit) => explicit.map(String::from),
+    };
+    Ok((root, combined_scope))
+}
+
+const CODESEARCH_FILENAME_FIELDS: &[&str] = &[
+    "query", "mode", "root", "projectPath", "path",
+    "k", "max_results", "maxResults", "limit", "session_id", "sessionId", "cwd",
+];
+
+fn codesearch_filename(body: &Value, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
+    if let Some(field) = ["glob", "path_glob"].iter().find(|f| body.get(**f).is_some()) {
+        return err("codesearch", &format!(
+            "mode \"filename\" takes its glob as \"query\" itself (e.g. \"src/**/*.rs\"); \"{field}\" is refused rather than ignored. Scope with \"root\"/\"path\" instead."
+        ));
+    }
+    let unknown: Vec<String> = body.as_object()
+        .map(|obj| obj.keys()
+            .filter(|key| !key.starts_with('_') && !CODESEARCH_FILENAME_FIELDS.contains(&key.as_str()))
+            .map(|key| format!("\"{key}\""))
+            .collect())
+        .unwrap_or_default();
+    if !unknown.is_empty() {
+        return err("codesearch", &format!(
+            "mode \"filename\" does not recognise body field(s) {} -- supported fields are {}",
+            unknown.join(", "),
+            CODESEARCH_FILENAME_FIELDS.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", "),
+        ));
+    }
+    let (root, scope) = match resolve_scan_target(body) {
+        Ok(target) => target,
+        Err(e) => return err("codesearch", &e),
+    };
+    let search = crate::code_index::FilenameSearch {
+        pattern: query,
+        root: root.as_deref(),
+        scope: scope.as_deref(),
+        max_hits: k as usize,
+    };
+    codesearch_scan_result(crate::code_index::search_filenames(&search, cfg), "filename search failed")
 }
 
 fn codesearch_scan_result(out: Value, fallback: &str) -> u64 {
@@ -1693,6 +1729,9 @@ fn codesearch(body: &Value) -> u64 {
         let explicit = if limit_was_explicit { Some(k) } else { None };
         return codesearch_exhaustive(body, query, mode == "regex", &cfg, explicit);
     }
+    if mode == "filename" {
+        return codesearch_filename(body, query, k, &cfg);
+    }
     if let Some(field) = CODESEARCH_SCOPE_FIELDS.iter().find(|f| body.get(**f).is_some()) {
         return err("codesearch", &format!(
             "body field \"{field}\" scopes a tree walk and is only honoured by mode \"literal\"/\"regex\"; mode \"{mode}\" would ignore it and answer from the whole index. Re-dispatch with mode \"literal\" or \"regex\", or drop \"{field}\"."
@@ -1703,9 +1742,6 @@ fn codesearch(body: &Value) -> u64 {
         .filter(|p| !p.is_empty());
     if let Some(root) = root {
         return codesearch_at_root(body, root, query, k, &cfg);
-    }
-    if mode == "filename" {
-        return codesearch_scan_result(crate::code_index::search_filenames(query, k as usize, &cfg), "filename search failed");
     }
     let (_dataflow_doc, dataflow_tier, dataflow_path) = crate::dataflow::document_detailed();
     if dataflow_tier != crate::dataflow::DataflowTier::CompiledDefault {
@@ -3769,7 +3805,12 @@ fn git_fetch(body: &Value) -> u64 {
 fn git_pull(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let remote = body.get("remote").and_then(|v| v.as_str()).unwrap_or("origin").trim();
-    let branch = body.get("branch").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let requested_branch = body.get("branch").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let branch_owned = match requested_branch {
+        "" => current_branch_when_it_tracks_nothing_on(cwd, remote).unwrap_or_default(),
+        named => named.to_string(),
+    };
+    let branch = branch_owned.as_str();
     let ff_only = body.get("ff_only").and_then(|v| v.as_bool()).unwrap_or(false);
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
     let mut argv = vec!["pull", "--no-edit", "--no-rebase"];
@@ -3805,6 +3846,13 @@ fn git_pull(body: &Value) -> u64 {
         "already_up_to_date": head_before == head_after,
         "output": output,
     }))
+}
+
+fn current_branch_when_it_tracks_nothing_on(cwd: Option<&str>, remote: &str) -> Option<String> {
+    let upstream = exec_git_in(cwd, "rev-parse --abbrev-ref --symbolic-full-name @{upstream}");
+    if upstream.trim().starts_with(&format!("{remote}/")) { return None; }
+    let current = exec_git_in(cwd, "symbolic-ref --short -q HEAD").trim().to_string();
+    (!current.is_empty()).then_some(current)
 }
 
 fn ci_status_resolve_repo_preferring_unambiguous_github_repo_field(body: &Value, cwd: Option<&str>) -> Result<String, u64> {
