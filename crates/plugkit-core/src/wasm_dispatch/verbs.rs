@@ -1451,7 +1451,9 @@ fn memorize_prune(body: &Value) -> u64 {
 /// submodule at all).
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
     if !crate::wasm_dispatch::host_allow_root(root) {
-        return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
+        return err("codesearch", &format!(
+            "root '{root}' is not a directory the host will grant access to -- a root for mode \"dual\"/\"filename\" must be a project (exists and carries .git, .gm, package.json, Cargo.toml, go.mod, or pyproject.toml), because it gets its own index at <root>/.gm/gm.db. To search a subdirectory, use mode \"literal\" or \"regex\": they accept a subdirectory as \"root\" or, equivalently, the project as \"root\" plus the subdirectory as \"path\"."
+        ));
     }
     if body.get("mode").and_then(|v| v.as_str()) == Some("filename") {
         let out = crate::code_index::search_filenames_at(query, k as usize, cfg, Some(root));
@@ -1503,6 +1505,67 @@ const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 /// left to fall through.
 const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit"];
 
+const CODESEARCH_SCOPE_FIELDS: &[&str] = &["path", "glob", "path_glob"];
+
+const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
+    "query", "mode", "root", "projectPath", "path", "glob", "path_glob",
+    "case_insensitive", "whole_word", "max_matches", "max_files",
+    "k", "max_results", "maxResults", "limit", "session_id", "sessionId", "cwd",
+];
+
+fn codesearch_exhaustive_unknown_fields(body: &Value) -> Vec<String> {
+    body.as_object()
+        .map(|obj| obj.keys()
+            .filter(|k| !k.starts_with('_') && !CODESEARCH_EXHAUSTIVE_FIELDS.contains(&k.as_str()))
+            .cloned()
+            .collect())
+        .unwrap_or_default()
+}
+
+fn resolve_exhaustive_scan_root(requested: &str) -> Result<(Option<String>, Option<String>), String> {
+    let normalized = requested.replace('\\', "/").trim_end_matches('/').to_string();
+    let bytes = normalized.as_bytes();
+    let has_drive_letter = bytes.len() >= 2 && bytes[1] == b':';
+    if !normalized.starts_with('/') && !has_drive_letter {
+        return Ok((None, Some(normalized)));
+    }
+    if crate::wasm_dispatch::host_allow_root(requested) {
+        return Ok((Some(requested.to_string()), None));
+    }
+    let comparable = |p: &str| if has_drive_letter { p.to_ascii_lowercase() } else { p.to_string() };
+    if let Some(cwd) = crate::wasm_dispatch::host_cwd_string() {
+        let cwd = cwd.replace('\\', "/").trim_end_matches('/').to_string();
+        let (target, base) = (comparable(&normalized), comparable(&cwd));
+        if target == base {
+            return Ok((None, None));
+        }
+        if target.starts_with(&format!("{base}/")) {
+            return Ok((None, Some(normalized[cwd.len() + 1..].to_string())));
+        }
+    }
+    let mut end = normalized.len();
+    while let Some(slash) = normalized[..end].rfind('/') {
+        let ancestor = &normalized[..slash];
+        if ancestor.is_empty() || ancestor.ends_with(':') { break; }
+        if crate::wasm_dispatch::host_allow_root(ancestor) {
+            return Ok((Some(ancestor.to_string()), Some(normalized[slash + 1..].to_string())));
+        }
+        end = slash;
+    }
+    Err(format!(
+        "root '{requested}' is neither the current project, a directory inside it, nor inside any directory the host will grant -- a granted root must exist and carry a project marker (.git, .gm, package.json, Cargo.toml, go.mod, pyproject.toml). Pass the project as \"root\" and the location inside it as \"path\"."
+    ))
+}
+
+fn codesearch_optional_str<'a>(body: &'a Value, field: &str) -> Result<Option<&'a str>, String> {
+    match body.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.trim())),
+        Some(other) => Err(format!("body field \"{field}\" must be a string, got {other}")),
+    }
+}
+
 /// Resolves the result limit, reporting a genuine conflict instead of picking
 /// a winner behind the caller's back. Returns the limit and whether the caller
 /// stated it explicitly (the exhaustive modes need that distinction: an
@@ -1545,14 +1608,44 @@ fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> R
 /// the embedding/fusion passes that follow, none of which an exact-match
 /// answer consults).
 fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ragconfig::RagConfig, explicit_limit: Option<u32>) -> u64 {
-    let root = body.get("root").and_then(|v| v.as_str())
-        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
-        .filter(|p| !p.is_empty());
-    if let Some(root) = root {
-        if !crate::wasm_dispatch::host_allow_root(root) {
-            return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
-        }
+    let unknown = codesearch_exhaustive_unknown_fields(body);
+    if !unknown.is_empty() {
+        return err("codesearch", &format!(
+            "mode \"{}\" does not recognise body field(s) {} -- supported fields are {}. An unrecognised field is refused rather than ignored: an ignored scoping field silently widens the scan to the whole tree.",
+            if regex { "regex" } else { "literal" },
+            unknown.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", "),
+            CODESEARCH_EXHAUSTIVE_FIELDS.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", "),
+        ));
     }
+    let requested_root = body.get("root").and_then(|v| v.as_str())
+        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    let (root, root_implied_scope) = match requested_root {
+        None => (None, None),
+        Some(r) => match resolve_exhaustive_scan_root(r) {
+            Ok(resolved) => resolved,
+            Err(e) => return err("codesearch", &e),
+        },
+    };
+    let explicit_scope = match codesearch_optional_str(body, "path") {
+        Ok(s) => s,
+        Err(e) => return err("codesearch", &e),
+    };
+    let combined_scope: Option<String> = match (root_implied_scope, explicit_scope) {
+        (Some(implied), Some(explicit)) => Some(format!("{}/{}", implied.trim_end_matches('/'), explicit)),
+        (Some(implied), None) => Some(implied),
+        (None, explicit) => explicit.map(String::from),
+    };
+    let root = root.as_deref();
+    let scope = combined_scope.as_deref();
+    let path_glob = match (codesearch_optional_str(body, "path_glob"), codesearch_optional_str(body, "glob")) {
+        (Err(e), _) | (_, Err(e)) => return err("codesearch", &e),
+        (Ok(Some(a)), Ok(Some(b))) if a != b => return err("codesearch", &format!(
+            "\"glob\" and \"path_glob\" are aliases but carry different values (\"{b}\" vs \"{a}\") -- pass one"
+        )),
+        (Ok(a), Ok(b)) => a.or(b),
+    };
     let max_matches = match body.get("max_matches") {
         Some(value) => match value.as_u64() {
             Some(limit) if limit > 0 => limit as usize,
@@ -1566,7 +1659,8 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         regex,
         case_insensitive: body.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false),
         whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
-        path_glob: body.get("path_glob").and_then(|v| v.as_str()).filter(|g| !g.is_empty()),
+        scope,
+        path_glob,
         max_matches,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
@@ -1601,6 +1695,11 @@ fn codesearch(body: &Value) -> u64 {
     if mode == "literal" || mode == "regex" {
         let explicit = if limit_was_explicit { Some(k) } else { None };
         return codesearch_exhaustive(body, query, mode == "regex", &cfg, explicit);
+    }
+    if let Some(field) = CODESEARCH_SCOPE_FIELDS.iter().find(|f| body.get(**f).is_some()) {
+        return err("codesearch", &format!(
+            "body field \"{field}\" scopes a tree walk and is only honoured by mode \"literal\"/\"regex\"; mode \"{mode}\" would ignore it and answer from the whole index. Re-dispatch with mode \"literal\" or \"regex\", or drop \"{field}\"."
+        ));
     }
     let root = body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
@@ -2618,6 +2717,68 @@ fn body_cwd(body: &Value) -> Option<&str> {
         .or_else(|| body.get("repo").and_then(|v| v.as_str()))
 }
 
+fn body_pathspecs(body: &Value) -> Result<Option<Vec<String>>, String> {
+    let (field, raw) = match (body.get("paths"), body.get("files")) {
+        (Some(_), Some(_)) => return Err("pass paths or files, not both -- they are aliases for the same pathspec list".to_string()),
+        (Some(v), None) => ("paths", v),
+        (None, Some(v)) => ("files", v),
+        (None, None) => return Ok(None),
+    };
+    let items: Vec<&Value> = match raw {
+        Value::String(_) => vec![raw],
+        Value::Array(a) => a.iter().collect(),
+        _ => return Err(format!("{field} must be an array of pathspec strings, got {raw}")),
+    };
+    let mut pathspecs = Vec::with_capacity(items.len());
+    for item in items {
+        match item.as_str().map(str::trim) {
+            Some(s) if !s.is_empty() => pathspecs.push(s.to_string()),
+            _ => return Err(format!("{field} entries must be non-empty pathspec strings, got {item}")),
+        }
+    }
+    if pathspecs.is_empty() {
+        return Err(format!("{field} is present but empty -- name at least one pathspec, or omit {field} to act on the whole worktree"));
+    }
+    Ok(Some(pathspecs))
+}
+
+fn argv_with_pathspecs<'a>(base: &[&'a str], pathspecs: Option<&'a [String]>) -> Vec<&'a str> {
+    let mut argv = base.to_vec();
+    if let Some(specs) = pathspecs {
+        argv.push("--");
+        argv.extend(specs.iter().map(String::as_str));
+    }
+    argv
+}
+
+fn commit_scope_covers_prd_file(pathspecs: Option<&[String]>) -> bool {
+    match pathspecs {
+        None => true,
+        Some(specs) => specs.iter().any(|spec| {
+            let normalized = spec.replace('\\', "/");
+            let trimmed = normalized.trim_start_matches("./").trim_end_matches('/');
+            trimmed.is_empty() || trimmed == "." || trimmed == ".gm" || trimmed == ".gm/prd.yml"
+        }),
+    }
+}
+
+fn git_porcelain_scoped(repo: Option<&str>, pathspecs: Option<&[String]>) -> String {
+    match pathspecs {
+        None => git_porcelain_in(repo),
+        Some(specs) => super::host_abi::porcelain_or_dirty(git_call_argv(&argv_with_pathspecs(&["status", "--porcelain"], Some(specs)), repo)),
+    }
+}
+
+fn git_exit_code(r: &Value) -> i64 {
+    r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0)
+}
+
+fn git_failure_text(r: &Value, fallback: &str) -> String {
+    let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
+    let stdout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim();
+    if !stderr.is_empty() { stderr.to_string() } else if !stdout.is_empty() { stdout.to_string() } else { fallback.to_string() }
+}
+
 const GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS: &str = "git_async";
 const GIT_PENDING_RESULT_OUTBOX_NS: &str = "outbox";
 
@@ -2894,13 +3055,14 @@ fn git_push(body: &Value) -> u64 {
             "branch": branch,
             "porcelain": porcelain_preview.clone() + &more,
             "reason": format!(
-                "worktree dirty in {} -- commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice. Porcelain:\n{}{}",
+                "worktree dirty in {} -- commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice. If this dirt belongs to another writer sharing the worktree and the commit to publish is already HEAD, re-dispatch with {{\"rev\":\"HEAD\"}}: that pushes exactly that commit and leaves the worktree untouched. Porcelain:\n{}{}",
                 repo.as_deref().unwrap_or("cwd"), branch, porcelain_preview, more
             ),
             "next_dispatch": "instruction",
             "next_dispatch_hint": "instruction",
             "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
-            "next_action_hint": "Read porcelain field, decide stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. Do NOT retry git_push with the same dirty tree -- the gate will deny again.",
+            "sanctioned_bypass": {"rev": "HEAD"},
+            "next_action_hint": "Read porcelain field. If the dirt is yours: stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. If the dirt belongs to a concurrent writer: commit only your files with git_commit {paths:[...]} (or git_finalize {message, paths:[...]}, which pushes by explicit ref on its own), then git_push {rev:\"HEAD\"}. Do NOT retry git_push unchanged with the same dirty tree -- the gate will deny again.",
         }).to_string());
     }
     let source_ref = explicit_source_ref.as_deref().unwrap_or("HEAD");
@@ -3020,23 +3182,16 @@ fn git_add(body: &Value) -> u64 {
     git_async_entry("git_add", body, |body, plan| {
         let repo = body.get("repo").and_then(|v| v.as_str());
         let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
-        let paths: Vec<String> = body.get("paths")
-            .or_else(|| body.get("files"))
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-        let mut argv: Vec<&str> = vec!["add"];
-        if paths.is_empty() {
-            argv.push("-A");
-        } else {
-            for p in &paths { argv.push(p.as_str()); }
-        }
+        let pathspecs = match body_pathspecs(body) {
+            Ok(p) => p,
+            Err(e) => return Ok(err("git_add", &e)),
+        };
+        let argv = argv_with_pathspecs(&["add", "-A"], pathspecs.as_deref());
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
-        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-        if code != 0 {
-            return Ok(err("git_add", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("git add failed")));
+        if git_exit_code(&r) != 0 {
+            return Ok(err("git_add", &git_failure_text(&r, "git add failed")));
         }
-        Ok(ok("git_add", json!({ "staged": if paths.is_empty() { vec!["-A".to_string()] } else { paths } })))
+        Ok(ok("git_add", json!({ "staged": pathspecs.unwrap_or_else(|| vec!["-A".to_string()]) })))
     })
 }
 
@@ -3062,20 +3217,38 @@ fn git_commit(body: &Value) -> u64 {
             return Ok(err("git_commit", "message required"));
         }
         let allow_empty = body.get("allow_empty").and_then(|v| v.as_bool()).unwrap_or(false);
-        let status_r = git_step_replayed_by_call_order(plan, &["status", "--porcelain"], cwd)?;
+        let pathspecs = match body_pathspecs(body) {
+            Ok(p) => p,
+            Err(e) => return Ok(err("git_commit", &e)),
+        };
+        let scope = pathspecs.as_deref();
+        let status_r = git_step_replayed_by_call_order(plan, &argv_with_pathspecs(&["status", "--porcelain"], scope), cwd)?;
         let porcelain = super::host_abi::porcelain_or_dirty(status_r);
         if porcelain.trim().is_empty() && !allow_empty {
-            return Ok(ok("git_commit", json!({ "nothing_to_commit": true })));
+            if scope.is_some() {
+                let known_r = git_step_replayed_by_call_order(plan, &argv_with_pathspecs(&["ls-files", "--error-unmatch"], scope), cwd)?;
+                if git_exit_code(&known_r) != 0 {
+                    return Ok(err("git_commit", &format!(
+                        "paths match no changed or tracked file -- refusing to report nothing_to_commit for a pathspec that names nothing: {}",
+                        git_failure_text(&known_r, "git ls-files --error-unmatch failed")
+                    )));
+                }
+            }
+            return Ok(ok("git_commit", json!({ "nothing_to_commit": true, "paths": scope })));
         }
         let head_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
         let head_before = head_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         let skip_blanket_add_because_caller_already_staged_via_git_add = body.get("no_add").and_then(|v| v.as_bool()).unwrap_or(false);
         if !skip_blanket_add_because_caller_already_staged_via_git_add {
-            let _ = git_step_replayed_by_call_order(plan, &["add", "-A"], cwd)?;
+            let add_r = git_step_replayed_by_call_order(plan, &argv_with_pathspecs(&["add", "-A"], scope), cwd)?;
+            if scope.is_some() && git_exit_code(&add_r) != 0 {
+                return Ok(err("git_commit", &format!("staging paths failed: {}", git_failure_text(&add_r, "git add failed"))));
+            }
         }
-        let bundled_message = bundle_prd_commit_comments(cwd, message);
-        let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
-        if allow_empty { argv.push("--allow-empty"); }
+        let bundled_message = if commit_scope_covers_prd_file(scope) { bundle_prd_commit_comments(cwd, message) } else { message.to_string() };
+        let mut base: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
+        if allow_empty { base.push("--allow-empty"); }
+        let argv = argv_with_pathspecs(&base, scope);
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
@@ -3093,9 +3266,12 @@ fn git_commit(body: &Value) -> u64 {
         }
         let sha = head_after[..head_after.len().min(10)].to_string();
         let summary = message.lines().next().unwrap_or("").to_string();
+        let files_r = git_step_replayed_by_call_order(plan, &["show", "--name-only", "--pretty=format:", "HEAD"], cwd)?;
+        let files: Vec<String> = files_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("")
+            .lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
         emit_event("git_commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary }));
         record_commit_in_liqology(&summary, &head_after);
-        Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary })))
+        Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary, "files": files, "paths": scope })))
     })
 }
 
@@ -3152,6 +3328,14 @@ fn git_finalize(body: &Value) -> u64 {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(String::from);
+    let pathspecs = match body_pathspecs(body) {
+        Ok(p) => p,
+        Err(e) => return err("git_finalize", &e),
+    };
+    if explicit_source_ref.is_some() && pathspecs.is_some() {
+        return err("git_finalize", "rev/source_ref publishes an existing commit while paths selects what to commit -- pass one or the other, not both");
+    }
+    let scope = pathspecs.as_deref();
     if let Some(source_ref) = explicit_source_ref {
         let push_resp = unpack_to_value(git_push(body));
         let pushed = push_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -3196,14 +3380,17 @@ fn git_finalize(body: &Value) -> u64 {
     let mut summary = String::new();
     let head_before_any_commit = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
 
-    let dirty = !git_porcelain_in(cwd_ref).trim().is_empty();
+    let dirty = !git_porcelain_scoped(cwd_ref, scope).trim().is_empty();
     if dirty {
         if message.is_empty() {
             return err("git_finalize", "worktree dirty but no commit message provided -- pass {message}");
         }
-        let _ = git_call_argv(&["add", "-A"], cwd_ref);
-        let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
-        let cr = git_call_argv(&["commit", "-m", bundled_message.as_str()], cwd_ref);
+        let add_r = git_call_argv(&argv_with_pathspecs(&["add", "-A"], scope), cwd_ref);
+        if scope.is_some() && git_exit_code(&add_r) != 0 {
+            return err("git_finalize", &format!("staging paths failed: {}", git_failure_text(&add_r, "git add failed")));
+        }
+        let bundled_message = if commit_scope_covers_prd_file(scope) { bundle_prd_commit_comments(cwd_ref, message.as_str()) } else { message.clone() };
+        let cr = git_call_argv(&argv_with_pathspecs(&["commit", "-m", bundled_message.as_str()], scope), cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if ccode != 0 {
             let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
@@ -3224,12 +3411,14 @@ fn git_finalize(body: &Value) -> u64 {
             steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
         }
     } else {
-        let pending_notes = crate::orchestrator::prd::peek_pending_commit_comments(cwd_ref);
+        let pending_notes = if commit_scope_covers_prd_file(scope) { crate::orchestrator::prd::peek_pending_commit_comments(cwd_ref) } else { Vec::new() };
         if !pending_notes.is_empty() {
             let flush_message = if message.is_empty() { "chore: flush resolved PRD notes".to_string() } else { message.clone() };
             let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
-            let _ = git_call_argv(&["add", "-A"], cwd_ref);
-            let cr = git_call_argv(&["commit", "--allow-empty", "-m", bundled_message.as_str()], cwd_ref);
+            if scope.is_none() {
+                let _ = git_call_argv(&["add", "-A"], cwd_ref);
+            }
+            let cr = git_call_argv(&argv_with_pathspecs(&["commit", "--allow-empty", "-m", bundled_message.as_str()], scope), cwd_ref);
             let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
             let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
             if ccode == 0 && !head_after.is_empty() && head_after != head_before_any_commit {
@@ -3269,14 +3458,14 @@ fn git_finalize(body: &Value) -> u64 {
         }));
     }
 
-    let mut leftover = git_porcelain_in(cwd_ref);
+    let mut leftover = git_porcelain_scoped(cwd_ref, scope);
     let dirty_only_from_concurrent_writer_on_just_committed_files =
         committed && !leftover.trim().is_empty() && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref));
     if dirty_only_from_concurrent_writer_on_just_committed_files {
-        leftover = git_porcelain_in(cwd_ref);
+        leftover = git_porcelain_scoped(cwd_ref, scope);
         if !leftover.trim().is_empty() && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref)) {
-            let _ = git_call_argv(&["add", "-A"], cwd_ref);
-            let amend = git_call_argv(&["commit", "--amend", "--no-edit"], cwd_ref);
+            let _ = git_call_argv(&argv_with_pathspecs(&["add", "-A"], scope), cwd_ref);
+            let amend = git_call_argv(&argv_with_pathspecs(&["commit", "--amend", "--no-edit"], scope), cwd_ref);
             if amend.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0 {
                 let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
                 sha = head_after[..head_after.len().min(10)].to_string();
@@ -3286,14 +3475,23 @@ fn git_finalize(body: &Value) -> u64 {
                     "note": "a file this dispatch committed was rewritten by a concurrent writer before the porcelain probe; amended rather than refusing the push",
                 }));
             }
-            leftover = git_porcelain_in(cwd_ref);
+            leftover = git_porcelain_scoped(cwd_ref, scope);
         }
     }
     if !leftover.trim().is_empty() {
-        return err("git_finalize", &format!("worktree still dirty after commit (untriaged residual) -- refusing push. Porcelain:\n{}", leftover.lines().take(8).collect::<Vec<_>>().join("\n")));
+        let within = if scope.is_some() { " within the named paths" } else { "" };
+        return err("git_finalize", &format!("worktree still dirty{} after commit (untriaged residual) -- refusing push. Porcelain:\n{}", within, leftover.lines().take(8).collect::<Vec<_>>().join("\n")));
     }
 
-    let push_resp_packed = git_push(body);
+    let dirt_outside_paths_belongs_to_another_writer = scope.is_some() && !git_porcelain_in(cwd_ref).trim().is_empty();
+    let push_body = if dirt_outside_paths_belongs_to_another_writer {
+        let mut b = body.clone();
+        if let Some(obj) = b.as_object_mut() { obj.insert("rev".to_string(), json!("HEAD")); }
+        b
+    } else {
+        body.clone()
+    };
+    let push_resp_packed = git_push(&push_body);
     let push_resp = unpack_to_value(push_resp_packed);
     let pushed = push_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if !pushed {
@@ -3304,6 +3502,7 @@ fn git_finalize(body: &Value) -> u64 {
             "pushed": false,
             "sha": sha,
             "steps": steps,
+            "paths": scope,
             "push_result": push_resp,
             "reason": "commit landed (or nothing to commit) but push was refused -- read push_result.reason",
             "next_dispatch": "instruction",
@@ -3315,11 +3514,13 @@ fn git_finalize(body: &Value) -> u64 {
     let remote_advanced = push_data.and_then(|d| d.get("remote_advanced")).and_then(|b| b.as_bool()).unwrap_or(false);
     let already_current = push_data.and_then(|d| d.get("already_current")).and_then(|b| b.as_bool()).unwrap_or(false);
     let remote_sha = push_data.and_then(|d| d.get("remote_sha")).and_then(|s| s.as_str()).unwrap_or("").to_string();
-    steps.push(json!({ "step": "push", "branch": branch, "remote_advanced": remote_advanced, "already_current": already_current }));
+    let preserved_dirty_worktree = push_data.and_then(|d| d.get("preserved_dirty_worktree")).and_then(|b| b.as_bool()).unwrap_or(false);
+    steps.push(json!({ "step": "push", "branch": branch, "remote_advanced": remote_advanced, "already_current": already_current, "explicit_ref": dirt_outside_paths_belongs_to_another_writer }));
 
     let head_sha = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
     let (ci_status_summary, ci_validated_written) = check_ci_status_and_write_validated_marker_if_green(repo.as_deref(), &head_sha);
     steps.push(json!({ "step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written }));
+    let files: Vec<String> = if committed { files_in_commit(cwd_ref) } else { Vec::new() };
 
     ok("git_finalize", json!({
         "committed": committed,
@@ -3330,6 +3531,9 @@ fn git_finalize(body: &Value) -> u64 {
         "remote_advanced": remote_advanced,
         "already_current": already_current,
         "remote_sha": remote_sha,
+        "paths": scope,
+        "files": files,
+        "preserved_dirty_worktree": preserved_dirty_worktree,
         "steps": steps,
         "ci_validated_marker_written": ci_validated_written,
         "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
@@ -3378,11 +3582,17 @@ fn git_diff(body: &Value) -> u64 {
             .or_else(|| body.get("ref").and_then(|v| v.as_str()))
             .unwrap_or("").trim();
         let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
-        let mut argv: Vec<&str> = vec!["diff", "--no-color"];
-        if staged { argv.push("--staged"); }
-        if stat { argv.push("--stat"); }
-        if !range.is_empty() { argv.push(range); }
-        if let Some(p) = path { argv.push("--"); argv.push(p); }
+        let mut pathspecs = match body_pathspecs(body) {
+            Ok(p) => p.unwrap_or_default(),
+            Err(e) => return Ok(err("git_diff", &e)),
+        };
+        if let Some(p) = path { pathspecs.insert(0, p.to_string()); }
+        let mut base: Vec<&str> = vec!["diff", "--no-color"];
+        if staged { base.push("--staged"); }
+        if stat { base.push("--stat"); }
+        if !range.is_empty() { base.push(range); }
+        let scope = if pathspecs.is_empty() { None } else { Some(pathspecs.as_slice()) };
+        let argv = argv_with_pathspecs(&base, scope);
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
@@ -3690,7 +3900,17 @@ fn git_branch(body: &Value) -> u64 {
 fn git_checkout(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("").trim();
-    if refspec.is_empty() { return err("git_checkout", "ref required"); }
+    let pathspecs = match body_pathspecs(body) {
+        Ok(p) => p,
+        Err(e) => return err("git_checkout", &e),
+    };
+    if let Some(specs) = pathspecs.as_deref() {
+        let base: Vec<&str> = if refspec.is_empty() { vec!["checkout"] } else { vec!["checkout", refspec] };
+        let argv = argv_with_pathspecs(&base, Some(specs));
+        if let Err(e) = run_git_checked(&argv, cwd, "git_checkout", "checkout of paths failed") { return e; }
+        return ok("git_checkout", json!({ "restored_paths": specs, "from": if refspec.is_empty() { "index" } else { refspec } }));
+    }
+    if refspec.is_empty() { return err("git_checkout", "ref required (or paths, to restore files from the index or from ref)"); }
     let create = body.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
     let argv: Vec<&str> = if create { vec!["checkout", "-b", refspec] } else { vec!["checkout", refspec] };
     if let Err(e) = run_git_checked(&argv, cwd, "git_checkout", "checkout failed") { return e; }
@@ -3745,8 +3965,13 @@ fn git_stash(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let include_untracked = body.get("include_untracked").and_then(|v| v.as_bool()).unwrap_or(true);
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("gm shelf").trim();
-    let mut argv = vec!["stash", "push", "--message", message];
-    if include_untracked { argv.push("--include-untracked"); }
+    let pathspecs = match body_pathspecs(body) {
+        Ok(p) => p,
+        Err(e) => return err("git_stash", &e),
+    };
+    let mut base = vec!["stash", "push", "--message", message];
+    if include_untracked { base.push("--include-untracked"); }
+    let argv = argv_with_pathspecs(&base, pathspecs.as_deref());
     let r = git_call_argv(&argv, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let output = format!("{}{}",
@@ -3763,6 +3988,7 @@ fn git_stash(body: &Value) -> u64 {
         "created": created,
         "stash": if stash.is_empty() { Value::Null } else { json!(stash) },
         "include_untracked": include_untracked,
+        "paths": pathspecs,
         "output": output
     }))
 }
