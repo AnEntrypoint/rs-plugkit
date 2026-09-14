@@ -595,7 +595,7 @@ fn lang(body: &Value) -> u64 {
     }
 }
 
-const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "timeoutMs=<ms>\\n<code>, or bare code (only when the caller's own timeout floor already applies, e.g. via a wrapping shell verb)";
+const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "timeoutMs=<ms>\\n<code>, or bare code (the host's 120000ms default budget applies)";
 
 fn exec_js(body: &Value, body_s: &str) -> u64 {
     if body.is_object() {
@@ -612,21 +612,16 @@ fn exec_js(body: &Value, body_s: &str) -> u64 {
         "error_code": ERR_CODE_INVALID_ARGS,
         "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
     })); }
-    let timeout_ms = match prefix_timeout_ms {
-        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
+    let opts = match prefix_timeout_ms {
+        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => json!({"timeoutMs": n}),
         Some(n) => return err_json("exec_js", json!({
             "error": "timeoutMs below floor",
             "error_code": ERR_CODE_INVALID_ARGS,
             "min": crate::validation::MIN_TIMEOUT_MS,
             "received": n,
         })),
-        None => return err_json("exec_js", json!({
-            "error": "missing timeoutMs -- prefix the body with a timeoutMs=<ms> line naming a positive integer millisecond budget",
-            "error_code": ERR_CODE_INVALID_ARGS,
-            "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
-        })),
-    };
-    let opts = json!({"timeoutMs": timeout_ms}).to_string();
+        None => json!({}),
+    }.to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok("exec_js", Value::String(s)),
@@ -2035,21 +2030,16 @@ fn shell_exec(body: &Value, body_s: &str, lang: &str) -> u64 {
         "error": format!("{lang} body is empty -- provide a raw command/script as the dispatch body"),
         "error_code": ERR_CODE_INVALID_ARGS,
     })); }
-    let timeout_ms = match prefix_timeout_ms {
-        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
+    let opts = match prefix_timeout_ms {
+        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => json!({ "lang": lang, "timeoutMs": n }),
         Some(n) => return err_json(lang, json!({
             "error": "timeoutMs below floor",
             "error_code": ERR_CODE_INVALID_ARGS,
             "min": crate::validation::MIN_TIMEOUT_MS,
             "received": n,
         })),
-        None => return err_json(lang, json!({
-            "error": "missing timeoutMs -- prefix the body with a timeoutMs=<ms> line naming a positive integer millisecond budget",
-            "error_code": ERR_CODE_INVALID_ARGS,
-            "supported_shapes": "timeoutMs=<ms>\\n<command>, or bare command text",
-        })),
-    };
-    let opts = json!({ "lang": lang, "timeoutMs": timeout_ms }).to_string();
+        None => json!({ "lang": lang }),
+    }.to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok(lang, Value::String(s)),
@@ -2779,6 +2769,12 @@ fn git_failure_text(r: &Value, fallback: &str) -> String {
     if !stderr.is_empty() { stderr.to_string() } else if !stdout.is_empty() { stdout.to_string() } else { fallback.to_string() }
 }
 
+const GIT_ADD_IGNORED_PATHSPEC_ADVISORY: &str = "are ignored by one of your .gitignore files";
+
+fn scoped_add_failed_only_on_ignored_pathspec_advisory(r: &Value) -> bool {
+    git_exit_code(r) == 1 && r.get("stderr").and_then(|x| x.as_str()).unwrap_or("").contains(GIT_ADD_IGNORED_PATHSPEC_ADVISORY)
+}
+
 const GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS: &str = "git_async";
 const GIT_PENDING_RESULT_OUTBOX_NS: &str = "outbox";
 
@@ -3188,10 +3184,14 @@ fn git_add(body: &Value) -> u64 {
         };
         let argv = argv_with_pathspecs(&["add", "-A"], pathspecs.as_deref());
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
-        if git_exit_code(&r) != 0 {
+        let ignored_pathspec_advisory = pathspecs.is_some() && scoped_add_failed_only_on_ignored_pathspec_advisory(&r);
+        if git_exit_code(&r) != 0 && !ignored_pathspec_advisory {
             return Ok(err("git_add", &git_failure_text(&r, "git add failed")));
         }
-        Ok(ok("git_add", json!({ "staged": pathspecs.unwrap_or_else(|| vec!["-A".to_string()]) })))
+        Ok(ok("git_add", json!({
+            "staged": pathspecs.unwrap_or_else(|| vec!["-A".to_string()]),
+            "ignored_pathspec_advisory": ignored_pathspec_advisory,
+        })))
     })
 }
 
@@ -3241,7 +3241,7 @@ fn git_commit(body: &Value) -> u64 {
         let skip_blanket_add_because_caller_already_staged_via_git_add = body.get("no_add").and_then(|v| v.as_bool()).unwrap_or(false);
         if !skip_blanket_add_because_caller_already_staged_via_git_add {
             let add_r = git_step_replayed_by_call_order(plan, &argv_with_pathspecs(&["add", "-A"], scope), cwd)?;
-            if scope.is_some() && git_exit_code(&add_r) != 0 {
+            if scope.is_some() && git_exit_code(&add_r) != 0 && !scoped_add_failed_only_on_ignored_pathspec_advisory(&add_r) {
                 return Ok(err("git_commit", &format!("staging paths failed: {}", git_failure_text(&add_r, "git add failed"))));
             }
         }
@@ -3610,17 +3610,35 @@ fn git_diff(body: &Value) -> u64 {
     })
 }
 
+const GIT_SHOW_REF_ALIASES: [&str; 4] = ["ref", "rev", "sha", "commit"];
+
 fn git_show(body: &Value) -> u64 {
     let cwd = body_cwd(body);
-    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
+    let named: Vec<(&str, &str)> = GIT_SHOW_REF_ALIASES
+        .iter()
+        .filter_map(|key| body.get(*key).map(|v| (*key, v.as_str().unwrap_or("").trim())))
+        .collect();
+    if let Some((key, _)) = named.iter().find(|(_, value)| value.is_empty()) {
+        return err("git_show", &format!("{key} must be a non-empty revision string"));
+    }
+    if named.windows(2).any(|pair| pair[0].1 != pair[1].1) {
+        return err("git_show", &format!("conflicting revisions given: {named:?} -- pass one of {GIT_SHOW_REF_ALIASES:?}"));
+    }
+    let refspec = named.first().map(|(_, value)| *value).unwrap_or("HEAD");
     let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
     let mut argv: Vec<&str> = vec!["show", "--no-color"];
     if stat { argv.push("--stat"); }
     argv.push(refspec);
     let r = git_call_argv(&argv, cwd);
+    if git_exit_code(&r) != 0 {
+        return err("git_show", &git_failure_text(&r, "git show failed"));
+    }
     let mut out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    if out.len() > 60000 { out.truncate(60000); }
-    ok("git_show", json!({ "output": out }))
+    if out.len() > 60000 {
+        let cut = (0..=60000).rev().find(|i| out.is_char_boundary(*i)).unwrap_or(0);
+        out.truncate(cut);
+    }
+    ok("git_show", json!({ "ref": refspec, "output": out }))
 }
 
 fn git_fetch(body: &Value) -> u64 {
@@ -4046,6 +4064,70 @@ fn git_branch_delete(body: &Value) -> u64 {
     ok("git_branch_delete", json!({ "deleted": name, "scope": "local", "forced": force, "output": out }))
 }
 
+fn parse_worktree_porcelain(listing: &str) -> Vec<Value> {
+    listing
+        .split("\n\n")
+        .filter(|block| !block.trim().is_empty())
+        .map(|block| {
+            let mut entry = serde_json::Map::new();
+            for line in block.lines() {
+                let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+                let value = value.trim();
+                match key {
+                    "worktree" => { entry.insert("path".to_string(), json!(value)); }
+                    "HEAD" => { entry.insert("head".to_string(), json!(value)); }
+                    "branch" => { entry.insert("branch".to_string(), json!(value.trim_start_matches("refs/heads/"))); }
+                    "detached" | "bare" => { entry.insert(key.to_string(), json!(true)); }
+                    "locked" | "prunable" => { entry.insert(key.to_string(), if value.is_empty() { json!(true) } else { json!(value) }); }
+                    _ => {}
+                }
+            }
+            Value::Object(entry)
+        })
+        .collect()
+}
+
+fn git_worktree(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("list").trim();
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    match action {
+        "list" => match run_git_checked(&["worktree", "list", "--porcelain"], cwd, "git_worktree", "git worktree list failed") {
+            Ok(r) => ok("git_worktree", json!({ "worktrees": parse_worktree_porcelain(r.get("stdout").and_then(|x| x.as_str()).unwrap_or("")) })),
+            Err(e) => e,
+        },
+        "add" => {
+            if path.is_empty() { return err("git_worktree", "path required for action add"); }
+            let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let detach = body.get("detach").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mut argv: Vec<&str> = vec!["worktree", "add"];
+            if detach { argv.push("--detach"); }
+            if force { argv.push("--force"); }
+            argv.push(path);
+            if !refspec.is_empty() { argv.push(refspec); }
+            if let Err(e) = run_git_checked(&argv, cwd, "git_worktree", "git worktree add failed") { return e; }
+            let worktree_dir = match cwd {
+                Some(base) if !std::path::Path::new(path).is_absolute() && !path.contains(':') => format!("{}/{}", base.trim_end_matches(['/', '\\']), path),
+                _ => path.to_string(),
+            };
+            let head = exec_git_in(Some(worktree_dir.as_str()), "rev-parse HEAD").trim().to_string();
+            ok("git_worktree", json!({ "added": path, "ref": if refspec.is_empty() { "HEAD" } else { refspec }, "detached": detach, "head": head }))
+        }
+        "remove" => {
+            if path.is_empty() { return err("git_worktree", "path required for action remove"); }
+            let argv: Vec<&str> = if force { vec!["worktree", "remove", "--force", path] } else { vec!["worktree", "remove", path] };
+            if let Err(e) = run_git_checked(&argv, cwd, "git_worktree", "git worktree remove failed") { return e; }
+            ok("git_worktree", json!({ "removed": path, "forced": force }))
+        }
+        "prune" => match run_git_checked(&["worktree", "prune", "--verbose"], cwd, "git_worktree", "git worktree prune failed") {
+            Ok(r) => ok("git_worktree", json!({ "pruned": r.get("stderr").and_then(|x| x.as_str()).unwrap_or("").lines().chain(r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").lines()).map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>() })),
+            Err(e) => e,
+        },
+        other => err("git_worktree", &format!("action must be add, remove, list or prune, got {other:?}")),
+    }
+}
+
 fn git_rm(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let paths: Vec<String> = body.get("paths").and_then(|v| v.as_array())
@@ -4414,6 +4496,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_stash_pop" => git_stash_pop(&body),
         "git_branch_delete" => git_branch_delete(&body),
         "git_rm" => git_rm(&body),
+        "git_worktree" => git_worktree(&body),
         "git_revert" => git_revert(&body),
         "git_reset" => git_reset(&body),
         "git_poll" => git_poll(&body),
