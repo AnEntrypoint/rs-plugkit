@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::code_index::{gitignore_excludes, is_hidden_segment, is_skipped_dir_segment, list_dir, load_repo_gitignore};
+use crate::code_index::{gitignore_excludes, is_dependency_noise_dir_segment, is_hidden_segment, is_skipped_dir_segment, list_dir, load_repo_gitignore};
 use crate::ragconfig::IndexConfig;
-use crate::wasm_dispatch::{git_call_argv, host_stat};
+use crate::wasm_dispatch::{git_call_argv, host_now_ms, host_stat};
 
 const GIT_LISTING_SPLIT_DEPTH_LIMIT: usize = 16;
 
@@ -167,10 +167,58 @@ fn git_worktree_files(dir: &str, nesting: usize) -> Result<(Vec<String>, bool), 
     Ok((files, complete))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TargetOrigin {
+    ProjectDefault,
+    CallerNamed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NoiseDirs {
+    ProjectNoiseList,
+    DependencyStoresVcsCachesOnly,
+}
+
+enum WalkCause {
+    TargetGitignored,
+    OutsideWorktree(String),
+    GitListingFailed(String),
+}
+
+struct WalkPolicy {
+    honour_gitignore: bool,
+    noise: NoiseDirs,
+    reason: String,
+}
+
+const DEPENDENCY_WALK_SKIPS: &str = "skipping only VCS, dependency-store, cache and tool directories (build-output directories such as dist/ are read)";
+
+fn walk_policy(cause: WalkCause, origin: TargetOrigin) -> WalkPolicy {
+    let project = |reason: String| WalkPolicy { honour_gitignore: true, noise: NoiseDirs::ProjectNoiseList, reason };
+    match (cause, origin) {
+        (WalkCause::GitListingFailed(e), _) => project(format!("git could not list the worktree, so it was walked directly ({e})")),
+        (WalkCause::TargetGitignored, TargetOrigin::ProjectDefault) => project("the target is gitignored, so git lists nothing there and it was walked directly".to_string()),
+        (WalkCause::OutsideWorktree(e), TargetOrigin::ProjectDefault) => project(format!("not inside a git worktree, so it was walked directly ({e})")),
+        (WalkCause::TargetGitignored, TargetOrigin::CallerNamed) => WalkPolicy {
+            honour_gitignore: false,
+            noise: NoiseDirs::DependencyStoresVcsCachesOnly,
+            reason: format!("the named target is gitignored, so git lists nothing there; it was walked directly without .gitignore rules, {DEPENDENCY_WALK_SKIPS}"),
+        },
+        (WalkCause::OutsideWorktree(e), TargetOrigin::CallerNamed) => WalkPolicy {
+            honour_gitignore: true,
+            noise: NoiseDirs::DependencyStoresVcsCachesOnly,
+            reason: format!("the named target is not inside a git worktree ({e}); it was walked directly honouring its root's .gitignore, {DEPENDENCY_WALK_SKIPS}"),
+        },
+    }
+}
+
 struct RuleRecordingWalk<'a> {
     cfg: &'a IndexConfig,
     gitignore: Option<ignore::gitignore::Gitignore>,
+    noise: NoiseDirs,
     max_files: usize,
+    deadline_ms: u64,
+    reached_deadline: bool,
     files: Vec<String>,
     excluded: Vec<RuleExclusion>,
 }
@@ -178,7 +226,11 @@ struct RuleRecordingWalk<'a> {
 impl RuleRecordingWalk<'_> {
     fn descend(&mut self, dir: &str) {
         for entry in list_dir(dir) {
-            if self.files.len() >= self.max_files { return; }
+            if self.files.len() >= self.max_files || self.reached_deadline { return; }
+            if unsafe { host_now_ms() } >= self.deadline_ms {
+                self.reached_deadline = true;
+                return;
+            }
             let name = entry.rsplit('/').next().unwrap_or(entry.as_str()).to_string();
             if name == ".git" { continue; }
             let next = join_under(dir, &entry);
@@ -196,12 +248,15 @@ impl RuleRecordingWalk<'_> {
         if gitignore_excludes(&self.gitignore, path, is_dir) { return Some("gitignore"); }
         if !is_dir { return None; }
         if is_hidden_segment(name) { return Some("hidden_dir"); }
-        if is_skipped_dir_segment(name, self.cfg) { return Some("noise_dir_name"); }
-        None
+        let noise = match self.noise {
+            NoiseDirs::ProjectNoiseList => is_skipped_dir_segment(name, self.cfg),
+            NoiseDirs::DependencyStoresVcsCachesOnly => is_dependency_noise_dir_segment(name, self.cfg),
+        };
+        noise.then_some("noise_dir_name")
     }
 }
 
-pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig) -> Result<ScanUniverse, String> {
+pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin) -> Result<ScanUniverse, String> {
     let rel = match scope {
         Some(s) => relative_scope(root, s)?,
         None => None,
@@ -218,23 +273,27 @@ pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg
             Some(true) => {}
         }
     }
-    let walk_reason = match directory_is_gitignored(&target) {
+    let cause = match directory_is_gitignored(&target) {
         Ok(false) => match git_worktree_files(&target, 0) {
             Ok((files, complete)) => return Ok(universe(files, FileSource::Git, complete, Vec::new(), None)),
-            Err(e) => format!("git could not list the worktree, so it was walked directly ({e})"),
+            Err(e) => WalkCause::GitListingFailed(e),
         },
-        Ok(true) => "the target is gitignored, so git lists nothing there and it was walked directly".to_string(),
-        Err(e) => format!("not inside a git worktree, so it was walked directly ({e})"),
+        Ok(true) => WalkCause::TargetGitignored,
+        Err(e) => WalkCause::OutsideWorktree(e),
     };
+    let policy = walk_policy(cause, origin);
     let mut walk = RuleRecordingWalk {
         cfg,
-        gitignore: load_repo_gitignore(root),
+        gitignore: if policy.honour_gitignore { load_repo_gitignore(root) } else { None },
+        noise: policy.noise,
         max_files,
+        deadline_ms: unsafe { host_now_ms() }.saturating_add(cfg.wall_budget_ms),
+        reached_deadline: false,
         files: Vec::new(),
         excluded: Vec::new(),
     };
     walk.descend(&target);
-    Ok(universe(walk.files, FileSource::Walk, true, walk.excluded, Some(walk_reason)))
+    Ok(universe(walk.files, FileSource::Walk, !walk.reached_deadline, walk.excluded, Some(policy.reason)))
 }
 
 pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> Vec<String> {
@@ -242,7 +301,7 @@ pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> 
     let absolute = root.starts_with('/') || (bytes.len() >= 2 && bytes[1] == b':');
     let (base, scope) = if root.is_empty() || root == "." || absolute { (if root.is_empty() { "." } else { root }, None) } else { (".", Some(root)) };
     let project_node_modules = join_under(base, "node_modules/");
-    match list_scan_universe(base, scope, max_files, cfg) {
+    match list_scan_universe(base, scope, max_files, cfg, TargetOrigin::ProjectDefault) {
         Ok(u) => u.files.into_iter().filter(|p| !p.starts_with(&project_node_modules)).take(max_files).collect(),
         Err(_) => Vec::new(),
     }
