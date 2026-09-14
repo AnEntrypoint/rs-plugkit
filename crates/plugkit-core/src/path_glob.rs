@@ -44,7 +44,7 @@ pub fn looks_like_glob(pattern: &str) -> bool {
     pattern.contains(['*', '?', '[', '{'])
 }
 
-fn root_relative<'a>(root: &str, path: &'a str) -> &'a str {
+pub(crate) fn root_relative<'a>(root: &str, path: &'a str) -> &'a str {
     let root = root.trim_end_matches('/');
     let under_root = match root {
         "" | "." => path,

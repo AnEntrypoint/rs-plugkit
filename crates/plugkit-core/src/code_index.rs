@@ -275,6 +275,17 @@ pub(crate) fn is_skipped_dir_segment(seg: &str, cfg: &crate::ragconfig::IndexCon
     cfg.skips_dir_segment(seg, SKIP_DIRS)
 }
 
+const BUILD_OUTPUT_DIR_NAMES: &[&str] = &[
+    "dist", "out", "build", "target", "vendor", "bin", "obj",
+    "_site", "public", "static", "site", "output", "builds", "artifacts",
+    "compiled", "generated", "gen",
+];
+
+pub(crate) fn is_dependency_noise_dir_segment(seg: &str, cfg: &crate::ragconfig::IndexConfig) -> bool {
+    let builtin_noise = SKIP_DIRS.contains(&seg) && !BUILD_OUTPUT_DIR_NAMES.contains(&seg);
+    builtin_noise || cfg.skips_dir_segment(seg, &[])
+}
+
 pub fn ensure_schema_at(path: &str) -> Result<(), String> {
     ensure_schema_at_cfg(path, &crate::ragconfig::RagConfig::default())
 }
@@ -2172,30 +2183,83 @@ pub fn git_commit_rank(query: &str, k: usize) -> Vec<(String, String, f64)> {
     git_commit_rank_fallback(query, k)
 }
 
-pub fn search_filenames(pattern: &str, k: usize, cfg: &crate::ragconfig::RagConfig) -> Value {
-    search_filenames_at(pattern, k, cfg, None)
+fn target_origin(root: Option<&str>, scope: Option<&str>) -> crate::scan_universe::TargetOrigin {
+    let named = root.is_some_and(|r| !r.is_empty()) || scope.is_some_and(|s| !s.is_empty());
+    if named { crate::scan_universe::TargetOrigin::CallerNamed } else { crate::scan_universe::TargetOrigin::ProjectDefault }
 }
 
-pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> Value {
-    let glob = match crate::path_glob::looks_like_glob(pattern) {
-        true => match crate::path_glob::PathGlob::parse(pattern) {
+fn insert_universe_disclosures(out: &mut serde_json::Map<String, Value>, universe: &crate::scan_universe::ScanUniverse) {
+    out.insert("file_source".to_string(), json!(universe.source.label()));
+    if let Some(reason) = &universe.walk_reason {
+        out.insert("walk_reason".to_string(), json!(reason));
+    }
+    if !universe.listing_complete {
+        let flag = if universe.source == crate::scan_universe::FileSource::Walk { "walk_listing_incomplete" } else { "git_listing_incomplete" };
+        out.insert(flag.to_string(), json!(true));
+    }
+    if !universe.excluded.is_empty() {
+        out.insert("excluded_by_rule_count".to_string(), json!(universe.excluded.len()));
+        out.insert("excluded_by_rule".to_string(), Value::Array(
+            universe.excluded.iter().take(LITERAL_SCAN_REPORTED_EXCLUSIONS)
+                .map(|x| json!({ "path": x.path, "rule": x.rule }))
+                .collect(),
+        ));
+    }
+}
+
+pub struct FilenameSearch<'a> {
+    pub pattern: &'a str,
+    pub root: Option<&'a str>,
+    pub scope: Option<&'a str>,
+    pub max_hits: usize,
+}
+
+pub fn search_filenames(req: &FilenameSearch, cfg: &crate::ragconfig::RagConfig) -> Value {
+    let glob = match crate::path_glob::looks_like_glob(req.pattern) {
+        true => match crate::path_glob::PathGlob::parse(req.pattern) {
             Ok(g) => Some(g),
             Err(e) => return json!({ "ok": false, "mode": "filename", "error": e }),
         },
         false => None,
     };
-    let needle = pattern.to_lowercase();
-    let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
-    let full_files = collect_files(root, cfg.index.digest_max_files.max(20000), &cfg.index);
-    let hits: Vec<Value> = full_files.iter()
+    let needle = req.pattern.to_lowercase();
+    let root = req.root.filter(|p| !p.is_empty()).unwrap_or(".");
+    let file_cap = LITERAL_SCAN_MAX_FILES;
+    let universe = match crate::scan_universe::list_scan_universe(root, req.scope, file_cap.saturating_add(1), &cfg.index, target_origin(req.root, req.scope)) {
+        Ok(u) => u,
+        Err(e) => return json!({ "ok": false, "mode": "filename", "error": e, "path": req.scope, "root": root }),
+    };
+    let files_truncated = universe.files.len() > file_cap;
+    let files = &universe.files[..universe.files.len().min(file_cap)];
+    let matching: Vec<&String> = files.iter()
         .filter(|p| match &glob {
-            Some(g) => g.admits(root, None, p),
-            None => p.to_lowercase().contains(&needle),
+            Some(g) => g.admits(root, req.scope, p),
+            None => crate::path_glob::root_relative(root, p).to_lowercase().contains(&needle),
         })
-        .take(k)
-        .map(|p| json!({ "path": p }))
         .collect();
-    json!({ "ok": true, "mode": "filename", "hits": hits, "scanned": full_files.len() })
+    let hits_truncated = matching.len() > req.max_hits;
+    let hits: Vec<Value> = matching.iter().take(req.max_hits).map(|p| json!({ "path": p })).collect();
+    let exhaustive = !hits_truncated && !files_truncated && universe.listing_complete && universe.excluded.is_empty();
+
+    let mut out = serde_json::Map::new();
+    out.insert("ok".to_string(), json!(true));
+    out.insert("mode".to_string(), json!("filename"));
+    out.insert("root".to_string(), json!(root));
+    if let Some(s) = req.scope { out.insert("path".to_string(), json!(s)); }
+    out.insert("match_count".to_string(), json!(matching.len()));
+    out.insert("scanned".to_string(), json!(files.len()));
+    out.insert("exhaustive".to_string(), json!(exhaustive));
+    insert_universe_disclosures(&mut out, &universe);
+    if hits_truncated {
+        out.insert("hits_truncated".to_string(), json!(true));
+        out.insert("hits_truncated_at".to_string(), json!(req.max_hits));
+    }
+    if files_truncated {
+        out.insert("files_truncated".to_string(), json!(true));
+        out.insert("files_truncated_at".to_string(), json!(file_cap));
+    }
+    out.insert("hits".to_string(), Value::Array(hits));
+    Value::Object(out)
 }
 
 /// Ceiling on files enumerated for an exhaustive literal/regex scan.
@@ -2374,7 +2438,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let budget_ms = cfg.index.wall_budget_ms;
-    let universe = match crate::scan_universe::list_scan_universe(root, req.scope, file_cap.saturating_add(1), &cfg.index) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.scope, file_cap.saturating_add(1), &cfg.index, target_origin(req.root, req.scope)) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "path": req.scope, "root": root }),
     };
@@ -2515,21 +2579,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     out.insert("elapsed_ms".to_string(), json!(unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms)));
     out.insert("exhaustive".to_string(), json!(exhaustive));
     out.insert("listing_ms".to_string(), json!(listing_ms));
-    out.insert("file_source".to_string(), json!(universe.source.label()));
-    if let Some(reason) = &universe.walk_reason {
-        out.insert("walk_reason".to_string(), json!(reason));
-    }
-    if !universe.listing_complete {
-        out.insert("git_listing_incomplete".to_string(), json!(true));
-    }
-    if !universe.excluded.is_empty() {
-        out.insert("excluded_by_rule_count".to_string(), json!(universe.excluded.len()));
-        out.insert("excluded_by_rule".to_string(), Value::Array(
-            universe.excluded.iter().take(LITERAL_SCAN_REPORTED_EXCLUSIONS)
-                .map(|x| json!({ "path": x.path, "rule": x.rule }))
-                .collect(),
-        ));
-    }
+    insert_universe_disclosures(&mut out, &universe);
     if !tracked_deleted.is_empty() {
         out.insert("tracked_files_deleted_in_worktree".to_string(), json!(tracked_deleted));
     }
@@ -2559,7 +2609,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     }
     if !exhaustive {
         out.insert("exhaustive_note".to_string(), json!(
-            "at least one bound or skip rule fired -- this is NOT every match in the tree; files_truncated/matches_truncated/budget_exhausted/files_skipped_too_large/files_unreadable/git_listing_incomplete/excluded_by_rule/glob_matched_no_files name which"
+            "at least one bound or skip rule fired -- this is NOT every match in the tree; files_truncated/matches_truncated/budget_exhausted/files_skipped_too_large/files_unreadable/git_listing_incomplete/walk_listing_incomplete/excluded_by_rule/glob_matched_no_files name which"
         ));
     }
     out.insert("matches".to_string(), Value::Array(matches));
