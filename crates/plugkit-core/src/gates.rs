@@ -103,8 +103,13 @@ fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
     (verb, count, ts)
 }
 
+const LONGGAP_EXEMPT_READ_ONLY_VERBS: &[&str] = &[
+    "codesearch", "recall", "memorize-fire", "git_status", "git_log", "git_diff", "git_show",
+    "branch_status", "ci-status", "fs_read", "fs_stat", "fs_readdir", "status",
+];
+
 fn is_longgap_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
-    policy.longgap_exempt_verbs.iter().any(|v| v == verb)
+    LONGGAP_EXEMPT_READ_ONLY_VERBS.contains(&verb) || policy.longgap_exempt_verbs.iter().any(|v| v == verb)
 }
 
 fn is_longgap_refresh(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
