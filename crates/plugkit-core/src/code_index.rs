@@ -620,42 +620,48 @@ pub fn extract_call_edges(source: &str, lang_name: &str, chunks: &[(String, Stri
     out
 }
 
+/// One kv row per FILE holding every call edge it contains. The previous
+/// layout (one row per edge, deleted by scanning the whole namespace for
+/// rows naming the path) cost a full-namespace read per indexed file, which
+/// made extraction O(files x edges): measured at ~0.5s per file on a 2400
+/// file monorepo, where it consumed the entire wall budget on its own.
 fn edges_ns() -> String {
+    format!("{}-call-edges", code_ns())
+}
+
+fn legacy_per_edge_ns() -> String {
     format!("{}-edges", code_ns())
 }
 
-fn edge_key(path: &str, line: usize, callee: &str, idx: usize) -> String {
-    format!("ce-{:x}-{}-{}-{}", crc32(path), line, callee, idx)
-}
-
-pub fn write_call_edges(path: &str, edges: &[CallEdge]) {
-    let ns = edges_ns();
-    for (idx, e) in edges.iter().enumerate() {
-        let key = edge_key(path, e.line, &e.callee_symbol, idx);
-        let val = json!({
-            "caller_path": path,
-            "caller_symbol": e.caller_symbol,
-            "callee_symbol": e.callee_symbol,
-            "line": e.line,
-        }).to_string();
-        fv_put(&ns, &key, &val);
-    }
-}
-
-pub fn delete_call_edges_for_path(path: &str) {
-    let ns = edges_ns();
+fn purge_legacy_per_edge_rows() {
+    let ns = legacy_per_edge_ns();
     let rows = fv_query(&ns, "");
     if let Some(arr) = rows.as_array() {
         for row in arr {
-            let key = match row.get("key").and_then(|k| k.as_str()) { Some(k) => k, None => continue };
-            let matches_path = row.get("value")
-                .and_then(|v| v.as_str())
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .and_then(|parsed| parsed.get("caller_path").and_then(|p| p.as_str()).map(|p| p == path))
-                .unwrap_or(false);
-            if matches_path { fv_delete(&ns, key); }
+            if let Some(key) = row.get("key").and_then(|k| k.as_str()) {
+                fv_delete(&ns, key);
+            }
         }
     }
+}
+
+fn edges_key(path: &str) -> String {
+    format!("ce-{:x}", crc32(path))
+}
+
+pub fn write_call_edges(path: &str, edges: &[CallEdge]) {
+    if edges.is_empty() { return; }
+    let rows: Vec<Value> = edges.iter().map(|e| json!({
+        "caller_path": path,
+        "caller_symbol": e.caller_symbol,
+        "callee_symbol": e.callee_symbol,
+        "line": e.line,
+    })).collect();
+    fv_put(&edges_ns(), &edges_key(path), &Value::Array(rows).to_string());
+}
+
+pub fn delete_call_edges_for_path(path: &str) {
+    fv_delete(&edges_ns(), &edges_key(path));
 }
 
 fn all_call_edges() -> Vec<Value> {
@@ -664,6 +670,9 @@ fn all_call_edges() -> Vec<Value> {
     rows.as_array()
         .map(|arr| arr.iter().filter_map(|row| {
             row.get("value").and_then(|v| v.as_str()).and_then(|s| serde_json::from_str::<Value>(s).ok())
+        }).flat_map(|v| match v {
+            Value::Array(edges) => edges,
+            other => vec![other],
         }).collect())
         .unwrap_or_default()
 }
@@ -832,7 +841,11 @@ fn code_vec_ns() -> String {
     ns.vec_namespace(&ns.code)
 }
 
-const MANIFEST_VERSION: u64 = 6;
+const MANIFEST_VERSION: u64 = 7;
+
+fn summary_ns_for(project_path: Option<&str>) -> String {
+    format!("codeinsight-summary{}", root_ns_suffix(project_path))
+}
 
 #[derive(Clone)]
 struct ChunkRecord {
@@ -845,6 +858,7 @@ struct ChunkRecord {
     content_hash: u32,
 }
 
+#[derive(Clone)]
 struct FileManifest {
     hash: u32,
     /// The value this file contributes to the WHOLE-TREE digest.
@@ -874,28 +888,67 @@ struct FileManifest {
     /// manifest rows without it simply skip this check once.
     size: Option<u64>,
     commit_overview: Option<String>,
+    /// A chunk with an empty `emb` is extracted but not yet embedded: it is
+    /// absent from the chunk table, served by BM25/symbol lookup from this
+    /// manifest, and picked up by the next pass's embed loop.
     chunks: Vec<ChunkRecord>,
-    /// Count of chunks this file produced that failed to embed on the pass
-    /// that wrote this manifest (embedder unavailable/erroring), and so are
-    /// NOT represented in `chunks` at all -- `chunks.len() == 0` is
-    /// structurally identical whether a file legitimately has no indexable
-    /// content or every one of its chunks failed to embed. Without this
-    /// field, a transient embedder outage poisons the cache permanently: the
-    /// stat-only and hash-match reuse fast paths only compare `chunks.len()`
-    /// against the live `chunk_rows(fp)` count (both 0, so they "match"),
-    /// and file_hash never changes for unedited content, so the file is
-    /// "reused" as fully-indexed-with-zero-chunks on every subsequent pass
-    /// forever, even after the embedder recovers. >0 forces both fast paths
-    /// to fall through to a full re-chunk+re-embed instead. Absent on
-    /// manifests written before this field existed, defaulting to 0 (an
-    /// older row is trusted once, same as every other optional field here --
-    /// it was written when embed failures weren't tracked, not necessarily
-    /// when there were none).
+    /// Manifests older than v7 recorded chunks that failed to embed as this
+    /// count instead of as pending chunks; >0 forces a full re-extraction
+    /// once, which rewrites the row in the current shape.
     skipped_no_embed: u32,
 }
 
-fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, size: u64, commit_overview: &Option<String>, chunks: &[ChunkRecord], skipped_no_embed: u32) -> String {
-    let arr: Vec<Value> = chunks.iter().map(|c| json!({
+impl FileManifest {
+    fn pending_chunks(&self) -> usize {
+        self.chunks.iter().filter(|c| c.emb.is_empty()).count()
+    }
+}
+
+#[derive(Default)]
+struct IndexSummary {
+    files: i64,
+    symbols: i64,
+    pending_embed_chunks: i64,
+    pending_embed_files: i64,
+    kinds: std::collections::HashMap<String, i64>,
+}
+
+impl IndexSummary {
+    fn apply(&mut self, m: &FileManifest, sign: i64) {
+        if m.chunks.is_empty() { return; }
+        let pending = m.pending_chunks() as i64;
+        self.files += sign;
+        self.symbols += sign * m.chunks.len() as i64;
+        self.pending_embed_chunks += sign * pending;
+        if pending > 0 { self.pending_embed_files += sign; }
+        for c in &m.chunks {
+            *self.kinds.entry(c.kind.clone()).or_insert(0) += sign;
+        }
+    }
+
+    fn to_json(&self) -> String {
+        let mut kinds: Vec<(&String, &i64)> = self.kinds.iter().filter(|(_, c)| **c > 0).collect();
+        kinds.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let by_kind: Vec<Value> = kinds.into_iter().take(10).map(|(k, c)| json!({ "kind": k, "c": c })).collect();
+        json!({
+            "files": self.files.max(0),
+            "symbols": self.symbols.max(0),
+            "pending_embed_chunks": self.pending_embed_chunks.max(0),
+            "pending_embed_files": self.pending_embed_files.max(0),
+            "by_kind": by_kind,
+        }).to_string()
+    }
+}
+
+fn load_index_summary(project_path: Option<&str>) -> Option<Value> {
+    let rows = fv_query(&summary_ns_for(project_path), "");
+    rows.as_array()?.iter().find_map(|row| {
+        row.get("value").and_then(|v| v.as_str()).and_then(|s| serde_json::from_str::<Value>(s).ok())
+    })
+}
+
+fn manifest_to_json(fp: &str, m: &FileManifest) -> String {
+    let arr: Vec<Value> = m.chunks.iter().map(|c| json!({
         "key": c.key,
         "kind": c.kind,
         "name": c.name,
@@ -904,7 +957,7 @@ fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, size: 
         "emb": c.emb,
         "ch": c.content_hash,
     })).collect();
-    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": hash, "digest_hash": digest_hash, "mtime_ms": mtime_ms, "size": size, "commit_overview": commit_overview, "chunks": arr, "skipped_no_embed": skipped_no_embed }).to_string()
+    json!({ "v": MANIFEST_VERSION, "path": fp, "hash": m.hash, "digest_hash": m.digest_hash, "mtime_ms": m.mtime_ms, "size": m.size, "commit_overview": m.commit_overview, "chunks": arr, "skipped_no_embed": m.skipped_no_embed }).to_string()
 }
 
 fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
@@ -945,7 +998,7 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
         let name = c.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
         let ls = c.get("ls").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
         let le = c.get("le").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-        let emb = json_to_f32_vec(c.get("emb")?)?;
+        let emb = c.get("emb").and_then(json_to_f32_vec).unwrap_or_default();
         // Absent on manifests written before v6 (content_hash didn't exist yet);
         // 0 is not a valid fnv1a64-derived u32 output for any real chunk body in
         // practice-safe terms here, and reuse-by-hash simply never matches it, so
@@ -1176,6 +1229,24 @@ fn delete_chunk_keys(chunks: &[ChunkRecord], project_path: Option<&str>) {
     }
 }
 
+pub fn default_index_file_limit() -> usize {
+    crate::ragconfig::RagConfig::resolved().index.digest_max_files
+}
+
+/// Source code is indexed before prose and before data/config files, so a
+/// tree too large for one pass yields code symbols first: a monorepo whose
+/// walk order put 1300 markdown files ahead of its 1400 JS files spent every
+/// pass on docs and answered code queries with section hits only.
+fn index_priority(path: &str) -> u8 {
+    let ext = match path.rfind('.') { Some(i) => &path[i..], None => "" };
+    match lang_for_ext(ext) {
+        Some("markdown") => 1,
+        Some("json") | Some("yaml") | Some("toml") | Some("xml") | Some("html") | Some("css") => 2,
+        Some(_) => 0,
+        None => 3,
+    }
+}
+
 pub fn index(root: &str, max_files: usize) -> Value {
     index_cfg(root, max_files, &crate::ragconfig::RagConfig::resolved())
 }
@@ -1212,6 +1283,7 @@ pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig
 }
 
 fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig, include_dead_code: bool, orphan_scan_limit: usize, project_path: Option<&str>) -> Value {
+    let pass_started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let db_path = project_db_path(project_path);
     let libsql_err = ensure_schema_at(&db_path).err().map(|e| e.to_string());
     let libsql_ok = libsql_err.is_none();
@@ -1229,6 +1301,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         }
     }
     let prior = load_manifests(project_path);
+    purge_legacy_per_edge_rows();
     // Hoisted out of the per-file loop: one GROUP BY instead of one full
     // open/query/close per file (see chunk_rows_by_path).
     let chunk_counts = if libsql_ok {
@@ -1242,10 +1315,12 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         .max(cfg.index.prune_pass_file_limit_floor)
         .min(cfg.index.prune_pass_file_limit_ceiling);
     let prune_enumeration_cap = cfg.index.prune_enumeration_file_cap;
-    let full_files = collect_files(r, limit.max(prune_enumeration_cap), &cfg.index);
+    let mut full_files = collect_files(r, limit.max(prune_enumeration_cap), &cfg.index);
+    full_files.sort_by_key(|p| index_priority(p));
     let files: Vec<String> = full_files.iter().take(limit).cloned().collect();
     {
-        let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
+        let setup_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(pass_started);
+        let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={} setup_ms={}", r, files.len(), libsql_ok, prior.len(), setup_ms);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     }
     if full_files.is_empty() && !prior.is_empty() {
@@ -1277,49 +1352,52 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     }
     let index_wall_budget_ms: u64 = cfg.index.wall_budget_ms;
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let elapsed_ms = || unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+    let manifest_ns = manifest_ns_for(project_path);
     let mut indexed = 0;
     let mut chunked = 0;
     let mut embedded = 0;
     let mut reused = 0;
     let mut reused_files = 0;
-    let mut skipped_no_embed = 0u32;
+    let mut extracted_files = 0u32;
     let mut deferred_files = 0u32;
     let mut treesitter_failures = 0u32;
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut digest_entries: Vec<(String, u32)> = Vec::with_capacity(files.len());
+    let mut pending: Vec<(String, FileManifest)> = Vec::new();
+    let mut summary = IndexSummary::default();
+    for m in prior.values() { summary.apply(m, 1); }
 
+    // Pass structure: the file loop below extracts symbols for every file it
+    // can reach inside the wall budget but embeds nothing new -- chunks whose
+    // vector is not yet known are persisted in the manifest with an empty
+    // `emb` (BM25 and symbol lookup serve them immediately). The embed loop
+    // after it spends whatever budget remains on those pending chunks, in
+    // file-priority order, and a file only leaves the pending set once every
+    // chunk has a stored vector. A tree that cannot be embedded in one pass
+    // therefore converges across passes instead of being truncated to the
+    // first few chunks of each file.
     for raw_fp in &files {
-        let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        if elapsed > index_wall_budget_ms {
+        if elapsed_ms() > index_wall_budget_ms {
             deferred_files += 1;
             continue;
         }
         let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();
         let fp = &canon;
-        let dot = fp.rfind('.');
-        let ext = match dot { Some(i) => &fp[i..], None => "" };
+        let ext = match fp.rfind('.') { Some(i) => &fp[i..], None => "" };
         let lang_name = match lang_for_ext(ext) { Some(x) => x, None => continue };
 
-        if let Some(m) = prior.get(fp) {
+        if let Some(m) = prior.get(fp).filter(|m| m.pending_chunks() == 0) {
             if let Some(stat) = crate::wasm_dispatch::host_stat(fp)
                 .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
             {
                 let stat_mtime = stat.get("mtime_ms").and_then(|v| v.as_f64());
                 let stat_size = stat.get("size").and_then(|v| v.as_u64());
-                // Only take the stat-only fast path when the manifest can supply
-                // this file's digest contribution; without it we cannot produce a
-                // digest that current_digest() will reproduce, and skipping the
-                // read would poison the whole-tree digest (see digest_hash docs).
-                //
-                // mtime equality ALONE is not a safe cache key -- a coarse
-                // filesystem mtime granularity or a fast restore can reproduce an
-                // identical timestamp on genuinely changed content. Size is a
-                // zero-cost additional signal from the same stat call; a manifest
-                // written before this field existed has size=None, which makes
-                // the size check vacuously true (`m.size.is_none() ||`) so an
-                // older row is not forced down the full-read path just for
-                // predating this guard.
+                // mtime alone is not a safe cache key (coarse filesystem
+                // granularity, fast restores); size comes free from the same
+                // stat call. A manifest written before `size` existed has
+                // None, which makes the check vacuously true once.
                 let size_matches = m.size.is_none() || stat_size == m.size;
                 if let (Some(mtime), Some(dh)) = (stat_mtime, m.digest_hash) {
                     if mtime == m.mtime_ms && size_matches && m.skipped_no_embed == 0 && libsql_ok && chunk_rows(fp) == m.chunks.len() {
@@ -1329,13 +1407,9 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                         chunked += m.chunks.len() as i32;
                         reused += m.chunks.len() as i32;
                         reused_files += 1;
-                        // The digest MUST be the same content-derived value on
-                        // every branch. current_digest() (what this is compared
-                        // against next dispatch) folds fnv1a64(content), so
-                        // pushing mtime here made the stored digest structurally
-                        // unable to ever match -- every dispatch saw
-                        // "digest-mismatch" and re-indexed the whole tree, which
-                        // is exactly the cost this fast path exists to avoid.
+                        // Must be the same content-derived value every branch
+                        // pushes, or the stored digest can never equal
+                        // current_digest() and every dispatch re-indexes.
                         digest_entries.push((fp.clone(), dh));
                         continue;
                     }
@@ -1358,15 +1432,20 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
         let file_hash = crc32(&content);
         let path_hash = crc32(fp);
-        // Computed once and BOTH pushed into this pass's digest and persisted in
-        // the manifest, so a later stat-only fast path can contribute the exact
-        // same value without re-reading the file. Must stay identical to
-        // current_digest()'s own per-file hash or the digest never matches.
         let file_digest_hash = crate::hash::fnv1a64(content.as_bytes()) as u32;
         digest_entries.push((fp.clone(), file_digest_hash));
 
         if let Some(m) = prior.get(fp) {
             if m.hash == file_hash && m.skipped_no_embed == 0 {
+                let pending_here = m.pending_chunks();
+                let embedded_here = m.chunks.len() - pending_here;
+                if pending_here > 0 {
+                    chunked += embedded_here as i32;
+                    reused += embedded_here as i32;
+                    reused_files += 1;
+                    pending.push((fp.clone(), m.clone()));
+                    continue;
+                }
                 if libsql_ok && chunk_rows(fp) == m.chunks.len() {
                     chunked += m.chunks.len() as i32;
                     reused += m.chunks.len() as i32;
@@ -1384,7 +1463,8 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                     reused += 1;
                 }
                 if !all_persisted {
-                    fv_delete(&manifest_ns_for(project_path), fp);
+                    fv_delete(&manifest_ns, fp);
+                    summary.apply(m, -1);
                 }
                 reused_files += 1;
                 continue;
@@ -1394,29 +1474,36 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             }
             delete_chunk_keys(&m.chunks, project_path);
             delete_call_edges_for_path(fp);
+            summary.apply(m, -1);
         } else if libsql_ok {
             let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
             delete_call_edges_for_path(fp);
         }
 
-        // Chunk-level reuse: a file-hash change forces re-extraction (tree-sitter
-        // boundaries can shift even when a single function's body is untouched),
-        // but most edits touch one function -- everything else's (kind, name,
-        // body) triple is byte-identical to the prior pass. Index prior chunks by
-        // that triple's content hash so an unchanged chunk skips embed_texts_batch
-        // entirely and reuses its stored vector, instead of the whole file always
-        // paying full re-embed cost on any single-line change.
+        // Tree-sitter boundaries can shift on any edit, but most edits touch
+        // one function: a chunk whose (kind, name, body-hash) triple is
+        // unchanged keeps its stored vector instead of re-embedding.
         let prior_chunk_by_identity: std::collections::HashMap<(String, String, u32), &ChunkRecord> = prior
             .get(fp)
             .map(|m| {
                 m.chunks
                     .iter()
+                    .filter(|c| !c.emb.is_empty())
                     .map(|c| ((c.kind.clone(), c.name.clone(), c.content_hash), c))
                     .collect()
             })
             .unwrap_or_default();
 
+        let extract_started = elapsed_ms();
         let (mut chunks, treesitter_failed) = extract_chunks_reporting_plugin_failure(fp, &content, lang_name);
+        let extract_ms = elapsed_ms().saturating_sub(extract_started);
+        if extract_ms > 2000 {
+            crate::wasm_dispatch::emit_event("code_index_slow_extract", json!({
+                "path": fp,
+                "extract_ms": extract_ms,
+                "source_len": content.len(),
+            }));
+        }
         if treesitter_failed {
             treesitter_failures += 1;
         } else {
@@ -1428,154 +1515,105 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             let line_end = content.lines().count().max(1);
             chunks.push(("document".to_string(), String::new(), 1, line_end, whole));
         }
-        if chunks.iter().any(|(_, _, _, _, body)| body.len() > crate::ragconfig::RagConfig::resolved().index.split_chunk_above_bytes) {
+        if chunks.iter().any(|(_, _, _, _, body)| body.len() > cfg.index.split_chunk_above_bytes) {
             chunks = chunks
                 .into_iter()
                 .flat_map(|(kind, name, ls, le, body)| split_oversized_chunk(&kind, &name, ls, le, &body))
                 .collect();
         }
+        extracted_files += 1;
 
-        let max_chunks_per_file_per_pass = cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only;
-        let elapsed_now = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        let remaining_ms = index_wall_budget_ms.saturating_sub(elapsed_now);
-        let pessimistic_ms_per_chunk = cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound.max(1);
-        let budget_chunks = (remaining_ms / pessimistic_ms_per_chunk).max(1) as usize;
-        let cap = max_chunks_per_file_per_pass.min(budget_chunks);
-        let oversized = chunks.len() > cap;
-        if oversized {
-            let full = chunks.len();
-            chunks.truncate(cap);
-            let msg = format!(
-                "code_index: capping {} chunks={} -> {} (count_cap={} budget_chunks={} remaining_ms={}; file still indexed and marked seen)",
-                fp, full, cap, max_chunks_per_file_per_pass, budget_chunks, remaining_ms
-            );
-            let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
-            crate::wasm_dispatch::emit_event("code_index_chunk_cap", json!({
-                "path": fp,
-                "chunks_total": full,
-                "chunks_indexed": cap,
-                "count_cap": max_chunks_per_file_per_pass,
-                "budget_chunks": budget_chunks,
-                "remaining_ms": remaining_ms,
-                "pessimistic_ms_per_chunk": pessimistic_ms_per_chunk,
-            }));
+        let mut records: Vec<ChunkRecord> = Vec::with_capacity(chunks.len());
+        let mut file_fully_persisted = true;
+        for (idx, (kind, name, ls, le, body)) in chunks.into_iter().enumerate() {
+            let content_hash = crate::hash::fnv1a64(body.as_bytes()) as u32;
+            let emb = prior_chunk_by_identity
+                .get(&(kind.clone(), name.clone(), content_hash))
+                .map(|c| c.emb.clone())
+                .unwrap_or_default();
+            let rec = ChunkRecord {
+                key: format!("ci-{:x}-{:x}-{}", path_hash, file_hash, idx),
+                kind, name, ls, le, emb, content_hash,
+            };
+            if !rec.emb.is_empty() {
+                chunked += 1;
+                reused += 1;
+                file_fully_persisted &= write_chunk(libsql_ok, &db_path, fp, &rec, &body, project_path);
+            }
+            records.push(rec);
         }
+        if !file_fully_persisted {
+            fv_delete(&manifest_ns, fp);
+            continue;
+        }
+        let manifest = FileManifest {
+            hash: file_hash,
+            digest_hash: Some(file_digest_hash),
+            mtime_ms: file_mtime,
+            size: Some(file_size),
+            commit_overview: None,
+            chunks: records,
+            skipped_no_embed: 0,
+        };
+        fv_put(&manifest_ns, fp, &manifest_to_json(fp, &manifest));
+        summary.apply(&manifest, 1);
+        if manifest.pending_chunks() > 0 {
+            pending.push((fp.clone(), manifest));
+        }
+    }
 
-        let chunk_content_hashes: Vec<u32> = chunks.iter()
-            .map(|(_, _, _, _, body)| crate::hash::fnv1a64(body.as_bytes()) as u32)
+    let pessimistic_ms_per_chunk = cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound.max(1);
+    let per_file_embed_cap = cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only;
+    for (fp, m) in pending.iter_mut() {
+        let fp = fp.as_str();
+        let remaining_ms = index_wall_budget_ms.saturating_sub(elapsed_ms());
+        let cap = ((remaining_ms / pessimistic_ms_per_chunk) as usize).min(per_file_embed_cap);
+        if cap == 0 { break; }
+        let content = match host_read(fp).or_else(|| host_read(&format!("/{}", fp))) { Some(c) => c, None => continue };
+        if crc32(&content) != m.hash { continue; }
+        let targets: Vec<usize> = m.chunks.iter().enumerate()
+            .filter(|(_, c)| c.emb.is_empty())
+            .map(|(i, _)| i)
+            .take(cap)
             .collect();
-        let reused_embs: Vec<Option<Vec<f32>>> = chunks.iter().zip(chunk_content_hashes.iter())
-            .map(|((kind, name, _, _, _), ch)| {
-                prior_chunk_by_identity.get(&(kind.clone(), name.clone(), *ch)).map(|c| c.emb.clone())
-            })
+        let bodies: Vec<String> = targets.iter().map(|&i| slice_lines(&content, m.chunks[i].ls, m.chunks[i].le)).collect();
+        let inputs: Vec<String> = targets.iter().zip(bodies.iter())
+            .map(|(&i, body)| format!("{} {}", m.chunks[i].name, truncate_for_embed(body)))
             .collect();
-
-        let embed_inputs: Vec<String> = chunks.iter().zip(reused_embs.iter())
-            .filter(|(_, reused)| reused.is_none())
-            .map(|((_, name, _, _, body), _)| format!("{} {}", name, truncate_for_embed(body)))
-            .collect();
-        let reused_chunk_count = reused_embs.iter().filter(|r| r.is_some()).count();
-        let embed_started = unsafe { crate::wasm_dispatch::host_now_ms() };
-        let mut fresh_embeds = embed_texts_batch(&embed_inputs).into_iter();
-        let embed_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(embed_started);
+        let embed_started = elapsed_ms();
+        let vectors = embed_texts_batch(&inputs);
+        let embed_ms = elapsed_ms().saturating_sub(embed_started);
         if embed_ms > 3000 {
-            let msg = format!("code_index: SLOW embed_texts_batch fp={} chunks={} reused_chunks={} embed_ms={}", fp, embed_inputs.len(), reused_chunk_count, embed_ms);
+            let msg = format!("code_index: SLOW embed_texts_batch fp={} chunks={} embed_ms={}", fp, inputs.len(), embed_ms);
             let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
             crate::wasm_dispatch::emit_event("code_index_slow_file_embed", json!({
                 "path": fp,
-                "chunks": embed_inputs.len(),
-                "reused_chunks": reused_chunk_count,
+                "chunks": inputs.len(),
                 "embed_ms": embed_ms,
             }));
         }
-        if reused_chunk_count > 0 {
-            crate::wasm_dispatch::emit_event("code_index_chunk_reuse", json!({
-                "path": fp,
-                "chunks_total": chunks.len(),
-                "chunks_reused": reused_chunk_count,
-                "chunks_embedded": embed_inputs.len(),
-            }));
-        }
-
-        let embed_results: Vec<(Option<Vec<f32>>, bool)> = reused_embs.into_iter()
-            .map(|reused| match reused {
-                Some(v) => (Some(v), true),
-                None => (fresh_embeds.next().unwrap_or(None), false),
-            })
-            .collect();
-
-        let mut records: Vec<ChunkRecord> = Vec::new();
-        let mut file_fully_persisted = true;
-        let mut file_skipped_no_embed: u32 = 0;
-        let chunk_write_loop_started = unsafe { crate::wasm_dispatch::host_now_ms() };
-        let chunks_in_this_file = chunk_content_hashes.len();
-        for (idx, (((kind, name, ls, le, body), (emb_opt, was_reused)), content_hash)) in chunks.into_iter().zip(embed_results.into_iter()).zip(chunk_content_hashes.into_iter()).enumerate() {
-            let v = match emb_opt {
-                Some(v) => v,
-                None => {
-                    skipped_no_embed += 1;
-                    file_skipped_no_embed += 1;
-                    let msg = format!("code_index: embed failed for {}:{} ({}); skipping chunk to avoid NULL-embedding row", fp, ls, name);
-                    let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
-                    continue;
-                }
-            };
-            chunked += 1;
-            if was_reused {
-                reused += 1;
+        let mut newly_embedded = 0usize;
+        for ((i, body), v) in targets.into_iter().zip(bodies).zip(vectors) {
+            let Some(v) = v else { continue };
+            m.chunks[i].emb = v;
+            if write_chunk(libsql_ok, &db_path, fp, &m.chunks[i], &body, project_path) {
+                newly_embedded += 1;
             } else {
-                embedded += 1;
+                m.chunks[i].emb = Vec::new();
             }
-            let key = format!("ci-{:x}-{:x}-{}", path_hash, file_hash, idx);
-            let rec = ChunkRecord { key, kind, name, ls, le, emb: v, content_hash };
-            file_fully_persisted &= write_chunk(libsql_ok, &db_path, fp, &rec, &body, project_path);
-            records.push(rec);
         }
-        // Telemetry only, no behavior change: this loop has no elapsed-check
-        // guard (a real, measured latency defect -- see the row this
-        // instruments, index-resumable-partial-file-so-chunk-writes-can-be-
-        // budget-bounded -- passes measured 4x over index.wall_budget_ms).
-        // Adding a naive elapsed-check abort here would create the exact
-        // manifest/code_chunks disagreement bug already fixed once this
-        // session (a manifest asserting a file is fully indexed while
-        // code_chunks holds only a partial write) -- the safe fix needs a
-        // resumable chunk-cursor in the manifest schema first, a real design
-        // task, not a one-line guard. This event measures the ACTUAL
-        // frequency/severity of long single-file chunk-write passes so that
-        // design work is informed by real numbers rather than the two
-        // convergence-run measurements already on record.
-        let chunk_write_loop_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(chunk_write_loop_started);
-        if chunk_write_loop_ms > 2000 {
-            crate::wasm_dispatch::emit_event("code_index_unbounded_chunk_write_loop_slow", json!({
-                "path": fp,
-                "chunks_in_file": chunks_in_this_file,
-                "loop_ms": chunk_write_loop_ms,
-                "wall_budget_ms": index_wall_budget_ms,
-                "note": "no elapsed-check guard exists inside this loop by design -- see index-resumable-partial-file-so-chunk-writes-can-be-budget-bounded for why a naive guard would be unsafe",
-            }));
+        if newly_embedded == 0 { continue; }
+        embedded += newly_embedded as i32;
+        chunked += newly_embedded as i32;
+        summary.pending_embed_chunks -= newly_embedded as i64;
+        if m.pending_chunks() == 0 { summary.pending_embed_files -= 1; }
+        if m.commit_overview.is_none() && elapsed_ms() < index_wall_budget_ms {
+            m.commit_overview = compute_commit_overview(fp);
         }
-        if file_fully_persisted {
-            // compute_commit_overview shells out to git. It sits after the last
-            // budget check, so on an over-budget pass it added a subprocess per
-            // file to a pass that was already meant to stop. The overview is
-            // enrichment, not correctness -- skipping it still writes a valid
-            // manifest, and the next pass recomputes it within budget.
-            let over_budget =
-                unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started) > index_wall_budget_ms;
-            let commit_overview = if over_budget {
-                crate::wasm_dispatch::emit_event("code_index_commit_overview_skipped", json!({
-                    "path": fp,
-                    "reason": "wall budget already exhausted; the git subprocess is enrichment and is deferred to the next pass",
-                }));
-                None
-            } else {
-                compute_commit_overview(fp)
-            };
-            fv_put(&manifest_ns_for(project_path), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, file_size, &commit_overview, &records, file_skipped_no_embed));
-        } else {
-            fv_delete(&manifest_ns_for(project_path), fp);
-        }
+        fv_put(&manifest_ns, fp, &manifest_to_json(fp, m));
     }
+    let pending_embed_files = pending.iter().filter(|(_, m)| m.pending_chunks() > 0).count() as u32;
+    deferred_files += pending_embed_files;
 
     let files_set: std::collections::HashSet<&str> = full_files.iter().map(|s| s.trim_start_matches("./").trim_start_matches('/')).collect();
     let mut removed_files = 0;
@@ -1583,7 +1621,8 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         if !seen.contains(fp) && !files_set.contains(fp.as_str()) {
             delete_chunk_keys(&m.chunks, project_path);
             delete_call_edges_for_path(fp);
-            fv_delete(&manifest_ns_for(project_path), fp);
+            fv_delete(&manifest_ns, fp);
+            summary.apply(m, -1);
             removed_files += 1;
         }
     }
@@ -1628,10 +1667,11 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     // deferred ones simply keep their prior entries absent, which reads as
     // "changed" next pass -- exactly the resume behaviour wanted. Marking it
     // partial keeps the distinction visible rather than pretending convergence.
+    fv_put(&summary_ns_for(project_path), "summary", &summary.to_json());
     if deferred_files == 0 {
         let digest = digest_from_entries(digest_entries);
         store_digest_at(&digest, project_path);
-        let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} removed_files={} skipped_no_embed={} digest={}", indexed, chunked, embedded, reused, reused_files, removed_files, skipped_no_embed, digest);
+        let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} extracted_files={} removed_files={} digest={}", indexed, chunked, embedded, reused, reused_files, extracted_files, removed_files, digest);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     } else {
         // Persist the converged subset (see the rationale above). Tagged
@@ -1642,17 +1682,26 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         // never-stored/always-reindex loop that starved this cache entirely.
         let partial_digest = format!("{}:partial={}", digest_from_entries(digest_entries), deferred_files);
         store_digest_at(&partial_digest, project_path);
-        let msg = format!("code_index: partial pass (wall budget) files_indexed={} deferred_files={} embedded={} reused={} removed_files={} -- partial digest stored, next call resumes", indexed, deferred_files, embedded, reused, removed_files);
+        let msg = format!("code_index: partial pass (wall budget) files_indexed={} extracted_files={} deferred_files={} pending_embed_files={} pending_embed_chunks={} embedded={} reused={} removed_files={} -- partial digest stored, next call resumes", indexed, extracted_files, deferred_files, pending_embed_files, summary.pending_embed_chunks.max(0), embedded, reused, removed_files);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
         crate::wasm_dispatch::emit_event("codeinsight_index_partial", json!({
             "files_indexed": indexed,
+            "extracted_files": extracted_files,
             "deferred_files": deferred_files,
+            "pending_embed_files": pending_embed_files,
+            "pending_embed_chunks": summary.pending_embed_chunks.max(0),
             "embedded": embedded,
         }));
     }
     let silently_empty_due_to_plugin_failure = indexed > 0 && chunked == 0 && treesitter_failures >= indexed as u32;
+    let pass_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(pass_started);
+    {
+        let msg = format!("code_index: pass_ms={} (wall_budget_ms={})", pass_ms, index_wall_budget_ms);
+        let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+    }
     json!({
         "ok": !silently_empty_due_to_plugin_failure,
+        "pass_ms": pass_ms,
         "files_scanned": files.len(),
         "files_indexed": indexed,
         "chunks": chunked,
@@ -1660,8 +1709,10 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         "reused": reused,
         "reused_files": reused_files,
         "removed_files": removed_files,
-        "skipped_no_embed": skipped_no_embed,
+        "extracted_files": extracted_files,
         "deferred_files": deferred_files,
+        "pending_embed_files": pending_embed_files,
+        "pending_embed_chunks": summary.pending_embed_chunks.max(0),
         "treesitter_failures": treesitter_failures,
         "kvvec_cleared_dim_mismatch": kvvec_cleared,
         "by_language": langs,
@@ -1833,10 +1884,31 @@ pub fn overview() -> Value {
         "digest": stored_digest(),
         "likely_orphaned": likely_orphaned_symbols(&db_path, 20),
     });
+    let summary = load_index_summary(None);
+    if let Some(s) = &summary {
+        out["extracted_files"] = s["files"].clone();
+        out["extracted_symbols"] = s["symbols"].clone();
+        out["pending_embed_files"] = s["pending_embed_files"].clone();
+        out["pending_embed_chunks"] = s["pending_embed_chunks"].clone();
+    }
     if let Some(e) = count_error {
-        out["counts_unavailable"] = json!(true);
-        out["counts_error"] = json!(e);
-        crate::wasm_dispatch::emit_event("codeinsight_overview_counts_failed", json!({ "error": e }));
+        // The chunk table lives in the libsql sibling plugin; when that plugin
+        // is absent or evicted the counts fall back to the index summary the
+        // last pass wrote to the host kv store, which no plugin outage can
+        // hide, and the response names the source instead of reporting zero.
+        out["chunk_store_unavailable"] = json!(e);
+        match &summary {
+            Some(s) => {
+                out["counts_source"] = json!("index_summary");
+                out["file_count"] = s["files"].clone();
+                out["symbol_count"] = s["symbols"].clone();
+                out["by_kind"] = s["by_kind"].clone();
+            }
+            None => {
+                out["counts_unavailable"] = json!(true);
+            }
+        }
+        crate::wasm_dispatch::emit_event("codeinsight_overview_counts_failed", json!({ "error": e, "fallback": summary.is_some() }));
     }
     out
 }
@@ -2133,7 +2205,7 @@ pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagC
 
 /// Ceiling on files enumerated for an exhaustive literal/regex scan.
 ///
-/// Deliberately NOT `IndexConfig::digest_max_files`, whose default is 2000 --
+/// Deliberately NOT `IndexConfig::digest_max_files` (2000 when this was
 /// measured on the real C:/dev/litebox-main workspace, which enumerates 2427
 /// files, so reusing the digest cap would have dropped ~400 files and returned
 /// a confidently wrong "every match" answer. That cap exists to bound a digest

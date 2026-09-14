@@ -1465,7 +1465,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         if stale {
             let reason = if stored.is_none() { "digest-absent" } else { "digest-mismatch" };
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "root": root, "stored_then_current": current }));
-            let _ = crate::code_index::index_at(root, 500, root);
+            let _ = crate::code_index::index_at(root, crate::code_index::default_index_file_limit(), root);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -1633,7 +1633,7 @@ fn codesearch(body: &Value) -> u64 {
         && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
         let cleared = crate::code_index::clear_codeinsight_full_cfg(&cfg);
         emit_event("codeinsight_rebuild", json!({ "reason": "explicit-rebuild", "keys_cleared": cleared }));
-        let _ = crate::code_index::index(".", 500);
+        let _ = crate::code_index::index(".", crate::code_index::default_index_file_limit());
         let mut retry = body.clone();
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -1649,7 +1649,7 @@ fn codesearch(body: &Value) -> u64 {
         if stale {
             let reason = if stored.is_none() { "digest-absent" } else { "digest-mismatch" };
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "stored_then_current": current }));
-            let _ = crate::code_index::index(".", 500);
+            let _ = crate::code_index::index(".", crate::code_index::default_index_file_limit());
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -1719,7 +1719,7 @@ fn codesearch(body: &Value) -> u64 {
     let hits = unpack_to_value(packed);
     let kv_empty = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
     if kv_empty && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let _ = crate::code_index::index(".", 500);
+        let _ = crate::code_index::index(".", crate::code_index::default_index_file_limit());
         let mut retry = body.clone();
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -2601,7 +2601,7 @@ fn codeinsight_index(body: &Value) -> u64 {
     let root = body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
         .filter(|p| !p.is_empty());
-    let max_files = body.get("max_files").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+    let max_files = body.get("max_files").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or_else(crate::code_index::default_index_file_limit);
     if body.get("dead_code").and_then(|v| v.as_bool()).unwrap_or(false) {
         let limit = body.get("dead_code_limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
         return pack(crate::code_index::index_with_dead_code(root.unwrap_or("."), max_files, limit).to_string());
