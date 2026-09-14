@@ -13,13 +13,12 @@
 //! for all the others. Each record instead carries a `delivered_to` roster of session ids
 //! it has already been handed to; a session is notified exactly once and never again.
 //!
-//! No process-wide caching lives in this module for the same reason: every path is derived
-//! from `gm_dir()` per call, which re-resolves the project root, so two projects sharing
+//! No process-wide caching lives in this module for the same reason: `pkfs` anchors the
+//! store path per call against the dispatching cwd's project root, so two projects sharing
 //! one plugin instance never read or write each other's store.
 
 use serde_json::{json, Value};
 
-use super::gm_dir;
 use crate::pkfs;
 
 /// Cap on retained records. A config source that flaps (a sync loop rewriting the same
@@ -44,20 +43,13 @@ const MAX_RECORD_AGE_MS: u128 = 24 * 60 * 60 * 1000;
 /// that many sessions have seen is already past `MAX_RECORD_AGE_MS`.
 const MAX_DELIVERED_TO: usize = 64;
 
-fn store_path() -> String {
-    gm_dir()
-        .join("exec-spool")
-        .join(".config-changes.json")
-        .to_string_lossy()
-        .to_string()
-}
+const STORE_PATH: &str = ".gm/exec-spool/.config-changes.json";
 
 fn read_records() -> Vec<Value> {
-    let path = store_path();
-    if !pkfs::exists(&path) {
+    if !pkfs::exists(STORE_PATH) {
         return Vec::new();
     }
-    let Some(raw) = pkfs::read_to_string(&path) else {
+    let Some(raw) = pkfs::read_to_string(STORE_PATH) else {
         return Vec::new();
     };
     // A torn or hand-mangled store must not take down the instruction dispatch: config
@@ -70,7 +62,7 @@ fn read_records() -> Vec<Value> {
 }
 
 fn write_records(records: &[Value]) -> bool {
-    pkfs::write(&store_path(), &Value::Array(records.to_vec()).to_string())
+    pkfs::write(STORE_PATH, &Value::Array(records.to_vec()).to_string())
 }
 
 fn short_sha(sha: &str) -> String {
