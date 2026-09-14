@@ -554,6 +554,21 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
 
 const AGENTS_DRAIN_STATE_FILE: &str = ".gm/exec-spool/.agents-drain-state.json";
 const FLAT_STREAK_WARN_THRESHOLD: u32 = 3;
+// The full back_pressure_warning/instruction prose repeated byte-for-byte on
+// every memorize-fire once flat_streak crossed the warn threshold. Every
+// caller already gets agents_bytes/agents_lines/dropped_since_last_fire/
+// flat_streak on every call, so the prose only needs to resurface
+// periodically -- mirrors the per-signature dedup/occurrenceCount pattern
+// plugkit-wasm-wrapper.js already uses for the GL-error capture path.
+const FULL_TEXT_REPEAT_INTERVAL: u64 = 10;
+
+/// Whether `streak` is due to surface its full prose: the turn it first
+/// reaches `first_at`, then every `FULL_TEXT_REPEAT_INTERVAL` turns beyond
+/// that. Other turns get the compact/omitted form instead of a
+/// byte-identical repeat of the same paragraph.
+fn due_for_full_text(streak: u64, first_at: u64) -> bool {
+    streak >= first_at && (streak - first_at) % FULL_TEXT_REPEAT_INTERVAL == 0
+}
 
 #[cfg(target_arch = "wasm32")]
 fn agents_drain_obligation() -> serde_json::Value {
@@ -575,13 +590,28 @@ fn agents_drain_obligation() -> serde_json::Value {
     let new_state = serde_json::json!({ "agents_bytes": bytes as u64, "flat_streak": flat_streak });
     let _ = crate::wasm_dispatch::host_write(AGENTS_DRAIN_STATE_FILE, &new_state.to_string());
 
-    let back_pressure_warning = if flat_streak >= FLAT_STREAK_WARN_THRESHOLD as u64 {
+    let warn_active = flat_streak >= FLAT_STREAK_WARN_THRESHOLD as u64;
+    let warn_due_full = warn_active && due_for_full_text(flat_streak, FLAT_STREAK_WARN_THRESHOLD as u64);
+    let instruction_due_full = due_for_full_text(flat_streak, 1);
+
+    let back_pressure_warning: Option<String> = if warn_due_full {
         Some(format!(
             "AGENTS.md byte count has not dropped across the last {} memorize-fire calls this session (currently {} bytes) -- the drain obligation has been skipped repeatedly, not merely absent this one turn. If genuinely nothing is eligible to drain, that is fine; if something detail-heavy/single-crate/single-platform is sitting in AGENTS.md, drain it THIS turn.",
             flat_streak, bytes
         ))
+    } else if warn_active {
+        Some(format!(
+            "AGENTS.md drain still overdue (flat_streak {}, {} bytes) -- full reminder repeats every {} calls; see this session's earlier back_pressure_warning for the full text.",
+            flat_streak, bytes, FULL_TEXT_REPEAT_INTERVAL
+        ))
     } else {
         None
+    };
+
+    let instruction: serde_json::Value = if instruction_due_full {
+        serde_json::Value::String("AGENTS.md is a staging ground; every memorize run drains it. THIS turn, pick a few existing AGENTS.md entries that are detail-heavy, single-crate, or single-platform (the material that belongs in rs-learn), memorize-fire their substance to the default namespace, then compress each drained paragraph to a one-line pointer in the SAME commit. Witness: this store gained the fact (recallable next turn) AND the AGENTS.md byte count dropped. A few entries per run, never a wholesale rewrite; top-level cross-cutting rules stay. Skipping the drain is the slow-bloat drift this back-pressure exists to prevent.".to_string())
+    } else {
+        serde_json::Value::Null
     };
 
     serde_json::json!({
@@ -590,7 +620,7 @@ fn agents_drain_obligation() -> serde_json::Value {
         "dropped_since_last_fire": dropped,
         "flat_streak": flat_streak,
         "back_pressure_warning": back_pressure_warning,
-        "instruction": "AGENTS.md is a staging ground; every memorize run drains it. THIS turn, pick a few existing AGENTS.md entries that are detail-heavy, single-crate, or single-platform (the material that belongs in rs-learn), memorize-fire their substance to the default namespace, then compress each drained paragraph to a one-line pointer in the SAME commit. Witness: this store gained the fact (recallable next turn) AND the AGENTS.md byte count dropped. A few entries per run, never a wholesale rewrite; top-level cross-cutting rules stay. Skipping the drain is the slow-bloat drift this back-pressure exists to prevent.",
+        "instruction": instruction,
     })
 }
 
