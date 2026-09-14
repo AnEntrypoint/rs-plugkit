@@ -58,3 +58,4 @@ ignore = "0.4.30"
 # ever built for (see .github/workflows/wasm-plugin-release.yml), which is
 # the same reason `ignore` lives here.
 regex = "1"
+globset = "0.4"

@@ -2172,39 +2172,25 @@ pub fn git_commit_rank(query: &str, k: usize) -> Vec<(String, String, f64)> {
     git_commit_rank_fallback(query, k)
 }
 
-fn glob_match_simple(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    let (mut pi, mut ti, mut star, mut match_i) = (0usize, 0usize, None::<usize>, 0usize);
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
-            pi += 1; ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some(pi); match_i = ti; pi += 1;
-        } else if let Some(sp) = star {
-            pi = sp + 1; match_i += 1; ti = match_i;
-        } else {
-            return false;
-        }
-    }
-    while pi < p.len() && p[pi] == '*' { pi += 1; }
-    pi == p.len()
-}
-
 pub fn search_filenames(pattern: &str, k: usize, cfg: &crate::ragconfig::RagConfig) -> Value {
     search_filenames_at(pattern, k, cfg, None)
 }
 
 pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> Value {
+    let glob = match crate::path_glob::looks_like_glob(pattern) {
+        true => match crate::path_glob::PathGlob::parse(pattern) {
+            Ok(g) => Some(g),
+            Err(e) => return json!({ "ok": false, "mode": "filename", "error": e }),
+        },
+        false => None,
+    };
     let needle = pattern.to_lowercase();
-    let is_glob = needle.contains('*') || needle.contains('?');
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
     let full_files = collect_files(root, cfg.index.digest_max_files.max(20000), &cfg.index);
     let hits: Vec<Value> = full_files.iter()
-        .filter(|p| {
-            let lp = p.to_lowercase();
-            if is_glob { glob_match_simple(&needle, &lp) || glob_match_simple(&needle, lp.rsplit('/').next().unwrap_or(&lp)) }
-            else { lp.contains(&needle) }
+        .filter(|p| match &glob {
+            Some(g) => g.admits(root, p),
+            None => p.to_lowercase().contains(&needle),
         })
         .take(k)
         .map(|p| json!({ "path": p }))
@@ -2380,6 +2366,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         }
     };
 
+    let path_glob = match req.path_glob.map(crate::path_glob::PathGlob::parse).transpose() {
+        Ok(g) => g,
+        Err(e) => return json!({ "ok": false, "error": e, "path_glob": req.path_glob }),
+    };
     let root = req.root.filter(|p| !p.is_empty()).unwrap_or(".");
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let universe = match crate::scan_universe::list_scan_universe(root, req.scope, file_cap.saturating_add(1), &cfg.index) {
@@ -2390,12 +2380,12 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let files_truncated = listed.len() > file_cap;
     let files: &[String] = if files_truncated { &listed[..file_cap] } else { &listed[..] };
 
-    let glob_needle = req.path_glob.map(|g| g.to_lowercase());
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let budget_ms = cfg.index.wall_budget_ms;
 
     let mut matches: Vec<Value> = Vec::new();
     let mut files_scanned = 0usize;
+    let mut files_matching_glob = 0usize;
     let mut files_with_matches = 0usize;
     let mut files_skipped_too_large: Vec<String> = Vec::new();
     let mut files_skipped_binary = 0usize;
@@ -2410,10 +2400,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             budget_exhausted = true;
             break;
         }
-        if let Some(glob) = &glob_needle {
-            let lower = path.to_lowercase();
-            let base = lower.rsplit('/').next().unwrap_or(lower.as_str()).to_string();
-            if !glob_match_simple(glob, &lower) && !glob_match_simple(glob, &base) { continue; }
+        if let Some(glob) = &path_glob {
+            if !glob.admits(root, path) { continue; }
+            files_matching_glob += 1;
         }
         let stat = host_stat(path).filter(|v| !v.is_null());
         if let Some(stat) = &stat {
@@ -2488,7 +2477,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
     let (tracked_deleted, unreadable_paths): (Vec<String>, Vec<String>) =
         unreadable_paths.into_iter().partition(|p| deleted_from_worktree.contains(p));
+    let glob_matched_no_files = path_glob.is_some() && files_matching_glob == 0 && !files.is_empty();
     let exhaustive = !files_truncated
+        && !glob_matched_no_files
         && !matches_truncated
         && !budget_exhausted
         && files_skipped_too_large.is_empty()
@@ -2504,7 +2495,18 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     out.insert("case_insensitive".to_string(), json!(req.case_insensitive));
     if !req.regex { out.insert("whole_word".to_string(), json!(req.whole_word)); }
     if let Some(s) = req.scope { out.insert("path".to_string(), json!(s)); }
-    if let Some(g) = req.path_glob { out.insert("path_glob".to_string(), json!(g)); }
+    if let Some(g) = req.path_glob {
+        out.insert("path_glob".to_string(), json!(g));
+        out.insert("files_matching_glob".to_string(), json!(files_matching_glob));
+    }
+    if glob_matched_no_files {
+        out.insert("glob_matched_no_files".to_string(), json!(true));
+        out.insert("glob_note".to_string(), json!(format!(
+            "path_glob admitted none of the {} listed files, so zero matches says nothing about the tree -- the glob is matched case-insensitively against each path relative to the root (and against the bare file name when it has no '/'); supported syntax: {}",
+            files.len(),
+            crate::path_glob::PATH_GLOB_SYNTAX,
+        )));
+    }
     out.insert("match_count".to_string(), json!(matches.len()));
     out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
     out.insert("files_with_matches".to_string(), json!(files_with_matches));
@@ -2556,7 +2558,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     }
     if !exhaustive {
         out.insert("exhaustive_note".to_string(), json!(
-            "at least one bound or skip rule fired -- this is NOT every match in the tree; files_truncated/matches_truncated/budget_exhausted/files_skipped_too_large/files_unreadable/git_listing_incomplete/excluded_by_rule name which"
+            "at least one bound or skip rule fired -- this is NOT every match in the tree; files_truncated/matches_truncated/budget_exhausted/files_skipped_too_large/files_unreadable/git_listing_incomplete/excluded_by_rule/glob_matched_no_files name which"
         ));
     }
     out.insert("matches".to_string(), Value::Array(matches));

@@ -1451,8 +1451,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         ));
     }
     if body.get("mode").and_then(|v| v.as_str()) == Some("filename") {
-        let out = crate::code_index::search_filenames_at(query, k as usize, cfg, Some(root));
-        return ok("codesearch", out);
+        return codesearch_scan_result(crate::code_index::search_filenames_at(query, k as usize, cfg, Some(root)), "filename search failed");
     }
     let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
     if !already_indexed {
@@ -1660,9 +1659,12 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
     };
-    let out = crate::code_index::scan_literal(&scan, cfg);
+    codesearch_scan_result(crate::code_index::scan_literal(&scan, cfg), "exhaustive scan failed")
+}
+
+fn codesearch_scan_result(out: Value, fallback: &str) -> u64 {
     if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
-        return err("codesearch", out.get("error").and_then(|e| e.as_str()).unwrap_or("exhaustive scan failed"));
+        return err_coded("codesearch", ERR_CODE_INVALID_ARGS, out.get("error").and_then(|e| e.as_str()).unwrap_or(fallback));
     }
     ok("codesearch", out)
 }
@@ -1703,8 +1705,7 @@ fn codesearch(body: &Value) -> u64 {
         return codesearch_at_root(body, root, query, k, &cfg);
     }
     if mode == "filename" {
-        let out = crate::code_index::search_filenames(query, k as usize, &cfg);
-        return ok("codesearch", out);
+        return codesearch_scan_result(crate::code_index::search_filenames(query, k as usize, &cfg), "filename search failed");
     }
     let (_dataflow_doc, dataflow_tier, dataflow_path) = crate::dataflow::document_detailed();
     if dataflow_tier != crate::dataflow::DataflowTier::CompiledDefault {
@@ -3540,18 +3541,102 @@ fn git_finalize(body: &Value) -> u64 {
     }))
 }
 
+const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &["session_id", "sessionId", "cwd", "repo"];
+const GIT_LOG_FIELDS: &[&str] = &["limit", "count", "range", "ref", "rev", "path", "paths", "files"];
+const GIT_LOG_REVISION_ALIASES: &[&str] = &["range", "ref", "rev"];
+const GIT_DIFF_FIELDS: &[&str] = &["staged", "stat", "range", "ref", "rev", "path", "paths", "files"];
+const GIT_SHOW_FIELDS: &[&str] = &["ref", "rev", "sha", "commit", "path", "paths", "files", "stat"];
+const GIT_SHOW_REF_ALIASES: &[&str] = &["ref", "rev", "sha", "commit"];
+const GIT_OUTPUT_MAX_BYTES: usize = 60000;
+
+fn git_refuse_unknown_fields(verb: &str, body: &Value, accepted: &[&str]) -> Option<u64> {
+    let unknown: Vec<&str> = body.as_object()?
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !k.starts_with('_') && !accepted.contains(k) && !GIT_BODY_ENVELOPE_FIELDS.contains(k))
+        .collect();
+    if unknown.is_empty() { return None; }
+    Some(err_json(verb, json!({
+        "error": format!(
+            "{verb} does not recognise body field(s) {} -- refused rather than ignored, because an ignored field silently answers a different question than the one asked",
+            unknown.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", "),
+        ),
+        "error_code": ERR_CODE_INVALID_ARGS,
+        "unknown_fields": unknown,
+        "accepted_fields": accepted,
+    })))
+}
+
+fn git_named_revision<'a>(body: &'a Value, aliases: &[&str]) -> Result<Option<&'a str>, String> {
+    let mut named: Vec<(&str, &str)> = Vec::new();
+    for key in aliases {
+        match body.get(*key) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) if !s.trim().is_empty() => named.push((key, s.trim())),
+            Some(other) => return Err(format!("{key} must be a non-empty revision string, got {other}")),
+        }
+    }
+    if named.windows(2).any(|pair| pair[0].1 != pair[1].1) {
+        return Err(format!("conflicting revisions given: {named:?} -- pass one of {aliases:?}"));
+    }
+    Ok(named.first().map(|(_, value)| *value))
+}
+
+fn git_optional_path<'a>(body: &'a Value) -> Result<Option<&'a str>, String> {
+    match body.get("path") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if !s.trim().is_empty() => Ok(Some(s.trim())),
+        Some(other) => Err(format!("path must be a non-empty path string, got {other}")),
+    }
+}
+
+fn git_path_and_pathspecs(body: &Value) -> Result<Option<Vec<String>>, String> {
+    let mut pathspecs = body_pathspecs(body)?.unwrap_or_default();
+    if let Some(p) = git_optional_path(body)? { pathspecs.insert(0, p.to_string()); }
+    Ok(if pathspecs.is_empty() { None } else { Some(pathspecs) })
+}
+
+fn git_positive_count(body: &Value, fields: &[&str], fallback: u64) -> Result<u64, String> {
+    for field in fields {
+        if let Some(v) = body.get(*field) {
+            return match v.as_u64() {
+                Some(n) if n > 0 => Ok(n),
+                _ => Err(format!("{field} must be a positive integer, got {v}")),
+            };
+        }
+    }
+    Ok(fallback)
+}
+
+fn git_capped_output(mut out: String) -> (String, bool, usize) {
+    let total = out.len();
+    if total > GIT_OUTPUT_MAX_BYTES {
+        let cut = (0..=GIT_OUTPUT_MAX_BYTES).rev().find(|i| out.is_char_boundary(*i)).unwrap_or(0);
+        out.truncate(cut);
+    }
+    (out, total > GIT_OUTPUT_MAX_BYTES, total)
+}
+
 fn git_log(body: &Value) -> u64 {
+    if let Some(refused) = git_refuse_unknown_fields("git_log", body, GIT_LOG_FIELDS) { return refused; }
     git_async_entry("git_log", body, |body, plan| {
         let cwd = body_cwd(body);
-        let count = body.get("limit").and_then(|v| v.as_u64())
-            .or_else(|| body.get("count").and_then(|v| v.as_u64()))
-            .unwrap_or(10);
+        let count = match git_positive_count(body, &["limit", "count"], 10) {
+            Ok(n) => n,
+            Err(e) => return Ok(err_coded("git_log", ERR_CODE_INVALID_ARGS, &e)),
+        };
+        let range = match git_named_revision(body, GIT_LOG_REVISION_ALIASES) {
+            Ok(r) => r.unwrap_or(""),
+            Err(e) => return Ok(err_coded("git_log", ERR_CODE_INVALID_ARGS, &e)),
+        };
+        let pathspecs = match git_path_and_pathspecs(body) {
+            Ok(p) => p,
+            Err(e) => return Ok(err_coded("git_log", ERR_CODE_INVALID_ARGS, &e)),
+        };
         let nflag = format!("-{}", count);
-        let range = body.get("range").and_then(|v| v.as_str())
-            .or_else(|| body.get("ref").and_then(|v| v.as_str()))
-            .unwrap_or("").trim();
-        let mut argv: Vec<&str> = vec!["log", &nflag, "--oneline", "--no-color"];
-        if !range.is_empty() { argv.push(range); }
+        let mut base: Vec<&str> = vec!["log", &nflag, "--oneline", "--no-color"];
+        if !range.is_empty() { base.push(range); }
+        let argv = argv_with_pathspecs(&base, pathspecs.as_deref());
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
@@ -3569,30 +3654,32 @@ fn git_log(body: &Value) -> u64 {
             let subject = it.next().unwrap_or("").to_string();
             json!({ "sha": sha, "subject": subject })
         }).collect();
-        Ok(ok("git_log", json!({ "commits": commits })))
+        let mut data = json!({ "commits": commits });
+        if !range.is_empty() { data["range"] = json!(range); }
+        if let Some(specs) = &pathspecs { data["paths"] = json!(specs); }
+        Ok(ok("git_log", data))
     })
 }
 
 fn git_diff(body: &Value) -> u64 {
+    if let Some(refused) = git_refuse_unknown_fields("git_diff", body, GIT_DIFF_FIELDS) { return refused; }
     git_async_entry("git_diff", body, |body, plan| {
         let cwd = body_cwd(body);
         let staged = body.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
-        let path = body.get("path").and_then(|v| v.as_str());
-        let range = body.get("range").and_then(|v| v.as_str())
-            .or_else(|| body.get("ref").and_then(|v| v.as_str()))
-            .unwrap_or("").trim();
-        let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
-        let mut pathspecs = match body_pathspecs(body) {
-            Ok(p) => p.unwrap_or_default(),
-            Err(e) => return Ok(err("git_diff", &e)),
+        let range = match git_named_revision(body, GIT_LOG_REVISION_ALIASES) {
+            Ok(r) => r.unwrap_or(""),
+            Err(e) => return Ok(err_coded("git_diff", ERR_CODE_INVALID_ARGS, &e)),
         };
-        if let Some(p) = path { pathspecs.insert(0, p.to_string()); }
+        let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
+        let pathspecs = match git_path_and_pathspecs(body) {
+            Ok(p) => p,
+            Err(e) => return Ok(err_coded("git_diff", ERR_CODE_INVALID_ARGS, &e)),
+        };
         let mut base: Vec<&str> = vec!["diff", "--no-color"];
         if staged { base.push("--staged"); }
         if stat { base.push("--stat"); }
         if !range.is_empty() { base.push(range); }
-        let scope = if pathspecs.is_empty() { None } else { Some(pathspecs.as_slice()) };
-        let argv = argv_with_pathspecs(&base, scope);
+        let argv = argv_with_pathspecs(&base, pathspecs.as_deref());
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
@@ -3603,42 +3690,68 @@ fn git_diff(body: &Value) -> u64 {
                 "hint": "git rejected the range; an empty diff must never be inferred from a rejected argument -- check both endpoints exist locally"
             })));
         }
-        let mut diff = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let truncated = diff.len() > 60000;
-        if truncated { diff.truncate(60000); }
-        Ok(ok("git_diff", json!({ "diff": diff, "truncated": truncated, "range": range })))
+        let (diff, truncated, total_bytes) = git_capped_output(r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string());
+        let mut data = json!({ "diff": diff, "truncated": truncated, "range": range });
+        if truncated { data["total_bytes"] = json!(total_bytes); }
+        if let Some(specs) = &pathspecs { data["paths"] = json!(specs); }
+        Ok(ok("git_diff", data))
     })
 }
 
-const GIT_SHOW_REF_ALIASES: [&str; 4] = ["ref", "rev", "sha", "commit"];
+fn git_object_at_revision(rev: &str, path: &str) -> Result<String, String> {
+    if rev.contains(':') {
+        return Err(format!("revision \"{rev}\" already names an object (<rev>:<path>) -- pass the bare revision with \"path\", or drop \"path\""));
+    }
+    let normalized = path.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    if normalized.starts_with('/') || (bytes.len() >= 2 && bytes[1] == b':') {
+        return Err(format!("path \"{path}\" must be relative to the repository working directory, not absolute"));
+    }
+    let relative = normalized.trim_start_matches("./");
+    Ok(if relative.starts_with("../") { format!("{rev}:{relative}") } else { format!("{rev}:./{relative}") })
+}
 
 fn git_show(body: &Value) -> u64 {
+    if let Some(refused) = git_refuse_unknown_fields("git_show", body, GIT_SHOW_FIELDS) { return refused; }
     let cwd = body_cwd(body);
-    let named: Vec<(&str, &str)> = GIT_SHOW_REF_ALIASES
-        .iter()
-        .filter_map(|key| body.get(*key).map(|v| (*key, v.as_str().unwrap_or("").trim())))
-        .collect();
-    if let Some((key, _)) = named.iter().find(|(_, value)| value.is_empty()) {
-        return err("git_show", &format!("{key} must be a non-empty revision string"));
-    }
-    if named.windows(2).any(|pair| pair[0].1 != pair[1].1) {
-        return err("git_show", &format!("conflicting revisions given: {named:?} -- pass one of {GIT_SHOW_REF_ALIASES:?}"));
-    }
-    let refspec = named.first().map(|(_, value)| *value).unwrap_or("HEAD");
+    let refspec = match git_named_revision(body, GIT_SHOW_REF_ALIASES) {
+        Ok(r) => r.unwrap_or("HEAD"),
+        Err(e) => return err_coded("git_show", ERR_CODE_INVALID_ARGS, &e),
+    };
+    let path = match git_optional_path(body) {
+        Ok(p) => p,
+        Err(e) => return err_coded("git_show", ERR_CODE_INVALID_ARGS, &e),
+    };
+    let pathspecs = match body_pathspecs(body) {
+        Ok(p) => p,
+        Err(e) => return err_coded("git_show", ERR_CODE_INVALID_ARGS, &e),
+    };
     let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
-    let mut argv: Vec<&str> = vec!["show", "--no-color"];
-    if stat { argv.push("--stat"); }
-    argv.push(refspec);
+    let object = match (path, &pathspecs) {
+        (Some(_), Some(_)) => return err_coded("git_show", ERR_CODE_INVALID_ARGS,
+            "\"path\" shows one file's content at a revision and \"paths\" limits a commit's diff to pathspecs -- pass one, not both"),
+        (Some(_), None) if stat => return err_coded("git_show", ERR_CODE_INVALID_ARGS,
+            "\"stat\" summarises a commit's diff and has no meaning for a file's content at a revision -- drop \"stat\" or \"path\""),
+        (Some(p), None) => match git_object_at_revision(refspec, p) {
+            Ok(o) => o,
+            Err(e) => return err_coded("git_show", ERR_CODE_INVALID_ARGS, &e),
+        },
+        (None, _) => refspec.to_string(),
+    };
+    let mut base: Vec<&str> = vec!["show", "--no-color"];
+    if stat { base.push("--stat"); }
+    base.push(&object);
+    let argv = argv_with_pathspecs(&base, pathspecs.as_deref());
     let r = git_call_argv(&argv, cwd);
     if git_exit_code(&r) != 0 {
         return err("git_show", &git_failure_text(&r, "git show failed"));
     }
-    let mut out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    if out.len() > 60000 {
-        let cut = (0..=60000).rev().find(|i| out.is_char_boundary(*i)).unwrap_or(0);
-        out.truncate(cut);
-    }
-    ok("git_show", json!({ "ref": refspec, "output": out }))
+    let (out, truncated, total_bytes) = git_capped_output(r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string());
+    let mut data = json!({ "ref": refspec, "output": out, "truncated": truncated });
+    if truncated { data["total_bytes"] = json!(total_bytes); }
+    if let Some(p) = path { data["path"] = json!(p); data["object"] = json!(object); }
+    if let Some(specs) = &pathspecs { data["paths"] = json!(specs); }
+    ok("git_show", data)
 }
 
 fn git_fetch(body: &Value) -> u64 {
