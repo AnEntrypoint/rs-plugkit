@@ -107,6 +107,7 @@ fn predicate_result(name: &str) -> bool {
     false
 }
 
+#[cfg(target_arch = "wasm32")]
 fn residual_scan_marker_matches_current_session_or_is_within_longgap_threshold(
     fired_sid: &str,
     fired_at_ms: u64,
