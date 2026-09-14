@@ -16,6 +16,9 @@ pub mod code_index;
 pub mod scan_deps;
 
 #[cfg(target_arch = "wasm32")]
+pub mod scan_universe;
+
+#[cfg(target_arch = "wasm32")]
 pub mod embed;
 
 #[cfg(target_arch = "wasm32")]
