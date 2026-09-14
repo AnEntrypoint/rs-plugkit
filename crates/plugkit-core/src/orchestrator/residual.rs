@@ -115,13 +115,6 @@ fn running_tasks_exist() -> bool {
     super::task::any_running()
 }
 
-/// Shape a skipped-scan result according to the kind's effective severity.
-///
-/// Both residual skips have always returned rc=0 with a `scan: "skipped"` body --
-/// advisory, not refusing. That stays the registry default (Severity::Log), so an
-/// unconfigured project sees byte-identical behaviour. A project that promotes the
-/// kind gets the same body plus a non-empty stderr and rc=1, which is what turns an
-/// advisory skip into a refusal the caller cannot read past.
 fn deviation_scan_result(
     payload: serde_json::Value,
     severity: super::deviations::Severity,
@@ -142,12 +135,6 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
 pub fn handle_scan(_content: &str) -> (String, String, i32) {
     let marker = gm_dir().join("residual-check-fired");
 
-    // Each check is gated on Policy.residual_checks. The order is fixed here
-    // because it is load-bearing -- each check short-circuits the scan, so the
-    // first to trip is the only residual reported, and the sequence runs
-    // cheapest-and-most-blocking first. What a project CAN change is which
-    // checks apply: a repo with no browser surface should not be told to close
-    // browser sessions it never opens.
     let enabled = crate::orchestrator::fsm::graph().policy.residual_checks.clone();
     let on = |k: &str| enabled.iter().any(|c| c == k);
 
@@ -208,14 +195,6 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
         return deviation_scan_result(payload, severity, &reason);
     }
 
-    // Wire format: "<session_id>:<fired_at_ms>", not a bare "fired" sentinel.
-    // A bare existence check cannot distinguish this stop window's own scan
-    // from an arbitrarily old one left over because a hook never ran to
-    // clear it -- the dangerous direction for a COMPLETE gate, since it fails
-    // OPEN (silently allows a transition whose residual scan never actually
-    // ran this window) rather than closed. The reader (transitions.rs's
-    // residual_scan_fired) checks session_id equality first, then a time
-    // bound as the fallback for a dispatch with no session_id attached.
     let marker_s = marker.to_string_lossy().to_string();
     let fired_sid = super::state::read_state().session_id.unwrap_or_default();
     let fired_at_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
@@ -236,11 +215,6 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     (payload.to_string(), String::new(), 0)
 }
 
-// Observability only, never blocking -- residual-scan surfaces this finding
-// when meaningful (a real, non-trivial fraction of liqology's tracked
-// entries would be pruned under its current policy), absent otherwise
-// (empty/small/healthy store). liqology's own store never gets auto-pruned
-// from here; that stays the agent's explicit tune_policy/record-driven call.
 #[cfg(target_arch = "wasm32")]
 fn liqology_stale_memory_finding() -> Option<serde_json::Value> {
     let resp = crate::wasm_dispatch::plugin_call("liqology", "prune_report", &serde_json::json!({}));

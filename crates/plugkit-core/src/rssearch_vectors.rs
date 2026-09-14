@@ -8,15 +8,6 @@ use crate::ragconfig::RagConfig;
 use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
 use crate::vecns::{self, QueryBudget, RecencyParams, VecTableSpec};
 
-/// Ambient config for the existing non-`_cfg` entry points.
-///
-/// Every public function here has a `_cfg` twin taking `&RagConfig`; the
-/// original name keeps its signature and forwards through this so the ~10
-/// call sites in `verbs.rs`/`memory_md.rs` need not change until a resolution
-/// layer actually has something to hand them. Constructed per call rather than
-/// cached in a `static`, because the plugin instance is process-wide and
-/// shared across concurrently-active projects -- a cached config would let one
-/// project's knowledgebase settings answer another project's query.
 fn default_cfg() -> RagConfig {
     RagConfig::resolved()
 }
@@ -42,19 +33,8 @@ pub fn ensure_schema() -> Result<(), String> {
     ensure_schema_cfg(&default_cfg())
 }
 
-/// `ensure_schema_cfg` is called by EVERY read as well as every write, and it
-/// issues four separate libsql round trips (dim-mismatch probe, CREATE TABLE,
-/// pragma_table_info, CREATE INDEX over a vector index). The plugin opens the
-/// database fresh per call, so on a large store that fixed cost dominates the
-/// search it is supposed to be preparing for. The schema cannot change under a
-/// running process except through this function, so remembering the
-/// (path, dim) pairs already ensured makes the repeat calls free while still
-/// re-running in full whenever either changes.
 static SCHEMA_ENSURED: Mutex<Option<HashSet<(String, usize)>>> = Mutex::new(None);
 
-/// Anything that destroys the tables out from under the memo must call this,
-/// or the next `ensure_schema_cfg` returns Ok against a database that no
-/// longer has the schema in it.
 pub fn forget_ensured_schema() {
     if let Some(seen) = SCHEMA_ENSURED.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         seen.clear();
@@ -71,10 +51,6 @@ pub fn ensure_schema_cfg(cfg: &RagConfig) -> Result<(), String> {
         }
     }
     shared_ensure_open(&path)?;
-    // ORDER IS LOAD-BEARING: the mismatch guard runs before the CREATE, so a
-    // config-driven `embed.dim` change destroys the old-width table first.
-    // Reversing this makes the CREATE a no-op against the surviving table and
-    // leaves the store answering queries at the previous vector width.
     let _ = spec(&path, cfg).drop_if_dim_mismatch_cfg(&cfg.embed);
     shared_exec(&format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, namespace TEXT NOT NULL, key TEXT NOT NULL, text TEXT, embedding F32_BLOB({}), updated_at INTEGER, deleted INTEGER NOT NULL DEFAULT 0, UNIQUE(namespace, key))",
@@ -87,12 +63,6 @@ pub fn ensure_schema_cfg(cfg: &RagConfig) -> Result<(), String> {
         ))?;
     }
     spec(&path, cfg).ensure_index();
-    // Table-scoped, not the shared/global marker -- this store's own dim-
-    // mismatch check above only ever answered for cfg.rssearch.table, so it
-    // records completion for that same table, independent of whatever
-    // code_index.rs or git_commit_vectors.rs have separately recorded for
-    // THEIR OWN tables. See embed_marker.rs's marker_rel_for_table doc
-    // comment for the false-negative a single shared marker caused.
     crate::embed_marker::record_embed_generation_for_table(&cfg.rssearch.table);
     SCHEMA_ENSURED
         .lock()
@@ -115,10 +85,6 @@ pub fn write_cfg(namespace: &str, key: &str, text: &str, embedding: &Value, now_
         Some(v) if !v.is_empty() => v,
         _ => return Err("rssearch_vectors: empty or non-array embedding; refusing NULL-embedding row".to_string()),
     };
-    // A row whose width disagrees with the column would be rejected by libsql
-    // at INSERT with an opaque error; reject it here instead, naming both
-    // widths, so a half-migrated embedder is diagnosable rather than just
-    // "insert failed".
     if vec.len() != cfg.dim() {
         return Err(format!(
             "rssearch_vectors: embedding dim {} does not match configured dim {}; refusing to write a row the F32_BLOB column cannot hold",
@@ -156,11 +122,6 @@ pub fn mark_deleted_cfg(namespace: &str, key: &str, cfg: &RagConfig) -> Result<(
     mark_deleted_reporting_match_cfg(namespace, key, cfg).map(|_| ())
 }
 
-/// Returns whether a row was actually marked, not merely whether the UPDATE
-/// executed. An UPDATE matching zero rows succeeds, so a caller using the
-/// `Result` alone cannot tell "tombstoned an existing row" from "this key was
-/// never here" -- and one that treats Ok as proof of deletion reports success
-/// for every key it is handed.
 pub fn mark_deleted_reporting_match_cfg(namespace: &str, key: &str, cfg: &RagConfig) -> Result<bool, String> {
     if let Err(e) = ensure_schema_cfg(cfg) {
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
@@ -189,18 +150,6 @@ pub fn undelete(namespace: &str, key: &str, updated_at_ms: i64) -> Result<(), St
     undelete_cfg(namespace, key, updated_at_ms, &default_cfg())
 }
 
-/// Hard-deletes soft-deleted rows, which nothing else does.
-///
-/// `mark_deleted` sets a tombstone and every read filters on it, so a pruned
-/// row stops being findable but never stops occupying the table or its vector
-/// index. Measured on this repo's store before this existed: 328 tombstones
-/// against 427 live rows -- 43% of the table unreclaimable, with all 755
-/// entries still carried by the vector index the ANN query scans.
-///
-/// Deliberately explicit rather than automatic. The prune surface is
-/// agent-judged by design ("never auto-similarity-deleted"), and reclaiming
-/// storage is a different decision from deciding a memory is unwanted, so this
-/// is a verb a caller invokes, not a policy that runs behind them.
 pub fn vacuum_tombstones_cfg(namespace: Option<&str>, cfg: &RagConfig) -> Result<u64, String> {
     ensure_schema_cfg(cfg)?;
     let count_sql = match namespace {
@@ -269,12 +218,6 @@ fn scoped_count(deleted_flag: u8, namespace: Option<&str>, cfg: &RagConfig) -> u
         .max(0) as u64
 }
 
-/// Counts live and tombstoned rows without mutating either.
-///
-/// Both counts carry a predicate deliberately: an unfiltered aggregate over a
-/// libsql F32_BLOB table answers 0 even when the table is full, so a census
-/// built on `COUNT(*)` would report an empty store and invite a caller to act
-/// on that.
 pub fn tombstone_census_cfg(namespace: Option<&str>, cfg: &RagConfig) -> Result<TombstoneCensus, String> {
     ensure_schema_cfg(cfg)?;
     Ok(TombstoneCensus {
@@ -283,12 +226,6 @@ pub fn tombstone_census_cfg(namespace: Option<&str>, cfg: &RagConfig) -> Result<
     })
 }
 
-/// Whether the census crosses either reclaim threshold.
-///
-/// Either threshold alone is sufficient: a ratio catches a small store that has
-/// gone mostly-tombstone, a count catches a large store whose ratio stays low
-/// while the absolute waste grows. A store at 43% tombstones, which is what
-/// prompted this policy, trips the ratio.
 pub fn retention_reclaim_due(census: &TombstoneCensus, cfg: &RagConfig) -> bool {
     census.tombstoned > 0
         && (census.tombstone_ratio() >= cfg.retention.tombstone_ratio_threshold
@@ -316,20 +253,6 @@ pub fn row_count(namespace: &str) -> Option<i64> {
     row_count_cfg(namespace, &default_cfg())
 }
 
-/// Counts live rows only, and never with an UNFILTERED scan.
-///
-/// An unfiltered aggregate over a libsql F32_BLOB vector table answers 0 even
-/// when the table is full. Measured on this repo's store: `SELECT COUNT(*)
-/// FROM rssearch_vectors` returns 0, and so does the subquery form without a
-/// WHERE -- but the same aggregate WITH any predicate returns 755, which
-/// reconciles exactly against 428 live plus 327 tombstoned rows. It is the
-/// missing predicate, not the aggregate, that produces the false empty.
-///
-/// This matters more than a wrong number: a caller reading 0 would conclude
-/// the knowledgebase is empty and could reasonably drop the table or re-index
-/// from scratch. The `deleted=0` filter both avoids the hazard and answers the
-/// question a caller actually means -- how many rows are live, not how many
-/// tombstones are still on disk.
 pub fn row_count_cfg(namespace: &str, cfg: &RagConfig) -> Option<i64> {
     ensure_schema_cfg(cfg).ok()?;
     let sql = format!(
@@ -344,15 +267,6 @@ fn recover_and_retry<F>(op: F) -> Result<Value, String>
 where
     F: Fn() -> Result<Value, String>,
 {
-    // Busy first: transient lock contention from a concurrent session against
-    // the same shared db (see libsql_wasm::retry_on_busy for why this is a
-    // bounded re-dispatch loop, not a spin-wait). Only once that is
-    // exhausted -- i.e. the error is genuinely not a lock, or three full
-    // busy-timeout cycles all still saw the lock held -- fall through to the
-    // existing Corrupt-only destructive recovery below. A busy database must
-    // never take the malformed path: recover_malformed_shared_db() deletes
-    // and recreates the file, which would destroy a perfectly healthy store
-    // that just happened to be locked by another process's in-flight write.
     match crate::libsql_wasm::retry_on_busy(&op) {
         Err(e) if crate::shared_db::is_malformed_by_sqlite_error_code(&e) => {
             if crate::shared_db::recover_malformed_shared_db() {
@@ -365,18 +279,10 @@ where
     }
 }
 
-/// Build the ANN-retrieval SQL shared by both search entry points.
-///
-/// The `pool` (not `limit`) is used for BOTH `vector_top_k`'s k and the outer
-/// LIMIT: recency reweighting and dedup happen after retrieval, so a hit that
-/// wins on final score can sit outside the top-`limit` by raw cosine. Cutting
-/// to `limit` here would make the reranker structurally unable to change the
-/// result set.
+const FIRST_NAMESPACE_PLACEHOLDER_AFTER_QUERY_VECTOR_PAIR: usize = 3;
+
 fn ann_query_sql(namespaces: &[String], pool: usize, cfg: &RagConfig) -> String {
-    // Namespace placeholders start at ?3 because ?1/?2 are both the query
-    // vector literal (once for the distance projection, once for the index
-    // probe).
-    let ns_placeholders: Vec<String> = (0..namespaces.len()).map(|i| format!("?{}", i + 3)).collect();
+    let ns_placeholders: Vec<String> = (0..namespaces.len()).map(|i| format!("?{}", i + FIRST_NAMESPACE_PLACEHOLDER_AFTER_QUERY_VECTOR_PAIR)).collect();
     let ns_filter = if namespaces.is_empty() {
         String::new()
     } else {
@@ -515,14 +421,6 @@ fn host_kv_query_raw(namespace: &str, query: &str) -> Value {
 }
 
 
-/// Namespaces confirmed fully migrated this process, so `rssearch_vector_hits`
-/// (called on every vector query) can skip straight past this entire function
-/// without paying `host_kv_query_raw`'s full flat-namespace scan just to
-/// recompute a `flat_total` that was already known to be satisfied. This is
-/// the same one-entry-per-key memoization shape as `git_commit_vectors`'s
-/// `SCHEMA_ENSURED` -- once a namespace's migration is done, it stays done for
-/// the lifetime of this process; `forget_ensured_schema`'s sibling below lets
-/// a caller invalidate it the same way the schema cache is invalidated.
 static MIGRATION_COMPLETE: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
     std::sync::Mutex::new(None);
 
@@ -585,8 +483,6 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
             }
         }
     }
-    // Only the code namespace has a tree-sitter corpus to recover chunk text
-    // from; every other namespace's text lives in the flat kv store.
     let is_code_ns = cfg.namespaces.is_code(namespace);
     let mut corpus = if is_code_ns { Some(crate::code_index::FusionCorpus::load()) } else { None };
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
@@ -632,9 +528,6 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
         "deferred_count": deferred,
     }));
     if deferred == 0 {
-        // This pass drained the whole backlog with nothing left over -- mark
-        // complete now rather than waiting for one more call to rediscover
-        // that fact via a fresh flat_total/existing comparison.
         MIGRATION_COMPLETE
             .lock()
             .unwrap_or_else(|e| e.into_inner())

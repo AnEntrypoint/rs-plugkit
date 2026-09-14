@@ -438,21 +438,6 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     (payload.to_string(), String::new(), 0)
 }
 
-/// Mark an EXISTING, already-tracked mutable `blockedBy: ["external"]` so
-/// `pending_detailed()` (the `mutables-all-resolved` COMPLETE-gate predicate, and the
-/// `mutables_pending` list surfaced by `instruction`) stops treating it as an open row
-/// blocking CONSOLIDATE -- without resolving it, which would falsely claim the unknown is
-/// answered. Mirrors `prd::handle_defer` exactly: a mutable inherited from a prior,
-/// unrelated session (a cross-session investigation with no fix available this session,
-/// or a one-way-door decision only a human can make -- a credential, a history rewrite,
-/// a product call) has no escape from `mutables-all-resolved` today even though the
-/// equivalent PRD-row case already does via `prd-defer`, which is the exact asymmetry
-/// that made the CONSOLIDATE gate's `prd-all-closed`+`mutables-all-resolved`+
-/// `residual-scan-fired` triple unsatisfiable whenever a session inherited a genuinely
-/// out-of-scope mutable: PRD could be emptied via `prd-defer`, but the mutable had no
-/// matching move and stayed permanently pending. Same deviation gate as prd-defer/
-/// prd-add: `reason` must name the actual concrete reach path, not bare deferral
-/// language, so this cannot become a second "declare it externally blocked" exit.
 pub fn handle_defer(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
