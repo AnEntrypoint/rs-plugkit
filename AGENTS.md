@@ -40,10 +40,15 @@ crates/plugkit-core/src/
 ## Code style
 
 Follows the same discipline as gm's own `AGENTS.md` (parent repo): no
-comments unless the WHY is genuinely non-obvious, no synthetic test files
-or test frameworks of any kind -- verification is a real build plus a
-live-witnessed dispatch through the actual spool, never a mock. No
-graphical/decorative glyphs in source or docs. No UTF-8 BOM.
+source comments. A fact a name can carry goes in the name (this crate's long
+descriptive identifiers are deliberate); a non-obvious rationale that is still
+true goes in "Source invariants" below, 1-3 lines each, or in the gm recall
+store. Kept in source: `#[...]` attributes, `// SAFETY:` on `unsafe` blocks,
+license headers. Doc comments count as comments: rustdoc is never built or
+published. No synthetic test files or test frameworks of any kind --
+verification is a real build plus a live-witnessed dispatch through the
+actual spool, never a mock. No graphical/decorative glyphs in source or docs.
+No UTF-8 BOM.
 
 ## Development
 
@@ -133,3 +138,90 @@ There are no branches or PRs in this workflow -- every change pushes
 straight to `main` (see gm's own `AGENTS.md`, direct-push-to-main rule).
 A branch or open PR found in this repo is a deviation to consolidate onto
 `main` or remove, not a review step to wait on.
+
+## Source invariants
+
+Non-obvious facts the code cannot carry, relocated from source comments.
+Each is still true of the current code; fix or delete an entry when that
+changes.
+
+### code_index.rs
+
+- `SKIP_FILE_SUFFIXES`: `.rlib`/`.rmeta`/`.pdb` are the only exclusion for
+  build output in dirs not named exactly `target` (e.g. `target-foo/`); they
+  hold readable symbol names that pollute literal scans.
+- `ensure_schema_at_cfg`: the dim-mismatch drop must run before `CREATE TABLE
+  IF NOT EXISTS`, which is a silent no-op against a surviving old-width table.
+- `parse_manifest`: accepts every version in
+  `MIN_READABLE_MANIFEST_VERSION..=MANIFEST_VERSION`. A parse failure routes to
+  `purge_stale_manifest_row`, so a strict version check turns a version bump
+  into a full cache wipe on every pass; new manifest fields must be optional.
+- `FileManifest::digest_hash`: every branch, the stat-only fast path included,
+  must record the same per-file value `current_digest()` folds, and
+  `current_digest_cfg` must apply the indexer's file-size cap; otherwise the
+  stored digest never matches and every dispatch re-indexes.
+- Over-budget passes (`code_index.rs`, `memory_md.rs`) store
+  `<digest>:partial=N`: it never equals a fresh digest, so the next dispatch
+  resumes. It must still be written; a missing digest forces a full re-index
+  that is itself partial. A tree that never fits re-runs every dispatch until
+  `IndexConfig::wall_budget_ms` / `MemorySyncBudgetConfig` is raised.
+- `root_ns_suffix`: host KV rows are keyed by namespace string alone, not by
+  libsql db path, so every per-root db also salts its KV namespaces; the
+  no-root namespace stays unsalted.
+- The libsql plugin retains no connection: every `libsql_wasm` call opens the
+  db by path, so per-file queries inside the index loop cost a full open each;
+  batch them (`chunk_rows_by_path`).
+- libsql: an unfiltered `COUNT(*)` or `COUNT(DISTINCT ...)` over an `F32_BLOB`
+  vector table returns 0; `overview` counts through a `GROUP BY` subquery.
+- Call edges are one KV row per file, never per edge: per-edge rows made
+  deletion a full-namespace scan per indexed file.
+- `index_with_dead_code`: the likely-orphaned-symbol scan is off by default
+  because `index_cfg` also backs `codeinsight_overview`, which runs on every
+  `instruction` dispatch.
+- `scan_literal`: `LITERAL_SCAN_MAX_FILES`/`LITERAL_SCAN_MAX_FILE_BYTES` are
+  independent of `IndexConfig::digest_max_files`/`max_file_bytes` (digest and
+  embedding cost bounds); reusing those drops real source from an "every match"
+  answer. Every bound hit clears `exhaustive`, except `files_skipped_binary`.
+- `host_read` returns `None` for both IO failure and non-UTF-8 content;
+  `scan_literal` tells them apart with `host_stat` (stat ok means binary skip,
+  stat failed means an unreadable gap).
+- Lowercasing can change byte length (`İ`): `LiteralMatcher::find_all` falls
+  back to a char-aligned scan when lengths differ, and match text is taken with
+  `get`, never a slice index.
+
+### ragconfig.rs
+
+- `IndexConfig::pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound`
+  = 16000: the worst measured wasm BERT cost is 3.6-15.2 s per chunk. It divides
+  the remaining wall budget into a per-file chunk allowance; a lower value lets
+  one slow file overrun the wasmtime epoch deadline and poison the Store.
+- `IndexConfig::digest_max_files`/`prune_enumeration_file_cap`: files past the
+  cap are silently ignored (stale chunk rows survive, the digest can report
+  converged), so large monorepos must raise them.
+- `BulkEmbedBudgetConfig::git_commit_sync_hard_ceiling_ms` is an elapsed-time
+  stop independent of the `git_commit_min_embeds_per_pass` floor: `git show -p`
+  cost scales with diff size (measured ~43 s/commit on a binary-heavy repo).
+  Commits over `git_commit_full_diff_max_changed_lines`/`_max_files` (read from
+  cheap `--shortstat`) embed their subject only; the file cap catches binary
+  diffs that count ~0 lines.
+- `.gm/index-config.json` (`apply_project_local_index_overlay`) sits outside
+  the config tiers because `config::resolve_with` returns a project-vendored
+  tier whole and drops lower tiers: a project tier holding one index tweak would
+  lose the config-source prose, fsm and messages. Its lists only append.
+- `RetentionConfig` only reclaims space behind already-tombstoned rows and
+  never tombstones a live row; pruning stays an agent decision.
+
+### wasm_dispatch/verbs.rs
+
+- `confinement_violation`/`capability_access_violation` key off the caller's
+  self-declared `discipline` field. The spool ABI carries no unforgeable caller
+  identity, so omitting `discipline` bypasses both: they catch accidental
+  cross-namespace access, they are not a security boundary.
+- `codesearch_at_root` skips the cwd-bound fusion/BM25/dataflow machinery on
+  purpose; it is tied to the current project's db and would mix roots.
+- `codesearch_exhaustive` (literal/regex) is dispatched before the root branch
+  and every digest/index/embedding step, none of which it reads; routed later,
+  a literal query on a large workspace took minutes.
+- `browser` and `cdp` share `host_browser_exec`; the engine travels in the opts
+  JSON (`"engine"`), never inside the code body, so the host picks
+  lightpanda/steel/chrome without re-escaping caller JS.

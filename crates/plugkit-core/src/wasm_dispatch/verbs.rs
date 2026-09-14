@@ -646,18 +646,6 @@ fn kv_get(body: &Value) -> u64 {
     }
 }
 
-/// Algorithm 6 (Cordis paper Section 5.1.4/6.3) proxy mediation, applied at
-/// the exact point of KV access -- not only at discipline-activation time
-/// the way `active_policies()`/`requires_satisfied` gate policy surfacing.
-/// A caller that names itself via `discipline` (the accessing fiber) and
-/// reads/writes a DIFFERENT discipline's namespace (the coeffect key) goes
-/// through `capability_proxy::resolve`, which raises `INACTIVE_ACCESS`
-/// (declared but the provider is not currently Active) or
-/// `UNDECLARED_ACCESS` (never declared in `requires.json` at all) exactly
-/// as Algorithm 6's `resolve` walk does. Same-namespace access and callers
-/// that omit `discipline` bypass this by construction (see
-/// `confinement_violation`'s own doc comment: an accessor that does not
-/// name itself is not resolving against any fiber's coeffect chain).
 fn capability_access_violation(body: &Value, namespace: &str) -> Option<u64> {
     let accessor = body.get("discipline").and_then(|v| v.as_str())?;
     if accessor == namespace {
@@ -677,23 +665,6 @@ fn capability_access_violation(body: &Value, namespace: &str) -> Option<u64> {
     }
 }
 
-/// A self-declared-identity check inspired by Confinement (Cordis paper
-/// Definition 48, Section 4.2), NOT an enforcement of it. Definition 48
-/// binds a component's OWN effect function -- trusted code the paper's
-/// model assumes runs as that fiber, never as an open dispatch surface a
-/// caller can lie to. gm's spool-dispatch ABI carries no caller identity
-/// a caller cannot simply omit or fabricate (no capability token, no
-/// signed session-to-discipline binding), so this check catches only a
-/// caller that VOLUNTARILY names itself via `discipline` and then
-/// contradicts that name with a mismatched `namespace` -- an accidental
-/// cross-namespace write from well-behaved code, not an adversary. A
-/// caller that wants to violate confinement does so by simply omitting
-/// `discipline`, at which point `claimed` is `None` and this function
-/// returns `None` (no violation) unconditionally: the check is fully
-/// bypassable and offers no security boundary. Genuine enforcement would
-/// need the dispatch ABI itself to carry a caller identity the caller
-/// cannot forge, which does not exist today -- a real capability/token
-/// system is the actual fix, not a stronger version of this function.
 fn confinement_violation(body: &Value, namespace: &str) -> Option<String> {
     let claimed = body.get("discipline").and_then(|v| v.as_str())?;
     if claimed == namespace {
@@ -1433,17 +1404,6 @@ fn memorize_prune(body: &Value) -> u64 {
     }))
 }
 
-/// Cross-project entry: `codesearch {root|projectPath, query, ...}` against a
-/// submodule or sibling repo, e.g. `C:/dev/liqology`. Its index/cache lives at
-/// `<root>/.gm/gm.db` plus a crc32-salted KV namespace -- isolated from and
-/// reusable independent of the current project's own index (see
-/// `code_index::project_db_path`/`root_ns_suffix`). Deliberately bypasses the
-/// cwd-only fusion/BM25/dataflow-pipeline machinery the default path uses:
-/// that machinery is inherently tied to the current project's own db and
-/// threading it through every root would risk mixing state across projects;
-/// filename+semantic search alone already covers the actual failure mode
-/// (falling back to `find`/Grep/Glob because codesearch could not reach a
-/// submodule at all).
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
     if !crate::wasm_dispatch::host_allow_root(root) {
         return err("codesearch", &format!(
@@ -1474,26 +1434,8 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
     }))
 }
 
-/// Every `mode` codesearch honours. Anything else is an ERROR naming this
-/// list, never a silent downgrade.
-///
-/// Why this list is enforced rather than pattern-matched in place: `mode` used
-/// to be consulted at exactly two sites and only for the literal string
-/// "filename", so every other value -- `"literal"`, `"regex"`, a typo -- fell
-/// through to the dual retrieval path and the response then reported
-/// `mode: "dual"`. The caller's instruction was discarded AND the response
-/// said so in a field the caller had no reason to re-read, which is how a
-/// ranked 10-hit answer got mistaken for an exhaustive one.
 const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 
-/// Body spellings accepted for "how many results", in precedence order.
-///
-/// `max_results` is here because it was silently ignored: only `k` was ever
-/// read, so `{"max_results": 60}` collapsed to `cfg.budget.default_k` (10) and
-/// the caller saw a 10-hit answer with nothing saying their limit was dropped.
-/// The other spellings are the plausible ways the same intent gets typed; an
-/// unrecognised one must never be ignored, so they are recognised rather than
-/// left to fall through.
 const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit"];
 
 const CODESEARCH_SCOPE_FIELDS: &[&str] = &["path", "glob", "path_glob"];
@@ -1557,11 +1499,6 @@ fn codesearch_optional_str<'a>(body: &'a Value, field: &str) -> Result<Option<&'
     }
 }
 
-/// Resolves the result limit, reporting a genuine conflict instead of picking
-/// a winner behind the caller's back. Returns the limit and whether the caller
-/// stated it explicitly (the exhaustive modes need that distinction: an
-/// explicit limit bounds them, an absent one must not silently bound them to
-/// the ranked-retrieval default of 10).
 fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> Result<(u32, bool), String> {
     let mut seen: Vec<(&str, u64)> = Vec::new();
     for field in CODESEARCH_LIMIT_FIELDS {
@@ -1588,16 +1525,6 @@ fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> R
     }
 }
 
-/// Exhaustive literal/regex search: ripgrep semantics, every match with
-/// path:line, enumeration order, no relevance ranking, no top-k.
-///
-/// Routed BEFORE the root branch and before every digest/index/embedding step
-/// because it needs none of them -- that bypass is the fix for a literal
-/// question over a large workspace costing minutes (measured on
-/// C:/dev/litebox-main: two 120s/240s timeouts and one ~420s answer, all spent
-/// in the corpus-digest walk, the `index(".", 500)` rebuild it triggered, and
-/// the embedding/fusion passes that follow, none of which an exact-match
-/// answer consults).
 fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ragconfig::RagConfig, explicit_limit: Option<u32>) -> u64 {
     let unknown = codesearch_exhaustive_unknown_fields(body);
     if !unknown.is_empty() {
@@ -2251,13 +2178,6 @@ fn browser_lightpanda_or_steel_cdp_engine(body: &Value, body_s: &str) -> u64 {
             })),
         },
     };
-    // The browser and cdp verbs share ONE host-import (host_browser_exec) and
-    // ONE agentplug-side driver (browser::run) -- both are real-Chrome-family
-    // CDP-over-port dispatch, differing only in which engine answers the
-    // port. The "engine" field rides in the small opts param (never inside
-    // the raw code body), so the agentplug host reads it to pick
-    // spawn-lightpanda vs dial-steel-endpoint vs the cdp verb's
-    // spawn-chrome default, without JSON-escaping the caller's raw JS.
     let opts = json!({ "timeoutMs": timeout_ms, "engine": "lightpanda" }).to_string();
     let packed = unsafe { host_browser_exec(
         code.as_ptr(), code.len() as u32,
@@ -2348,12 +2268,6 @@ fn cdp_real_chrome_escape_hatch(body: &Value, body_s: &str) -> u64 {
             })),
         },
     };
-    // Explicit "engine":"chrome" (rather than relying on field-absence) keeps
-    // cdp's own dispatch self-describing on the same shared envelope the
-    // browser verb now also sends over host_browser_exec -- the agentplug
-    // host's default for a missing/unrecognized engine field is ALSO chrome
-    // (see browser_engine::select_engine), so this is belt-and-suspenders
-    // preserving cdp's exact prior behavior, not a functional dependency.
     let opts = json!({ "timeoutMs": timeout_ms, "engine": "chrome" }).to_string();
     let packed = unsafe { host_browser_exec(
         code.as_ptr(), code.len() as u32,
@@ -3312,14 +3226,6 @@ fn git_commit(body: &Value) -> u64 {
     })
 }
 
-// Best-effort: feeds every real commit into liqology's memory-relevance
-// tracker (record verb) so the plugin accumulates real interaction history
-// instead of sitting built-but-uncalled. A commit is the closest real
-// signal to a completed interaction available at this point -- the same
-// text embeds both input and output since git_commit has no separate
-// input/output split to offer, matching liqology's own memory-loop example
-// convention for this case. Never blocks or fails the commit itself: a
-// liqology-unavailable/embed-failed/plugin-error outcome is only logged.
 fn record_commit_in_liqology(summary: &str, sha_full: &str) {
     let Some(embedding) = crate::embed::embed_text(summary) else {
         emit_event("liqology_record_skipped", json!({ "reason": "embed_failed", "sha_full": sha_full }));
