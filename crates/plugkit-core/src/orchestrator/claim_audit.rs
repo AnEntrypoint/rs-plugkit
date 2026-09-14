@@ -26,16 +26,6 @@ fn line_asserts_shipped_claim_cfg(line: &str, cfg: &crate::ragconfig::ClaimAudit
         .any(|marker| lower.contains(&marker.to_ascii_lowercase()))
 }
 
-/// Which submodule, if any, a claim line is talking about.
-///
-/// Derived from the same `.gitmodules`-backed source `submodule_drift` uses,
-/// rather than a second hardcoded copy of the list. The two copies were
-/// byte-identical and had to stay that way: a name added to one and not the
-/// other sends a hash to the WRONG repo to be verified, which reports a
-/// perfectly valid claim as stale.
-///
-/// Matched on the final path component, since a claim line names a repo
-/// ("landed in rs-plugkit abc1234"), not a checkout path.
 fn named_submodule_in_line(line: &str) -> Option<String> {
     let lower = line.to_ascii_lowercase();
     super::submodule_drift::submodule_paths()
@@ -131,14 +121,6 @@ pub fn claim_audit_fired() -> bool {
     pkfs::exists(&marker_path)
 }
 
-/// Whether the last claim audit found nothing stale.
-///
-/// Requires the literal `clean`. Testing `!= "stale"` made every unexpected
-/// body -- empty, truncated by a partial write, or any other content -- read as
-/// a passing audit, so a gate on both guarded edges could be satisfied by a
-/// marker no audit ever wrote. A gate must fail CLOSED on anything it does not
-/// positively recognise, which is the same rule `predicate_result` applies to an
-/// unknown predicate name.
 pub fn claim_audit_clean() -> bool {
     let marker_path = gm_dir().join("claim-audit-fired").to_string_lossy().to_string();
     match pkfs::read_to_string(&marker_path) {

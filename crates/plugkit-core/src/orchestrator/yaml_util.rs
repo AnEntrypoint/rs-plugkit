@@ -67,10 +67,6 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Shared by prd::handle_add/handle_defer and mutables::handle_defer: rejects a
-/// `blockedBy: ["external"]` reason/description that is bare hand-waving ("later",
-/// "next session") rather than a concrete, genuinely out-of-reach justification.
-/// Returns the matched marker text for the caller's error message.
 pub fn defer_marker_in_text(text: &str) -> Option<&'static str> {
     let lower = text.to_lowercase();
     const HARD_MARKERS: &[&str] = &[

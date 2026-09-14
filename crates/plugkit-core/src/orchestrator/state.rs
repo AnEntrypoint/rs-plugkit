@@ -44,12 +44,6 @@ impl std::fmt::Display for Phase {
     }
 }
 
-/// One phase transition, recorded as an accumulator entry so a feedback-edge
-/// re-entry (e.g. DECIDE->SPECIFY) can be reverted precisely instead of only
-/// via the separately-tracked mutables.yml/prd.yml side state. Mirrors the
-/// Cordis effect-context accumulator: each transition composes an inverse
-/// (its own `from` phase) onto a LIFO history, so `transition-revert` pops
-/// the last entry and restores the phase it recorded.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhaseTransitionEntry {
     pub from: String,
@@ -89,22 +83,6 @@ fn initial_phase() -> Phase {
     Phase::parse(&super::fsm::graph().policy.initial_phase).unwrap_or_else(Phase::plan)
 }
 
-/// Migrates a persisted `TurnState` whose `phase` may not be valid in the
-/// caller's already-resolved `g` to the graph's own initial phase. Takes `g`
-/// rather than resolving `fsm::graph()` itself: each resolution is a real
-/// network fetch through the config-repo tiers, and two independent
-/// resolutions within one dispatch can observe two DIFFERENT graphs if the
-/// tier flips mid-dispatch (a debounce window elapsing between calls, a
-/// config-repo cache directory being concurrently refreshed by another
-/// process). That TOCTOU let a persisted phase pass migration against
-/// graph-instance-A's states, then fail the transition edge-check moments
-/// later against graph-instance-B's edges -- observed live 2026-07-30
-/// (thebird project): `transition{to:EXECUTE}` denied "no edge from PLAN to
-/// EXECUTE" repeatedly even though `PLAN` had just passed state validation in
-/// the same dispatch. Every caller in this module now resolves the graph
-/// exactly once per dispatch and threads that single value through every
-/// helper that needs it (see transitions::handle), so within one dispatch
-/// every check agrees on which graph is active.
 fn migrate_to_graph(mut s: TurnState, g: &super::fsm::Graph) -> TurnState {
     if !g.has_state(s.phase.as_str()) {
         s.phase = Phase::parse(&g.policy.initial_phase).unwrap_or_else(Phase::plan);
@@ -134,10 +112,6 @@ pub fn read_state() -> TurnState {
     read_state_with_graph(&g)
 }
 
-/// `read_state` split so a caller resolving the graph once for a whole
-/// dispatch (see transitions::handle) can pass it in, avoiding a second
-/// independent `fsm::graph()` network resolution that could disagree with
-/// the first (see migrate_to_graph's doc comment).
 pub fn read_state_with_graph(g: &super::fsm::Graph) -> TurnState {
     let p = state_path();
     let ps = p.to_string_lossy().to_string();
@@ -193,14 +167,6 @@ pub fn set_phase_with_session(phase: Phase, last_skill: Option<String>, session_
     set_phase_with_session_with_graph(phase, last_skill, session_id, &g)
 }
 
-/// `set_phase_with_session` split so a caller resolving the graph once for a
-/// whole dispatch (see transitions::handle) can pass it in, avoiding a
-/// second independent `fsm::graph()` network resolution (see
-/// migrate_to_graph's doc comment). `phase` here is the already-validated
-/// target the caller computed against that SAME graph, so this function does
-/// not re-validate it -- only the underlying `read_state_with_graph` call
-/// uses `g`, to migrate whatever was on disk consistently with the rest of
-/// this dispatch.
 pub fn set_phase_with_session_with_graph(phase: Phase, last_skill: Option<String>, session_id: Option<String>, g: &super::fsm::Graph) -> Result<TurnState, std::io::Error> {
     let mut s = read_state_with_graph(g);
     let from = s.phase.as_str().to_string();
@@ -220,11 +186,6 @@ pub fn set_phase_with_session_with_graph(phase: Phase, last_skill: Option<String
     Ok(s)
 }
 
-/// Reverts the most recent recorded transition, restoring the phase it
-/// moved from. Pops the LIFO history exactly once, mirroring how a Cordis
-/// accumulator's inverse recovers one effect at a time -- never a bulk
-/// rewind, so a caller reverting N transitions dispatches this N times and
-/// observes each intermediate phase.
 pub fn revert_last_transition() -> Result<TurnState, std::io::Error> {
     let g = super::fsm::graph();
     let mut s = read_state_with_graph(&g);

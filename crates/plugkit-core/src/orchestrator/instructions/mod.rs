@@ -58,18 +58,6 @@ fn iso8601_to_ms(s: &str) -> Option<i64> {
     Some(((days * 86400 + h * 3600 + mi * 60 + sec) * 1000) + ms)
 }
 
-/// Mirror the turn-relevant markers into `.turn-summary.json`.
-///
-/// `update_available` and `config_changed_count` are passed in rather than
-/// re-read here: the caller has already read the marker and already DRAINED the
-/// config-change store for this session, and re-reading would either duplicate
-/// the read or -- for the drain -- consume the same records a second time and
-/// mark them delivered to a session that never saw them.
-///
-/// The summary is a snapshot for an agent reading it at turn start, so
-/// `config_changed_count` is a count rather than the records themselves: the
-/// records ride the instruction response body, and duplicating them here would
-/// invite an agent to act on a notification twice.
 #[cfg(target_arch = "wasm32")]
 fn write_turn_summary(
     phase: &str,
@@ -145,20 +133,6 @@ pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
     }
 }
 
-/// Whether `key` has a REAL compiled default, as opposed to landing on the
-/// `_ => entry::TEXT` fallthrough above.
-///
-/// The fallthrough exists so an unrecognised key always serves *something*
-/// rather than failing a dispatch -- but it makes an unknown key indistinguishable
-/// from `entry` at the call site. A custom phase declaring `prose_key: "triage"`
-/// silently serves ENTRY prose, which reads as a working config while being
-/// completely wrong. Callers that need to TELL THE DIFFERENCE (graph validation,
-/// and the vendor scaffolder, which would otherwise write a file full of ENTRY
-/// text under a `triage.md` filename) ask here first.
-///
-/// Kept deliberately adjacent to the match above so the two cannot drift: adding
-/// a compiled default without adding it here would make validation warn about a
-/// key that actually resolves fine.
 pub fn has_compiled_default_for_prose_key(key: &str) -> bool {
     matches!(
         key,
@@ -179,8 +153,6 @@ pub fn fnv1a64(text: &str) -> u64 {
 pub fn get_instruction(phase: &str) -> String {
     let upper = phase.trim().to_ascii_uppercase();
     let g = super::fsm::graph();
-    // Pseudo-phases come from Policy, so a project can rename or add one
-    // without editing Rust. An empty phase is always the entry surface.
     let pseudo = g.policy.pseudo_phases.iter().find(|(name, _)| name == &upper).map(|(_, key)| key.clone());
     let key = match pseudo {
         Some(k) => k,
@@ -490,15 +462,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
 
     let instruction_hash = format!("{:016x}", fnv1a64(&instruction));
-    // The server-side marker records that prose was SENT, never that it
-    // ARRIVED. A dispatch whose out-file never reached the caller (a lost
-    // claim, a client poll timeout, a re-dispatch) still stamped the marker, so
-    // the retry that the caller made precisely because it had no prose was
-    // answered with an empty `instruction` and no way to recover short of
-    // `prompt=entry-extended`. A hash the caller asserts from prose it is
-    // actually holding cannot be wrong in that direction: absent an assertion,
-    // prose is served. The same field is what lets a caller that DOES hold the
-    // prose suppress re-sending tens of kilobytes of it on every dispatch.
     let prior_instruction_hash = notify_session
         .as_deref()
         .and_then(|sid| read_spool_json(&format!(".last-instruction-hash-{sid}.json")).get("hash").and_then(|h| h.as_str()).map(|s| s.to_string()));

@@ -1,16 +1,3 @@
-//! Data-driven plugin-orchestration pipelines: the dataflow counterpart to
-//! `orchestrator::fsm`'s phase graph. A pipeline names an entry point
-//! (`codesearch`, `recall`, `code_index`) and describes its steps as data --
-//! which plugin+verb each step calls, how its input is built from prior
-//! steps' outputs, and how independent steps' outputs are fused -- instead of
-//! a fixed Rust call sequence. Resolution mirrors `fsm::graph_detailed()`'s
-//! three tiers exactly: a project-vendored local override always wins, then a
-//! repo-sourced graph via the same `config::resolve()`-backed cache the FSM
-//! graph already uses, then the compiled default. A project pointing at an
-//! unmodified default reproduces today's fixed call sequence byte-for-byte;
-//! that reproduction is enforced by construction, not by convention, since the
-//! compiled default IS the executor's only source of truth absent an override.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,9 +5,6 @@ use crate::pkfs;
 
 pub const DATAFLOW_SCHEMA_VERSION: u32 = 1;
 
-/// One step: invoke `plugin`'s `verb`, building its request body from
-/// `input`. `id` is this step's own handle, referenced by later steps' `input`
-/// mappings and by a fuse step's `sources`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepNode {
     pub id: String,
@@ -28,16 +12,10 @@ pub struct StepNode {
     pub verb: String,
     #[serde(default)]
     pub input: InputMapping,
-    /// Only run this step if the named condition (from `conditions`)
-    /// evaluates true. Absent = always run.
     #[serde(default)]
     pub when: Option<String>,
 }
 
-/// How a step's request body is assembled. Every key names either a literal
-/// JSON value, a path into the original pipeline request (`request.<key>`),
-/// or a path into a prior step's output (`steps.<id>.<key>`) -- `serde_json`
-/// `Value`s so a literal object/array is expressible without a second syntax.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InputMapping {
     #[serde(default)]
@@ -53,12 +31,6 @@ pub struct FuseNode {
     pub params: std::collections::BTreeMap<String, Value>,
 }
 
-/// A named boolean condition a `when` field can reference. `field` names a
-/// dotted path into the resolved `RagConfig`-adjacent config value (e.g.
-/// `namespaces.vector_only`); `equals` is the literal it must match. This is
-/// intentionally narrow (one field, one literal) -- broader expression
-/// languages are a hook's job (see `fsm::GateDef`'s own predicate/hook split),
-/// not this schema's.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Condition {
     pub name: String,
@@ -66,10 +38,6 @@ pub struct Condition {
     pub equals: Value,
 }
 
-/// One named pipeline (an entry point's whole graph): steps run in the order
-/// listed except where a `when` skips one, fuse nodes run once every step
-/// their `sources` name has finished, and the pipeline's own result is
-/// whatever step or fuse-node id `output` names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pipeline {
     pub entry_point: String,
@@ -139,10 +107,6 @@ fn known_fuse_strategy(name: &str) -> bool {
     matches!(name, "rrf_fuse")
 }
 
-/// The full resolved document: one `Pipeline` per named entry point, so a
-/// project overriding only `codesearch` inherits `recall`/`code_index`
-/// unmodified -- the same per-key partial-override contract `config.rs`'s
-/// tiered resolution already promises elsewhere.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DataflowDocument {
     #[serde(default)]
@@ -247,11 +211,6 @@ pub fn pipeline_for(entry_point: &str) -> Option<Pipeline> {
     document().pipelines.remove(entry_point)
 }
 
-/// The compiled-default pipelines: one entry per rewired entry point,
-/// expressed as data. Each MUST reproduce that entry point's pre-rewire fixed
-/// call sequence exactly -- this is the tier that serves every project
-/// without a dataflow override, so a divergence here is a silent regression
-/// against every unconfigured caller, not a design choice made once.
 fn default_document() -> DataflowDocument {
     let mut pipelines = std::collections::BTreeMap::new();
 
@@ -302,14 +261,6 @@ fn default_document() -> DataflowDocument {
         },
     );
 
-    // code_index: extract_chunks (parse-via-treesitter + node-to-chunk in one
-    // real call) -> embed-batch -> cache-write. NOTE: this pipeline covers
-    // only the per-file chunk/embed/cache transform -- the wall-budget,
-    // deferred-file convergence, and digest/manifest bookkeeping that wraps
-    // it in code_index.rs's index_cfg() is intentionally NOT expressed here
-    // (safety-critical, see dataflow_exec.rs's chunk_split doc comment); a
-    // dataflow override of this entry point governs only the per-file
-    // extract/embed/cache-write step shape, not the outer indexing loop.
     pipelines.insert(
         "code_index".to_string(),
         Pipeline {
@@ -347,8 +298,6 @@ fn default_document() -> DataflowDocument {
         },
     );
 
-    // recall: embed_query -> vector_search (recency+cosine+jaccard already
-    // config-driven inside this one call) -> that IS the final ranked result.
     pipelines.insert(
         "recall".to_string(),
         Pipeline {

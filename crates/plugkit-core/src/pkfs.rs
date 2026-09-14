@@ -67,9 +67,6 @@ pub enum CasWriteOutcome {
     IoError,
 }
 
-/// Atomic compare-and-swap write: succeeds only if the file's current
-/// content still equals `expected` at the moment the host checks, in one
-/// locked host-side critical section -- see host_abi::host_cas_write.
 #[cfg(target_arch = "wasm32")]
 pub fn cas_write(path: &str, expected: &str, data: &str) -> CasWriteOutcome {
     match crate::wasm_dispatch::host_cas_write(&anchor(path), expected, data) {

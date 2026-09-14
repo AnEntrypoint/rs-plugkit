@@ -142,16 +142,6 @@ pub struct Resolution {
     pub tier: Tier,
     pub why: String,
     pub rejected: Vec<String>,
-    /// Absolute directory the winning tier's repo checkout is materialized
-    /// into, when the winning tier is repo-backed. `None` for
-    /// `ProjectVendored` (no checkout, a single file) and `BuiltinDefault`
-    /// (nothing fetched). A caller resolving a path RELATIVE to this
-    /// resolution's config (e.g. `fsm.graph`, an instructions-source `path`)
-    /// must join against this field rather than guess a tier's cache dir
-    /// from a hardcoded constant -- three distinct constants
-    /// (`SOURCE_CACHE_REL`, `DEFAULT_REPO_CACHE_REL`, `user_cache_root()`)
-    /// name three different directories, and only the tier that actually won
-    /// knows which one holds the checkout this `Resolution` was read from.
     pub cache_dir: Option<String>,
 }
 
@@ -256,13 +246,6 @@ fn type_name_of(v: &Value) -> &'static str {
     }
 }
 
-/// Parse ONE repo-source object (a single entry of a tier-2/3 spec, whether
-/// the spec file held a bare object or one element of an array). `cache_root`
-/// is the tier's cache root; the entry's own sub-directory beneath it is
-/// derived from a content hash of (repo, reference, path) so N entries in one
-/// spec never collide on disk, and reordering the array (same entries, new
-/// priority) resolves to the SAME sub-directories rather than triggering a
-/// needless re-clone.
 fn parse_source_entry(obj: &Map<String, Value>, origin: &str, cache_root: &str, tier_label: &str) -> Result<RepoSource, String> {
     let repo = obj
         .get("repo")
@@ -298,13 +281,6 @@ fn parse_source_entry(obj: &Map<String, Value>, origin: &str, cache_root: &str, 
     })
 }
 
-/// Parse a repo-source SPEC (tiers 2 and 3): either a bare `{repo,...}`
-/// object (the original single-source shape, treated as a 1-element list for
-/// backward compatibility) or a JSON array of such objects, resolved and
-/// deep-merged in array order (first entry's keys win, falling through to the
-/// next entry, then to the tier below). Separate from [`parse_config`]
-/// because a spec is a pointer with an entirely different required shape --
-/// conflating them would let a config-shaped file satisfy a spec read.
 fn parse_source_spec(text: &str, origin: &str, cache_root: &str, tier_label: &str) -> Result<Vec<RepoSource>, String> {
     let cleaned = text.trim_start_matches('\u{feff}');
     if cleaned.trim().is_empty() {
@@ -452,13 +428,6 @@ fn load_one_repo_source(src: &RepoSource, spec_path: &str, fetcher: &dyn RepoFet
     }
 }
 
-/// Load a repo-backed tier that may declare MULTIPLE sources (an array in the
-/// spec file): each is loaded independently, and a bad/unreachable entry never
-/// blocks the OTHERS -- only every entry failing (or the spec being genuinely
-/// empty/absent) degrades the whole tier to `Absent`/`Rejected`. Configs from
-/// entries that DID load are deep-merged in array order: entry 0's keys win,
-/// falling through entry-by-entry, matching the same first-non-empty-wins
-/// semantics `resolve_with` already applies across tiers.
 fn load_repo_tier(
     spec_path: &str,
     cache_root: String,
@@ -502,46 +471,6 @@ fn load_repo_tier(
     }
 }
 
-/// Resolve the full chain against a project root, reporting which tier won.
-///
-/// `project_root` is passed in rather than resolved here so callers that
-/// already hold a root (orchestrator::gm_dir resolves one via git, and refuses
-/// to guess) do not resolve it twice, and so this stays callable off-wasm.
-///
-/// Never panics and always returns a `Resolution`: tier 4 is infallible.
-/// The wired entry point: resolve config for THIS dispatch's project using the
-/// real git-backed fetcher.
-///
-/// `resolve_with` takes an injected fetcher so it stays testable and so a
-/// caller that must not touch the network can pass `NoopFetcher`. That
-/// injection is also how the module ended up shipped-but-inert: nothing
-/// constructed a real fetcher, so tiers 2 and 3 could never fire in production
-/// no matter how correct the chain was. This function is the one place that
-/// binds the chain to `GitRepoFetcher`, so "resolve config" has a single
-/// obvious call for the rest of the codebase.
-///
-/// Resolves against the CURRENT dispatch's project root (host_cwd_string,
-/// fresh every call) because the plugin instance is process-wide and shared
-/// across concurrently-active projects -- a cached root would leak one
-/// project's config into another's dispatch.
-///
-/// Also resolves the config, then honors the resolved `sync.debounce_ms` for
-/// the repo-tier fetch that produced it. The first pass necessarily runs on
-/// the compiled default debounce (`GitRepoFetcher::default()`), since the
-/// debounce setting itself lives inside the config being fetched -- a
-/// chicken-and-egg only a second pass can resolve. The second pass is cheap:
-/// `ensure_current`'s debounce state is a per-`RepoSource` file read plus an
-/// mkdir-lock, not a network round trip, unless the debounce window has
-/// actually elapsed.
-///
-/// Cached for a few seconds per project root (mirroring `ragconfig.rs`'s
-/// `RagConfig::resolved()` cache). Several independent call sites
-/// (`prose::resolve`, `RagConfig::resolved`, `fsm::graph`, the `config_resolve`
-/// verb) each call this function fresh within one dispatch; without a cache,
-/// a cold repo-tier source gets its own mkdir-lock acquisition attempted once
-/// per call site in the same few milliseconds -- the LATER attempts see the
-/// FIRST one's still-held lock and misreport "another process is cloning"
-/// even though it is this same process's own earlier, still-in-flight call.
 #[cfg(target_arch = "wasm32")]
 const RESOLVE_CACHE_TTL_MS: u64 = 2_000;
 
@@ -586,15 +515,6 @@ pub fn resolve() -> Resolution {
     resolution
 }
 
-/// Force an immediate remote-ref probe against every repo-backed tier this
-/// project could resolve, bypassing the normal debounce entirely
-/// (`GitRepoFetcher::with_debounce_ms(0)` -- `ensure_current`'s own debounce
-/// check is `elapsed < required`, which a `required` of 0 can never satisfy).
-/// For an agent that just pushed a change to its own config repo: this is the
-/// on-demand refresh that lets that change apply THIS session instead of
-/// waiting out `sync.debounce_ms` (default 15 minutes). Invalidates the
-/// short-lived resolve cache so the very next plain `resolve()` call sees the
-/// fresh result rather than a cached pre-refresh one.
 #[cfg(target_arch = "wasm32")]
 pub fn resolve_forced(project_root: &str) -> Resolution {
     let forced_fetcher = crate::config_sync::GitRepoFetcher::with_debounce_ms(0);
@@ -614,20 +534,6 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
     if let Some(text) = pkfs::read_to_string(&p1) {
         match parse_config(&text, &p1) {
             Load::Accepted(config) => {
-                // A ProjectVendored win means every lower tier's own refresh() call is
-                // skipped by the early-return pattern below -- which also means a lower
-                // tier's own record_change() (fired from inside config_sync's refresh,
-                // triggered only by that tier's fetcher actually running) never fires for
-                // a tier this project has overridden and therefore never revisits. An
-                // upstream default drifting behind an override is then permanently
-                // invisible: nothing ever checks it again. Calling the lower tiers' own
-                // load functions here for their side effect (the refresh, and therefore
-                // any record_change it triggers) -- while still discarding their returned
-                // config and keeping this ProjectVendored tier as the actual winner --
-                // is what lets "your override shadows a setting that has since changed
-                // upstream" surface through the exact same config_changed/drain_for_session
-                // delivery-once path every other config-source change already uses,
-                // instead of needing a second parallel notification mechanism.
                 let _ = load_repo_tier(&join(project_root, SOURCE_SPEC_REL), join(project_root, SOURCE_CACHE_REL), fetcher, Tier::ProjectRepoSpec.as_str());
                 if let Some(home) = home_dir() {
                     let _ = load_repo_tier(&join(&home, SOURCE_SPEC_REL), join(&home, SOURCE_CACHE_REL), fetcher, Tier::UserRepoSpec.as_str());

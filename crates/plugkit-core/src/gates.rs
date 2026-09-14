@@ -391,11 +391,6 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             let gate_key = to.to_ascii_lowercase();
             log_deviation("gate-deny", &format!("{}-gate residuals={}", gate_key, residuals.len()));
             let repeat_count = record_gate_repeat(&gate_key, "gate-deny");
-            // Compare against the CONFIGURED terminal phase, not a literal.
-            // A project that renames its terminal phase in fsm/graph.json got
-            // the generic "<phase>-gate" label here while every other site
-            // honoured policy.terminal_phase -- so the one denial a caller most
-            // needs to recognise silently stopped identifying itself.
             let label = if to == policy.terminal_phase {
                 "stop-gate".to_string()
             } else {

@@ -12,13 +12,6 @@ fn parse_entries(v: &Value) -> Vec<ComponentEntry> {
         .unwrap_or_default()
 }
 
-/// `component-loader-reconcile`: dispatch body `{previous: [entry...],
-/// next: [entry...]}` (Definition 74 entries). Runs `diff_entries`
-/// (the paper's per-field dispatch, Section 5.2.1) and, for every entry
-/// whose decision is `ReassignRealms`, additionally runs Algorithm 7
-/// (`patch_isolation`) against the persisted `LoaderState`. Returns the
-/// full decision list plus each realm reassignment's key diffs and
-/// notified dependents.
 pub fn handle_reconcile(content: &str) -> (String, String, i32) {
     let parsed: Value = serde_json::from_str(content).unwrap_or(Value::Null);
     let previous = parse_entries(&parsed.get("previous").cloned().unwrap_or(Value::Array(vec![])));
@@ -76,15 +69,6 @@ impl FiberSwap for RecordingSwap {
     }
 }
 
-/// `component-loader-hmr`: dispatch body `{stashed: [url...], externals:
-/// [url...], entries: [entry...], graph: {url: [import_url...]},
-/// current_sources: {url: source}, next_sources: {url: source},
-/// fail_urls: [url...]}`. `fail_urls` (optional) names modules whose
-/// `instantiate` should simulate an import failure -- the transactional
-/// rollback path (Algorithm 10 lines 7-11), exercised deliberately
-/// rather than left unreachable in a live dispatch. Runs the full
-/// Algorithms 8-10 pipeline (`hmr_cycle`) and reports which entries were
-/// classified stale, the final accepted set, and the reload outcome.
 pub fn handle_hmr(content: &str) -> (String, String, i32) {
     let parsed: Value = serde_json::from_str(content).unwrap_or(Value::Null);
 

@@ -31,14 +31,6 @@ fn clear_embed_failure() {
     }
 }
 
-/// Why the most recent `embed_text*` call returned `None`. Every embedding
-/// entry point is `Option`-returning across a dozen call sites, so the reason
-/// cannot ride the return value without rewriting all of them; recording it
-/// here lets the one caller that reports to a human say what actually broke.
-/// Before this, a failed `memorize-fire` could only say "embed_text failed",
-/// naming no provider, no status, no timeout and no retry advice -- a dead end
-/// for the caller and indistinguishable between a missing model, an evicted
-/// bert pool slot, and a dispatch that simply ran out of deadline.
 pub fn last_embed_failure() -> Option<String> {
     LAST_EMBED_FAILURE.lock().ok().and_then(|slot| slot.clone())
 }
@@ -57,13 +49,6 @@ fn try_host_embed(text: &str) -> Option<Vec<f32>> {
         l2_normalize(&mut out);
         return Some(out);
     }
-    // rc was the only evidence this call ever produced and it used to be
-    // discarded outright. The host implements host_vec_embed by dispatching to
-    // the `bert` sibling plugin, so a negative rc is a failure of that dispatch
-    // (bert not loaded for this project, its pool slot evicted or still held by
-    // another dispatch, or its own call deadline exceeded) while a non-negative
-    // rc that is not EMBED_DIM is a width disagreement between the host's
-    // embedder and this build's compiled-in model.
     let reason = if rc < 0 {
         format!("host_vec_embed (bert sibling plugin, via the agentplug host) returned rc={rc} for a {}-byte input: the host-side dispatch itself failed -- bert not loaded for this project, its shared pool slot evicted, or its dispatch deadline exceeded. A retry may help once the bert pool is free", text.len())
     } else {
@@ -73,22 +58,6 @@ fn try_host_embed(text: &str) -> Option<Vec<f32>> {
     None
 }
 
-/// Second, independent route to the same bert model: the generic
-/// `host_plugin_call` sibling dispatch rather than the `host_vec_embed`
-/// convenience import.
-///
-/// The two are not equivalent, and the difference is the whole reason this
-/// exists. The host implements `host_vec_embed` with three bare
-/// `pool.acquire()` attempts 500ms apart and collapses every outcome into a
-/// single `-1`: a cold or evicted bert pool slot, a bert plugin that was never
-/// installed for this project (that branch logs NOTHING host-side), a capability
-/// denial, and a genuine model error are indistinguishable, and a 1.5s retry
-/// budget cannot outlast instantiating a 136MB `bert.wasm`. `host_plugin_call`
-/// goes through the registry's real dispatch path instead -- FIFO pool wait,
-/// reinstantiate-on-evicted-slot retry -- and answers with a structured error
-/// naming `unknown_plugin` / `plugin_not_loaded_yet` / the plugin's own message.
-/// So this both RECOVERS the cases `host_vec_embed` gives up on too early, and
-/// when it cannot, reports why in terms a caller can act on.
 fn try_sibling_plugin_embed(text: &str) -> Option<Vec<f32>> {
     let resp = crate::wasm_dispatch::plugin_call(
         "bert",
@@ -139,20 +108,6 @@ pub const EMBED_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 
 pub const EMBED_QUERY_PREFIX_IDENTITY: &str = BGE_QUERY_PREFIX;
 
-/// The model's output width. NOT config-driven, and deliberately so: this is a
-/// property of the safetensors blob compiled into this binary (and of the
-/// host's `host_vec_embed` implementation), not a preference. Changing
-/// `ragconfig`'s `embed.dim` alone cannot make this model emit a different
-/// width -- it would only make every store expect a width the embedder never
-/// produces, and `embed_text_uncached`'s own `flat.len() != EMBED_DIM` check
-/// would then reject every vector it computed.
-///
-/// The assertion below is the tripwire: a config default that no longer
-/// matches the compiled model fails the build here, rather than shipping a
-/// binary whose stores drop-and-rebuild on every boot and never repopulate.
-/// Genuinely swapping the embedding model means replacing the weights, this
-/// constant, `bge_small_config()`'s `hidden_size`, and the ragconfig default
-/// together.
 const EMBED_DIM: usize = 384;
 
 const _: () = {
@@ -167,16 +122,6 @@ const MAX_TOKENS: usize = 512;
 
 const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
 
-/// Condition a raw query string for the currently-compiled embedding model.
-///
-/// BGE is asymmetric: a query must carry an instruction prefix that a passage
-/// must not, or the two are embedded into differently-conditioned subspaces and
-/// their cosine similarity is meaningless. That asymmetry is a property of the
-/// model, so it is expressed once, here, next to `EMBED_DIM` and the weights it
-/// belongs to. Every query-side call site -- in-wasm (`embed_text_json_query`)
-/// and out-of-process (`code_index`'s bert-plugin path) -- routes through this
-/// function, so swapping to a model with a different prefix, or none at all,
-/// cannot leave one site conditioning its queries and the other not.
 pub fn condition_query(query_text: &str) -> String {
     format!("{}{}", BGE_QUERY_PREFIX, query_text)
 }
@@ -203,19 +148,6 @@ struct EmbedCtx {
 
 static CTX: OnceLock<EmbedCtx> = OnceLock::new();
 
-/// Lazy wasm-side fallback model, populated ONLY the first time a
-/// host_delegated context's live host_vec_embed call actually fails during
-/// real use -- never loaded eagerly just because CTX was initialized
-/// host_delegated. This is what closes the "bert host embed plugin down
-/// needs a process restart" gap: previously, once CTX chose host_delegated:true
-/// at init (host was up, so the wasm model load was skipped as a genuine and
-/// worthwhile optimization -- model load is real cost), a LATER host crash hit
-/// embed_text_uncached's host_delegated branch, which unconditionally refused
-/// with "no wasm fallback available" even on a fat (non-slim) build that HAS
-/// the weights compiled in and could have loaded them right then. `OnceLock`
-/// on CTX itself cannot be reset without a broader interior-mutability
-/// rewrite of the whole struct, so this is a second, independent OnceLock
-/// scoped to exactly the fallback model, populated on-demand.
 #[cfg(not(feature = "slim"))]
 static LAZY_WASM_FALLBACK: OnceLock<Option<(Tokenizer, BertModel, Device)>> = OnceLock::new();
 
@@ -286,12 +218,6 @@ fn load_wasm_model_uncached() -> Result<(Tokenizer, BertModel, Device), String> 
     Ok((tokenizer, model, device))
 }
 
-/// Lazily loads (once) and returns the wasm-side fallback model for a
-/// host_delegated context whose live host_vec_embed call just failed. Never
-/// called unless that live failure actually happens -- the eager-skip
-/// optimization in init_ctx (do not pay model-load cost while the host is
-/// healthy) is preserved; this only pays that cost the first time it is
-/// genuinely needed.
 #[cfg(not(feature = "slim"))]
 fn lazy_wasm_fallback() -> Option<&'static (Tokenizer, BertModel, Device)> {
     LAZY_WASM_FALLBACK
@@ -589,11 +515,6 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
 
     let mut still_uncached: Vec<usize> = Vec::new();
     for &i in &uncached_idx {
-        // Same two-route attempt as the single-text path: host_vec_embed first,
-        // then the bert sibling plugin over host_plugin_call. Without the second
-        // route, a host_delegated context whose host_vec_embed is down returned
-        // early below with every remaining item still None, so a bulk pass
-        // silently produced no vectors at all.
         let embedded = try_host_embed(&texts[i]).or_else(|| try_sibling_plugin_embed(&texts[i]));
         if let Some(v) = embedded {
             let cacheable = texts[i].len() <= plain_cache_max_text();
@@ -772,13 +693,6 @@ pub fn embed_text_json_query(query_text: &str) -> Option<serde_json::Value> {
     Some(vec_to_json(v))
 }
 
-/// The in-process query cache lives in a `static` inside the gm wasm Store,
-/// so every Store eviction throws it away -- and evictions are frequent: this
-/// repo's daemon log showed 40 of them against a single recorded cache hit,
-/// i.e. the cache was being destroyed far faster than it could earn its keep.
-/// Spilling each entry to KV, keyed by a hash of the conditioned query text,
-/// lets a warm embedding survive a respawn. A miss here is free; the caller
-/// simply embeds as before.
 const QUERY_SPILL_NAMESPACE: &str = "embed-query-spill";
 
 fn query_spill_key(text: &str) -> String {
@@ -838,27 +752,6 @@ struct CacheEntry {
     ts_ms: i64,
 }
 
-/// Hash-keyed embedding cache with a bounded insertion-order recency ring.
-///
-/// The keys are up to the configured plain-cache text limit bytes of source text, so the
-/// previous `Vec<CacheEntry>` shape paid a full-vector `retain` plus a
-/// `position()` scan of whole-string comparisons on every get, and a second
-/// `retain` plus repeated `remove(0)` memmoves on every put. Keying on
-/// `fnv1a64` of the project-scoped key makes lookup a single 8-byte hash
-/// probe, and `order` bounds eviction to the one entry actually being
-/// displaced rather than a rescan of everything.
-///
-/// `key` is still stored in full and compared on hit: a 64-bit collision would
-/// otherwise serve one text's embedding for a different text, which is exactly
-/// the silent-wrong-vector failure the project scoping exists to prevent. TTL
-/// expiry is checked lazily per entry rather than by sweeping the whole map,
-/// so an expired entry costs its own removal and nothing else.
-///
-/// `BTreeMap` rather than `HashMap` because these are `static` caches and only
-/// the former is const-constructible; against a capacity-bounded map
-/// its lookup is a handful of 8-byte integer comparisons, which is the point
-/// -- the cost being removed here is comparing multi-kilobyte strings, not the
-/// difference between a tree probe and a hash probe.
 struct EmbedCache {
     entries: BTreeMap<u64, CacheEntry>,
     order: VecDeque<u64>,
@@ -889,18 +782,6 @@ fn now_ms() -> i64 {
     unsafe { crate::wasm_dispatch::host_now_ms() as i64 }
 }
 
-/// Prefix a cache key with the project it belongs to.
-///
-/// These caches are process-global `static`s, and the plugin instance is shared
-/// across concurrently-active projects, so a key of bare text meant project A's
-/// embedding could be served to project B. That is harmless only while every
-/// project embeds identically -- the moment the model, its query prefix, or the
-/// embedding dimension becomes configurable, the same text legitimately has
-/// different vectors per project and the cache silently returns the wrong one.
-///
-/// Scoped here rather than at each call site so no caller can forget it, and
-/// the entry-count cap is unchanged: the cap bounds total entries, and a
-/// second active project simply shares that budget.
 fn scoped_key(key: &str) -> String {
     let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     format!("{root}\u{1f}{key}")

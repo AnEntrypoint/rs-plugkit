@@ -7,15 +7,6 @@ pub fn dispatch(body: &Value, raw: &str) -> (Value, Option<String>) {
         .or_else(|| body.get("stdout").and_then(|v| v.as_str()))
         .or_else(|| body.get("text").and_then(|v| v.as_str()))
         .map(|s| s.to_string());
-    // Falling back to `raw` is right when the caller PIPED raw text as the body,
-    // but catastrophic when they sent a structured JSON body and simply forgot
-    // input/stdout/text: filter then greps its own request body and answers
-    // ok:true with meaningless stats (witnessed: a {kind,path,pattern} body
-    // returned lines_matched:1 against the serialized body itself, files:0,
-    // bytes_in exactly the body length). A silent wrong answer is worse than a
-    // refusal, so only fall back to `raw` when the body is NOT a JSON object.
-    // Note `path` is deliberately not consulted anywhere here -- filter is a
-    // stream filter over another dispatch's output, never a file reader.
     let input = match explicit_input {
         Some(s) => s,
         None if body.is_object() => {
