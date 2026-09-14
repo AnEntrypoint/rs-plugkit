@@ -63,12 +63,6 @@ pub struct VecTableSpec<'a> {
 }
 
 impl<'a> VecTableSpec<'a> {
-    /// Build a spec from configured names plus a call-time db path.
-    ///
-    /// The lifetime is tied to `names`, not to the spec, so the caller must
-    /// keep the `VecTableNames` alive for the duration -- config is owned by
-    /// the caller and passed down, never stashed in a process-global (the
-    /// plugin instance is shared across concurrently-active projects).
     pub fn from_names(db_name: &'a str, names: &'a VecTableNames) -> VecTableSpec<'a> {
         VecTableSpec { db_name, table: &names.table, index: &names.index }
     }
@@ -88,11 +82,6 @@ impl<'a> VecTableSpec<'a> {
         ));
     }
 
-    /// Config-driven mismatch guard. Every schema-ensuring path must call this
-    /// BEFORE its CREATE TABLE, because
-    /// `CREATE TABLE IF NOT EXISTS` is a silent no-op against a surviving
-    /// old-width table -- the width in the CREATE would be ignored and the
-    /// store would keep answering queries with the wrong vector length.
     pub fn drop_if_dim_mismatch_cfg(&self, cfg: &EmbedDimConfig) -> bool {
         drop_if_dim_mismatch_at_cfg(self.db_name, self.table, cfg).unwrap_or(false)
     }
@@ -110,7 +99,6 @@ impl<'a> VecTableSpec<'a> {
     }
 }
 
-/// Gates dropping and rebuilding a vector index.
 pub fn is_shadow_row_err(err: &str) -> bool {
     crate::libsql_wasm::classify_error(err) == crate::libsql_wasm::LibsqlErrorKind::ShadowRow
 }
@@ -171,11 +159,6 @@ pub struct RecencyParams {
 }
 
 impl RecencyParams {
-    /// Project a `ScoringConfig` onto the recency-only view `recency_score`
-    /// needs. Kept as a projection rather than replacing `RecencyParams`
-    /// outright so scoring stays a pure function of two numbers -- the cosine
-    /// floor and dedup threshold are *filtering* decisions made by the caller
-    /// before/after scoring, not inputs to the decay curve.
     pub fn from_scoring(cfg: &ScoringConfig) -> RecencyParams {
         RecencyParams { half_life_ms: cfg.half_life_ms, recency_floor: cfg.recency_floor }
     }
@@ -205,9 +188,6 @@ impl Default for QueryBudget {
 }
 
 impl QueryBudget {
-    /// Project a `QueryBudgetConfig` onto the pool-sizing view. The default
-    /// limit/k fields stay behind in config because they belong to the verb
-    /// layer (what a caller asked for), not to ANN retrieval sizing.
     pub fn from_config(cfg: &QueryBudgetConfig) -> QueryBudget {
         QueryBudget { pool_multiplier: cfg.pool_multiplier, pool_floor: cfg.pool_floor }
     }

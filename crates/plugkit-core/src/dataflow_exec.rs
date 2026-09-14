@@ -1,19 +1,7 @@
-//! Executor for `dataflow::Pipeline`. Walks a resolved pipeline's steps and
-//! fuse nodes in declaration order, building each step's request body from
-//! its `InputMapping` (resolved against the original request and every prior
-//! step/fuse-node's output so far), dispatching gm-internal verbs directly
-//! (the same internal functions the pre-rewire fixed call sites already
-//! called) and every other plugin through the real `host_plugin_call`
-//! (`wasm_dispatch::host_abi::plugin_call`) -- there is no wasm self-call
-//! back into gm's own dispatch table, since that would round-trip through
-//! the host for a call already running inside the guest.
-
 use serde_json::{json, Value};
 
 use crate::dataflow::{FuseNode, InputMapping, Pipeline};
 
-/// Every value a step or fuse node has produced so far, keyed by its id, plus
-/// the original pipeline request body under the reserved key `""`.
 pub struct RunState {
     outputs: std::collections::BTreeMap<String, Value>,
     request: Value,
@@ -76,9 +64,6 @@ fn dig(v: &Value, dotted_path: &str) -> Value {
     cur.clone()
 }
 
-/// Dispatch one step's plugin+verb, given its already-built request body.
-/// gm-internal verbs call the real internal function directly (no host
-/// round-trip); anything else routes through `plugin_call`.
 fn dispatch_step(plugin: &str, verb: &str, body: &Value) -> Value {
     if plugin == "gm" {
         return dispatch_gm_internal(verb, body);
@@ -145,12 +130,6 @@ fn dispatch_gm_internal(verb: &str, body: &Value) -> Value {
     }
 }
 
-/// Run `pipeline` against `request`, returning the value named by its
-/// `output` field. Steps run in declaration order (this executor does not
-/// yet reorder for a genuinely independent-order DAG execution -- the
-/// compiled defaults are ordered so today's fixed sequence is exactly
-/// reproduced; a project's own pipeline is responsible for its own valid
-/// step order until a topological scheduler lands as a later increment).
 pub fn run(pipeline: &Pipeline, request: Value) -> Value {
     let mut state = RunState::new(request);
     for step in &pipeline.steps {

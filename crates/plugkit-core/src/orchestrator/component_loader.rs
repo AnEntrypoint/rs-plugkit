@@ -6,18 +6,6 @@ use super::coeffect_realm::RealmTable;
 use super::gm_dir;
 use crate::pkfs;
 
-/// paper Section 5.2.1, Definition 74. An entry declares a single fiber.
-/// `isolate` is `None` for no isolation, `Some(true)` for a local
-/// per-entry realm, `Some(false)` reserved (never produced by
-/// `Isolate::Local`/`Isolate::Global`, kept only so round-tripping an
-/// externally-vendored config that sends `"isolate": false` does not
-/// silently misparse), `Some` of an arbitrary string for a global realm
-/// name -- represented here as `Isolate` rather than a raw
-/// `Option<serde_json::Value>` so the two scoping rules the paper's own
-/// text distinguishes ("a value of true asks for a local realm ... a
-/// string asks for a global realm") are two variants a match can be
-/// exhaustive over, not two ad hoc value shapes re-parsed at every call
-/// site.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Isolate {
@@ -27,10 +15,6 @@ pub enum Isolate {
 }
 
 impl Isolate {
-    /// The realm a key isolated under this annotation resolves to, given
-    /// the owning entry's own `id` -- `Local` is "private to the entry
-    /// and tagged by its id" per the paper's own text; `Global` is the
-    /// named shared realm as-is.
     pub fn realm_for(&self, entry_id: &str) -> Option<String> {
         match self {
             Isolate::None => None,
@@ -52,11 +36,6 @@ pub struct ComponentEntry {
     pub config: serde_json::Value,
     #[serde(default)]
     pub disabled: bool,
-    /// Keys this entry's component both requires and installs -- the
-    /// finite substitute for the paper's `get_imports`-driven realm
-    /// resolution: which realm-scoped keys this entry participates in is
-    /// declared data here rather than derived from a live module graph,
-    /// since this crate has no JS-style dynamic import to introspect.
     #[serde(default)]
     pub isolated_keys: Vec<String>,
 }
@@ -65,12 +44,6 @@ fn default_isolate() -> Isolate {
     Isolate::None
 }
 
-/// paper Section 5.2.1: "On top of the fiber that an entry declares, the
-/// loader dispatches on which of the entry's fields changed and applies
-/// the least disruptive operation for each." One variant per bullet in
-/// that dispatch list, `id`/`url` folded into one `Rebuild` (the paper
-/// gives them the same operation: "rebuilds the entry, since its identity
-/// or its component has changed").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReconcileOp {
@@ -82,10 +55,6 @@ pub enum ReconcileOp {
     Noop,
 }
 
-/// One entry's reconciliation outcome: which operation the field diff
-/// selected, in the paper's own priority order when several fields
-/// changed at once (identity first, since a rebuild subsumes every other
-/// operation on the same entry).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReconcileDecision {
     pub id: String,
@@ -93,14 +62,6 @@ pub struct ReconcileDecision {
     pub changed_fields: Vec<String>,
 }
 
-/// Diffs `previous` against `next` by entry `id` (Definition 74: "id --
-/// a stable identifier, used as the reconciliation key when its group's
-/// child list changes") and returns one `ReconcileDecision` per entry
-/// that is new, removed, or field-changed. A removed entry (present in
-/// `previous`, absent from `next`) reports `ToggleDisabled` with
-/// `changed_fields: ["<removed>"]`, matching the paper's own withdrawal
-/// path (Corollary 62: "a departing fiber's contribution to the state is
-/// nothing"). A brand-new entry reports `Rebuild`.
 pub fn diff_entries(previous: &[ComponentEntry], next: &[ComponentEntry]) -> Vec<ReconcileDecision> {
     let prev_by_id: BTreeMap<&str, &ComponentEntry> = previous.iter().map(|e| (e.id.as_str(), e)).collect();
     let mut out = Vec::new();
@@ -134,12 +95,6 @@ pub fn diff_entries(previous: &[ComponentEntry], next: &[ComponentEntry]) -> Vec
                 if changed.is_empty() {
                     continue;
                 }
-                // Priority order matches the paper's bullet list: isolate
-                // reassignment is a structural move, so it takes priority
-                // over the read-time-only intercept update and the
-                // component-decided config apply; disabled is evaluated
-                // last since unloading supersedes any other adjustment to
-                // an entry that is about to stop existing as a fiber.
                 let op = if changed.contains(&"disabled".to_string()) {
                     ReconcileOp::ToggleDisabled
                 } else if changed.contains(&"isolate".to_string()) {
@@ -167,13 +122,6 @@ pub fn diff_entries(previous: &[ComponentEntry], next: &[ComponentEntry]) -> Vec
     out
 }
 
-/// One key's realm-reassignment diff record -- the `diff[k]` entry
-/// Algorithm 7 builds at line 7: `(rho(k), rho'(k), delta_k, provider's
-/// delta_k)`. `tag` here is the fresh tag Algorithm 7 line 6 draws for
-/// the entry's own context under `delta_k`; `provider_tag` is the
-/// provider fiber's own `delta_k`, read from `provider_tags` supplied by
-/// the caller since this crate has no live context tree to read
-/// `store[rho(k)].fiber.ctx[delta_k]` from directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RealmKeyDiff {
     pub key: String,
@@ -183,11 +131,6 @@ pub struct RealmKeyDiff {
     pub provider_tag: Option<u64>,
 }
 
-/// The result of Algorithm 7: which keys moved realm, whether the
-/// binding itself moved (the entry was the provider at that key and
-/// `own` held), and the fresh `entry_tag` values to persist for next
-/// time (Definition 65's own-test: `gamma'[delta_k] = d1 <=> gamma' is
-/// derived from the entry's context`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RealmReassignment {
     pub entry_id: String,
@@ -201,18 +144,6 @@ fn next_tag(state: &mut LoaderState) -> u64 {
     state.tag_counter
 }
 
-/// Algorithm 7, `patch_isolation`. `entry` is the entry being
-/// reassigned; `new_isolate` is `rho'`; `all_entries` supplies every
-/// other live entry so `affected(fiber, k)` (line 15-17) can be
-/// evaluated per dependent, and `provider_of` maps a realm name to the
-/// entry id currently providing at that realm (the `store[rho(k)]`
-/// lookup) so the binding-move check at line 12 has something concrete
-/// to test against. Returns the full diff plus the dependent ids
-/// Algorithm 7's own `notify(entry.ctx, Delta, affected)` (line 18)
-/// would have to walk -- computing the notify set is this function's
-/// job since the paper's `notify` is itself the generic coeffect-change
-/// broadcast (Algorithm 3) this crate models with `RealmTable` (see
-/// `coeffect_realm.rs`), not a routine private to isolation.
 pub fn patch_isolation(
     state: &mut LoaderState,
     entry: &ComponentEntry,
@@ -250,10 +181,6 @@ pub fn patch_isolation(
             .as_ref()
             .and_then(|pid| state.entry_delta_tags.get(&(pid.clone(), key.clone())).copied());
 
-        // line 12: `d1 = d2 and store[s1] and not store[s2]` -- the
-        // entry itself is (or was) the provider at the old realm, and no
-        // provider is yet registered at the new realm, so the binding
-        // (not merely the reader) moves with the entry.
         let own_binding = provider_id.as_deref() == Some(entry.id.as_str())
             && !state.provider_of.contains_key(&(key.clone(), new_realm.clone()));
         if own_binding {
@@ -299,12 +226,6 @@ fn entry_realm_table(entry: &ComponentEntry) -> RealmTable {
     table
 }
 
-/// Persisted loader state across dispatches: the fresh-tag counter
-/// (Algorithm 7 line 6, "fresh tag" -- a monotonic counter is a sound
-/// freshness source since this crate has no concurrent writers per
-/// project, matching the single-writer invariant `entry.md` already
-/// requires of every surface) and the provider registry (`store` in the
-/// paper's own notation) mapping `(key, realm) -> owning entry id`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LoaderState {
     #[serde(default)]
@@ -331,23 +252,12 @@ pub fn write_state(state: &LoaderState) {
     }
 }
 
-// ---------------------------------------------------------------------
-// Section 5.2.2 Hot Module Replacement -- Algorithms 8, 9, 10.
-// ---------------------------------------------------------------------
-
-/// The dependency graph HMR classification walks: `get_imports(url)` per
-/// the paper's own notation, supplied by the caller as an adjacency map
-/// since this crate indexes real source files via `code_index.rs` rather
-/// than a live JS module loader.
 pub type ImportGraph = BTreeMap<String, Vec<String>>;
 
 fn get_imports<'a>(graph: &'a ImportGraph, url: &str) -> &'a [String] {
     graph.get(url).map(|v| v.as_slice()).unwrap_or(&[])
 }
 
-/// Algorithm 8, `classify`. `stashed` = changed-file URLs, `externals` =
-/// modules that force a full restart. Returns `(accepted, declined)`
-/// exactly as the paper's own return statement.
 pub fn classify(stashed: &BTreeSet<String>, externals: &BTreeSet<String>, graph: &ImportGraph) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut accepted: BTreeSet<String> = stashed.clone();
     let mut declined: BTreeSet<String> = externals.clone();
@@ -388,16 +298,11 @@ pub fn classify(stashed: &BTreeSet<String>, externals: &BTreeSet<String>, graph:
         }
     }
 
-    // line 21: any module left undecided (an import cycle) defaults to
-    // declined.
     declined.extend(pending);
 
     (accepted, declined)
 }
 
-/// Algorithm 9's inner `get_dependencies`: the transitive-import closure
-/// of `root`, stopping at `declined` boundaries (line 4: `if url in deps
-/// or url in declined then return`).
 pub fn get_dependencies(root: &str, declined: &BTreeSet<String>, graph: &ImportGraph) -> BTreeSet<String> {
     let mut deps: BTreeSet<String> = BTreeSet::new();
     let mut stack = vec![root.to_string()];
@@ -415,11 +320,6 @@ pub fn get_dependencies(root: &str, declined: &BTreeSet<String>, graph: &ImportG
     deps
 }
 
-/// Algorithm 9's outer `detect`. Folds each stale entry's whole
-/// dependency tree into `accepted` as it goes (line 14), matching the
-/// paper's own note that "every stale module along it is invalidated in
-/// the next phase" -- so a later entry in `entries` sees the growing
-/// `accepted` set from earlier ones in the same call, not a snapshot.
 pub fn detect(entries: &[ComponentEntry], accepted: &BTreeSet<String>, declined: &BTreeSet<String>, graph: &ImportGraph) -> (Vec<String>, BTreeSet<String>) {
     let mut accepted = accepted.clone();
     let mut stale_entries = Vec::new();
@@ -433,53 +333,19 @@ pub fn detect(entries: &[ComponentEntry], accepted: &BTreeSet<String>, declined:
     (stale_entries, accepted)
 }
 
-/// A backed-up module's prior source, keyed by url -- what Algorithm 10's
-/// `invalidate_caches(accepted)` (line 2) returns as `backup`, and what
-/// `backup[entry.url]` (line 11) re-imports on rollback.
 pub type ModuleBackup = BTreeMap<String, String>;
 
-/// The outcome of a transactional reload attempt (Algorithm 10). `Ok`
-/// carries the entries that were actually swapped in; `Err` carries the
-/// import failure's message, and by construction of `reload` below every
-/// stale entry has already been restored from `backup` before the error
-/// is returned -- so a caller holding an `Err` needs no further recovery
-/// step, matching the paper's own "the system never enters a
-/// half-reloaded state" guarantee.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReloadOutcome {
     Committed { reloaded: Vec<String> },
     RolledBack { reloaded_from_backup: Vec<String>, error: String },
 }
 
-/// One stale entry's real reload step -- disposing the old fiber and
-/// instantiating a fresh one from `source`. Kept as a trait rather than
-/// a bare closure so `reload` below can be driven by both live source
-/// (the real path) and a caller-supplied failing stub during an
-/// adversarial DECIDE-phase sweep, without `reload` itself branching on
-/// which.
 pub trait FiberSwap {
     fn dispose(&mut self, entry_id: &str);
-    /// Imports `source` and instantiates a new fiber for `entry_id`
-    /// bound to `config`. Returns the new module's persisted source on
-    /// success (what the next backup would restore to), or an error
-    /// message on import failure (e.g. a syntax error).
     fn instantiate(&mut self, entry_id: &str, url: &str, source: &str, config: &serde_json::Value) -> Result<String, String>;
 }
 
-/// Algorithm 10, `reload`. `sources` supplies each stale entry's current
-/// module source under its url -- the real content `invalidate_caches`
-/// would fetch fresh and what `backup` preserves. Every entry is
-/// attempted; on the FIRST import failure, every entry already disposed
-/// in this call (successes so far, plus the one that just failed if it
-/// was disposed before the instantiate error) is restored from `backup`
-/// via a second `dispose`+`instantiate(backup[...])` pass, matching the
-/// paper's own catch block (lines 8-11) which unconditionally rebuilds
-/// every `stale_entries` member from backup, not only the ones already
-/// swapped -- the paper's own text: "every stale entry is rebuilt from
-/// backup[entry.url] ... undoing the swaps already made" reads as the
-/// full set, since a not-yet-attempted entry was never disposed and
-/// rebuilding it from backup is a no-op re-instantiation of what is
-/// already running.
 pub fn reload(
     stale_entries: &[ComponentEntry],
     sources: &BTreeMap<String, String>,
@@ -513,11 +379,6 @@ pub fn reload(
     ReloadOutcome::Committed { reloaded }
 }
 
-/// The full three-phase HMR pipeline (Algorithms 8-10 composed), the
-/// `@cordisjs/hmr` engine's own top-level entry point. `current_sources`
-/// backs `invalidate_caches`: every url in the returned `accepted` set is
-/// backed up from its currently-running source before any dispose runs,
-/// matching Algorithm 10 line 2 running before the loop at line 4.
 pub fn hmr_cycle(
     stashed: &BTreeSet<String>,
     externals: &BTreeSet<String>,

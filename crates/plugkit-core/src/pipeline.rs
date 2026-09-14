@@ -5,11 +5,6 @@ use serde_json::{json, Value};
 use crate::libsql_wasm;
 use crate::wasm_dispatch::host_now_ms;
 
-// Was four literals here, two of them written TWICE: max_result_bytes and the
-// attempt budget each appeared both where they are ADVERTISED to the caller and
-// where they are ENFORCED. Two independent literals meant to be one value is a
-// latent divergence bug -- change one and the pipeline promises a limit it does
-// not apply. One config now, so the two sites cannot disagree.
 fn pipeline_cfg() -> crate::ragconfig::PipelineConfig {
     crate::ragconfig::RagConfig::resolved().pipeline
 }

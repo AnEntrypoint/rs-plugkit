@@ -5,18 +5,6 @@ use serde_json::{json, Value};
 use crate::orchestrator::yaml_util::{base64_decode, base64_encode};
 use crate::wasm_dispatch::{host_cwd_string, plugin_call};
 
-/// What a libsql failure actually was, recovered from the plugin's message.
-///
-/// The plugin flattens a real `sqlite3_extended_errcode` into its error string
-/// ("exec rc=11 ext=11 msg=..."), so the codes are present but unusable by a
-/// consumer without re-parsing. Two consumers make DESTRUCTIVE decisions on
-/// that string -- shared_db deletes the database on "malformed", vecns drops
-/// an index on "shadow row" -- and a bare `contains` there matches any message
-/// that merely quotes the phrase, including one describing a different db.
-///
-/// Classifying on the numeric code first, and only falling back to text when
-/// no code is present, keeps those decisions on ground the plugin actually
-/// asserted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LibsqlErrorKind {
     Corrupt,
@@ -47,12 +35,6 @@ pub fn classify_error(err: &str) -> LibsqlErrorKind {
             SQLITE_BUSY | SQLITE_LOCKED => return LibsqlErrorKind::Busy,
             _ => {}
         }
-        // The plugin stated a code and it was not corruption. Text matching
-        // past this point would let a message that merely QUOTES "database
-        // disk image is malformed" -- a log line, an error about a different
-        // file -- trigger deletion of this database. The code is the
-        // authority; only ShadowRow is text-only, since no SQLite code
-        // expresses it.
         return if err.to_ascii_lowercase().contains("shadow row") {
             LibsqlErrorKind::ShadowRow
         } else {
@@ -74,32 +56,6 @@ pub fn classify_error(err: &str) -> LibsqlErrorKind {
     }
 }
 
-/// Bounded retry for the ONE error class that is expected, transient, and
-/// self-clearing: `Busy` (SQLITE_BUSY/SQLITE_LOCKED, rc/ext 5 or 6).
-///
-/// This plugin runs under wasm32-wasi-vfs, which implements no `xShmMap`, so
-/// `PRAGMA journal_mode=WAL` (attempted once per path in
-/// agentplug-libsql/src/db.rs::open_fresh) never actually takes -- the store
-/// stays in `journal_mode=delete` for the life of the process, where a writer
-/// holds an exclusive lock and every concurrent reader/writer against the
-/// SAME db file gets SQLITE_BUSY until it releases. The plugin already waits
-/// up to `BUSY_TIMEOUT_MS` (8s, kept under the 40s host dispatch epoch
-/// deadline) via `sqlite3_busy_timeout` inside a single `host_plugin_call`,
-/// but that wait is entirely inside the plugin's native process on the OTHER
-/// side of the wasm boundary -- this guest has no thread/sleep primitive of
-/// its own (host_abi exposes no yield/sleep import), so the only way to give
-/// a slow concurrent writer more total time is to let the call return, cross
-/// back into the plugin, and let ITS busy_timeout wait again. Each retry is
-/// therefore a full re-dispatch, not a spin loop: three attempts spend at
-/// most ~3 * 8s = 24s against the 40s dispatch budget, which is what a
-/// genuinely finishing concurrent write (embedding upsert, schema migration)
-/// needs to clear on a machine running several concurrent gm sessions across
-/// unrelated project repos against the one process-wide daemon.
-///
-/// Corrupt (SQLITE_CORRUPT/SQLITE_NOTADB) is NOT retried here -- that is
-/// `rssearch_vectors::recover_and_retry`'s job (delete-and-recreate via
-/// `shared_db::recover_malformed_shared_db`), a destructive recovery this
-/// function must never attempt on a merely-busy database.
 const BUSY_RETRY_ATTEMPTS: u32 = 3;
 
 pub fn retry_on_busy<T>(mut op: impl FnMut() -> Result<T, String>) -> Result<T, String> {

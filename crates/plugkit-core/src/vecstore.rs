@@ -5,19 +5,9 @@ use serde_json::{json, Value};
 use crate::ragconfig::{EmbedDimConfig, RagConfig};
 use crate::wasm_dispatch::plugin_call;
 
-/// Retained as the ambient default for call sites that have not yet been
-/// handed a `RagConfig`. It is now DERIVED from `EmbedDimConfig::default()`
-/// rather than being an independent literal, so the two can never drift into
-/// disagreeing about the store's on-disk width.
 pub const EXPECTED_EMBED_DIM: usize = 384;
 
-/// Compile-time proof that the const above still tracks the config default.
-/// If a future edit changes only one of them, this fails the build instead of
-/// producing a store whose schema width disagrees with its mismatch check --
-/// which would silently drop and rebuild every vector table on each boot.
 const _: () = {
-    // `EmbedDimConfig::default()` is not const-callable (Default is not a const
-    // trait), so assert against the same literal the Default impl documents.
     assert!(EXPECTED_EMBED_DIM == 384);
 };
 
@@ -123,7 +113,6 @@ pub fn drop_if_dim_mismatch_at_cfg(db_name: &str, table: &str, cfg: &EmbedDimCon
     }
 }
 
-/// Whole-`RagConfig` convenience wrapper, for callers that already hold one.
 pub fn drop_if_dim_mismatch_at_rag(db_name: &str, table: &str, cfg: &RagConfig) -> Result<bool, String> {
     drop_if_dim_mismatch_at_cfg(db_name, table, &cfg.embed)
 }
