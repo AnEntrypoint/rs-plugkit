@@ -8,6 +8,8 @@ use crate::wasm_dispatch::{git_call_argv, host_stat};
 
 const GIT_LISTING_SPLIT_DEPTH_LIMIT: usize = 16;
 
+const NESTED_REPO_DEPTH_LIMIT: usize = 8;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileSource {
     Git,
@@ -140,13 +142,29 @@ fn directory_is_gitignored(dir: &str) -> Result<bool, String> {
     }
 }
 
-fn git_worktree_files(dir: &str) -> Result<(Vec<String>, bool), String> {
-    let mut rel = Vec::new();
-    let tracked_complete = git_list_into(dir, &["--cached", "--recurse-submodules"], None, 0, &mut rel)?;
-    let untracked_complete = git_list_into(dir, &["--others", "--exclude-standard"], None, 0, &mut rel)?;
-    rel.sort_unstable();
-    rel.dedup();
-    Ok((rel.into_iter().map(|p| join_under(dir, &p)).collect(), tracked_complete && untracked_complete))
+fn git_worktree_files(dir: &str, nesting: usize) -> Result<(Vec<String>, bool), String> {
+    let mut tracked = Vec::new();
+    let mut untracked = Vec::new();
+    let mut complete = git_list_into(dir, &["--cached", "--recurse-submodules"], None, 0, &mut tracked)?;
+    complete &= git_list_into(dir, &["--others", "--exclude-standard"], None, 0, &mut untracked)?;
+    let mut files: Vec<String> = tracked.into_iter().map(|p| join_under(dir, &p)).collect();
+    for entry in untracked {
+        let Some(nested_repo) = entry.strip_suffix('/') else {
+            files.push(join_under(dir, &entry));
+            continue;
+        };
+        let nested_dir = join_under(dir, nested_repo);
+        match (nesting < NESTED_REPO_DEPTH_LIMIT).then(|| git_worktree_files(&nested_dir, nesting + 1)) {
+            Some(Ok((nested_files, nested_complete))) => {
+                files.extend(nested_files);
+                complete &= nested_complete;
+            }
+            _ => complete = false,
+        }
+    }
+    files.sort_unstable();
+    files.dedup();
+    Ok((files, complete))
 }
 
 struct RuleRecordingWalk<'a> {
@@ -201,7 +219,7 @@ pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg
         }
     }
     let walk_reason = match directory_is_gitignored(&target) {
-        Ok(false) => match git_worktree_files(&target) {
+        Ok(false) => match git_worktree_files(&target, 0) {
             Ok((files, complete)) => return Ok(universe(files, FileSource::Git, complete, Vec::new(), None)),
             Err(e) => format!("git could not list the worktree, so it was walked directly ({e})"),
         },
