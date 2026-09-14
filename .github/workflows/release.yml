@@ -13,6 +13,7 @@ jobs:
       published_asset_basename: plugkit-slim
       release_repo: AnEntrypoint/plugkit-bin
       release_title_prefix: plugkit
+      version_manifest: crates/plugkit-core/Cargo.toml
       build_command: cargo build -p rs-plugkit --release --target wasm32-wasip1 --features slim
     secrets:
       publisher_token: ${{ secrets.PUBLISHER_TOKEN }}
