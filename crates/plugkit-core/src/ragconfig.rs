@@ -206,9 +206,9 @@ impl Default for IndexConfig {
             extra_skip_file_suffixes_appended_to_builtins_never_replacing: Vec::new(),
             force_include_path_substrings_overriding_every_skip: Vec::new(),
             prune_enumeration_file_cap: 20000,
-            digest_max_files: 2000,
+            digest_max_files: 20000,
             prune_pass_file_limit_floor: 50,
-            prune_pass_file_limit_ceiling: 2000,
+            prune_pass_file_limit_ceiling: 20000,
             likely_orphaned_symbol_scan_enabled: false,
         }
     }
