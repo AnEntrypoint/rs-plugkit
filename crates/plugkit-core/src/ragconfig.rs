@@ -85,18 +85,7 @@ pub struct NamespaceConfig {
     pub default: String,
     pub vec_sidecar_suffix: String,
     pub code_manifest_suffix: String,
-    /// Discipline namespaces fanned out alongside the base on recall.
-    ///
-    /// Union-ed with `.gm/disciplines/enabled.txt` rather than replacing it:
-    /// that file is the only per-project namespace configuration that predates
-    /// this config, and a project relying on it must keep working untouched.
     pub discipline_fanout: Vec<String>,
-    /// Extra namespaces the agent-facing `kv_put` verb may write.
-    ///
-    /// ADDITIVE ONLY -- the compiled allowlist is always permitted, and this
-    /// extends it. A replacing list would let a project silently revoke
-    /// `default`/`session`/`config`/`cache`/`user` and break callers that have
-    /// no idea a config file exists.
     pub kv_put_extra: Vec<String>,
 }
 
@@ -165,17 +154,8 @@ pub struct IndexConfig {
     pub extra_skip_dirs_appended_to_builtins_never_replacing: Vec<String>,
     pub extra_skip_file_suffixes_appended_to_builtins_never_replacing: Vec<String>,
     pub force_include_path_substrings_overriding_every_skip: Vec<String>,
-    /// Ceiling on files enumerated when deciding which chunk rows to prune.
-    /// A repo larger than this silently keeps rows for the files past the cap,
-    /// so a monorepo needs to raise it rather than discover stale rows later.
     pub prune_enumeration_file_cap: usize,
-    /// Ceiling on files walked to compute the corpus digest. Two repos that
-    /// differ only past this cap produce the same digest, so an index can
-    /// believe it is converged when it is not.
     pub digest_max_files: usize,
-    /// Bounds the caller-supplied file limit for a prune pass. The floor stops
-    /// a tiny limit from making a pass pointless; the ceiling stops one pass
-    /// from walking an unbounded tree.
     pub prune_pass_file_limit_floor: usize,
     pub prune_pass_file_limit_ceiling: usize,
     pub likely_orphaned_symbol_scan_enabled: bool,
@@ -186,19 +166,6 @@ impl Default for IndexConfig {
         IndexConfig {
             split_chunk_above_bytes: 8192,
             max_chunks_embedded_per_file_per_pass_count_bound_only: 64,
-            // Real measurement (2026-07-30, .watcher.log code_index_slow_file_embed
-            // events against the bert plugin's wasm-hosted BERT forward pass):
-            // 501703ms/33 chunks, 138049ms/13, 126331ms/21, 97884ms/10, 21753ms/6
-            // -- 3626ms to 15203ms per chunk, 15-30x the previous 800ms guess. The
-            // old value let budget_chunks (code_index.rs's per-file cap derived
-            // from remaining_ms / this constant) admit far more chunks than the
-            // real wall-budget could ever finish, so a single slow file could blow
-            // past both this module's own wall_budget_ms AND the wasmtime dispatch
-            // epoch deadline before the next per-file check point could catch it --
-            // the actual cause of the poisoned-Store crashes this constant's
-            // mis-calibration produced. Rounded up from the worst observed
-            // per-chunk cost, not the average, since this bound exists specifically
-            // to keep a single file from starving the whole pass.
             pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound: 16_000,
             wall_budget_ms: HOST_DISPATCH_CALL_DEADLINE_MS - WALL_BUDGET_TAIL_MARGIN_MS,
             max_file_bytes: 256 * 1024,
@@ -234,11 +201,6 @@ impl IndexConfig {
     }
 }
 
-/// Where the store lives. The filename and the state-root directory were
-/// hardcoded in two DIFFERENT modules (code_index for the filename, libsql_wasm
-/// for the .gm segment), so relocating a store meant editing both and knowing
-/// they existed. A project that wants its gm state somewhere other than .gm --
-/// or two stores side by side -- has no way to say so.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DbPathConfig {
     pub state_root_dir: String,
@@ -251,10 +213,6 @@ impl Default for DbPathConfig {
     }
 }
 
-/// The two bookkeeping tables backing markdown-memory sync. They sit in the
-/// same database as the configurable vector tables but were hardcoded, so a
-/// project that renamed its vector tables to coexist with another store still
-/// collided on these two.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryMdTableNames {
     pub meta: String,
@@ -278,41 +236,8 @@ pub struct BulkEmbedBudgetConfig {
     pub git_commit_diff_char_cap: usize,
     pub git_commit_log_window: usize,
     pub git_commit_max_consecutive_embed_failures: usize,
-    /// Hard stop for the WHOLE sync_incremental pass, checked before every
-    /// commit regardless of `git_commit_min_embeds_per_pass` -- that floor
-    /// exists so a pass embeds *something* even under transient budget
-    /// pressure, but it has no opinion about how expensive any ONE commit is.
-    /// Live-witnessed against a real messy repo (`C:/dev/guru`, vendored
-    /// sub-git-stores and large binary blobs in its history): 8 commits
-    /// (exactly the floor) took 348s to embed -- ~43s/commit average, because
-    /// `commit_diff_text`'s `git show -p` render cost scales with the
-    /// commit's actual diff size, which the floor's count-based check cannot
-    /// see. Without an elapsed-time ceiling independent of the floor, a run
-    /// of large/binary-heavy commits inside the log window can multiply the
-    /// intended ~30s budget by 10x+ with the daemon emitting zero progress
-    /// events the whole time -- indistinguishable from a hang to any caller
-    /// polling the spool. Set well above `git_commit_embed_budget_ms` so the
-    /// normal case (small commits) never reaches it; it only fires when the
-    /// per-commit cost-capping in `commit_diff_text` (see
-    /// `git_commit_full_diff_max_changed_lines`/`_max_files`) still was not
-    /// enough to keep the floor's 8 commits cheap.
     pub git_commit_sync_hard_ceiling_ms: u64,
-    /// Above this many changed lines (insertions+deletions from `git show
-    /// --shortstat`), skip the expensive full `-p` diff render for a commit
-    /// and embed its subject line alone instead (same fallback already used
-    /// when a commit's diff is empty). The shortstat probe itself is cheap --
-    /// git counts changes without rendering diff text -- so this bounds the
-    /// dominant per-commit cost (rendering+filtering a potentially huge
-    /// patch) without skipping the commit's own semantic search value
-    /// entirely.
     pub git_commit_full_diff_max_changed_lines: usize,
-    /// Same cost cap as `git_commit_full_diff_max_changed_lines`, keyed on
-    /// file count instead of line count -- catches a commit that touches many
-    /// files with small text diffs (still expensive to render/filter as one
-    /// patch) and, more importantly, a binary-heavy commit whose changed
-    /// content contributes ~0 to the insertions/deletions count (git cannot
-    /// line-diff binary content) but whose file count and underlying blob
-    /// sizes still make `git show -p` slow.
     pub git_commit_full_diff_max_files: usize,
     pub rssearch_migrate_reported_failures: usize,
     pub max_subbatch_items: usize,
@@ -336,11 +261,6 @@ impl Default for BulkEmbedBudgetConfig {
     }
 }
 
-/// Bounds on the in-process embedding caches. Capacity and TTL decide how
-/// much repeat work is avoided between Store evictions; the cacheability
-/// threshold decides which passages are worth remembering at all. A large
-/// corpus and a small cap interact badly -- entries evict before they are
-/// reused -- and that tradeoff is workload-specific, so it belongs in config.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmbedCacheConfig {
     pub query_cache_capacity: usize,
@@ -358,22 +278,6 @@ impl Default for EmbedCacheConfig {
     }
 }
 
-/// Budgets bounding a memory_md sync pass. These were compiled-in constants,
-/// which made a slow store unfixable from config: a sync that cannot finish
-/// inside its budget records a `:partial` digest, and a `:partial` digest can
-/// never equal a freshly computed one, so the pass re-runs forever and never
-/// converges. That exact loop caused this session's recall stall. Raising the
-/// budget is the operator-side fix, so it has to be reachable.
-/// Thresholds for reclaiming space from ALREADY-tombstoned rows.
-///
-/// Reclaim-only by construction: nothing here ever tombstones a live row. The
-/// prune surface is agent-judged and never auto-similarity-deleted, so deciding
-/// a memory is unwanted stays a human/agent call; this only decides when the
-/// space behind rows already judged unwanted gets returned.
-///
-/// `auto_vacuum_enabled` defaults false so an unconfigured store behaves
-/// exactly as before. The report is available regardless, which is the intended
-/// order of adoption: look at what a policy would reclaim before enabling one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RetentionConfig {
     pub auto_vacuum_enabled: bool,
@@ -496,10 +400,6 @@ pub struct PipelineConfig {
     pub summarize_threshold: usize,
     pub max_result_bytes_advertised_and_enforced_by_one_field: usize,
     pub max_attempts: u64,
-    /// The summarize step's whole policy. The threshold decided WHETHER to
-    /// summarize while the prompt, the size targets and the result schema --
-    /// what the summary actually is -- stayed compiled in, so a project could
-    /// change when summarization happens but not what it produces.
     pub summarize_prompt_template: String,
     pub summarize_target_chars: usize,
     pub summarize_max_summary_chars: usize,
@@ -541,25 +441,6 @@ impl Default for ClaimAuditConfig {
     }
 }
 
-/// Project-local, NON-TIERED index overrides read from `.gm/index-config.json`.
-///
-/// The tiered config (`.gm/gm.config.json`) cannot carry these for most projects:
-/// `config::resolve_with` returns the project-vendored tier IMMEDIATELY and
-/// discards every lower tier, so a project that wants to change one index
-/// setting silently loses the config-source repo's prose, fsm and messages --
-/// observed live as `config_repo_unreachable` ("the mandatory default prose
-/// source did not resolve") with served prose dropping from 32611 to 25463
-/// chars. Making a one-line indexing tweak cost the whole workflow definition.
-///
-/// This mirrors `.gm/browser-config.json`, which already carries project-local
-/// browser settings outside the tier system for the same reason. Both lists
-/// APPEND to whatever the resolved tier produced; neither can remove a builtin.
-///
-/// The motivating case: rs-plugkit's builtin SKIP_DIRS contains "public", the
-/// right default when public/ is build output, but wrong for a no-build-step
-/// app whose public/js IS the hand-written source -- there the entire frontend
-/// is missing from the index and every frontend query silently returns
-/// unrelated hits instead of an empty result.
 fn apply_project_local_index_overlay(project_root: &str, index: &mut IndexConfig) {
     let path = if project_root.is_empty() {
         ".gm/index-config.json".to_string()
@@ -872,11 +753,6 @@ impl RagConfig {
             }
         }
         let tiered_config_value = crate::config::resolve().config.value;
-        // A validation failure discards EVERY setting in the file, not just the
-        // offending one. Silently swallowing it meant an operator saw their
-        // whole config ignored with no indication which value caused it --
-        // every explanatory message validate() composes was written into a
-        // Result that was then dropped.
         let resolved_config_or_defaults_on_validation_failure = match RagConfig::from_value(&tiered_config_value) {
             Ok(cfg) => cfg,
             Err(reason) => {

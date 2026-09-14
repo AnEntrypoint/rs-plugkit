@@ -96,9 +96,6 @@ pub fn clear_codeinsight_full_cfg(cfg: &crate::ragconfig::RagConfig) -> u32 {
         }
     }
     let db_path = project_db_path(None);
-    // Clears rows, not the table: the schema (and its ANN index) is correct at
-    // the configured width here -- only a DIM change warrants a DROP, which
-    // ensure_schema_at_cfg's guard owns.
     let _ = libsql_wasm::exec(&db_path, &format!("DELETE FROM {}", cfg.code_chunks.table));
     cleared
 }
@@ -125,8 +122,6 @@ fn clear_codeinsight_if_dim_mismatch_cfg(cfg: &crate::ragconfig::RagConfig, proj
     }
     let old_dim = match existing_dim {
         Some(d) => d,
-        // Every entry failed to parse a width; nothing trustworthy to compare
-        // against, so leave the namespace alone rather than clearing on a guess.
         None => return false,
     };
     if !cfg.embed.should_drop_table_for_dim_mismatch(&vec_ns, old_dim) {
@@ -240,13 +235,6 @@ const SKIP_FILE_SUFFIXES: &[&str] = &[
     ".glb", ".gltf", ".vrm", ".fbx", ".blend", ".blend1", ".usdz", ".hf",
     ".uasset", ".umap",
     ".wasm", ".exe", ".dll", ".dylib", ".so", ".o", ".obj", ".a", ".lib",
-    // Rust build artifacts. ".pdb" and ".lib" were already here but ".rlib"
-    // and ".rmeta" were not, and they carry readable symbol names: an
-    // exhaustive literal scan of C:/dev/litebox-main matched "set_times_at"
-    // 10 extra times inside target-myfork/*.rlib/.rmeta/.pdb, which are not
-    // call sites. A sibling build dir whose name is not the literal "target"
-    // (target-myfork here) is not caught by SKIP_DIRS, so the suffix is the
-    // only thing that excludes it.
     ".rlib", ".rmeta",
     ".pdb", ".class", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa",
     ".hex", ".elf", ".uf2", ".dfu",
@@ -295,13 +283,6 @@ pub fn ensure_schema_at_cfg(path: &str, cfg: &crate::ragconfig::RagConfig) -> Re
         let _ = std::fs::create_dir_all(parent);
     }
     libsql_wasm::open(path)?;
-    // Both CREATEs previously spelled the width as a literal 384 while the
-    // guards above them compared against EXPECTED_EMBED_DIM -- two independent
-    // sources of truth for the same number, one of which nothing would have
-    // updated on a dim change. Both now read `cfg.dim()`, and the guard runs
-    // first so a changed dim actually drops the old-width table (a
-    // `CREATE TABLE IF NOT EXISTS` at the new width against a surviving table
-    // is a silent no-op, leaving the store queryable only at the old width).
     let _ = drop_if_dim_mismatch_cfg(path, &cfg.code_chunks.table, &cfg.embed);
     let _ = drop_if_dim_mismatch_cfg(path, &cfg.legacy_memories_alongside_code_chunks.table, &cfg.embed);
     libsql_wasm::exec(path, &format!(
@@ -314,12 +295,6 @@ pub fn ensure_schema_at_cfg(path: &str, cfg: &crate::ragconfig::RagConfig) -> Re
     ))?;
     crate::vecns::VecTableSpec::from_names(path, &cfg.code_chunks).ensure_index();
     crate::vecns::VecTableSpec::from_names(path, &cfg.legacy_memories_alongside_code_chunks).ensure_index();
-    // Table-scoped, not the shared/global marker: this function only ever
-    // checked and (if needed) dropped these two SPECIFIC tables above, so it
-    // only records completion for those two, not for every table any other
-    // store (rssearch_vectors, git_commit_vectors) separately owns. See
-    // embed_marker.rs's marker_rel_for_table doc comment for the false-
-    // negative this closes.
     crate::embed_marker::record_embed_generation_for_table(&cfg.code_chunks.table);
     crate::embed_marker::record_embed_generation_for_table(&cfg.legacy_memories_alongside_code_chunks.table);
     Ok(())
@@ -332,14 +307,6 @@ fn project_db_filename(project_path: Option<&str>) -> String {
     }
 }
 
-/// Live at `<project_path>/.gm/gm.db`, not a crc32-hashed file inside the
-/// CURRENT project's own `.gm/` -- a cache under the target folder's own
-/// `.gm/` is reusable by any other project/session that later points at that
-/// same folder, matching how the current project's own index is reusable.
-/// `project_db_filename`'s crc32-hash naming stays live for callers that pass
-/// a project_path but want the digest/memorize-style co-located cache
-/// (memorize_at_finalize et al.) -- only code_index's own db path resolution
-/// moved to the per-root `.gm/` layout.
 pub(crate) fn project_db_path(project_path: Option<&str>) -> String {
     match project_path {
         Some(p) if !p.is_empty() => {
@@ -640,11 +607,6 @@ pub fn extract_call_edges(source: &str, lang_name: &str, chunks: &[(String, Stri
     out
 }
 
-/// One kv row per FILE holding every call edge it contains. The previous
-/// layout (one row per edge, deleted by scanning the whole namespace for
-/// rows naming the path) cost a full-namespace read per indexed file, which
-/// made extraction O(files x edges): measured at ~0.5s per file on a 2400
-/// file monorepo, where it consumed the entire wall budget on its own.
 fn edges_ns() -> String {
     format!("{}-call-edges", code_ns())
 }
@@ -745,9 +707,6 @@ pub fn impact_of(symbol: &str, max_depth: usize) -> Value {
     json!({ "symbol": symbol, "max_depth": depth_cap, "reachable": reachable })
 }
 
-// Overlap is derived, not independently configured: it must stay strictly
-// below the split threshold or  underflows and the splitter loops.
-// Ten percent keeps that invariant true for any threshold a caller sets.
 fn oversized_chunk_overlap(threshold: usize) -> usize {
     (threshold / 10).max(1).min(threshold.saturating_sub(1))
 }
@@ -821,13 +780,6 @@ fn indexing_pipeline_namespace_config_unthreaded_default() -> crate::ragconfig::
     crate::ragconfig::NamespaceConfig::default()
 }
 
-/// KV namespaces (manifest/code/vec) live in a host-side store keyed by
-/// namespace string alone, independent of the libsql db path -- so a
-/// per-root db path fix without a matching namespace salt would still mix
-/// every root's manifests/embeddings into the same KV rows. `project_path`
-/// salts the namespace with the same crc32 tag `project_db_filename` uses,
-/// keeping the default (no project_path) namespace byte-identical to the
-/// pre-existing behaviour.
 fn root_ns_suffix(project_path: Option<&str>) -> String {
     match project_path {
         Some(p) if !p.is_empty() => format!("__root{:x}", crc32(p)),
@@ -881,40 +833,11 @@ struct ChunkRecord {
 #[derive(Clone)]
 struct FileManifest {
     hash: u32,
-    /// The value this file contributes to the WHOLE-TREE digest.
-    ///
-    /// Deliberately separate from `hash`: `hash` is crc32 (change detection
-    /// within this module), while `current_digest()` folds an fnv1a64-derived
-    /// u32 per file. Storing it here lets the stat-only fast path contribute
-    /// the correct digest value WITHOUT re-reading the file -- previously that
-    /// branch pushed the mtime instead, which `current_digest()` could never
-    /// reproduce, so the stored digest structurally never matched and every
-    /// dispatch re-indexed the entire tree.
-    ///
-    /// Optional because manifests written before this field existed still
-    /// parse; a missing value simply forces that one file down the full path
-    /// once, which repopulates it.
     digest_hash: Option<u32>,
     mtime_ms: f64,
-    /// Byte size at last index, alongside mtime_ms for the stat-only fast
-    /// path's change-detection guard. mtime ALONE is not a safe cache key: a
-    /// coarse-granularity filesystem (FAT32's 2s resolution) or a fast
-    /// automated restore can reproduce an identical mtime on genuinely
-    /// changed content. Size does not catch every edit either (a same-length
-    /// in-place byte change), but combined with the existing chunk-row-count
-    /// check it costs nothing extra -- host_stat already returns size on the
-    /// same call mtime comes from -- so there is no reason not to use it.
-    /// Optional for the same backward-compat reason as digest_hash: older
-    /// manifest rows without it simply skip this check once.
     size: Option<u64>,
     commit_overview: Option<String>,
-    /// A chunk with an empty `emb` is extracted but not yet embedded: it is
-    /// absent from the chunk table, served by BM25/symbol lookup from this
-    /// manifest, and picked up by the next pass's embed loop.
     chunks: Vec<ChunkRecord>,
-    /// Manifests older than v7 recorded chunks that failed to embed as this
-    /// count instead of as pending chunks; >0 forces a full re-extraction
-    /// once, which rewrites the row in the current shape.
     skipped_no_embed: u32,
 }
 
@@ -982,23 +905,6 @@ fn manifest_to_json(fp: &str, m: &FileManifest) -> String {
 
 fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     let parsed: Value = serde_json::from_str(val).ok()?;
-    // Accept any manifest version we know how to read forward, rather than
-    // rejecting everything that is not the current version.
-    //
-    // Rejecting on `v != MANIFEST_VERSION` looks conservative but is actively
-    // destructive here: load_manifests routes a parse failure to
-    // purge_stale_manifest_row, which fv_deletes the file's chunk keys AND its
-    // manifest row. So bumping MANIFEST_VERSION did not merely invalidate the
-    // cache -- it made every pass DELETE the entire cache and rebuild it from
-    // zero, forever, because the rewritten rows are only ever written for files
-    // that survive a pass. Live-witnessed: all 230 manifest rows on disk were
-    // v4 while the code demanded v5.
-    //
-    // Every field added since v4 is optional-with-a-sane-default on read
-    // (commit_overview: Option, digest_hash: Option), so an older row is
-    // readable as-is and is silently upgraded the next time its file is
-    // genuinely re-indexed. A row OLDER than the readable floor still returns
-    // None and is purged, which is correct -- we cannot interpret it.
     const MIN_READABLE_MANIFEST_VERSION: u64 = 4;
     match parsed.get("v").and_then(|v| v.as_u64()) {
         Some(v) if v >= MIN_READABLE_MANIFEST_VERSION && v <= MANIFEST_VERSION => {}
@@ -1019,11 +925,6 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
         let ls = c.get("ls").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
         let le = c.get("le").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
         let emb = c.get("emb").and_then(json_to_f32_vec).unwrap_or_default();
-        // Absent on manifests written before v6 (content_hash didn't exist yet);
-        // 0 is not a valid fnv1a64-derived u32 output for any real chunk body in
-        // practice-safe terms here, and reuse-by-hash simply never matches it, so
-        // that one chunk falls back to the pre-existing "re-embed whole file"
-        // path once until it is naturally rewritten with a real hash.
         let content_hash = c.get("ch").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
         chunks.push(ChunkRecord { key, kind, name, ls, le, emb, content_hash });
     }
@@ -1031,17 +932,6 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     Some((fp, FileManifest { hash, digest_hash, mtime_ms, size, commit_overview, chunks, skipped_no_embed }))
 }
 
-/// Whether a path lives inside a submodule, so per-file git history is skipped.
-///
-/// Derived from `.gitmodules` via the same helper the submodules gate uses,
-/// rather than a hardcoded list of THIS repo's own sibling names. That list was
-/// the identical vacuous-vocabulary shape already fixed in the gate: for any
-/// other project it matched nothing, so every file in a real submodule paid a
-/// `git log -1` subprocess whose output describes the wrong repository.
-///
-/// Matches on any path SEGMENT rather than only the first, since a submodule is
-/// frequently nested (`client/vendor/wireweave`, which is exactly what this
-/// project declares).
 fn is_submodule_path(fp: &str) -> bool {
     let paths = crate::orchestrator::submodule_drift::submodule_paths();
     if paths.is_empty() {
@@ -1150,20 +1040,6 @@ fn slice_lines(content: &str, ls: usize, le: usize) -> String {
     content.lines().skip(ls - 1).take(le - ls + 1).collect::<Vec<_>>().join("\n")
 }
 
-/// Every path's chunk-row count in ONE query.
-///
-/// This replaces a per-file `SELECT COUNT(*) ... WHERE path=?1` that was called
-/// from inside the indexing loop -- including on the stat-only "nothing
-/// changed" fast path -- and the
-/// shared libsql plugin opens, operates and closes the database on EVERY
-/// exec_params call (no connection is retained across calls), so a warm pass
-/// over an N-file tree paid N full open/close cycles purely to re-learn counts
-/// that one GROUP BY answers. That is pure unnecessary waiting on the path
-/// whose entire purpose is to be cheap.
-///
-/// Returns an empty map on failure, which makes every lookup read 0 and simply
-/// routes files down the full path -- correct, just not fast, so a db hiccup
-/// degrades to slow rather than to wrong.
 fn chunk_rows_by_path(db_path: &str) -> std::collections::HashMap<String, usize> {
     let mut out = std::collections::HashMap::new();
     let rows = match libsql_wasm::query(db_path, &format!("SELECT path, COUNT(*) AS c FROM {} GROUP BY path", chunks_table())) {
@@ -1203,12 +1079,6 @@ fn truncate_for_embed(body: &str) -> &str {
     &body[..e]
 }
 
-/// Returns false when the chunk was meant to reach libsql and did not.
-///
-/// The caller writes a manifest asserting which chunks are indexed. Dropping
-/// this result let that manifest claim a chunk the insert had rejected, so the
-/// manifest and code_chunks disagreed permanently and the file re-processed on
-/// every pass with nothing surfaced.
 fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: &str, project_path: Option<&str>) -> bool {
     let mut persisted = true;
     if libsql_ok {
@@ -1253,10 +1123,6 @@ pub fn default_index_file_limit() -> usize {
     crate::ragconfig::RagConfig::resolved().index.digest_max_files
 }
 
-/// Source code is indexed before prose and before data/config files, so a
-/// tree too large for one pass yields code symbols first: a monorepo whose
-/// walk order put 1300 markdown files ahead of its 1400 JS files spent every
-/// pass on docs and answered code queries with section hits only.
 fn index_priority(path: &str) -> u8 {
     let ext = match path.rfind('.') { Some(i) => &path[i..], None => "" };
     match lang_for_ext(ext) {
@@ -1271,22 +1137,10 @@ pub fn index(root: &str, max_files: usize) -> Value {
     index_cfg(root, max_files, &crate::ragconfig::RagConfig::resolved())
 }
 
-/// Same as [`index`], targeting an explicit project root -- its manifest,
-/// chunk, and digest state live under `<project_path>/.gm/gm.db` and a
-/// crc32-salted KV namespace, isolated from the current project's own index
-/// so indexing a submodule/sibling never mixes into or overwrites it.
 pub fn index_at(root: &str, max_files: usize, project_path: &str) -> Value {
     index_cfg_impl(root, max_files, &crate::ragconfig::RagConfig::resolved(), false, 20, Some(project_path))
 }
 
-/// Same as [`index`], but always runs the likely-orphaned-symbol scan
-/// regardless of `index.likely_orphaned_symbol_scan_enabled` -- the config
-/// flag defaults off because the scan is O(candidates) extra queries and
-/// this codepath also backs the always-on `codeinsight_overview` hot path
-/// fired on every `instruction` dispatch; an explicit opt-in dispatch
-/// (`codeinsight_index {"dead_code": true}`) is the correct place to pay
-/// that cost on demand, matching `scan_deps`'s `{"full": true}` pattern --
-/// cheap by default, exhaustive when actually asked for.
 pub fn index_with_dead_code(root: &str, max_files: usize, limit: usize) -> Value {
     let mut out = index_cfg_impl(root, max_files, &crate::ragconfig::RagConfig::resolved(), true, limit, None);
     if let Some(obj) = out.as_object_mut() {
@@ -1295,9 +1149,6 @@ pub fn index_with_dead_code(root: &str, max_files: usize, limit: usize) -> Value
     out
 }
 
-/// Same as [`index`], with the knowledgebase config supplied explicitly --
-/// matching the `_cfg` convention every other config-aware entry point in this
-/// module already follows.
 pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig) -> Value {
     index_cfg_impl(root, max_files, cfg, cfg.index.likely_orphaned_symbol_scan_enabled, 20, None)
 }
@@ -1322,8 +1173,6 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     }
     let prior = load_manifests(project_path);
     purge_legacy_per_edge_rows();
-    // Hoisted out of the per-file loop: one GROUP BY instead of one full
-    // open/query/close per file (see chunk_rows_by_path).
     let chunk_counts = if libsql_ok {
         chunk_rows_by_path(&db_path)
     } else {
@@ -1389,15 +1238,6 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     let mut summary = IndexSummary::default();
     for m in prior.values() { summary.apply(m, 1); }
 
-    // Pass structure: the file loop below extracts symbols for every file it
-    // can reach inside the wall budget but embeds nothing new -- chunks whose
-    // vector is not yet known are persisted in the manifest with an empty
-    // `emb` (BM25 and symbol lookup serve them immediately). The embed loop
-    // after it spends whatever budget remains on those pending chunks, in
-    // file-priority order, and a file only leaves the pending set once every
-    // chunk has a stored vector. A tree that cannot be embedded in one pass
-    // therefore converges across passes instead of being truncated to the
-    // first few chunks of each file.
     for raw_fp in &files {
         if elapsed_ms() > index_wall_budget_ms {
             deferred_files += 1;
@@ -1414,10 +1254,6 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             {
                 let stat_mtime = stat.get("mtime_ms").and_then(|v| v.as_f64());
                 let stat_size = stat.get("size").and_then(|v| v.as_u64());
-                // mtime alone is not a safe cache key (coarse filesystem
-                // granularity, fast restores); size comes free from the same
-                // stat call. A manifest written before `size` existed has
-                // None, which makes the check vacuously true once.
                 let size_matches = m.size.is_none() || stat_size == m.size;
                 if let (Some(mtime), Some(dh)) = (stat_mtime, m.digest_hash) {
                     if mtime == m.mtime_ms && size_matches && m.skipped_no_embed == 0 && libsql_ok && chunk_rows(fp) == m.chunks.len() {
@@ -1427,9 +1263,6 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                         chunked += m.chunks.len() as i32;
                         reused += m.chunks.len() as i32;
                         reused_files += 1;
-                        // Must be the same content-derived value every branch
-                        // pushes, or the stored digest can never equal
-                        // current_digest() and every dispatch re-indexes.
                         digest_entries.push((fp.clone(), dh));
                         continue;
                     }
@@ -1500,9 +1333,6 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             delete_call_edges_for_path(fp);
         }
 
-        // Tree-sitter boundaries can shift on any edit, but most edits touch
-        // one function: a chunk whose (kind, name, body-hash) triple is
-        // unchanged keeps its stored vector instead of re-embedding.
         let prior_chunk_by_identity: std::collections::HashMap<(String, String, u32), &ChunkRecord> = prior
             .get(fp)
             .map(|m| {
@@ -1646,18 +1476,6 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             removed_files += 1;
         }
     }
-    // Orphan sweep: a process kill between a file's chunk-table DELETE+INSERT
-    // and its manifest write (fv_put, further below in the main loop) leaves
-    // chunk rows with no corresponding manifest entry. The loop above cannot
-    // see these -- it walks `prior` (the manifest map), so a path with chunks
-    // but NO manifest is invisible to it by construction. This sweep instead
-    // walks the chunks TABLE directly for any path absent from both the
-    // current file set and the manifest map, which is the only way to catch
-    // an orphan that a normal re-index pass over that same path would
-    // otherwise silently clean up on next encounter (code_index.rs's
-    // per-file DELETE-before-INSERT already handles the case where the file
-    // gets touched again) -- this closes the gap for a file that never gets
-    // touched again (deleted from disk before its next index pass).
     if libsql_ok {
         let chunk_paths = chunk_rows_by_path(&db_path);
         let mut orphan_chunk_files = 0u32;
@@ -1674,19 +1492,6 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             }));
         }
     }
-    // A partial pass MUST still persist what it converged, or the digest is
-    // never written at all on any tree big enough to exceed the wall budget --
-    // and a missing digest is treated as stale, so the very next dispatch
-    // re-indexes everything, which guarantees the next pass is also partial.
-    // That is a self-sustaining loop: live-witnessed as a permanently absent
-    // .codeinsight-digest alongside 230 manifest rows, with only 10 distinct
-    // paths ever reaching code_chunks.
-    //
-    // The digest is only a CHANGE DETECTOR, so a partial digest is still sound:
-    // it is computed from the files this pass actually accounted for, and the
-    // deferred ones simply keep their prior entries absent, which reads as
-    // "changed" next pass -- exactly the resume behaviour wanted. Marking it
-    // partial keeps the distinction visible rather than pretending convergence.
     fv_put(&summary_ns_for(project_path), "summary", &summary.to_json());
     if deferred_files == 0 {
         let digest = digest_from_entries(digest_entries);
@@ -1694,12 +1499,6 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} extracted_files={} removed_files={} digest={}", indexed, chunked, embedded, reused, reused_files, extracted_files, removed_files, digest);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     } else {
-        // Persist the converged subset (see the rationale above). Tagged
-        // ":partial=N" so it can never be mistaken for a complete-tree digest:
-        // current_digest() always produces the untagged full-tree form, so a
-        // partial digest still compares as "changed" next pass and the resume
-        // continues -- but the file now EXISTS, which stops the
-        // never-stored/always-reindex loop that starved this cache entirely.
         let partial_digest = format!("{}:partial={}", digest_from_entries(digest_entries), deferred_files);
         store_digest_at(&partial_digest, project_path);
         let msg = format!("code_index: partial pass (wall budget) files_indexed={} extracted_files={} deferred_files={} pending_embed_files={} pending_embed_chunks={} embedded={} reused={} removed_files={} -- partial digest stored, next call resumes", indexed, extracted_files, deferred_files, pending_embed_files, summary.pending_embed_chunks.max(0), embedded, reused, removed_files);
@@ -1789,10 +1588,6 @@ pub fn current_digest_at(project_path: &str) -> String {
     current_digest_cfg_at(&crate::ragconfig::RagConfig::resolved(), Some(project_path))
 }
 
-/// Same as [`current_digest`] with explicit config. The file-size cap MUST match
-/// the indexer own, or the digest counts files the index skips and the two can
-/// never agree -- the same class of mismatch that made the stored digest
-/// permanently unequal to the computed one.
 pub fn current_digest_cfg(cfg: &crate::ragconfig::RagConfig) -> String {
     current_digest_cfg_at(cfg, None)
 }
@@ -1849,10 +1644,6 @@ pub fn overview() -> Value {
         return Value::Null;
     }
     let db_path = project_db_path(None);
-    // A failed count and a genuinely empty index both used to arrive as 0.
-    // They are not the same thing: a `database is locked` here (the shared
-    // daemon holding the file) reported "0 symbols" for a fully populated
-    // store, which reads as data loss rather than as a transient failure.
     let mut count_error: Option<String> = None;
     let mut count_via = |sql: String| -> Option<u64> {
         match libsql_wasm::query_params(&db_path, &sql, &[]) {
@@ -1868,12 +1659,6 @@ pub fn overview() -> Value {
             }
         }
     };
-    // COUNT via a GROUP BY subquery, not a bare aggregate: an unfiltered
-    // aggregate over an F32_BLOB vector table answers 0 even when the table is
-    // full. Measured on this repo's store -- COUNT(*) on code_chunks returns 0
-    // (and still 0 with a predicate) while this form returns 138, matching the
-    // _vec_shadow companion exactly. file_count hit the identical bug via
-    // COUNT(DISTINCT path) and is fixed the same way.
     let file_count_opt = count_via(format!(
         "SELECT COUNT(*) AS c FROM (SELECT path FROM {} GROUP BY path)",
         chunks_table()
@@ -1912,10 +1697,6 @@ pub fn overview() -> Value {
         out["pending_embed_chunks"] = s["pending_embed_chunks"].clone();
     }
     if let Some(e) = count_error {
-        // The chunk table lives in the libsql sibling plugin; when that plugin
-        // is absent or evicted the counts fall back to the index summary the
-        // last pass wrote to the host kv store, which no plugin outage can
-        // hide, and the response names the source instead of reporting zero.
         out["chunk_store_unavailable"] = json!(e);
         match &summary {
             Some(s) => {
@@ -2262,39 +2043,14 @@ pub fn search_filenames(req: &FilenameSearch, cfg: &crate::ragconfig::RagConfig)
     Value::Object(out)
 }
 
-/// Ceiling on files enumerated for an exhaustive literal/regex scan.
-///
-/// Deliberately NOT `IndexConfig::digest_max_files` (2000 when this was
-/// measured on the real C:/dev/litebox-main workspace, which enumerates 2427
-/// files, so reusing the digest cap would have dropped ~400 files and returned
-/// a confidently wrong "every match" answer. That cap exists to bound a digest
-/// whose own doc comment already concedes it can believe an index converged
-/// when it has not; an exhaustive scan has the opposite contract and cannot
-/// inherit it. A tree larger than this ceiling is reported via
-/// `files_truncated: true`, never silently shortened.
 pub const LITERAL_SCAN_MAX_FILES: usize = 50_000;
 
-/// Per-line text returned with a match, capped so one minified or generated
-/// line cannot dominate the response. A capped line sets `text_truncated`.
 const LITERAL_SCAN_MAX_LINE_BYTES: usize = 512;
 
-/// Largest file an exhaustive scan will read.
-///
-/// Deliberately NOT `IndexConfig::max_file_bytes` (256KB). That bound exists to
-/// cap EMBEDDING cost per file, and a literal scan embeds nothing -- it is one
-/// linear pass over bytes. Witnessed on the real C:/dev/litebox-main workspace:
-/// inheriting the 256KB cap skipped 15 files including
-/// `litebox_shim_linux/src/syscalls/file.rs` and
-/// `litebox_platform_windows_userland/src/lib.rs`, both genuine Rust source a
-/// call-graph trace must cover. Large enough that no plausible hand-written
-/// source file is excluded; a file past it is still reported via
-/// `files_skipped_too_large`, never silently dropped.
 const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 const LITERAL_SCAN_REPORTED_EXCLUSIONS: usize = 200;
 
-/// What `scan_literal` was asked for. A struct rather than a long parameter
-/// list so a caller cannot transpose two same-typed flags silently.
 pub struct LiteralScan<'a> {
     pub pattern: &'a str,
     pub root: Option<&'a str>,
@@ -2324,9 +2080,6 @@ fn occurrence_is_whole_word(haystack: &str, start: usize, end: usize) -> bool {
 }
 
 impl LiteralMatcher {
-    /// Every byte offset pair this matcher hits in one line, not just the
-    /// first -- two call sites on one line are two real call sites, and a
-    /// call-graph trace that reported one would be wrong.
     fn find_all(&self, line: &str) -> Vec<(usize, usize)> {
         match self {
             LiteralMatcher::Substring { needle, case_insensitive, whole_word } => {
@@ -2336,10 +2089,6 @@ impl LiteralMatcher {
                 } else {
                     (None, line)
                 };
-                // A lowercased copy can differ in byte length from the
-                // original (e.g. 'İ'), which would make offsets taken in the
-                // copy wrong in the original. Fall back to a char-aligned
-                // scan of the original whenever the lengths disagree.
                 let search_in: &str = match &haystack_owned {
                     Some(lowered) if lowered.len() == line.len() => lowered.as_str(),
                     Some(_) => return self.find_all_case_insensitive_unaligned(line, needle, *whole_word),
@@ -2384,24 +2133,6 @@ impl LiteralMatcher {
     }
 }
 
-/// Exhaustive literal/regex scan with ripgrep semantics: EVERY match, each
-/// with `path` and `line`, in enumeration order, with no relevance ranking
-/// and no top-k truncation.
-///
-/// Touches none of the retrieval machinery the `dual` mode uses -- no corpus
-/// digest comparison, no `index()` rebuild, no query embedding, no vector
-/// search, no `FusionCorpus`. That is the point, not an optimisation: those
-/// steps are what made a literal question over a large workspace cost minutes
-/// (measured on C:/dev/litebox-main: 120s and 240s timeouts, one ~420s
-/// answer), and an exact-match answer needs none of them. Cost here is one
-/// file listing plus one read per file.
-///
-/// Every bound it hits is disclosed in the response rather than quietly
-/// shortening the answer, because a caller tracing a call graph acts on this
-/// being complete: `files_truncated`, `matches_truncated`, `budget_exhausted`,
-/// `files_skipped_too_large`, `files_unreadable`, `git_listing_incomplete`
-/// and `excluded_by_rule` each mean "this result is NOT the whole tree", and
-/// `exhaustive` is true only when none of them fired.
 pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
     if req.pattern.is_empty() {
         return json!({ "ok": false, "error": "pattern required -- an exhaustive scan needs something to match" });
@@ -2412,10 +2143,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             .build()
         {
             Ok(re) => LiteralMatcher::Regex(re),
-            // A bad pattern is an error naming the parse failure, never a
-            // silent fall back to substring matching: a caller who asked for
-            // regex and got substring results would read them as regex
-            // results.
             Err(e) => return json!({
                 "ok": false,
                 "error": format!("mode \"regex\" got an invalid regular expression: {e}"),
@@ -2485,12 +2212,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             }
         }
         let Some(content) = host_read(path) else {
-            // `host_read` returns None for both "could not read" and "not
-            // valid UTF-8", which are different facts about completeness. A
-            // successful stat means the file is there and sized, so the read
-            // failing is a decode failure: binary content, which cannot
-            // contain a text match and is therefore NOT a gap in the answer.
-            // A failed stat is a genuine IO/permission failure, which is.
             if stat.is_some() { files_skipped_binary += 1 } else { unreadable_paths.push(path.clone()) }
             continue;
         };
@@ -2514,10 +2235,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 hit.insert("path".to_string(), json!(path));
                 hit.insert("line".to_string(), json!(idx + 1));
                 hit.insert("column".to_string(), json!(start + 1));
-                // `get` rather than a slice index: a case-insensitive search
-                // takes offsets from a lowercased copy of the line, and a
-                // pathological char whose lowercase is the same byte length
-                // but a different boundary would panic on a raw slice.
                 hit.insert("match".to_string(), json!(line.get(start..end).unwrap_or(req.pattern)));
                 hit.insert("text".to_string(), json!(shown.trim_end()));
                 if text_truncated { hit.insert("text_truncated".to_string(), json!(true)); }
@@ -2529,11 +2246,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         if matches_truncated { break; }
     }
 
-    // `files_skipped_binary` deliberately does NOT void exhaustiveness: a file
-    // that is not text cannot hold a text match, so skipping it leaves the
-    // answer complete. Counting it as a gap would make `exhaustive` false on
-    // essentially every real repo and train the caller to ignore the flag,
-    // which is worse than not having it.
     let deleted_from_worktree = if unreadable_paths.is_empty() {
         std::collections::HashSet::new()
     } else {
