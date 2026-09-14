@@ -257,6 +257,21 @@ round trip. On a non-green or unresolvable result, the response's
 `next_dispatch` field names `ci-status` so the caller can re-check once CI
 finishes.
 
+`git_add`, `git_commit`, `git_finalize`, `git_diff`, `git_stash` and
+`git_checkout` take an optional `paths` (alias `files`) pathspec list
+(`git_checkout {paths, ref?}` restores just those files). With it, `git_commit` and
+`git_finalize` stage and commit exactly those pathspecs (`git commit -- <paths>`,
+so entries another writer staged stay staged and uncommitted), the
+post-commit porcelain gate considers only those paths, and when dirt remains
+outside them `git_finalize` pushes by explicit ref (`rev: "HEAD"`) instead of
+refusing. `git_push {rev: "HEAD"}` publishes an existing commit over a dirty
+worktree without touching it; it never rebases, so a remote that moved is
+reported rather than reconciled. `paths` together with `rev` on
+`git_finalize` is refused, as is an empty or non-string `paths`. Resolved-PRD
+`commit_comment` notes are bundled only by a commit whose scope covers
+`.gm/prd.yml` (no `paths`, or `paths` naming it or `.gm`); a narrower scoped
+commit leaves them pending so the row removal and its note land together.
+
 Async git hosts use a pending-token protocol shaped like `host_fetch`'s. A
 host that cannot block the wasm call (a browser driving isomorphic-git on the
 wasm's own thread) answers `host_git` with `{"pending": true, "token"}` and

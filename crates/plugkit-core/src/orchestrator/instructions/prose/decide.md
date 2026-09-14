@@ -51,7 +51,7 @@ Every claim of correctness is proven by a live `exec_js`/`browser` dispatch witn
 
 ## Push and worktree-clean
 
-`git_push` is the only admissible push surface, any repo, any cwd -- runs `[worktree-clean]` porcelain probe internally, refuses dirty. `git_finalize {message}` bundles add -> commit -> probe -> push. Sibling push: `git_push {repo:"<abs>", branch:"<branch>"}`. Raw `git` shell body gated `deviation.bash-git-bypass`. A dirty tree at this stage is yours to resolve now: commit real work, revert junk, or fold transient emission into the managed gitignore block -- never carry it forward as "pre-existing."
+`git_push` is the only admissible push surface, any repo, any cwd -- runs `[worktree-clean]` porcelain probe internally, refuses dirty. `git_finalize {message}` bundles add -> commit -> probe -> push. In a worktree another writer is also editing, commit only your files: `git_commit {message, paths:[...]}` / `git_finalize {message, paths:[...]}` stage and commit exactly those pathspecs, the porcelain probe checks only them, and the push goes by explicit ref when dirt remains outside them; `git_push {rev:"HEAD"}` is the sanctioned push of an already-made commit over someone else's dirt. Sibling push: `git_push {repo:"<abs>", branch:"<branch>"}`. Raw `git` shell body gated `deviation.bash-git-bypass`. A dirty tree at this stage is yours to resolve now: commit real work, revert junk, or fold transient emission into the managed gitignore block -- never carry it forward as "pre-existing."
 
 ## CI
 
