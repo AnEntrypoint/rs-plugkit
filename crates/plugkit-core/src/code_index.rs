@@ -2372,16 +2372,16 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
     let root = req.root.filter(|p| !p.is_empty()).unwrap_or(".");
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
+    let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let budget_ms = cfg.index.wall_budget_ms;
     let universe = match crate::scan_universe::list_scan_universe(root, req.scope, file_cap.saturating_add(1), &cfg.index) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "path": req.scope, "root": root }),
     };
+    let listing_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms);
     let listed = &universe.files;
     let files_truncated = listed.len() > file_cap;
     let files: &[String] = if files_truncated { &listed[..file_cap] } else { &listed[..] };
-
-    let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let budget_ms = cfg.index.wall_budget_ms;
 
     let mut matches: Vec<Value> = Vec::new();
     let mut files_scanned = 0usize;
@@ -2514,6 +2514,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     out.insert("files_listed".to_string(), json!(files.len()));
     out.insert("elapsed_ms".to_string(), json!(unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms)));
     out.insert("exhaustive".to_string(), json!(exhaustive));
+    out.insert("listing_ms".to_string(), json!(listing_ms));
     out.insert("file_source".to_string(), json!(universe.source.label()));
     if let Some(reason) = &universe.walk_reason {
         out.insert("walk_reason".to_string(), json!(reason));
