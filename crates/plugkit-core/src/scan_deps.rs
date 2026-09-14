@@ -484,7 +484,7 @@ pub fn scan_deps(body: &Value) -> Value {
     let mut findings: Vec<FileFinding> = Vec::new();
     let mut blocked: Vec<BlockedRead> = Vec::new();
 
-    let tracked = crate::code_index::collect_files(root, cfg.digest_max_files, &cfg);
+    let tracked = crate::scan_universe::project_source_files(root, cfg.digest_max_files, &cfg);
     let tracked_scanned = scan_file_list(&tracked, tracked.len(), &mut findings, &mut blocked);
 
     if force_full {

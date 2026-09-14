@@ -271,7 +271,7 @@ fn is_skipped_filename(name: &str, cfg: &crate::ragconfig::IndexConfig) -> bool 
     cfg.skips_filename(name, SKIP_FILE_SUFFIXES)
 }
 
-fn is_skipped_dir_segment(seg: &str, cfg: &crate::ragconfig::IndexConfig) -> bool {
+pub(crate) fn is_skipped_dir_segment(seg: &str, cfg: &crate::ragconfig::IndexConfig) -> bool {
     cfg.skips_dir_segment(seg, SKIP_DIRS)
 }
 
@@ -416,7 +416,7 @@ fn build_repo_gitignore(
     builder.build().ok()
 }
 
-fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
+pub(crate) fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
     let gitignore_content = host_read(&ignore_file_path(root, ".gitignore"));
     let custom_content = host_read(&ignore_file_path(root, ".codesearchignore"));
     let key: GitignoreMemoKey = (root.to_string(), gitignore_content.clone(), custom_content.clone());
@@ -429,14 +429,14 @@ fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
     built
 }
 
-fn gitignore_excludes(gi: &Option<ignore::gitignore::Gitignore>, rel_path: &str, is_dir: bool) -> bool {
+pub(crate) fn gitignore_excludes(gi: &Option<ignore::gitignore::Gitignore>, rel_path: &str, is_dir: bool) -> bool {
     match gi {
         Some(g) => g.matched(rel_path, is_dir).is_ignore(),
         None => false,
     }
 }
 
-fn is_hidden_segment(seg: &str) -> bool {
+pub(crate) fn is_hidden_segment(seg: &str) -> bool {
     seg.starts_with('.') && seg != "." && seg != ".."
 }
 
@@ -461,38 +461,6 @@ pub(crate) fn collect_files(root: &str, max_files: usize, cfg: &crate::ragconfig
     let mut files = Vec::new();
     walk_posix(root, max_files, &mut files, &gi, cfg);
     files
-}
-
-fn scoped_scan_target(root: &str, scope: &str) -> Result<String, String> {
-    let normalized = scope.replace('\\', "/");
-    let bytes = normalized.as_bytes();
-    let absolute = normalized.starts_with('/') || (bytes.len() >= 2 && bytes[1] == b':');
-    if absolute {
-        return Err(format!("path '{scope}' must be relative to the search root '{root}' -- pass another project as \"root\", and a location inside it as \"path\""));
-    }
-    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
-    if segments.iter().any(|s| *s == "..") {
-        return Err(format!("path '{scope}' may not climb out of the search root with '..'"));
-    }
-    if segments.is_empty() {
-        return Ok(root.to_string());
-    }
-    let joined = segments.join("/");
-    Ok(if root.ends_with('/') { format!("{root}{joined}") } else { format!("{root}/{joined}") })
-}
-
-pub(crate) fn collect_scoped_files(root: &str, scope: &str, max_files: usize, cfg: &crate::ragconfig::IndexConfig) -> Result<Vec<String>, String> {
-    let target = scoped_scan_target(root, scope)?;
-    let Some(stat) = host_stat(&target).filter(|v| !v.is_null()) else {
-        return Err(format!("path '{scope}' does not exist under search root '{root}'"));
-    };
-    if !stat.get("isDirectory").and_then(|b| b.as_bool()).unwrap_or(false) {
-        return Ok(vec![target]);
-    }
-    let gi = load_repo_gitignore(root);
-    let mut files = Vec::new();
-    walk_children(&target, target.len(), max_files, &mut files, &gi, cfg);
-    Ok(files)
 }
 
 fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option<ignore::gitignore::Gitignore>, cfg: &crate::ragconfig::IndexConfig) {
@@ -2273,6 +2241,8 @@ const LITERAL_SCAN_MAX_LINE_BYTES: usize = 512;
 /// `files_skipped_too_large`, never silently dropped.
 const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
+const LITERAL_SCAN_REPORTED_EXCLUSIONS: usize = 200;
+
 /// What `scan_literal` was asked for. A struct rather than a long parameter
 /// list so a caller cannot transpose two same-typed flags silently.
 pub struct LiteralScan<'a> {
@@ -2374,14 +2344,14 @@ impl LiteralMatcher {
 /// steps are what made a literal question over a large workspace cost minutes
 /// (measured on C:/dev/litebox-main: 120s and 240s timeouts, one ~420s
 /// answer), and an exact-match answer needs none of them. Cost here is one
-/// file walk plus one read per file.
+/// file listing plus one read per file.
 ///
 /// Every bound it hits is disclosed in the response rather than quietly
 /// shortening the answer, because a caller tracing a call graph acts on this
 /// being complete: `files_truncated`, `matches_truncated`, `budget_exhausted`,
-/// `files_skipped_too_large`, `files_skipped_binary` and `files_unreadable`
-/// each mean "this result is NOT the whole tree", and `exhaustive` is true
-/// only when none of them fired.
+/// `files_skipped_too_large`, `files_unreadable`, `git_listing_incomplete`
+/// and `excluded_by_rule` each mean "this result is NOT the whole tree", and
+/// `exhaustive` is true only when none of them fired.
 pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
     if req.pattern.is_empty() {
         return json!({ "ok": false, "error": "pattern required -- an exhaustive scan needs something to match" });
@@ -2412,15 +2382,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
 
     let root = req.root.filter(|p| !p.is_empty()).unwrap_or(".");
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
-    // Ask for one more than the cap so hitting it is distinguishable from a
-    // tree that happens to be exactly cap-sized.
-    let listed = match req.scope {
-        None => collect_files(root, file_cap.saturating_add(1), &cfg.index),
-        Some(scope) => match collect_scoped_files(root, scope, file_cap.saturating_add(1), &cfg.index) {
-            Ok(files) => files,
-            Err(e) => return json!({ "ok": false, "error": e, "path": scope, "root": root }),
-        },
+    let universe = match crate::scan_universe::list_scan_universe(root, req.scope, file_cap.saturating_add(1), &cfg.index) {
+        Ok(u) => u,
+        Err(e) => return json!({ "ok": false, "error": e, "path": req.scope, "root": root }),
     };
+    let listed = &universe.files;
     let files_truncated = listed.len() > file_cap;
     let files: &[String] = if files_truncated { &listed[..file_cap] } else { &listed[..] };
 
@@ -2433,7 +2399,8 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut files_with_matches = 0usize;
     let mut files_skipped_too_large: Vec<String> = Vec::new();
     let mut files_skipped_binary = 0usize;
-    let mut files_unreadable = 0usize;
+    let mut unreadable_paths: Vec<String> = Vec::new();
+    let mut directories_listed_as_files: Vec<String> = Vec::new();
     let mut lines_with_matches = 0usize;
     let mut matches_truncated = false;
     let mut budget_exhausted = false;
@@ -2448,11 +2415,19 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             let base = lower.rsplit('/').next().unwrap_or(lower.as_str()).to_string();
             if !glob_match_simple(glob, &lower) && !glob_match_simple(glob, &base) { continue; }
         }
-        let stat = host_stat(path);
+        let stat = host_stat(path).filter(|v| !v.is_null());
         if let Some(stat) = &stat {
+            if stat.get("isDirectory").and_then(|v| v.as_bool()) == Some(true) {
+                directories_listed_as_files.push(path.clone());
+                continue;
+            }
             let size = stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
             if size > LITERAL_SCAN_MAX_FILE_BYTES {
                 files_skipped_too_large.push(path.clone());
+                continue;
+            }
+            if size == 0 {
+                files_scanned += 1;
                 continue;
             }
         }
@@ -2463,7 +2438,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             // failing is a decode failure: binary content, which cannot
             // contain a text match and is therefore NOT a gap in the answer.
             // A failed stat is a genuine IO/permission failure, which is.
-            if stat.is_some() { files_skipped_binary += 1 } else { files_unreadable += 1 }
+            if stat.is_some() { files_skipped_binary += 1 } else { unreadable_paths.push(path.clone()) }
             continue;
         };
         if content.as_bytes().contains(&0u8) { files_skipped_binary += 1; continue; }
@@ -2506,11 +2481,20 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     // answer complete. Counting it as a gap would make `exhaustive` false on
     // essentially every real repo and train the caller to ignore the flag,
     // which is worse than not having it.
+    let deleted_from_worktree = if unreadable_paths.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        universe.tracked_paths_deleted_from_worktree()
+    };
+    let (tracked_deleted, unreadable_paths): (Vec<String>, Vec<String>) =
+        unreadable_paths.into_iter().partition(|p| deleted_from_worktree.contains(p));
     let exhaustive = !files_truncated
         && !matches_truncated
         && !budget_exhausted
         && files_skipped_too_large.is_empty()
-        && files_unreadable == 0;
+        && unreadable_paths.is_empty()
+        && universe.listing_complete
+        && universe.excluded.is_empty();
 
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), json!(true));
@@ -2528,6 +2512,27 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     out.insert("files_listed".to_string(), json!(files.len()));
     out.insert("elapsed_ms".to_string(), json!(unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms)));
     out.insert("exhaustive".to_string(), json!(exhaustive));
+    out.insert("file_source".to_string(), json!(universe.source.label()));
+    if let Some(reason) = &universe.walk_reason {
+        out.insert("walk_reason".to_string(), json!(reason));
+    }
+    if !universe.listing_complete {
+        out.insert("git_listing_incomplete".to_string(), json!(true));
+    }
+    if !universe.excluded.is_empty() {
+        out.insert("excluded_by_rule_count".to_string(), json!(universe.excluded.len()));
+        out.insert("excluded_by_rule".to_string(), Value::Array(
+            universe.excluded.iter().take(LITERAL_SCAN_REPORTED_EXCLUSIONS)
+                .map(|x| json!({ "path": x.path, "rule": x.rule }))
+                .collect(),
+        ));
+    }
+    if !tracked_deleted.is_empty() {
+        out.insert("tracked_files_deleted_in_worktree".to_string(), json!(tracked_deleted));
+    }
+    if !directories_listed_as_files.is_empty() {
+        out.insert("submodules_not_checked_out".to_string(), json!(directories_listed_as_files));
+    }
     if files_truncated {
         out.insert("files_truncated".to_string(), json!(true));
         out.insert("files_truncated_at".to_string(), json!(file_cap));
@@ -2542,13 +2547,16 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     }
     if !files_skipped_too_large.is_empty() {
         out.insert("files_skipped_too_large".to_string(), json!(files_skipped_too_large));
-        out.insert("max_file_bytes".to_string(), json!(cfg.index.max_file_bytes));
+        out.insert("max_file_bytes".to_string(), json!(LITERAL_SCAN_MAX_FILE_BYTES));
     }
     if files_skipped_binary > 0 { out.insert("files_skipped_binary".to_string(), json!(files_skipped_binary)); }
-    if files_unreadable > 0 { out.insert("files_unreadable".to_string(), json!(files_unreadable)); }
+    if !unreadable_paths.is_empty() {
+        out.insert("files_unreadable".to_string(), json!(unreadable_paths.len()));
+        out.insert("files_unreadable_paths".to_string(), json!(unreadable_paths));
+    }
     if !exhaustive {
         out.insert("exhaustive_note".to_string(), json!(
-            "at least one bound fired -- this is NOT every match in the tree; the files_truncated/matches_truncated/budget_exhausted/files_skipped_* fields above name which"
+            "at least one bound or skip rule fired -- this is NOT every match in the tree; files_truncated/matches_truncated/budget_exhausted/files_skipped_too_large/files_unreadable/git_listing_incomplete/excluded_by_rule name which"
         ));
     }
     out.insert("matches".to_string(), Value::Array(matches));
