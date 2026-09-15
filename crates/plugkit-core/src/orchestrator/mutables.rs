@@ -9,6 +9,46 @@ pub fn mutables_path() -> std::path::PathBuf {
     gm_dir().join("mutables.yml")
 }
 
+fn row_id(item: &Value) -> Option<&str> {
+    item.as_mapping()
+        .and_then(|m| m.get(&Value::String("id".to_string())))
+        .and_then(|v| v.as_str())
+}
+
+fn row_status<'a>(item: &'a Value, default_status: &'a str) -> &'a str {
+    item.get("status").and_then(|v| v.as_str()).unwrap_or(default_status)
+}
+
+fn collapse_duplicate_ids_keeping_resolved_else_last(
+    seq: &mut Vec<Value>,
+    resolved_statuses: &[String],
+    default_status: &str,
+) {
+    let mut slot_of_id: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut kept: Vec<Value> = Vec::with_capacity(seq.len());
+    for item in seq.drain(..) {
+        let Some(id) = row_id(&item).map(|s| s.to_string()) else {
+            kept.push(item);
+            continue;
+        };
+        match slot_of_id.get(&id) {
+            Some(&slot) => {
+                let kept_row_already_resolved = resolved_statuses
+                    .iter()
+                    .any(|s| s == row_status(&kept[slot], default_status));
+                if !kept_row_already_resolved {
+                    kept[slot] = item;
+                }
+            }
+            None => {
+                slot_of_id.insert(id, kept.len());
+                kept.push(item);
+            }
+        }
+    }
+    *seq = kept;
+}
+
 fn extract_depends_on(map: &serde_yaml::Mapping) -> Vec<String> {
     map.get(&Value::String("depends_on".to_string()))
         .and_then(|v| v.as_sequence())
@@ -96,25 +136,44 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                 );
             }
         }
+        let mut replaced_existing_id = false;
         if let Some(seq) = doc.as_sequence_mut() {
             let mut new_with_id = map.clone();
             new_with_id.insert(Value::String("id".to_string()), Value::String(id.clone()));
             if !new_with_id.contains_key(&Value::String("status".to_string())) {
                 new_with_id.insert(Value::String("status".to_string()), Value::String(policy.mutables_default_status.clone()));
             }
-            seq.push(Value::Mapping(new_with_id));
+            let new_row = Value::Mapping(new_with_id);
+            collapse_duplicate_ids_keeping_resolved_else_last(
+                seq,
+                &policy.mutables_resolved_statuses,
+                &policy.mutables_default_status,
+            );
+            match seq.iter_mut().find(|it| row_id(it) == Some(id.as_str())) {
+                Some(slot) => {
+                    replaced_existing_id = true;
+                    *slot = new_row;
+                }
+                None => seq.push(new_row),
+            }
         } else {
             return cas::CasOutcome::Abort(String::new(), "mutables.yml is not a sequence".to_string(), 1);
         }
-        cas::CasOutcome::Write(doc, ())
+        cas::CasOutcome::Write(doc, replaced_existing_id)
     });
-    if let Err((out, err, rc)) = outcome {
-        return (out, err, rc);
-    }
+    let replaced_existing_id = match outcome {
+        Ok(v) => v,
+        Err((out, err, rc)) => return (out, err, rc),
+    };
     invalidate_residual_marker();
     #[cfg(target_arch = "wasm32")]
-    crate::wasm_dispatch::emit_event("mutable.added", serde_json::json!({ "id": id }));
-    (serde_json::json!({ "added": id }).to_string(), String::new(), 0)
+    crate::wasm_dispatch::emit_event("mutable.added", serde_json::json!({ "id": id, "rescoped": replaced_existing_id }));
+    let mut response = serde_json::Map::new();
+    response.insert(
+        if replaced_existing_id { "rescoped" } else { "added" }.to_string(),
+        serde_json::Value::String(id.clone()),
+    );
+    (serde_json::Value::Object(response).to_string(), String::new(), 0)
 }
 
 pub fn handle_list(_content: &str) -> (String, String, i32) {
@@ -233,7 +292,8 @@ pub fn pending_detailed() -> Vec<serde_json::Value> {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
-    let mut out = Vec::new();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut slot_of_id: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let policy = super::fsm::graph().policy;
     let resolved_statuses = policy.mutables_resolved_statuses;
     if let Some(seq) = doc.as_sequence() {
@@ -247,7 +307,17 @@ pub fn pending_detailed() -> Vec<serde_json::Value> {
                             obj.insert(ks.to_string(), yaml_to_json(v));
                         }
                     }
-                    out.push(serde_json::Value::Object(obj));
+                    let row = serde_json::Value::Object(obj);
+                    match row_id(item).map(|s| s.to_string()) {
+                        Some(id) => match slot_of_id.get(&id) {
+                            Some(&slot) => out[slot] = row,
+                            None => {
+                                slot_of_id.insert(id, out.len());
+                                out.push(row);
+                            }
+                        },
+                        None => out.push(row),
+                    }
                 }
             }
         }
