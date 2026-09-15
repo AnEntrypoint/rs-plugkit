@@ -1443,7 +1443,7 @@ const CODESEARCH_SCOPE_FIELDS: &[&str] = &["path", "glob", "path_glob"];
 const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "query", "mode", "root", "projectPath", "path", "glob", "path_glob",
     "case_insensitive", "whole_word", "max_matches", "max_files",
-    "k", "max_results", "maxResults", "limit", "session_id", "sessionId", "cwd",
+    "k", "max_results", "maxResults", "limit", "session_id", "sessionId", "SESSION_ID", "cwd",
 ];
 
 fn codesearch_exhaustive_unknown_fields(body: &Value) -> Vec<String> {
@@ -1590,7 +1590,7 @@ fn resolve_scan_target(body: &Value) -> Result<(Option<String>, Option<String>),
 
 const CODESEARCH_FILENAME_FIELDS: &[&str] = &[
     "query", "mode", "root", "projectPath", "path",
-    "k", "max_results", "maxResults", "limit", "session_id", "sessionId", "cwd",
+    "k", "max_results", "maxResults", "limit", "session_id", "sessionId", "SESSION_ID", "cwd",
 ];
 
 fn codesearch_filename(body: &Value, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
@@ -3483,7 +3483,7 @@ fn git_finalize(body: &Value) -> u64 {
     }))
 }
 
-const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &["session_id", "sessionId", "cwd", "repo"];
+const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &["session_id", "sessionId", "SESSION_ID", "cwd", "repo"];
 const GIT_LOG_FIELDS: &[&str] = &["limit", "count", "range", "ref", "rev", "path", "paths", "files"];
 const GIT_LOG_REVISION_ALIASES: &[&str] = &["range", "ref", "rev"];
 const GIT_DIFF_FIELDS: &[&str] = &["staged", "stat", "range", "ref", "rev", "path", "paths", "files"];
@@ -4369,7 +4369,7 @@ fn stamp_request_identity(mut value: Value, fingerprint: &str, body_parse_failed
 
 fn extract_session_id_from_plain_text_body(body_s: &str) -> Option<String> {
     let trimmed = body_s.trim_start();
-    for prefix in ["sessionId=", "session_id="] {
+    for prefix in ["sessionId=", "session_id=", "SESSION_ID="] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             let id = rest.split('\n').next().unwrap_or("").trim();
             if !id.is_empty() {
@@ -4405,10 +4405,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     let body: Value = if body_s.is_empty() { Value::Null } else {
         serde_json::from_str(&body_s).unwrap_or(Value::Null)
     };
-    let dispatch_session_id = body.get("sessionId").and_then(|v| v.as_str())
-        .or_else(|| body.get("session_id").and_then(|v| v.as_str()))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let dispatch_session_id = crate::validation::session_id_from_body(&body)
         .or_else(|| extract_session_id_from_plain_text_body(&body_s));
     super::events::set_dispatch_session_id(dispatch_session_id);
     let result_packed = dispatch_gated_verb(&verb, &body, &body_s);
