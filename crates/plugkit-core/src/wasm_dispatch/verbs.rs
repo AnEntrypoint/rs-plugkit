@@ -2503,6 +2503,8 @@ fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u6
                     rag_obj.insert("code_chunks_table".to_string(), json!(rag.code_chunks.table));
                     rag_obj.insert("code_chunks_index".to_string(), json!(rag.code_chunks.index));
                     rag_obj.insert("instruction_payload_ready_wave_limit".to_string(), json!(rag.instruction_payload.ready_wave_limit));
+                    rag_obj.insert("instruction_payload_mutables_pending_rows_inlined_limit".to_string(), json!(rag.instruction_payload.mutables_pending_rows_inlined_limit));
+                    rag_obj.insert("instruction_payload_prd_items_rows_inlined_limit".to_string(), json!(rag.instruction_payload.prd_items_rows_inlined_limit));
                     rag_obj.insert("instruction_payload_instruction_recall_hits".to_string(), json!(rag.instruction_payload.instruction_recall_hits));
                     rag_obj.insert("instruction_payload_transition_recall_hits".to_string(), json!(rag.instruction_payload.transition_recall_hits));
                     rag_obj.insert("instruction_payload_prompt_excerpt_chars".to_string(), json!(rag.instruction_payload.prompt_excerpt_chars));
