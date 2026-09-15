@@ -222,12 +222,49 @@ fn item_is_open(it: &serde_json::Value) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn dedup_rows_by_id_keeping_last(rows: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut slot_of_id: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut kept: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Some(id) = row.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+            kept.push(row);
+            continue;
+        };
+        match slot_of_id.get(&id) {
+            Some(&slot) => kept[slot] = row,
+            None => {
+                slot_of_id.insert(id, kept.len());
+                kept.push(row);
+            }
+        }
+    }
+    kept
+}
+
+#[cfg(target_arch = "wasm32")]
+fn rows_truncation_note(
+    inlined: usize,
+    total: usize,
+    kept_end: &str,
+    full_list_path: &std::path::Path,
+    full_list_verb: &str,
+) -> serde_json::Value {
+    json!({
+        "inlined": inlined,
+        "of": total,
+        "inlined_rows_are": kept_end,
+        "full_list_on_disk": full_list_path.to_string_lossy(),
+        "full_list_verb": full_list_verb,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
 fn ready_wave(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
     let completed_ids: std::collections::HashSet<String> = items.iter()
         .filter(|it| !item_is_open(it))
         .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .collect();
-    items.iter()
+    let unblocked: Vec<serde_json::Value> = items.iter()
         .filter(|it| item_is_open(it))
         .filter(|it| {
             it.get("blockedBy")
@@ -240,9 +277,11 @@ fn ready_wave(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
                 }))
                 .unwrap_or(true)
         })
-        .take(payload_cfg().ready_wave_limit)
         .cloned()
-        .collect()
+        .collect();
+    let mut wave = dedup_rows_by_id_keeping_last(unblocked);
+    wave.truncate(payload_cfg().ready_wave_limit);
+    wave
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -497,10 +536,12 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         let _ = pkfs::write(&early_next_step_path_s, &early_next_step);
     }
 
-    let mutables_pending = mutables::pending_detailed();
+    let mutables_pending = dedup_rows_by_id_keeping_last(mutables::pending_detailed());
     let prd_items = prd_items_json();
     let prd_pending = prd_pending_count(&prd_items);
-    let prd_items_open: Vec<serde_json::Value> = prd_items.iter().filter(|it| item_is_open(it)).cloned().collect();
+    let prd_items_open = dedup_rows_by_id_keeping_last(
+        prd_items.iter().filter(|it| item_is_open(it)).cloned().collect(),
+    );
     let next = next_phase_hint(&phase);
 
     let prompt_query = {
@@ -541,6 +582,37 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let wave = ready_wave(&prd_items);
     let mutables_pending_count = mutables_pending.len();
 
+    let payload_limits = payload_cfg();
+    let mutables_rows_inlined = mutables_pending_count.min(payload_limits.mutables_pending_rows_inlined_limit);
+    let mutables_pending_inlined: Vec<serde_json::Value> =
+        mutables_pending[mutables_pending_count - mutables_rows_inlined..].to_vec();
+    let mutables_pending_truncated = if mutables_rows_inlined < mutables_pending_count {
+        rows_truncation_note(
+            mutables_rows_inlined,
+            mutables_pending_count,
+            "the most recently added pending rows",
+            &mutables::mutables_path(),
+            "mutable-list",
+        )
+    } else {
+        serde_json::Value::Null
+    };
+
+    let prd_items_open_count = prd_items_open.len();
+    let prd_rows_inlined = prd_items_open_count.min(payload_limits.prd_items_rows_inlined_limit);
+    let prd_items_inlined: Vec<serde_json::Value> = prd_items_open[..prd_rows_inlined].to_vec();
+    let prd_items_truncated = if prd_rows_inlined < prd_items_open_count {
+        rows_truncation_note(
+            prd_rows_inlined,
+            prd_items_open_count,
+            "the open rows nearest the front of the queue, ready_wave order",
+            &prd::prd_path(),
+            "prd-list",
+        )
+    } else {
+        serde_json::Value::Null
+    };
+
     let turn_state = super::state::read_state();
     let await_result = pending_step_block(&turn_state);
 
@@ -579,10 +651,13 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "instruction_hash": instruction_hash,
         "instruction_unchanged": instruction_unchanged,
         "instruction_suppressible_by_asserting_hash": instruction_suppressible_but_unasserted,
-        "mutables_pending": mutables_pending,
+        "mutables_pending": mutables_pending_inlined,
         "mutables_pending_count": mutables_pending_count,
+        "mutables_pending_truncated": mutables_pending_truncated,
         "epistemic_gap": mutables_pending_count,
-        "prd_items": prd_items_open,
+        "prd_items": prd_items_inlined,
+        "prd_items_truncated": prd_items_truncated,
+        "prd_open_count": prd_items_open_count,
         "prd_total_count": prd_items.len(),
         "prd_pending_count": prd_pending,
         "prd_pending": prd_pending,

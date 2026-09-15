@@ -366,6 +366,8 @@ impl Default for BrowserWitnessConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct InstructionPayloadConfig {
     pub ready_wave_limit: usize,
+    pub mutables_pending_rows_inlined_limit: usize,
+    pub prd_items_rows_inlined_limit: usize,
     pub instruction_recall_hits: u32,
     pub transition_recall_hits: u32,
     pub prompt_excerpt_chars: usize,
@@ -378,6 +380,8 @@ impl Default for InstructionPayloadConfig {
     fn default() -> Self {
         InstructionPayloadConfig {
             ready_wave_limit: 3,
+            mutables_pending_rows_inlined_limit: 5,
+            prd_items_rows_inlined_limit: 10,
             instruction_recall_hits: 5,
             transition_recall_hits: 3,
             prompt_excerpt_chars: 400,
@@ -678,6 +682,8 @@ impl RagConfig {
         overwrite_present_u64_or_record_problem("pipeline", "max_attempts", &mut cfg.pipeline.max_attempts, &mut problems);
 
         overwrite_present_usize_or_record_problem("instruction_payload", "ready_wave_limit", &mut cfg.instruction_payload.ready_wave_limit, &mut problems);
+        overwrite_present_usize_or_record_problem("instruction_payload", "mutables_pending_rows_inlined_limit", &mut cfg.instruction_payload.mutables_pending_rows_inlined_limit, &mut problems);
+        overwrite_present_usize_or_record_problem("instruction_payload", "prd_items_rows_inlined_limit", &mut cfg.instruction_payload.prd_items_rows_inlined_limit, &mut problems);
         if let Some(found) = v.get("instruction_payload").and_then(|p| p.get("instruction_recall_hits")) {
             match found.as_u64() {
                 Some(n) => cfg.instruction_payload.instruction_recall_hits = n as u32,

@@ -366,6 +366,18 @@ changes.
 - `instructions::handle` suppresses prose only when the caller asserts the hash
   it holds; `.last-instruction-hash-<sid>.json` records what was sent, not what
   arrived.
+- `instructions::handle` inlines only `instruction_payload.mutables_pending_rows_inlined_limit`
+  / `prd_items_rows_inlined_limit` rows; the counts (`mutables_pending_count`,
+  `epistemic_gap`, `prd_open_count`) stay exact and a `*_truncated` block names
+  the on-disk file and the `mutable-list`/`prd-list` verb that still serve the
+  whole list. Unbounded arrays are what blew one first-turn response to 375 KB
+  raw / 146 KB MCP-cleaned against a 146-row mutables file.
+- `mutables::handle_add` upserts on `id` and collapses pre-existing duplicate
+  ids, keeping a resolved row over an unresolved one so a witnessed obligation
+  is never reopened by the collapse. Before this it pushed blindly, so one id
+  could occupy several byte-identical rows and inflate both the payload and
+  `epistemic_gap`. `handle_list` stays un-deduped: it is the full-fidelity view
+  of the file.
 
 ### Other modules
 
