@@ -728,8 +728,8 @@ pub fn handle(content: &str) -> (String, String, i32) {
     let target = if trimmed.is_empty() {
         next_phase(&cur_phase, &graph)
     } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
-            session_id = Some(sid.to_string());
+        if let Some(sid) = crate::validation::session_id_from_body(&v) {
+            session_id = Some(sid);
         }
         let to_str = v.get("to").and_then(|s| s.as_str())
             .or_else(|| v.get("phase").and_then(|s| s.as_str()))
