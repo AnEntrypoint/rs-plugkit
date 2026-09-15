@@ -333,8 +333,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     } else if let Some(stripped) = trimmed.strip_prefix("phase=") {
         Some(stripped.trim().to_string())
     } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
-            session_id_opt = Some(sid.to_string());
+        if let Some(sid) = crate::validation::session_id_from_body(&v) {
+            session_id_opt = Some(sid);
         }
         if let Some(p) = v.get("prompt").and_then(|s| s.as_str()) {
             prompt_opt = Some(p.to_string());
