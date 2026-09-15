@@ -4470,7 +4470,10 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         return pack(gate.to_denial_json(verb).to_string());
     }
     let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-    crate::browser_witness::record_from_body(cwd_for_witness, body);
+    let verb_writes_the_named_file_content_itself = verb == "fs_write";
+    if !verb_writes_the_named_file_content_itself {
+        crate::browser_witness::record_from_body(cwd_for_witness, body);
+    }
     if crate::orchestrator::is_orchestrator_verb(verb) {
         if let Some(unresolvable) = reject_if_project_root_unresolvable_before_gm_dir_panics(verb) {
             return unresolvable;
@@ -4573,6 +4576,9 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "" => err_coded("", ERR_CODE_INVALID_ARGS, "verb required"),
         _ => err_coded(&verb, ERR_CODE_UNKNOWN_VERB, "unknown verb"),
     };
+    if verb_writes_the_named_file_content_itself {
+        crate::browser_witness::record_from_body(cwd_for_witness, &body);
+    }
     #[cfg(target_arch = "wasm32")]
     {
         let ms = unsafe { host_now_ms() }.saturating_sub(dispatch_start_ms);
