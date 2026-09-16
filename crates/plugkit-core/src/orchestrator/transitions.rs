@@ -364,7 +364,7 @@ fn pred_no_hedge_language_in_diff() -> bool {
 fn pred_no_hedge_language_in_diff() -> bool { true }
 
 #[cfg(target_arch = "wasm32")]
-fn pred_no_graphical_symbols_in_diff() -> bool {
+fn graphical_symbol_lines_in_diff() -> Vec<String> {
     let mut found = Vec::new();
     for (path, line_no, text) in added_lines_in_diff() {
         if path.ends_with("CHANGELOG.md") { continue; }
@@ -376,6 +376,12 @@ fn pred_no_graphical_symbols_in_diff() -> bool {
             found.push(format!("{path}:{line_no}: {}", text.trim()));
         }
     }
+    found
+}
+
+#[cfg(target_arch = "wasm32")]
+fn pred_no_graphical_symbols_in_diff() -> bool {
+    let found = graphical_symbol_lines_in_diff();
     if found.is_empty() { return true; }
     crate::wasm_dispatch::emit_event("deviation.graphical-symbol", serde_json::json!({
         "lines": found,
@@ -619,6 +625,19 @@ fn evaluate_gate(g: &GateDef) -> bool {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn predicate_detail(predicate_name: Option<&str>) -> Option<String> {
+    match predicate_name {
+        Some("no-graphical-symbols-in-diff") => {
+            let lines = graphical_symbol_lines_in_diff();
+            (!lines.is_empty()).then(|| lines.join("; "))
+        }
+        _ => None,
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn predicate_detail(_predicate_name: Option<&str>) -> Option<String> { None }
+
 fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, String, i32)> {
     let Some(edge) = graph.edge_between(from, to) else {
         return Some((
@@ -633,7 +652,8 @@ fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, S
     for gate_name in &edge.gates {
         let Some(g) = graph.gate(gate_name) else { continue };
         if !evaluate_gate(g) {
-            let detail = hook_denial_detail_or_none_if_predicate_caused_it(g);
+            let detail = hook_denial_detail_or_none_if_predicate_caused_it(g)
+                .or_else(|| predicate_detail(g.predicate.as_deref()));
             let message = match detail {
                 Some(d) => format!("{} -- {}", g.message, d),
                 None => g.message.clone(),
