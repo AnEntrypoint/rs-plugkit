@@ -68,6 +68,13 @@ pub fn handle_spawn(content: &str) -> (String, String, i32) {
         .unwrap_or("");
     if lang.is_empty() { return err_resp("task-spawn", "lang required"); }
     if code.is_empty() { return err_resp("task-spawn", "code required"); }
+    let codeinsight_start = crate::code_index::ensure_current_insight();
+    if !codeinsight_start.get("ready").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return err_resp("task-spawn", &format!(
+            "code insight is required before starting a job but did not reach a current complete index: {}",
+            codeinsight_start
+        ));
+    }
     let requested = body.get("timeoutMs").and_then(|v| v.as_u64());
     let timeout = clamp_timeout(requested);
     let was_clamped = requested.map(|r| r != timeout).unwrap_or(false);
