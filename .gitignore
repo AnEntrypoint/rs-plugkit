@@ -7,3 +7,5 @@ Cargo.lock
 .gm/config-source-cache-default.0f97d1a3fa2b58cb.sync.json
 .gm/last-dispatch-ts
 .gm/last-instruction-ts
+/.agentplug-kv/
+/crates/plugkit-core/.gm/
