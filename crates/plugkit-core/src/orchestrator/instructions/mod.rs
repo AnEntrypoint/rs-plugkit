@@ -622,7 +622,11 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let route_hint = serde_json::Value::Null;
 
     #[cfg(target_arch = "wasm32")]
+    let codeinsight_start = crate::code_index::ensure_current_insight();
+    #[cfg(target_arch = "wasm32")]
     let codeinsight_overview = crate::code_index::overview();
+    #[cfg(not(target_arch = "wasm32"))]
+    let codeinsight_start = serde_json::Value::Null;
     #[cfg(not(target_arch = "wasm32"))]
     let codeinsight_overview = serde_json::Value::Null;
 
@@ -665,6 +669,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "recall_hits": recall_hits,
         "recall_embed_failed": recall_embed_failed,
         "orient_nouns": nouns,
+        "codeinsight_start": codeinsight_start,
         "codeinsight_overview": codeinsight_overview,
         "ready_wave": wave,
         "update_available": update_available,

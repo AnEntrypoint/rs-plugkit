@@ -595,7 +595,7 @@ fn lang(body: &Value) -> u64 {
     }
 }
 
-const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "timeoutMs=<ms>\\n<code>, or bare code (the host's 120000ms default budget applies)";
+const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "timeoutMs=<ms>\\n<code>";
 
 fn exec_js(body: &Value, body_s: &str) -> u64 {
     if body.is_object() {
@@ -612,16 +612,21 @@ fn exec_js(body: &Value, body_s: &str) -> u64 {
         "error_code": ERR_CODE_INVALID_ARGS,
         "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
     })); }
-    let opts = match prefix_timeout_ms {
-        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => json!({"timeoutMs": n}),
+    let timeout_ms = match prefix_timeout_ms {
+        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
         Some(n) => return err_json("exec_js", json!({
             "error": "timeoutMs below floor",
             "error_code": ERR_CODE_INVALID_ARGS,
             "min": crate::validation::MIN_TIMEOUT_MS,
             "received": n,
         })),
-        None => json!({}),
-    }.to_string();
+        None => return err_json("exec_js", json!({
+            "error": "missing timeoutMs -- prefix the body with a timeoutMs=<ms> line naming a positive integer millisecond budget",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
+        })),
+    };
+    let opts = json!({"timeoutMs": timeout_ms}).to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok("exec_js", Value::String(s)),
@@ -646,6 +651,18 @@ fn kv_get(body: &Value) -> u64 {
     }
 }
 
+/// Algorithm 6 (Cordis paper Section 5.1.4/6.3) proxy mediation, applied at
+/// the exact point of KV access -- not only at discipline-activation time
+/// the way `active_policies()`/`requires_satisfied` gate policy surfacing.
+/// A caller that names itself via `discipline` (the accessing fiber) and
+/// reads/writes a DIFFERENT discipline's namespace (the coeffect key) goes
+/// through `capability_proxy::resolve`, which raises `INACTIVE_ACCESS`
+/// (declared but the provider is not currently Active) or
+/// `UNDECLARED_ACCESS` (never declared in `requires.json` at all) exactly
+/// as Algorithm 6's `resolve` walk does. Same-namespace access and callers
+/// that omit `discipline` bypass this by construction (see
+/// `confinement_violation`'s own doc comment: an accessor that does not
+/// name itself is not resolving against any fiber's coeffect chain).
 fn capability_access_violation(body: &Value, namespace: &str) -> Option<u64> {
     let accessor = body.get("discipline").and_then(|v| v.as_str())?;
     if accessor == namespace {
@@ -665,6 +682,23 @@ fn capability_access_violation(body: &Value, namespace: &str) -> Option<u64> {
     }
 }
 
+/// A self-declared-identity check inspired by Confinement (Cordis paper
+/// Definition 48, Section 4.2), NOT an enforcement of it. Definition 48
+/// binds a component's OWN effect function -- trusted code the paper's
+/// model assumes runs as that fiber, never as an open dispatch surface a
+/// caller can lie to. gm's spool-dispatch ABI carries no caller identity
+/// a caller cannot simply omit or fabricate (no capability token, no
+/// signed session-to-discipline binding), so this check catches only a
+/// caller that VOLUNTARILY names itself via `discipline` and then
+/// contradicts that name with a mismatched `namespace` -- an accidental
+/// cross-namespace write from well-behaved code, not an adversary. A
+/// caller that wants to violate confinement does so by simply omitting
+/// `discipline`, at which point `claimed` is `None` and this function
+/// returns `None` (no violation) unconditionally: the check is fully
+/// bypassable and offers no security boundary. Genuine enforcement would
+/// need the dispatch ABI itself to carry a caller identity the caller
+/// cannot forge, which does not exist today -- a real capability/token
+/// system is the actual fix, not a stronger version of this function.
 fn confinement_violation(body: &Value, namespace: &str) -> Option<String> {
     let claimed = body.get("discipline").and_then(|v| v.as_str())?;
     if claimed == namespace {
@@ -1404,11 +1438,24 @@ fn memorize_prune(body: &Value) -> u64 {
     }))
 }
 
+/// Cross-project entry: `codesearch {root|projectPath, query, ...}` against a
+/// submodule or sibling repo, e.g. `C:/dev/liqology`. Its index/cache lives at
+/// `<root>/.gm/gm.db` plus a crc32-salted KV namespace -- isolated from and
+/// reusable independent of the current project's own index (see
+/// `code_index::project_db_path`/`root_ns_suffix`). Deliberately bypasses the
+/// cwd-only fusion/BM25/dataflow-pipeline machinery the default path uses:
+/// that machinery is inherently tied to the current project's own db and
+/// threading it through every root would risk mixing state across projects;
+/// filename+semantic search alone already covers the actual failure mode
+/// (falling back to `find`/Grep/Glob because codesearch could not reach a
+/// submodule at all).
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
     if !crate::wasm_dispatch::host_allow_root(root) {
-        return err("codesearch", &format!(
-            "root '{root}' is not a directory the host will grant access to -- a root for mode \"dual\" must be a project (exists and carries .git, .gm, package.json, Cargo.toml, go.mod, or pyproject.toml), because it gets its own index at <root>/.gm/gm.db. To search a subdirectory, use mode \"literal\", \"regex\" or \"filename\": they accept a subdirectory as \"root\" or, equivalently, the project as \"root\" plus the subdirectory as \"path\"."
-        ));
+        return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
+    }
+    if body.get("mode").and_then(|v| v.as_str()) == Some("filename") {
+        let out = crate::code_index::search_filenames_at(query, k as usize, cfg, Some(root));
+        return ok("codesearch", out);
     }
     let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
     if !already_indexed {
@@ -1418,7 +1465,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         if stale {
             let reason = if stored.is_none() { "digest-absent" } else { "digest-mismatch" };
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "root": root, "stored_then_current": current }));
-            let _ = crate::code_index::index_at(root, crate::code_index::default_index_file_limit(), root);
+            let _ = crate::code_index::index_at(root, 500, root);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -1428,77 +1475,65 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
     }
     let embedding = embed_query(query);
     let vres = crate::code_index::search_at(query, k as usize, Some(&embedding), Some(root));
-    let hits = vres.get("rows").cloned().unwrap_or_else(|| json!([]));
+    let vector_hits = vres.get("rows").cloned().unwrap_or_else(|| json!([]));
+    let mut corpus = crate::code_index::FusionCorpus::load_at(Some(root));
+    let bm25_hits: Vec<Value> = corpus.bm25_rank_cfg(query, k as usize, &cfg.scoring)
+        .into_iter()
+        .map(|(key, score)| {
+            let text = corpus.text_for_key(&key).unwrap_or_default();
+            let mut hit = serde_json::Map::new();
+            hit.insert("key".to_string(), json!(key));
+            hit.insert("text".to_string(), json!(text));
+            hit.insert("score".to_string(), json!(score));
+            if let Some(symbol) = corpus.symbol_for_key(hit.get("key").and_then(|v| v.as_str()).unwrap_or("")) {
+                hit.insert("symbol".to_string(), symbol);
+            }
+            Value::Object(hit)
+        })
+        .collect();
+    let commits = crate::code_index::git_commit_rank_at(root, query, 10);
     ok("codesearch", json!({
-        "mode": "root_scoped", "root": root, "vector_hits": hits, "degraded": vres.get("degraded").cloned().unwrap_or(json!(false)),
+        "mode": "dual",
+        "root": root,
+        "vector_hits": vector_hits,
+        "bm25_hits": bm25_hits,
+        "commits": commits,
+        "channels": {
+            "vector": { "independent": true, "indexed_root": root },
+            "bm25": { "independent": true, "indexed_root": root },
+            "commits": { "independent": true, "indexed_root": root },
+        },
+        "degraded": vres.get("degraded").cloned().unwrap_or(json!(false)),
     }))
 }
 
+/// Every `mode` codesearch honours. Anything else is an ERROR naming this
+/// list, never a silent downgrade.
+///
+/// Why this list is enforced rather than pattern-matched in place: `mode` used
+/// to be consulted at exactly two sites and only for the literal string
+/// "filename", so every other value -- `"literal"`, `"regex"`, a typo -- fell
+/// through to the dual retrieval path and the response then reported
+/// `mode: "dual"`. The caller's instruction was discarded AND the response
+/// said so in a field the caller had no reason to re-read, which is how a
+/// ranked 10-hit answer got mistaken for an exhaustive one.
 const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 
+/// Body spellings accepted for "how many results", in precedence order.
+///
+/// `max_results` is here because it was silently ignored: only `k` was ever
+/// read, so `{"max_results": 60}` collapsed to `cfg.budget.default_k` (10) and
+/// the caller saw a 10-hit answer with nothing saying their limit was dropped.
+/// The other spellings are the plausible ways the same intent gets typed; an
+/// unrecognised one must never be ignored, so they are recognised rather than
+/// left to fall through.
 const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit"];
 
-const CODESEARCH_SCOPE_FIELDS: &[&str] = &["path", "glob", "path_glob"];
-
-const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
-    "query", "mode", "root", "projectPath", "path", "glob", "path_glob",
-    "case_insensitive", "whole_word", "max_matches", "max_files",
-    "k", "max_results", "maxResults", "limit", "session_id", "sessionId", "SESSION_ID", "cwd",
-];
-
-fn codesearch_exhaustive_unknown_fields(body: &Value) -> Vec<String> {
-    body.as_object()
-        .map(|obj| obj.keys()
-            .filter(|k| !k.starts_with('_') && !CODESEARCH_EXHAUSTIVE_FIELDS.contains(&k.as_str()))
-            .cloned()
-            .collect())
-        .unwrap_or_default()
-}
-
-fn resolve_exhaustive_scan_root(requested: &str) -> Result<(Option<String>, Option<String>), String> {
-    let normalized = requested.replace('\\', "/").trim_end_matches('/').to_string();
-    let bytes = normalized.as_bytes();
-    let has_drive_letter = bytes.len() >= 2 && bytes[1] == b':';
-    if !normalized.starts_with('/') && !has_drive_letter {
-        return Ok((None, Some(normalized)));
-    }
-    if crate::wasm_dispatch::host_allow_root(requested) {
-        return Ok((Some(requested.to_string()), None));
-    }
-    let comparable = |p: &str| if has_drive_letter { p.to_ascii_lowercase() } else { p.to_string() };
-    if let Some(cwd) = crate::wasm_dispatch::host_cwd_string() {
-        let cwd = cwd.replace('\\', "/").trim_end_matches('/').to_string();
-        let (target, base) = (comparable(&normalized), comparable(&cwd));
-        if target == base {
-            return Ok((None, None));
-        }
-        if target.starts_with(&format!("{base}/")) {
-            return Ok((None, Some(normalized[cwd.len() + 1..].to_string())));
-        }
-    }
-    let mut end = normalized.len();
-    while let Some(slash) = normalized[..end].rfind('/') {
-        let ancestor = &normalized[..slash];
-        if ancestor.is_empty() || ancestor.ends_with(':') { break; }
-        if crate::wasm_dispatch::host_allow_root(ancestor) {
-            return Ok((Some(ancestor.to_string()), Some(normalized[slash + 1..].to_string())));
-        }
-        end = slash;
-    }
-    Err(format!(
-        "root '{requested}' is neither the current project, a directory inside it, nor inside any directory the host will grant -- a granted root must exist and carry a project marker (.git, .gm, package.json, Cargo.toml, go.mod, pyproject.toml). Pass the project as \"root\" and the location inside it as \"path\"."
-    ))
-}
-
-fn codesearch_optional_str<'a>(body: &'a Value, field: &str) -> Result<Option<&'a str>, String> {
-    match body.get(field) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
-        Some(Value::String(s)) => Ok(Some(s.trim())),
-        Some(other) => Err(format!("body field \"{field}\" must be a string, got {other}")),
-    }
-}
-
+/// Resolves the result limit, reporting a genuine conflict instead of picking
+/// a winner behind the caller's back. Returns the limit and whether the caller
+/// stated it explicitly (the exhaustive modes need that distinction: an
+/// explicit limit bounds them, an absent one must not silently bound them to
+/// the ranked-retrieval default of 10).
 fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> Result<(u32, bool), String> {
     let mut seen: Vec<(&str, u64)> = Vec::new();
     for field in CODESEARCH_LIMIT_FIELDS {
@@ -1525,29 +1560,25 @@ fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> R
     }
 }
 
+/// Exhaustive literal/regex search: ripgrep semantics, every match with
+/// path:line, enumeration order, no relevance ranking, no top-k.
+///
+/// Routed BEFORE the root branch and before every digest/index/embedding step
+/// because it needs none of them -- that bypass is the fix for a literal
+/// question over a large workspace costing minutes (measured on
+/// C:/dev/litebox-main: two 120s/240s timeouts and one ~420s answer, all spent
+/// in the corpus-digest walk, the `index(".", 500)` rebuild it triggered, and
+/// the embedding/fusion passes that follow, none of which an exact-match
+/// answer consults).
 fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ragconfig::RagConfig, explicit_limit: Option<u32>) -> u64 {
-    let unknown = codesearch_exhaustive_unknown_fields(body);
-    if !unknown.is_empty() {
-        return err("codesearch", &format!(
-            "mode \"{}\" does not recognise body field(s) {} -- supported fields are {}. An unrecognised field is refused rather than ignored: an ignored scoping field silently widens the scan to the whole tree.",
-            if regex { "regex" } else { "literal" },
-            unknown.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", "),
-            CODESEARCH_EXHAUSTIVE_FIELDS.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", "),
-        ));
+    let root = body.get("root").and_then(|v| v.as_str())
+        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty());
+    if let Some(root) = root {
+        if !crate::wasm_dispatch::host_allow_root(root) {
+            return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
+        }
     }
-    let (root, combined_scope) = match resolve_scan_target(body) {
-        Ok(target) => target,
-        Err(e) => return err("codesearch", &e),
-    };
-    let root = root.as_deref();
-    let scope = combined_scope.as_deref();
-    let path_glob = match (codesearch_optional_str(body, "path_glob"), codesearch_optional_str(body, "glob")) {
-        (Err(e), _) | (_, Err(e)) => return err("codesearch", &e),
-        (Ok(Some(a)), Ok(Some(b))) if a != b => return err("codesearch", &format!(
-            "\"glob\" and \"path_glob\" are aliases but carry different values (\"{b}\" vs \"{a}\") -- pass one"
-        )),
-        (Ok(a), Ok(b)) => a.or(b),
-    };
     let max_matches = match body.get("max_matches") {
         Some(value) => match value.as_u64() {
             Some(limit) if limit > 0 => limit as usize,
@@ -1561,73 +1592,14 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         regex,
         case_insensitive: body.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false),
         whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
-        scope,
-        path_glob,
+        path_glob: body.get("path_glob").and_then(|v| v.as_str()).filter(|g| !g.is_empty()),
         max_matches,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
     };
-    codesearch_scan_result(crate::code_index::scan_literal(&scan, cfg), "exhaustive scan failed")
-}
-
-fn resolve_scan_target(body: &Value) -> Result<(Option<String>, Option<String>), String> {
-    let requested_root = body.get("root").and_then(|v| v.as_str())
-        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
-        .map(str::trim)
-        .filter(|p| !p.is_empty());
-    let (root, root_implied_scope) = match requested_root {
-        None => (None, None),
-        Some(r) => resolve_exhaustive_scan_root(r)?,
-    };
-    let explicit_scope = codesearch_optional_str(body, "path")?;
-    let combined_scope = match (root_implied_scope, explicit_scope) {
-        (Some(implied), Some(explicit)) => Some(format!("{}/{}", implied.trim_end_matches('/'), explicit)),
-        (Some(implied), None) => Some(implied),
-        (None, explicit) => explicit.map(String::from),
-    };
-    Ok((root, combined_scope))
-}
-
-const CODESEARCH_FILENAME_FIELDS: &[&str] = &[
-    "query", "mode", "root", "projectPath", "path",
-    "k", "max_results", "maxResults", "limit", "session_id", "sessionId", "SESSION_ID", "cwd",
-];
-
-fn codesearch_filename(body: &Value, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
-    if let Some(field) = ["glob", "path_glob"].iter().find(|f| body.get(**f).is_some()) {
-        return err("codesearch", &format!(
-            "mode \"filename\" takes its glob as \"query\" itself (e.g. \"src/**/*.rs\"); \"{field}\" is refused rather than ignored. Scope with \"root\"/\"path\" instead."
-        ));
-    }
-    let unknown: Vec<String> = body.as_object()
-        .map(|obj| obj.keys()
-            .filter(|key| !key.starts_with('_') && !CODESEARCH_FILENAME_FIELDS.contains(&key.as_str()))
-            .map(|key| format!("\"{key}\""))
-            .collect())
-        .unwrap_or_default();
-    if !unknown.is_empty() {
-        return err("codesearch", &format!(
-            "mode \"filename\" does not recognise body field(s) {} -- supported fields are {}",
-            unknown.join(", "),
-            CODESEARCH_FILENAME_FIELDS.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", "),
-        ));
-    }
-    let (root, scope) = match resolve_scan_target(body) {
-        Ok(target) => target,
-        Err(e) => return err("codesearch", &e),
-    };
-    let search = crate::code_index::FilenameSearch {
-        pattern: query,
-        root: root.as_deref(),
-        scope: scope.as_deref(),
-        max_hits: k as usize,
-    };
-    codesearch_scan_result(crate::code_index::search_filenames(&search, cfg), "filename search failed")
-}
-
-fn codesearch_scan_result(out: Value, fallback: &str) -> u64 {
+    let out = crate::code_index::scan_literal(&scan, cfg);
     if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
-        return err_coded("codesearch", ERR_CODE_INVALID_ARGS, out.get("error").and_then(|e| e.as_str()).unwrap_or(fallback));
+        return err("codesearch", out.get("error").and_then(|e| e.as_str()).unwrap_or("exhaustive scan failed"));
     }
     ok("codesearch", out)
 }
@@ -1656,19 +1628,15 @@ fn codesearch(body: &Value) -> u64 {
         let explicit = if limit_was_explicit { Some(k) } else { None };
         return codesearch_exhaustive(body, query, mode == "regex", &cfg, explicit);
     }
-    if mode == "filename" {
-        return codesearch_filename(body, query, k, &cfg);
-    }
-    if let Some(field) = CODESEARCH_SCOPE_FIELDS.iter().find(|f| body.get(**f).is_some()) {
-        return err("codesearch", &format!(
-            "body field \"{field}\" scopes a tree walk and is only honoured by mode \"literal\"/\"regex\"; mode \"{mode}\" would ignore it and answer from the whole index. Re-dispatch with mode \"literal\" or \"regex\", or drop \"{field}\"."
-        ));
-    }
     let root = body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
         .filter(|p| !p.is_empty());
     if let Some(root) = root {
         return codesearch_at_root(body, root, query, k, &cfg);
+    }
+    if mode == "filename" {
+        let out = crate::code_index::search_filenames(query, k as usize, &cfg);
+        return ok("codesearch", out);
     }
     let (_dataflow_doc, dataflow_tier, dataflow_path) = crate::dataflow::document_detailed();
     if dataflow_tier != crate::dataflow::DataflowTier::CompiledDefault {
@@ -1691,7 +1659,7 @@ fn codesearch(body: &Value) -> u64 {
         && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
         let cleared = crate::code_index::clear_codeinsight_full_cfg(&cfg);
         emit_event("codeinsight_rebuild", json!({ "reason": "explicit-rebuild", "keys_cleared": cleared }));
-        let _ = crate::code_index::index(".", crate::code_index::default_index_file_limit());
+        let _ = crate::code_index::index(".", 500);
         let mut retry = body.clone();
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -1707,7 +1675,7 @@ fn codesearch(body: &Value) -> u64 {
         if stale {
             let reason = if stored.is_none() { "digest-absent" } else { "digest-mismatch" };
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "stored_then_current": current }));
-            let _ = crate::code_index::index(".", crate::code_index::default_index_file_limit());
+            let _ = crate::code_index::index(".", 500);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -1777,7 +1745,7 @@ fn codesearch(body: &Value) -> u64 {
     let hits = unpack_to_value(packed);
     let kv_empty = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
     if kv_empty && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let _ = crate::code_index::index(".", crate::code_index::default_index_file_limit());
+        let _ = crate::code_index::index(".", 500);
         let mut retry = body.clone();
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -1980,12 +1948,15 @@ fn discipline(body: &Value) -> u64 {
     }
 }
 
+const SHELL_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+const SHELL_SUPPORTED_BODY_SHAPES: &str = "timeoutMs=<ms>\\n<command>, or bare command text (uses the default 120000 ms timeout)";
+
 fn shell_exec(body: &Value, body_s: &str, lang: &str) -> u64 {
     if body.is_object() {
         return err_json(lang, json!({
             "error": format!("{lang} takes a plain-text body, never a JSON object. Send the raw command/script itself as the dispatch body, with an optional leading timeoutMs=<ms> line."),
             "error_code": ERR_CODE_INVALID_ARGS,
-            "supported_shapes": "timeoutMs=<ms>\\n<command>, or bare command text",
+            "supported_shapes": SHELL_SUPPORTED_BODY_SHAPES,
             "received_keys": body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
         }));
     }
@@ -1994,16 +1965,17 @@ fn shell_exec(body: &Value, body_s: &str, lang: &str) -> u64 {
         "error": format!("{lang} body is empty -- provide a raw command/script as the dispatch body"),
         "error_code": ERR_CODE_INVALID_ARGS,
     })); }
-    let opts = match prefix_timeout_ms {
-        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => json!({ "lang": lang, "timeoutMs": n }),
+    let timeout_ms = match prefix_timeout_ms {
+        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
         Some(n) => return err_json(lang, json!({
             "error": "timeoutMs below floor",
             "error_code": ERR_CODE_INVALID_ARGS,
             "min": crate::validation::MIN_TIMEOUT_MS,
             "received": n,
         })),
-        None => json!({ "lang": lang }),
-    }.to_string();
+        None => SHELL_DEFAULT_TIMEOUT_MS,
+    };
+    let opts = json!({ "lang": lang, "timeoutMs": timeout_ms }).to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok(lang, Value::String(s)),
@@ -2178,6 +2150,13 @@ fn browser_lightpanda_or_steel_cdp_engine(body: &Value, body_s: &str) -> u64 {
             })),
         },
     };
+    // The browser and cdp verbs share ONE host-import (host_browser_exec) and
+    // ONE agentplug-side driver (browser::run) -- both are real-Chrome-family
+    // CDP-over-port dispatch, differing only in which engine answers the
+    // port. The "engine" field rides in the small opts param (never inside
+    // the raw code body), so the agentplug host reads it to pick
+    // spawn-lightpanda vs dial-steel-endpoint vs the cdp verb's
+    // spawn-chrome default, without JSON-escaping the caller's raw JS.
     let opts = json!({ "timeoutMs": timeout_ms, "engine": "lightpanda" }).to_string();
     let packed = unsafe { host_browser_exec(
         code.as_ptr(), code.len() as u32,
@@ -2268,6 +2247,12 @@ fn cdp_real_chrome_escape_hatch(body: &Value, body_s: &str) -> u64 {
             })),
         },
     };
+    // Explicit "engine":"chrome" (rather than relying on field-absence) keeps
+    // cdp's own dispatch self-describing on the same shared envelope the
+    // browser verb now also sends over host_browser_exec -- the agentplug
+    // host's default for a missing/unrecognized engine field is ALSO chrome
+    // (see browser_engine::select_engine), so this is belt-and-suspenders
+    // preserving cdp's exact prior behavior, not a functional dependency.
     let opts = json!({ "timeoutMs": timeout_ms, "engine": "chrome" }).to_string();
     let packed = unsafe { host_browser_exec(
         code.as_ptr(), code.len() as u32,
@@ -2503,8 +2488,6 @@ fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u6
                     rag_obj.insert("code_chunks_table".to_string(), json!(rag.code_chunks.table));
                     rag_obj.insert("code_chunks_index".to_string(), json!(rag.code_chunks.index));
                     rag_obj.insert("instruction_payload_ready_wave_limit".to_string(), json!(rag.instruction_payload.ready_wave_limit));
-                    rag_obj.insert("instruction_payload_mutables_pending_rows_inlined_limit".to_string(), json!(rag.instruction_payload.mutables_pending_rows_inlined_limit));
-                    rag_obj.insert("instruction_payload_prd_items_rows_inlined_limit".to_string(), json!(rag.instruction_payload.prd_items_rows_inlined_limit));
                     rag_obj.insert("instruction_payload_instruction_recall_hits".to_string(), json!(rag.instruction_payload.instruction_recall_hits));
                     rag_obj.insert("instruction_payload_transition_recall_hits".to_string(), json!(rag.instruction_payload.transition_recall_hits));
                     rag_obj.insert("instruction_payload_prompt_excerpt_chars".to_string(), json!(rag.instruction_payload.prompt_excerpt_chars));
@@ -2643,7 +2626,7 @@ fn codeinsight_index(body: &Value) -> u64 {
     let root = body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
         .filter(|p| !p.is_empty());
-    let max_files = body.get("max_files").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or_else(crate::code_index::default_index_file_limit);
+    let max_files = body.get("max_files").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
     if body.get("dead_code").and_then(|v| v.as_bool()).unwrap_or(false) {
         let limit = body.get("dead_code_limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
         return pack(crate::code_index::index_with_dead_code(root.unwrap_or("."), max_files, limit).to_string());
@@ -2658,74 +2641,6 @@ fn codeinsight_index(body: &Value) -> u64 {
 fn body_cwd(body: &Value) -> Option<&str> {
     body.get("cwd").and_then(|v| v.as_str())
         .or_else(|| body.get("repo").and_then(|v| v.as_str()))
-}
-
-fn body_pathspecs(body: &Value) -> Result<Option<Vec<String>>, String> {
-    let (field, raw) = match (body.get("paths"), body.get("files")) {
-        (Some(_), Some(_)) => return Err("pass paths or files, not both -- they are aliases for the same pathspec list".to_string()),
-        (Some(v), None) => ("paths", v),
-        (None, Some(v)) => ("files", v),
-        (None, None) => return Ok(None),
-    };
-    let items: Vec<&Value> = match raw {
-        Value::String(_) => vec![raw],
-        Value::Array(a) => a.iter().collect(),
-        _ => return Err(format!("{field} must be an array of pathspec strings, got {raw}")),
-    };
-    let mut pathspecs = Vec::with_capacity(items.len());
-    for item in items {
-        match item.as_str().map(str::trim) {
-            Some(s) if !s.is_empty() => pathspecs.push(s.to_string()),
-            _ => return Err(format!("{field} entries must be non-empty pathspec strings, got {item}")),
-        }
-    }
-    if pathspecs.is_empty() {
-        return Err(format!("{field} is present but empty -- name at least one pathspec, or omit {field} to act on the whole worktree"));
-    }
-    Ok(Some(pathspecs))
-}
-
-fn argv_with_pathspecs<'a>(base: &[&'a str], pathspecs: Option<&'a [String]>) -> Vec<&'a str> {
-    let mut argv = base.to_vec();
-    if let Some(specs) = pathspecs {
-        argv.push("--");
-        argv.extend(specs.iter().map(String::as_str));
-    }
-    argv
-}
-
-fn commit_scope_covers_prd_file(pathspecs: Option<&[String]>) -> bool {
-    match pathspecs {
-        None => true,
-        Some(specs) => specs.iter().any(|spec| {
-            let normalized = spec.replace('\\', "/");
-            let trimmed = normalized.trim_start_matches("./").trim_end_matches('/');
-            trimmed.is_empty() || trimmed == "." || trimmed == ".gm" || trimmed == ".gm/prd.yml"
-        }),
-    }
-}
-
-fn git_porcelain_scoped(repo: Option<&str>, pathspecs: Option<&[String]>) -> String {
-    match pathspecs {
-        None => git_porcelain_in(repo),
-        Some(specs) => super::host_abi::porcelain_or_dirty(git_call_argv(&argv_with_pathspecs(&["status", "--porcelain"], Some(specs)), repo)),
-    }
-}
-
-fn git_exit_code(r: &Value) -> i64 {
-    r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0)
-}
-
-fn git_failure_text(r: &Value, fallback: &str) -> String {
-    let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
-    let stdout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim();
-    if !stderr.is_empty() { stderr.to_string() } else if !stdout.is_empty() { stdout.to_string() } else { fallback.to_string() }
-}
-
-const GIT_ADD_IGNORED_PATHSPEC_ADVISORY: &str = "are ignored by one of your .gitignore files";
-
-fn scoped_add_failed_only_on_ignored_pathspec_advisory(r: &Value) -> bool {
-    git_exit_code(r) == 1 && r.get("stderr").and_then(|x| x.as_str()).unwrap_or("").contains(GIT_ADD_IGNORED_PATHSPEC_ADVISORY)
 }
 
 const GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS: &str = "git_async";
@@ -3004,14 +2919,13 @@ fn git_push(body: &Value) -> u64 {
             "branch": branch,
             "porcelain": porcelain_preview.clone() + &more,
             "reason": format!(
-                "worktree dirty in {} -- commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice. If this dirt belongs to another writer sharing the worktree and the commit to publish is already HEAD, re-dispatch with {{\"rev\":\"HEAD\"}}: that pushes exactly that commit and leaves the worktree untouched. Porcelain:\n{}{}",
+                "worktree dirty in {} -- commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice. Porcelain:\n{}{}",
                 repo.as_deref().unwrap_or("cwd"), branch, porcelain_preview, more
             ),
             "next_dispatch": "instruction",
             "next_dispatch_hint": "instruction",
             "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
-            "sanctioned_bypass": {"rev": "HEAD"},
-            "next_action_hint": "Read porcelain field. If the dirt is yours: stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. If the dirt belongs to a concurrent writer: commit only your files with git_commit {paths:[...]} (or git_finalize {message, paths:[...]}, which pushes by explicit ref on its own), then git_push {rev:\"HEAD\"}. Do NOT retry git_push unchanged with the same dirty tree -- the gate will deny again.",
+            "next_action_hint": "Read porcelain field, decide stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. Do NOT retry git_push with the same dirty tree -- the gate will deny again.",
         }).to_string());
     }
     let source_ref = explicit_source_ref.as_deref().unwrap_or("HEAD");
@@ -3131,20 +3045,23 @@ fn git_add(body: &Value) -> u64 {
     git_async_entry("git_add", body, |body, plan| {
         let repo = body.get("repo").and_then(|v| v.as_str());
         let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
-        let pathspecs = match body_pathspecs(body) {
-            Ok(p) => p,
-            Err(e) => return Ok(err("git_add", &e)),
-        };
-        let argv = argv_with_pathspecs(&["add", "-A"], pathspecs.as_deref());
-        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
-        let ignored_pathspec_advisory = pathspecs.is_some() && scoped_add_failed_only_on_ignored_pathspec_advisory(&r);
-        if git_exit_code(&r) != 0 && !ignored_pathspec_advisory {
-            return Ok(err("git_add", &git_failure_text(&r, "git add failed")));
+        let paths: Vec<String> = body.get("paths")
+            .or_else(|| body.get("files"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let mut argv: Vec<&str> = vec!["add"];
+        if paths.is_empty() {
+            argv.push("-A");
+        } else {
+            for p in &paths { argv.push(p.as_str()); }
         }
-        Ok(ok("git_add", json!({
-            "staged": pathspecs.unwrap_or_else(|| vec!["-A".to_string()]),
-            "ignored_pathspec_advisory": ignored_pathspec_advisory,
-        })))
+        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 {
+            return Ok(err("git_add", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("git add failed")));
+        }
+        Ok(ok("git_add", json!({ "staged": if paths.is_empty() { vec!["-A".to_string()] } else { paths } })))
     })
 }
 
@@ -3170,38 +3087,20 @@ fn git_commit(body: &Value) -> u64 {
             return Ok(err("git_commit", "message required"));
         }
         let allow_empty = body.get("allow_empty").and_then(|v| v.as_bool()).unwrap_or(false);
-        let pathspecs = match body_pathspecs(body) {
-            Ok(p) => p,
-            Err(e) => return Ok(err("git_commit", &e)),
-        };
-        let scope = pathspecs.as_deref();
-        let status_r = git_step_replayed_by_call_order(plan, &argv_with_pathspecs(&["status", "--porcelain"], scope), cwd)?;
+        let status_r = git_step_replayed_by_call_order(plan, &["status", "--porcelain"], cwd)?;
         let porcelain = super::host_abi::porcelain_or_dirty(status_r);
         if porcelain.trim().is_empty() && !allow_empty {
-            if scope.is_some() {
-                let known_r = git_step_replayed_by_call_order(plan, &argv_with_pathspecs(&["ls-files", "--error-unmatch"], scope), cwd)?;
-                if git_exit_code(&known_r) != 0 {
-                    return Ok(err("git_commit", &format!(
-                        "paths match no changed or tracked file -- refusing to report nothing_to_commit for a pathspec that names nothing: {}",
-                        git_failure_text(&known_r, "git ls-files --error-unmatch failed")
-                    )));
-                }
-            }
-            return Ok(ok("git_commit", json!({ "nothing_to_commit": true, "paths": scope })));
+            return Ok(ok("git_commit", json!({ "nothing_to_commit": true })));
         }
         let head_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
         let head_before = head_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         let skip_blanket_add_because_caller_already_staged_via_git_add = body.get("no_add").and_then(|v| v.as_bool()).unwrap_or(false);
         if !skip_blanket_add_because_caller_already_staged_via_git_add {
-            let add_r = git_step_replayed_by_call_order(plan, &argv_with_pathspecs(&["add", "-A"], scope), cwd)?;
-            if scope.is_some() && git_exit_code(&add_r) != 0 && !scoped_add_failed_only_on_ignored_pathspec_advisory(&add_r) {
-                return Ok(err("git_commit", &format!("staging paths failed: {}", git_failure_text(&add_r, "git add failed"))));
-            }
+            let _ = git_step_replayed_by_call_order(plan, &["add", "-A"], cwd)?;
         }
-        let bundled_message = if commit_scope_covers_prd_file(scope) { bundle_prd_commit_comments(cwd, message) } else { message.to_string() };
-        let mut base: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
-        if allow_empty { base.push("--allow-empty"); }
-        let argv = argv_with_pathspecs(&base, scope);
+        let bundled_message = bundle_prd_commit_comments(cwd, message);
+        let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
+        if allow_empty { argv.push("--allow-empty"); }
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
@@ -3219,15 +3118,20 @@ fn git_commit(body: &Value) -> u64 {
         }
         let sha = head_after[..head_after.len().min(10)].to_string();
         let summary = message.lines().next().unwrap_or("").to_string();
-        let files_r = git_step_replayed_by_call_order(plan, &["show", "--name-only", "--pretty=format:", "HEAD"], cwd)?;
-        let files: Vec<String> = files_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("")
-            .lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
         emit_event("git_commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary }));
         record_commit_in_liqology(&summary, &head_after);
-        Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary, "files": files, "paths": scope })))
+        Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary })))
     })
 }
 
+// Best-effort: feeds every real commit into liqology's memory-relevance
+// tracker (record verb) so the plugin accumulates real interaction history
+// instead of sitting built-but-uncalled. A commit is the closest real
+// signal to a completed interaction available at this point -- the same
+// text embeds both input and output since git_commit has no separate
+// input/output split to offer, matching liqology's own memory-loop example
+// convention for this case. Never blocks or fails the commit itself: a
+// liqology-unavailable/embed-failed/plugin-error outcome is only logged.
 fn record_commit_in_liqology(summary: &str, sha_full: &str) {
     let Some(embedding) = crate::embed::embed_text(summary) else {
         emit_event("liqology_record_skipped", json!({ "reason": "embed_failed", "sha_full": sha_full }));
@@ -3273,14 +3177,6 @@ fn git_finalize(body: &Value) -> u64 {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(String::from);
-    let pathspecs = match body_pathspecs(body) {
-        Ok(p) => p,
-        Err(e) => return err("git_finalize", &e),
-    };
-    if explicit_source_ref.is_some() && pathspecs.is_some() {
-        return err("git_finalize", "rev/source_ref publishes an existing commit while paths selects what to commit -- pass one or the other, not both");
-    }
-    let scope = pathspecs.as_deref();
     if let Some(source_ref) = explicit_source_ref {
         let push_resp = unpack_to_value(git_push(body));
         let pushed = push_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -3325,17 +3221,14 @@ fn git_finalize(body: &Value) -> u64 {
     let mut summary = String::new();
     let head_before_any_commit = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
 
-    let dirty = !git_porcelain_scoped(cwd_ref, scope).trim().is_empty();
+    let dirty = !git_porcelain_in(cwd_ref).trim().is_empty();
     if dirty {
         if message.is_empty() {
             return err("git_finalize", "worktree dirty but no commit message provided -- pass {message}");
         }
-        let add_r = git_call_argv(&argv_with_pathspecs(&["add", "-A"], scope), cwd_ref);
-        if scope.is_some() && git_exit_code(&add_r) != 0 {
-            return err("git_finalize", &format!("staging paths failed: {}", git_failure_text(&add_r, "git add failed")));
-        }
-        let bundled_message = if commit_scope_covers_prd_file(scope) { bundle_prd_commit_comments(cwd_ref, message.as_str()) } else { message.clone() };
-        let cr = git_call_argv(&argv_with_pathspecs(&["commit", "-m", bundled_message.as_str()], scope), cwd_ref);
+        let _ = git_call_argv(&["add", "-A"], cwd_ref);
+        let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
+        let cr = git_call_argv(&["commit", "-m", bundled_message.as_str()], cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if ccode != 0 {
             let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
@@ -3356,14 +3249,12 @@ fn git_finalize(body: &Value) -> u64 {
             steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
         }
     } else {
-        let pending_notes = if commit_scope_covers_prd_file(scope) { crate::orchestrator::prd::peek_pending_commit_comments(cwd_ref) } else { Vec::new() };
+        let pending_notes = crate::orchestrator::prd::peek_pending_commit_comments(cwd_ref);
         if !pending_notes.is_empty() {
             let flush_message = if message.is_empty() { "chore: flush resolved PRD notes".to_string() } else { message.clone() };
             let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
-            if scope.is_none() {
-                let _ = git_call_argv(&["add", "-A"], cwd_ref);
-            }
-            let cr = git_call_argv(&argv_with_pathspecs(&["commit", "--allow-empty", "-m", bundled_message.as_str()], scope), cwd_ref);
+            let _ = git_call_argv(&["add", "-A"], cwd_ref);
+            let cr = git_call_argv(&["commit", "--allow-empty", "-m", bundled_message.as_str()], cwd_ref);
             let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
             let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
             if ccode == 0 && !head_after.is_empty() && head_after != head_before_any_commit {
@@ -3403,14 +3294,14 @@ fn git_finalize(body: &Value) -> u64 {
         }));
     }
 
-    let mut leftover = git_porcelain_scoped(cwd_ref, scope);
+    let mut leftover = git_porcelain_in(cwd_ref);
     let dirty_only_from_concurrent_writer_on_just_committed_files =
         committed && !leftover.trim().is_empty() && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref));
     if dirty_only_from_concurrent_writer_on_just_committed_files {
-        leftover = git_porcelain_scoped(cwd_ref, scope);
+        leftover = git_porcelain_in(cwd_ref);
         if !leftover.trim().is_empty() && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref)) {
-            let _ = git_call_argv(&argv_with_pathspecs(&["add", "-A"], scope), cwd_ref);
-            let amend = git_call_argv(&argv_with_pathspecs(&["commit", "--amend", "--no-edit"], scope), cwd_ref);
+            let _ = git_call_argv(&["add", "-A"], cwd_ref);
+            let amend = git_call_argv(&["commit", "--amend", "--no-edit"], cwd_ref);
             if amend.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0 {
                 let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
                 sha = head_after[..head_after.len().min(10)].to_string();
@@ -3420,23 +3311,14 @@ fn git_finalize(body: &Value) -> u64 {
                     "note": "a file this dispatch committed was rewritten by a concurrent writer before the porcelain probe; amended rather than refusing the push",
                 }));
             }
-            leftover = git_porcelain_scoped(cwd_ref, scope);
+            leftover = git_porcelain_in(cwd_ref);
         }
     }
     if !leftover.trim().is_empty() {
-        let within = if scope.is_some() { " within the named paths" } else { "" };
-        return err("git_finalize", &format!("worktree still dirty{} after commit (untriaged residual) -- refusing push. Porcelain:\n{}", within, leftover.lines().take(8).collect::<Vec<_>>().join("\n")));
+        return err("git_finalize", &format!("worktree still dirty after commit (untriaged residual) -- refusing push. Porcelain:\n{}", leftover.lines().take(8).collect::<Vec<_>>().join("\n")));
     }
 
-    let dirt_outside_paths_belongs_to_another_writer = scope.is_some() && !git_porcelain_in(cwd_ref).trim().is_empty();
-    let push_body = if dirt_outside_paths_belongs_to_another_writer {
-        let mut b = body.clone();
-        if let Some(obj) = b.as_object_mut() { obj.insert("rev".to_string(), json!("HEAD")); }
-        b
-    } else {
-        body.clone()
-    };
-    let push_resp_packed = git_push(&push_body);
+    let push_resp_packed = git_push(body);
     let push_resp = unpack_to_value(push_resp_packed);
     let pushed = push_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if !pushed {
@@ -3447,7 +3329,6 @@ fn git_finalize(body: &Value) -> u64 {
             "pushed": false,
             "sha": sha,
             "steps": steps,
-            "paths": scope,
             "push_result": push_resp,
             "reason": "commit landed (or nothing to commit) but push was refused -- read push_result.reason",
             "next_dispatch": "instruction",
@@ -3459,13 +3340,11 @@ fn git_finalize(body: &Value) -> u64 {
     let remote_advanced = push_data.and_then(|d| d.get("remote_advanced")).and_then(|b| b.as_bool()).unwrap_or(false);
     let already_current = push_data.and_then(|d| d.get("already_current")).and_then(|b| b.as_bool()).unwrap_or(false);
     let remote_sha = push_data.and_then(|d| d.get("remote_sha")).and_then(|s| s.as_str()).unwrap_or("").to_string();
-    let preserved_dirty_worktree = push_data.and_then(|d| d.get("preserved_dirty_worktree")).and_then(|b| b.as_bool()).unwrap_or(false);
-    steps.push(json!({ "step": "push", "branch": branch, "remote_advanced": remote_advanced, "already_current": already_current, "explicit_ref": dirt_outside_paths_belongs_to_another_writer }));
+    steps.push(json!({ "step": "push", "branch": branch, "remote_advanced": remote_advanced, "already_current": already_current }));
 
     let head_sha = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
     let (ci_status_summary, ci_validated_written) = check_ci_status_and_write_validated_marker_if_green(repo.as_deref(), &head_sha);
     steps.push(json!({ "step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written }));
-    let files: Vec<String> = if committed { files_in_commit(cwd_ref) } else { Vec::new() };
 
     ok("git_finalize", json!({
         "committed": committed,
@@ -3476,111 +3355,24 @@ fn git_finalize(body: &Value) -> u64 {
         "remote_advanced": remote_advanced,
         "already_current": already_current,
         "remote_sha": remote_sha,
-        "paths": scope,
-        "files": files,
-        "preserved_dirty_worktree": preserved_dirty_worktree,
         "steps": steps,
         "ci_validated_marker_written": ci_validated_written,
         "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
     }))
 }
 
-const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &["session_id", "sessionId", "SESSION_ID", "cwd", "repo"];
-const GIT_LOG_FIELDS: &[&str] = &["limit", "count", "range", "ref", "rev", "path", "paths", "files"];
-const GIT_LOG_REVISION_ALIASES: &[&str] = &["range", "ref", "rev"];
-const GIT_DIFF_FIELDS: &[&str] = &["staged", "stat", "range", "ref", "rev", "path", "paths", "files"];
-const GIT_SHOW_FIELDS: &[&str] = &["ref", "rev", "sha", "commit", "path", "paths", "files", "stat"];
-const GIT_SHOW_REF_ALIASES: &[&str] = &["ref", "rev", "sha", "commit"];
-const GIT_OUTPUT_MAX_BYTES: usize = 60000;
-
-fn git_refuse_unknown_fields(verb: &str, body: &Value, accepted: &[&str]) -> Option<u64> {
-    let unknown: Vec<&str> = body.as_object()?
-        .keys()
-        .map(String::as_str)
-        .filter(|k| !k.starts_with('_') && !accepted.contains(k) && !GIT_BODY_ENVELOPE_FIELDS.contains(k))
-        .collect();
-    if unknown.is_empty() { return None; }
-    Some(err_json(verb, json!({
-        "error": format!(
-            "{verb} does not recognise body field(s) {} -- refused rather than ignored, because an ignored field silently answers a different question than the one asked",
-            unknown.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", "),
-        ),
-        "error_code": ERR_CODE_INVALID_ARGS,
-        "unknown_fields": unknown,
-        "accepted_fields": accepted,
-    })))
-}
-
-fn git_named_revision<'a>(body: &'a Value, aliases: &[&str]) -> Result<Option<&'a str>, String> {
-    let mut named: Vec<(&str, &str)> = Vec::new();
-    for key in aliases {
-        match body.get(*key) {
-            None | Some(Value::Null) => {}
-            Some(Value::String(s)) if !s.trim().is_empty() => named.push((key, s.trim())),
-            Some(other) => return Err(format!("{key} must be a non-empty revision string, got {other}")),
-        }
-    }
-    if named.windows(2).any(|pair| pair[0].1 != pair[1].1) {
-        return Err(format!("conflicting revisions given: {named:?} -- pass one of {aliases:?}"));
-    }
-    Ok(named.first().map(|(_, value)| *value))
-}
-
-fn git_optional_path<'a>(body: &'a Value) -> Result<Option<&'a str>, String> {
-    match body.get("path") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(s)) if !s.trim().is_empty() => Ok(Some(s.trim())),
-        Some(other) => Err(format!("path must be a non-empty path string, got {other}")),
-    }
-}
-
-fn git_path_and_pathspecs(body: &Value) -> Result<Option<Vec<String>>, String> {
-    let mut pathspecs = body_pathspecs(body)?.unwrap_or_default();
-    if let Some(p) = git_optional_path(body)? { pathspecs.insert(0, p.to_string()); }
-    Ok(if pathspecs.is_empty() { None } else { Some(pathspecs) })
-}
-
-fn git_positive_count(body: &Value, fields: &[&str], fallback: u64) -> Result<u64, String> {
-    for field in fields {
-        if let Some(v) = body.get(*field) {
-            return match v.as_u64() {
-                Some(n) if n > 0 => Ok(n),
-                _ => Err(format!("{field} must be a positive integer, got {v}")),
-            };
-        }
-    }
-    Ok(fallback)
-}
-
-fn git_capped_output(mut out: String) -> (String, bool, usize) {
-    let total = out.len();
-    if total > GIT_OUTPUT_MAX_BYTES {
-        let cut = (0..=GIT_OUTPUT_MAX_BYTES).rev().find(|i| out.is_char_boundary(*i)).unwrap_or(0);
-        out.truncate(cut);
-    }
-    (out, total > GIT_OUTPUT_MAX_BYTES, total)
-}
-
 fn git_log(body: &Value) -> u64 {
-    if let Some(refused) = git_refuse_unknown_fields("git_log", body, GIT_LOG_FIELDS) { return refused; }
     git_async_entry("git_log", body, |body, plan| {
         let cwd = body_cwd(body);
-        let count = match git_positive_count(body, &["limit", "count"], 10) {
-            Ok(n) => n,
-            Err(e) => return Ok(err_coded("git_log", ERR_CODE_INVALID_ARGS, &e)),
-        };
-        let range = match git_named_revision(body, GIT_LOG_REVISION_ALIASES) {
-            Ok(r) => r.unwrap_or(""),
-            Err(e) => return Ok(err_coded("git_log", ERR_CODE_INVALID_ARGS, &e)),
-        };
-        let pathspecs = match git_path_and_pathspecs(body) {
-            Ok(p) => p,
-            Err(e) => return Ok(err_coded("git_log", ERR_CODE_INVALID_ARGS, &e)),
-        };
+        let count = body.get("limit").and_then(|v| v.as_u64())
+            .or_else(|| body.get("count").and_then(|v| v.as_u64()))
+            .unwrap_or(10);
         let nflag = format!("-{}", count);
-        let mut base: Vec<&str> = vec!["log", &nflag, "--oneline", "--no-color"];
-        if !range.is_empty() { base.push(range); }
-        let argv = argv_with_pathspecs(&base, pathspecs.as_deref());
+        let range = body.get("range").and_then(|v| v.as_str())
+            .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+            .unwrap_or("").trim();
+        let mut argv: Vec<&str> = vec!["log", &nflag, "--oneline", "--no-color"];
+        if !range.is_empty() { argv.push(range); }
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
@@ -3598,32 +3390,24 @@ fn git_log(body: &Value) -> u64 {
             let subject = it.next().unwrap_or("").to_string();
             json!({ "sha": sha, "subject": subject })
         }).collect();
-        let mut data = json!({ "commits": commits });
-        if !range.is_empty() { data["range"] = json!(range); }
-        if let Some(specs) = &pathspecs { data["paths"] = json!(specs); }
-        Ok(ok("git_log", data))
+        Ok(ok("git_log", json!({ "commits": commits })))
     })
 }
 
 fn git_diff(body: &Value) -> u64 {
-    if let Some(refused) = git_refuse_unknown_fields("git_diff", body, GIT_DIFF_FIELDS) { return refused; }
     git_async_entry("git_diff", body, |body, plan| {
         let cwd = body_cwd(body);
         let staged = body.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
-        let range = match git_named_revision(body, GIT_LOG_REVISION_ALIASES) {
-            Ok(r) => r.unwrap_or(""),
-            Err(e) => return Ok(err_coded("git_diff", ERR_CODE_INVALID_ARGS, &e)),
-        };
+        let path = body.get("path").and_then(|v| v.as_str());
+        let range = body.get("range").and_then(|v| v.as_str())
+            .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+            .unwrap_or("").trim();
         let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
-        let pathspecs = match git_path_and_pathspecs(body) {
-            Ok(p) => p,
-            Err(e) => return Ok(err_coded("git_diff", ERR_CODE_INVALID_ARGS, &e)),
-        };
-        let mut base: Vec<&str> = vec!["diff", "--no-color"];
-        if staged { base.push("--staged"); }
-        if stat { base.push("--stat"); }
-        if !range.is_empty() { base.push(range); }
-        let argv = argv_with_pathspecs(&base, pathspecs.as_deref());
+        let mut argv: Vec<&str> = vec!["diff", "--no-color"];
+        if staged { argv.push("--staged"); }
+        if stat { argv.push("--stat"); }
+        if !range.is_empty() { argv.push(range); }
+        if let Some(p) = path { argv.push("--"); argv.push(p); }
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
@@ -3634,68 +3418,24 @@ fn git_diff(body: &Value) -> u64 {
                 "hint": "git rejected the range; an empty diff must never be inferred from a rejected argument -- check both endpoints exist locally"
             })));
         }
-        let (diff, truncated, total_bytes) = git_capped_output(r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string());
-        let mut data = json!({ "diff": diff, "truncated": truncated, "range": range });
-        if truncated { data["total_bytes"] = json!(total_bytes); }
-        if let Some(specs) = &pathspecs { data["paths"] = json!(specs); }
-        Ok(ok("git_diff", data))
+        let mut diff = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let truncated = diff.len() > 60000;
+        if truncated { diff.truncate(60000); }
+        Ok(ok("git_diff", json!({ "diff": diff, "truncated": truncated, "range": range })))
     })
 }
 
-fn git_object_at_revision(rev: &str, path: &str) -> Result<String, String> {
-    if rev.contains(':') {
-        return Err(format!("revision \"{rev}\" already names an object (<rev>:<path>) -- pass the bare revision with \"path\", or drop \"path\""));
-    }
-    let normalized = path.replace('\\', "/");
-    let bytes = normalized.as_bytes();
-    if normalized.starts_with('/') || (bytes.len() >= 2 && bytes[1] == b':') {
-        return Err(format!("path \"{path}\" must be relative to the repository working directory, not absolute"));
-    }
-    let relative = normalized.trim_start_matches("./");
-    Ok(if relative.starts_with("../") { format!("{rev}:{relative}") } else { format!("{rev}:./{relative}") })
-}
-
 fn git_show(body: &Value) -> u64 {
-    if let Some(refused) = git_refuse_unknown_fields("git_show", body, GIT_SHOW_FIELDS) { return refused; }
     let cwd = body_cwd(body);
-    let refspec = match git_named_revision(body, GIT_SHOW_REF_ALIASES) {
-        Ok(r) => r.unwrap_or("HEAD"),
-        Err(e) => return err_coded("git_show", ERR_CODE_INVALID_ARGS, &e),
-    };
-    let path = match git_optional_path(body) {
-        Ok(p) => p,
-        Err(e) => return err_coded("git_show", ERR_CODE_INVALID_ARGS, &e),
-    };
-    let pathspecs = match body_pathspecs(body) {
-        Ok(p) => p,
-        Err(e) => return err_coded("git_show", ERR_CODE_INVALID_ARGS, &e),
-    };
+    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
     let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
-    let object = match (path, &pathspecs) {
-        (Some(_), Some(_)) => return err_coded("git_show", ERR_CODE_INVALID_ARGS,
-            "\"path\" shows one file's content at a revision and \"paths\" limits a commit's diff to pathspecs -- pass one, not both"),
-        (Some(_), None) if stat => return err_coded("git_show", ERR_CODE_INVALID_ARGS,
-            "\"stat\" summarises a commit's diff and has no meaning for a file's content at a revision -- drop \"stat\" or \"path\""),
-        (Some(p), None) => match git_object_at_revision(refspec, p) {
-            Ok(o) => o,
-            Err(e) => return err_coded("git_show", ERR_CODE_INVALID_ARGS, &e),
-        },
-        (None, _) => refspec.to_string(),
-    };
-    let mut base: Vec<&str> = vec!["show", "--no-color"];
-    if stat { base.push("--stat"); }
-    base.push(&object);
-    let argv = argv_with_pathspecs(&base, pathspecs.as_deref());
+    let mut argv: Vec<&str> = vec!["show", "--no-color"];
+    if stat { argv.push("--stat"); }
+    argv.push(refspec);
     let r = git_call_argv(&argv, cwd);
-    if git_exit_code(&r) != 0 {
-        return err("git_show", &git_failure_text(&r, "git show failed"));
-    }
-    let (out, truncated, total_bytes) = git_capped_output(r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string());
-    let mut data = json!({ "ref": refspec, "output": out, "truncated": truncated });
-    if truncated { data["total_bytes"] = json!(total_bytes); }
-    if let Some(p) = path { data["path"] = json!(p); data["object"] = json!(object); }
-    if let Some(specs) = &pathspecs { data["paths"] = json!(specs); }
-    ok("git_show", data)
+    let mut out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if out.len() > 60000 { out.truncate(60000); }
+    ok("git_show", json!({ "output": out }))
 }
 
 fn git_fetch(body: &Value) -> u64 {
@@ -3713,12 +3453,7 @@ fn git_fetch(body: &Value) -> u64 {
 fn git_pull(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let remote = body.get("remote").and_then(|v| v.as_str()).unwrap_or("origin").trim();
-    let requested_branch = body.get("branch").and_then(|v| v.as_str()).unwrap_or("").trim();
-    let branch_owned = match requested_branch {
-        "" => current_branch_when_it_tracks_nothing_on(cwd, remote).unwrap_or_default(),
-        named => named.to_string(),
-    };
-    let branch = branch_owned.as_str();
+    let branch = body.get("branch").and_then(|v| v.as_str()).unwrap_or("").trim();
     let ff_only = body.get("ff_only").and_then(|v| v.as_bool()).unwrap_or(false);
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
     let mut argv = vec!["pull", "--no-edit", "--no-rebase"];
@@ -3754,13 +3489,6 @@ fn git_pull(body: &Value) -> u64 {
         "already_up_to_date": head_before == head_after,
         "output": output,
     }))
-}
-
-fn current_branch_when_it_tracks_nothing_on(cwd: Option<&str>, remote: &str) -> Option<String> {
-    let upstream = exec_git_in(cwd, "rev-parse --abbrev-ref --symbolic-full-name @{upstream}");
-    if upstream.trim().starts_with(&format!("{remote}/")) { return None; }
-    let current = exec_git_in(cwd, "symbolic-ref --short -q HEAD").trim().to_string();
-    (!current.is_empty()).then_some(current)
 }
 
 fn ci_status_resolve_repo_preferring_unambiguous_github_repo_field(body: &Value, cwd: Option<&str>) -> Result<String, u64> {
@@ -3987,17 +3715,7 @@ fn git_branch(body: &Value) -> u64 {
 fn git_checkout(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("").trim();
-    let pathspecs = match body_pathspecs(body) {
-        Ok(p) => p,
-        Err(e) => return err("git_checkout", &e),
-    };
-    if let Some(specs) = pathspecs.as_deref() {
-        let base: Vec<&str> = if refspec.is_empty() { vec!["checkout"] } else { vec!["checkout", refspec] };
-        let argv = argv_with_pathspecs(&base, Some(specs));
-        if let Err(e) = run_git_checked(&argv, cwd, "git_checkout", "checkout of paths failed") { return e; }
-        return ok("git_checkout", json!({ "restored_paths": specs, "from": if refspec.is_empty() { "index" } else { refspec } }));
-    }
-    if refspec.is_empty() { return err("git_checkout", "ref required (or paths, to restore files from the index or from ref)"); }
+    if refspec.is_empty() { return err("git_checkout", "ref required"); }
     let create = body.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
     let argv: Vec<&str> = if create { vec!["checkout", "-b", refspec] } else { vec!["checkout", refspec] };
     if let Err(e) = run_git_checked(&argv, cwd, "git_checkout", "checkout failed") { return e; }
@@ -4052,13 +3770,8 @@ fn git_stash(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let include_untracked = body.get("include_untracked").and_then(|v| v.as_bool()).unwrap_or(true);
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("gm shelf").trim();
-    let pathspecs = match body_pathspecs(body) {
-        Ok(p) => p,
-        Err(e) => return err("git_stash", &e),
-    };
-    let mut base = vec!["stash", "push", "--message", message];
-    if include_untracked { base.push("--include-untracked"); }
-    let argv = argv_with_pathspecs(&base, pathspecs.as_deref());
+    let mut argv = vec!["stash", "push", "--message", message];
+    if include_untracked { argv.push("--include-untracked"); }
     let r = git_call_argv(&argv, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let output = format!("{}{}",
@@ -4075,7 +3788,6 @@ fn git_stash(body: &Value) -> u64 {
         "created": created,
         "stash": if stash.is_empty() { Value::Null } else { json!(stash) },
         "include_untracked": include_untracked,
-        "paths": pathspecs,
         "output": output
     }))
 }
@@ -4131,70 +3843,6 @@ fn git_branch_delete(body: &Value) -> u64 {
         }));
     }
     ok("git_branch_delete", json!({ "deleted": name, "scope": "local", "forced": force, "output": out }))
-}
-
-fn parse_worktree_porcelain(listing: &str) -> Vec<Value> {
-    listing
-        .split("\n\n")
-        .filter(|block| !block.trim().is_empty())
-        .map(|block| {
-            let mut entry = serde_json::Map::new();
-            for line in block.lines() {
-                let (key, value) = line.split_once(' ').unwrap_or((line, ""));
-                let value = value.trim();
-                match key {
-                    "worktree" => { entry.insert("path".to_string(), json!(value)); }
-                    "HEAD" => { entry.insert("head".to_string(), json!(value)); }
-                    "branch" => { entry.insert("branch".to_string(), json!(value.trim_start_matches("refs/heads/"))); }
-                    "detached" | "bare" => { entry.insert(key.to_string(), json!(true)); }
-                    "locked" | "prunable" => { entry.insert(key.to_string(), if value.is_empty() { json!(true) } else { json!(value) }); }
-                    _ => {}
-                }
-            }
-            Value::Object(entry)
-        })
-        .collect()
-}
-
-fn git_worktree(body: &Value) -> u64 {
-    let cwd = body_cwd(body);
-    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("list").trim();
-    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
-    let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-    match action {
-        "list" => match run_git_checked(&["worktree", "list", "--porcelain"], cwd, "git_worktree", "git worktree list failed") {
-            Ok(r) => ok("git_worktree", json!({ "worktrees": parse_worktree_porcelain(r.get("stdout").and_then(|x| x.as_str()).unwrap_or("")) })),
-            Err(e) => e,
-        },
-        "add" => {
-            if path.is_empty() { return err("git_worktree", "path required for action add"); }
-            let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("").trim();
-            let detach = body.get("detach").and_then(|v| v.as_bool()).unwrap_or(false);
-            let mut argv: Vec<&str> = vec!["worktree", "add"];
-            if detach { argv.push("--detach"); }
-            if force { argv.push("--force"); }
-            argv.push(path);
-            if !refspec.is_empty() { argv.push(refspec); }
-            if let Err(e) = run_git_checked(&argv, cwd, "git_worktree", "git worktree add failed") { return e; }
-            let worktree_dir = match cwd {
-                Some(base) if !std::path::Path::new(path).is_absolute() && !path.contains(':') => format!("{}/{}", base.trim_end_matches(['/', '\\']), path),
-                _ => path.to_string(),
-            };
-            let head = exec_git_in(Some(worktree_dir.as_str()), "rev-parse HEAD").trim().to_string();
-            ok("git_worktree", json!({ "added": path, "ref": if refspec.is_empty() { "HEAD" } else { refspec }, "detached": detach, "head": head }))
-        }
-        "remove" => {
-            if path.is_empty() { return err("git_worktree", "path required for action remove"); }
-            let argv: Vec<&str> = if force { vec!["worktree", "remove", "--force", path] } else { vec!["worktree", "remove", path] };
-            if let Err(e) = run_git_checked(&argv, cwd, "git_worktree", "git worktree remove failed") { return e; }
-            ok("git_worktree", json!({ "removed": path, "forced": force }))
-        }
-        "prune" => match run_git_checked(&["worktree", "prune", "--verbose"], cwd, "git_worktree", "git worktree prune failed") {
-            Ok(r) => ok("git_worktree", json!({ "pruned": r.get("stderr").and_then(|x| x.as_str()).unwrap_or("").lines().chain(r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").lines()).map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>() })),
-            Err(e) => e,
-        },
-        other => err("git_worktree", &format!("action must be add, remove, list or prune, got {other:?}")),
-    }
 }
 
 fn git_rm(body: &Value) -> u64 {
@@ -4371,7 +4019,7 @@ fn stamp_request_identity(mut value: Value, fingerprint: &str, body_parse_failed
 
 fn extract_session_id_from_plain_text_body(body_s: &str) -> Option<String> {
     let trimmed = body_s.trim_start();
-    for prefix in ["sessionId=", "session_id=", "SESSION_ID="] {
+    for prefix in ["sessionId=", "session_id="] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             let id = rest.split('\n').next().unwrap_or("").trim();
             if !id.is_empty() {
@@ -4407,7 +4055,10 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     let body: Value = if body_s.is_empty() { Value::Null } else {
         serde_json::from_str(&body_s).unwrap_or(Value::Null)
     };
-    let dispatch_session_id = crate::validation::session_id_from_body(&body)
+    let dispatch_session_id = body.get("sessionId").and_then(|v| v.as_str())
+        .or_else(|| body.get("session_id").and_then(|v| v.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
         .or_else(|| extract_session_id_from_plain_text_body(&body_s));
     super::events::set_dispatch_session_id(dispatch_session_id);
     let result_packed = dispatch_gated_verb(&verb, &body, &body_s);
@@ -4469,10 +4120,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         return pack(gate.to_denial_json(verb).to_string());
     }
     let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-    let verb_writes_the_named_file_content_itself = verb == "fs_write";
-    if !verb_writes_the_named_file_content_itself {
-        crate::browser_witness::record_from_body(cwd_for_witness, body);
-    }
+    crate::browser_witness::record_from_body(cwd_for_witness, body);
     if crate::orchestrator::is_orchestrator_verb(verb) {
         if let Some(unresolvable) = reject_if_project_root_unresolvable_before_gm_dir_panics(verb) {
             return unresolvable;
@@ -4565,7 +4213,6 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_stash_pop" => git_stash_pop(&body),
         "git_branch_delete" => git_branch_delete(&body),
         "git_rm" => git_rm(&body),
-        "git_worktree" => git_worktree(&body),
         "git_revert" => git_revert(&body),
         "git_reset" => git_reset(&body),
         "git_poll" => git_poll(&body),
@@ -4575,9 +4222,6 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "" => err_coded("", ERR_CODE_INVALID_ARGS, "verb required"),
         _ => err_coded(&verb, ERR_CODE_UNKNOWN_VERB, "unknown verb"),
     };
-    if verb_writes_the_named_file_content_itself {
-        crate::browser_witness::record_from_body(cwd_for_witness, &body);
-    }
     #[cfg(target_arch = "wasm32")]
     {
         let ms = unsafe { host_now_ms() }.saturating_sub(dispatch_start_ms);
