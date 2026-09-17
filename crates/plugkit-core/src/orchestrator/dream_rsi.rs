@@ -253,7 +253,7 @@ pub fn record_discovery(content: &str) -> Result<Value, String> {
     let dispatch_id = string_field(&evaluator, "dispatch_id")?;
     let evaluator_score = evaluator.get("evaluator_score").and_then(Value::as_f64).filter(|value| value.is_finite()).ok_or_else(|| "dream-discovery-record evaluator receipt requires finite evaluator_score".to_string())?;
     let cost = evaluator.get("cost").and_then(Value::as_u64).ok_or_else(|| "dream-discovery-record evaluator receipt requires non-negative integer cost".to_string())?;
-    let parent_id = evaluator.get("parent_id").map(|_| string_field(&evaluator, "parent_id")).transpose()?;
+    let parent_id = evaluator.get("parent_id").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).map(ToOwned::to_owned);
     let policy_path = session_store_path("policies")?;
     let raw_policies = crate::pkfs::read_to_string(&policy_path).ok_or_else(|| "dream-discovery-record has no registered policies".to_string())?;
     let policies = serde_json::from_str::<Value>(&raw_policies).map_err(|_| "dream-discovery-record policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-discovery-record policy store is invalid".to_string())?.into_iter().map(|entry| verify_record("policy", &entry)).collect::<Result<Vec<_>, _>>()?;
