@@ -154,11 +154,9 @@ fn evaluate_worlds(baseline_id: String, policies: Vec<Policy>, worlds: Vec<World
 }
 
 #[cfg(target_arch = "wasm32")]
-const WORLD_PATH: &str = ".gm/dream-rsi/worlds.json";
-#[cfg(target_arch = "wasm32")]
-const DISCOVERY_PATH: &str = ".gm/dream-rsi/discovery.json";
-#[cfg(target_arch = "wasm32")]
-const POLICY_PATH: &str = ".gm/dream-rsi/policies.json";
+fn session_store_path(name: &str) -> Result<String, String> {
+    Ok(format!(".gm/dream-rsi/{}/{}.json", session_id()?, name))
+}
 
 #[cfg(target_arch = "wasm32")]
 fn session_id() -> Result<String, String> {
@@ -189,14 +187,15 @@ pub fn register_policy(content: &str) -> Result<Value, String> {
     let policy = parse_policy(body.get("policy").ok_or_else(|| "dream-policy-register requires policy".to_string())?)?;
     let owner_session_id = session_id()?;
     let deployed = body.get("deployed").and_then(Value::as_bool).unwrap_or(false);
-    let raw = crate::pkfs::read_to_string(POLICY_PATH).unwrap_or_else(|| "[]".to_string());
+    let policy_path = session_store_path("policies")?;
+    let raw = crate::pkfs::read_to_string(&policy_path).unwrap_or_else(|| "[]".to_string());
     let mut policies = serde_json::from_str::<Value>(&raw).map_err(|_| "dream-policy-register policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-policy-register policy store is invalid".to_string())?.into_iter().map(|entry| verify_record("policy", &entry)).collect::<Result<Vec<_>, _>>()?;
     if policies.iter().any(|entry| entry.get("id").and_then(Value::as_str) == Some(policy.id.as_str()) && entry.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str())) { return Err(format!("dream-policy-register policy {} already exists", policy.id)); }
     if deployed { for entry in &mut policies { if entry.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str()) { entry["deployed"] = Value::Bool(false); } } }
     let new_policy = json!({ "id": policy.id, "owner_session_id": owner_session_id, "roots": policy.roots, "max_nodes": policy.max_nodes, "deployed": deployed });
     policies.push(new_policy);
     let signed = policies.into_iter().map(|record| signed_record("policy", record)).collect::<Result<Vec<_>, _>>()?;
-    if !crate::pkfs::write(POLICY_PATH, &Value::Array(signed).to_string()) { return Err("dream-policy-register could not persist policy".to_string()); }
+    if !crate::pkfs::write(&policy_path, &Value::Array(signed).to_string()) { return Err("dream-policy-register could not persist policy".to_string()); }
     Ok(json!({ "ok": true, "policy_id": policy.id, "deployed": deployed }))
 }
 
@@ -229,13 +228,15 @@ pub fn record_discovery(content: &str) -> Result<Value, String> {
     let evaluator_score = evaluator.get("evaluator_score").and_then(Value::as_f64).filter(|value| value.is_finite()).ok_or_else(|| "dream-discovery-record evaluator receipt requires finite evaluator_score".to_string())?;
     let cost = evaluator.get("cost").and_then(Value::as_u64).ok_or_else(|| "dream-discovery-record evaluator receipt requires non-negative integer cost".to_string())?;
     let parent_id = evaluator.get("parent_id").map(|_| string_field(&evaluator, "parent_id")).transpose()?;
-    let raw_policies = crate::pkfs::read_to_string(POLICY_PATH).ok_or_else(|| "dream-discovery-record has no registered policies".to_string())?;
+    let policy_path = session_store_path("policies")?;
+    let raw_policies = crate::pkfs::read_to_string(&policy_path).ok_or_else(|| "dream-discovery-record has no registered policies".to_string())?;
     let policies = serde_json::from_str::<Value>(&raw_policies).map_err(|_| "dream-discovery-record policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-discovery-record policy store is invalid".to_string())?.into_iter().map(|entry| verify_record("policy", &entry)).collect::<Result<Vec<_>, _>>()?;
     if !policies.iter().any(|policy| policy.get("id").and_then(Value::as_str) == Some(policy_id.as_str()) && policy.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str())) { return Err("dream-discovery-record policy_id is not registered in this session".to_string()); }
     let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id).ok_or_else(|| "dream-discovery-record dispatch_id is not a completed gm dispatch".to_string())?;
     if dispatch.get("exit_code").and_then(Value::as_i64) != Some(0) { return Err("dream-discovery-record requires a successful completed dispatch".to_string()); }
-    let raw = crate::pkfs::read_to_string(DISCOVERY_PATH).unwrap_or_else(|| "[]".to_string());
+    let discovery_path = session_store_path("discovery")?;
+    let raw = crate::pkfs::read_to_string(&discovery_path).unwrap_or_else(|| "[]".to_string());
     let mut records = serde_json::from_str::<Value>(&raw).map_err(|_| "dream-discovery-record store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-discovery-record store is invalid".to_string())?.into_iter().map(|entry| verify_record("discovery", &entry)).collect::<Result<Vec<_>, _>>()?;
     if records.iter().any(|record| record.get("id").and_then(Value::as_str) == Some(id.as_str())) { return Err(format!("dream-discovery-record {id} already exists")); }
     if let Some(parent_id) = &parent_id {
@@ -244,7 +245,7 @@ pub fn record_discovery(content: &str) -> Result<Value, String> {
     let record = json!({ "id": id, "owner_session_id": owner_session_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": evaluator_score, "cost": cost, "parent_id": parent_id });
     records.push(record.clone());
     let signed = records.into_iter().map(|record| signed_record("discovery", record)).collect::<Result<Vec<_>, _>>()?;
-    if !crate::pkfs::write(DISCOVERY_PATH, &Value::Array(signed).to_string()) { return Err("dream-discovery-record could not persist discovery record".to_string()); }
+    if !crate::pkfs::write(&discovery_path, &Value::Array(signed).to_string()) { return Err("dream-discovery-record could not persist discovery record".to_string()); }
     Ok(json!({ "ok": true, "discovery_id": id }))
 }
 
@@ -255,7 +256,8 @@ pub fn seal(content: &str) -> Result<Value, String> {
     let owner_session_id = session_id()?;
     let discovery_ids = array_field(&body, "discovery_ids")?;
     if discovery_ids.is_empty() { return Err("dream-world-seal requires recorded discovery_ids".to_string()); }
-    let raw_records = crate::pkfs::read_to_string(DISCOVERY_PATH).ok_or_else(|| "dream-world-seal has no discovery records".to_string())?;
+    let discovery_path = session_store_path("discovery")?;
+    let raw_records = crate::pkfs::read_to_string(&discovery_path).ok_or_else(|| "dream-world-seal has no discovery records".to_string())?;
     let records = serde_json::from_str::<Value>(&raw_records).map_err(|_| "dream-world-seal discovery record store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-world-seal discovery record store is invalid".to_string())?.into_iter().map(|entry| verify_record("discovery", &entry)).collect::<Result<Vec<_>, _>>()?;
     let nodes = discovery_ids.iter().enumerate().map(|(index, value)| {
         let id = value.as_str().ok_or_else(|| "dream-world-seal discovery_ids must contain strings".to_string())?;
@@ -266,12 +268,13 @@ pub fn seal(content: &str) -> Result<Value, String> {
         Ok(json!({ "id": id, "score": score, "cost": cost, "children": if index + 1 < discovery_ids.len() { vec![discovery_ids[index + 1].as_str().unwrap_or("")] } else { vec![] } }))
     }).collect::<Result<Vec<_>, String>>()?;
     let world = parse_world(&json!({ "id": world_id, "nodes": nodes }))?;
-    let raw = crate::pkfs::read_to_string(WORLD_PATH).unwrap_or_else(|| "[]".to_string());
+    let world_path = session_store_path("worlds")?;
+    let raw = crate::pkfs::read_to_string(&world_path).unwrap_or_else(|| "[]".to_string());
     let mut worlds = serde_json::from_str::<Value>(&raw).map_err(|_| "dream-world-seal world store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-world-seal world store is invalid".to_string())?.into_iter().map(|entry| verify_record("world", &entry)).collect::<Result<Vec<_>, _>>()?;
     if worlds.iter().any(|entry| entry.get("id").and_then(Value::as_str) == Some(world.id.as_str())) { return Err(format!("dream-world-seal world {} already exists", world.id)); }
     worlds.push(json!({ "id": world.id, "owner_session_id": owner_session_id, "discovery_ids": discovery_ids, "nodes": nodes }));
     let signed = worlds.into_iter().map(|record| signed_record("world", record)).collect::<Result<Vec<_>, _>>()?;
-    if !crate::pkfs::write(WORLD_PATH, &Value::Array(signed).to_string()) { return Err("dream-world-seal could not persist sealed world".to_string()); }
+    if !crate::pkfs::write(&world_path, &Value::Array(signed).to_string()) { return Err("dream-world-seal could not persist sealed world".to_string()); }
     Ok(json!({ "ok": true, "world_id": world.id, "node_count": world.nodes.len() }))
 }
 
@@ -283,7 +286,8 @@ pub fn evaluate(content: &str) -> Result<Value, String> {
     let ids = array_field(&body, "world_ids")?;
     let baseline_id = string_field(&body, "baseline_policy_id")?;
     let policy_ids = array_field(&body, "policy_ids")?;
-    let raw_policies = crate::pkfs::read_to_string(POLICY_PATH).ok_or_else(|| "dream-replay has no registered policies".to_string())?;
+    let policy_path = session_store_path("policies")?;
+    let raw_policies = crate::pkfs::read_to_string(&policy_path).ok_or_else(|| "dream-replay has no registered policies".to_string())?;
     let stored_policies = serde_json::from_str::<Value>(&raw_policies).map_err(|_| "dream-replay policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-replay policy store is invalid".to_string())?.into_iter().map(|entry| verify_record("policy", &entry)).collect::<Result<Vec<_>, _>>()?;
     let policies = policy_ids.iter().map(|id| {
         let id = id.as_str().ok_or_else(|| "dream-replay policy_ids must contain strings".to_string())?;
@@ -291,7 +295,8 @@ pub fn evaluate(content: &str) -> Result<Value, String> {
         parse_policy(stored_policy)
     }).collect::<Result<Vec<_>, _>>()?;
     if !stored_policies.iter().any(|policy| policy.get("id").and_then(Value::as_str) == Some(baseline_id.as_str()) && policy.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str()) && policy.get("deployed").and_then(Value::as_bool) == Some(true)) { return Err("dream-replay baseline_policy_id is not this session's deployed policy".to_string()); }
-    let raw = crate::pkfs::read_to_string(WORLD_PATH).ok_or_else(|| "dream-replay has no sealed worlds".to_string())?;
+    let world_path = session_store_path("worlds")?;
+    let raw = crate::pkfs::read_to_string(&world_path).ok_or_else(|| "dream-replay has no sealed worlds".to_string())?;
     let stored = serde_json::from_str::<Value>(&raw).map_err(|_| "dream-replay sealed world store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-replay sealed world store is invalid".to_string())?.into_iter().map(|entry| verify_record("world", &entry)).collect::<Result<Vec<_>, _>>()?;
     let worlds = ids.iter().map(|id| {
         let id = id.as_str().ok_or_else(|| "dream-replay world_ids must contain strings".to_string())?;
