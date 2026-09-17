@@ -25,7 +25,7 @@ pub fn ensure_pipeline_schema() -> Result<(), String> {
     )
 }
 
-fn hmac_key() -> Result<String, String> {
+pub fn hmac_key() -> Result<String, String> {
     let k = "GM_PIPELINE_HMAC_KEY";
     let packed = unsafe { host_env_get(k.as_ptr(), k.len() as u32) };
     let ptr = (packed & 0xFFFF_FFFF) as u32;
@@ -41,7 +41,7 @@ fn hmac_key() -> Result<String, String> {
 
 use crate::hash::fnv1a64;
 
-fn keyed_hash(key: &str, data: &str) -> String {
+pub fn keyed_hash(key: &str, data: &str) -> String {
     let inner = fnv1a64(format!("{}|{}", key, data).as_bytes());
     let outer = fnv1a64(format!("{}|{:016x}", key, inner).as_bytes());
     format!("{:016x}{:016x}", outer, inner)
