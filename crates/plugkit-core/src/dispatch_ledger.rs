@@ -17,7 +17,7 @@ fn now_ms() -> u64 {
     unsafe { host_now_ms() }
 }
 
-pub fn record(cwd: &str, verb: &str, fingerprint: &str, exit_code: i64) -> String {
+pub fn record(cwd: &str, verb: &str, fingerprint: &str, exit_code: i64, session_id: Option<&str>) -> String {
     let path = ledger_path(cwd);
     let existing = host_read(&path).unwrap_or_default();
     let mut list: Vec<Value> = if existing.trim().is_empty() {
@@ -44,6 +44,7 @@ pub fn record(cwd: &str, verb: &str, fingerprint: &str, exit_code: i64) -> Strin
         "fingerprint": fingerprint,
         "ts": ts,
         "exit_code": exit_code,
+        "session_id": session_id,
     });
     list.push(entry);
     if list.len() > MAX_ENTRIES {
