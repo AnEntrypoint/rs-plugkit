@@ -209,6 +209,7 @@ pub fn evaluator_receipt(content: &str) -> Result<Value, String> {
     let owner_session_id = session_id()?;
     let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id).ok_or_else(|| "dream-evaluator-receipt dispatch_id is not a completed GM dispatch".to_string())?;
+    if dispatch.get("session_id").and_then(Value::as_str) != Some(owner_session_id.as_str()) { return Err("dream-evaluator-receipt dispatch belongs to another session".to_string()); }
     let verb = dispatch.get("verb").and_then(Value::as_str).ok_or_else(|| "dream-evaluator-receipt dispatch lacks verb".to_string())?;
     let fingerprint = dispatch.get("fingerprint").and_then(Value::as_str).ok_or_else(|| "dream-evaluator-receipt dispatch lacks fingerprint".to_string())?;
     let exit_code = dispatch.get("exit_code").and_then(Value::as_i64).ok_or_else(|| "dream-evaluator-receipt dispatch lacks exit code".to_string())?;
