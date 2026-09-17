@@ -77,7 +77,6 @@ fn write_turn_summary(
         "ts": now_ms,
         "runtime": "native",
         "phase": phase,
-        "prd_pending": prd_pending,
         "prd_pending_count": prd_pending,
         "mutables_pending_count": mutables_pending,
         "last_instruction_ts": last_instruction_ts,
@@ -367,6 +366,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let mut session_id_opt: Option<String> = None;
     let mut prompt_opt: Option<String> = None;
     let mut asserted_instruction_hash: Option<String> = None;
+    let mut asserted_policy_hash: Option<String> = None;
     let raw_phase_opt = if trimmed.is_empty() {
         None
     } else if let Some(stripped) = trimmed.strip_prefix("phase=") {
@@ -381,9 +381,17 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         if let Some(h) = v
             .get("known_instruction_hash")
             .or_else(|| v.get("instruction_hash"))
+            .or_else(|| v.get("ih"))
             .and_then(|s| s.as_str())
         {
             asserted_instruction_hash = Some(h.trim().to_string());
+        }
+        if let Some(h) = v
+            .get("known_policy_hash")
+            .or_else(|| v.get("ph"))
+            .and_then(|s| s.as_str())
+        {
+            asserted_policy_hash = Some(h.trim().to_string());
         }
         if let Some(s) = v.as_str() {
             Some(s.to_string())
@@ -630,6 +638,10 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     #[cfg(not(target_arch = "wasm32"))]
     let codeinsight_overview = serde_json::Value::Null;
 
+    let discipline_policies = super::discipline_note::active_policies();
+    let discipline_policies_hash = format!("{:016x}", fnv1a64(&discipline_policies.to_string()));
+    let discipline_policies_unchanged = asserted_policy_hash.as_deref() == Some(discipline_policies_hash.as_str());
+
     write_turn_summary(
         &phase,
         prd_pending,
@@ -639,7 +651,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         graph.policy.longgap_threshold_ms,
     );
 
-    let payload = json!({
+    let mut payload = json!({
         "phase": phase,
         "fsm_graph_rejected": super::fsm::graph_rejection(),
         "fsm_gates_weaker_than_default": super::fsm::gates_missing_vs_default(&graph)
@@ -654,6 +666,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "instruction": instruction_for_payload,
         "instruction_hash": instruction_hash,
         "instruction_unchanged": instruction_unchanged,
+        "policy_hash": discipline_policies_hash,
         "instruction_suppressible_by_asserting_hash": instruction_suppressible_but_unasserted,
         "mutables_pending": mutables_pending_inlined,
         "mutables_pending_count": mutables_pending_count,
@@ -664,7 +677,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "prd_open_count": prd_items_open_count,
         "prd_total_count": prd_items.len(),
         "prd_pending_count": prd_pending,
-        "prd_pending": prd_pending,
         "next_phase_hint": next,
         "recall_hits": recall_hits,
         "recall_embed_failed": recall_embed_failed,
@@ -683,8 +695,12 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "unsupervised_watcher": unsupervised_watcher,
         "should_residual_scan": should_scan,
         "route_hint": route_hint,
-        "discipline_policies": super::discipline_note::active_policies(),
     });
+    if !discipline_policies_unchanged {
+        if let Some(fields) = payload.as_object_mut() {
+            fields.insert("discipline_policies".to_string(), discipline_policies);
+        }
+    }
     let s = payload.to_string();
     ilog(&format!("instruction::handle done out_len={}", s.len()));
     #[cfg(target_arch = "wasm32")]
