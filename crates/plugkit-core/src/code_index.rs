@@ -1310,6 +1310,8 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     let mut reused_files = 0;
     let mut skipped_no_embed = 0u32;
     let mut deferred_files = 0u32;
+    let mut floor_grace_used_this_pass = false;
+    let pessimistic_ms_per_chunk = cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound.max(1);
     let mut treesitter_failures = 0u32;
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1367,6 +1369,16 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                     }
                 }
             }
+        }
+
+        let elapsed_before_extraction = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+        let remaining_before_extraction = index_wall_budget_ms.saturating_sub(elapsed_before_extraction);
+        if remaining_before_extraction < pessimistic_ms_per_chunk {
+            if floor_grace_used_this_pass {
+                deferred_files += 1;
+                continue;
+            }
+            floor_grace_used_this_pass = true;
         }
 
         let content = match host_read(fp)
@@ -1464,7 +1476,6 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         let max_chunks_per_file_per_pass = cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only;
         let elapsed_now = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
         let remaining_ms = index_wall_budget_ms.saturating_sub(elapsed_now);
-        let pessimistic_ms_per_chunk = cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound.max(1);
         let budget_chunks = (remaining_ms / pessimistic_ms_per_chunk).max(1) as usize;
         let cap = max_chunks_per_file_per_pass.min(budget_chunks);
         let oversized = chunks.len() > cap;
