@@ -201,8 +201,19 @@ pub fn register_policy(content: &str) -> Result<Value, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn evaluator_receipt(_content: &str) -> Result<Value, String> {
-    Err("dream-evaluator-receipt requires a deployment-owned evaluator provider; caller-supplied target, score, and cost are not admissible evidence".to_string())
+pub fn evaluator_receipt(content: &str) -> Result<Value, String> {
+    let body: Value = serde_json::from_str(content).map_err(|error| format!("dream-evaluator-receipt requires JSON: {error}"))?;
+    let policy_id = string_field(&body, "policy_id")?;
+    let dispatch_id = string_field(&body, "dispatch_id")?;
+    let parent_id = body.get("parent_id").map(|_| string_field(&body, "parent_id")).transpose()?;
+    let owner_session_id = session_id()?;
+    let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id).ok_or_else(|| "dream-evaluator-receipt dispatch_id is not a completed GM dispatch".to_string())?;
+    let verb = dispatch.get("verb").and_then(Value::as_str).ok_or_else(|| "dream-evaluator-receipt dispatch lacks verb".to_string())?;
+    let fingerprint = dispatch.get("fingerprint").and_then(Value::as_str).ok_or_else(|| "dream-evaluator-receipt dispatch lacks fingerprint".to_string())?;
+    let exit_code = dispatch.get("exit_code").and_then(Value::as_i64).ok_or_else(|| "dream-evaluator-receipt dispatch lacks exit code".to_string())?;
+    let target = format!("{}:{}", verb, fingerprint);
+    signed_record("evaluator", json!({ "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": if exit_code == 0 { 1.0 } else { 0.0 }, "cost": 1, "parent_id": parent_id, "owner_session_id": owner_session_id, "metric": "completed-dispatch-success" }))
 }
 
 #[cfg(target_arch = "wasm32")]
