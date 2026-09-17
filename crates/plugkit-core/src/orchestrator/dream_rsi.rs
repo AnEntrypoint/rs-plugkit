@@ -159,6 +159,11 @@ fn session_store_path(name: &str) -> Result<String, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn evaluator_receipt_path() -> Result<String, String> {
+    session_store_path("evaluator-receipts")
+}
+
+#[cfg(target_arch = "wasm32")]
 fn session_id() -> Result<String, String> {
     crate::orchestrator::state::dispatch_session_id().filter(|id| !id.trim().is_empty())
         .ok_or_else(|| "Dream-RSI requires a gm session ID".to_string())
@@ -213,7 +218,13 @@ pub fn evaluator_receipt(content: &str) -> Result<Value, String> {
     let fingerprint = dispatch.get("fingerprint").and_then(Value::as_str).ok_or_else(|| "dream-evaluator-receipt dispatch lacks fingerprint".to_string())?;
     let exit_code = dispatch.get("exit_code").and_then(Value::as_i64).ok_or_else(|| "dream-evaluator-receipt dispatch lacks exit code".to_string())?;
     let target = format!("{}:{}", verb, fingerprint);
-    signed_record("evaluator", json!({ "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": if exit_code == 0 { 1.0 } else { 0.0 }, "cost": 1, "parent_id": parent_id, "owner_session_id": owner_session_id, "metric": "completed-dispatch-success" }))
+    let signed = signed_record("evaluator", json!({ "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": if exit_code == 0 { 1.0 } else { 0.0 }, "cost": 1, "parent_id": parent_id, "owner_session_id": owner_session_id, "metric": "completed-dispatch-success" }))?;
+    let path = evaluator_receipt_path()?;
+    let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
+    let mut receipts = serde_json::from_str::<Value>(&raw).map_err(|_| "dream-evaluator-receipt store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-evaluator-receipt store is invalid".to_string())?;
+    receipts.push(signed.clone());
+    if !crate::pkfs::write(&path, &Value::Array(receipts).to_string()) { return Err("dream-evaluator-receipt could not persist receipt".to_string()); }
+    Ok(signed)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -221,7 +232,12 @@ pub fn record_discovery(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content).map_err(|error| format!("dream-discovery-record requires JSON: {error}"))?;
     let id = string_field(&body, "id")?;
     let owner_session_id = session_id()?;
-    let evaluator = verify_record("evaluator", body.get("evaluator_receipt").ok_or_else(|| "dream-discovery-record requires evaluator_receipt".to_string())?)?;
+    let receipt_dispatch_id = string_field(&body, "evaluator_receipt_dispatch_id")?;
+    let receipt_path = evaluator_receipt_path()?;
+    let raw_receipts = crate::pkfs::read_to_string(&receipt_path).ok_or_else(|| "dream-discovery-record has no evaluator receipts".to_string())?;
+    let receipts = serde_json::from_str::<Value>(&raw_receipts).map_err(|_| "dream-discovery-record evaluator receipt store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-discovery-record evaluator receipt store is invalid".to_string())?;
+    let signed_receipt = receipts.iter().find(|receipt| receipt.get("record").and_then(|record| record.get("dispatch_id")).and_then(Value::as_str) == Some(receipt_dispatch_id.as_str())).ok_or_else(|| "dream-discovery-record evaluator receipt is absent".to_string())?;
+    let evaluator = verify_record("evaluator", signed_receipt)?;
     let target = string_field(&evaluator, "target")?;
     let policy_id = string_field(&evaluator, "policy_id")?;
     let dispatch_id = string_field(&evaluator, "dispatch_id")?;
