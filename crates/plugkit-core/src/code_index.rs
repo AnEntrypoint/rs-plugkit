@@ -78,6 +78,7 @@ pub fn clear_codeinsight_cfg(cfg: &crate::ragconfig::RagConfig) -> u32 {
         }
     }
     bm25_doc_cache_clear();
+    fusion_corpus_cache_clear();
     cleared
 }
 
@@ -1600,6 +1601,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         } else {
             fv_delete(&manifest_ns_for(project_path), fp);
         }
+        fusion_corpus_cache_invalidate(project_path);
     }
 
     let files_set: std::collections::HashSet<&str> = full_files.iter().map(|s| s.trim_start_matches("./").trim_start_matches('/')).collect();
@@ -1609,6 +1611,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             delete_chunk_keys(&m.chunks, project_path);
             delete_call_edges_for_path(fp);
             fv_delete(&manifest_ns_for(project_path), fp);
+            fusion_corpus_cache_invalidate(project_path);
             removed_files += 1;
         }
     }
@@ -1999,6 +2002,7 @@ fn likely_orphaned_symbols(db_path: &str, limit: usize) -> Value {
     Value::Array(orphaned)
 }
 
+#[derive(Clone)]
 pub struct ChunkMeta {
     pub key: String,
     pub path: String,
@@ -2040,6 +2044,34 @@ fn bm25_doc_cache_clear() {
     }
 }
 
+struct CachedCorpus {
+    metas: Vec<ChunkMeta>,
+    overview_by_path: std::collections::HashMap<String, String>,
+    index_by_key: std::collections::HashMap<String, usize>,
+    index_by_path_line: std::collections::HashMap<(String, usize), usize>,
+}
+
+static FUSION_CORPUS_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, CachedCorpus>>> =
+    std::sync::Mutex::new(None);
+
+fn fusion_corpus_cache_key(project_path: Option<&str>) -> String {
+    project_path.unwrap_or("").to_string()
+}
+
+fn fusion_corpus_cache_invalidate(project_path: Option<&str>) {
+    if let Ok(mut cache) = FUSION_CORPUS_CACHE.lock() {
+        if let Some(m) = cache.as_mut() {
+            m.remove(&fusion_corpus_cache_key(project_path));
+        }
+    }
+}
+
+fn fusion_corpus_cache_clear() {
+    if let Ok(mut cache) = FUSION_CORPUS_CACHE.lock() {
+        *cache = None;
+    }
+}
+
 impl FusionCorpus {
     pub fn load() -> Self {
         Self::load_at(None)
@@ -2048,7 +2080,25 @@ impl FusionCorpus {
     /// Builds lexical retrieval over the same manifest namespace as an explicit
     /// root's vector index. Root-scoped dual search used to return vectors only,
     /// silently losing its independent BM25 channel.
+    ///
+    /// The KV manifest fetch this reconstructs from is a full-corpus read on
+    /// every call; cached per project_path and invalidated only where a
+    /// manifest actually gets written (index_cfg_impl's fv_put) or a chunk is
+    /// deleted, so a burst of dual-mode queries against an unchanged corpus
+    /// reconstructs it once instead of once per query.
     pub fn load_at(project_path: Option<&str>) -> Self {
+        let cache_key = fusion_corpus_cache_key(project_path);
+        if let Ok(cache) = FUSION_CORPUS_CACHE.lock() {
+            if let Some(c) = cache.as_ref().and_then(|m| m.get(&cache_key)) {
+                return FusionCorpus {
+                    metas: c.metas.clone(),
+                    file_cache: std::collections::HashMap::new(),
+                    overview_by_path: c.overview_by_path.clone(),
+                    index_by_key: c.index_by_key.clone(),
+                    index_by_path_line: c.index_by_path_line.clone(),
+                };
+            }
+        }
         let mut metas = Vec::new();
         let mut overview_by_path = std::collections::HashMap::new();
         let mut index_by_key = std::collections::HashMap::new();
@@ -2072,6 +2122,14 @@ impl FusionCorpus {
                     le: c.le,
                 });
             }
+        }
+        if let Ok(mut cache) = FUSION_CORPUS_CACHE.lock() {
+            cache.get_or_insert_with(std::collections::HashMap::new).insert(cache_key, CachedCorpus {
+                metas: metas.clone(),
+                overview_by_path: overview_by_path.clone(),
+                index_by_key: index_by_key.clone(),
+                index_by_path_line: index_by_path_line.clone(),
+            });
         }
         FusionCorpus {
             metas,
