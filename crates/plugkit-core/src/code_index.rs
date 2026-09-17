@@ -77,6 +77,7 @@ pub fn clear_codeinsight_cfg(cfg: &crate::ragconfig::RagConfig) -> u32 {
             }
         }
     }
+    bm25_doc_cache_clear();
     cleared
 }
 
@@ -1176,6 +1177,7 @@ fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: 
     }
     let emb_json = serde_json::json!({ "embedding": c.emb }).to_string();
     fv_put(&code_ns_for(project_path), &c.key, &emb_json);
+    bm25_doc_cache_invalidate(&c.key);
     persisted
 }
 
@@ -1183,6 +1185,7 @@ fn delete_chunk_keys(chunks: &[ChunkRecord], project_path: Option<&str>) {
     for c in chunks {
         fv_delete(&code_ns_for(project_path), &c.key);
         fv_delete(&code_vec_ns_for(project_path), &c.key);
+        bm25_doc_cache_invalidate(&c.key);
     }
 }
 
@@ -1196,6 +1199,12 @@ pub fn index(root: &str, max_files: usize) -> Value {
 /// so indexing a submodule/sibling never mixes into or overwrites it.
 pub fn index_at(root: &str, max_files: usize, project_path: &str) -> Value {
     index_cfg_impl(root, max_files, &crate::ragconfig::RagConfig::resolved(), false, 20, Some(project_path))
+}
+
+pub fn index_at_topup(root: &str, max_files: usize, project_path: &str, cap_ms: u64) -> Value {
+    let mut cfg = crate::ragconfig::RagConfig::resolved();
+    cfg.index.wall_budget_ms = cap_ms.min(cfg.index.wall_budget_ms);
+    index_cfg_impl(root, max_files, &cfg, false, 20, Some(project_path))
 }
 
 /// Same as [`index`], but always runs the likely-orphaned-symbol scan
@@ -1219,6 +1228,12 @@ pub fn index_with_dead_code(root: &str, max_files: usize, limit: usize) -> Value
 /// module already follows.
 pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig) -> Value {
     index_cfg_impl(root, max_files, cfg, cfg.index.likely_orphaned_symbol_scan_enabled, 20, None)
+}
+
+pub fn index_topup(root: &str, max_files: usize, cap_ms: u64) -> Value {
+    let mut cfg = crate::ragconfig::RagConfig::resolved();
+    cfg.index.wall_budget_ms = cap_ms.min(cfg.index.wall_budget_ms);
+    index_cfg(root, max_files, &cfg)
 }
 
 fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig, include_dead_code: bool, orphan_scan_limit: usize, project_path: Option<&str>) -> Value {
@@ -1777,7 +1792,26 @@ pub fn current_digest_cfg(cfg: &crate::ragconfig::RagConfig) -> String {
     current_digest_cfg_at(cfg, None)
 }
 
+const DIGEST_CACHE_TTL_MS: u64 = 5_000;
+
+struct DigestCacheEntry {
+    ts_ms: u64,
+    digest: String,
+}
+
+static DIGEST_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, DigestCacheEntry>>> =
+    std::sync::Mutex::new(None);
+
 pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> String {
+    let cache_key = project_path.unwrap_or("").to_string();
+    let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    if let Ok(cache) = DIGEST_CACHE.lock() {
+        if let Some(entry) = cache.as_ref().and_then(|m| m.get(&cache_key)) {
+            if now_ms.saturating_sub(entry.ts_ms) < DIGEST_CACHE_TTL_MS {
+                return entry.digest.clone();
+            }
+        }
+    }
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
     let files = collect_files(root, cfg.index.digest_max_files, &cfg.index);
     let mut entries: Vec<(String, u32)> = Vec::new();
@@ -1795,7 +1829,12 @@ pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Op
         let content_hash = crate::hash::fnv1a64(content.as_bytes()) as u32;
         entries.push((canon, content_hash));
     }
-    digest_from_entries(entries)
+    let digest = digest_from_entries(entries);
+    if let Ok(mut cache) = DIGEST_CACHE.lock() {
+        cache.get_or_insert_with(std::collections::HashMap::new)
+            .insert(cache_key, DigestCacheEntry { ts_ms: now_ms, digest: digest.clone() });
+    }
+    digest
 }
 
 fn digest_path_for(project_path: Option<&str>) -> String {
@@ -1981,6 +2020,26 @@ pub struct FusionCorpus {
     index_by_path_line: std::collections::HashMap<(String, usize), usize>,
 }
 
+struct Bm25DocEntry {
+    tf: std::collections::HashMap<String, u32>,
+    dl: f64,
+}
+
+static BM25_DOC_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, Bm25DocEntry>>> =
+    std::sync::Mutex::new(None);
+
+fn bm25_doc_cache_invalidate(key: &str) {
+    if let Ok(mut cache) = BM25_DOC_CACHE.lock() {
+        if let Some(m) = cache.as_mut() { m.remove(key); }
+    }
+}
+
+fn bm25_doc_cache_clear() {
+    if let Ok(mut cache) = BM25_DOC_CACHE.lock() {
+        *cache = None;
+    }
+}
+
 impl FusionCorpus {
     pub fn load() -> Self {
         Self::load_at(None)
@@ -2076,18 +2135,30 @@ impl FusionCorpus {
         let b = scoring.bm25_b_document_length_normalization;
         let q_tokens = rs_search::tokenize::tokenize(query);
         if q_tokens.is_empty() || self.metas.is_empty() { return Vec::new(); }
+        let mut cache = BM25_DOC_CACHE.lock().ok();
+        if let Some(guard) = cache.as_mut() {
+            guard.get_or_insert_with(std::collections::HashMap::new);
+        }
         let mut doc_tfs: Vec<(usize, std::collections::HashMap<String, u32>, f64)> = Vec::new();
         for i in 0..self.metas.len() {
-            let (path, name, ls, le) = {
-                let m = &self.metas[i];
-                (m.path.clone(), m.name.clone(), m.ls, m.le)
+            let key = self.metas[i].key.clone();
+            let cached = cache.as_ref()
+                .and_then(|c| c.as_ref())
+                .and_then(|m| m.get(&key))
+                .map(|e| (e.tf.clone(), e.dl));
+            let (tf, dl) = match cached {
+                Some(v) => v,
+                None => match compute_doc_tf(self, i) {
+                    Some(v) => v,
+                    None => continue,
+                },
             };
-            let content = match self.file_content(&path) { Some(c) => c, None => continue };
-            let body = slice_lines(&content, ls, le);
-            let tf = term_freqs(&format!("{} {} {}", path, name, body));
-            let dl: u32 = tf.values().sum();
-            doc_tfs.push((i, tf, dl as f64));
+            if let Some(m) = cache.as_mut().and_then(|c| c.as_mut()) {
+                m.insert(key, Bm25DocEntry { tf: tf.clone(), dl });
+            }
+            doc_tfs.push((i, tf, dl));
         }
+        drop(cache);
         if doc_tfs.is_empty() { return Vec::new(); }
         let n = doc_tfs.len() as f64;
         let avgdl = doc_tfs.iter().map(|(_, _, dl)| dl).sum::<f64>() / n;
@@ -2112,6 +2183,18 @@ impl FusionCorpus {
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.into_iter().take(k).map(|(i, s)| (self.metas[i].key.clone(), s)).collect()
     }
+}
+
+fn compute_doc_tf(corpus: &mut FusionCorpus, i: usize) -> Option<(std::collections::HashMap<String, u32>, f64)> {
+    let (path, name, ls, le) = {
+        let m = &corpus.metas[i];
+        (m.path.clone(), m.name.clone(), m.ls, m.le)
+    };
+    let content = corpus.file_content(&path)?;
+    let body = slice_lines(&content, ls, le);
+    let tf = term_freqs(&format!("{} {} {}", path, name, body));
+    let dl = tf.values().sum::<u32>() as f64;
+    Some((tf, dl))
 }
 
 fn term_freqs(text: &str) -> std::collections::HashMap<String, u32> {

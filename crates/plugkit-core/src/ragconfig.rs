@@ -150,6 +150,7 @@ pub struct IndexConfig {
     pub max_chunks_embedded_per_file_per_pass_count_bound_only: usize,
     pub pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound: u64,
     pub wall_budget_ms: u64,
+    pub incremental_topup_wall_budget_ms: u64,
     pub max_file_bytes: usize,
     pub extra_skip_dirs_appended_to_builtins_never_replacing: Vec<String>,
     pub extra_skip_file_suffixes_appended_to_builtins_never_replacing: Vec<String>,
@@ -168,6 +169,7 @@ impl Default for IndexConfig {
             max_chunks_embedded_per_file_per_pass_count_bound_only: 64,
             pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound: 16_000,
             wall_budget_ms: HOST_DISPATCH_CALL_DEADLINE_MS - WALL_BUDGET_TAIL_MARGIN_MS,
+            incremental_topup_wall_budget_ms: 4_000,
             max_file_bytes: 256 * 1024,
             extra_skip_dirs_appended_to_builtins_never_replacing: Vec::new(),
             extra_skip_file_suffixes_appended_to_builtins_never_replacing: Vec::new(),
@@ -620,6 +622,7 @@ impl RagConfig {
         };
 
         overwrite_present_u64_or_record_problem("index", "wall_budget_ms", &mut cfg.index.wall_budget_ms, &mut problems);
+        overwrite_present_u64_or_record_problem("index", "incremental_topup_wall_budget_ms", &mut cfg.index.incremental_topup_wall_budget_ms, &mut problems);
         overwrite_present_usize_or_record_problem("index", "max_file_bytes", &mut cfg.index.max_file_bytes, &mut problems);
         overwrite_present_usize_or_record_problem("index", "max_chunks_per_file_per_pass", &mut cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only, &mut problems);
         overwrite_present_u64_or_record_problem("index", "pessimistic_ms_per_chunk", &mut cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound, &mut problems);
