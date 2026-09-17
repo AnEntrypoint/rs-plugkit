@@ -271,8 +271,18 @@ fn is_skipped_filename(name: &str, cfg: &crate::ragconfig::IndexConfig) -> bool 
     cfg.skips_filename(name, SKIP_FILE_SUFFIXES)
 }
 
-fn is_skipped_dir_segment(seg: &str, cfg: &crate::ragconfig::IndexConfig) -> bool {
+pub(crate) fn is_skipped_dir_segment(seg: &str, cfg: &crate::ragconfig::IndexConfig) -> bool {
     cfg.skips_dir_segment(seg, SKIP_DIRS)
+}
+
+pub(crate) fn is_dependency_noise_dir_segment(seg: &str, cfg: &crate::ragconfig::IndexConfig) -> bool {
+    const DEPENDENCY_NOISE_DIRS: &[&str] = &[
+        ".git", ".svn", ".hg", ".bzr", "CVS", ".gm",
+        "node_modules", ".npm", ".yarn", ".pnp", ".pnpm-store",
+        "vendor", "site-packages", "target", ".cargo", ".rustup",
+        ".m2", ".sbt", ".ivy2", ".gem", "Pods", "DerivedData",
+    ];
+    cfg.skips_dir_segment(seg, DEPENDENCY_NOISE_DIRS)
 }
 
 pub fn ensure_schema_at(path: &str) -> Result<(), String> {
@@ -416,7 +426,7 @@ fn build_repo_gitignore(
     builder.build().ok()
 }
 
-fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
+pub(crate) fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
     let gitignore_content = host_read(&ignore_file_path(root, ".gitignore"));
     let custom_content = host_read(&ignore_file_path(root, ".codesearchignore"));
     let key: GitignoreMemoKey = (root.to_string(), gitignore_content.clone(), custom_content.clone());
@@ -429,14 +439,14 @@ fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
     built
 }
 
-fn gitignore_excludes(gi: &Option<ignore::gitignore::Gitignore>, rel_path: &str, is_dir: bool) -> bool {
+pub(crate) fn gitignore_excludes(gi: &Option<ignore::gitignore::Gitignore>, rel_path: &str, is_dir: bool) -> bool {
     match gi {
         Some(g) => g.matched(rel_path, is_dir).is_ignore(),
         None => false,
     }
 }
 
-fn is_hidden_segment(seg: &str) -> bool {
+pub(crate) fn is_hidden_segment(seg: &str) -> bool {
     seg.starts_with('.') && seg != "." && seg != ".."
 }
 
