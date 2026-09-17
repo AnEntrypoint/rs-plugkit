@@ -1712,11 +1712,16 @@ pub fn ensure_current_insight() -> Value {
     let current = current_digest_cfg(&cfg);
     let stale = stored.as_deref() != Some(current.as_str());
     let prior_partial = stored.as_deref().is_some_and(|digest| digest.contains(":partial="));
+    let cold_start = stored.is_none();
     // A partial index is usable code insight and records exactly what remains.
     // Retrying it on every job start only repeats its wall-bounded work and
     // starves jobs forever on repositories larger than one pass can cover.
     let index = if stale && !prior_partial {
-        index_cfg(".", cfg.index.prune_pass_file_limit_ceiling, &cfg)
+        if cold_start {
+            index_cfg(".", cfg.index.prune_pass_file_limit_ceiling, &cfg)
+        } else {
+            index_topup(".", cfg.index.prune_pass_file_limit_ceiling, cfg.index.incremental_topup_wall_budget_ms)
+        }
     } else {
         json!({
             "ok": true,
