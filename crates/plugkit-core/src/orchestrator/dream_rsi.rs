@@ -211,6 +211,9 @@ pub fn record_discovery(content: &str) -> Result<Value, String> {
     let evaluator_score = body.get("evaluator_score").and_then(Value::as_f64).filter(|value| value.is_finite()).ok_or_else(|| "dream-discovery-record requires finite evaluator_score".to_string())?;
     let cost = body.get("cost").and_then(Value::as_u64).ok_or_else(|| "dream-discovery-record requires non-negative integer cost".to_string())?;
     let parent_id = body.get("parent_id").map(|_| string_field(&body, "parent_id")).transpose()?;
+    let raw_policies = crate::pkfs::read_to_string(POLICY_PATH).ok_or_else(|| "dream-discovery-record has no registered policies".to_string())?;
+    let policies = serde_json::from_str::<Value>(&raw_policies).map_err(|_| "dream-discovery-record policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-discovery-record policy store is invalid".to_string())?.into_iter().map(|entry| verify_record("policy", &entry)).collect::<Result<Vec<_>, _>>()?;
+    if !policies.iter().any(|policy| policy.get("id").and_then(Value::as_str) == Some(policy_id.as_str()) && policy.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str())) { return Err("dream-discovery-record policy_id is not registered in this session".to_string()); }
     let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id).ok_or_else(|| "dream-discovery-record dispatch_id is not a completed gm dispatch".to_string())?;
     if dispatch.get("exit_code").and_then(Value::as_i64) != Some(0) { return Err("dream-discovery-record requires a successful completed dispatch".to_string()); }
