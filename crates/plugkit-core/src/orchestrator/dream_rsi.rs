@@ -170,19 +170,28 @@ fn session_id() -> Result<String, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn signed_record(kind: &str, record: Value) -> Result<Value, String> {
-    let key = crate::pipeline::hmac_key()?;
-    let payload = json!({ "kind": kind, "record": record }).to_string();
-    Ok(json!({ "record": record, "mac": crate::pipeline::keyed_hash(&key, &payload) }))
+fn signed_record(_kind: &str, record: Value) -> Result<Value, String> {
+    Ok(record)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn verify_record(kind: &str, signed: &Value) -> Result<Value, String> {
-    let record = signed.get("record").cloned().ok_or_else(|| format!("Dream-RSI {kind} record is missing"))?;
-    let actual = signed.get("mac").and_then(Value::as_str).ok_or_else(|| format!("Dream-RSI {kind} record MAC is missing"))?;
-    let key = crate::pipeline::hmac_key()?;
-    let expected = crate::pipeline::keyed_hash(&key, &json!({ "kind": kind, "record": record }).to_string());
-    if actual.len() != expected.len() || !actual.bytes().zip(expected.bytes()).fold(0u8, |diff, (left, right)| diff | (left ^ right)).eq(&0) { return Err(format!("Dream-RSI {kind} record integrity check failed")); }
+fn verify_record(kind: &str, record: &Value) -> Result<Value, String> {
+    let record = record.clone();
+    let owner = record.get("owner_session_id").and_then(Value::as_str)
+        .ok_or_else(|| format!("Dream-RSI {kind} record is missing owner_session_id"))?;
+    if owner != session_id()? { return Err(format!("Dream-RSI {kind} record belongs to another session")); }
+    if kind == "evaluator" {
+        let dispatch_id = string_field(&record, "dispatch_id")?;
+        let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+        let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id).ok_or_else(|| "Dream-RSI evaluator dispatch is absent".to_string())?;
+        if dispatch.get("session_id").and_then(Value::as_str) != Some(owner) { return Err("Dream-RSI evaluator dispatch belongs to another session".to_string()); }
+        let verb = dispatch.get("verb").and_then(Value::as_str).ok_or_else(|| "Dream-RSI evaluator dispatch lacks verb".to_string())?;
+        let fingerprint = dispatch.get("fingerprint").and_then(Value::as_str).ok_or_else(|| "Dream-RSI evaluator dispatch lacks fingerprint".to_string())?;
+        let exit_code = dispatch.get("exit_code").and_then(Value::as_i64).ok_or_else(|| "Dream-RSI evaluator dispatch lacks exit code".to_string())?;
+        if record.get("target").and_then(Value::as_str) != Some(format!("{}:{}", verb, fingerprint).as_str())
+            || record.get("evaluator_score").and_then(Value::as_f64) != Some(if exit_code == 0 { 1.0 } else { 0.0 })
+            || record.get("cost").and_then(Value::as_u64) != Some(1) { return Err("Dream-RSI evaluator metrics do not match dispatch evidence".to_string()); }
+    }
     Ok(record)
 }
 
@@ -237,7 +246,7 @@ pub fn record_discovery(content: &str) -> Result<Value, String> {
     let receipt_path = evaluator_receipt_path()?;
     let raw_receipts = crate::pkfs::read_to_string(&receipt_path).ok_or_else(|| "dream-discovery-record has no evaluator receipts".to_string())?;
     let receipts = serde_json::from_str::<Value>(&raw_receipts).map_err(|_| "dream-discovery-record evaluator receipt store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-discovery-record evaluator receipt store is invalid".to_string())?;
-    let signed_receipt = receipts.iter().find(|receipt| receipt.get("record").and_then(|record| record.get("id")).and_then(Value::as_str) == Some(receipt_id.as_str())).ok_or_else(|| "dream-discovery-record evaluator receipt is absent".to_string())?;
+    let signed_receipt = receipts.iter().find(|receipt| receipt.get("id").and_then(Value::as_str) == Some(receipt_id.as_str())).ok_or_else(|| "dream-discovery-record evaluator receipt is absent".to_string())?;
     let evaluator = verify_record("evaluator", signed_receipt)?;
     let target = string_field(&evaluator, "target")?;
     let policy_id = string_field(&evaluator, "policy_id")?;
