@@ -116,9 +116,7 @@ fn evaluate_policy(world: &World, policy: &Policy) -> Result<Value, String> {
     }))
 }
 
-fn evaluate_worlds(body: Value, worlds: Vec<World>) -> Result<Value, String> {
-    let baseline_id = string_field(&body, "baseline_policy_id")?;
-    let policies = array_field(&body, "policies")?.iter().map(parse_policy).collect::<Result<Vec<_>, _>>()?;
+fn evaluate_worlds(baseline_id: String, policies: Vec<Policy>, worlds: Vec<World>) -> Result<Value, String> {
     let mut policy_ids = BTreeSet::new();
     for policy in &policies {
         if !policy_ids.insert(policy.id.clone()) {
@@ -157,25 +155,80 @@ fn evaluate_worlds(body: Value, worlds: Vec<World>) -> Result<Value, String> {
 
 #[cfg(target_arch = "wasm32")]
 const WORLD_PATH: &str = ".gm/dream-rsi/worlds.json";
+#[cfg(target_arch = "wasm32")]
+const DISCOVERY_PATH: &str = ".gm/dream-rsi/discovery.json";
+#[cfg(target_arch = "wasm32")]
+const POLICY_PATH: &str = ".gm/dream-rsi/policies.json";
+
+#[cfg(target_arch = "wasm32")]
+fn session_id() -> Result<String, String> {
+    crate::orchestrator::state::dispatch_session_id().filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| "Dream-RSI requires a gm session ID".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn register_policy(content: &str) -> Result<Value, String> {
+    let body: Value = serde_json::from_str(content).map_err(|error| format!("dream-policy-register requires JSON: {error}"))?;
+    let policy = parse_policy(body.get("policy").ok_or_else(|| "dream-policy-register requires policy".to_string())?)?;
+    let owner_session_id = session_id()?;
+    let deployed = body.get("deployed").and_then(Value::as_bool).unwrap_or(false);
+    let raw = crate::pkfs::read_to_string(POLICY_PATH).unwrap_or_else(|| "[]".to_string());
+    let mut policies = serde_json::from_str::<Value>(&raw).map_err(|_| "dream-policy-register policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-policy-register policy store is invalid".to_string())?;
+    if policies.iter().any(|entry| entry.get("id").and_then(Value::as_str) == Some(policy.id.as_str()) && entry.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str())) { return Err(format!("dream-policy-register policy {} already exists", policy.id)); }
+    if deployed { for entry in &mut policies { if entry.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str()) { entry["deployed"] = Value::Bool(false); } } }
+    policies.push(json!({ "id": policy.id, "owner_session_id": owner_session_id, "roots": policy.roots, "max_nodes": policy.max_nodes, "deployed": deployed }));
+    if !crate::pkfs::write(POLICY_PATH, &Value::Array(policies).to_string()) { return Err("dream-policy-register could not persist policy".to_string()); }
+    Ok(json!({ "ok": true, "policy_id": policy.id, "deployed": deployed }))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn record_discovery(content: &str) -> Result<Value, String> {
+    let body: Value = serde_json::from_str(content).map_err(|error| format!("dream-discovery-record requires JSON: {error}"))?;
+    let id = string_field(&body, "id")?;
+    let owner_session_id = session_id()?;
+    let target = string_field(&body, "target")?;
+    let policy_id = string_field(&body, "policy_id")?;
+    let dispatch_id = string_field(&body, "dispatch_id")?;
+    let evaluator_score = body.get("evaluator_score").and_then(Value::as_f64).filter(|value| value.is_finite()).ok_or_else(|| "dream-discovery-record requires finite evaluator_score".to_string())?;
+    let cost = body.get("cost").and_then(Value::as_u64).ok_or_else(|| "dream-discovery-record requires non-negative integer cost".to_string())?;
+    let parent_id = body.get("parent_id").map(|_| string_field(&body, "parent_id")).transpose()?;
+    let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id).ok_or_else(|| "dream-discovery-record dispatch_id is not a completed gm dispatch".to_string())?;
+    if dispatch.get("exit_code").and_then(Value::as_i64) != Some(0) { return Err("dream-discovery-record requires a successful completed dispatch".to_string()); }
+    let raw = crate::pkfs::read_to_string(DISCOVERY_PATH).unwrap_or_else(|| "[]".to_string());
+    let mut records = serde_json::from_str::<Value>(&raw).ok().and_then(|value| value.as_array().cloned()).unwrap_or_default();
+    if records.iter().any(|record| record.get("id").and_then(Value::as_str) == Some(id.as_str())) { return Err(format!("dream-discovery-record {id} already exists")); }
+    if let Some(parent_id) = &parent_id {
+        if !records.iter().any(|record| record.get("id").and_then(Value::as_str) == Some(parent_id.as_str())) { return Err(format!("dream-discovery-record parent {parent_id} is absent")); }
+    }
+    let record = json!({ "id": id, "owner_session_id": owner_session_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": evaluator_score, "cost": cost, "parent_id": parent_id });
+    records.push(record.clone());
+    if !crate::pkfs::write(DISCOVERY_PATH, &Value::Array(records).to_string()) { return Err("dream-discovery-record could not persist discovery record".to_string()); }
+    Ok(json!({ "ok": true, "discovery_id": id }))
+}
 
 #[cfg(target_arch = "wasm32")]
 pub fn seal(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content).map_err(|error| format!("dream-world-seal requires JSON: {error}"))?;
     let world_id = string_field(&body, "world_id")?;
-    let dispatch_ids = array_field(&body, "dispatch_ids")?;
-    if dispatch_ids.is_empty() { return Err("dream-world-seal requires completed dispatch_ids".to_string()); }
-    let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-    let nodes = dispatch_ids.iter().enumerate().map(|(index, value)| {
-        let id = value.as_str().ok_or_else(|| "dream-world-seal dispatch_ids must contain strings".to_string())?;
-        let entry = crate::dispatch_ledger::lookup(&cwd, id).ok_or_else(|| format!("dream-world-seal dispatch {id} is absent"))?;
-        let exit_code = entry.get("exit_code").and_then(Value::as_i64).ok_or_else(|| format!("dream-world-seal dispatch {id} lacks exit code"))?;
-        Ok(json!({ "id": id, "score": if exit_code == 0 { 1.0 } else { 0.0 }, "cost": 1, "children": if index + 1 < dispatch_ids.len() { vec![dispatch_ids[index + 1].as_str().unwrap_or("")] } else { vec![] } }))
+    let owner_session_id = session_id()?;
+    let discovery_ids = array_field(&body, "discovery_ids")?;
+    if discovery_ids.is_empty() { return Err("dream-world-seal requires recorded discovery_ids".to_string()); }
+    let raw_records = crate::pkfs::read_to_string(DISCOVERY_PATH).ok_or_else(|| "dream-world-seal has no discovery records".to_string())?;
+    let records = serde_json::from_str::<Value>(&raw_records).map_err(|_| "dream-world-seal discovery record store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-world-seal discovery record store is invalid".to_string())?;
+    let nodes = discovery_ids.iter().enumerate().map(|(index, value)| {
+        let id = value.as_str().ok_or_else(|| "dream-world-seal discovery_ids must contain strings".to_string())?;
+        let record = records.iter().find(|record| record.get("id").and_then(Value::as_str) == Some(id)).ok_or_else(|| format!("dream-world-seal discovery {id} is absent"))?;
+        if record.get("owner_session_id").and_then(Value::as_str) != Some(owner_session_id.as_str()) { return Err(format!("dream-world-seal discovery {id} belongs to another session")); }
+        let score = record.get("evaluator_score").and_then(Value::as_f64).filter(|value| value.is_finite()).ok_or_else(|| format!("dream-world-seal discovery {id} lacks evaluator score"))?;
+        let cost = record.get("cost").and_then(Value::as_u64).ok_or_else(|| format!("dream-world-seal discovery {id} lacks cost"))?;
+        Ok(json!({ "id": id, "score": score, "cost": cost, "children": if index + 1 < discovery_ids.len() { vec![discovery_ids[index + 1].as_str().unwrap_or("")] } else { vec![] } }))
     }).collect::<Result<Vec<_>, String>>()?;
     let world = parse_world(&json!({ "id": world_id, "nodes": nodes }))?;
     let raw = crate::pkfs::read_to_string(WORLD_PATH).unwrap_or_else(|| "[]".to_string());
-    let mut worlds = serde_json::from_str::<Value>(&raw).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    let mut worlds = serde_json::from_str::<Value>(&raw).map_err(|_| "dream-world-seal world store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-world-seal world store is invalid".to_string())?;
     if worlds.iter().any(|entry| entry.get("id").and_then(Value::as_str) == Some(world.id.as_str())) { return Err(format!("dream-world-seal world {} already exists", world.id)); }
-    worlds.push(json!({ "id": world.id, "dispatch_ids": dispatch_ids, "nodes": nodes }));
+    worlds.push(json!({ "id": world.id, "owner_session_id": owner_session_id, "discovery_ids": discovery_ids, "nodes": nodes }));
     if !crate::pkfs::write(WORLD_PATH, &Value::Array(worlds).to_string()) { return Err("dream-world-seal could not persist sealed world".to_string()); }
     Ok(json!({ "ok": true, "world_id": world.id, "node_count": world.nodes.len() }))
 }
@@ -183,23 +236,53 @@ pub fn seal(content: &str) -> Result<Value, String> {
 #[cfg(target_arch = "wasm32")]
 pub fn evaluate(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content).map_err(|error| format!("dream-replay requires JSON: {error}"))?;
+    let owner_session_id = session_id()?;
     if body.get("worlds").is_some() { return Err("dream-replay accepts sealed world_ids, never caller-supplied worlds".to_string()); }
     let ids = array_field(&body, "world_ids")?;
+    let baseline_id = string_field(&body, "baseline_policy_id")?;
+    let policy_ids = array_field(&body, "policy_ids")?;
+    let raw_policies = crate::pkfs::read_to_string(POLICY_PATH).ok_or_else(|| "dream-replay has no registered policies".to_string())?;
+    let stored_policies = serde_json::from_str::<Value>(&raw_policies).map_err(|_| "dream-replay policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-replay policy store is invalid".to_string())?;
+    let policies = policy_ids.iter().map(|id| {
+        let id = id.as_str().ok_or_else(|| "dream-replay policy_ids must contain strings".to_string())?;
+        let stored_policy = stored_policies.iter().find(|policy| policy.get("id").and_then(Value::as_str) == Some(id) && policy.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str())).ok_or_else(|| format!("dream-replay registered policy {id} is absent"))?;
+        parse_policy(stored_policy)
+    }).collect::<Result<Vec<_>, _>>()?;
+    if !stored_policies.iter().any(|policy| policy.get("id").and_then(Value::as_str) == Some(baseline_id.as_str()) && policy.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str()) && policy.get("deployed").and_then(Value::as_bool) == Some(true)) { return Err("dream-replay baseline_policy_id is not this session's deployed policy".to_string()); }
     let raw = crate::pkfs::read_to_string(WORLD_PATH).ok_or_else(|| "dream-replay has no sealed worlds".to_string())?;
     let stored = serde_json::from_str::<Value>(&raw).ok().and_then(|v| v.as_array().cloned()).ok_or_else(|| "dream-replay sealed world store is invalid".to_string())?;
     let worlds = ids.iter().map(|id| {
         let id = id.as_str().ok_or_else(|| "dream-replay world_ids must contain strings".to_string())?;
         let stored_world = stored.iter().find(|world| world.get("id").and_then(Value::as_str) == Some(id)).ok_or_else(|| format!("dream-replay sealed world {id} is absent"))?;
+        if stored_world.get("owner_session_id").and_then(Value::as_str) != Some(owner_session_id.as_str()) { return Err(format!("dream-replay sealed world {id} belongs to another session")); }
         parse_world(stored_world)
     }).collect::<Result<Vec<_>, _>>()?;
-    evaluate_worlds(body, worlds)
+    evaluate_worlds(baseline_id, policies, worlds)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn evaluate(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content).map_err(|error| format!("dream-replay requires JSON: {error}"))?;
+    let baseline_id = string_field(&body, "baseline_policy_id")?;
+    let policies = array_field(&body, "policies")?.iter().map(parse_policy).collect::<Result<Vec<_>, _>>()?;
     let worlds = array_field(&body, "worlds")?.iter().map(parse_world).collect::<Result<Vec<_>, _>>()?;
-    evaluate_worlds(body, worlds)
+    evaluate_worlds(baseline_id, policies, worlds)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn handle_policy_register(content: &str) -> (String, String, i32) {
+    match register_policy(content) {
+        Ok(result) => (result.to_string(), String::new(), 0),
+        Err(error) => (json!({ "ok": false, "error": error }).to_string(), String::new(), 1),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn handle_discovery_record(content: &str) -> (String, String, i32) {
+    match record_discovery(content) {
+        Ok(result) => (result.to_string(), String::new(), 0),
+        Err(error) => (json!({ "ok": false, "error": error }).to_string(), String::new(), 1),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
