@@ -201,16 +201,22 @@ pub fn register_policy(content: &str) -> Result<Value, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub fn evaluator_receipt(_content: &str) -> Result<Value, String> {
+    Err("dream-evaluator-receipt requires a deployment-owned evaluator provider; caller-supplied target, score, and cost are not admissible evidence".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn record_discovery(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content).map_err(|error| format!("dream-discovery-record requires JSON: {error}"))?;
     let id = string_field(&body, "id")?;
     let owner_session_id = session_id()?;
-    let target = string_field(&body, "target")?;
-    let policy_id = string_field(&body, "policy_id")?;
-    let dispatch_id = string_field(&body, "dispatch_id")?;
-    let evaluator_score = body.get("evaluator_score").and_then(Value::as_f64).filter(|value| value.is_finite()).ok_or_else(|| "dream-discovery-record requires finite evaluator_score".to_string())?;
-    let cost = body.get("cost").and_then(Value::as_u64).ok_or_else(|| "dream-discovery-record requires non-negative integer cost".to_string())?;
-    let parent_id = body.get("parent_id").map(|_| string_field(&body, "parent_id")).transpose()?;
+    let evaluator = verify_record("evaluator", body.get("evaluator_receipt").ok_or_else(|| "dream-discovery-record requires evaluator_receipt".to_string())?)?;
+    let target = string_field(&evaluator, "target")?;
+    let policy_id = string_field(&evaluator, "policy_id")?;
+    let dispatch_id = string_field(&evaluator, "dispatch_id")?;
+    let evaluator_score = evaluator.get("evaluator_score").and_then(Value::as_f64).filter(|value| value.is_finite()).ok_or_else(|| "dream-discovery-record evaluator receipt requires finite evaluator_score".to_string())?;
+    let cost = evaluator.get("cost").and_then(Value::as_u64).ok_or_else(|| "dream-discovery-record evaluator receipt requires non-negative integer cost".to_string())?;
+    let parent_id = evaluator.get("parent_id").map(|_| string_field(&evaluator, "parent_id")).transpose()?;
     let raw_policies = crate::pkfs::read_to_string(POLICY_PATH).ok_or_else(|| "dream-discovery-record has no registered policies".to_string())?;
     let policies = serde_json::from_str::<Value>(&raw_policies).map_err(|_| "dream-discovery-record policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-discovery-record policy store is invalid".to_string())?.into_iter().map(|entry| verify_record("policy", &entry)).collect::<Result<Vec<_>, _>>()?;
     if !policies.iter().any(|policy| policy.get("id").and_then(Value::as_str) == Some(policy_id.as_str()) && policy.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str())) { return Err("dream-discovery-record policy_id is not registered in this session".to_string()); }
@@ -296,6 +302,14 @@ pub fn evaluate(content: &str) -> Result<Value, String> {
 #[cfg(target_arch = "wasm32")]
 pub fn handle_policy_register(content: &str) -> (String, String, i32) {
     match register_policy(content) {
+        Ok(result) => (result.to_string(), String::new(), 0),
+        Err(error) => (json!({ "ok": false, "error": error }).to_string(), String::new(), 1),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn handle_evaluator_receipt(content: &str) -> (String, String, i32) {
+    match evaluator_receipt(content) {
         Ok(result) => (result.to_string(), String::new(), 0),
         Err(error) => (json!({ "ok": false, "error": error }).to_string(), String::new(), 1),
     }

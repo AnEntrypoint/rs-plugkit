@@ -205,7 +205,7 @@ pub fn gm_dir() -> PathBuf {
 /// runs on every orchestrator dispatch in a debug build and names the exact
 /// verb that drifted.
 pub const ORCHESTRATOR_VERBS: &[&str] = &[
-    "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list", "mutable-defer", "dream-policy-register", "dream-discovery-record", "dream-world-seal", "dream-replay",
+    "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list", "mutable-defer", "dream-policy-register", "dream-evaluator-receipt", "dream-discovery-record", "dream-world-seal", "dream-replay",
     "memorize-fire", "discipline-note", "discipline-check-removal", "discipline-audit", "capability-resolve", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan", "auto-recall",
     "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
     "task-spawn", "task-list", "task-stop", "task-output",
@@ -270,7 +270,7 @@ fn handle_memorize_continue(_content: &str) -> (String, String, i32) {
 /// the same literal set the match arms below list; a verb added to one and
 /// not the other is exactly the drift this guard exists to catch.
 const DISPATCH_ARM_VERBS: &[&str] = &[
-    "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list", "mutable-defer", "dream-policy-register", "dream-discovery-record", "dream-world-seal", "dream-replay",
+    "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list", "mutable-defer", "dream-policy-register", "dream-evaluator-receipt", "dream-discovery-record", "dream-world-seal", "dream-replay",
     "memorize-fire", "discipline-note", "discipline-check-removal", "discipline-audit", "capability-resolve", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan",
     "auto-recall", "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
     "task-spawn", "task-list", "task-stop", "task-output",
@@ -299,6 +299,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "mutable-list" => mutables::handle_list(content),
         "mutable-defer" => mutables::handle_defer(content),
         "dream-policy-register" => dream_rsi::handle_policy_register(content),
+        "dream-evaluator-receipt" => dream_rsi::handle_evaluator_receipt(content),
         "dream-discovery-record" => dream_rsi::handle_discovery_record(content),
         "dream-world-seal" => dream_rsi::handle_seal(content),
         "dream-replay" => dream_rsi::handle(content),
