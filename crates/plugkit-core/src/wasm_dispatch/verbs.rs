@@ -1696,7 +1696,6 @@ fn codesearch(body: &Value) -> u64 {
     let cand_k = cfg.budget.pool(k as usize).max(50) as u32;
     let embedding = embed_query(query);
     let code_ns = cfg.namespaces.code.as_str();
-    let (vector_hits, _) = rssearch_vector_hits(&embedding, code_ns, k, false);
     let vec_hits = vec_search_local(&embedding, code_ns, cand_k);
     let vec_ids: Vec<String> = vec_hits.as_array().map(|a| {
         a.iter().filter_map(|h| h.get("key").and_then(|x| x.as_str()).map(String::from)).collect()
@@ -1737,10 +1736,9 @@ fn codesearch(body: &Value) -> u64 {
         if let Some(ov) = corpus.overview_for_key(key) { obj.insert("overview".to_string(), json!(ov)); }
         Value::Object(obj)
     };
-    let vector_ranked: Vec<Value> = vector_hits.as_array()
+    let vector_ranked: Vec<Value> = vec_hits.as_array()
         .filter(|a| !a.is_empty())
         .map(|a| a.iter().take(k as usize).cloned().collect())
-        .or_else(|| vec_hits.as_array().filter(|a| !a.is_empty()).map(|a| a.iter().take(k as usize).cloned().collect()))
         .unwrap_or_else(|| vec_ids.iter().take(k as usize).map(|key| build_hit(&mut corpus, key, None, None)).collect());
     let bm25_ranked_response: Vec<Value> = bm25_ranked.iter().take(k as usize)
         .map(|(key, score)| build_hit(&mut corpus, key, Some(*score), None))
