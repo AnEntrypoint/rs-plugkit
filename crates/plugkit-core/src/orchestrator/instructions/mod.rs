@@ -570,6 +570,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     ilog("instruction::handle post-recall");
 
     let update_available = read_spool_json(".update-available.json");
+    let dream_rsi_strategy = super::dream_rsi::active_strategy(notify_session.as_deref());
     let config_changed = super::config_notify::drain_for_session(notify_session.as_deref());
     let running_tasks = super::task::live_running_tasks();
     let open_browser_sessions = super::task::open_browser_sessions();
@@ -684,6 +685,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "codeinsight_start": codeinsight_start,
         "codeinsight_overview": codeinsight_overview,
         "ready_wave": wave,
+        "dream_rsi_strategy": dream_rsi_strategy,
         "update_available": update_available,
         "config_changed": config_changed,
         "gm_plugkit_stale": gm_plugkit_stale,
