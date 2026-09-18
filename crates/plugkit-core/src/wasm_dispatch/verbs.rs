@@ -4133,6 +4133,10 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
     if !gate.allowed {
         return pack(gate.to_denial_json(verb).to_string());
     }
+    #[cfg(target_arch = "wasm32")]
+    if let Err(error) = crate::orchestrator::dream_rsi::admit_dispatch(verb) {
+        return err_json(verb, json!({ "error": error }));
+    }
     let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
     crate::browser_witness::record_from_body(cwd_for_witness, body);
     if crate::orchestrator::is_orchestrator_verb(verb) {
