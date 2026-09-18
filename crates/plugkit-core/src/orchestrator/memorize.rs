@@ -184,6 +184,14 @@ fn write_pending_ledger(rows: &[serde_json::Value]) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn pending_ledger_contains(namespace: &str, key: &str) -> bool {
+    read_pending_ledger().iter().any(|r| {
+        r.get("key").and_then(|v| v.as_str()) == Some(key)
+            && r.get("namespace").and_then(|v| v.as_str()) == Some(namespace)
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
 fn queue_pending_embedding(
     namespace: &str,
     key: &str,
@@ -481,14 +489,25 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             "key": key,
             "namespace": namespace,
         }));
+        // The dedup branch used to assert "embedded": true without consulting
+        // anything, which is how a row stored during an embedder outage reported
+        // itself as fully indexed the moment the same text was fired again: the
+        // dedup check only proves the TEXT is already stored, never that a vector
+        // exists for it. The pending ledger is the authority on that.
+        let still_owes_vector = pending_ledger_contains(&namespace, &key);
         let payload = serde_json::json!({
             "ok": true,
             "key": key,
             "namespace": namespace,
-            "embedded": true,
+            "embedded": !still_owes_vector,
+            "vector_pending": still_owes_vector,
             "deduped": true,
             "bytes": text.len(),
             "md_file": md_path,
+            "backfill_verb": if still_owes_vector { Some("memorize-backfill") } else { None },
+            "disclosure": if still_owes_vector {
+                Some("this memo's text was already stored, but it is still queued in the pending-embedding ledger, so it carries NO vector and is reachable only by the degraded keyword path until memorize-backfill runs")
+            } else { None },
             "agents_drain": agents_drain_obligation(),
         });
         return (payload.to_string(), String::new(), 0);
@@ -554,18 +573,25 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
 
 const AGENTS_DRAIN_STATE_FILE: &str = ".gm/exec-spool/.agents-drain-state.json";
 const FLAT_STREAK_WARN_THRESHOLD: u32 = 3;
-// The full back_pressure_warning/instruction prose repeated byte-for-byte on
-// every memorize-fire once flat_streak crossed the warn threshold. Every
-// caller already gets agents_bytes/agents_lines/dropped_since_last_fire/
-// flat_streak on every call, so the prose only needs to resurface
-// periodically -- mirrors the per-signature dedup/occurrenceCount pattern
-// plugkit-wasm-wrapper.js already uses for the GL-error capture path.
+// The full `back_pressure_warning`/`instruction` prose (~600+ bytes combined)
+// was landing byte-for-byte identical on every single memorize-fire response
+// once a session's flat_streak crossed the warn threshold -- observed
+// repeating unchanged across 5+ consecutive dispatches in one live session,
+// with only the `flat_streak` counter moving. Real callers already get that
+// counter (plus agents_bytes/agents_lines/dropped_since_last_fire) on every
+// call, so the prose itself only needs to resurface periodically: once when
+// a given obligation first fires, then on an escalating cadence so it is
+// never silently forgotten if genuinely never addressed. Mirrors the
+// per-signature dedup/occurrenceCount pattern the GL-error capture path
+// (`plugkit-wasm-wrapper.js`) already uses for the same class of problem --
+// full detail once, a compact running count on every repeat after that.
 const FULL_TEXT_REPEAT_INTERVAL: u64 = 10;
 
-/// Whether `streak` is due to surface its full prose: the turn it first
-/// reaches `first_at`, then every `FULL_TEXT_REPEAT_INTERVAL` turns beyond
-/// that. Other turns get the compact/omitted form instead of a
-/// byte-identical repeat of the same paragraph.
+/// Whether `streak` (a monotonically-increasing counter, never reset except
+/// to 0) is due to surface its full prose: the turn it first reaches
+/// `first_at`, then every `FULL_TEXT_REPEAT_INTERVAL` turns beyond that.
+/// Turns in between get the compact/omitted form instead of a byte-identical
+/// repeat of the same paragraph.
 fn due_for_full_text(streak: u64, first_at: u64) -> bool {
     streak >= first_at && (streak - first_at) % FULL_TEXT_REPEAT_INTERVAL == 0
 }
