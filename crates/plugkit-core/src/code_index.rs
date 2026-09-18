@@ -2462,6 +2462,7 @@ const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 pub struct LiteralScan<'a> {
     pub pattern: &'a str,
     pub root: Option<&'a str>,
+    pub path: Option<&'a str>,
     pub regex: bool,
     pub case_insensitive: bool,
     pub whole_word: bool,
@@ -2594,14 +2595,35 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
 
     let root = req.root.filter(|p| !p.is_empty()).unwrap_or(".");
+    let scope = req.path.filter(|p| !p.is_empty());
+    let origin = if req.root.filter(|p| !p.is_empty()).is_some() {
+        crate::scan_universe::TargetOrigin::CallerNamed
+    } else {
+        crate::scan_universe::TargetOrigin::ProjectDefault
+    };
+    let glob = match req.path_glob.filter(|g| !g.is_empty()) {
+        Some(g) => match crate::path_glob::PathGlob::parse(g) {
+            Ok(parsed) => Some(parsed),
+            Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
+        },
+        None => None,
+    };
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     // Ask for one more than the cap so hitting it is distinguishable from a
     // tree that happens to be exactly cap-sized.
-    let listed = collect_files(root, file_cap.saturating_add(1), &cfg.index);
+    let universe = match crate::scan_universe::list_scan_universe(root, scope, file_cap.saturating_add(1), &cfg.index, origin) {
+        Ok(u) => u,
+        Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
+    };
+    let listed = universe.files;
     let files_truncated = listed.len() > file_cap;
     let files: &[String] = if files_truncated { &listed[..file_cap] } else { &listed[..] };
+    let files_matching_glob = match &glob {
+        Some(g) => files.iter().filter(|p| g.admits(root, scope, p)).count(),
+        None => files.len(),
+    };
+    let glob_matched_no_files = glob.is_some() && !files.is_empty() && files_matching_glob == 0;
 
-    let glob_needle = req.path_glob.map(|g| g.to_lowercase());
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let budget_ms = cfg.index.wall_budget_ms;
 
@@ -2620,10 +2642,8 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             budget_exhausted = true;
             break;
         }
-        if let Some(glob) = &glob_needle {
-            let lower = path.to_lowercase();
-            let base = lower.rsplit('/').next().unwrap_or(lower.as_str()).to_string();
-            if !glob_match_simple(glob, &lower) && !glob_match_simple(glob, &base) { continue; }
+        if let Some(g) = &glob {
+            if !g.admits(root, scope, path) { continue; }
         }
         let stat = host_stat(path);
         if let Some(stat) = &stat {
@@ -2687,16 +2707,34 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         && !matches_truncated
         && !budget_exhausted
         && files_skipped_too_large.is_empty()
-        && files_unreadable == 0;
+        && files_unreadable == 0
+        && universe.listing_complete
+        && !glob_matched_no_files;
 
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), json!(true));
     out.insert("mode".to_string(), json!(if req.regex { "regex" } else { "literal" }));
     out.insert("pattern".to_string(), json!(req.pattern));
     out.insert("root".to_string(), json!(root));
+    if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
     out.insert("case_insensitive".to_string(), json!(req.case_insensitive));
     if !req.regex { out.insert("whole_word".to_string(), json!(req.whole_word)); }
     if let Some(g) = req.path_glob { out.insert("path_glob".to_string(), json!(g)); }
+    if glob.is_some() { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
+    if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
+    out.insert("file_source".to_string(), json!(universe.source.label()));
+    if !universe.listing_complete {
+        out.insert("listing_incomplete".to_string(), json!(true));
+        if let Some(reason) = &universe.walk_reason { out.insert("walk_reason".to_string(), json!(reason)); }
+    }
+    if !universe.excluded.is_empty() {
+        let cap = 200usize;
+        let shown: Vec<Value> = universe.excluded.iter().take(cap)
+            .map(|e| json!({ "path": e.path, "rule": e.rule }))
+            .collect();
+        out.insert("excluded_by_rule".to_string(), json!(shown));
+        out.insert("excluded_by_rule_count".to_string(), json!(universe.excluded.len()));
+    }
     out.insert("match_count".to_string(), json!(matches.len()));
     out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
     out.insert("files_with_matches".to_string(), json!(files_with_matches));

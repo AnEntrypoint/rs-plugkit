@@ -1594,10 +1594,13 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
     let scan = crate::code_index::LiteralScan {
         pattern: query,
         root,
+        path: body.get("path").and_then(|v| v.as_str()).filter(|p| !p.is_empty()),
         regex,
         case_insensitive: body.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false),
         whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
-        path_glob: body.get("path_glob").and_then(|v| v.as_str()).filter(|g| !g.is_empty()),
+        path_glob: body.get("path_glob").and_then(|v| v.as_str())
+            .or_else(|| body.get("glob").and_then(|v| v.as_str()))
+            .filter(|g| !g.is_empty()),
         max_matches,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
