@@ -164,7 +164,13 @@ pub fn observe_dispatch(session_id: &str, dispatch_id: &str, verb: &str, fingerp
     let path = format!(".gm/dream-rsi/{session_id}/observations.json");
     let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
     let mut observations = serde_json::from_str::<Value>(&raw).ok().and_then(|value| value.as_array().cloned()).unwrap_or_default();
-    observations.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "exit_code": exit_code }));
+    let prd_open_count = crate::orchestrator::prd::handle_list("").0
+        .parse::<Value>().ok().and_then(|value| value.get("items").and_then(Value::as_array).cloned())
+        .map(|items| items.iter().filter(|item| crate::orchestrator::prd::status_is_open(item.get("status").and_then(Value::as_str).unwrap_or("pending"))).count())
+        .unwrap_or(0);
+    let mutable_open_count = crate::orchestrator::mutables::pending_detailed().len();
+    let quality = if exit_code == 0 { 1.0 / (1.0 + (prd_open_count + mutable_open_count) as f64) } else { 0.0 };
+    observations.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "exit_code": exit_code, "prd_open_count": prd_open_count, "mutable_open_count": mutable_open_count, "quality": quality }));
     if observations.len() > 256 { observations.drain(0..observations.len() - 256); }
     let successes = observations.iter().filter(|observation| observation.get("exit_code").and_then(Value::as_i64) == Some(0)).count();
     let failures = observations.len().saturating_sub(successes);
@@ -215,7 +221,10 @@ pub fn automatic_replay(session_id: Option<&str>) -> Value {
         let Some(exit_code) = dispatch.get("exit_code").and_then(Value::as_i64) else { continue };
         let Some(verb) = dispatch.get("verb").and_then(Value::as_str) else { continue };
         let Some(fingerprint) = dispatch.get("fingerprint").and_then(Value::as_str) else { continue };
-        replays.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "score": if exit_code == 0 { 1.0 } else { 0.0 }, "cost": 1 }));
+        let quality = observation.get("quality").and_then(Value::as_f64).unwrap_or(if exit_code == 0 { 1.0 } else { 0.0 });
+        let cost = observation.get("prd_open_count").and_then(Value::as_u64).unwrap_or(0)
+            + observation.get("mutable_open_count").and_then(Value::as_u64).unwrap_or(0) + 1;
+        replays.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "score": quality, "cost": cost }));
     }
     if replays.is_empty() { return Value::Null; }
     let score = replays.iter().filter_map(|entry| entry.get("score").and_then(Value::as_f64)).sum::<f64>();
