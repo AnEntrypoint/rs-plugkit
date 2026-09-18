@@ -166,7 +166,25 @@ pub fn observe_dispatch(session_id: &str, dispatch_id: &str, verb: &str, fingerp
     let mut observations = serde_json::from_str::<Value>(&raw).ok().and_then(|value| value.as_array().cloned()).unwrap_or_default();
     observations.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "exit_code": exit_code }));
     if observations.len() > 256 { observations.drain(0..observations.len() - 256); }
+    let successes = observations.iter().filter(|observation| observation.get("exit_code").and_then(Value::as_i64) == Some(0)).count();
+    let failures = observations.len().saturating_sub(successes);
+    let active_strategy = json!({
+        "observation_count": observations.len(),
+        "successful_dispatch_count": successes,
+        "failed_dispatch_count": failures,
+        "selection": if failures > 0 { "replay-recorded-successes-first" } else { "continue-current-exploration" },
+        "evidence": observations.iter().rev().take(8).cloned().collect::<Vec<_>>(),
+    });
     let _ = crate::pkfs::write(&path, &Value::Array(observations).to_string());
+    let _ = crate::pkfs::write(&format!(".gm/dream-rsi/{session_id}/active-strategy.json"), &active_strategy.to_string());
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn active_strategy(session_id: Option<&str>) -> Value {
+    let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else { return Value::Null };
+    crate::pkfs::read_to_string(&format!(".gm/dream-rsi/{session_id}/active-strategy.json"))
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or(Value::Null)
 }
 
 #[cfg(target_arch = "wasm32")]
