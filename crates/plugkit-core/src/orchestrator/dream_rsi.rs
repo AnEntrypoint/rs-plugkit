@@ -268,7 +268,7 @@ pub fn record_discovery(content: &str) -> Result<Value, String> {
     if let Some(parent_id) = &parent_id {
         if !records.iter().any(|record| record.get("id").and_then(Value::as_str) == Some(parent_id.as_str()) && record.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str())) { return Err(format!("dream-discovery-record parent {parent_id} is absent")); }
     }
-    let record = json!({ "id": id, "owner_session_id": owner_session_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": evaluator_score, "cost": cost, "parent_id": parent_id });
+    let record = json!({ "id": id, "evaluator_receipt_id": receipt_id, "owner_session_id": owner_session_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": evaluator_score, "cost": cost, "parent_id": parent_id });
     records.push(record.clone());
     let signed = records.into_iter().map(|record| signed_record("discovery", record)).collect::<Result<Vec<_>, _>>()?;
     if !crate::pkfs::write(&discovery_path, &Value::Array(signed).to_string()) { return Err("dream-discovery-record could not persist discovery record".to_string()); }
@@ -289,8 +289,16 @@ pub fn seal(content: &str) -> Result<Value, String> {
         let id = value.as_str().ok_or_else(|| "dream-world-seal discovery_ids must contain strings".to_string())?;
         let record = records.iter().find(|record| record.get("id").and_then(Value::as_str) == Some(id)).ok_or_else(|| format!("dream-world-seal discovery {id} is absent"))?;
         if record.get("owner_session_id").and_then(Value::as_str) != Some(owner_session_id.as_str()) { return Err(format!("dream-world-seal discovery {id} belongs to another session")); }
-        let score = record.get("evaluator_score").and_then(Value::as_f64).filter(|value| value.is_finite()).ok_or_else(|| format!("dream-world-seal discovery {id} lacks evaluator score"))?;
-        let cost = record.get("cost").and_then(Value::as_u64).ok_or_else(|| format!("dream-world-seal discovery {id} lacks cost"))?;
+        let receipt_id = string_field(record, "evaluator_receipt_id")?;
+        let receipt_path = evaluator_receipt_path()?;
+        let raw_receipts = crate::pkfs::read_to_string(&receipt_path).ok_or_else(|| "dream-world-seal has no evaluator receipts".to_string())?;
+        let receipts = serde_json::from_str::<Value>(&raw_receipts).map_err(|_| "dream-world-seal evaluator receipt store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-world-seal evaluator receipt store is invalid".to_string())?;
+        let receipt = receipts.iter().find(|receipt| receipt.get("id").and_then(Value::as_str) == Some(receipt_id.as_str())).ok_or_else(|| format!("dream-world-seal evaluator receipt {receipt_id} is absent"))?;
+        let evaluator = verify_record("evaluator", receipt)?;
+        if evaluator.get("policy_id").and_then(Value::as_str) != record.get("policy_id").and_then(Value::as_str)
+            || evaluator.get("dispatch_id").and_then(Value::as_str) != record.get("dispatch_id").and_then(Value::as_str) { return Err(format!("dream-world-seal discovery {id} does not match evaluator receipt")); }
+        let score = evaluator.get("evaluator_score").and_then(Value::as_f64).ok_or_else(|| format!("dream-world-seal evaluator receipt {receipt_id} lacks score"))?;
+        let cost = evaluator.get("cost").and_then(Value::as_u64).ok_or_else(|| format!("dream-world-seal evaluator receipt {receipt_id} lacks cost"))?;
         Ok(json!({ "id": id, "score": score, "cost": cost, "children": if index + 1 < discovery_ids.len() { vec![discovery_ids[index + 1].as_str().unwrap_or("")] } else { vec![] } }))
     }).collect::<Result<Vec<_>, String>>()?;
     let world = parse_world(&json!({ "id": world_id, "nodes": nodes }))?;
