@@ -160,7 +160,12 @@ fn session_store_path(name: &str) -> Result<String, String> {
 
 #[cfg(target_arch = "wasm32")]
 pub fn observe_dispatch(session_id: &str, dispatch_id: &str, verb: &str, fingerprint: &str, exit_code: i64) {
-    if verb.starts_with("dream-") { return; }
+    if verb.starts_with("dream-") || matches!(verb,
+        "instruction" | "phase-status" | "transition" | "transition-revert" |
+        "prd-add" | "prd-resolve" | "prd-list" | "prd-defer" |
+        "mutable-add" | "mutable-resolve" | "mutable-list" | "mutable-defer" |
+        "memorize-fire" | "residual-scan"
+    ) { return; }
     let path = format!(".gm/dream-rsi/{session_id}/observations.json");
     let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
     let mut observations = serde_json::from_str::<Value>(&raw).ok().and_then(|value| value.as_array().cloned()).unwrap_or_default();
