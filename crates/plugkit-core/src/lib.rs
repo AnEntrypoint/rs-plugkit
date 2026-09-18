@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod hash;
 
 #[cfg(target_arch = "wasm32")]

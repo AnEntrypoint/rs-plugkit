@@ -188,6 +188,31 @@ pub fn active_strategy(session_id: Option<&str>) -> Value {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub fn automatic_replay(session_id: Option<&str>) -> Value {
+    let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else { return Value::Null };
+    let observations_path = format!(".gm/dream-rsi/{session_id}/observations.json");
+    let Some(observations) = crate::pkfs::read_to_string(&observations_path)
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.as_array().cloned()) else { return Value::Null };
+    if observations.is_empty() { return Value::Null; }
+    let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let mut replays = Vec::new();
+    for observation in observations.iter().rev().take(8) {
+        let Some(dispatch_id) = observation.get("dispatch_id").and_then(Value::as_str) else { continue };
+        let Some(dispatch) = crate::dispatch_ledger::lookup(&cwd, dispatch_id) else { continue };
+        if dispatch.get("session_id").and_then(Value::as_str) != Some(session_id) { continue; }
+        let Some(exit_code) = dispatch.get("exit_code").and_then(Value::as_i64) else { continue };
+        let Some(verb) = dispatch.get("verb").and_then(Value::as_str) else { continue };
+        let Some(fingerprint) = dispatch.get("fingerprint").and_then(Value::as_str) else { continue };
+        replays.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "score": if exit_code == 0 { 1.0 } else { 0.0 }, "cost": 1 }));
+    }
+    if replays.is_empty() { return Value::Null; }
+    let score = replays.iter().filter_map(|entry| entry.get("score").and_then(Value::as_f64)).sum::<f64>();
+    let selected = if replays.iter().any(|entry| entry.get("score").and_then(Value::as_f64) == Some(0.0)) { "replay-recorded-successes-first" } else { "continue-current-exploration" };
+    json!({ "ok": true, "selection": selected, "score": score, "replays": replays })
+}
+
+#[cfg(target_arch = "wasm32")]
 fn evaluator_receipt_path() -> Result<String, String> {
     session_store_path("evaluator-receipts")
 }
