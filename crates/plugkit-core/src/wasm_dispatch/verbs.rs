@@ -1463,9 +1463,14 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         let current = crate::code_index::current_digest_at(root);
         let stale = match &stored { Some(s) => s != &current, None => true };
         if stale {
-            let reason = if stored.is_none() { "digest-absent" } else { "digest-mismatch" };
+            let cold_start = stored.is_none();
+            let reason = if cold_start { "digest-absent" } else { "digest-mismatch" };
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "root": root, "stored_then_current": current }));
-            let _ = crate::code_index::index_at(root, 500, root);
+            if cold_start {
+                let _ = crate::code_index::index_at(root, 500, root);
+            } else {
+                let _ = crate::code_index::index_at_topup(root, 500, root, cfg.index.incremental_topup_wall_budget_ms);
+            }
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -1673,9 +1678,14 @@ fn codesearch(body: &Value) -> u64 {
         let current = crate::code_index::current_digest();
         let stale = match &stored { Some(s) => s != &current, None => true };
         if stale {
-            let reason = if stored.is_none() { "digest-absent" } else { "digest-mismatch" };
+            let cold_start = stored.is_none();
+            let reason = if cold_start { "digest-absent" } else { "digest-mismatch" };
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "stored_then_current": current }));
-            let _ = crate::code_index::index(".", 500);
+            if cold_start {
+                let _ = crate::code_index::index(".", 500);
+            } else {
+                let _ = crate::code_index::index_topup(".", 500, cfg.index.incremental_topup_wall_budget_ms);
+            }
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -1686,7 +1696,6 @@ fn codesearch(body: &Value) -> u64 {
     let cand_k = cfg.budget.pool(k as usize).max(50) as u32;
     let embedding = embed_query(query);
     let code_ns = cfg.namespaces.code.as_str();
-    let (vector_hits, _) = rssearch_vector_hits(&embedding, code_ns, k, false);
     let vec_hits = vec_search_local(&embedding, code_ns, cand_k);
     let vec_ids: Vec<String> = vec_hits.as_array().map(|a| {
         a.iter().filter_map(|h| h.get("key").and_then(|x| x.as_str()).map(String::from)).collect()
@@ -1727,10 +1736,9 @@ fn codesearch(body: &Value) -> u64 {
         if let Some(ov) = corpus.overview_for_key(key) { obj.insert("overview".to_string(), json!(ov)); }
         Value::Object(obj)
     };
-    let vector_ranked: Vec<Value> = vector_hits.as_array()
+    let vector_ranked: Vec<Value> = vec_hits.as_array()
         .filter(|a| !a.is_empty())
         .map(|a| a.iter().take(k as usize).cloned().collect())
-        .or_else(|| vec_hits.as_array().filter(|a| !a.is_empty()).map(|a| a.iter().take(k as usize).cloned().collect()))
         .unwrap_or_else(|| vec_ids.iter().take(k as usize).map(|key| build_hit(&mut corpus, key, None, None)).collect());
     let bm25_ranked_response: Vec<Value> = bm25_ranked.iter().take(k as usize)
         .map(|(key, score)| build_hit(&mut corpus, key, Some(*score), None))
