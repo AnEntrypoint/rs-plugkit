@@ -206,6 +206,10 @@ pub fn admit_dispatch(verb: &str) -> Result<(), String> {
     if strategy.get("selection").and_then(Value::as_str) != Some("replay-recorded-successes-first") { return Ok(()); }
     let evidence = strategy.get("evidence").and_then(Value::as_array).ok_or_else(|| "Dream-RSI strategy lacks evidence".to_string())?;
     if evidence.iter().any(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb) && entry.get("exit_code").and_then(Value::as_i64) == Some(0)) { return Ok(()); }
+    // A verb this session has never attempted yet has no way to earn a recorded
+    // success without first being allowed to run: block only retries of a verb
+    // that has already failed in this session, never a cold-start first attempt.
+    if !evidence.iter().any(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb)) { return Ok(()); }
     Err(format!("Dream-RSI selected replay-recorded-successes-first after observed failures; {verb} has no recorded successful replay in this session"))
 }
 
