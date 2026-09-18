@@ -3379,8 +3379,17 @@ fn git_log(body: &Value) -> u64 {
         let range = body.get("range").and_then(|v| v.as_str())
             .or_else(|| body.get("ref").and_then(|v| v.as_str()))
             .unwrap_or("").trim();
+        let paths: Vec<String> = body.get("paths").or_else(|| body.get("files"))
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_else(|| body.get("path").and_then(|v| v.as_str())
+                .map(|s| vec![s.to_string()]).unwrap_or_default());
         let mut argv: Vec<&str> = vec!["log", &nflag, "--oneline", "--no-color"];
         if !range.is_empty() { argv.push(range); }
+        if !paths.is_empty() {
+            argv.push("--");
+            for p in &paths { argv.push(p.as_str()); }
+        }
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {

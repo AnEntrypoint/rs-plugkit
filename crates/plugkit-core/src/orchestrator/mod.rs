@@ -206,7 +206,7 @@ pub fn gm_dir() -> PathBuf {
 /// verb that drifted.
 pub const ORCHESTRATOR_VERBS: &[&str] = &[
     "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list", "mutable-defer", "dream-policy-register", "dream-evaluator-receipt", "dream-discovery-record", "dream-world-seal", "dream-replay",
-    "memorize-fire", "discipline-note", "discipline-check-removal", "discipline-audit", "capability-resolve", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan", "auto-recall",
+    "memorize-fire", "memorize-backfill", "discipline-note", "discipline-check-removal", "discipline-audit", "capability-resolve", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan", "auto-recall",
     "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
     "task-spawn", "task-list", "task-stop", "task-output",
     "memorize-continue", "fsm-vendor", "fsm-validate", "fsm-propose-override", "claim-audit", "submodule-check",
@@ -271,7 +271,7 @@ fn handle_memorize_continue(_content: &str) -> (String, String, i32) {
 /// not the other is exactly the drift this guard exists to catch.
 const DISPATCH_ARM_VERBS: &[&str] = &[
     "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list", "mutable-defer", "dream-policy-register", "dream-evaluator-receipt", "dream-discovery-record", "dream-world-seal", "dream-replay",
-    "memorize-fire", "discipline-note", "discipline-check-removal", "discipline-audit", "capability-resolve", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan",
+    "memorize-fire", "memorize-backfill", "discipline-note", "discipline-check-removal", "discipline-audit", "capability-resolve", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan",
     "auto-recall", "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
     "task-spawn", "task-list", "task-stop", "task-output",
     "memorize-continue", "fsm-vendor", "fsm-validate", "fsm-propose-override",
@@ -304,6 +304,7 @@ pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i
         "dream-world-seal" => dream_rsi::handle_seal(content),
         "dream-replay" => dream_rsi::handle(content),
         "memorize-fire" => memorize::handle_fire(content),
+        "memorize-backfill" => memorize::handle_backfill(content),
         "discipline-note" => discipline_note::handle(content),
         "discipline-check-removal" => discipline_note::handle_check_removal(content),
         "discipline-audit" => discipline_note::handle_audit(content),
