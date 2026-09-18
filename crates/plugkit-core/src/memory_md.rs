@@ -260,6 +260,85 @@ pub fn has_stored_digest(namespaces: &[String]) -> bool {
 }
 
 
+/// How many md files a degraded keyword scan will read before stopping.
+///
+/// Bounded because this runs on a read path with no index behind it; the files
+/// are sorted by name so the bound is at least deterministic. A corpus larger
+/// than this has a working vector store in every healthy configuration, and
+/// this rung only exists for the unhealthy one.
+const KEYWORD_SCAN_MAX_FILES: usize = 2000;
+
+const KEYWORD_SCAN_MIN_TERM_LEN: usize = 3;
+const KEYWORD_SCAN_MAX_TERMS: usize = 12;
+
+/// Last-resort keyword recall read straight off the md corpus on disk.
+///
+/// Every rung above this in `recall`'s fallback chain needs a live dependency:
+/// vector search needs an embedding, and the flat-kv keyword scan needs libsql,
+/// because `host_kv` is libsql-backed -- when the plugin pool holds no libsql
+/// slot, the kv write silently no-ops and the kv query silently answers nothing.
+/// The md corpus needs neither. It is plain files, and it is the store
+/// `write_memory` treats as durable, so it is exactly what survives an embedder
+/// outage. Without this rung a memo stored during such an outage was genuinely
+/// on disk and still unreachable by any read path, which would make "stored,
+/// vector pending" an empty promise.
+pub fn keyword_scan(ns: &str, query: &str, limit: usize) -> Value {
+    let Some(dir) = md_dir(ns) else { return Value::Array(Vec::new()) };
+    let mut terms: Vec<String> = Vec::new();
+    for raw in query.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_') {
+        let t = raw.to_lowercase();
+        if t.len() >= KEYWORD_SCAN_MIN_TERM_LEN && !terms.contains(&t) {
+            terms.push(t);
+        }
+        if terms.len() >= KEYWORD_SCAN_MAX_TERMS {
+            break;
+        }
+    }
+    if terms.is_empty() {
+        return Value::Array(Vec::new());
+    }
+    let entries = match crate::pkfs::readdir(&dir) {
+        Some(Value::Array(a)) => a,
+        _ => return Value::Array(Vec::new()),
+    };
+    let mut names: Vec<String> = entries
+        .iter()
+        .filter_map(|e| e.get("name").and_then(|n| n.as_str()).or_else(|| e.as_str()))
+        .filter(|n| n.ends_with(".md"))
+        .map(|n| n.to_string())
+        .collect();
+    names.sort();
+    names.truncate(KEYWORD_SCAN_MAX_FILES);
+    let mut scored: Vec<(usize, i64, Value)> = Vec::new();
+    for name in &names {
+        let content = match host_read(&format!("{}/{}", dir, name)) {
+            Some(c) => c,
+            None => continue,
+        };
+        let Some(doc) = parse(&content) else { continue };
+        let lowered = doc.text.to_lowercase();
+        let matched = terms.iter().filter(|t| lowered.contains(t.as_str())).count();
+        if matched == 0 {
+            continue;
+        }
+        scored.push((
+            matched,
+            doc.updated,
+            json!({
+                "key": doc.key,
+                "namespace": doc.ns,
+                "text": doc.text,
+                "matched_terms": matched,
+                "query_terms": terms.len(),
+                "vector_pending": true,
+                "source": "md_corpus_keyword_scan",
+            }),
+        ));
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    Value::Array(scored.into_iter().take(limit).map(|(_, _, v)| v).collect())
+}
+
 fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>, Vec<(String, String)>), String> {
     let Some(dir) = md_dir(ns) else {
         crate::wasm_dispatch::emit_event("memory_md_namespace_invalid", json!({
