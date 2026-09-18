@@ -188,6 +188,17 @@ pub fn active_strategy(session_id: Option<&str>) -> Value {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub fn admit_dispatch(verb: &str) -> Result<(), String> {
+    if verb.starts_with("dream-") || verb == "instruction" { return Ok(()); }
+    let Some(session_id) = crate::orchestrator::state::dispatch_session_id() else { return Ok(()); };
+    let strategy = active_strategy(Some(&session_id));
+    if strategy.get("selection").and_then(Value::as_str) != Some("replay-recorded-successes-first") { return Ok(()); }
+    let evidence = strategy.get("evidence").and_then(Value::as_array).ok_or_else(|| "Dream-RSI strategy lacks evidence".to_string())?;
+    if evidence.iter().any(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb) && entry.get("exit_code").and_then(Value::as_i64) == Some(0)) { return Ok(()); }
+    Err(format!("Dream-RSI selected replay-recorded-successes-first after observed failures; {verb} has no recorded successful replay in this session"))
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn automatic_replay(session_id: Option<&str>) -> Value {
     let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else { return Value::Null };
     let observations_path = format!(".gm/dream-rsi/{session_id}/observations.json");
