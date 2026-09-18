@@ -4076,7 +4076,13 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     let dispatch_id = {
         let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
         let exit_code = if result_value.get("ok").and_then(|v| v.as_bool()).unwrap_or(true) { 0 } else { 1 };
-        Some(crate::dispatch_ledger::record(cwd, &verb, &fingerprint, exit_code, dispatch_session_id.as_deref()))
+{
+            let dispatch_id = crate::dispatch_ledger::record(cwd, &verb, &fingerprint, exit_code, dispatch_session_id.as_deref());
+            if let Some(session_id) = dispatch_session_id.as_deref() {
+                crate::orchestrator::dream_rsi::observe_dispatch(session_id, &dispatch_id, &verb, &fingerprint, exit_code);
+            }
+            Some(dispatch_id)
+        }
     };
     #[cfg(not(target_arch = "wasm32"))]
     let dispatch_id: Option<String> = None;
