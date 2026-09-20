@@ -4151,6 +4151,14 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
     }
     let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
     crate::browser_witness::record_from_body(cwd_for_witness, body);
+    // Escape hatch for a cwd git cannot root (no .git in its ancestry, e.g. a
+    // cross-repo audit directory) or where the git subprocess is unavailable:
+    // a caller that already knows the intended project root can pin it
+    // directly, before the unresolvable check below ever runs. See
+    // `orchestrator::seed_project_root_override` for the exact scoping.
+    if let Some(root_override) = body.get("git_root_override").and_then(|v| v.as_str()) {
+        crate::orchestrator::seed_project_root_override(root_override);
+    }
     if crate::orchestrator::is_orchestrator_verb(verb) {
         if let Some(unresolvable) = reject_if_project_root_unresolvable_before_gm_dir_panics(verb) {
             return unresolvable;

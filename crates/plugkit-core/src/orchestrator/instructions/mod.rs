@@ -358,6 +358,42 @@ fn idev(event: &str, detail: &str) {
 #[cfg(not(target_arch = "wasm32"))]
 fn idev(_event: &str, _detail: &str) {}
 
+// Accepted spellings for the lightweight passthrough. Kept as a small fixed
+// list (not a prefix/substring match) so an unrelated field that happens to
+// contain one of these words in a longer value never accidentally trips it --
+// this only fires on an exact, deliberate opt-in.
+#[cfg(target_arch = "wasm32")]
+const INVESTIGATE_READONLY_MODES: &[&str] =
+    &["investigate_readonly", "readonly", "read_only", "investigate", "readonly_investigate"];
+
+#[cfg(target_arch = "wasm32")]
+fn is_investigate_readonly_mode(mode: &str) -> bool {
+    INVESTIGATE_READONLY_MODES.contains(&mode)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn investigate_readonly_instruction() -> &'static str {
+    "# READ-ONLY INVESTIGATION (lightweight mode)\n\n\
+This dispatch was marked `mode: \"investigate_readonly\"`, so it bypassed the \
+SPECIFY -> PROVE -> EMIT -> STATE -> CONC -> SEC -> RES -> DECIDE -> COMPLETE \
+orchestrator trajectory entirely: no phase was read or changed, no PRD row was \
+required or opened, no mutables/state file was touched.\n\n\
+Do the investigation/scan/search the prompt asked for using whatever verbs fit \
+(exec_js/bash/python for shell + grep-equivalents, fs_read/fs_readdir, codesearch, \
+callers/callees/impact, git_log/git_diff/git_show, recall, etc.) and report findings \
+directly in your final response.\n\n\
+Constraints: make NO code changes, NO commits, NO PRD rows, NO mutable writes -- this \
+mode exists for read-only forensic/audit/investigate asks where a PRD and a phase walk \
+would be pure ceremony over a result. If mid-investigation you discover the task actually \
+needs a code change, stop and re-dispatch `instruction` without `mode` (or with a fresh \
+prompt) to enter the normal phase-managed flow for that change -- do not make the edit \
+under this mode's cover.\n\n\
+This mode is exempt from the continuation invariant that would otherwise demand a final \
+`gm-continue` dispatch: it never entered the phase machine and leaves no open PRD/phase \
+state behind, so a plain final response (no further tool call) is a valid end to this turn \
+once findings are reported.\n"
+}
+
 #[cfg(target_arch = "wasm32")]
 pub fn handle_instruction(content: &str) -> (String, String, i32) {
     ilog(&format!("instruction::handle start body_len={}", content.len()));
@@ -367,6 +403,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let mut prompt_opt: Option<String> = None;
     let mut asserted_instruction_hash: Option<String> = None;
     let mut asserted_policy_hash: Option<String> = None;
+    let mut mode_opt: Option<String> = None;
     let raw_phase_opt = if trimmed.is_empty() {
         None
     } else if let Some(stripped) = trimmed.strip_prefix("phase=") {
@@ -393,6 +430,9 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         {
             asserted_policy_hash = Some(h.trim().to_string());
         }
+        if let Some(m) = v.get("mode").and_then(|s| s.as_str()) {
+            mode_opt = Some(m.trim().to_ascii_lowercase());
+        }
         if let Some(s) = v.as_str() {
             Some(s.to_string())
         } else if let Some(s) = v.get("phase").and_then(|p| p.as_str()) {
@@ -403,6 +443,33 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     } else {
         Some(trimmed.to_string())
     };
+
+    // Lightweight passthrough for a read-only/investigate-only ask: `mode`
+    // in the request body opts out of the SPECIFY->PROVE->EMIT->STATE->CONC
+    // ->SEC trajectory entirely -- no phase read/reset, no PRD/mutables
+    // scan, no state write, no ~30KB orchestrator prose. This is the escape
+    // hatch for "grep/scan and report back, make no changes": a one-shot
+    // forensic/security ask that has no PRD to open and nothing to persist,
+    // so the full phase machine is pure overhead for it. Opt-in only --
+    // omitting `mode` (the overwhelming default case) falls straight
+    // through to the unchanged phase-machine path below.
+    if let Some(mode) = mode_opt.as_deref() {
+        if is_investigate_readonly_mode(mode) {
+            ilog("instruction::handle mode=investigate_readonly -- bypassing phase/PRD orchestration, no state touched");
+            let instruction = investigate_readonly_instruction().to_string();
+            let instruction_hash = format!("{:016x}", fnv1a64(&instruction));
+            let payload = json!({
+                "mode": "investigate_readonly",
+                "session_id": session_id_opt,
+                "instruction": instruction,
+                "instruction_hash": instruction_hash,
+                "note": "lightweight read-only dispatch: no phase/PRD/mutables state was read or written for this call; this bypasses the SPECIFY->...->COMPLETE trajectory entirely and is not resumable via instruction_hash/phase machinery -- dispatch `instruction` again with no `mode` (or a fresh prompt) to re-enter the normal phase-managed flow",
+            });
+            let s = payload.to_string();
+            ilog(&format!("instruction::handle investigate_readonly done out_len={}", s.len()));
+            return (s, String::new(), 0);
+        }
+    }
 
     let is_valid_phase = |upper: &str| -> bool {
         graph.policy.pseudo_phases.iter().any(|(name, _)| name == upper) || graph.has_state(upper)

@@ -167,6 +167,12 @@ pub fn project_root_resolvable() -> bool {
     try_resolve_project_root().is_ok()
 }
 
+/// The workaround text every project-root-unresolvable message ends with.
+/// Named out so `project_root_unresolvable_reason()` and the `gm_dir()`
+/// panic carry the identical escape hatch instead of two messages drifting
+/// apart over time.
+const PROJECT_ROOT_UNRESOLVABLE_WORKAROUND: &str = "If cwd is intentionally a non-repo or multi-repo directory (e.g. a cross-repo audit root with no .git of its own), either dispatch with cwd set to one of the actual git repos underneath it, or pass `git_root_override: \"<path>\"` in this dispatch's body to pin the project root explicitly and skip git resolution entirely for this cwd.";
+
 /// Human-readable reason the project root could not be resolved, for a
 /// caller that already called `project_root_resolvable() == false` and
 /// needs the same message `gm_dir()`'s panic would have carried, without
@@ -175,8 +181,33 @@ pub fn project_root_unresolvable_reason() -> String {
     match try_resolve_project_root() {
         Ok(_) => "project root is resolvable".to_string(),
         Err(attempts) => format!(
-            "gm_dir: project root resolution failed after {attempts} attempts via `git rev-parse --show-toplevel` -- refusing to silently fall back to CLAUDE_PROJECT_DIR/HOME, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory."
+            "gm_dir: project root resolution failed after {attempts} attempts via `git rev-parse --show-toplevel` -- refusing to silently fall back to CLAUDE_PROJECT_DIR/HOME, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory. {PROJECT_ROOT_UNRESOLVABLE_WORKAROUND}"
         ),
+    }
+}
+
+/// Explicit escape hatch for a `cwd` that git cannot root (no `.git`
+/// anywhere in its ancestry -- e.g. a directory holding many unrelated
+/// repos for a cross-repo audit) or where the `git` subprocess itself is
+/// unavailable/contended. A caller that already knows which tree state
+/// should land under can pass `git_root_override: "<path>"` in an
+/// orchestrator verb's request body; `dispatch_gated_verb` seeds this cache
+/// with it (see `wasm_dispatch::verbs::dispatch_gated_verb`) before running
+/// the verb, so every `gm_dir()` call made during that dispatch -- including
+/// ones deep inside the orchestrator -- resolves to the override instead of
+/// shelling `git rev-parse --show-toplevel` and either failing or panicking.
+/// Scoped to `current_cwd_string()`'s cache key exactly like a real git
+/// resolution, so it can never leak onto an unrelated cwd sharing this
+/// process, and it only ever takes effect for the cwd the caller is
+/// currently dispatching against -- it does not persist across a cwd change
+/// within the same long-lived process.
+pub fn seed_project_root_override(root_str: &str) {
+    let trimmed = root_str.trim();
+    if trimmed.is_empty() { return; }
+    let cwd = current_cwd_string();
+    if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
+        cache.get_or_insert_with(std::collections::HashMap::new)
+            .insert(cwd, PathBuf::from(trimmed));
     }
 }
 
@@ -184,8 +215,8 @@ fn resolve_project_root_with_retry() -> PathBuf {
     match try_resolve_project_root() {
         Ok(root) => root,
         Err(attempts) => panic!(
-            "gm_dir: project root resolution failed after {} attempts via `git rev-parse --show-toplevel` -- refusing to silently fall back to CLAUDE_PROJECT_DIR/HOME, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory.",
-            attempts
+            "gm_dir: project root resolution failed after {} attempts via `git rev-parse --show-toplevel` -- refusing to silently fall back to CLAUDE_PROJECT_DIR/HOME, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory. {}",
+            attempts, PROJECT_ROOT_UNRESOLVABLE_WORKAROUND
         ),
     }
 }
