@@ -518,12 +518,17 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
         };
         if !crate::browser_witness::is_browser_running_file(file) { continue; }
         let edit_hash = entry.get("hash").and_then(|v| v.as_str()).unwrap_or("");
-        if edit_hash.is_empty() {
-            unwitnessed.push(format!("{file} (edit recorded with no readable content hash)"));
-            continue;
-        }
+        // The witness is a statement about the file's CURRENT content: a browser
+        // dispatch rehashes what is on disk when it records. The edit record's
+        // hash is the content at edit time, which goes stale whenever the file
+        // is edited again through a path that does not re-record, and a stale
+        // edit hash then refuses every witness forever. Compare against the
+        // content that exists now; a file deleted since its edit has nothing
+        // left to witness.
+        let current_hash = crate::browser_witness::hash_file_short(file);
+        if current_hash.is_empty() { continue; }
         let witness_hash = witnessed_hashes.get(file).and_then(|v| v.as_str()).unwrap_or("");
-        if witness_hash != edit_hash {
+        if witness_hash != current_hash {
             let kind = if witness_hash.is_empty() {
                 "browser-witness-missing"
             } else {
@@ -534,6 +539,7 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
                 "kind": kind,
                 "severity": super::deviations::effective_severity(kind).as_str(),
                 "edit_hash": edit_hash,
+                "current_hash": current_hash,
                 "witness_hash": witness_hash,
                 "reason": if witness_hash.is_empty() {
                     "this file was edited but never witnessed in a browser dispatch"

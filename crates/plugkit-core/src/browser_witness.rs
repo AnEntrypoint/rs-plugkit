@@ -96,7 +96,7 @@ fn sha256_hex_first32(data: &[u8]) -> String {
     s
 }
 
-fn hash_file_short(rel: &str) -> String {
+pub fn hash_file_short(rel: &str) -> String {
     match host_read(rel) {
         Some(content) => sha256_hex_first32(content.as_bytes()),
         None => String::new(),
