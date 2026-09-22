@@ -497,18 +497,21 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
         format!("{}/.gm/exec-spool/.turn-browser-witnessed", cwd.trim_end_matches('/').trim_end_matches('\\'))
     };
     let witness_raw = crate::pkfs::read_to_string(&witness_path).unwrap_or_default();
-    let witnessed_hashes: serde_json::Map<String, serde_json::Value> = if witness_raw.trim().is_empty() {
-        serde_json::Map::new()
-    } else {
-        serde_json::from_str::<serde_json::Value>(&witness_raw).ok().and_then(|v| {
-            match v {
-                serde_json::Value::Object(ref m) if m.contains_key("witnessed_hashes") => {
-                    m.get("witnessed_hashes").and_then(|w| w.as_object().cloned())
-                }
-                serde_json::Value::Object(m) => Some(m),
-                _ => None,
+    // record_witness writes one top-level `file -> hash` entry per file. Older
+    // writers nested them under `witnessed_hashes`, and a file that carries both
+    // shapes used to be read from the legacy map ALONE, so every witness the
+    // current writer recorded was invisible to this check. Read both, current
+    // entries winning.
+    let witnessed_hashes: serde_json::Map<String, serde_json::Value> = match serde_json::from_str::<serde_json::Value>(&witness_raw) {
+        Ok(serde_json::Value::Object(m)) => {
+            let mut merged = serde_json::Map::new();
+            if let Some(serde_json::Value::Object(legacy)) = m.get("witnessed_hashes") {
+                for (k, v) in legacy { if v.is_string() { merged.insert(k.clone(), v.clone()); } }
             }
-        }).unwrap_or_default()
+            for (k, v) in &m { if k != "witnessed_hashes" && v.is_string() { merged.insert(k.clone(), v.clone()); } }
+            merged
+        }
+        _ => serde_json::Map::new(),
     };
     let mut unwitnessed: Vec<String> = vec![];
     for entry in edits.iter() {
@@ -528,7 +531,10 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
         let current_hash = crate::browser_witness::hash_file_short(file);
         if current_hash.is_empty() { continue; }
         let witness_hash = witnessed_hashes.get(file).and_then(|v| v.as_str()).unwrap_or("");
-        if witness_hash != current_hash {
+        // Legacy witnesses kept 12 hex characters of the same sha256; a prefix
+        // match on either side is the same content.
+        let matches = !witness_hash.is_empty() && (current_hash.starts_with(witness_hash) || witness_hash.starts_with(current_hash.as_str()));
+        if !matches {
             let kind = if witness_hash.is_empty() {
                 "browser-witness-missing"
             } else {
