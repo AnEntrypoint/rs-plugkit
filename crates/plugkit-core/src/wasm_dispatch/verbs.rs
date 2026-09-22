@@ -3447,15 +3447,30 @@ fn git_diff(body: &Value) -> u64 {
 
 fn git_show(body: &Value) -> u64 {
     let cwd = body_cwd(body);
-    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
+    let refspec = body.get("rev").and_then(|v| v.as_str())
+        .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+        .unwrap_or("HEAD");
     let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
+    let path = body.get("path").and_then(|v| v.as_str());
+    let paths: Vec<String> = body.get("paths")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let combined_ref = match path {
+        Some(p) => format!("{}:{}", refspec, p),
+        None => refspec.to_string(),
+    };
     let mut argv: Vec<&str> = vec!["show", "--no-color"];
     if stat { argv.push("--stat"); }
-    argv.push(refspec);
+    argv.push(&combined_ref);
+    if !paths.is_empty() {
+        argv.push("--");
+        for p in &paths { argv.push(p.as_str()); }
+    }
     let r = git_call_argv(&argv, cwd);
     let mut out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
     if out.len() > 60000 { out.truncate(60000); }
-    ok("git_show", json!({ "output": out }))
+    ok("git_show", json!({ "output": out, "rev": refspec }))
 }
 
 fn git_fetch(body: &Value) -> u64 {
