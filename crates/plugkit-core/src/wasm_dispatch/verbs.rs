@@ -4103,7 +4103,15 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     let dispatch_id = {
         let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
         let exit_code = if result_value.get("ok").and_then(|v| v.as_bool()).unwrap_or(true) { 0 } else { 1 };
-{
+        // A Dream-RSI veto never let the verb actually run, so it is not a fresh
+        // failure of that verb -- recording one here would re-arm the very block
+        // that produced it on every single retry, making the block permanent by
+        // construction regardless of any decay rule. Only a dispatch that really
+        // executed feeds the replay evidence.
+        let dream_rsi_vetoed = result_value.get("dream_rsi_vetoed").and_then(|v| v.as_bool()).unwrap_or(false);
+        if dream_rsi_vetoed {
+            None
+        } else {
             let dispatch_id = crate::dispatch_ledger::record(cwd, &verb, &fingerprint, exit_code, dispatch_session_id.as_deref());
             if let Some(session_id) = dispatch_session_id.as_deref() {
                 crate::orchestrator::dream_rsi::observe_dispatch(session_id, &dispatch_id, &verb, &fingerprint, exit_code);
@@ -4162,7 +4170,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
     }
     #[cfg(target_arch = "wasm32")]
     if let Err(error) = crate::orchestrator::dream_rsi::admit_dispatch(verb) {
-        return err_json(verb, json!({ "error": error }));
+        return err_json(verb, json!({ "error": error, "dream_rsi_vetoed": true }));
     }
     let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
     crate::browser_witness::record_from_body(cwd_for_witness, body);
