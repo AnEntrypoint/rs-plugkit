@@ -210,6 +210,9 @@ pub fn record_witness(cwd: &str, file_path: &str) -> Result<bool, String> {
     if hash.is_empty() {
         return Err(format!("browser_witness: cannot hash {rel_slash} -- refusing to record a witness with no content behind it"));
     }
+    if let Some(Value::Object(legacy)) = map.remove("witnessed_hashes") {
+        for (k, v) in legacy { if v.is_string() && !map.contains_key(&k) { map.insert(k, v); } }
+    }
     map.insert(rel_slash, Value::String(hash));
 
     let serialized = Value::Object(map).to_string();
