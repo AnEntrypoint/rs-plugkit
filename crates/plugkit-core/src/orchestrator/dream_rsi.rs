@@ -175,7 +175,8 @@ pub fn observe_dispatch(session_id: &str, dispatch_id: &str, verb: &str, fingerp
         .unwrap_or(0);
     let mutable_open_count = crate::orchestrator::mutables::pending_detailed().len();
     let quality = if exit_code == 0 { 1.0 / (1.0 + (prd_open_count + mutable_open_count) as f64) } else { 0.0 };
-    observations.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "exit_code": exit_code, "prd_open_count": prd_open_count, "mutable_open_count": mutable_open_count, "quality": quality }));
+    let ts = super::state::now_ms() as i64;
+    observations.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "exit_code": exit_code, "prd_open_count": prd_open_count, "mutable_open_count": mutable_open_count, "quality": quality, "ts": ts }));
     if observations.len() > 256 { observations.drain(0..observations.len() - 256); }
     let successes = observations.iter().filter(|observation| observation.get("exit_code").and_then(Value::as_i64) == Some(0)).count();
     let failures = observations.len().saturating_sub(successes);
@@ -209,8 +210,20 @@ pub fn admit_dispatch(verb: &str) -> Result<(), String> {
     // A verb this session has never attempted yet has no way to earn a recorded
     // success without first being allowed to run: block only retries of a verb
     // that has already failed in this session, never a cold-start first attempt.
-    if !evidence.iter().any(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb)) { return Ok(()); }
-    Err(format!("Dream-RSI selected replay-recorded-successes-first after observed failures; {verb} has no recorded successful replay in this session"))
+    let Some(last_failure_ts) = evidence.iter()
+        .filter(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb))
+        .filter_map(|entry| entry.get("ts").and_then(Value::as_i64))
+        .max() else { return Ok(()); };
+    // A failure is a signal to re-orient, not a life sentence for the verb: the
+    // error this function returns names `instruction` as the recovery dispatch,
+    // so once `instruction` has actually been re-dispatched after the failure,
+    // the block decays and the next attempt is a fresh one -- never a permanent,
+    // unfalsifiable block for the rest of the session.
+    let last_instruction_ts = crate::pkfs::read_to_string(".gm/last-instruction-ts")
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    if last_instruction_ts >= last_failure_ts { return Ok(()); }
+    Err(format!("Dream-RSI selected replay-recorded-successes-first after observed failures; {verb} has no recorded successful replay in this session since the last `instruction` re-orientation -- dispatch `instruction` to clear this, then retry"))
 }
 
 #[cfg(target_arch = "wasm32")]
