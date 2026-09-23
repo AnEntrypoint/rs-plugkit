@@ -3058,6 +3058,19 @@ fn git_add(body: &Value) -> u64 {
     })
 }
 
+fn git_commit_found_nothing_staged(sout: &str, serr: &str, cwd: Option<&str>) -> bool {
+    for s in [sout, serr] {
+        if s.contains("nothing to commit")
+            || s.contains("no changes added to commit")
+            || s.contains("nothing added to commit")
+        {
+            return true;
+        }
+    }
+    git_call_argv(&["diff", "--cached", "--quiet"], cwd)
+        .get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0
+}
+
 fn bundle_prd_commit_comments(cwd: Option<&str>, message: &str) -> String {
     let notes = crate::orchestrator::prd::drain_pending_commit_comments(cwd);
     if notes.is_empty() {
@@ -3117,7 +3130,7 @@ fn git_commit(body: &Value) -> u64 {
         if code != 0 {
             let serr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
             let sout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-            if sout.contains("nothing to commit") || serr.contains("nothing to commit") {
+            if git_commit_found_nothing_staged(sout, serr, cwd) {
                 return Ok(ok("git_commit", json!({ "nothing_to_commit": true })));
             }
             return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
@@ -3256,7 +3269,7 @@ fn git_finalize(body: &Value) -> u64 {
         if ccode != 0 {
             let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
             let sout = cr.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-            if !(sout.contains("nothing to commit") || serr.contains("nothing to commit")) {
+            if !git_commit_found_nothing_staged(sout, serr, cwd_ref) {
                 return err("git_finalize", &format!("commit failed: {}", if serr.is_empty() { sout } else { serr }));
             }
         } else {
