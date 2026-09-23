@@ -431,6 +431,12 @@ changes.
   structure: past the cap, the caller must seal and dream-replay (or
   dream-replay-round) before a fresh deployed policy can keep recording
   online discoveries.
+- `dream-replay-round` never exposes the full frozen world to the caller,
+  only each round's newly revealed nodes and the current eligible set --
+  by construction, a policy revised from this feedback cannot be shaped
+  around exact node ids, scores, or targets it was never shown, matching
+  the paper's warning against overfitting policy logic to one frozen
+  trace.
 
 ### Other modules
 
