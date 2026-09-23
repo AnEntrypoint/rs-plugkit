@@ -1438,17 +1438,6 @@ fn memorize_prune(body: &Value) -> u64 {
     }))
 }
 
-/// Cross-project entry: `codesearch {root|projectPath, query, ...}` against a
-/// submodule or sibling repo, e.g. `C:/dev/liqology`. Its index/cache lives at
-/// `<root>/.gm/gm.db` plus a crc32-salted KV namespace -- isolated from and
-/// reusable independent of the current project's own index (see
-/// `code_index::project_db_path`/`root_ns_suffix`). Deliberately bypasses the
-/// cwd-only fusion/BM25/dataflow-pipeline machinery the default path uses:
-/// that machinery is inherently tied to the current project's own db and
-/// threading it through every root would risk mixing state across projects;
-/// filename+semantic search alone already covers the actual failure mode
-/// (falling back to `find`/Grep/Glob because codesearch could not reach a
-/// submodule at all).
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
     if !crate::wasm_dispatch::host_allow_root(root) {
         return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
@@ -1512,33 +1501,10 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
     }))
 }
 
-/// Every `mode` codesearch honours. Anything else is an ERROR naming this
-/// list, never a silent downgrade.
-///
-/// Why this list is enforced rather than pattern-matched in place: `mode` used
-/// to be consulted at exactly two sites and only for the literal string
-/// "filename", so every other value -- `"literal"`, `"regex"`, a typo -- fell
-/// through to the dual retrieval path and the response then reported
-/// `mode: "dual"`. The caller's instruction was discarded AND the response
-/// said so in a field the caller had no reason to re-read, which is how a
-/// ranked 10-hit answer got mistaken for an exhaustive one.
 const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 
-/// Body spellings accepted for "how many results", in precedence order.
-///
-/// `max_results` is here because it was silently ignored: only `k` was ever
-/// read, so `{"max_results": 60}` collapsed to `cfg.budget.default_k` (10) and
-/// the caller saw a 10-hit answer with nothing saying their limit was dropped.
-/// The other spellings are the plausible ways the same intent gets typed; an
-/// unrecognised one must never be ignored, so they are recognised rather than
-/// left to fall through.
 const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit"];
 
-/// Resolves the result limit, reporting a genuine conflict instead of picking
-/// a winner behind the caller's back. Returns the limit and whether the caller
-/// stated it explicitly (the exhaustive modes need that distinction: an
-/// explicit limit bounds them, an absent one must not silently bound them to
-/// the ranked-retrieval default of 10).
 fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> Result<(u32, bool), String> {
     let mut seen: Vec<(&str, u64)> = Vec::new();
     for field in CODESEARCH_LIMIT_FIELDS {
@@ -1565,16 +1531,6 @@ fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> R
     }
 }
 
-/// Exhaustive literal/regex search: ripgrep semantics, every match with
-/// path:line, enumeration order, no relevance ranking, no top-k.
-///
-/// Routed BEFORE the root branch and before every digest/index/embedding step
-/// because it needs none of them -- that bypass is the fix for a literal
-/// question over a large workspace costing minutes (measured on
-/// C:/dev/litebox-main: two 120s/240s timeouts and one ~420s answer, all spent
-/// in the corpus-digest walk, the `index(".", 500)` rebuild it triggered, and
-/// the embedding/fusion passes that follow, none of which an exact-match
-/// answer consults).
 fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ragconfig::RagConfig, explicit_limit: Option<u32>) -> u64 {
     let root = body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
@@ -2656,6 +2612,31 @@ fn body_cwd(body: &Value) -> Option<&str> {
 
 const GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS: &str = "git_async";
 const GIT_PENDING_RESULT_OUTBOX_NS: &str = "outbox";
+const GIT_COMMIT_DEDUP_NS: &str = "git_commit_dedup";
+const GIT_COMMIT_DEDUP_TTL_MS: u64 = 180_000;
+
+fn git_commit_dedup_key(cwd: Option<&str>, head_before: &str, message: &str, paths: &[String], add_all: bool) -> String {
+    format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}", cwd.unwrap_or(""), head_before, message, paths.join(","), add_all)
+}
+
+fn git_commit_dedup_lookup(key: &str, cwd: Option<&str>) -> Option<Value> {
+    let raw = super::host_abi::host_kv_read(GIT_COMMIT_DEDUP_NS, key)?;
+    let record: Value = serde_json::from_str(&raw).ok()?;
+    let ts = record.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
+    let now = unsafe { host_now_ms() };
+    if now.saturating_sub(ts) > GIT_COMMIT_DEDUP_TTL_MS { return None; }
+    let sha_full = record.get("sha_full").and_then(|v| v.as_str())?.to_string();
+    let still_reachable = git_call_argv(&["cat-file", "-e", &sha_full], cwd)
+        .get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0;
+    if !still_reachable { return None; }
+    Some(record)
+}
+
+fn git_commit_dedup_record(key: &str, sha_full: &str, sha: &str, summary: &str) {
+    let now = unsafe { host_now_ms() };
+    let record = json!({ "ts": now, "sha_full": sha_full, "sha": sha, "summary": summary }).to_string();
+    git_async_kv_put(GIT_COMMIT_DEDUP_NS, key, &record);
+}
 
 struct GitPendingTokenReplayPlan {
     id: String,
@@ -2970,10 +2951,11 @@ fn git_push(body: &Value) -> u64 {
             "source_sha": local_source_before,
             "preserved_dirty_worktree": preserved_dirty_worktree,
             "reason": format!(
-                "push of explicit source ref '{}' to {} failed; git_push will not rebase or otherwise mutate a dirty checkout for an isolated-ref publication. Reconcile the remote separately, then retry this exact ref. Output:\n{}",
-                source_ref, branch, push_out
+                "push of explicit source ref '{}' to {} failed because the remote moved (e.g. a CI autobump commit landed after this ref was created); git_push will not rebase or otherwise mutate a dirty checkout for an isolated-ref publication. Recover with exactly: git_pull {{branch:\"{}\"}} to fast-forward past the remote's new commit, then git_push {{rev:\"HEAD\"}} (or git_finalize {{rev:\"HEAD\"}}) to publish this ref on top of it. Output:\n{}",
+                source_ref, branch, branch, push_out
             ),
             "next_dispatch": "instruction",
+            "next_action_hint": "git_pull {branch} then git_push {rev:\"HEAD\"}",
         }).to_string());
     }
     while !push_succeeded && attempts < 3 {
@@ -3098,6 +3080,21 @@ fn git_commit(body: &Value) -> u64 {
             return Ok(err("git_commit", "message required"));
         }
         let allow_empty = body.get("allow_empty").and_then(|v| v.as_bool()).unwrap_or(false);
+        let paths: Vec<String> = body.get("paths").or_else(|| body.get("files"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let add_all = body.get("add_all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let head_before_probe = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+        let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message, &paths, add_all);
+        if let Some(prior) = git_commit_dedup_lookup(&dedup_key, cwd) {
+            let sha = prior.get("sha").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let summary = prior.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            return Ok(ok("git_commit", json!({
+                "committed": true, "sha": sha, "summary": summary,
+                "replayed_from_recent_identical_dispatch": true,
+            })));
+        }
         let status_r = git_step_replayed_by_call_order(plan, &["status", "--porcelain"], cwd)?;
         let porcelain = super::host_abi::porcelain_or_dirty(status_r);
         if porcelain.trim().is_empty() && !allow_empty {
@@ -3105,9 +3102,12 @@ fn git_commit(body: &Value) -> u64 {
         }
         let head_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
         let head_before = head_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-        let skip_blanket_add_because_caller_already_staged_via_git_add = body.get("no_add").and_then(|v| v.as_bool()).unwrap_or(false);
-        if !skip_blanket_add_because_caller_already_staged_via_git_add {
+        if add_all {
             let _ = git_step_replayed_by_call_order(plan, &["add", "-A"], cwd)?;
+        } else if !paths.is_empty() {
+            let mut argv: Vec<&str> = vec!["add", "--"];
+            for p in &paths { argv.push(p.as_str()); }
+            let _ = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         }
         let bundled_message = bundle_prd_commit_comments(cwd, message);
         let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
@@ -3129,6 +3129,7 @@ fn git_commit(body: &Value) -> u64 {
         }
         let sha = head_after[..head_after.len().min(10)].to_string();
         let summary = message.lines().next().unwrap_or("").to_string();
+        git_commit_dedup_record(&dedup_key, &head_after, &sha, &summary);
         emit_event("git_commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary }));
         record_commit_in_liqology(&summary, &head_after);
         Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary })))
@@ -3226,18 +3227,29 @@ fn git_finalize(body: &Value) -> u64 {
         }));
     }
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let paths: Vec<String> = body.get("paths").or_else(|| body.get("files"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let scoped = !paths.is_empty();
     let mut steps: Vec<Value> = vec![];
     let mut committed = false;
     let mut sha = String::new();
     let mut summary = String::new();
     let head_before_any_commit = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
 
-    let dirty = !git_porcelain_in(cwd_ref).trim().is_empty();
+    let dirty = !git_porcelain_scoped(cwd_ref, &paths).trim().is_empty();
     if dirty {
         if message.is_empty() {
             return err("git_finalize", "worktree dirty but no commit message provided -- pass {message}");
         }
-        let _ = git_call_argv(&["add", "-A"], cwd_ref);
+        if scoped {
+            let mut add_argv: Vec<&str> = vec!["add", "--"];
+            for p in &paths { add_argv.push(p.as_str()); }
+            let _ = git_call_argv(&add_argv, cwd_ref);
+        } else {
+            let _ = git_call_argv(&["add", "-A"], cwd_ref);
+        }
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
         let cr = git_call_argv(&["commit", "-m", bundled_message.as_str()], cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -3305,13 +3317,19 @@ fn git_finalize(body: &Value) -> u64 {
         }));
     }
 
-    let mut leftover = git_porcelain_in(cwd_ref);
+    let mut leftover = git_porcelain_scoped(cwd_ref, &paths);
     let dirty_only_from_concurrent_writer_on_just_committed_files =
         committed && !leftover.trim().is_empty() && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref));
     if dirty_only_from_concurrent_writer_on_just_committed_files {
-        leftover = git_porcelain_in(cwd_ref);
+        leftover = git_porcelain_scoped(cwd_ref, &paths);
         if !leftover.trim().is_empty() && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref)) {
-            let _ = git_call_argv(&["add", "-A"], cwd_ref);
+            if scoped {
+                let mut add_argv: Vec<&str> = vec!["add", "--"];
+                for p in &paths { add_argv.push(p.as_str()); }
+                let _ = git_call_argv(&add_argv, cwd_ref);
+            } else {
+                let _ = git_call_argv(&["add", "-A"], cwd_ref);
+            }
             let amend = git_call_argv(&["commit", "--amend", "--no-edit"], cwd_ref);
             if amend.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0 {
                 let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
@@ -3322,14 +3340,23 @@ fn git_finalize(body: &Value) -> u64 {
                     "note": "a file this dispatch committed was rewritten by a concurrent writer before the porcelain probe; amended rather than refusing the push",
                 }));
             }
-            leftover = git_porcelain_in(cwd_ref);
+            leftover = git_porcelain_scoped(cwd_ref, &paths);
         }
     }
     if !leftover.trim().is_empty() {
         return err("git_finalize", &format!("worktree still dirty after commit (untriaged residual) -- refusing push. Porcelain:\n{}", leftover.lines().take(8).collect::<Vec<_>>().join("\n")));
     }
 
-    let push_resp_packed = git_push(body);
+    let push_body = if scoped {
+        let mut b = body.clone();
+        if let Some(m) = b.as_object_mut() {
+            m.insert("rev".to_string(), json!(exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string()));
+        }
+        b
+    } else {
+        body.clone()
+    };
+    let push_resp_packed = git_push(&push_body);
     let push_resp = unpack_to_value(push_resp_packed);
     let pushed = push_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if !pushed {
@@ -3387,7 +3414,8 @@ fn git_log(body: &Value) -> u64 {
             .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_else(|| body.get("path").and_then(|v| v.as_str())
                 .map(|s| vec![s.to_string()]).unwrap_or_default());
-        let mut argv: Vec<&str> = vec!["log", &nflag, "--oneline", "--no-color"];
+        let pretty = "--pretty=format:%h\u{1f}%H\u{1f}%an\u{1f}%ae\u{1f}%aI\u{1f}%s";
+        let mut argv: Vec<&str> = vec!["log", &nflag, pretty, "--no-color"];
         if !range.is_empty() { argv.push(range); }
         if !paths.is_empty() {
             argv.push("--");
@@ -3405,10 +3433,19 @@ fn git_log(body: &Value) -> u64 {
         }
         let out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
         let commits: Vec<Value> = out.lines().filter(|l| !l.is_empty()).map(|l| {
-            let mut it = l.splitn(2, ' ');
+            let mut it = l.splitn(6, '\u{1f}');
             let sha = it.next().unwrap_or("").to_string();
+            let sha_full = it.next().unwrap_or("").to_string();
+            let author_name = it.next().unwrap_or("").to_string();
+            let author_email = it.next().unwrap_or("").to_string();
+            let author_date = it.next().unwrap_or("").to_string();
             let subject = it.next().unwrap_or("").to_string();
-            json!({ "sha": sha, "subject": subject })
+            json!({
+                "sha": sha,
+                "sha_full": sha_full,
+                "subject": subject,
+                "author": { "name": author_name, "email": author_email, "date": author_date },
+            })
         }).collect();
         Ok(ok("git_log", json!({ "commits": commits })))
     })
@@ -3485,6 +3522,19 @@ fn git_fetch(body: &Value) -> u64 {
     ok("git_fetch", json!({ "remote": remote, "output": out }))
 }
 
+fn classify_pull_hang_phase(output: &str) -> &'static str {
+    let low = output.to_lowercase();
+    if low.contains("hook") {
+        "a post-merge/post-checkout hook"
+    } else if low.contains("auto packing") || low.contains("garbage collect") || low.contains(" gc ") {
+        "auto-gc"
+    } else if low.contains("username for") || low.contains("password for") || low.contains("terminal prompts disabled") {
+        "a credential prompt"
+    } else {
+        "unknown -- git exited past the host's own timeout after the fetch/merge apparently completed"
+    }
+}
+
 fn git_pull(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let remote = body.get("remote").and_then(|v| v.as_str()).unwrap_or("origin").trim();
@@ -3503,6 +3553,31 @@ fn git_pull(body: &Value) -> u64 {
     let conflicts: Vec<String> = exec_git_in(cwd, "diff --name-only --diff-filter=U")
         .lines().map(|line| line.trim().to_string()).filter(|line| !line.is_empty()).collect();
     if code != 0 {
+        if conflicts.is_empty() {
+            let target_branch = if branch.is_empty() {
+                exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string()
+            } else {
+                branch.to_string()
+            };
+            let remote_name = if remote.is_empty() { "origin" } else { remote };
+            let _ = git_call_argv(&["fetch", remote_name, &target_branch], cwd);
+            let remote_head = resolve_ref(cwd, &format!("{}/{}", remote_name, target_branch));
+            let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+            let worktree_clean = git_porcelain_in(cwd).trim().is_empty();
+            if worktree_clean && !head_after.is_empty() && remote_head.as_deref() == Some(head_after.as_str()) {
+                return ok("git_pull", json!({
+                    "remote": remote,
+                    "branch": if branch.is_empty() { Value::Null } else { json!(branch) },
+                    "ff_only": ff_only,
+                    "head_before": head_before,
+                    "head_after": head_after,
+                    "already_up_to_date": head_before == head_after,
+                    "output": output,
+                    "subprocess_reported_failure_but_merge_verified_landed": true,
+                    "hung_phase": classify_pull_hang_phase(&output),
+                }));
+            }
+        }
         return err_json("git_pull", json!({
             "error": output,
             "remote": remote,
@@ -3938,6 +4013,13 @@ fn exec_git_in(repo: Option<&str>, args: &str) -> String {
 
 fn git_porcelain_in(repo: Option<&str>) -> String {
     super::host_abi::porcelain_or_dirty(git_call("status --porcelain", repo))
+}
+
+fn git_porcelain_scoped(repo: Option<&str>, paths: &[String]) -> String {
+    if paths.is_empty() { return git_porcelain_in(repo); }
+    let mut argv: Vec<&str> = vec!["status", "--porcelain", "--"];
+    for p in paths { argv.push(p.as_str()); }
+    super::host_abi::porcelain_or_dirty(git_call_argv(&argv, repo))
 }
 
 fn files_in_commit(repo: Option<&str>) -> Vec<String> {

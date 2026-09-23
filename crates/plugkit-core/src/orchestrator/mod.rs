@@ -231,7 +231,7 @@ pub fn gm_dir() -> PathBuf {
 /// a verb cannot get a dispatch arm without also becoming advertised, and
 /// nothing here can drift out of a third hand-maintained copy again.
 macro_rules! orchestrator_dispatch_table {
-    ( $( $verb:literal => $handler:expr ),+ $(,)? ) => {
+    ( $content:ident, $( $verb:literal => $handler:expr ),+ $(,)? ) => {
         pub const ORCHESTRATOR_VERBS: &[&str] = &[ $( $verb ),+ ];
 
         const DISPATCH_ARM_VERBS: &[&str] = &[ $( $verb ),+ ];
@@ -242,7 +242,7 @@ macro_rules! orchestrator_dispatch_table {
         }
 
         #[cfg(target_arch = "wasm32")]
-        pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i32) {
+        pub fn dispatch(verb: &str, _file_id: &str, $content: &str) -> (String, String, i32) {
             assert_verb_sets_agree();
             match verb {
                 $( $verb => $handler, )+
@@ -286,76 +286,52 @@ fn handle_memorize_continue(_content: &str) -> (String, String, i32) {
     ("{\"ok\":false,\"error\":\"memorize-continue requires wasm32\"}".to_string(), String::new(), 1)
 }
 
-/// The verb literal set the `match` inside `dispatch()` actually handles,
-/// kept as its own const so `assert_verb_sets_agree` can iterate the real
-/// dispatch surface rather than a third hand-maintained copy of it. This is
-/// the same literal set the match arms below list; a verb added to one and
-/// not the other is exactly the drift this guard exists to catch.
-const DISPATCH_ARM_VERBS: &[&str] = &[
-    "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list", "mutable-defer", "dream-policy-register", "dream-evaluator-receipt", "dream-discovery-record", "dream-world-seal", "dream-replay", "dream-replay-round",
-    "memorize-fire", "memorize-backfill", "discipline-note", "discipline-check-removal", "discipline-audit", "capability-resolve", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan",
-    "auto-recall", "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
-    "task-spawn", "task-list", "task-stop", "task-output",
-    "memorize-continue", "fsm-vendor", "fsm-validate", "fsm-propose-override",
-    "claim-audit", "submodule-check",
-    "component-loader-reconcile", "component-loader-hmr",
-];
-
 fn verb_has_dispatch_arm(verb: &str) -> bool {
     DISPATCH_ARM_VERBS.contains(&verb)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub fn dispatch(verb: &str, _file_id: &str, _content: &str) -> (String, String, i32) {
-    (format!("{{\"ok\":false,\"error\":\"orchestrator verb '{}' requires wasm32\"}}", verb), String::new(), 1)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i32) {
-    assert_verb_sets_agree();
-    match verb {
-        "transition" => transitions::handle(content),
-        "transition-revert" => transitions::handle_revert(content),
-        "mutable-resolve" => mutables::handle_resolve(content),
-        "mutable-add" => mutables::handle_add(content),
-        "mutable-list" => mutables::handle_list(content),
-        "mutable-defer" => mutables::handle_defer(content),
-        "dream-policy-register" => dream_rsi::handle_policy_register(content),
-        "dream-evaluator-receipt" => dream_rsi::handle_evaluator_receipt(content),
-        "dream-discovery-record" => dream_rsi::handle_discovery_record(content),
-        "dream-world-seal" => dream_rsi::handle_seal(content),
-        "dream-replay-round" => dream_rsi::handle_replay_round(content),
-        "dream-replay" => dream_rsi::handle(content),
-        "memorize-fire" => memorize::handle_fire(content),
-        "memorize-backfill" => memorize::handle_backfill(content),
-        "discipline-note" => discipline_note::handle(content),
-        "discipline-check-removal" => discipline_note::handle_check_removal(content),
-        "discipline-audit" => discipline_note::handle_audit(content),
-        "capability-resolve" => capability_proxy::handle(content),
-        "memory-namespace-audit" => memory_component::handle_audit(content),
-        "codeinsight-namespace-audit" => codeinsight_component::handle_audit(content),
-        "calculus-model-check" => calculus::handle_model_check(content),
-        "phase-status" => state::handle_status(),
-        "residual-scan" => residual::handle_scan(content),
-        "claim-audit" => claim_audit::handle_audit(content),
-        "submodule-check" => submodule_drift::handle_check(content),
-        "component-loader-reconcile" => component_loader_dispatch::handle_reconcile(content),
-        "component-loader-hmr" => component_loader_dispatch::handle_hmr(content),
-        "auto-recall" => recall::handle_auto_recall(content),
-        "instruction" => instructions::handle_instruction(content),
-        "prd-add" => prd::handle_add(content),
-        "prd-resolve" => prd::handle_resolve(content),
-        "prd-list" => prd::handle_list(content),
-        "prd-defer" => prd::handle_defer(content),
-        "task-spawn" => task::handle_spawn(content),
-        "task-list" => task::handle_list(content),
-        "task-stop" => task::handle_stop(content),
-        "task-output" => task::handle_output(content),
-        "memorize-continue" => handle_memorize_continue(content),
-        "fsm-vendor" => fsm_vendor::handle_vendor(content),
-        "fsm-validate" => fsm_vendor::handle_validate(content),
-        "predicates-md" => transitions::handle_predicates_md(content),
-        "fsm-propose-override" => fsm_propose::handle_propose(content),
-        _ => (format!("Unknown orchestrator verb: {}", verb), String::new(), 1),
-    }
+orchestrator_dispatch_table! {
+    content,
+    "transition" => transitions::handle(content),
+    "transition-revert" => transitions::handle_revert(content),
+    "mutable-resolve" => mutables::handle_resolve(content),
+    "mutable-add" => mutables::handle_add(content),
+    "mutable-list" => mutables::handle_list(content),
+    "mutable-defer" => mutables::handle_defer(content),
+    "dream-policy-register" => dream_rsi::handle_policy_register(content),
+    "dream-evaluator-receipt" => dream_rsi::handle_evaluator_receipt(content),
+    "dream-discovery-record" => dream_rsi::handle_discovery_record(content),
+    "dream-world-seal" => dream_rsi::handle_seal(content),
+    "dream-replay-round" => dream_rsi::handle_replay_round(content),
+    "dream-replay" => dream_rsi::handle(content),
+    "memorize-fire" => memorize::handle_fire(content),
+    "memorize-backfill" => memorize::handle_backfill(content),
+    "discipline-note" => discipline_note::handle(content),
+    "discipline-check-removal" => discipline_note::handle_check_removal(content),
+    "discipline-audit" => discipline_note::handle_audit(content),
+    "capability-resolve" => capability_proxy::handle(content),
+    "memory-namespace-audit" => memory_component::handle_audit(content),
+    "codeinsight-namespace-audit" => codeinsight_component::handle_audit(content),
+    "calculus-model-check" => calculus::handle_model_check(content),
+    "phase-status" => state::handle_status(),
+    "residual-scan" => residual::handle_scan(content),
+    "claim-audit" => claim_audit::handle_audit(content),
+    "submodule-check" => submodule_drift::handle_check(content),
+    "component-loader-reconcile" => component_loader_dispatch::handle_reconcile(content),
+    "component-loader-hmr" => component_loader_dispatch::handle_hmr(content),
+    "auto-recall" => recall::handle_auto_recall(content),
+    "instruction" => instructions::handle_instruction(content),
+    "prd-add" => prd::handle_add(content),
+    "prd-resolve" => prd::handle_resolve(content),
+    "prd-list" => prd::handle_list(content),
+    "prd-defer" => prd::handle_defer(content),
+    "task-spawn" => task::handle_spawn(content),
+    "task-list" => task::handle_list(content),
+    "task-stop" => task::handle_stop(content),
+    "task-output" => task::handle_output(content),
+    "memorize-continue" => handle_memorize_continue(content),
+    "fsm-vendor" => fsm_vendor::handle_vendor(content),
+    "fsm-validate" => fsm_vendor::handle_validate(content),
+    "predicates-md" => transitions::handle_predicates_md(content),
+    "fsm-propose-override" => fsm_propose::handle_propose(content),
 }

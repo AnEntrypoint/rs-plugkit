@@ -157,12 +157,9 @@ prematurely) and two-phase (correct, dependent stays `Active`) orderings.
 
 Recovery exactness (Theorem 61) and ordering (Theorem 63) are also
 brought into the type system, alongside preservation's `ActiveFiberSet`:
-`fiber_lifecycle::WithdrawalComplete::advance` is the only way to obtain
-proof a fiber reached `Inactive` from `Unloading` (it performs the real,
-state-mutating recovery and refuses to construct otherwise);
-`verify_recovery_exactness` is its read-only companion, checking the pure
-`transition` table exhaustively over both reachable targets without
-mutating anything, used by `discipline-audit`. `fiber_lifecycle::SafeToWithdraw::check`
+`verify_recovery_exactness` checks the pure `transition` table exhaustively
+over both reachable targets without mutating anything, used by
+`discipline-audit`. `fiber_lifecycle::SafeToWithdraw::check`
 is the only way to obtain proof a component has no dependents, taking the
 caller's own coeffect-resolved dependent set as a parameter (kept
 kind-agnostic by NOT recomputing it) -- any future code path that

@@ -97,27 +97,6 @@ impl ActiveFiberSet {
     }
 }
 
-pub struct WithdrawalComplete {
-    pub name: String,
-}
-
-impl WithdrawalComplete {
-    pub fn advance(state_path: &str, name: &str) -> Option<WithdrawalComplete> {
-        if read_fiber_state(state_path) != FiberLifecycle::Unloading {
-            return None;
-        }
-        let reached_active = advance_fiber(state_path, false);
-        debug_assert!(!reached_active, "advance_fiber from Unloading must never report Active");
-        let final_state = read_fiber_state(state_path);
-        debug_assert_eq!(final_state, FiberLifecycle::Inactive, "recovery exactness violated: Unloading did not reach Inactive");
-        if final_state == FiberLifecycle::Inactive {
-            Some(WithdrawalComplete { name: name.to_string() })
-        } else {
-            None
-        }
-    }
-}
-
 pub fn verify_recovery_exactness(current: FiberLifecycle) -> bool {
     if current != FiberLifecycle::Unloading {
         return true;

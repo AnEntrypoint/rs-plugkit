@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::component_loader::{
     self, ComponentEntry, FiberSwap,
 };
+use crate::pkfs;
 use serde_json::Value;
 
 fn parse_entries(v: &Value) -> Vec<ComponentEntry> {
@@ -26,20 +27,43 @@ pub fn handle_reconcile(content: &str) -> (String, String, i32) {
     }
 
     let decisions = component_loader::diff_entries(&previous, &next);
-    let mut state = component_loader::read_state();
 
-    let mut reassignments = Vec::new();
-    for decision in &decisions {
-        if decision.op != component_loader::ReconcileOp::ReassignRealms {
-            continue;
+    const MAX_CAS_ATTEMPTS: u32 = 8;
+    let mut reassignments;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let (mut state, expected_raw) = component_loader::read_state_with_raw();
+        reassignments = Vec::new();
+        for decision in &decisions {
+            if decision.op != component_loader::ReconcileOp::ReassignRealms {
+                continue;
+            }
+            let Some(entry) = next.iter().find(|e| e.id == decision.id) else { continue };
+            let Some(prev_entry) = previous.iter().find(|e| e.id == decision.id) else { continue };
+            let reassignment = component_loader::patch_isolation(&mut state, prev_entry, &entry.isolate, &next);
+            reassignments.push(reassignment);
         }
-        let Some(entry) = next.iter().find(|e| e.id == decision.id) else { continue };
-        let Some(prev_entry) = previous.iter().find(|e| e.id == decision.id) else { continue };
-        let reassignment = component_loader::patch_isolation(&mut state, prev_entry, &entry.isolate, &next);
-        reassignments.push(reassignment);
-    }
 
-    component_loader::write_state(&state);
+        match component_loader::cas_write_state(&expected_raw, &state) {
+            pkfs::CasWriteOutcome::Swapped => break,
+            pkfs::CasWriteOutcome::Mismatch if attempt < MAX_CAS_ATTEMPTS => continue,
+            pkfs::CasWriteOutcome::Mismatch => {
+                return (
+                    serde_json::json!({"ok": false, "error": "component-loader-reconcile: loader-state.json kept changing under concurrent dispatches; exhausted retries"}).to_string(),
+                    String::new(),
+                    1,
+                );
+            }
+            pkfs::CasWriteOutcome::IoError => {
+                return (
+                    serde_json::json!({"ok": false, "error": "component-loader-reconcile: could not write loader-state.json"}).to_string(),
+                    String::new(),
+                    1,
+                );
+            }
+        }
+    }
 
     let payload = serde_json::json!({
         "ok": true,

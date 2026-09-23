@@ -237,9 +237,37 @@ changes.
 - `codesearch_exhaustive` (literal/regex) is dispatched before the root branch
   and every digest/index/embedding step, none of which it reads; routed later,
   a literal query on a large workspace took minutes.
+- `CODESEARCH_MODES`/`CODESEARCH_LIMIT_FIELDS`/`codesearch_result_limit` exist
+  because an unrecognized `mode` and an unread `max_results` both used to be
+  silently dropped (falling through to `mode: "dual"` / the default `k`) with
+  nothing telling the caller its instruction was ignored; the limit function's
+  bool return lets `codesearch_exhaustive` bound results only when the caller
+  actually stated a limit.
 - `browser` and `cdp` share `host_browser_exec`; the engine travels in the opts
   JSON (`"engine"`), never inside the code body, so the host picks
   lightpanda/steel/chrome without re-escaping caller JS.
+- `git_commit`/`git_finalize` default to committing exactly what is already
+  staged; blanket `git add -A` needs `add_all: true` (or, for `git_finalize`
+  with no `paths`, stays the default there); `paths`/`files` stages only those
+  pathspecs, so a shared writer's unrelated dirty files are never swept in.
+  `git_commit`'s dedup cache (keyed on cwd+pre-commit-HEAD+message+paths,
+  TTL'd via `GIT_COMMIT_DEDUP_TTL_MS`) replays the one real sha instead of
+  re-running `add`/`commit` when a caller or host re-dispatches one logical
+  commit request twice.
+- `git_finalize` given `paths` scopes its porcelain checks to those paths
+  (`git_porcelain_scoped`) and pushes by explicit ref (its own new HEAD)
+  instead of the unscoped push path, so another writer's pre-existing dirt
+  elsewhere never blocks the push.
+- `git_push`'s explicit-`rev` path never rebases a dirty checkout by design;
+  when the remote has since moved past that ref (e.g. a CI autobump), its
+  rejection names the exact recovery (`git_pull` then `git_push
+  {rev:"HEAD"}`) instead of leaving the caller to rediscover it.
+- `git_pull` on a nonzero exit with no conflicts re-fetches and compares HEAD
+  against the remote-tracking ref before trusting the failure: a slow
+  post-merge hook/auto-gc/credential prompt can make the host report a
+  timeout-kill after the fast-forward itself already landed.
+- `git_log` parses `--pretty=format` on `\u{1f}` (never plain-text split, since
+  subjects can hold spaces) for `sha`/`sha_full`/`author {name,email,date}`.
 
 ### Cargo.toml, embed.rs
 
@@ -276,29 +304,18 @@ changes.
 
 ### plugin_abi.rs
 
-- `call` merges the `{abi, plugin, verb, body}` envelope over the body's own
-  top-level fields, envelope keys last. Pre-envelope `libsql`/`bert` read
-  top-level fields, so sending only the nested envelope breaks every call.
-- `parse_response`: a null or empty-object reply (the host's empty pointer
-  pair) is `PluginNotFound`; an `ok:true` reply without `data` returns the whole
-  object minus `ok`/`abi`, which keeps legacy `rows`/`embedding` results.
-- `AbiErrorKind` wire strings (`plugin-not-found`, `verb-not-supported`,
-  `plugin-error`, `timeout`) are frozen. Without an explicit `kind`,
-  `classify_failure` sniffs the "unknown verb"/"verb not supported" texts
-  `verbs.rs` emits.
+- Drained to gm recall (`mem-ae3514f8ed9a27b4-980`, query "plugin_abi call
+  envelope parse_response AbiErrorKind"): the envelope-over-body merge order
+  in `call`, `parse_response`'s null/empty-object/no-`data` handling, and the
+  frozen `AbiErrorKind` wire strings with their text-sniffing fallback.
 
 ### scan_deps.rs
 
-- `find_suspicious_escapes` requires an identifier shape, not printable ASCII
-  (escaped CSS punctuation would fail the scan); `count_hex_obfuscator_idents`
-  covers the escape-free `_0x` variant. A size ratio alone only warns.
-- `walk_package` signs a package by max `mtime_ms` plus summed size (a dir
-  mtime misses in-place edits) and walks node_modules per package with
-  `list_dir`: `IndexConfig::is_force_included` is a substring match and would
-  force-include every descendant.
-- `scan_one_file`: a file over `MAX_SCAN_BYTES` warns without a content scan.
-  `host_read` `None` with stat size > 0 is a blocked read (AV), which fails the
-  scan; size 0 is an empty file.
+- Drained to gm recall (`mem-73c705bb66f60897-863`, query "scan_deps
+  find_suspicious_escapes walk_package is_force_included"):
+  `find_suspicious_escapes`/`count_hex_obfuscator_idents` escape-shape rules,
+  `walk_package`'s mtime+size package signature, and `scan_one_file`'s
+  blocked-read-vs-empty-file distinction.
 
 ### config.rs, config_sync.rs, prose.rs
 
@@ -320,6 +337,37 @@ changes.
   `host_fs_write` overwrites in place and readers can see a torn file.
 - `prose::read_from_config_repo` reads `config::resolve().cache_dir`, never a
   hardcoded dir: tiers write to different caches.
+
+### orchestrator/config_notify.rs
+
+- A config-source change is PERSISTED at record time and drained onto the next
+  `instruction` response body (the `update_available`/`discipline_policies`
+  surface), because a change between two dispatches with no agent inside a
+  verb call would otherwise be visible to nothing.
+- Delivery-once is per session, not global: several agents share one
+  process-wide plugin instance, so a global "delivered" flag would let
+  whichever agent dispatches first swallow the notification for the rest.
+  Each record keeps a `delivered_to` session-id roster instead; a
+  `session_id` of `None` buckets under `"(no-session)"`, which still gets
+  delivery-once semantics rather than re-notifying forever.
+- No process-wide cache: `pkfs` anchors `STORE_PATH` against the dispatching
+  cwd's project root per call, so two projects sharing one plugin instance
+  never cross-read.
+- `MAX_RECORDS`(32)/`MAX_SUMMARY_ITEMS`(24)/`MAX_RECORD_AGE_MS`(24h)/
+  `MAX_DELIVERED_TO`(64) bound the store against a flapping config source and
+  an unbounded delivery roster; each evicts oldest-first, and a record already
+  past `MAX_RECORD_AGE_MS` cannot practically reach `MAX_DELIVERED_TO`.
+- `read_records` degrades a torn/unparseable store to "no pending changes"
+  rather than failing the dispatch -- this is an advisory surface. A failed
+  `write_records` in `drain_for_session` is likewise not fatal: the caller
+  still gets this dispatch's notifications, and the worst case is one repeat
+  delivery next time.
+- `record_change` skips a no-op resha (same sha before and after) and never
+  retries a failed write (the spool dir being unwritable would fail
+  identically); its id folds tier+shas+timestamp so two sources changing in
+  the same millisecond stay distinct. `drain_for_session` keeps a record with
+  an unreadable/absent `ts` rather than dropping it, and marks delivery on the
+  drain itself since no separate acknowledgement verb exists.
 
 ### cache.rs, embed_marker.rs
 
@@ -345,8 +393,9 @@ changes.
 - `build_interception_context` folds every enabled discipline in `enabled.txt`
   order; `MergeKind::combine` is right-biased, so for `ScalarOverwrite` the last
   non-empty declaration wins.
-- `handle_check_removal` is the crate's only writer of `enabled.txt` (CAS
-  against a re-read taken just before the write).
+- `handle_check_removal` is the crate's only writer of `enabled.txt`; it reads
+  it exactly once and CAS-writes against that same snapshot, so a change
+  concurrent with its safety evaluation is never silently overwritten.
 - `fiber_lifecycle::transition` is mirrored arm for arm by agentplug-host
   `registry.rs` `PluginFiberLifecycle`; change both repos together.
 - `calculus::verify_calculus` is the runnable counterpart of the Lean proofs in
@@ -392,64 +441,46 @@ changes.
   `epistemic_gap`. `handle_list` stays un-deduped: it is the full-fidelity view
   of the file.
 
+### memory_md.rs
+
+- `vector_table()` re-resolves the rssearch table name from config with its
+  own hand-written SQL rather than reusing `crate::rssearch_vectors`'s
+  resolution; both must resolve it the same way or a configured rename leaves
+  this module querying a table that no longer exists.
+- `has_stored_digest`/the sync pass both skip the code namespace: it is fed by
+  the tree-sitter indexer, not by markdown memory files, so it has no corpus
+  digest to sync here.
+- `flat_vec_embedding` rejects a stale-width embedding by comparing against
+  `cfg.dim()` rather than a bare literal, so a configured embedding-dimension
+  change does not leave it silently rejecting every valid embedding at the
+  `F32_BLOB` column.
+- `KEYWORD_SCAN_MAX_FILES` (2000) bounds `keyword_scan`, a read path with no
+  index behind it (files sorted by name for a deterministic bound); a corpus
+  past this size has a working vector store in every healthy configuration,
+  and this rung exists only for the unhealthy one. It is the last rung in
+  `recall`'s fallback chain that needs neither an embedder nor libsql (unlike
+  the flat-kv keyword scan, which is libsql-backed through `host_kv` and
+  silently no-ops without a libsql slot) -- the plain-file md corpus is what
+  survives an embedder/libsql outage, so a memo stored during one is still
+  reachable.
+- A merely-deferred sync pass (wall budget hit, nothing failed, nothing
+  rekeyed) still stores its digest, tagged `:partial=N` so it is never
+  mistaken for converged; without this, `has_stored_digest` stays false
+  forever on any corpus large enough to defer (live-witnessed:
+  `memories_md_meta` at 0 rows against 168 real `memories_md_files` entries,
+  `memory_md_sync_partial` recurring every boot). Never stored when
+  `failed>0`/`rekeyed>0`, and the orphan-prune stays gated on full
+  convergence, since pruning decides what to `mark_deleted` by diffing the
+  manifest -- acting on an incomplete view would delete live entries.
+
 ### orchestrator/dream_rsi.rs
 
-- The replay objective follows the Dream-RSI paper's Eq. 1: per-world
-  `replay_score = quality - beta1*cost + beta2*parallelism_bonus`, where
-  `quality` is the MAX node score observed in the revealed trajectory (not a
-  sum -- matches the paper's best-attained-quality term), `cost` is the
-  summed per-node cost (every node's cost is fixed at 1 by
-  `evaluator_receipt`, so this already equals the paper's revealed-node
-  count), and `parallelism_bonus` is observed-node-count divided by the
-  count of distinct `round` values among those nodes (average attempts per
-  decision round).
-- `beta1`/`beta2` are required, non-negative, finite fields on every
-  `dream-replay` call (`nonneg_f64_field`) -- never given a default, since
-  they are the paper's fixed per-experiment hyperparameters and this crate's
-  own admission-filter prose rejects unmeasured constants.
-- `round` is caller-declared per discovery (`dream-discovery-record`'s
-  optional `round`), carried through `seal()` into each sealed node.
-  Siblings sharing a `round` represent one decision-round batch. Omitted
-  `round` defaults to the node's sequential position at seal/parse time,
-  giving one round per node (`parallelism_bonus` = 1.0, i.e. no bonus) --
-  the honest default when a caller has not declared batching. This keeps
-  every world sealed before this field existed parseable.
-- A policy's evaluation score is the MEAN `replay_score` across all
-  supplied worlds (the paper's R-bar), not a sum across worlds -- adding a
-  world must not mechanically change which policy wins on its own. The
-  strictly-higher-than-baseline no-regression selection rule is unchanged.
-- `seal()` builds each sealed node's `children` from the discoveries whose
-  `parent_id` points to it (real tree topology, including branching --
-  more than one discovery may share a parent), never from `discovery_ids`
-  array order. `dream-replay`'s one-shot BFS stays a cheap non-interactive
-  approximation; `dream-replay-round` is the paper-faithful path (Section
-  3.2/Algorithm 1): a session-scoped, stateful, round-by-round replay
-  where the CALLER (the agent's own inference, not this crate) picks each
-  round's batch from the current eligible set -- a policy's declared
-  `roots` (always eligible, can reopen a new branch at any round) union
-  the leaves of the revealed subtree (a revealed node with no revealed
-  child yet). `max_rounds` (the paper's N2) and a policy's `max_nodes`
-  both bound a replay; either cap reached closes it and folds that
-  round's reveal into the closing tally, never truncates it. State lives
-  at `.gm/dream-rsi/<session>/replay-rounds.json`, one record per
-  `replay_id`, closed replays reject further calls.
-- `register_policy` takes an optional `max_online_rounds` (the paper's
-  N1), stored on the policy record with an empty `online_rounds` tally.
-  When set, `record_discovery` for that policy requires an explicit
-  `round` and rejects a NEW round value once `online_rounds.len()` would
-  exceed the cap -- reusing an already-used round (a parallel sibling in
-  the same batch) never counts twice. A policy without
-  `max_online_rounds` is unbounded, unchanged from before this field
-  existed. This is what actually forces the paper's alternate-and-improve
-  structure: past the cap, the caller must seal and dream-replay (or
-  dream-replay-round) before a fresh deployed policy can keep recording
-  online discoveries.
-- `dream-replay-round` never exposes the full frozen world to the caller,
-  only each round's newly revealed nodes and the current eligible set --
-  by construction, a policy revised from this feedback cannot be shaped
-  around exact node ids, scores, or targets it was never shown, matching
-  the paper's warning against overfitting policy logic to one frozen
-  trace.
+- Drained to gm recall (`mem-4beb69b539b50f83-3404`, query "dream_rsi
+  replay_score beta1 beta2 parallelism_bonus"): the Dream-RSI paper's Eq. 1
+  replay-objective formula, `beta1`/`beta2` field rules, `round` semantics,
+  the mean-score policy-evaluation rule, `seal()` tree topology, the
+  `dream-replay-round` session-scoped windowed-replay protocol, and
+  `max_online_rounds` admission-cap semantics.
 
 ### Other modules
 

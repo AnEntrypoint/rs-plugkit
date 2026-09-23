@@ -104,7 +104,7 @@ impl Pipeline {
 }
 
 fn known_fuse_strategy(name: &str) -> bool {
-    matches!(name, "rrf_fuse")
+    matches!(name, "rrf_fuse" | "present_both")
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

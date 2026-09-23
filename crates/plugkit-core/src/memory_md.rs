@@ -203,11 +203,6 @@ pub fn delete_memory(ns: &str, key: &str) -> bool {
     }
 }
 
-/// The vector table this module reads with raw SQL. Every other reference to
-/// that store here goes through `crate::rssearch_vectors`, which already
-/// resolves the name from config; these few hand-written queries must resolve
-/// it the same way or a configured rename silently leaves them querying a
-/// table that no longer exists.
 fn vector_table() -> String {
     crate::ragconfig::RagConfig::resolved().rssearch.table
 }
@@ -247,8 +242,6 @@ pub fn has_stored_digest(namespaces: &[String]) -> bool {
         return false;
     }
     for ns in namespaces {
-        // The code namespace is fed by the tree-sitter indexer, not by
-        // markdown memory files, so it has no corpus/digest to sync here.
         if crate::ragconfig::NamespaceConfig::default().is_code(ns) {
             continue;
         }
@@ -260,28 +253,10 @@ pub fn has_stored_digest(namespaces: &[String]) -> bool {
 }
 
 
-/// How many md files a degraded keyword scan will read before stopping.
-///
-/// Bounded because this runs on a read path with no index behind it; the files
-/// are sorted by name so the bound is at least deterministic. A corpus larger
-/// than this has a working vector store in every healthy configuration, and
-/// this rung only exists for the unhealthy one.
 const KEYWORD_SCAN_MAX_FILES: usize = 2000;
-
 const KEYWORD_SCAN_MIN_TERM_LEN: usize = 3;
 const KEYWORD_SCAN_MAX_TERMS: usize = 12;
 
-/// Last-resort keyword recall read straight off the md corpus on disk.
-///
-/// Every rung above this in `recall`'s fallback chain needs a live dependency:
-/// vector search needs an embedding, and the flat-kv keyword scan needs libsql,
-/// because `host_kv` is libsql-backed -- when the plugin pool holds no libsql
-/// slot, the kv write silently no-ops and the kv query silently answers nothing.
-/// The md corpus needs neither. It is plain files, and it is the store
-/// `write_memory` treats as durable, so it is exactly what survives an embedder
-/// outage. Without this rung a memo stored during such an outage was genuinely
-/// on disk and still unreachable by any read path, which would make "stored,
-/// vector pending" an empty promise.
 pub fn keyword_scan(ns: &str, query: &str, limit: usize) -> Value {
     let Some(dir) = md_dir(ns) else { return Value::Array(Vec::new()) };
     let mut terms: Vec<String> = Vec::new();
@@ -441,10 +416,6 @@ fn flat_vec_embedding(ns: &str, key: &str) -> Option<Value> {
     let raw = crate::wasm_dispatch::host_kv_read(&vec_ns, key)?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;
     let emb = extract_embedding(&parsed)?;
-    // Reject a stale-width embedding rather than handing it to a writer that
-    // would fail at the F32_BLOB column. This was a bare `== 384` literal,
-    // independent of every other place the dimension is spelled -- a config
-    // dim change would have left it silently rejecting every valid embedding.
     if emb.as_array().map(|a| a.len()).unwrap_or(0) == cfg.dim() { Some(emb) } else { None }
 }
 
@@ -553,8 +524,6 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
     let mut converged = true;
     let mut report = Vec::new();
     'ns: for ns in namespaces {
-        // The code namespace is fed by the tree-sitter indexer, not by
-        // markdown memory files, so it has no corpus/digest to sync here.
         if crate::ragconfig::NamespaceConfig::default().is_code(ns) {
             continue;
         }
@@ -816,22 +785,6 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
             }
             store_meta_digest(ns, &digest);
         } else if deferred > 0 && failed == 0 && rekeyed == 0 {
-            // Record progress on a merely-DEFERRED pass (wall budget hit, but
-            // nothing failed and nothing was rekeyed), tagged so it can never
-            // be mistaken for a converged digest.
-            //
-            // Without this the digest is never stored on any corpus large
-            // enough to defer, so has_stored_digest() stays false forever and
-            // the md-index recall backend is permanently disabled -- live-
-            // witnessed as memories_md_meta holding 0 rows against 168 real
-            // memories_md_files entries, with memory_md_sync_partial
-            // (deferred=415) recurring every boot.
-            //
-            // Deliberately NOT stored when failed>0 or rekeyed>0, and the
-            // orphan-prune above stays gated on full convergence: pruning
-            // decides what to mark_deleted by diffing against the manifest, so
-            // acting on an incomplete view would delete live entries. Progress
-            // is safe to record; deletion authority is not.
             store_meta_digest(ns, &format!("{}:partial={}", digest, deferred));
             crate::wasm_dispatch::emit_event("memory_md_sync_partial", json!({
                 "namespace": ns,

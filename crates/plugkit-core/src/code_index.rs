@@ -2408,7 +2408,19 @@ pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagC
     let needle = pattern.to_lowercase();
     let is_glob = needle.contains('*') || needle.contains('?');
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
-    let full_files = collect_files(root, cfg.index.digest_max_files.max(20000), &cfg.index);
+    let origin = if project_path.filter(|p| !p.is_empty()).is_some() {
+        crate::scan_universe::TargetOrigin::CallerNamed
+    } else {
+        crate::scan_universe::TargetOrigin::ProjectDefault
+    };
+    let file_cap = cfg.index.digest_max_files.max(20000).min(LITERAL_SCAN_MAX_FILES).max(1);
+    let universe = match crate::scan_universe::list_scan_universe(root, None, file_cap.saturating_add(1), &cfg.index, origin) {
+        Ok(e) => e,
+        Err(e) => return json!({ "ok": false, "error": e, "mode": "filename" }),
+    };
+    let listed = universe.files;
+    let files_truncated = listed.len() > file_cap;
+    let full_files: &[String] = if files_truncated { &listed[..file_cap] } else { &listed[..] };
     let hits: Vec<Value> = full_files.iter()
         .filter(|p| {
             let lp = p.to_lowercase();
@@ -2418,7 +2430,23 @@ pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagC
         .take(k)
         .map(|p| json!({ "path": p }))
         .collect();
-    json!({ "ok": true, "mode": "filename", "hits": hits, "scanned": full_files.len() })
+    let exhaustive = !files_truncated && universe.listing_complete;
+    let mut out = serde_json::Map::new();
+    out.insert("ok".to_string(), json!(true));
+    out.insert("mode".to_string(), json!("filename"));
+    out.insert("hits".to_string(), json!(hits));
+    out.insert("scanned".to_string(), json!(full_files.len()));
+    out.insert("file_source".to_string(), json!(universe.source.label()));
+    out.insert("exhaustive".to_string(), json!(exhaustive));
+    if !universe.listing_complete {
+        out.insert("listing_incomplete".to_string(), json!(true));
+        if let Some(reason) = &universe.walk_reason { out.insert("walk_reason".to_string(), json!(reason)); }
+    }
+    if files_truncated {
+        out.insert("files_truncated".to_string(), json!(true));
+        out.insert("files_truncated_at".to_string(), json!(file_cap));
+    }
+    Value::Object(out)
 }
 
 pub const LITERAL_SCAN_MAX_FILES: usize = 50_000;
