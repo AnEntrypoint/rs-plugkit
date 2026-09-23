@@ -473,6 +473,23 @@ changes.
   convergence, since pruning decides what to `mark_deleted` by diffing the
   manifest -- acting on an incomplete view would delete live entries.
 
+### orchestrator/instructions/mod.rs -- automatic supply-chain scan
+
+- `automatic_supply_chain_scan()` runs `scan_deps` on every `instruction`
+  dispatch, surfaced as the response's `supply_chain_scan` field, debounced
+  by `.gm/.last-scan-deps-ts` at `SUPPLY_CHAIN_SCAN_DEBOUNCE_MS` (300000ms,
+  matching this project's existing `sync.debounce_ms` convention rather
+  than an invented number). Measured cost on this repo: 531ms for one full
+  scan (17 tracked files plus `node_modules`'s already-incremental,
+  changed-since-stamp pass) -- cheap enough to run passively without being
+  asked, which is the point: a HiddenSpawn-class payload smuggled into a
+  legitimate-looking commit (real incident, 2026-09, gm-mcp and gm-config)
+  is exactly the class of thing nobody remembers to check for by hand. This
+  does not replace `codesearch`-based literal-signature hunts for a known
+  specific IOC once one is found -- `scan_deps`'s structural heuristics
+  (size-ratio disproportion, dense `\uXXXX` escape runs) catch the general
+  shape, not every possible disguise.
+
 ### orchestrator/dream_rsi.rs
 
 - Drained to gm recall (`mem-4beb69b539b50f83-3404`, query "dream_rsi
