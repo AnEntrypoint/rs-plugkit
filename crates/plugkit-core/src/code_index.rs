@@ -242,13 +242,6 @@ const SKIP_FILE_SUFFIXES: &[&str] = &[
     ".glb", ".gltf", ".vrm", ".fbx", ".blend", ".blend1", ".usdz", ".hf",
     ".uasset", ".umap",
     ".wasm", ".exe", ".dll", ".dylib", ".so", ".o", ".obj", ".a", ".lib",
-    // Rust build artifacts. ".pdb" and ".lib" were already here but ".rlib"
-    // and ".rmeta" were not, and they carry readable symbol names: an
-    // exhaustive literal scan of C:/dev/litebox-main matched "set_times_at"
-    // 10 extra times inside target-myfork/*.rlib/.rmeta/.pdb, which are not
-    // call sites. A sibling build dir whose name is not the literal "target"
-    // (target-myfork here) is not caught by SKIP_DIRS, so the suffix is the
-    // only thing that excludes it.
     ".rlib", ".rmeta",
     ".pdb", ".class", ".jar", ".war", ".ear", ".apk", ".aab", ".ipa",
     ".hex", ".elf", ".uf2", ".dfu",
@@ -2428,37 +2421,12 @@ pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagC
     json!({ "ok": true, "mode": "filename", "hits": hits, "scanned": full_files.len() })
 }
 
-/// Ceiling on files enumerated for an exhaustive literal/regex scan.
-///
-/// Deliberately NOT `IndexConfig::digest_max_files`, whose default is 2000 --
-/// measured on the real C:/dev/litebox-main workspace, which enumerates 2427
-/// files, so reusing the digest cap would have dropped ~400 files and returned
-/// a confidently wrong "every match" answer. That cap exists to bound a digest
-/// whose own doc comment already concedes it can believe an index converged
-/// when it has not; an exhaustive scan has the opposite contract and cannot
-/// inherit it. A tree larger than this ceiling is reported via
-/// `files_truncated: true`, never silently shortened.
 pub const LITERAL_SCAN_MAX_FILES: usize = 50_000;
 
-/// Per-line text returned with a match, capped so one minified or generated
-/// line cannot dominate the response. A capped line sets `text_truncated`.
 const LITERAL_SCAN_MAX_LINE_BYTES: usize = 512;
 
-/// Largest file an exhaustive scan will read.
-///
-/// Deliberately NOT `IndexConfig::max_file_bytes` (256KB). That bound exists to
-/// cap EMBEDDING cost per file, and a literal scan embeds nothing -- it is one
-/// linear pass over bytes. Witnessed on the real C:/dev/litebox-main workspace:
-/// inheriting the 256KB cap skipped 15 files including
-/// `litebox_shim_linux/src/syscalls/file.rs` and
-/// `litebox_platform_windows_userland/src/lib.rs`, both genuine Rust source a
-/// call-graph trace must cover. Large enough that no plausible hand-written
-/// source file is excluded; a file past it is still reported via
-/// `files_skipped_too_large`, never silently dropped.
 const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// What `scan_literal` was asked for. A struct rather than a long parameter
-/// list so a caller cannot transpose two same-typed flags silently.
 pub struct LiteralScan<'a> {
     pub pattern: &'a str,
     pub root: Option<&'a str>,
@@ -2488,9 +2456,6 @@ fn occurrence_is_whole_word(haystack: &str, start: usize, end: usize) -> bool {
 }
 
 impl LiteralMatcher {
-    /// Every byte offset pair this matcher hits in one line, not just the
-    /// first -- two call sites on one line are two real call sites, and a
-    /// call-graph trace that reported one would be wrong.
     fn find_all(&self, line: &str) -> Vec<(usize, usize)> {
         match self {
             LiteralMatcher::Substring { needle, case_insensitive, whole_word } => {
@@ -2500,10 +2465,6 @@ impl LiteralMatcher {
                 } else {
                     (None, line)
                 };
-                // A lowercased copy can differ in byte length from the
-                // original (e.g. 'İ'), which would make offsets taken in the
-                // copy wrong in the original. Fall back to a char-aligned
-                // scan of the original whenever the lengths disagree.
                 let search_in: &str = match &haystack_owned {
                     Some(lowered) if lowered.len() == line.len() => lowered.as_str(),
                     Some(_) => return self.find_all_case_insensitive_unaligned(line, needle, *whole_word),
@@ -2548,24 +2509,6 @@ impl LiteralMatcher {
     }
 }
 
-/// Exhaustive literal/regex scan with ripgrep semantics: EVERY match, each
-/// with `path` and `line`, in enumeration order, with no relevance ranking
-/// and no top-k truncation.
-///
-/// Touches none of the retrieval machinery the `dual` mode uses -- no corpus
-/// digest comparison, no `index()` rebuild, no query embedding, no vector
-/// search, no `FusionCorpus`. That is the point, not an optimisation: those
-/// steps are what made a literal question over a large workspace cost minutes
-/// (measured on C:/dev/litebox-main: 120s and 240s timeouts, one ~420s
-/// answer), and an exact-match answer needs none of them. Cost here is one
-/// file walk plus one read per file.
-///
-/// Every bound it hits is disclosed in the response rather than quietly
-/// shortening the answer, because a caller tracing a call graph acts on this
-/// being complete: `files_truncated`, `matches_truncated`, `budget_exhausted`,
-/// `files_skipped_too_large`, `files_skipped_binary` and `files_unreadable`
-/// each mean "this result is NOT the whole tree", and `exhaustive` is true
-/// only when none of them fired.
 pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
     if req.pattern.is_empty() {
         return json!({ "ok": false, "error": "pattern required -- an exhaustive scan needs something to match" });
@@ -2576,10 +2519,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             .build()
         {
             Ok(re) => LiteralMatcher::Regex(re),
-            // A bad pattern is an error naming the parse failure, never a
-            // silent fall back to substring matching: a caller who asked for
-            // regex and got substring results would read them as regex
-            // results.
             Err(e) => return json!({
                 "ok": false,
                 "error": format!("mode \"regex\" got an invalid regular expression: {e}"),
@@ -2609,8 +2548,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         None => None,
     };
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
-    // Ask for one more than the cap so hitting it is distinguishable from a
-    // tree that happens to be exactly cap-sized.
     let universe = match crate::scan_universe::list_scan_universe(root, scope, file_cap.saturating_add(1), &cfg.index, origin) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
@@ -2654,12 +2591,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             }
         }
         let Some(content) = host_read(path) else {
-            // `host_read` returns None for both "could not read" and "not
-            // valid UTF-8", which are different facts about completeness. A
-            // successful stat means the file is there and sized, so the read
-            // failing is a decode failure: binary content, which cannot
-            // contain a text match and is therefore NOT a gap in the answer.
-            // A failed stat is a genuine IO/permission failure, which is.
             if stat.is_some() { files_skipped_binary += 1 } else { files_unreadable += 1 }
             continue;
         };
@@ -2683,10 +2614,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 hit.insert("path".to_string(), json!(path));
                 hit.insert("line".to_string(), json!(idx + 1));
                 hit.insert("column".to_string(), json!(start + 1));
-                // `get` rather than a slice index: a case-insensitive search
-                // takes offsets from a lowercased copy of the line, and a
-                // pathological char whose lowercase is the same byte length
-                // but a different boundary would panic on a raw slice.
                 hit.insert("match".to_string(), json!(line.get(start..end).unwrap_or(req.pattern)));
                 hit.insert("text".to_string(), json!(shown.trim_end()));
                 if text_truncated { hit.insert("text_truncated".to_string(), json!(true)); }
@@ -2698,11 +2625,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         if matches_truncated { break; }
     }
 
-    // `files_skipped_binary` deliberately does NOT void exhaustiveness: a file
-    // that is not text cannot hold a text match, so skipping it leaves the
-    // answer complete. Counting it as a gap would make `exhaustive` false on
-    // essentially every real repo and train the caller to ignore the flag,
-    // which is worse than not having it.
     let exhaustive = !files_truncated
         && !matches_truncated
         && !budget_exhausted

@@ -57,6 +57,16 @@ fn host_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(target_arch = "wasm32")]
+fn ensure_current_insight() -> Value {
+    crate::code_index::ensure_current_insight()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_current_insight() -> Value {
+    json!({ "ok": false, "ready": false, "error": "code insight unavailable on native target" })
+}
+
 pub fn handle_spawn(content: &str) -> (String, String, i32) {
     let body: Value = match serde_json::from_str(content) {
         Ok(v) => v,
@@ -68,7 +78,7 @@ pub fn handle_spawn(content: &str) -> (String, String, i32) {
         .unwrap_or("");
     if lang.is_empty() { return err_resp("task-spawn", "lang required"); }
     if code.is_empty() { return err_resp("task-spawn", "code required"); }
-    let codeinsight_start = crate::code_index::ensure_current_insight();
+    let codeinsight_start = ensure_current_insight();
     if !codeinsight_start.get("ready").and_then(|v| v.as_bool()).unwrap_or(false) {
         return err_resp("task-spawn", &format!(
             "code insight is required before starting a job but did not reach a current complete index: {}",

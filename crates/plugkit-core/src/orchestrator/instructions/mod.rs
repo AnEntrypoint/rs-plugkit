@@ -241,6 +241,15 @@ fn dedup_rows_by_id_keeping_last(rows: Vec<serde_json::Value>) -> Vec<serde_json
 }
 
 #[cfg(target_arch = "wasm32")]
+fn summarize_prd_row(item: &serde_json::Value) -> serde_json::Value {
+    json!({
+        "id": item.get("id").cloned().unwrap_or(serde_json::Value::Null),
+        "title": item.get("title").cloned().unwrap_or(serde_json::Value::Null),
+        "status": item.get("status").cloned().unwrap_or(serde_json::Value::Null),
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
 fn rows_truncation_note(
     inlined: usize,
     total: usize,
@@ -404,6 +413,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let mut asserted_instruction_hash: Option<String> = None;
     let mut asserted_policy_hash: Option<String> = None;
     let mut mode_opt: Option<String> = None;
+    let mut prd_full_detail = false;
     let raw_phase_opt = if trimmed.is_empty() {
         None
     } else if let Some(stripped) = trimmed.strip_prefix("phase=") {
@@ -432,6 +442,9 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         }
         if let Some(m) = v.get("mode").and_then(|s| s.as_str()) {
             mode_opt = Some(m.trim().to_ascii_lowercase());
+        }
+        if let Some(b) = v.get("prd_full_detail").and_then(|s| s.as_bool()) {
+            prd_full_detail = b;
         }
         if let Some(s) = v.as_str() {
             Some(s.to_string())
@@ -677,15 +690,26 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
 
     let prd_items_open_count = prd_items_open.len();
     let prd_rows_inlined = prd_items_open_count.min(payload_limits.prd_items_rows_inlined_limit);
-    let prd_items_inlined: Vec<serde_json::Value> = prd_items_open[..prd_rows_inlined].to_vec();
-    let prd_items_truncated = if prd_rows_inlined < prd_items_open_count {
-        rows_truncation_note(
+    let prd_items_inlined: Vec<serde_json::Value> = if prd_full_detail {
+        prd_items_open[..prd_rows_inlined].to_vec()
+    } else {
+        prd_items_open[..prd_rows_inlined].iter().map(summarize_prd_row).collect()
+    };
+    let prd_items_truncated = if prd_rows_inlined < prd_items_open_count || !prd_full_detail {
+        let mut note = rows_truncation_note(
             prd_rows_inlined,
             prd_items_open_count,
             "the open rows nearest the front of the queue, ready_wave order",
             &prd::prd_path(),
             "prd-list",
-        )
+        );
+        if let Some(fields) = note.as_object_mut() {
+            fields.insert(
+                "inlined_rows_shape".to_string(),
+                json!(if prd_full_detail { "full" } else { "summary (id, title, status) -- full description/acceptance_criteria/witness_plan via prd-list or {\"prd_full_detail\":true}" }),
+            );
+        }
+        note
     } else {
         serde_json::Value::Null
     };

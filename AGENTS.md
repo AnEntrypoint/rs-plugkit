@@ -183,13 +183,26 @@ changes.
 - `scan_literal`: `LITERAL_SCAN_MAX_FILES`/`LITERAL_SCAN_MAX_FILE_BYTES` are
   independent of `IndexConfig::digest_max_files`/`max_file_bytes` (digest and
   embedding cost bounds); reusing those drops real source from an "every match"
-  answer. Every bound hit clears `exhaustive`, except `files_skipped_binary`.
+  answer -- measured on a real workspace, the digest cap (2000) undercounted a
+  2427-file tree, and the 256KB embedding cap excluded genuine 300KB+ source
+  files. Every bound hit clears `exhaustive`, except `files_skipped_binary`,
+  which never clears it: a non-text file cannot hold a text match, so skipping
+  one is not a gap.
+- `scan_literal` skips the `dual`-mode retrieval machinery entirely (digest
+  diff, `index()`, query embedding, vector search, fusion) -- routing a
+  workspace-wide literal query through that machinery instead measured
+  120-420s; skipping it is what keeps an exact-match answer fast.
+- `list_scan_universe` is asked for `file_cap + 1` entries so hitting the cap
+  is distinguishable from a tree that is exactly cap-sized, which is what makes
+  `files_truncated` accurate at the boundary.
 - `host_read` returns `None` for both IO failure and non-UTF-8 content;
   `scan_literal` tells them apart with `host_stat` (stat ok means binary skip,
   stat failed means an unreadable gap).
 - Lowercasing can change byte length (U+0130): `LiteralMatcher::find_all` falls
-  back to a char-aligned scan when lengths differ, and match text is taken with
-  `get`, never a slice index.
+  back to a char-aligned scan when lengths differ, match text is taken with
+  `get` (never a slice index, for the same reason), and it returns every match
+  per line rather than the first, since two matches on one line are two real
+  call sites for a call-graph trace.
 
 ### ragconfig.rs
 
