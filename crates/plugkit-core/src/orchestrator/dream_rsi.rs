@@ -315,12 +315,15 @@ pub fn register_policy(content: &str) -> Result<Value, String> {
     let policy = parse_policy(body.get("policy").ok_or_else(|| "dream-policy-register requires policy".to_string())?)?;
     let owner_session_id = session_id()?;
     let deployed = body.get("deployed").and_then(Value::as_bool).unwrap_or(false);
+    let max_online_rounds = body.get("max_online_rounds").map(|value| value.as_u64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "dream-policy-register max_online_rounds must be a positive integer when present".to_string())).transpose()?;
     let policy_path = session_store_path("policies")?;
     let raw = crate::pkfs::read_to_string(&policy_path).unwrap_or_else(|| "[]".to_string());
     let mut policies = serde_json::from_str::<Value>(&raw).map_err(|_| "dream-policy-register policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-policy-register policy store is invalid".to_string())?.into_iter().map(|entry| verify_record("policy", &entry)).collect::<Result<Vec<_>, _>>()?;
     if policies.iter().any(|entry| entry.get("id").and_then(Value::as_str) == Some(policy.id.as_str()) && entry.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str())) { return Err(format!("dream-policy-register policy {} already exists", policy.id)); }
     if deployed { for entry in &mut policies { if entry.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str()) { entry["deployed"] = Value::Bool(false); } } }
-    let new_policy = json!({ "id": policy.id, "owner_session_id": owner_session_id, "roots": policy.roots, "max_nodes": policy.max_nodes, "deployed": deployed });
+    let new_policy = json!({ "id": policy.id, "owner_session_id": owner_session_id, "roots": policy.roots, "max_nodes": policy.max_nodes, "deployed": deployed, "max_online_rounds": max_online_rounds, "online_rounds": Vec::<u64>::new() });
     policies.push(new_policy);
     let signed = policies.into_iter().map(|record| signed_record("policy", record)).collect::<Result<Vec<_>, _>>()?;
     if !crate::pkfs::write(&policy_path, &Value::Array(signed).to_string()) { return Err("dream-policy-register could not persist policy".to_string()); }
@@ -372,8 +375,22 @@ pub fn record_discovery(content: &str) -> Result<Value, String> {
     let parent_id = evaluator.get("parent_id").and_then(Value::as_str).filter(|value| !value.trim().is_empty()).map(ToOwned::to_owned);
     let policy_path = session_store_path("policies")?;
     let raw_policies = crate::pkfs::read_to_string(&policy_path).ok_or_else(|| "dream-discovery-record has no registered policies".to_string())?;
-    let policies = serde_json::from_str::<Value>(&raw_policies).map_err(|_| "dream-discovery-record policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-discovery-record policy store is invalid".to_string())?.into_iter().map(|entry| verify_record("policy", &entry)).collect::<Result<Vec<_>, _>>()?;
-    if !policies.iter().any(|policy| policy.get("id").and_then(Value::as_str) == Some(policy_id.as_str()) && policy.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str())) { return Err("dream-discovery-record policy_id is not registered in this session".to_string()); }
+    let mut policies = serde_json::from_str::<Value>(&raw_policies).map_err(|_| "dream-discovery-record policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-discovery-record policy store is invalid".to_string())?.into_iter().map(|entry| verify_record("policy", &entry)).collect::<Result<Vec<_>, _>>()?;
+    let policy_index = policies.iter().position(|policy| policy.get("id").and_then(Value::as_str) == Some(policy_id.as_str()) && policy.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str())).ok_or_else(|| "dream-discovery-record policy_id is not registered in this session".to_string())?;
+    let mut policies_dirty = false;
+    if let Some(max_online_rounds) = policies[policy_index].get("max_online_rounds").and_then(Value::as_u64) {
+        let round = round.ok_or_else(|| format!("dream-discovery-record policy {policy_id} caps online rounds at {max_online_rounds}; round is required"))?;
+        let mut online_rounds: Vec<u64> = policies[policy_index].get("online_rounds").and_then(Value::as_array)
+            .map(|values| values.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+        if !online_rounds.contains(&round) {
+            if online_rounds.len() as u64 >= max_online_rounds {
+                return Err(format!("dream-discovery-record policy {policy_id} has used all {max_online_rounds} online rounds; seal the recorded discoveries and dream-replay/dream-replay-round before continuing this policy's online rollout"));
+            }
+            online_rounds.push(round);
+            policies[policy_index]["online_rounds"] = Value::Array(online_rounds.into_iter().map(Value::from).collect());
+            policies_dirty = true;
+        }
+    }
     let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id).ok_or_else(|| "dream-discovery-record dispatch_id is not a completed gm dispatch".to_string())?;
     if dispatch.get("exit_code").and_then(Value::as_i64) != Some(0) { return Err("dream-discovery-record requires a successful completed dispatch".to_string()); }
@@ -388,6 +405,10 @@ pub fn record_discovery(content: &str) -> Result<Value, String> {
     records.push(record.clone());
     let signed = records.into_iter().map(|record| signed_record("discovery", record)).collect::<Result<Vec<_>, _>>()?;
     if !crate::pkfs::write(&discovery_path, &Value::Array(signed).to_string()) { return Err("dream-discovery-record could not persist discovery record".to_string()); }
+    if policies_dirty {
+        let signed_policies = policies.into_iter().map(|record| signed_record("policy", record)).collect::<Result<Vec<_>, _>>()?;
+        if !crate::pkfs::write(&policy_path, &Value::Array(signed_policies).to_string()) { return Err("dream-discovery-record could not persist policy online-round usage".to_string()); }
+    }
     Ok(json!({ "ok": true, "discovery_id": id }))
 }
 
