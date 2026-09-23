@@ -6,6 +6,7 @@ struct Node {
     id: String,
     score: f64,
     cost: u64,
+    round: u64,
     children: Vec<String>,
 }
 
@@ -36,6 +37,12 @@ fn array_field<'a>(value: &'a Value, field: &str) -> Result<&'a Vec<Value>, Stri
         .ok_or_else(|| format!("dream-replay requires array {field}"))
 }
 
+fn nonneg_f64_field(value: &Value, field: &str) -> Result<f64, String> {
+    value.get(field).and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| format!("dream-replay requires non-negative finite {field}"))
+}
+
 fn parse_policy(value: &Value) -> Result<Policy, String> {
     let id = string_field(value, "id")?;
     let roots = array_field(value, "roots")?.iter().map(|root| {
@@ -56,7 +63,7 @@ fn parse_policy(value: &Value) -> Result<Policy, String> {
 fn parse_world(value: &Value) -> Result<World, String> {
     let id = string_field(value, "id")?;
     let mut nodes = BTreeMap::new();
-    for raw in array_field(value, "nodes")? {
+    for (index, raw) in array_field(value, "nodes")?.iter().enumerate() {
         let node_id = string_field(raw, "id")?;
         if nodes.contains_key(&node_id) {
             return Err(format!("dream-replay world {id} repeats node {node_id}"));
@@ -66,12 +73,13 @@ fn parse_world(value: &Value) -> Result<World, String> {
             .ok_or_else(|| format!("dream-replay node {node_id} requires finite score"))?;
         let cost = raw.get("cost").and_then(Value::as_u64)
             .ok_or_else(|| format!("dream-replay node {node_id} requires non-negative integer cost"))?;
+        let round = raw.get("round").and_then(Value::as_u64).unwrap_or(index as u64);
         let children = array_field(raw, "children")?.iter().map(|child| {
             child.as_str().filter(|value| !value.trim().is_empty())
                 .map(ToOwned::to_owned)
                 .ok_or_else(|| format!("dream-replay node {node_id} has an empty child"))
         }).collect::<Result<Vec<_>, _>>()?;
-        nodes.insert(node_id.clone(), Node { id: node_id, score, cost, children });
+        nodes.insert(node_id.clone(), Node { id: node_id, score, cost, round, children });
     }
     if nodes.is_empty() {
         return Err(format!("dream-replay world {id} requires at least one node"));
@@ -86,19 +94,21 @@ fn parse_world(value: &Value) -> Result<World, String> {
     Ok(World { id, nodes })
 }
 
-fn evaluate_policy(world: &World, policy: &Policy) -> Result<Value, String> {
+fn evaluate_policy(world: &World, policy: &Policy, beta1: f64, beta2: f64) -> Result<Value, String> {
     let mut queue = VecDeque::from(policy.roots.clone());
     let mut observed = BTreeSet::new();
-    let mut score = 0.0;
+    let mut quality = f64::NEG_INFINITY;
     let mut cost = 0_u64;
+    let mut rounds = BTreeSet::new();
     while let Some(id) = queue.pop_front() {
         if observed.len() >= policy.max_nodes || !observed.insert(id.clone()) {
             continue;
         }
         let node = world.nodes.get(&id)
             .ok_or_else(|| format!("dream-replay policy {} asks world {} for unobserved node {id}", policy.id, world.id))?;
-        score += node.score;
+        quality = quality.max(node.score);
         cost = cost.checked_add(node.cost).ok_or_else(|| "dream-replay cost overflow".to_string())?;
+        rounds.insert(node.round);
         for child in &node.children {
             if !observed.contains(child) {
                 queue.push_back(child.clone());
@@ -108,15 +118,21 @@ fn evaluate_policy(world: &World, policy: &Policy) -> Result<Value, String> {
     if observed.is_empty() {
         return Err(format!("dream-replay policy {} observed no nodes in world {}", policy.id, world.id));
     }
+    let attempts = observed.len() as f64;
+    let parallelism_bonus = attempts / rounds.len().max(1) as f64;
+    let replay_score = quality - beta1 * cost as f64 + beta2 * parallelism_bonus;
     Ok(json!({
         "world_id": world.id,
         "observed_node_ids": observed.into_iter().collect::<Vec<_>>(),
-        "score": score,
+        "quality": quality,
         "cost": cost,
+        "rounds": rounds.len(),
+        "parallelism_bonus": parallelism_bonus,
+        "replay_score": replay_score,
     }))
 }
 
-fn evaluate_worlds(baseline_id: String, policies: Vec<Policy>, worlds: Vec<World>) -> Result<Value, String> {
+fn evaluate_worlds(baseline_id: String, policies: Vec<Policy>, worlds: Vec<World>, beta1: f64, beta2: f64) -> Result<Value, String> {
     let mut policy_ids = BTreeSet::new();
     for policy in &policies {
         if !policy_ids.insert(policy.id.clone()) {
@@ -131,8 +147,8 @@ fn evaluate_worlds(baseline_id: String, policies: Vec<Policy>, worlds: Vec<World
     }
     let mut rankings = Vec::new();
     for policy in &policies {
-        let replays = worlds.iter().map(|world| evaluate_policy(world, policy)).collect::<Result<Vec<_>, _>>()?;
-        let score = replays.iter().filter_map(|replay| replay.get("score").and_then(Value::as_f64)).sum::<f64>();
+        let replays = worlds.iter().map(|world| evaluate_policy(world, policy, beta1, beta2)).collect::<Result<Vec<_>, _>>()?;
+        let score = replays.iter().filter_map(|replay| replay.get("replay_score").and_then(Value::as_f64)).sum::<f64>() / replays.len() as f64;
         let cost = replays.iter().filter_map(|replay| replay.get("cost").and_then(Value::as_u64)).sum::<u64>();
         rankings.push(json!({ "policy_id": policy.id, "score": score, "cost": cost, "replays": replays }));
     }
@@ -149,6 +165,8 @@ fn evaluate_worlds(baseline_id: String, policies: Vec<Policy>, worlds: Vec<World
         "baseline_score": baseline_score,
         "selected_score": selected.get("score").and_then(Value::as_f64),
         "improved": selected.get("policy_id") != baseline.get("policy_id"),
+        "beta1": beta1,
+        "beta2": beta2,
         "rankings": rankings,
     }))
 }
@@ -339,6 +357,8 @@ pub fn record_discovery(content: &str) -> Result<Value, String> {
     let id = string_field(&body, "id")?;
     let owner_session_id = session_id()?;
     let receipt_id = string_field(&body, "evaluator_receipt_id")?;
+    let round = body.get("round").map(|_| body.get("round").and_then(Value::as_u64)
+        .ok_or_else(|| "dream-discovery-record round must be a non-negative integer when present".to_string())).transpose()?;
     let receipt_path = evaluator_receipt_path()?;
     let raw_receipts = crate::pkfs::read_to_string(&receipt_path).ok_or_else(|| "dream-discovery-record has no evaluator receipts".to_string())?;
     let receipts = serde_json::from_str::<Value>(&raw_receipts).map_err(|_| "dream-discovery-record evaluator receipt store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-discovery-record evaluator receipt store is invalid".to_string())?;
@@ -364,7 +384,7 @@ pub fn record_discovery(content: &str) -> Result<Value, String> {
     if let Some(parent_id) = &parent_id {
         if !records.iter().any(|record| record.get("id").and_then(Value::as_str) == Some(parent_id.as_str()) && record.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str())) { return Err(format!("dream-discovery-record parent {parent_id} is absent")); }
     }
-    let record = json!({ "id": id, "evaluator_receipt_id": receipt_id, "owner_session_id": owner_session_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": evaluator_score, "cost": cost, "parent_id": parent_id });
+    let record = json!({ "id": id, "evaluator_receipt_id": receipt_id, "owner_session_id": owner_session_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": evaluator_score, "cost": cost, "round": round, "parent_id": parent_id });
     records.push(record.clone());
     let signed = records.into_iter().map(|record| signed_record("discovery", record)).collect::<Result<Vec<_>, _>>()?;
     if !crate::pkfs::write(&discovery_path, &Value::Array(signed).to_string()) { return Err("dream-discovery-record could not persist discovery record".to_string()); }
@@ -395,7 +415,8 @@ pub fn seal(content: &str) -> Result<Value, String> {
             || evaluator.get("dispatch_id").and_then(Value::as_str) != record.get("dispatch_id").and_then(Value::as_str) { return Err(format!("dream-world-seal discovery {id} does not match evaluator receipt")); }
         let score = evaluator.get("evaluator_score").and_then(Value::as_f64).ok_or_else(|| format!("dream-world-seal evaluator receipt {receipt_id} lacks score"))?;
         let cost = evaluator.get("cost").and_then(Value::as_u64).ok_or_else(|| format!("dream-world-seal evaluator receipt {receipt_id} lacks cost"))?;
-        Ok(json!({ "id": id, "score": score, "cost": cost, "children": if index + 1 < discovery_ids.len() { vec![discovery_ids[index + 1].as_str().unwrap_or("")] } else { vec![] } }))
+        let round = record.get("round").and_then(Value::as_u64).unwrap_or(index as u64);
+        Ok(json!({ "id": id, "score": score, "cost": cost, "round": round, "children": if index + 1 < discovery_ids.len() { vec![discovery_ids[index + 1].as_str().unwrap_or("")] } else { vec![] } }))
     }).collect::<Result<Vec<_>, String>>()?;
     let world = parse_world(&json!({ "id": world_id, "nodes": nodes }))?;
     let world_path = session_store_path("worlds")?;
@@ -416,6 +437,8 @@ pub fn evaluate(content: &str) -> Result<Value, String> {
     let ids = array_field(&body, "world_ids")?;
     let baseline_id = string_field(&body, "baseline_policy_id")?;
     let policy_ids = array_field(&body, "policy_ids")?;
+    let beta1 = nonneg_f64_field(&body, "beta1")?;
+    let beta2 = nonneg_f64_field(&body, "beta2")?;
     let policy_path = session_store_path("policies")?;
     let raw_policies = crate::pkfs::read_to_string(&policy_path).ok_or_else(|| "dream-replay has no registered policies".to_string())?;
     let stored_policies = serde_json::from_str::<Value>(&raw_policies).map_err(|_| "dream-replay policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-replay policy store is invalid".to_string())?.into_iter().map(|entry| verify_record("policy", &entry)).collect::<Result<Vec<_>, _>>()?;
@@ -434,7 +457,7 @@ pub fn evaluate(content: &str) -> Result<Value, String> {
         if stored_world.get("owner_session_id").and_then(Value::as_str) != Some(owner_session_id.as_str()) { return Err(format!("dream-replay sealed world {id} belongs to another session")); }
         parse_world(stored_world)
     }).collect::<Result<Vec<_>, _>>()?;
-    evaluate_worlds(baseline_id, policies, worlds)
+    evaluate_worlds(baseline_id, policies, worlds, beta1, beta2)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -443,7 +466,9 @@ pub fn evaluate(content: &str) -> Result<Value, String> {
     let baseline_id = string_field(&body, "baseline_policy_id")?;
     let policies = array_field(&body, "policies")?.iter().map(parse_policy).collect::<Result<Vec<_>, _>>()?;
     let worlds = array_field(&body, "worlds")?.iter().map(parse_world).collect::<Result<Vec<_>, _>>()?;
-    evaluate_worlds(baseline_id, policies, worlds)
+    let beta1 = nonneg_f64_field(&body, "beta1")?;
+    let beta2 = nonneg_f64_field(&body, "beta2")?;
+    evaluate_worlds(baseline_id, policies, worlds, beta1, beta2)
 }
 
 #[cfg(target_arch = "wasm32")]

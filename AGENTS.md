@@ -379,6 +379,33 @@ changes.
   `epistemic_gap`. `handle_list` stays un-deduped: it is the full-fidelity view
   of the file.
 
+### orchestrator/dream_rsi.rs
+
+- The replay objective follows the Dream-RSI paper's Eq. 1: per-world
+  `replay_score = quality - beta1*cost + beta2*parallelism_bonus`, where
+  `quality` is the MAX node score observed in the revealed trajectory (not a
+  sum -- matches the paper's best-attained-quality term), `cost` is the
+  summed per-node cost (every node's cost is fixed at 1 by
+  `evaluator_receipt`, so this already equals the paper's revealed-node
+  count), and `parallelism_bonus` is observed-node-count divided by the
+  count of distinct `round` values among those nodes (average attempts per
+  decision round).
+- `beta1`/`beta2` are required, non-negative, finite fields on every
+  `dream-replay` call (`nonneg_f64_field`) -- never given a default, since
+  they are the paper's fixed per-experiment hyperparameters and this crate's
+  own admission-filter prose rejects unmeasured constants.
+- `round` is caller-declared per discovery (`dream-discovery-record`'s
+  optional `round`), carried through `seal()` into each sealed node.
+  Siblings sharing a `round` represent one decision-round batch. Omitted
+  `round` defaults to the node's sequential position at seal/parse time,
+  giving one round per node (`parallelism_bonus` = 1.0, i.e. no bonus) --
+  the honest default when a caller has not declared batching. This keeps
+  every world sealed before this field existed parseable.
+- A policy's evaluation score is the MEAN `replay_score` across all
+  supplied worlds (the paper's R-bar), not a sum across worlds -- adding a
+  world must not mechanically change which policy wins on its own. The
+  strictly-higher-than-baseline no-regression selection rule is unchanged.
+
 ### Other modules
 
 - `dataflow::default_document` is never executed: `verbs.rs` runs
