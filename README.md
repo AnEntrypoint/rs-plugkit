@@ -317,9 +317,12 @@ cargo build --release
 Outputs `target/wasm32-wasip1/release/plugkit.wasm` (or `plugkit-slim.wasm`
 via the slim build profile). Release artifacts for the wasm target are
 produced by `.github/workflows/release.yml` on `git push` to `main`, and
-published to `AnEntrypoint/plugkit-bin` as both npm packages
-(`plugkit-wasm`) and GitHub Releases assets, sha256-verified alongside each
-resolved release tag.
+published to `AnEntrypoint/plugkit-bin` as GitHub Releases assets,
+sha256-verified alongside each resolved release tag. `agentplug-runner`
+polls and installs from these GitHub Releases directly
+(`agentplug-runner/src/download.rs`); there is no npm-publish step in this
+pipeline, so the `plugkit-wasm` npm package is not kept current by CI and
+should not be relied on as a live distribution channel.
 
 ## Cascade
 
