@@ -225,44 +225,35 @@ pub fn gm_dir() -> PathBuf {
     resolve_project_root_with_retry().join(".gm")
 }
 
-/// Which verbs `dispatch_verb_inner` routes to the orchestrator.
-///
-/// `is_orchestrator_verb` and the mediator's advertised subsystem map both
-/// read this slice, so the ADVERTISED surface cannot drift from it. The
-/// DISPATCHED surface is a separate match below, and nothing in the type
-/// system tied the two together -- a verb added to one and not the other
-/// either advertises a verb that returns unknown_verb, or dispatches one no
-/// caller can discover. `debug_assert_verb_sets_agree` closes that gap: it
-/// runs on every orchestrator dispatch in a debug build and names the exact
-/// verb that drifted.
-pub const ORCHESTRATOR_VERBS: &[&str] = &[
-    "transition", "transition-revert", "mutable-resolve", "mutable-add", "mutable-list", "mutable-defer", "dream-policy-register", "dream-evaluator-receipt", "dream-discovery-record", "dream-world-seal", "dream-replay", "dream-replay-round",
-    "memorize-fire", "memorize-backfill", "discipline-note", "discipline-check-removal", "discipline-audit", "capability-resolve", "memory-namespace-audit", "codeinsight-namespace-audit", "calculus-model-check", "phase-status", "residual-scan", "auto-recall",
-    "instruction", "prd-add", "prd-resolve", "prd-list", "prd-defer",
-    "task-spawn", "task-list", "task-stop", "task-output",
-    "memorize-continue", "fsm-vendor", "fsm-validate", "fsm-propose-override", "claim-audit", "submodule-check",
-    "component-loader-reconcile", "component-loader-hmr",
-];
+/// A verb absent from both `ORCHESTRATOR_VERBS` and the `dispatch()` match is
+/// invisible to `assert_verb_sets_agree` (it only iterates those two consts),
+/// so this macro generates both consts and the match from one literal list:
+/// a verb cannot get a dispatch arm without also becoming advertised, and
+/// nothing here can drift out of a third hand-maintained copy again.
+macro_rules! orchestrator_dispatch_table {
+    ( $( $verb:literal => $handler:expr ),+ $(,)? ) => {
+        pub const ORCHESTRATOR_VERBS: &[&str] = &[ $( $verb ),+ ];
 
+        const DISPATCH_ARM_VERBS: &[&str] = &[ $( $verb ),+ ];
 
-/// Every verb this list advertises must have a real dispatch arm, and every
-/// verb with a real dispatch arm must be advertised here. The second
-/// direction is the one that actually shipped two fully-implemented HMR
-/// verbs as unreachable in production: `is_orchestrator_verb` (built from
-/// `ORCHESTRATOR_VERBS`) gates entry to `dispatch()` before its match ever
-/// runs, so a verb present in the match but missing from
-/// `ORCHESTRATOR_VERBS` never reaches its own correct handler --
-/// `unknown_verb` on every call, with no signal that a working handler
-/// exists. Checking only "advertised implies has an arm" (the original
-/// shape of this guard) cannot catch that failure mode at all, since the
-/// missing verb is never iterated in the first place.
-///
-/// Runs unconditionally, in every build profile including release: the
-/// original debug-only guard (and the `verb_has_dispatch_arm` predicate it
-/// called) did not exist in a release wasm at all, so this drift class went
-/// uncaught in production. A `matches!` over ~32 string literals per
-/// dispatch is a negligible per-call cost next to the network/filesystem/db
-/// work every real verb handler already does.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn dispatch(verb: &str, _file_id: &str, _content: &str) -> (String, String, i32) {
+            (format!("{{\"ok\":false,\"error\":\"orchestrator verb '{}' requires wasm32\"}}", verb), String::new(), 1)
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        pub fn dispatch(verb: &str, _file_id: &str, content: &str) -> (String, String, i32) {
+            assert_verb_sets_agree();
+            match verb {
+                $( $verb => $handler, )+
+                _ => (format!("Unknown orchestrator verb: {}", verb), String::new(), 1),
+            }
+        }
+    };
+}
+
+/// Runs unconditionally, in every build profile including release: the guard
+/// this superseded was debug-only and never shipped in a release wasm.
 fn assert_verb_sets_agree() {
     for v in ORCHESTRATOR_VERBS {
         assert!(
