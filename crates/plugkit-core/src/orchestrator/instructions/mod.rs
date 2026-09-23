@@ -59,6 +59,28 @@ fn iso8601_to_ms(s: &str) -> Option<i64> {
 }
 
 #[cfg(target_arch = "wasm32")]
+const SUPPLY_CHAIN_SCAN_DEBOUNCE_MS: i64 = 300_000;
+
+#[cfg(target_arch = "wasm32")]
+fn automatic_supply_chain_scan() -> serde_json::Value {
+    let ts_path = super::gm_dir().join(".last-scan-deps-ts").to_string_lossy().to_string();
+    let result_path = super::gm_dir().join(".last-scan-deps-result.json").to_string_lossy().to_string();
+    let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
+    let last_ts = pkfs::read_to_string(&ts_path).and_then(|s| s.trim().parse::<i64>().ok()).filter(|n| *n > 0);
+    if let Some(last) = last_ts {
+        if now_ms.saturating_sub(last) < SUPPLY_CHAIN_SCAN_DEBOUNCE_MS {
+            return pkfs::read_to_string(&result_path)
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or(serde_json::Value::Null);
+        }
+    }
+    let result = crate::scan_deps::scan_deps(&json!({}));
+    let _ = pkfs::write(&ts_path, &now_ms.to_string());
+    let _ = pkfs::write(&result_path, &result.to_string());
+    result
+}
+
+#[cfg(target_arch = "wasm32")]
 fn write_turn_summary(
     phase: &str,
     prd_pending: usize,
@@ -650,6 +672,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     ilog("instruction::handle post-recall");
 
     let update_available = read_spool_json(".update-available.json");
+    let supply_chain_scan = automatic_supply_chain_scan();
     let dream_rsi_strategy = super::dream_rsi::active_strategy(notify_session.as_deref());
     let dream_rsi_replay = super::dream_rsi::automatic_replay(notify_session.as_deref());
     let config_changed = super::config_notify::drain_for_session(notify_session.as_deref());
@@ -777,6 +800,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "codeinsight_start": codeinsight_start,
         "codeinsight_overview": codeinsight_overview,
         "ready_wave": wave,
+        "supply_chain_scan": supply_chain_scan,
         "dream_rsi_strategy": dream_rsi_strategy,
         "dream_rsi_replay": dream_rsi_replay,
         "update_available": update_available,
