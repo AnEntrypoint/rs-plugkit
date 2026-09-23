@@ -283,23 +283,28 @@ pub fn handle(content: &str) -> (String, String, i32) {
     (payload.to_string(), String::new(), 0)
 }
 
-pub fn enabled_names() -> Vec<String> {
+fn parse_enabled_names(content: &str) -> Vec<String> {
     let mut names: Vec<String> = vec!["default".to_string()];
-    let enabled_path = gm_dir().join("disciplines").join("enabled.txt");
-    let enabled_s = enabled_path.to_string_lossy().to_string();
-    if let Some(content) = pkfs::read_to_string(&enabled_s) {
-        for line in content.lines() {
-            let name = line.trim();
-            if !name.is_empty() && !names.iter().any(|n| n == name) {
-                names.push(name.to_string());
-            }
+    for line in content.lines() {
+        let name = line.trim();
+        if !name.is_empty() && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
         }
     }
     names
 }
 
+pub fn enabled_names() -> Vec<String> {
+    let enabled_path = gm_dir().join("disciplines").join("enabled.txt");
+    let enabled_s = enabled_path.to_string_lossy().to_string();
+    parse_enabled_names(&pkfs::read_to_string(&enabled_s).unwrap_or_default())
+}
+
 pub fn removal_dependents(discipline: &str) -> Vec<String> {
-    let names = enabled_names();
+    removal_dependents_with_names(discipline, &enabled_names())
+}
+
+fn removal_dependents_with_names(discipline: &str, names: &[String]) -> Vec<String> {
     if !names.iter().any(|n| n == discipline) {
         return Vec::new();
     }
@@ -310,7 +315,7 @@ pub fn removal_dependents(discipline: &str) -> Vec<String> {
         .filter(|n| n.as_str() != discipline)
         .filter(|n| declared_realm(n) == realm)
         .filter(|n| read_fiber_state(n) == FiberLifecycle::Active)
-        .filter(|n| requires_satisfied(n, &names))
+        .filter(|n| requires_satisfied(n, names))
         .filter(|n| {
             declared_requires(n)
                 .iter()
@@ -337,7 +342,11 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    let dependents = removal_dependents(&discipline);
+    let enabled_path = gm_dir().join("disciplines").join("enabled.txt").to_string_lossy().to_string();
+    let original_content = pkfs::read_to_string(&enabled_path).unwrap_or_default();
+    let names = parse_enabled_names(&original_content);
+
+    let dependents = removal_dependents_with_names(&discipline, &names);
     let lifecycle = read_fiber_state(&discipline);
     let all_known = all_known_discipline_dirs();
     let dangling = dangling_requires(&discipline, &all_known);
@@ -376,7 +385,6 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
         );
     };
 
-    let names = enabled_names();
     if !names.iter().any(|n| n == discipline.as_str()) {
         let payload = serde_json::json!({
             "ok": true,
@@ -393,9 +401,7 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
 
     let remaining: Vec<&String> = names.iter().filter(|n| n.as_str() != discipline.as_str() && n.as_str() != "default").collect();
     let new_content = remaining.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
-    let enabled_path = gm_dir().join("disciplines").join("enabled.txt").to_string_lossy().to_string();
     let write_content = if new_content.is_empty() { String::new() } else { format!("{}\n", new_content) };
-    let original_content = pkfs::read_to_string(&enabled_path).unwrap_or_default();
     match pkfs::cas_write(&enabled_path, &original_content, &write_content) {
         pkfs::CasWriteOutcome::Swapped => {}
         pkfs::CasWriteOutcome::Mismatch => {

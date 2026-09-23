@@ -75,9 +75,8 @@ pub fn diff_entries(previous: &[ComponentEntry], next: &[ComponentEntry]) -> Vec
             }),
             Some(prev) => {
                 let mut changed = Vec::new();
-                if prev.id != entry.id || prev.url != entry.url {
-                    changed.push(if prev.id != entry.id { "id".to_string() } else { "url".to_string() });
-                    out.push(ReconcileDecision { id: entry.id.clone(), op: ReconcileOp::Rebuild, changed_fields: changed });
+                if prev.url != entry.url {
+                    out.push(ReconcileDecision { id: entry.id.clone(), op: ReconcileOp::Rebuild, changed_fields: vec!["url".to_string()] });
                     continue;
                 }
                 if prev.isolate != entry.isolate {
@@ -241,14 +240,19 @@ fn state_path() -> std::path::PathBuf {
 }
 
 pub fn read_state() -> LoaderState {
-    pkfs::read_to_string(&state_path().to_string_lossy())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    read_state_with_raw().0
 }
 
-pub fn write_state(state: &LoaderState) {
-    if let Ok(text) = serde_json::to_string(state) {
-        let _ = pkfs::write(&state_path().to_string_lossy(), &text);
+pub fn read_state_with_raw() -> (LoaderState, String) {
+    let raw = pkfs::read_to_string(&state_path().to_string_lossy()).unwrap_or_default();
+    let state = serde_json::from_str(&raw).unwrap_or_default();
+    (state, raw)
+}
+
+pub fn cas_write_state(expected_raw: &str, state: &LoaderState) -> pkfs::CasWriteOutcome {
+    match serde_json::to_string(state) {
+        Ok(text) => pkfs::cas_write(&state_path().to_string_lossy(), expected_raw, &text),
+        Err(_) => pkfs::CasWriteOutcome::IoError,
     }
 }
 
@@ -352,12 +356,10 @@ pub fn reload(
     backup: &ModuleBackup,
     swap: &mut dyn FiberSwap,
 ) -> ReloadOutcome {
-    let mut disposed: Vec<String> = Vec::new();
     let mut reloaded: Vec<String> = Vec::new();
 
     for entry in stale_entries {
         swap.dispose(&entry.id);
-        disposed.push(entry.id.clone());
         let source = sources.get(&entry.url).cloned().unwrap_or_default();
         match swap.instantiate(&entry.id, &entry.url, &source, &entry.config) {
             Ok(_new_source) => {
