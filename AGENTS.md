@@ -420,6 +420,17 @@ changes.
   round's reveal into the closing tally, never truncates it. State lives
   at `.gm/dream-rsi/<session>/replay-rounds.json`, one record per
   `replay_id`, closed replays reject further calls.
+- `register_policy` takes an optional `max_online_rounds` (the paper's
+  N1), stored on the policy record with an empty `online_rounds` tally.
+  When set, `record_discovery` for that policy requires an explicit
+  `round` and rejects a NEW round value once `online_rounds.len()` would
+  exceed the cap -- reusing an already-used round (a parallel sibling in
+  the same batch) never counts twice. A policy without
+  `max_online_rounds` is unbounded, unchanged from before this field
+  existed. This is what actually forces the paper's alternate-and-improve
+  structure: past the cap, the caller must seal and dream-replay (or
+  dream-replay-round) before a fresh deployed policy can keep recording
+  online discoveries.
 
 ### Other modules
 
