@@ -416,7 +416,12 @@ pub fn seal(content: &str) -> Result<Value, String> {
         let score = evaluator.get("evaluator_score").and_then(Value::as_f64).ok_or_else(|| format!("dream-world-seal evaluator receipt {receipt_id} lacks score"))?;
         let cost = evaluator.get("cost").and_then(Value::as_u64).ok_or_else(|| format!("dream-world-seal evaluator receipt {receipt_id} lacks cost"))?;
         let round = record.get("round").and_then(Value::as_u64).unwrap_or(index as u64);
-        Ok(json!({ "id": id, "score": score, "cost": cost, "round": round, "children": if index + 1 < discovery_ids.len() { vec![discovery_ids[index + 1].as_str().unwrap_or("")] } else { vec![] } }))
+        let children = records.iter()
+            .filter(|other| other.get("parent_id").and_then(Value::as_str) == Some(id)
+                && discovery_ids.iter().any(|listed| listed.as_str() == Some(other.get("id").and_then(Value::as_str).unwrap_or(""))))
+            .filter_map(|other| other.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        Ok(json!({ "id": id, "score": score, "cost": cost, "round": round, "children": children }))
     }).collect::<Result<Vec<_>, String>>()?;
     let world = parse_world(&json!({ "id": world_id, "nodes": nodes }))?;
     let world_path = session_store_path("worlds")?;
@@ -427,6 +432,158 @@ pub fn seal(content: &str) -> Result<Value, String> {
     let signed = worlds.into_iter().map(|record| signed_record("world", record)).collect::<Result<Vec<_>, _>>()?;
     if !crate::pkfs::write(&world_path, &Value::Array(signed).to_string()) { return Err("dream-world-seal could not persist sealed world".to_string()); }
     Ok(json!({ "ok": true, "world_id": world.id, "node_count": world.nodes.len() }))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn replay_rounds_path() -> Result<String, String> {
+    session_store_path("replay-rounds")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn eligible_nodes(roots: &[String], revealed: &BTreeSet<String>, world: &World) -> BTreeSet<String> {
+    roots.iter().cloned()
+        .chain(revealed.iter().filter(|id| {
+            world.nodes.get(id.as_str()).map(|node| !node.children.iter().any(|child| revealed.contains(child))).unwrap_or(false)
+        }).cloned())
+        .filter(|id| world.nodes.contains_key(id))
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn replay_round(content: &str) -> Result<Value, String> {
+    let body: Value = serde_json::from_str(content).map_err(|error| format!("dream-replay-round requires JSON: {error}"))?;
+    let owner_session_id = session_id()?;
+    let replay_id = string_field(&body, "replay_id")?;
+    let path = replay_rounds_path()?;
+    let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
+    let mut states = serde_json::from_str::<Value>(&raw).map_err(|_| "dream-replay-round state store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-replay-round state store is invalid".to_string())?;
+    let existing_index = states.iter().position(|state| state.get("replay_id").and_then(Value::as_str) == Some(replay_id.as_str()) && state.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str()));
+
+    let mut state = if let Some(index) = existing_index {
+        states[index].clone()
+    } else {
+        let policy_id = string_field(&body, "policy_id")?;
+        let world_id = string_field(&body, "world_id")?;
+        let max_rounds = body.get("max_rounds").and_then(Value::as_u64)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "dream-replay-round requires positive integer max_rounds".to_string())?;
+        let beta1 = nonneg_f64_field(&body, "beta1")?;
+        let beta2 = nonneg_f64_field(&body, "beta2")?;
+        let policy_path = session_store_path("policies")?;
+        let raw_policies = crate::pkfs::read_to_string(&policy_path).ok_or_else(|| "dream-replay-round has no registered policies".to_string())?;
+        let stored_policies = serde_json::from_str::<Value>(&raw_policies).map_err(|_| "dream-replay-round policy store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-replay-round policy store is invalid".to_string())?.into_iter().map(|entry| verify_record("policy", &entry)).collect::<Result<Vec<_>, _>>()?;
+        let stored_policy = stored_policies.iter().find(|policy| policy.get("id").and_then(Value::as_str) == Some(policy_id.as_str()) && policy.get("owner_session_id").and_then(Value::as_str) == Some(owner_session_id.as_str())).ok_or_else(|| format!("dream-replay-round registered policy {policy_id} is absent"))?;
+        let policy = parse_policy(stored_policy)?;
+        let world_path = session_store_path("worlds")?;
+        let raw_worlds = crate::pkfs::read_to_string(&world_path).ok_or_else(|| "dream-replay-round has no sealed worlds".to_string())?;
+        let stored_worlds = serde_json::from_str::<Value>(&raw_worlds).map_err(|_| "dream-replay-round world store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-replay-round world store is invalid".to_string())?.into_iter().map(|entry| verify_record("world", &entry)).collect::<Result<Vec<_>, _>>()?;
+        let stored_world = stored_worlds.iter().find(|world| world.get("id").and_then(Value::as_str) == Some(world_id.as_str())).ok_or_else(|| format!("dream-replay-round sealed world {world_id} is absent"))?;
+        if stored_world.get("owner_session_id").and_then(Value::as_str) != Some(owner_session_id.as_str()) { return Err(format!("dream-replay-round sealed world {world_id} belongs to another session")); }
+        parse_world(stored_world)?;
+        json!({
+            "replay_id": replay_id,
+            "owner_session_id": owner_session_id,
+            "policy_id": policy_id,
+            "world_id": world_id,
+            "roots": policy.roots,
+            "max_nodes": policy.max_nodes,
+            "max_rounds": max_rounds,
+            "beta1": beta1,
+            "beta2": beta2,
+            "revealed": Vec::<String>::new(),
+            "rounds_used": 0,
+            "quality": Value::Null,
+            "cost": 0,
+            "closed": false,
+        })
+    };
+
+    if state.get("closed").and_then(Value::as_bool) == Some(true) {
+        return Err(format!("dream-replay-round {replay_id} is already closed"));
+    }
+
+    let world_id = string_field(&state, "world_id")?;
+    let world_path = session_store_path("worlds")?;
+    let raw_worlds = crate::pkfs::read_to_string(&world_path).ok_or_else(|| "dream-replay-round has no sealed worlds".to_string())?;
+    let stored_worlds = serde_json::from_str::<Value>(&raw_worlds).map_err(|_| "dream-replay-round world store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-replay-round world store is invalid".to_string())?.into_iter().map(|entry| verify_record("world", &entry)).collect::<Result<Vec<_>, _>>()?;
+    let stored_world = stored_worlds.iter().find(|world| world.get("id").and_then(Value::as_str) == Some(world_id.as_str())).ok_or_else(|| format!("dream-replay-round sealed world {world_id} is absent"))?;
+    let world = parse_world(stored_world)?;
+
+    let roots: Vec<String> = state.get("roots").and_then(Value::as_array).map(|values| values.iter().filter_map(Value::as_str).map(ToOwned::to_owned).collect()).unwrap_or_default();
+    let max_nodes = state.get("max_nodes").and_then(Value::as_u64).unwrap_or(u64::MAX) as usize;
+    let max_rounds = state.get("max_rounds").and_then(Value::as_u64).unwrap_or(0);
+    let beta1 = state.get("beta1").and_then(Value::as_f64).unwrap_or(0.0);
+    let beta2 = state.get("beta2").and_then(Value::as_f64).unwrap_or(0.0);
+    let mut revealed: BTreeSet<String> = state.get("revealed").and_then(Value::as_array).map(|values| values.iter().filter_map(Value::as_str).map(ToOwned::to_owned).collect()).unwrap_or_default();
+    let mut rounds_used = state.get("rounds_used").and_then(Value::as_u64).unwrap_or(0);
+    let mut quality = state.get("quality").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
+    let mut cost = state.get("cost").and_then(Value::as_u64).unwrap_or(0);
+
+    let eligible = eligible_nodes(&roots, &revealed, &world);
+    let requested_batch: Vec<String> = body.get("batch").and_then(Value::as_array).map(|values| values.iter().filter_map(Value::as_str).map(ToOwned::to_owned).collect()).unwrap_or_default();
+    let finalize = requested_batch.is_empty() || rounds_used >= max_rounds || revealed.len() >= max_nodes;
+
+    let mut newly_revealed = Vec::new();
+    if !finalize {
+        for id in &requested_batch {
+            if !eligible.contains(id) {
+                return Err(format!("dream-replay-round {id} is not an eligible continuation this round"));
+            }
+        }
+        for id in &requested_batch {
+            let node = world.nodes.get(id).ok_or_else(|| format!("dream-replay-round world {world_id} has no node {id}"))?;
+            for child_id in &node.children {
+                if revealed.len() >= max_nodes { break; }
+                if revealed.insert(child_id.clone()) {
+                    let child = world.nodes.get(child_id).ok_or_else(|| format!("dream-replay-round world {world_id} node {id} references unobserved child {child_id}"))?;
+                    quality = quality.max(child.score);
+                    cost = cost.checked_add(child.cost).ok_or_else(|| "dream-replay-round cost overflow".to_string())?;
+                    newly_revealed.push(json!({ "id": child_id, "score": child.score, "cost": child.cost }));
+                }
+            }
+        }
+        rounds_used += 1;
+    }
+
+    let closed = finalize || rounds_used >= max_rounds || revealed.len() >= max_nodes;
+    state["revealed"] = Value::Array(revealed.iter().cloned().map(Value::String).collect());
+    state["rounds_used"] = Value::from(rounds_used);
+    state["quality"] = if quality.is_finite() { Value::from(quality) } else { Value::Null };
+    state["cost"] = Value::from(cost);
+    state["closed"] = Value::Bool(closed);
+
+    let response = if closed {
+        let attempts = revealed.len() as f64;
+        let parallelism_bonus = if rounds_used > 0 { attempts / rounds_used as f64 } else { 0.0 };
+        let final_quality = if quality.is_finite() { quality } else { 0.0 };
+        let replay_score = final_quality - beta1 * cost as f64 + beta2 * parallelism_bonus;
+        state["replay_score"] = Value::from(replay_score);
+        json!({
+            "ok": true, "replay_id": replay_id, "closed": true, "rounds_used": rounds_used,
+            "revealed_count": revealed.len(), "quality": final_quality, "cost": cost,
+            "parallelism_bonus": parallelism_bonus, "replay_score": replay_score,
+        })
+    } else {
+        json!({
+            "ok": true, "replay_id": replay_id, "closed": false, "rounds_used": rounds_used,
+            "rounds_remaining": max_rounds.saturating_sub(rounds_used), "revealed_now": newly_revealed,
+            "eligible_next": eligible_nodes(&roots, &revealed, &world).into_iter().collect::<Vec<_>>(),
+            "quality_so_far": if quality.is_finite() { Value::from(quality) } else { Value::Null },
+            "cost_so_far": cost,
+        })
+    };
+
+    if let Some(index) = existing_index { states[index] = state; } else { states.push(state); }
+    if !crate::pkfs::write(&path, &Value::Array(states).to_string()) { return Err("dream-replay-round could not persist state".to_string()); }
+    Ok(response)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn handle_replay_round(content: &str) -> (String, String, i32) {
+    match replay_round(content) {
+        Ok(result) => (result.to_string(), String::new(), 0),
+        Err(error) => (json!({ "ok": false, "error": error }).to_string(), String::new(), 1),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

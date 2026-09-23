@@ -405,6 +405,21 @@ changes.
   supplied worlds (the paper's R-bar), not a sum across worlds -- adding a
   world must not mechanically change which policy wins on its own. The
   strictly-higher-than-baseline no-regression selection rule is unchanged.
+- `seal()` builds each sealed node's `children` from the discoveries whose
+  `parent_id` points to it (real tree topology, including branching --
+  more than one discovery may share a parent), never from `discovery_ids`
+  array order. `dream-replay`'s one-shot BFS stays a cheap non-interactive
+  approximation; `dream-replay-round` is the paper-faithful path (Section
+  3.2/Algorithm 1): a session-scoped, stateful, round-by-round replay
+  where the CALLER (the agent's own inference, not this crate) picks each
+  round's batch from the current eligible set -- a policy's declared
+  `roots` (always eligible, can reopen a new branch at any round) union
+  the leaves of the revealed subtree (a revealed node with no revealed
+  child yet). `max_rounds` (the paper's N2) and a policy's `max_nodes`
+  both bound a replay; either cap reached closes it and folds that
+  round's reveal into the closing tally, never truncates it. State lives
+  at `.gm/dream-rsi/<session>/replay-rounds.json`, one record per
+  `replay_id`, closed replays reject further calls.
 
 ### Other modules
 
