@@ -4,10 +4,8 @@ use serde_json::json;
 
 use crate::wasm_dispatch::{host_cwd_string, host_read, host_write};
 
-const MARKER_REL: &str = ".gm/.embed-generation";
-
 fn marker_rel_for_table(table: &str) -> String {
-    format!("{}.{}", MARKER_REL, table)
+    format!(".gm/.embed-generation.{}", table)
 }
 
 const COMPONENT_SEPARATOR: u8 = 0xff;
@@ -73,20 +71,8 @@ fn embed_generation_state_at(rel: &str) -> EmbedGenerationState {
     }
 }
 
-pub fn embed_generation_state() -> EmbedGenerationState {
-    embed_generation_state_at(MARKER_REL)
-}
-
-pub fn embed_generation_changed() -> bool {
-    embed_generation_state() == EmbedGenerationState::Changed
-}
-
 pub fn embed_generation_changed_for_table(table: &str) -> bool {
     embed_generation_state_at(&marker_rel_for_table(table)) == EmbedGenerationState::Changed
-}
-
-pub fn record_embed_generation() -> bool {
-    record_embed_generation_at(MARKER_REL)
 }
 
 pub fn record_embed_generation_for_table(table: &str) -> bool {

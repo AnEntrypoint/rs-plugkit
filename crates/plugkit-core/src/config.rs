@@ -428,25 +428,32 @@ fn load_one_repo_source(src: &RepoSource, spec_path: &str, fetcher: &dyn RepoFet
     }
 }
 
+/// `Load` alone cannot name where the winning config actually loaded from:
+/// `RepoSource::cache_dir` is the per-entry checkout one level below the
+/// tier's cache root (`{cache_root}/{fnv1a64(repo|ref|path):016x}`, set by
+/// `parse_source_entry`), and a caller resolving prose/hooks/dataflow needs
+/// that checkout path, not the root several sources under this tier share.
 fn load_repo_tier(
     spec_path: &str,
     cache_root: String,
     fetcher: &dyn RepoFetcher,
     tier_label: &str,
-) -> Load {
+) -> (Load, Option<String>) {
     let Some(raw) = pkfs::read_to_string(spec_path) else {
-        return Load::Absent;
+        return (Load::Absent, None);
     };
     let sources = match parse_source_spec(&raw, spec_path, &cache_root, tier_label) {
-        Ok(list) if list.is_empty() => return Load::Absent,
+        Ok(list) if list.is_empty() => return (Load::Absent, None),
         Ok(list) => list,
-        Err(reason) => return Load::Rejected { reason },
+        Err(reason) => return (Load::Rejected { reason }, None),
     };
     let mut merged: Option<Config> = None;
+    let mut winning_cache_dir: Option<String> = None;
     let mut entry_failures: Vec<String> = Vec::new();
     for src in &sources {
         match load_one_repo_source(src, spec_path, fetcher) {
             Load::Accepted(cfg) => {
+                winning_cache_dir = Some(src.cache_dir.clone());
                 merged = Some(match merged {
                     None => cfg,
                     Some(prior) => Config {
@@ -460,14 +467,17 @@ fn load_repo_tier(
         }
     }
     match merged {
-        Some(cfg) => Load::Accepted(cfg),
-        None => Load::Rejected {
-            reason: format!(
-                "{spec_path}: every source in this tier failed to load ({} entries): {}",
-                sources.len(),
-                entry_failures.join("; ")
-            ),
-        },
+        Some(cfg) => (Load::Accepted(cfg), winning_cache_dir),
+        None => (
+            Load::Rejected {
+                reason: format!(
+                    "{spec_path}: every source in this tier failed to load ({} entries): {}",
+                    sources.len(),
+                    entry_failures.join("; ")
+                ),
+            },
+            None,
+        ),
     }
 }
 
@@ -534,9 +544,9 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
     if let Some(text) = pkfs::read_to_string(&p1) {
         match parse_config(&text, &p1) {
             Load::Accepted(config) => {
-                let _ = load_repo_tier(&join(project_root, SOURCE_SPEC_REL), join(project_root, SOURCE_CACHE_REL), fetcher, Tier::ProjectRepoSpec.as_str());
+                let _ = load_repo_tier(&join(project_root, SOURCE_SPEC_REL), join(project_root, SOURCE_CACHE_REL), fetcher, Tier::ProjectRepoSpec.as_str()).0;
                 if let Some(home) = home_dir() {
-                    let _ = load_repo_tier(&join(&home, SOURCE_SPEC_REL), join(&home, SOURCE_CACHE_REL), fetcher, Tier::UserRepoSpec.as_str());
+                    let _ = load_repo_tier(&join(&home, SOURCE_SPEC_REL), join(&home, SOURCE_CACHE_REL), fetcher, Tier::UserRepoSpec.as_str()).0;
                 }
                 let _ = load_implicit_default_repo_tier(project_root, fetcher);
                 return Resolution {
@@ -555,34 +565,34 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
     let p2_cache_dir = join(project_root, SOURCE_CACHE_REL);
     let p2 = join(project_root, SOURCE_SPEC_REL);
     match load_repo_tier(&p2, p2_cache_dir.clone(), fetcher, Tier::ProjectRepoSpec.as_str()) {
-        Load::Accepted(config) => {
+        (Load::Accepted(config), winning_cache_dir) => {
             return Resolution {
                 config,
                 tier: Tier::ProjectRepoSpec,
                 why: format!("in-project config-repo spec at {p2}"),
                 rejected,
-                cache_dir: Some(p2_cache_dir),
+                cache_dir: winning_cache_dir.or(Some(p2_cache_dir)),
             }
         }
-        Load::Rejected { reason } => rejected.push(reason),
-        Load::Absent => {}
+        (Load::Rejected { reason }, _) => rejected.push(reason),
+        (Load::Absent, _) => {}
     }
 
     if let Some(home) = home_dir() {
         let p3_cache_dir = join(&home, SOURCE_CACHE_REL);
         let p3 = join(&home, SOURCE_SPEC_REL);
         match load_repo_tier(&p3, p3_cache_dir.clone(), fetcher, Tier::UserRepoSpec.as_str()) {
-            Load::Accepted(config) => {
+            (Load::Accepted(config), winning_cache_dir) => {
                 return Resolution {
                     config,
                     tier: Tier::UserRepoSpec,
                     why: format!("user-wide config-repo spec at {p3}"),
                     rejected,
-                    cache_dir: Some(p3_cache_dir),
+                    cache_dir: winning_cache_dir.or(Some(p3_cache_dir)),
                 }
             }
-            Load::Rejected { reason } => rejected.push(reason),
-            Load::Absent => {}
+            (Load::Rejected { reason }, _) => rejected.push(reason),
+            (Load::Absent, _) => {}
         }
     }
 
