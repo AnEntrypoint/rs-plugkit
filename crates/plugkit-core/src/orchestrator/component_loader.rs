@@ -143,6 +143,14 @@ fn next_tag(state: &mut LoaderState) -> u64 {
     state.tag_counter
 }
 
+fn entry_delta_key(entry_id: &str, key: &str) -> String {
+    format!("{entry_id}\u{0}{key}")
+}
+
+fn provider_key(key: &str, realm: &str) -> String {
+    format!("{key}\u{0}{realm}")
+}
+
 pub fn patch_isolation(
     state: &mut LoaderState,
     entry: &ComponentEntry,
@@ -173,18 +181,18 @@ pub fn patch_isolation(
         let old_realm = rho.realm_of(key);
         let new_realm = rho_prime.realm_of(key);
         let entry_tag = next_tag(state);
-        state.entry_delta_tags.insert((entry.id.clone(), key.clone()), entry_tag);
+        state.entry_delta_tags.insert(entry_delta_key(&entry.id, key), entry_tag);
 
-        let provider_id = state.provider_of.get(&(key.clone(), old_realm.clone())).cloned();
+        let provider_id = state.provider_of.get(&provider_key(key, &old_realm)).cloned();
         let provider_tag = provider_id
             .as_ref()
-            .and_then(|pid| state.entry_delta_tags.get(&(pid.clone(), key.clone())).copied());
+            .and_then(|pid| state.entry_delta_tags.get(&entry_delta_key(pid, key)).copied());
 
         let own_binding = provider_id.as_deref() == Some(entry.id.as_str())
-            && !state.provider_of.contains_key(&(key.clone(), new_realm.clone()));
+            && !state.provider_of.contains_key(&provider_key(key, &new_realm));
         if own_binding {
-            state.provider_of.remove(&(key.clone(), old_realm.clone()));
-            state.provider_of.insert((key.clone(), new_realm.clone()), entry.id.clone());
+            state.provider_of.remove(&provider_key(key, &old_realm));
+            state.provider_of.insert(provider_key(key, &new_realm), entry.id.clone());
             binding_moved.push(key.clone());
         }
 
@@ -196,7 +204,7 @@ pub fn patch_isolation(
             if dep_realm != old_realm && dep_realm != new_realm {
                 continue;
             }
-            let dep_tag = state.entry_delta_tags.get(&(dep.id.clone(), key.clone())).copied();
+            let dep_tag = state.entry_delta_tags.get(&entry_delta_key(&dep.id, key)).copied();
             let owned_old = dep_tag == Some(entry_tag);
             let owned_new = dep_tag == provider_tag && provider_tag.is_some();
             if owned_old != owned_new {
@@ -229,10 +237,15 @@ fn entry_realm_table(entry: &ComponentEntry) -> RealmTable {
 pub struct LoaderState {
     #[serde(default)]
     pub tag_counter: u64,
+    /// Keyed by `entry_delta_key`/`provider_key` (NUL-joined composite
+    /// strings): serde_json cannot serialize a `BTreeMap` with a tuple key
+    /// as a JSON object, so a `(String, String)` key here silently failed
+    /// every `serde_json::to_string` and this state was never actually
+    /// persisted.
     #[serde(default)]
-    pub entry_delta_tags: BTreeMap<(String, String), u64>,
+    pub entry_delta_tags: BTreeMap<String, u64>,
     #[serde(default)]
-    pub provider_of: BTreeMap<(String, String), String>,
+    pub provider_of: BTreeMap<String, String>,
 }
 
 fn state_path() -> std::path::PathBuf {
