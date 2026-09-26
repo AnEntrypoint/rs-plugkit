@@ -1503,12 +1503,26 @@ fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> R
 }
 
 fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ragconfig::RagConfig, explicit_limit: Option<u32>) -> u64 {
-    let root = body.get("root").and_then(|v| v.as_str())
+    let mut root = body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
         .filter(|p| !p.is_empty());
-    if let Some(root) = root {
-        if !crate::wasm_dispatch::host_allow_root(root) {
-            return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
+    let mut path = body.get("path").and_then(|v| v.as_str())
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned);
+    if let Some(candidate) = root {
+        if !crate::wasm_dispatch::host_allow_root(candidate) {
+            let scope = candidate.strip_prefix("./").unwrap_or(candidate);
+            let valid_relative_scope = !scope.starts_with('/')
+                && scope.split('/').all(|part| !part.is_empty() && part != "." && part != "..");
+            if valid_relative_scope {
+                path = Some(match path {
+                    Some(path) => format!("{scope}/{path}"),
+                    None => scope.to_owned(),
+                });
+                root = None;
+            } else {
+                return err("codesearch", &format!("root '{candidate}' is not a real, existing directory the host will grant access to"));
+            }
         }
     }
     let max_matches = match body.get("max_matches") {
@@ -1521,7 +1535,7 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
     let scan = crate::code_index::LiteralScan {
         pattern: query,
         root,
-        path: body.get("path").and_then(|v| v.as_str()).filter(|p| !p.is_empty()),
+        path: path.as_deref(),
         regex,
         case_insensitive: body.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false),
         whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
