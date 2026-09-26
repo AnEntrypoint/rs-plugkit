@@ -1,4 +1,3 @@
-
 use serde_json::{json, Value};
 
 use crate::ragconfig::IndexConfig;
@@ -9,15 +8,40 @@ const MAX_SCAN_BYTES: u64 = 500 * 1024;
 const MAX_NODE_MODULES_FILES: usize = 20_000;
 
 const NOISE_SKIP_DIRS: &[&str] = &[
-    "test", "tests", "__tests__", "spec", "specs", "__mocks__",
-    "docs", "doc", "examples", "example", "demo", "demos",
-    "fixtures", "__fixtures__", "coverage", ".nyc_output", "benchmark", "benchmarks",
+    "test",
+    "tests",
+    "__tests__",
+    "spec",
+    "specs",
+    "__mocks__",
+    "docs",
+    "doc",
+    "examples",
+    "example",
+    "demo",
+    "demos",
+    "fixtures",
+    "__fixtures__",
+    "coverage",
+    ".nyc_output",
+    "benchmark",
+    "benchmarks",
 ];
-const NOISE_SKIP_SUFFIXES: &[&str] = &[".map", ".d.ts", ".md", ".markdown", ".txt", ".min.css", ".css"];
+const NOISE_SKIP_SUFFIXES: &[&str] = &[
+    ".map",
+    ".d.ts",
+    ".md",
+    ".markdown",
+    ".txt",
+    ".min.css",
+    ".css",
+];
 
 fn has_code_ext(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    CODE_EXTS.iter().any(|ext| lower.ends_with(&format!(".{ext}")))
+    CODE_EXTS
+        .iter()
+        .any(|ext| lower.ends_with(&format!(".{ext}")))
 }
 
 fn find_suspicious_escapes(text: &str) -> Vec<String> {
@@ -33,11 +57,24 @@ fn find_suspicious_escapes(text: &str) -> Vec<String> {
         let mut j = i;
         let mut count = 0usize;
         loop {
-            if j + 6 > bytes.len() { break; }
-            if bytes[j] != b'\\' || bytes[j + 1] != b'u' { break; }
-            let hex = match std::str::from_utf8(&bytes[j + 2..j + 6]) { Ok(s) => s, Err(_) => break };
-            let code = match u32::from_str_radix(hex, 16) { Ok(c) => c, Err(_) => break };
-            let ch = match char::from_u32(code) { Some(c) => c, None => break };
+            if j + 6 > bytes.len() {
+                break;
+            }
+            if bytes[j] != b'\\' || bytes[j + 1] != b'u' {
+                break;
+            }
+            let hex = match std::str::from_utf8(&bytes[j + 2..j + 6]) {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let code = match u32::from_str_radix(hex, 16) {
+                Ok(c) => c,
+                Err(_) => break,
+            };
+            let ch = match char::from_u32(code) {
+                Some(c) => c,
+                None => break,
+            };
             decoded.push(ch);
             count += 1;
             j += 6;
@@ -52,8 +89,12 @@ fn find_suspicious_escapes(text: &str) -> Vec<String> {
 
 fn is_identifier_shaped(s: &str) -> bool {
     let mut chars = s.chars();
-    let Some(first) = chars.next() else { return false };
-    if !first.is_ascii_alphabetic() { return false; }
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
     let rest_ok = chars.clone().all(|c| c.is_ascii_alphanumeric() || c == '_');
     rest_ok && chars.count() + 1 >= 3
 }
@@ -70,7 +111,9 @@ fn count_hex_obfuscator_idents(text: &str) -> usize {
             continue;
         }
         let mut j = i + 3;
-        while j < bytes.len() && bytes[j].is_ascii_hexdigit() { j += 1; }
+        while j < bytes.len() && bytes[j].is_ascii_hexdigit() {
+            j += 1;
+        }
         let hex_len = j - (i + 3);
         if (4..=6).contains(&hex_len) {
             count += 1;
@@ -83,7 +126,7 @@ fn count_hex_obfuscator_idents(text: &str) -> usize {
 #[derive(Clone)]
 struct FileFinding {
     path: String,
-    severity: &'static str, // "fail" | "warn"
+    severity: &'static str,
     ratio: Option<u64>,
     escape_hits: Vec<String>,
     note: Option<String>,
@@ -98,10 +141,18 @@ fn scan_one_file(path: &str) -> Option<Result<FileFinding, BlockedRead>> {
     let stat = crate::wasm_dispatch::host_stat(path);
     let size = match &stat {
         Some(v) if !v.is_null() => v.get("size").and_then(|s| s.as_u64()),
-        _ => return Some(Err(BlockedRead { path: path.to_string(), reason: "stat failed or file missing".into() })),
+        _ => {
+            return Some(Err(BlockedRead {
+                path: path.to_string(),
+                reason: "stat failed or file missing".into(),
+            }))
+        }
     };
     let Some(size) = size else {
-        return Some(Err(BlockedRead { path: path.to_string(), reason: "stat returned no size".into() }));
+        return Some(Err(BlockedRead {
+            path: path.to_string(),
+            reason: "stat returned no size".into(),
+        }));
     };
     if size > MAX_SCAN_BYTES {
         return Some(Ok(FileFinding {
@@ -115,7 +166,12 @@ fn scan_one_file(path: &str) -> Option<Result<FileFinding, BlockedRead>> {
     let text = match crate::wasm_dispatch::host_read(path) {
         Some(t) => t,
         None if size == 0 => return None,
-        None => return Some(Err(BlockedRead { path: path.to_string(), reason: "read failed after successful stat".into() })),
+        None => {
+            return Some(Err(BlockedRead {
+                path: path.to_string(),
+                reason: "read failed after successful stat".into(),
+            }))
+        }
     };
     let lines = text.lines().count().max(1) as u64;
     let bytes = text.len() as u64;
@@ -124,10 +180,18 @@ fn scan_one_file(path: &str) -> Option<Result<FileFinding, BlockedRead>> {
     let escape_hits = find_suspicious_escapes(&text);
     let hex_ident_count = count_hex_obfuscator_idents(&text);
     let hex_obfuscated = hex_ident_count >= HEX_IDENT_DENSITY_THRESHOLD;
-    if !oversized && escape_hits.is_empty() && !hex_obfuscated { return None; }
-    let severity = if !escape_hits.is_empty() || hex_obfuscated { "fail" } else { "warn" };
+    if !oversized && escape_hits.is_empty() && !hex_obfuscated {
+        return None;
+    }
+    let severity = if !escape_hits.is_empty() || hex_obfuscated {
+        "fail"
+    } else {
+        "warn"
+    };
     let note = if hex_obfuscated && escape_hits.is_empty() {
-        Some(format!("{hex_ident_count} _0x-hex obfuscator-style identifiers"))
+        Some(format!(
+            "{hex_ident_count} _0x-hex obfuscator-style identifiers"
+        ))
     } else {
         None
     };
@@ -140,10 +204,17 @@ fn scan_one_file(path: &str) -> Option<Result<FileFinding, BlockedRead>> {
     }))
 }
 
-fn scan_file_list(paths: &[String], budget: usize, findings: &mut Vec<FileFinding>, blocked: &mut Vec<BlockedRead>) -> usize {
+fn scan_file_list(
+    paths: &[String],
+    budget: usize,
+    findings: &mut Vec<FileFinding>,
+    blocked: &mut Vec<BlockedRead>,
+) -> usize {
     let mut scanned = 0usize;
     for p in paths.iter().take(budget) {
-        if !has_code_ext(p) { continue; }
+        if !has_code_ext(p) {
+            continue;
+        }
         scanned += 1;
         match scan_one_file(p) {
             Some(Ok(f)) => findings.push(f),
@@ -157,18 +228,27 @@ fn scan_file_list(paths: &[String], budget: usize, findings: &mut Vec<FileFindin
 const STAMP_PATH: &str = ".gm/scan-deps-stamp.json";
 
 fn load_stamp() -> std::collections::HashMap<String, (f64, u64)> {
-    let Some(text) = crate::wasm_dispatch::host_read(STAMP_PATH) else { return Default::default() };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else { return Default::default() };
-    let Some(obj) = v.get("packages").and_then(|p| p.as_object()) else { return Default::default() };
-    obj.iter().filter_map(|(k, entry)| {
-        let mtime = entry.get(0).and_then(|x| x.as_f64())?;
-        let size = entry.get(1).and_then(|x| x.as_u64())?;
-        Some((k.clone(), (mtime, size)))
-    }).collect()
+    let Some(text) = crate::wasm_dispatch::host_read(STAMP_PATH) else {
+        return Default::default();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return Default::default();
+    };
+    let Some(obj) = v.get("packages").and_then(|p| p.as_object()) else {
+        return Default::default();
+    };
+    obj.iter()
+        .filter_map(|(k, entry)| {
+            let mtime = entry.get(0).and_then(|x| x.as_f64())?;
+            let size = entry.get(1).and_then(|x| x.as_u64())?;
+            Some((k.clone(), (mtime, size)))
+        })
+        .collect()
 }
 
 fn save_stamp(packages: &std::collections::HashMap<String, (f64, u64)>) {
-    let obj: serde_json::Map<String, Value> = packages.iter()
+    let obj: serde_json::Map<String, Value> = packages
+        .iter()
         .map(|(k, (mtime, size))| (k.clone(), json!([mtime, size])))
         .collect();
     let doc = json!({ "tool": "scan_deps", "version": 1, "packages": obj });
@@ -199,7 +279,9 @@ fn package_directory_identity(dir: &str) -> Option<String> {
         [scope, _] => scope.starts_with('@'),
         _ => false,
     };
-    if !is_package_root { return None; }
+    if !is_package_root {
+        return None;
+    }
     let text = crate::wasm_dispatch::host_read(&format!("{dir}/package.json"))?;
     let manifest = serde_json::from_str::<Value>(&text).ok()?;
     let name = manifest.get("name")?.as_str()?;
@@ -213,33 +295,62 @@ fn walk_package(
     visited_directories: &mut std::collections::HashSet<String>,
     r: &mut PackageWalkResult,
 ) {
-    if r.file_count >= budget { return; }
-    let Some(stat) = crate::wasm_dispatch::host_stat(dir) else { return };
-    if !stat.get("isDirectory").and_then(|v| v.as_bool()).unwrap_or(false) { return; }
+    if r.file_count >= budget {
+        return;
+    }
+    let Some(stat) = crate::wasm_dispatch::host_stat(dir) else {
+        return;
+    };
+    if !stat
+        .get("isDirectory")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return;
+    }
     let directory_identity = stat
         .get("canonicalPath")
         .and_then(|v| v.as_str())
         .map(ToOwned::to_owned)
         .or_else(|| package_directory_identity(dir).map(|identity| format!("package:{identity}")))
         .unwrap_or_else(|| format!("path:{dir}"));
-    if !visited_directories.insert(directory_identity) { return; }
+    if !visited_directories.insert(directory_identity) {
+        return;
+    }
     for entry in crate::code_index::list_dir(dir) {
-        if r.file_count >= budget { return; }
-        if entry.starts_with('.') { continue; }
+        if r.file_count >= budget {
+            return;
+        }
+        if entry.starts_with('.') {
+            continue;
+        }
         let next = format!("{dir}/{entry}");
-        let Some(stat) = crate::wasm_dispatch::host_stat(&next) else { continue };
-        if stat.is_null() { continue; }
-        let is_dir = stat.get("isDirectory").and_then(|b| b.as_bool()).unwrap_or(false);
+        let Some(stat) = crate::wasm_dispatch::host_stat(&next) else {
+            continue;
+        };
+        if stat.is_null() {
+            continue;
+        }
+        let is_dir = stat
+            .get("isDirectory")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
         if is_dir {
-            if entry == "node_modules" || is_noise_dir_segment(&entry) { continue; }
+            if entry == "node_modules" || is_noise_dir_segment(&entry) {
+                continue;
+            }
             walk_package(&next, budget, visited_directories, r);
         } else {
             r.file_count += 1;
             if let Some(m) = stat.get("mtime_ms").and_then(|v| v.as_f64()) {
-                if m > r.max_mtime { r.max_mtime = m; }
+                if m > r.max_mtime {
+                    r.max_mtime = m;
+                }
             }
             r.total_size += stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-            if !is_noise_suffix(&next) { r.candidates.push(next); }
+            if !is_noise_suffix(&next) {
+                r.candidates.push(next);
+            }
         }
     }
 }
@@ -260,7 +371,9 @@ fn scan_node_modules(max_files: usize) -> (Vec<FileFinding>, Vec<BlockedRead>, u
 
     let mut package_dirs: Vec<String> = Vec::new();
     for entry in crate::code_index::list_dir("node_modules") {
-        if entry.starts_with('.') { continue; }
+        if entry.starts_with('.') {
+            continue;
+        }
         let path = format!("node_modules/{entry}");
         if entry.starts_with('@') {
             for scoped in crate::code_index::list_dir(&path) {
@@ -272,21 +385,36 @@ fn scan_node_modules(max_files: usize) -> (Vec<FileFinding>, Vec<BlockedRead>, u
     }
 
     for pkg_dir in package_dirs {
-        if scanned >= max_files { truncated = true; break; }
-        let mut r = PackageWalkResult { max_mtime: 0.0, total_size: 0, file_count: 0, candidates: Vec::new() };
+        if scanned >= max_files {
+            truncated = true;
+            break;
+        }
+        let mut r = PackageWalkResult {
+            max_mtime: 0.0,
+            total_size: 0,
+            file_count: 0,
+            candidates: Vec::new(),
+        };
         walk_package(
             &pkg_dir,
             max_files.saturating_sub(scanned),
             &mut visited_directories,
             &mut r,
         );
-        if r.file_count == 0 { continue; }
+        if r.file_count == 0 {
+            continue;
+        }
         let sig = (r.max_mtime, r.total_size);
         new_stamp.insert(pkg_dir.clone(), sig);
         if prior_stamp.get(&pkg_dir) == Some(&sig) {
             continue;
         }
-        scanned += scan_file_list(&r.candidates, r.candidates.len(), &mut findings, &mut blocked);
+        scanned += scan_file_list(
+            &r.candidates,
+            r.candidates.len(),
+            &mut findings,
+            &mut blocked,
+        );
     }
 
     for (k, v) in prior_stamp.drain() {
