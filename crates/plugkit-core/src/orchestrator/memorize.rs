@@ -139,33 +139,12 @@ fn is_derivable_state(text: &str) -> Option<String> {
     None
 }
 
-/// Rows whose text is stored but whose vector could not be computed yet.
-///
-/// Refusing a silent NULL-embedding insert is right -- a row with a zero or
-/// absent vector poisons cosine ranking and reads as a genuine match at
-/// distance 0. But refusing the WHOLE write was the wrong consequence: the
-/// lesson an agent was instructed to persist was discarded, with no record that
-/// it had ever existed, while gm's own graph mandates `memorize-fire` at every
-/// M_RECORD pass. So the text goes to the durable md corpus AND to the flat kv
-/// store (which is exactly what `recall`'s degraded keyword path scans when the
-/// embedder is down), the key is queued here, and the response says plainly that
-/// the row carries no vector. "Stored, vector pending, and said so" replaces
-/// both "stored silently as if fine" and "nothing stored at all".
 #[cfg(target_arch = "wasm32")]
 const EMBED_PENDING_LEDGER_FILE: &str = ".gm/exec-spool/.memorize-embed-pending.json";
 
-/// Bounded so a long embedder outage cannot grow an unbounded file. The md
-/// corpus is the durable store either way; this ledger only tracks which keys
-/// still owe a vector, and the oldest entries are the ones most likely to have
-/// been superseded.
 #[cfg(target_arch = "wasm32")]
 const EMBED_PENDING_LEDGER_MAX_ROWS: usize = 500;
 
-/// How many queued rows one successful `memorize-fire` opportunistically
-/// backfills. A successful fire is direct proof the embedder is up again, so it
-/// is the cheapest possible recovery trigger -- no separate poll, no daemon
-/// timer. Bounded per call so a 500-row backlog cannot turn one fire into a
-/// minutes-long dispatch; `memorize-backfill` drains the rest on demand.
 #[cfg(target_arch = "wasm32")]
 const EMBED_PENDING_DRAIN_PER_SUCCESSFUL_FIRE: usize = 8;
 
@@ -223,9 +202,6 @@ fn queue_pending_embedding(
     total
 }
 
-/// Re-embeds queued rows and promotes each into the vector store, dropping only
-/// the ones that actually succeeded. A row whose embedding still fails stays
-/// queued, so a partial recovery loses nothing.
 #[cfg(target_arch = "wasm32")]
 fn drain_pending_embeddings(max_rows: usize) -> serde_json::Value {
     let rows = read_pending_ledger();
@@ -289,7 +265,6 @@ fn drain_pending_embeddings(max_rows: usize) -> serde_json::Value {
     })
 }
 
-/// The degraded write: text durable, vector owed, disclosure mandatory.
 #[cfg(target_arch = "wasm32")]
 fn store_without_vector(
     namespace: &str,
@@ -314,15 +289,6 @@ fn store_without_vector(
             return (String::new(), format!("memorize: md write failed at {}; the md corpus is the durable store, refusing an unbacked memory", p), 1);
         }
     };
-    // Deliberately NOT mirrored into the flat kv store. host_kv is libsql-backed,
-    // so the same outage that takes the embedder down leaves the libsql pool with
-    // no instantiated slot -- and the pool's FIFO wait does not deny, it waits, so
-    // the kv write blocks for minutes and still lands nothing. Measured on this
-    // path: a degraded fire that wrote the md file in milliseconds then sat in
-    // host_kv_put long enough that the ledger entry below never got written within
-    // the dispatch. The md corpus is the durable store and `recall`'s md keyword
-    // scan reads it directly, so the kv mirror bought nothing and cost the whole
-    // degraded write.
     let queued_total = queue_pending_embedding(namespace, key, kind, text, why, tencentdb, now_ms);
     crate::wasm_dispatch::emit_event("memorize_stored_without_vector", serde_json::json!({
         "key": key,
@@ -489,11 +455,6 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             "key": key,
             "namespace": namespace,
         }));
-        // The dedup branch used to assert "embedded": true without consulting
-        // anything, which is how a row stored during an embedder outage reported
-        // itself as fully indexed the moment the same text was fired again: the
-        // dedup check only proves the TEXT is already stored, never that a vector
-        // exists for it. The pending ledger is the authority on that.
         let still_owes_vector = pending_ledger_contains(&namespace, &key);
         let payload = serde_json::json!({
             "ok": true,
@@ -550,9 +511,6 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             "error": e,
         }));
     }
-    // This fire just proved the embedder is healthy, which is the cheapest
-    // possible recovery trigger for rows an earlier outage stored without a
-    // vector -- no poll, no timer, no separate dispatch needed.
     let backfilled = drain_pending_embeddings(EMBED_PENDING_DRAIN_PER_SUCCESSFUL_FIRE);
     let mut payload = serde_json::json!({
         "ok": true,
@@ -573,25 +531,8 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
 
 const AGENTS_DRAIN_STATE_FILE: &str = ".gm/exec-spool/.agents-drain-state.json";
 const FLAT_STREAK_WARN_THRESHOLD: u32 = 3;
-// The full `back_pressure_warning`/`instruction` prose (~600+ bytes combined)
-// was landing byte-for-byte identical on every single memorize-fire response
-// once a session's flat_streak crossed the warn threshold -- observed
-// repeating unchanged across 5+ consecutive dispatches in one live session,
-// with only the `flat_streak` counter moving. Real callers already get that
-// counter (plus agents_bytes/agents_lines/dropped_since_last_fire) on every
-// call, so the prose itself only needs to resurface periodically: once when
-// a given obligation first fires, then on an escalating cadence so it is
-// never silently forgotten if genuinely never addressed. Mirrors the
-// per-signature dedup/occurrenceCount pattern the GL-error capture path
-// (`plugkit-wasm-wrapper.js`) already uses for the same class of problem --
-// full detail once, a compact running count on every repeat after that.
 const FULL_TEXT_REPEAT_INTERVAL: u64 = 10;
 
-/// Whether `streak` (a monotonically-increasing counter, never reset except
-/// to 0) is due to surface its full prose: the turn it first reaches
-/// `first_at`, then every `FULL_TEXT_REPEAT_INTERVAL` turns beyond that.
-/// Turns in between get the compact/omitted form instead of a byte-identical
-/// repeat of the same paragraph.
 fn due_for_full_text(streak: u64, first_at: u64) -> bool {
     streak >= first_at && (streak - first_at) % FULL_TEXT_REPEAT_INTERVAL == 0
 }

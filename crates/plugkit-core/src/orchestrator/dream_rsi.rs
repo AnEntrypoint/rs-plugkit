@@ -225,18 +225,10 @@ pub fn admit_dispatch(verb: &str) -> Result<(), String> {
     if strategy.get("selection").and_then(Value::as_str) != Some("replay-recorded-successes-first") { return Ok(()); }
     let evidence = strategy.get("evidence").and_then(Value::as_array).ok_or_else(|| "Dream-RSI strategy lacks evidence".to_string())?;
     if evidence.iter().any(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb) && entry.get("exit_code").and_then(Value::as_i64) == Some(0)) { return Ok(()); }
-    // A verb this session has never attempted yet has no way to earn a recorded
-    // success without first being allowed to run: block only retries of a verb
-    // that has already failed in this session, never a cold-start first attempt.
     let Some(last_failure_ts) = evidence.iter()
         .filter(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb))
         .filter_map(|entry| entry.get("ts").and_then(Value::as_i64))
         .max() else { return Ok(()); };
-    // A failure is a signal to re-orient, not a life sentence for the verb: the
-    // error this function returns names `instruction` as the recovery dispatch,
-    // so once `instruction` has actually been re-dispatched after the failure,
-    // the block decays and the next attempt is a fresh one -- never a permanent,
-    // unfalsifiable block for the rest of the session.
     let last_instruction_ts = crate::pkfs::read_to_string(".gm/last-instruction-ts")
         .and_then(|raw| raw.trim().parse::<i64>().ok())
         .unwrap_or(0);
