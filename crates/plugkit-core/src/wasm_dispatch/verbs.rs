@@ -1510,7 +1510,9 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         .filter(|p| !p.is_empty())
         .map(str::to_owned);
     if let Some(candidate) = root {
-        if !crate::wasm_dispatch::host_allow_root(candidate) {
+        if candidate == "." || candidate == "./" {
+            root = None;
+        } else if !crate::wasm_dispatch::host_allow_root(candidate) {
             let scope = candidate.strip_prefix("./").unwrap_or(candidate);
             let valid_relative_scope = !scope.starts_with('/')
                 && scope.split('/').all(|part| !part.is_empty() && part != "." && part != "..");
@@ -2580,6 +2582,8 @@ fn codeinsight_index(body: &Value) -> u64 {
 fn body_cwd(body: &Value) -> Option<&str> {
     body.get("cwd").and_then(|v| v.as_str())
         .or_else(|| body.get("repo").and_then(|v| v.as_str()))
+        .or_else(|| body.get("root").and_then(|v| v.as_str()))
+        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
 }
 
 const GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS: &str = "git_async";
