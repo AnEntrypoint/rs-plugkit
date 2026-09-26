@@ -31,6 +31,9 @@ Callers write request JSON to `.gm/exec-spool/in/<verb>/<N>.txt` (or
 read and writes `out/<N>.json` (metadata) alongside `out/<N>.out`/`.err` for
 process-execution verbs.
 
+`codesearch` is the canonical code-search verb. `code_search` is an accepted
+compatibility alias with the same request body and response behavior.
+
 Orchestrator verbs: `instruction`, `transition`, `transition-revert`,
 `discipline-check-removal`, `discipline-audit`, `memory-namespace-audit`,
 `codeinsight-namespace-audit`, `calculus-model-check`, `phase-status`,

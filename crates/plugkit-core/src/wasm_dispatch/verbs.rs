@@ -4329,7 +4329,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "cache_invalidate" => cache_invalidate(&body),
         "cache_stats" => cache_stats(&body),
         "codeinsight_index" => codeinsight_index(&body),
-        "codesearch" => codesearch(&body),
+        "codesearch" | "code_search" => codesearch(&body),
         "callers" => callers(&body),
         "callees" => callees(&body),
         "impact" => impact(&body),
