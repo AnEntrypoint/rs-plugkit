@@ -250,6 +250,14 @@ GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
 `sql_smoke`, `task-spawn`/`task-list`/`task-output`/`task-stop`,
 `background-convert`, `kill-port`, `similarity`, `claim-audit`.
 
+When a shell verb returns a `task_id`, use `task-output` with JSON body
+`{"id":"task-…"}` to retrieve it. Use `task-stop` with the same body to stop
+it. These are GM verb dispatches, not shell commands.
+
+Close a completed PRD row with `prd-resolve` and JSON body
+`{"id":"<prd-item-id>","witness_evidence":"<live evidence>"}`. An optional
+`commit_comment` attaches a one-line resolution note to the next GM commit.
+
 `git_finalize` bundles add -> commit -> porcelain-gate -> push in one
 dispatch, then runs `ci-status` inline against the pushed commit's SHA: on a
 green result it writes `.gm/exec-spool/.ci-validated` (`{"head_sha": "..."}`)
