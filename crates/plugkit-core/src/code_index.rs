@@ -2599,6 +2599,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut files_skipped_binary = 0usize;
     let mut files_unreadable = 0usize;
     let mut lines_with_matches = 0usize;
+    let mut occurrence_count = 0usize;
     let mut matches_truncated = false;
     let mut budget_exhausted = false;
 
@@ -2630,23 +2631,24 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             if found.is_empty() { continue; }
             this_file_matched = true;
             lines_with_matches += 1;
-            for (start, end) in found {
-                if matches.len() >= req.max_matches { matches_truncated = true; break; }
-                let text_truncated = line.len() > LITERAL_SCAN_MAX_LINE_BYTES;
-                let shown: String = if text_truncated {
-                    line.chars().take(LITERAL_SCAN_MAX_LINE_BYTES).collect()
-                } else {
-                    line.to_string()
-                };
-                let mut hit = serde_json::Map::new();
-                hit.insert("path".to_string(), json!(path));
-                hit.insert("line".to_string(), json!(idx + 1));
-                hit.insert("column".to_string(), json!(start + 1));
-                hit.insert("match".to_string(), json!(line.get(start..end).unwrap_or(req.pattern)));
-                hit.insert("text".to_string(), json!(shown.trim_end()));
-                if text_truncated { hit.insert("text_truncated".to_string(), json!(true)); }
-                matches.push(Value::Object(hit));
-            }
+            occurrence_count += found.len();
+            if matches.len() >= req.max_matches { matches_truncated = true; break; }
+            let (start, end) = found[0];
+            let text_truncated = line.len() > LITERAL_SCAN_MAX_LINE_BYTES;
+            let shown: String = if text_truncated {
+                line.chars().take(LITERAL_SCAN_MAX_LINE_BYTES).collect()
+            } else {
+                line.to_string()
+            };
+            let mut hit = serde_json::Map::new();
+            hit.insert("path".to_string(), json!(path));
+            hit.insert("line".to_string(), json!(idx + 1));
+            hit.insert("column".to_string(), json!(start + 1));
+            hit.insert("match".to_string(), json!(line.get(start..end).unwrap_or(req.pattern)));
+            hit.insert("occurrence_count".to_string(), json!(found.len()));
+            hit.insert("text".to_string(), json!(shown.trim_end()));
+            if text_truncated { hit.insert("text_truncated".to_string(), json!(true)); }
+            matches.push(Value::Object(hit));
             if matches_truncated { break; }
         }
         if this_file_matched { files_with_matches += 1; }
@@ -2686,6 +2688,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("excluded_by_rule_count".to_string(), json!(universe.excluded.len()));
     }
     out.insert("match_count".to_string(), json!(matches.len()));
+    out.insert("occurrence_count".to_string(), json!(occurrence_count));
     out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
     out.insert("files_with_matches".to_string(), json!(files_with_matches));
     out.insert("files_scanned".to_string(), json!(files_scanned));
