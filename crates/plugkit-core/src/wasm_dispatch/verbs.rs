@@ -651,18 +651,6 @@ fn kv_get(body: &Value) -> u64 {
     }
 }
 
-/// Algorithm 6 (Cordis paper Section 5.1.4/6.3) proxy mediation, applied at
-/// the exact point of KV access -- not only at discipline-activation time
-/// the way `active_policies()`/`requires_satisfied` gate policy surfacing.
-/// A caller that names itself via `discipline` (the accessing fiber) and
-/// reads/writes a DIFFERENT discipline's namespace (the coeffect key) goes
-/// through `capability_proxy::resolve`, which raises `INACTIVE_ACCESS`
-/// (declared but the provider is not currently Active) or
-/// `UNDECLARED_ACCESS` (never declared in `requires.json` at all) exactly
-/// as Algorithm 6's `resolve` walk does. Same-namespace access and callers
-/// that omit `discipline` bypass this by construction (see
-/// `confinement_violation`'s own doc comment: an accessor that does not
-/// name itself is not resolving against any fiber's coeffect chain).
 fn capability_access_violation(body: &Value, namespace: &str) -> Option<u64> {
     let accessor = body.get("discipline").and_then(|v| v.as_str())?;
     if accessor == namespace {
@@ -682,23 +670,6 @@ fn capability_access_violation(body: &Value, namespace: &str) -> Option<u64> {
     }
 }
 
-/// A self-declared-identity check inspired by Confinement (Cordis paper
-/// Definition 48, Section 4.2), NOT an enforcement of it. Definition 48
-/// binds a component's OWN effect function -- trusted code the paper's
-/// model assumes runs as that fiber, never as an open dispatch surface a
-/// caller can lie to. gm's spool-dispatch ABI carries no caller identity
-/// a caller cannot simply omit or fabricate (no capability token, no
-/// signed session-to-discipline binding), so this check catches only a
-/// caller that VOLUNTARILY names itself via `discipline` and then
-/// contradicts that name with a mismatched `namespace` -- an accidental
-/// cross-namespace write from well-behaved code, not an adversary. A
-/// caller that wants to violate confinement does so by simply omitting
-/// `discipline`, at which point `claimed` is `None` and this function
-/// returns `None` (no violation) unconditionally: the check is fully
-/// bypassable and offers no security boundary. Genuine enforcement would
-/// need the dispatch ABI itself to carry a caller identity the caller
-/// cannot forge, which does not exist today -- a real capability/token
-/// system is the actual fix, not a stronger version of this function.
 fn confinement_violation(body: &Value, namespace: &str) -> Option<String> {
     let claimed = body.get("discipline").and_then(|v| v.as_str())?;
     if claimed == namespace {
@@ -2117,13 +2088,6 @@ fn browser_lightpanda_or_steel_cdp_engine(body: &Value, body_s: &str) -> u64 {
             })),
         },
     };
-    // The browser and cdp verbs share ONE host-import (host_browser_exec) and
-    // ONE agentplug-side driver (browser::run) -- both are real-Chrome-family
-    // CDP-over-port dispatch, differing only in which engine answers the
-    // port. The "engine" field rides in the small opts param (never inside
-    // the raw code body), so the agentplug host reads it to pick
-    // spawn-lightpanda vs dial-steel-endpoint vs the cdp verb's
-    // spawn-chrome default, without JSON-escaping the caller's raw JS.
     let opts = json!({ "timeoutMs": timeout_ms, "engine": "lightpanda" }).to_string();
     let packed = unsafe { host_browser_exec(
         code.as_ptr(), code.len() as u32,
@@ -2214,12 +2178,6 @@ fn cdp_real_chrome_escape_hatch(body: &Value, body_s: &str) -> u64 {
             })),
         },
     };
-    // Explicit "engine":"chrome" (rather than relying on field-absence) keeps
-    // cdp's own dispatch self-describing on the same shared envelope the
-    // browser verb now also sends over host_browser_exec -- the agentplug
-    // host's default for a missing/unrecognized engine field is ALSO chrome
-    // (see browser_engine::select_engine), so this is belt-and-suspenders
-    // preserving cdp's exact prior behavior, not a functional dependency.
     let opts = json!({ "timeoutMs": timeout_ms, "engine": "chrome" }).to_string();
     let packed = unsafe { host_browser_exec(
         code.as_ptr(), code.len() as u32,
@@ -3149,14 +3107,6 @@ fn git_commit(body: &Value) -> u64 {
     })
 }
 
-// Best-effort: feeds every real commit into liqology's memory-relevance
-// tracker (record verb) so the plugin accumulates real interaction history
-// instead of sitting built-but-uncalled. A commit is the closest real
-// signal to a completed interaction available at this point -- the same
-// text embeds both input and output since git_commit has no separate
-// input/output split to offer, matching liqology's own memory-loop example
-// convention for this case. Never blocks or fails the commit itself: a
-// liqology-unavailable/embed-failed/plugin-error outcome is only logged.
 fn record_commit_in_liqology(summary: &str, sha_full: &str) {
     let Some(embedding) = crate::embed::embed_text(summary) else {
         emit_event("liqology_record_skipped", json!({ "reason": "embed_failed", "sha_full": sha_full }));
@@ -4198,11 +4148,6 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     let dispatch_id = {
         let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
         let exit_code = if result_value.get("ok").and_then(|v| v.as_bool()).unwrap_or(true) { 0 } else { 1 };
-        // A Dream-RSI veto never let the verb actually run, so it is not a fresh
-        // failure of that verb -- recording one here would re-arm the very block
-        // that produced it on every single retry, making the block permanent by
-        // construction regardless of any decay rule. Only a dispatch that really
-        // executed feeds the replay evidence.
         let dream_rsi_vetoed = result_value.get("dream_rsi_vetoed").and_then(|v| v.as_bool()).unwrap_or(false);
         if dream_rsi_vetoed {
             None
@@ -4269,11 +4214,6 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
     }
     let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
     crate::browser_witness::record_from_body(cwd_for_witness, body);
-    // Escape hatch for a cwd git cannot root (no .git in its ancestry, e.g. a
-    // cross-repo audit directory) or where the git subprocess is unavailable:
-    // a caller that already knows the intended project root can pin it
-    // directly, before the unresolvable check below ever runs. See
-    // `orchestrator::seed_project_root_override` for the exact scoping.
     if let Some(root_override) = body.get("git_root_override").and_then(|v| v.as_str()) {
         crate::orchestrator::seed_project_root_override(root_override);
     }
