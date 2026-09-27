@@ -2207,7 +2207,12 @@ fn publish_codesearch_artifact(metadata: &serde_json::Map<String, Value>, matche
     let code = format!("const fs=require('fs');const crypto=require('crypto');const p={pair};try{{fs.renameSync(p.temporary,p.artifact);process.stdout.write(JSON.stringify({{ok:true,sha256:crypto.createHash('sha256').update(fs.readFileSync(p.artifact)).digest('hex')}}));}}catch(e){{try{{fs.unlinkSync(p.temporary);}}catch(_){{}}process.stdout.write(JSON.stringify({{ok:false}}));}}");
     let options = json!({ "timeoutMs": 5_000 }).to_string();
     let packed = unsafe { crate::wasm_dispatch::host_exec_js(code.as_ptr(), code.len() as u32, options.as_ptr(), options.len() as u32) };
-    let outcome = crate::wasm_dispatch::unpack_to_value_pub(packed);
+    let outcome = crate::wasm_dispatch::unpack_to_string_pub(packed)
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|wrapped| wrapped.get("stdout").and_then(Value::as_str).and_then(|stdout| serde_json::from_str::<Value>(stdout).ok()));
+    let Some(outcome) = outcome else {
+        return Err("artifact atomic publish failed");
+    };
     if outcome.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err("artifact atomic publish failed");
     }
