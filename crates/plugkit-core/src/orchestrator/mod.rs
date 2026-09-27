@@ -27,6 +27,7 @@ pub mod submodule_drift;
 pub mod dream_rsi;
 pub mod component_loader;
 pub mod component_loader_dispatch;
+pub mod wait;
 
 use std::path::PathBuf;
 
@@ -250,6 +251,8 @@ orchestrator_dispatch_table! {
     "codeinsight-namespace-audit" => codeinsight_component::handle_audit(content),
     "calculus-model-check" => calculus::handle_model_check(content),
     "phase-status" => state::handle_status(),
+    "wait" => wait::handle(content),
+    "sleep" => wait::handle(content),
     "residual-scan" => residual::handle_scan(content),
     "claim-audit" => claim_audit::handle_audit(content),
     "submodule-check" => submodule_drift::handle_check(content),
