@@ -2190,6 +2190,31 @@ const LITERAL_SCAN_MAX_LINE_BYTES: usize = 512;
 
 const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
+const INLINE_CODESEARCH_MATCH_LIMIT: usize = 100;
+static CODESEARCH_ARTIFACT_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn publish_codesearch_artifact(metadata: &serde_json::Map<String, Value>, matches: &[Value]) -> Result<Value, &'static str> {
+    let sequence = CODESEARCH_ARTIFACT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let relative_path = format!(".gm/codesearch-result-{}-{}.json", unsafe { crate::wasm_dispatch::host_now_ms() }, sequence);
+    let artifact_path = crate::pkfs::anchor(&relative_path);
+    let temporary_path = format!("{}.tmp-{}", artifact_path, sequence);
+    let artifact = json!({ "metadata": metadata, "matches": matches });
+    let artifact_text = serde_json::to_string(&artifact).map_err(|_| "artifact serialization failed")?;
+    if !crate::wasm_dispatch::host_write(&temporary_path, &artifact_text) {
+        return Err("artifact temporary write failed");
+    }
+    let pair = json!({ "temporary": temporary_path, "artifact": artifact_path }).to_string();
+    let code = format!("const fs=require('fs');const crypto=require('crypto');const p={pair};try{{fs.renameSync(p.temporary,p.artifact);process.stdout.write(JSON.stringify({{ok:true,sha256:crypto.createHash('sha256').update(fs.readFileSync(p.artifact)).digest('hex')}}));}}catch(e){{try{{fs.unlinkSync(p.temporary);}}catch(_){{}}process.stdout.write(JSON.stringify({{ok:false}}));}}");
+    let options = json!({ "timeoutMs": 5_000 }).to_string();
+    let packed = unsafe { crate::wasm_dispatch::host_exec_js(code.as_ptr(), code.len() as u32, options.as_ptr(), options.len() as u32) };
+    let outcome = crate::wasm_dispatch::unpack_to_value_pub(packed);
+    if outcome.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err("artifact atomic publish failed");
+    }
+    let sha256 = outcome.get("sha256").and_then(Value::as_str).ok_or("artifact digest unavailable")?;
+    Ok(json!({ "path": relative_path, "sha256": sha256, "match_count": matches.len() }))
+}
+
 pub struct LiteralScan<'a> {
     pub pattern: &'a str,
     pub root: Option<&'a str>,
@@ -2453,7 +2478,20 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             "at least one bound fired -- this is NOT every match in the tree; the files_truncated/matches_truncated/budget_exhausted/files_skipped_* fields above name which"
         ));
     }
-    out.insert("matches".to_string(), Value::Array(matches));
+    if matches.len() > INLINE_CODESEARCH_MATCH_LIMIT {
+        match publish_codesearch_artifact(&out, &matches) {
+            Ok(artifact) => {
+                out.insert("result_artifact".to_string(), artifact);
+                out.insert("matches_omitted".to_string(), json!(matches.len()));
+            }
+            Err(error) => {
+                out.insert("result_artifact_error".to_string(), json!(error));
+                out.insert("matches".to_string(), Value::Array(matches));
+            }
+        }
+    } else {
+        out.insert("matches".to_string(), Value::Array(matches));
+    }
     Value::Object(out)
 }
 
