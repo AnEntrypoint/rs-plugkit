@@ -1384,9 +1384,10 @@ fn memorize_prune(body: &Value) -> u64 {
             let flat_rc = unsafe { host_kv_delete(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
             let _ = unsafe { host_kv_delete(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32) };
             let md_deleted = crate::memory_md::delete_memory(namespace, key);
-            if flat_rc != 0 || md_deleted || idx_marked {
+            let legacy_deleted = crate::memory_md::delete_legacy_flat(namespace, key);
+            if flat_rc != 0 || md_deleted || idx_marked || legacy_deleted {
                 deleted.push(key.clone());
-                emit_event("memory.pruned", json!({"key": key, "namespace": namespace, "mode": "explicit-key", "md_deleted": md_deleted, "index_marked": idx_marked}));
+                emit_event("memory.pruned", json!({"key": key, "namespace": namespace, "mode": "explicit-key", "md_deleted": md_deleted, "index_marked": idx_marked, "legacy_deleted": legacy_deleted}));
             } else {
                 not_found.push(key.clone());
                 emit_event("memory.prune-miss", json!({"key": key, "namespace": namespace, "mode": "explicit-key"}));
@@ -1428,14 +1429,61 @@ fn memorize_prune(body: &Value) -> u64 {
         };
     }
     let (vector_candidates, _) = rssearch_vector_hits(&embedding, namespace, k, true);
-    let candidates = vec_search_local(&embedding, namespace, k);
-    ok("memorize-prune", json!({
+    let mut candidates = vec_search_local(&embedding, namespace, k);
+    let (unindexed_listed, unindexed_total) = unindexed_on_disk_candidates(namespace);
+    let listed_keys: Vec<String> = candidates
+        .as_array()
+        .map(|a| a.iter().filter_map(|c| c.get("key").and_then(|v| v.as_str()).map(String::from)).collect())
+        .unwrap_or_default();
+    if let Some(arr) = candidates.as_array_mut() {
+        for entry in &unindexed_listed {
+            let Some(key) = entry.get("key").and_then(|v| v.as_str()) else { continue };
+            if listed_keys.iter().any(|listed| listed == key) {
+                continue;
+            }
+            arr.push(entry.clone());
+        }
+    }
+    let mut resp = json!({
         "namespace": namespace,
         "mode": "review",
         "candidates": candidates,
         "vector_candidates": vector_candidates,
-        "note": "Review-only: re-dispatch memorize-prune with {keys:[...]} naming the stale ones to delete. Pruning is agent-judged, never auto-similarity-deleted. candidates falls back to the libsql rssearch_vectors result when host_vec_search is unimplemented (both native runtimes stub it).",
-    }))
+        "unindexed_on_disk": unindexed_listed,
+        "unindexed_on_disk_total": unindexed_total,
+        "note": "Review-only: re-dispatch memorize-prune with {keys:[...]} naming the stale ones to delete. Pruning is agent-judged, never auto-similarity-deleted. candidates falls back to the libsql rssearch_vectors result when host_vec_search is unimplemented (both native runtimes stub it). Entries carrying source=on_disk_unindexed exist on disk with no vector row, so they never surface in recall and never appear in vector candidates; they are still real memos and are prunable by explicit key.",
+    });
+    if unindexed_total > unindexed_listed.len() {
+        resp["unindexed_on_disk_truncated"] = json!(unindexed_total - unindexed_listed.len());
+    }
+    ok("memorize-prune", resp)
+}
+
+const UNINDEXED_CANDIDATE_MAX: usize = 500;
+
+fn unindexed_on_disk_candidates(namespace: &str) -> (Vec<Value>, usize) {
+    let indexed = crate::rssearch_vectors::live_keys(namespace);
+    let mut paths: Vec<(String, String)> = crate::memory_md::on_disk_memo_paths(namespace)
+        .into_iter()
+        .filter(|(key, _)| !indexed.iter().any(|k| k == key))
+        .collect();
+    let total = paths.len();
+    paths.truncate(UNINDEXED_CANDIDATE_MAX);
+    let mut out = Vec::new();
+    for (key, path) in paths {
+        let Some(content) = host_read(&path) else { continue };
+        let text = crate::memory_md::parse(&content)
+            .map(|doc| doc.text)
+            .unwrap_or_else(|| content.trim().to_string());
+        out.push(json!({
+            "key": key,
+            "namespace": namespace,
+            "text": text,
+            "indexed": false,
+            "source": "on_disk_unindexed",
+        }));
+    }
+    (out, total)
 }
 
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {

@@ -203,6 +203,69 @@ pub fn delete_memory(ns: &str, key: &str) -> bool {
     }
 }
 
+pub fn legacy_flat_dir(ns: &str) -> Option<String> {
+    if !valid_component(ns) {
+        return None;
+    }
+    Some(format!(".gm/disciplines/{}", ns))
+}
+
+pub fn legacy_flat_paths(ns: &str, key: &str) -> Option<(String, String)> {
+    if !valid_component(key) {
+        return None;
+    }
+    legacy_flat_dir(ns).map(|d| (format!("{}/{}.json", d, key), format!("{}-vec/{}.json", d, key)))
+}
+
+pub fn delete_legacy_flat(ns: &str, key: &str) -> bool {
+    let Some((text_path, vec_path)) = legacy_flat_paths(ns, key) else {
+        return false;
+    };
+    let mut removed = false;
+    for path in [text_path, vec_path] {
+        if host_read(&path).is_some() && host_remove_file_never_directory(&path) {
+            removed = true;
+        }
+    }
+    removed
+}
+
+const ON_DISK_SCAN_MAX_FILES: usize = 5000;
+
+fn memo_file_names(dir: &str, suffix: &str) -> Vec<String> {
+    let entries = match crate::pkfs::readdir(dir) {
+        Some(Value::Array(a)) => a,
+        _ => return Vec::new(),
+    };
+    let mut names: Vec<String> = entries
+        .iter()
+        .filter_map(|e| e.get("name").and_then(|n| n.as_str()).or_else(|| e.as_str()))
+        .filter(|n| n.ends_with(suffix))
+        .map(|n| n.to_string())
+        .collect();
+    names.sort();
+    names.truncate(ON_DISK_SCAN_MAX_FILES);
+    names
+}
+
+pub fn on_disk_memo_paths(ns: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(dir) = md_dir(ns) {
+        for name in memo_file_names(&dir, ".md") {
+            out.push((name.trim_end_matches(".md").to_string(), format!("{}/{}", dir, name)));
+        }
+    }
+    if let Some(dir) = legacy_flat_dir(ns) {
+        for name in memo_file_names(&dir, ".json") {
+            if !name.starts_with("mem-") {
+                continue;
+            }
+            out.push((name.trim_end_matches(".json").to_string(), format!("{}/{}", dir, name)));
+        }
+    }
+    out
+}
+
 fn vector_table() -> String {
     crate::ragconfig::RagConfig::resolved().rssearch.table
 }
