@@ -497,11 +497,6 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
         format!("{}/.gm/exec-spool/.turn-browser-witnessed", cwd.trim_end_matches('/').trim_end_matches('\\'))
     };
     let witness_raw = crate::pkfs::read_to_string(&witness_path).unwrap_or_default();
-    // record_witness writes one top-level `file -> hash` entry per file. Older
-    // writers nested them under `witnessed_hashes`, and a file that carries both
-    // shapes used to be read from the legacy map ALONE, so every witness the
-    // current writer recorded was invisible to this check. Read both, current
-    // entries winning.
     let witnessed_hashes: serde_json::Map<String, serde_json::Value> = match serde_json::from_str::<serde_json::Value>(&witness_raw) {
         Ok(serde_json::Value::Object(m)) => {
             let mut merged = serde_json::Map::new();
@@ -521,18 +516,9 @@ fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
         };
         if !crate::browser_witness::is_browser_running_file(file) { continue; }
         let edit_hash = entry.get("hash").and_then(|v| v.as_str()).unwrap_or("");
-        // The witness is a statement about the file's CURRENT content: a browser
-        // dispatch rehashes what is on disk when it records. The edit record's
-        // hash is the content at edit time, which goes stale whenever the file
-        // is edited again through a path that does not re-record, and a stale
-        // edit hash then refuses every witness forever. Compare against the
-        // content that exists now; a file deleted since its edit has nothing
-        // left to witness.
         let current_hash = crate::browser_witness::hash_file_short(file);
         if current_hash.is_empty() { continue; }
         let witness_hash = witnessed_hashes.get(file).and_then(|v| v.as_str()).unwrap_or("");
-        // Legacy witnesses kept 12 hex characters of the same sha256; a prefix
-        // match on either side is the same content.
         let matches = !witness_hash.is_empty() && (current_hash.starts_with(witness_hash) || witness_hash.starts_with(current_hash.as_str()));
         if !matches {
             let kind = if witness_hash.is_empty() {

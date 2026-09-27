@@ -389,10 +389,6 @@ fn idev(event: &str, detail: &str) {
 #[cfg(not(target_arch = "wasm32"))]
 fn idev(_event: &str, _detail: &str) {}
 
-// Accepted spellings for the lightweight passthrough. Kept as a small fixed
-// list (not a prefix/substring match) so an unrelated field that happens to
-// contain one of these words in a longer value never accidentally trips it --
-// this only fires on an exact, deliberate opt-in.
 #[cfg(target_arch = "wasm32")]
 const INVESTIGATE_READONLY_MODES: &[&str] =
     &["investigate_readonly", "readonly", "read_only", "investigate", "readonly_investigate"];
@@ -479,15 +475,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         Some(trimmed.to_string())
     };
 
-    // Lightweight passthrough for a read-only/investigate-only ask: `mode`
-    // in the request body opts out of the SPECIFY->PROVE->EMIT->STATE->CONC
-    // ->SEC trajectory entirely -- no phase read/reset, no PRD/mutables
-    // scan, no state write, no ~30KB orchestrator prose. This is the escape
-    // hatch for "grep/scan and report back, make no changes": a one-shot
-    // forensic/security ask that has no PRD to open and nothing to persist,
-    // so the full phase machine is pure overhead for it. Opt-in only --
-    // omitting `mode` (the overwhelming default case) falls straight
-    // through to the unchanged phase-machine path below.
     if let Some(mode) = mode_opt.as_deref() {
         if is_investigate_readonly_mode(mode) {
             ilog("instruction::handle mode=investigate_readonly -- bypassing phase/PRD orchestration, no state touched");
@@ -505,6 +492,12 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
             return (s, String::new(), 0);
         }
     }
+
+    let prior_session_owner = read_state().session_id;
+    let session_mismatch = match (&session_id_opt, &prior_session_owner) {
+        (Some(incoming), Some(prior)) => incoming != prior,
+        _ => false,
+    };
 
     let is_valid_phase = |upper: &str| -> bool {
         graph.policy.pseudo_phases.iter().any(|(name, _)| name == upper) || graph.has_state(upper)
@@ -529,13 +522,17 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
 
     let mut phase = phase;
+    let previous_prompt = read_last_prompt();
     let fresh_prompt = prompt_opt
         .as_deref()
-        .map(|p| !p.trim().is_empty())
+        .map(|p| {
+            let prompt = p.trim();
+            !prompt.is_empty() && prompt != previous_prompt.trim()
+        })
         .unwrap_or(false);
 
     if let Some(p) = &prompt_opt {
-        if !p.trim().is_empty() {
+        if !session_mismatch && !p.trim().is_empty() {
             let path = super::gm_dir().join("last-prompt.txt");
             let ps = path.to_string_lossy().to_string();
             let _ = pkfs::write(&ps, p);
@@ -553,6 +550,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     if policy.fresh_prompt_resets_phase
         && fresh_prompt && !raw_phase_override && phase != initial_phase && phase != terminal_phase
         && prd_pending_count(&prd_items_json()) == 0
+        && !session_mismatch
     {
         ilog(&format!("instruction::handle fresh prompt on stuck {} chain (no pending PRD) -> reset phase to {}", phase, initial_phase));
         phase = initial_phase.clone();
@@ -580,19 +578,16 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         }
     }
 
-    let prior_session_owner = read_state().session_id;
-    let session_mismatch = match (&session_id_opt, &prior_session_owner) {
-        (Some(incoming), Some(prior)) => incoming != prior,
-        _ => false,
-    };
     let notify_session = session_id_opt
         .clone()
         .or_else(|| prior_session_owner.clone());
 
     if let Some(sid) = session_id_opt.clone() {
-        let mut st = read_state();
-        st.session_id = Some(sid);
-        let _ = super::state::write_state(&st);
+        if !session_mismatch || read_state().phase.as_str() == terminal_phase {
+            let mut st = read_state();
+            st.session_id = Some(sid);
+            let _ = super::state::write_state(&st);
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
