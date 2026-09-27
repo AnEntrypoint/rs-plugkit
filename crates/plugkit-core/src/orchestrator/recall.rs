@@ -55,12 +55,6 @@ fn emit_recall(query: &str, hits: &serde_json::Value, mode: &str, namespace: &st
     crate::wasm_dispatch::emit_event("recall", serde_json::Value::Object(fields));
 }
 
-/// The flat-kv keyword fallback answers `{key, value}` rows while every vector
-/// path answers `{key, namespace, text}`. A caller reading `text` therefore saw
-/// nothing at all from the degraded path -- the hits were present and looked
-/// empty. Mapping `value` onto `text` here makes the degraded result consumable
-/// by the same readers, and `vector_pending` states why it arrived by the
-/// keyword route rather than by similarity.
 #[cfg(target_arch = "wasm32")]
 fn normalize_kv_hits(hits: serde_json::Value, namespace: &str) -> serde_json::Value {
     let arr = match hits.as_array() {
@@ -124,12 +118,6 @@ pub fn recall_hits_reporting_embed_failure(query_text: &str, limit: u32) -> (ser
             emit_recall(&query, &vec_hits, "vector_top_k", namespace);
             return (vec_hits, embed_failed);
         }
-        // Order is load-bearing when the embedder is down. host_kv is
-        // libsql-backed and the shared plugin pool's wait does not deny, it
-        // waits, so querying kv against an uninstantiated libsql slot blocks for
-        // minutes and still answers nothing. The md corpus needs no plugin at
-        // all, so on the degraded path it is tried FIRST; kv stays ahead of it
-        // whenever the embedder was healthy and only the vector search missed.
         if embed_failed {
             let md_hits = crate::memory_md::keyword_scan(namespace, &query, limit as usize);
             if md_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
@@ -146,11 +134,6 @@ pub fn recall_hits_reporting_embed_failure(query_text: &str, limit: u32) -> (ser
         let kv_hits = crate::wasm_dispatch::unpack_to_value_pub(packed);
         let result = if kv_hits.is_null() { serde_json::Value::Array(Vec::new()) } else { normalize_kv_hits(kv_hits, namespace) };
         if result.as_array().map(|a| a.is_empty()).unwrap_or(true) {
-            // host_kv is libsql-backed, so a project whose libsql pool slot is
-            // empty answers the kv query with nothing at all -- the same
-            // outage that takes the embedder down can take this rung with it.
-            // The md corpus is plain files and is what write_memory treats as
-            // durable, so it is the rung that still answers.
             let md_hits = crate::memory_md::keyword_scan(namespace, &query, limit as usize);
             if md_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
                 rlog("recall::recall_hits done via md-corpus keyword scan");
@@ -185,10 +168,6 @@ pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
         "embed_failed": embed_failed,
     });
     let empty = results.as_array().map(|a| a.is_empty()).unwrap_or(true);
-    // A degraded read that still returned rows is a partial answer, not a
-    // failure: reporting exit 1 over real hits told the caller to discard
-    // matches it was actually holding. Only an empty degraded result carries
-    // the "not exhaustive" warning it was written for.
     if embed_failed && empty {
         (payload.to_string(), "embedder unavailable; recall results are empty, not exhaustive -- do not treat as a genuine no-hits result".to_string(), 1)
     } else if embed_failed {

@@ -237,11 +237,6 @@ fn entry_realm_table(entry: &ComponentEntry) -> RealmTable {
 pub struct LoaderState {
     #[serde(default)]
     pub tag_counter: u64,
-    /// Keyed by `entry_delta_key`/`provider_key` (NUL-joined composite
-    /// strings): serde_json cannot serialize a `BTreeMap` with a tuple key
-    /// as a JSON object, so a `(String, String)` key here silently failed
-    /// every `serde_json::to_string` and this state was never actually
-    /// persisted.
     #[serde(default)]
     pub entry_delta_tags: BTreeMap<String, u64>,
     #[serde(default)]

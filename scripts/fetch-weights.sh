@@ -27,15 +27,6 @@ fetch() {
     return 0
   fi
   echo "fetching $url -> $path"
-  # Retry with exponential backoff. A single bare curl made every release
-  # hostage to upstream rate limiting: huggingface.co returned 429 on a real
-  # release run whose only change was unrelated, failing the whole workflow
-  # while Build and Deploy passed on the identical commit.
-  #
-  # Retrying is safe here precisely BECAUSE the sha256 check below is
-  # independent of the transport -- a truncated or rate-limit-error-body
-  # response fails verification and is retried rather than trusted, so this
-  # widens the window for a good download without weakening integrity.
   local attempt=1 max_attempts=5 delay=5
   while true; do
     if curl -L -f --retry 3 --retry-delay 2 --retry-connrefused -o "$path" "$url"; then

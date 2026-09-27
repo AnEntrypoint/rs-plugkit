@@ -1,8 +1,8 @@
 import CordisCalculus
 
-/-- Running this executable is itself a witness: it only compiles because
-every theorem below type-checked successfully with no `sorry`, over the
-paper's own Section 4.2 base calculus and Section 7 metatheory. -/
+
+
+
 def main : IO Unit := do
   IO.println "CordisCalculus: all five base-calculus theorems are machine-checked Lean proofs, no sorry."
   IO.println "  Theorem 59 (preservation): Registry.preservation"

@@ -31,6 +31,9 @@ Callers write request JSON to `.gm/exec-spool/in/<verb>/<N>.txt` (or
 read and writes `out/<N>.json` (metadata) alongside `out/<N>.out`/`.err` for
 process-execution verbs.
 
+`codesearch` is the canonical code-search verb. `code_search` and `search` are accepted
+compatibility alias with the same request body and response behavior.
+
 Orchestrator verbs: `instruction`, `transition`, `transition-revert`,
 `discipline-check-removal`, `discipline-audit`, `memory-namespace-audit`,
 `codeinsight-namespace-audit`, `calculus-model-check`, `phase-status`,
@@ -246,6 +249,14 @@ GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
 `fsm-validate`, `fsm-propose-override`, `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/
 `sql_smoke`, `task-spawn`/`task-list`/`task-output`/`task-stop`,
 `background-convert`, `kill-port`, `similarity`, `claim-audit`.
+
+When a shell verb returns a `task_id`, use `task-output` with JSON body
+`{"id":"task-…"}` to retrieve it. Use `task-stop` with the same body to stop
+it. These are GM verb dispatches, not shell commands.
+
+Close a completed PRD row with `prd-resolve` and JSON body
+`{"id":"<prd-item-id>","witness_evidence":"<live evidence>"}`. An optional
+`commit_comment` attaches a one-line resolution note to the next GM commit.
 
 `git_finalize` bundles add -> commit -> porcelain-gate -> push in one
 dispatch, then runs `ci-status` inline against the pushed commit's SHA: on a

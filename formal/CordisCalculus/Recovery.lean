@@ -1,21 +1,21 @@
 import CordisCalculus.Basic
 
-/-!
-Recovery-exactness (paper Theorem 61): withdrawing a component
-(`unload`) and later reinstating it (`reload`) once its target is
-satisfied again recovers EXACTLY the fiber that existed before
-withdrawal -- same `requires`, same `provides`, same `retired` flag,
-differing only in `state`, which returns to `Active`. No information
-about the component is lost or altered by a withdraw/reinstate round
-trip; this is what makes `unload` a genuinely REVERTIBLE effect rather
-than a destructive one.
--/
+
+
+
+
+
+
+
+
+
+
 
 namespace Registry
 
-/-- After a successful `unload`, the named fiber is unaffected in every
-field except `state`, which is `Inactive`; this is the same content as
-`unload_result_is_inactive` plus the field-preservation guarantee. -/
+
+
+
 theorem unload_preserves_fields (r : Registry) (name : String) (r' : Registry) (fiber : Fiber)
     (hfind : r.find name = some fiber) (h : r.unload name = some r') :
     r'.find name = some { fiber with state := .inactive } := by
@@ -32,10 +32,10 @@ theorem unload_preserves_fields (r : Registry) (name : String) (r' : Registry) (
     rw [hcond] at h
     simp at h
 
-/-- Reloading a just-unloaded fiber, once its `requires` is satisfied
-again in the withdrawn registry, restores it to `Active` with every
-other field exactly as it was before the `unload` -- the recovery is
-EXACT, not merely "some `Active` fiber reappeared with this name". -/
+
+
+
+
 theorem unload_reload_recovers_exactly (r : Registry) (name : String) (r' r'' : Registry) (fiber : Fiber)
     (hfind : r.find name = some fiber) (hnotretired : ¬ fiber.retired)
     (hunload : r.unload name = some r') (hsat' : r'.satisfied name = true)

@@ -428,11 +428,6 @@ fn load_one_repo_source(src: &RepoSource, spec_path: &str, fetcher: &dyn RepoFet
     }
 }
 
-/// `Load` alone cannot name where the winning config actually loaded from:
-/// `RepoSource::cache_dir` is the per-entry checkout one level below the
-/// tier's cache root (`{cache_root}/{fnv1a64(repo|ref|path):016x}`, set by
-/// `parse_source_entry`), and a caller resolving prose/hooks/dataflow needs
-/// that checkout path, not the root several sources under this tier share.
 fn load_repo_tier(
     spec_path: &str,
     cache_root: String,

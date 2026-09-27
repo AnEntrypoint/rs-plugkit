@@ -46,17 +46,6 @@ fn git_project_root_once() -> Option<PathBuf> {
     parse_toplevel(out)
 }
 
-/// Root resolution for hosts that park `git rev-parse` under the async
-/// pending-token protocol instead of answering inline: the git probe above
-/// can never succeed there, but host_fs_* IS synchronous on every host, and
-/// the question rev-parse answers is only "which ancestor of the cwd holds
-/// the .git entry". Walk up probing that entry (`.git` itself for gitfile
-/// worktrees, `.git/HEAD` for the common directory form). Returns None when
-/// no ancestor holds one -- resolve_project_root_with_retry's deliberate
-/// refuse-to-mis-root panic still fires for the genuinely repoless case,
-/// exactly as a real git failure produces it on sync hosts. The walk's
-/// result lands in the same cwd-keyed PROJECT_ROOT_CACHE the git path feeds,
-/// so the parked-rev-parse probe happens at most once per cwd per process.
 #[cfg(target_arch = "wasm32")]
 fn fs_walk_project_root() -> Option<PathBuf> {
     let cwd = current_cwd_string();
@@ -117,21 +106,6 @@ fn current_cwd_string() -> String {
 static PROJECT_ROOT_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, PathBuf>>> =
     std::sync::Mutex::new(None);
 
-/// `git rev-parse --show-toplevel` shells a subprocess (wasm:
-/// via the host git bridge, native: a real `git` child process) on every call.
-/// The project root cannot change within a process's lifetime for a fixed cwd,
-/// so this is cached exactly like `pkfs::project_root`'s `ROOT_CACHE` -- keyed
-/// by cwd in a map (never a single slot), so concurrent dispatches from
-/// different projects sharing this process never evict each other's cached
-/// root, and a legitimate cwd change (a worktree switch, a different project
-/// driving the same shared process) still resolves fresh rather than serving
-/// a stale root for the wrong tree.
-/// Same retry/backoff/cache logic `resolve_project_root_with_retry` panics
-/// on exhaustion of, but returns the attempt count on failure instead of
-/// unwinding. Split out so a caller that CAN act on a clean failure --
-/// dispatch_verb_inner, before routing into any panicking `gm_dir()` call --
-/// gets one, while every existing infallible `gm_dir()` call site keeps its
-/// exact prior behavior untouched.
 fn try_resolve_project_root() -> Result<PathBuf, u32> {
     let cwd = current_cwd_string();
     if let Ok(cache) = PROJECT_ROOT_CACHE.lock() {
@@ -155,28 +129,12 @@ fn try_resolve_project_root() -> Result<PathBuf, u32> {
     Err(last_err_attempts)
 }
 
-/// True when the project root is currently resolvable (from cache or a
-/// live git probe). Callers that can return a structured error to their
-/// caller -- verb dispatch, specifically -- should check this BEFORE
-/// routing into any codepath that calls `gm_dir()`, since `gm_dir()` itself
-/// still panics on exhaustion (see its doc comment) and that panic does not
-/// reliably unwind to a clean error response on every wasm host: hosts
-/// without the wasm exception-handling proposal enabled trap the whole
-/// instance instead, which `catch_unwind` in wasm_dispatch cannot catch.
 pub fn project_root_resolvable() -> bool {
     try_resolve_project_root().is_ok()
 }
 
-/// The workaround text every project-root-unresolvable message ends with.
-/// Named out so `project_root_unresolvable_reason()` and the `gm_dir()`
-/// panic carry the identical escape hatch instead of two messages drifting
-/// apart over time.
 const PROJECT_ROOT_UNRESOLVABLE_WORKAROUND: &str = "If cwd is intentionally a non-repo or multi-repo directory (e.g. a cross-repo audit root with no .git of its own), either dispatch with cwd set to one of the actual git repos underneath it, or pass `git_root_override: \"<path>\"` in this dispatch's body to pin the project root explicitly and skip git resolution entirely for this cwd.";
 
-/// Human-readable reason the project root could not be resolved, for a
-/// caller that already called `project_root_resolvable() == false` and
-/// needs the same message `gm_dir()`'s panic would have carried, without
-/// triggering that panic to get it.
 pub fn project_root_unresolvable_reason() -> String {
     match try_resolve_project_root() {
         Ok(_) => "project root is resolvable".to_string(),
@@ -186,21 +144,6 @@ pub fn project_root_unresolvable_reason() -> String {
     }
 }
 
-/// Explicit escape hatch for a `cwd` that git cannot root (no `.git`
-/// anywhere in its ancestry -- e.g. a directory holding many unrelated
-/// repos for a cross-repo audit) or where the `git` subprocess itself is
-/// unavailable/contended. A caller that already knows which tree state
-/// should land under can pass `git_root_override: "<path>"` in an
-/// orchestrator verb's request body; `dispatch_gated_verb` seeds this cache
-/// with it (see `wasm_dispatch::verbs::dispatch_gated_verb`) before running
-/// the verb, so every `gm_dir()` call made during that dispatch -- including
-/// ones deep inside the orchestrator -- resolves to the override instead of
-/// shelling `git rev-parse --show-toplevel` and either failing or panicking.
-/// Scoped to `current_cwd_string()`'s cache key exactly like a real git
-/// resolution, so it can never leak onto an unrelated cwd sharing this
-/// process, and it only ever takes effect for the cwd the caller is
-/// currently dispatching against -- it does not persist across a cwd change
-/// within the same long-lived process.
 pub fn seed_project_root_override(root_str: &str) {
     let trimmed = root_str.trim();
     if trimmed.is_empty() { return; }
@@ -225,11 +168,6 @@ pub fn gm_dir() -> PathBuf {
     resolve_project_root_with_retry().join(".gm")
 }
 
-/// A verb absent from both `ORCHESTRATOR_VERBS` and the `dispatch()` match is
-/// invisible to `assert_verb_sets_agree` (it only iterates those two consts),
-/// so this macro generates both consts and the match from one literal list:
-/// a verb cannot get a dispatch arm without also becoming advertised, and
-/// nothing here can drift out of a third hand-maintained copy again.
 macro_rules! orchestrator_dispatch_table {
     ( $content:ident, $( $verb:literal => $handler:expr ),+ $(,)? ) => {
         pub const ORCHESTRATOR_VERBS: &[&str] = &[ $( $verb ),+ ];
@@ -252,8 +190,6 @@ macro_rules! orchestrator_dispatch_table {
     };
 }
 
-/// Runs unconditionally, in every build profile including release: the guard
-/// this superseded was debug-only and never shipped in a release wasm.
 fn assert_verb_sets_agree() {
     for v in ORCHESTRATOR_VERBS {
         assert!(
