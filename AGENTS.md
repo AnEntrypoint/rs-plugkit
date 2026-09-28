@@ -254,6 +254,12 @@ changes.
   TTL'd via `GIT_COMMIT_DEDUP_TTL_MS`) replays the one real sha instead of
   re-running `add`/`commit` when a caller or host re-dispatches one logical
   commit request twice.
+- Every staging path (`git_add`, `git_commit`, `git_finalize`, the porcelain
+  probes and `git_push`'s dirty gate) appends `GIT_PROTECTED_PATHSPECS`
+  (`:(top,exclude).gm`, `:(top,exclude).agentplug*`) after the caller's
+  pathspecs, so the project's own runtime state (Chrome profile dirs, KV
+  cache) is never staged, committed or counted as dirt whatever `paths` or
+  `.gitignore` say; receipts list them under `excluded`.
 - `git_finalize` given `paths` scopes its porcelain checks to those paths
   (`git_porcelain_scoped`) and pushes by explicit ref (its own new HEAD)
   instead of the unscoped push path, so another writer's pre-existing dirt
