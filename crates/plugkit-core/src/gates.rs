@@ -108,8 +108,12 @@ const LONGGAP_EXEMPT_READ_ONLY_VERBS: &[&str] = &[
     "branch_status", "ci-status", "fs_read", "fs_stat", "fs_readdir", "status",
 ];
 
-fn is_longgap_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
-    LONGGAP_EXEMPT_READ_ONLY_VERBS.contains(&verb) || policy.longgap_exempt_verbs.iter().any(|v| v == verb)
+fn is_longgap_activity_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
+    policy.longgap_exempt_verbs.iter().any(|v| v == verb)
+}
+
+fn is_longgap_denial_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
+    LONGGAP_EXEMPT_READ_ONLY_VERBS.contains(&verb) || is_longgap_activity_exempt(verb, policy)
 }
 
 fn is_longgap_refresh(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
@@ -124,7 +128,7 @@ fn dispatch_submitted_at_ms() -> Option<u64> {
 
 pub fn restamp_last_dispatch_to_completion(verb: &str) {
     let policy = crate::orchestrator::fsm::graph().policy;
-    if is_longgap_exempt(verb, &policy) {
+    if is_longgap_activity_exempt(verb, &policy) {
         return;
     }
     let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-dispatch-ts"), &now_ms().to_string());
@@ -333,7 +337,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     let claim_ms = now_ms();
     let submitted_at_ms = dispatch_submitted_at_ms().map(|ms| ms.min(claim_ms)).unwrap_or(claim_ms);
 
-    let prev_dispatch_ms: u64 = if !is_longgap_exempt(verb, &policy) {
+    let prev_dispatch_ms: u64 = if !is_longgap_activity_exempt(verb, &policy) {
         let p = host_read(&crate::pkfs::anchor(".gm/last-dispatch-ts")).unwrap_or_default().trim().parse().unwrap_or(0);
         let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-dispatch-ts"), &claim_ms.to_string());
         p
@@ -342,7 +346,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     if is_longgap_refresh(verb, &policy) {
         let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-instruction-ts"), &claim_ms.to_string());
         let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/long-gap-retry-state"), "");
-    } else if !is_longgap_exempt(verb, &policy) {
+    } else if !is_longgap_denial_exempt(verb, &policy) {
         let last = host_read(&crate::pkfs::anchor(".gm/last-instruction-ts")).unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let longgap_threshold_ms = policy.longgap_threshold_ms;
