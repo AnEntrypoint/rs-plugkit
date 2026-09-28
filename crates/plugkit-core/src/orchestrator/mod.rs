@@ -36,14 +36,30 @@ fn parse_toplevel(out: &str) -> Option<PathBuf> {
     Some(PathBuf::from(toplevel))
 }
 
+enum RootProbe {
+    Root(PathBuf),
+    NotARepo,
+    Transient,
+}
+
+fn stderr_says_not_a_repo(stderr: &str) -> bool {
+    stderr.to_ascii_lowercase().contains("not a git repository")
+}
+
 #[cfg(target_arch = "wasm32")]
-fn git_project_root_once() -> Option<PathBuf> {
+fn git_project_root_once() -> RootProbe {
     let v = crate::wasm_dispatch::git_call("rev-parse --show-toplevel", None);
     if v.get("async_parked").and_then(|x| x.as_bool()).unwrap_or(false) {
-        return fs_walk_project_root();
+        return match fs_walk_project_root() {
+            Some(root) => RootProbe::Root(root),
+            None => RootProbe::Transient,
+        };
     }
-    let out = v.get("stdout").and_then(|x| x.as_str())?;
-    parse_toplevel(out)
+    if let Some(root) = v.get("stdout").and_then(|x| x.as_str()).and_then(parse_toplevel) {
+        return RootProbe::Root(root);
+    }
+    let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+    if stderr_says_not_a_repo(stderr) { RootProbe::NotARepo } else { RootProbe::Transient }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -68,14 +84,18 @@ fn fs_walk_project_root() -> Option<PathBuf> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn git_project_root_once() -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() { return None; }
-    let out = String::from_utf8_lossy(&output.stdout);
-    parse_toplevel(&out)
+fn git_project_root_once() -> RootProbe {
+    let output = match std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).output() {
+        Ok(o) => o,
+        Err(_) => return RootProbe::Transient,
+    };
+    if output.status.success() {
+        return match parse_toplevel(&String::from_utf8_lossy(&output.stdout)) {
+            Some(root) => RootProbe::Root(root),
+            None => RootProbe::Transient,
+        };
+    }
+    if stderr_says_not_a_repo(&String::from_utf8_lossy(&output.stderr)) { RootProbe::NotARepo } else { RootProbe::Transient }
 }
 
 const RESOLVE_MAX_ATTEMPTS: u32 = 5;
@@ -106,20 +126,84 @@ fn current_cwd_string() -> String {
 static PROJECT_ROOT_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, PathBuf>>> =
     std::sync::Mutex::new(None);
 
+static NONREPO_FALLBACK_CWDS: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+
+fn cwd_is_nonrepo_fallback(cwd: &str) -> bool {
+    NONREPO_FALLBACK_CWDS.lock().ok()
+        .and_then(|set| set.as_ref().map(|s| s.contains(cwd)))
+        .unwrap_or(false)
+}
+
+fn set_nonrepo_fallback(cwd: &str, on: bool) {
+    if let Ok(mut set) = NONREPO_FALLBACK_CWDS.lock() {
+        let set = set.get_or_insert_with(std::collections::HashSet::new);
+        if on { set.insert(cwd.to_string()); } else { set.remove(cwd); }
+    }
+}
+
+fn cwd_has_dot_git(cwd: &str) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::wasm_dispatch::host_exists(&format!("{cwd}/.git"))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::path::Path::new(cwd).join(".git").exists()
+    }
+}
+
+fn nonrepo_fallback_root(cwd: &str) -> Option<PathBuf> {
+    let trimmed = cwd.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() || trimmed.ends_with(':') { return None; }
+    Some(PathBuf::from(trimmed))
+}
+
+pub fn disclose_nonrepo_root(out: String) -> String {
+    let cwd = current_cwd_string();
+    if !cwd_is_nonrepo_fallback(&cwd) { return out; }
+    let Ok(root) = try_resolve_project_root() else { return out };
+    let note = format!(
+        "cwd is not inside a git repository; using cwd itself as the project root ({}/.gm holds this dispatch's state). Pass git_root_override to pin a different root.",
+        root.to_string_lossy().trim_end_matches(['/', '\\'])
+    );
+    match serde_json::from_str::<serde_json::Value>(&out) {
+        Ok(serde_json::Value::Object(mut map)) => {
+            map.insert("project_root_disclosure".to_string(), serde_json::Value::String(note));
+            serde_json::Value::Object(map).to_string()
+        }
+        _ => out,
+    }
+}
+
 fn try_resolve_project_root() -> Result<PathBuf, u32> {
     let cwd = current_cwd_string();
     if let Ok(cache) = PROJECT_ROOT_CACHE.lock() {
         if let Some(root) = cache.as_ref().and_then(|m| m.get(&cwd)) {
-            return Ok(root.clone());
+            if !cwd_is_nonrepo_fallback(&cwd) || !cwd_has_dot_git(&cwd) {
+                return Ok(root.clone());
+            }
         }
     }
+    set_nonrepo_fallback(&cwd, false);
     let mut last_err_attempts = 0u32;
     for attempt in 0..RESOLVE_MAX_ATTEMPTS {
-        if let Some(root) = git_project_root_once() {
-            if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
-                cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd, root.clone());
+        match git_project_root_once() {
+            RootProbe::Root(root) => {
+                if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
+                    cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd, root.clone());
+                }
+                return Ok(root);
             }
-            return Ok(root);
+            RootProbe::NotARepo => {
+                let Some(root) = nonrepo_fallback_root(&cwd) else { return Err(attempt + 1) };
+                if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
+                    cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd.clone(), root.clone());
+                }
+                set_nonrepo_fallback(&cwd, true);
+                return Ok(root);
+            }
+            RootProbe::Transient => {}
         }
         last_err_attempts = attempt + 1;
         if attempt + 1 < RESOLVE_MAX_ATTEMPTS {
@@ -148,6 +232,7 @@ pub fn seed_project_root_override(root_str: &str) {
     let trimmed = root_str.trim();
     if trimmed.is_empty() { return; }
     let cwd = current_cwd_string();
+    set_nonrepo_fallback(&cwd, false);
     if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
         cache.get_or_insert_with(std::collections::HashMap::new)
             .insert(cwd, PathBuf::from(trimmed));
@@ -182,10 +267,11 @@ macro_rules! orchestrator_dispatch_table {
         #[cfg(target_arch = "wasm32")]
         pub fn dispatch(verb: &str, _file_id: &str, $content: &str) -> (String, String, i32) {
             assert_verb_sets_agree();
-            match verb {
+            let (out, err_msg, code) = match verb {
                 $( $verb => $handler, )+
                 _ => (format!("Unknown orchestrator verb: {}", verb), String::new(), 1),
-            }
+            };
+            (if code == 0 { disclose_nonrepo_root(out) } else { out }, err_msg, code)
         }
     };
 }
