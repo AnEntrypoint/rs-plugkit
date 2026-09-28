@@ -327,7 +327,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             log_deviation("bash-git-bypass", &format!("verb={} cmd={}", verb, cmd.chars().take(80).collect::<String>()));
             return GateVerdict::deny(format!(
                 "bash-git-bypass: a `{}` verb invoking `git` is denied - git is a first-class spool surface, not a shell command. Use the git verb instead: \
-                 git_status (porcelain), git_log, git_diff, git_show, git_branch (inspect); git_add, git_commit, git_finalize (stage/commit/push in one), git_push (push w/ rebase-retry); git_checkout (switch a ref, or restore only the given paths), git_fetch, git_rm, git_revert, git_reset (mutate); git_stash, git_stash_pop, git_stash_drop, git_stash_list (shelve). \
+                 git_status (porcelain), git_log, git_diff, git_show, git_branch (inspect); git_add, git_commit, git_finalize (stage/commit/push in one), git_push (push w/ rebase-retry); git_checkout (switch a ref, or restore only the given paths), git_fetch, git_rm, git_revert, git_reset (mutate); git_stash, git_stash_pop, git_stash_drop, git_stash_list (shelve); git_init (turn a non-repo directory into a repo). \
                  git_finalize {{message}} bundles add->commit->porcelain-gate->push in ONE dispatch. The shell git bypasses the porcelain gate, the witness ledger, and is non-portable. Command was: `{}`",
                 verb, cmd.chars().take(120).collect::<String>()
             )).with_next("git_finalize");
