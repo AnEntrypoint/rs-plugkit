@@ -177,7 +177,27 @@ fn session_store_path(name: &str) -> Result<String, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn observe_dispatch(session_id: &str, dispatch_id: &str, verb: &str, fingerprint: &str, exit_code: i64) {
+pub fn failure_is_gate_drift(result: &Value) -> bool {
+    matches!(
+        result.get("error_code").and_then(Value::as_str),
+        Some(
+            crate::wasm_dispatch::ERR_CODE_GATE_DENIED
+                | crate::wasm_dispatch::ERR_CODE_INVALID_ARGS
+                | crate::wasm_dispatch::ERR_CODE_UNKNOWN_VERB
+                | crate::wasm_dispatch::ERR_CODE_RETIRED_VERB
+                | crate::wasm_dispatch::ERR_CODE_UNSUPPORTED
+        )
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn observation_is_gate_drift_failure(observation: &Value) -> bool {
+    observation.get("exit_code").and_then(Value::as_i64) != Some(0)
+        && observation.get("gate_drift").and_then(Value::as_bool).unwrap_or(true)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn observe_dispatch(session_id: &str, dispatch_id: &str, verb: &str, fingerprint: &str, exit_code: i64, gate_drift: bool) {
     if verb.starts_with("dream-") || matches!(verb,
         "instruction" | "phase-status" | "transition" | "transition-revert" |
         "prd-add" | "prd-resolve" | "prd-list" | "prd-defer" |
@@ -194,15 +214,17 @@ pub fn observe_dispatch(session_id: &str, dispatch_id: &str, verb: &str, fingerp
     let mutable_open_count = crate::orchestrator::mutables::pending_detailed().len();
     let quality = if exit_code == 0 { 1.0 / (1.0 + (prd_open_count + mutable_open_count) as f64) } else { 0.0 };
     let ts = super::state::now_ms() as i64;
-    observations.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "exit_code": exit_code, "prd_open_count": prd_open_count, "mutable_open_count": mutable_open_count, "quality": quality, "ts": ts }));
+    observations.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "exit_code": exit_code, "gate_drift": gate_drift, "prd_open_count": prd_open_count, "mutable_open_count": mutable_open_count, "quality": quality, "ts": ts }));
     if observations.len() > 256 { observations.drain(0..observations.len() - 256); }
     let successes = observations.iter().filter(|observation| observation.get("exit_code").and_then(Value::as_i64) == Some(0)).count();
     let failures = observations.len().saturating_sub(successes);
+    let gate_drift_failures = observations.iter().filter(|observation| observation_is_gate_drift_failure(observation)).count();
     let active_strategy = json!({
         "observation_count": observations.len(),
         "successful_dispatch_count": successes,
         "failed_dispatch_count": failures,
-        "selection": if failures > 0 { "replay-recorded-successes-first" } else { "continue-current-exploration" },
+        "gate_drift_failure_count": gate_drift_failures,
+        "selection": if gate_drift_failures > 0 { "replay-recorded-successes-first" } else { "continue-current-exploration" },
         "evidence": observations.iter().rev().take(8).cloned().collect::<Vec<_>>(),
     });
     let _ = crate::pkfs::write(&path, &Value::Array(observations).to_string());
@@ -227,6 +249,7 @@ pub fn admit_dispatch(verb: &str) -> Result<(), String> {
     if evidence.iter().any(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb) && entry.get("exit_code").and_then(Value::as_i64) == Some(0)) { return Ok(()); }
     let Some(last_failure_ts) = evidence.iter()
         .filter(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb))
+        .filter(|entry| observation_is_gate_drift_failure(entry))
         .filter_map(|entry| entry.get("ts").and_then(Value::as_i64))
         .max() else { return Ok(()); };
     let last_instruction_ts = crate::pkfs::read_to_string(".gm/last-instruction-ts")
@@ -247,6 +270,8 @@ pub fn automatic_replay(session_id: Option<&str>) -> Value {
     let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let mut replays = Vec::new();
     for observation in observations.iter().rev().take(8) {
+        let is_failure = observation.get("exit_code").and_then(Value::as_i64) != Some(0);
+        if is_failure && !observation_is_gate_drift_failure(observation) { continue; }
         let Some(dispatch_id) = observation.get("dispatch_id").and_then(Value::as_str) else { continue };
         let Some(dispatch) = crate::dispatch_ledger::lookup(&cwd, dispatch_id) else { continue };
         if dispatch.get("session_id").and_then(Value::as_str) != Some(session_id) { continue; }

@@ -335,7 +335,8 @@ pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> 
     let absolute = root.starts_with('/') || (bytes.len() >= 2 && bytes[1] == b':');
     let (base, scope) = if root.is_empty() || root == "." || absolute { (if root.is_empty() { "." } else { root }, None) } else { (".", Some(root)) };
     let project_node_modules = join_under(base, "node_modules/");
-    match list_scan_universe(base, scope, max_files, cfg, TargetOrigin::ProjectDefault) {
+    let origin = if absolute { TargetOrigin::CallerNamed } else { TargetOrigin::ProjectDefault };
+    match list_scan_universe(base, scope, max_files, cfg, origin) {
         Ok(u) => u.files.into_iter().filter(|p| !p.starts_with(&project_node_modules)).take(max_files).collect(),
         Err(_) => Vec::new(),
     }
