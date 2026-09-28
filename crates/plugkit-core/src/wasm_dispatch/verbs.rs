@@ -3083,18 +3083,16 @@ fn git_add(body: &Value) -> u64 {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let mut argv: Vec<&str> = vec!["add"];
-        if paths.is_empty() {
-            argv.push("-A");
-        } else {
-            for p in &paths { argv.push(p.as_str()); }
-        }
+        let argv = git_stage_argv(&paths);
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
             return Ok(err("git_add", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("git add failed")));
         }
-        Ok(ok("git_add", json!({ "staged": if paths.is_empty() { vec!["-A".to_string()] } else { paths } })))
+        Ok(ok("git_add", json!({
+            "staged": if paths.is_empty() { vec!["-A".to_string()] } else { paths },
+            "excluded": git_protected_names(),
+        })))
     })
 }
 
@@ -3148,19 +3146,16 @@ fn git_commit(body: &Value) -> u64 {
                 "replayed_from_recent_identical_dispatch": true,
             })));
         }
-        let status_r = git_step_replayed_by_call_order(plan, &["status", "--porcelain"], cwd)?;
+        let status_r = git_step_replayed_by_call_order(plan, &git_porcelain_argv(&[]), cwd)?;
         let porcelain = super::host_abi::porcelain_or_dirty(status_r);
         if porcelain.trim().is_empty() && !allow_empty {
-            return Ok(ok("git_commit", json!({ "nothing_to_commit": true })));
+            return Ok(ok("git_commit", json!({ "nothing_to_commit": true, "excluded": git_protected_names() })));
         }
         let head_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
         let head_before = head_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-        if add_all {
-            let _ = git_step_replayed_by_call_order(plan, &["add", "-A"], cwd)?;
-        } else if !paths.is_empty() {
-            let mut argv: Vec<&str> = vec!["add", "--"];
-            for p in &paths { argv.push(p.as_str()); }
-            let _ = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        if add_all || !paths.is_empty() {
+            let staged_paths: &[String] = if add_all { &[] } else { &paths };
+            let _ = git_step_replayed_by_call_order(plan, &git_stage_argv(staged_paths), cwd)?;
         }
         let bundled_message = bundle_prd_commit_comments(cwd, message);
         let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
@@ -3171,7 +3166,7 @@ fn git_commit(body: &Value) -> u64 {
             let serr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
             let sout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
             if git_commit_found_nothing_staged(sout, serr, cwd) {
-                return Ok(ok("git_commit", json!({ "nothing_to_commit": true })));
+                return Ok(ok("git_commit", json!({ "nothing_to_commit": true, "excluded": git_protected_names() })));
             }
             return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
         }
@@ -3185,7 +3180,7 @@ fn git_commit(body: &Value) -> u64 {
         git_commit_dedup_record(&dedup_key, &head_after, &sha, &summary);
         emit_event("git_commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary }));
         record_commit_in_liqology(&summary, &head_after);
-        Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary })))
+        Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary, "excluded": git_protected_names() })))
     })
 }
 
@@ -3288,13 +3283,7 @@ fn git_finalize(body: &Value) -> u64 {
         if message.is_empty() {
             return err("git_finalize", "worktree dirty but no commit message provided -- pass {message}");
         }
-        if scoped {
-            let mut add_argv: Vec<&str> = vec!["add", "--"];
-            for p in &paths { add_argv.push(p.as_str()); }
-            let _ = git_call_argv(&add_argv, cwd_ref);
-        } else {
-            let _ = git_call_argv(&["add", "-A"], cwd_ref);
-        }
+        let _ = git_call_argv(&git_stage_argv(&paths), cwd_ref);
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
         let cr = git_call_argv(&["commit", "-m", bundled_message.as_str()], cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -3321,7 +3310,7 @@ fn git_finalize(body: &Value) -> u64 {
         if !pending_notes.is_empty() {
             let flush_message = if message.is_empty() { "chore: flush resolved PRD notes".to_string() } else { message.clone() };
             let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
-            let _ = git_call_argv(&["add", "-A"], cwd_ref);
+            let _ = git_call_argv(&git_stage_argv(&[]), cwd_ref);
             let cr = git_call_argv(&["commit", "--allow-empty", "-m", bundled_message.as_str()], cwd_ref);
             let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
             let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
@@ -3368,13 +3357,7 @@ fn git_finalize(body: &Value) -> u64 {
     if dirty_only_from_concurrent_writer_on_just_committed_files {
         leftover = git_porcelain_scoped(cwd_ref, &paths);
         if !leftover.trim().is_empty() && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref)) {
-            if scoped {
-                let mut add_argv: Vec<&str> = vec!["add", "--"];
-                for p in &paths { add_argv.push(p.as_str()); }
-                let _ = git_call_argv(&add_argv, cwd_ref);
-            } else {
-                let _ = git_call_argv(&["add", "-A"], cwd_ref);
-            }
+            let _ = git_call_argv(&git_stage_argv(&paths), cwd_ref);
             let amend = git_call_argv(&["commit", "--amend", "--no-edit"], cwd_ref);
             if amend.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0 {
                 let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
@@ -3439,6 +3422,7 @@ fn git_finalize(body: &Value) -> u64 {
         "already_current": already_current,
         "remote_sha": remote_sha,
         "steps": steps,
+        "excluded": git_protected_names(),
         "ci_validated_marker_written": ci_validated_written,
         "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
     }))
@@ -4309,14 +4293,33 @@ fn exec_git_in(repo: Option<&str>, args: &str) -> String {
 }
 
 fn git_porcelain_in(repo: Option<&str>) -> String {
-    super::host_abi::porcelain_or_dirty(git_call("status --porcelain", repo))
+    git_porcelain_scoped(repo, &[])
 }
 
 fn git_porcelain_scoped(repo: Option<&str>, paths: &[String]) -> String {
-    if paths.is_empty() { return git_porcelain_in(repo); }
+    super::host_abi::porcelain_or_dirty(git_call_argv(&git_porcelain_argv(paths), repo))
+}
+
+fn git_pathspec_scope<'a>(paths: &'a [String]) -> Vec<&'a str> {
+    let mut scope: Vec<&str> = if paths.is_empty() { vec![":/"] } else { paths.iter().map(String::as_str).collect() };
+    scope.extend(GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
+    scope
+}
+
+fn git_stage_argv<'a>(paths: &'a [String]) -> Vec<&'a str> {
+    let mut argv: Vec<&str> = vec!["add", "--"];
+    argv.extend(git_pathspec_scope(paths));
+    argv
+}
+
+fn git_porcelain_argv<'a>(paths: &'a [String]) -> Vec<&'a str> {
     let mut argv: Vec<&str> = vec!["status", "--porcelain", "--"];
-    for p in paths { argv.push(p.as_str()); }
-    super::host_abi::porcelain_or_dirty(git_call_argv(&argv, repo))
+    argv.extend(git_pathspec_scope(paths));
+    argv
+}
+
+fn git_protected_names() -> Vec<&'static str> {
+    GIT_PROTECTED_PATHSPECS.iter().map(|(name, _)| *name).collect()
 }
 
 fn files_in_commit(repo: Option<&str>) -> Vec<String> {
