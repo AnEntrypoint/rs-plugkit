@@ -13,14 +13,16 @@ jobs:
   check-drift:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: rs-plugkit
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: AnEntrypoint/gm-config
           path: gm-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
       - name: generate predicates.md from the live registry
         run: |
           cat > /tmp/gen_driver.rs <<'DRIVER'
