@@ -3851,8 +3851,77 @@ fn git_branch(body: &Value) -> u64 {
     ok("git_branch", json!({ "current": current, "branches": branches }))
 }
 
+fn git_checkout_pathspec(raw: &str, top: &str, prefix: &str) -> Result<String, &'static str> {
+    let spec = raw.trim();
+    if spec.is_empty() { return Err("empty pathspec"); }
+    if spec.starts_with('-') { return Err("a leading '-' would be read as an option"); }
+    if spec.starts_with(':') { return Err("pathspec magic is refused"); }
+    let unified = spec.replace('\\', "/");
+    if unified.split('/').any(|segment| segment == "..") { return Err("'..' traversal is refused"); }
+    let (from_top, for_git) = if crate::pkfs::is_absolute(spec) {
+        let top_dir = top.trim_end_matches('/');
+        let inside = unified.len() >= top_dir.len()
+            && unified.is_char_boundary(top_dir.len())
+            && unified[..top_dir.len()].eq_ignore_ascii_case(top_dir)
+            && matches!(unified[top_dir.len()..].chars().next(), None | Some('/'));
+        if !inside { return Err("absolute path is outside the repository"); }
+        let rest = unified[top_dir.len()..].trim_start_matches('/').to_string();
+        let for_git = format!(":(top){}", if rest.is_empty() { "." } else { rest.as_str() });
+        (rest, for_git)
+    } else {
+        (format!("{}{}", prefix, unified), spec.to_string())
+    };
+    let top_segment = from_top.split('/').find(|segment| !segment.is_empty() && *segment != ".").unwrap_or("").to_ascii_lowercase();
+    if GIT_PROTECTED_PATHSPECS.iter().any(|(name, _)| top_segment == name.trim_end_matches('*') || (name.ends_with('*') && top_segment.starts_with(name.trim_end_matches('*')))) {
+        return Err("the project's own .gm/ and .agentplug* are never restored");
+    }
+    Ok(for_git)
+}
+
+fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Value) -> u64 {
+    if body.get("create").and_then(|v| v.as_bool()).unwrap_or(false) { return err("git_checkout", "create cannot be combined with paths"); }
+    let items: Vec<&Value> = match requested { Value::Array(a) => a.iter().collect(), single => vec![single] };
+    if items.is_empty() { return err("git_checkout", "paths must be a non-empty list of pathspecs"); }
+    let source = body.get("ref").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
+    if source.is_some_and(|s| s.starts_with('-')) { return err("git_checkout", "ref must not start with '-'"); }
+    let top = exec_git_in(cwd, "rev-parse --show-toplevel").trim().replace('\\', "/");
+    if top.is_empty() { return err("git_checkout", "not inside a git worktree"); }
+    let prefix = exec_git_in(cwd, "rev-parse --show-prefix").trim().replace('\\', "/");
+    let mut specs: Vec<String> = vec![];
+    for item in items {
+        let Some(raw) = item.as_str() else { return err("git_checkout", "every entry of paths must be a string"); };
+        match git_checkout_pathspec(raw, &top, &prefix) {
+            Ok(spec) => specs.push(spec),
+            Err(reason) => return err_json("git_checkout", json!({ "error": format!("refused pathspec {:?}: {}", raw, reason), "path": raw })),
+        }
+    }
+    let mut scope: Vec<&str> = specs.iter().map(|s| s.as_str()).collect();
+    scope.extend(GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
+    let mut diff_argv: Vec<&str> = vec!["diff", "--name-only"];
+    if let Some(s) = source { diff_argv.push(s); }
+    diff_argv.push("--");
+    diff_argv.extend(scope.iter().copied());
+    let differing: Vec<String> = git_call_argv(&diff_argv, cwd).get("stdout").and_then(|x| x.as_str()).unwrap_or("")
+        .lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+    let source_arg = source.map(|s| format!("--source={}", s));
+    let mut argv: Vec<&str> = vec!["restore"];
+    if let Some(a) = &source_arg { argv.push(a.as_str()); }
+    argv.push("--");
+    argv.extend(scope.iter().copied());
+    let r = git_call_argv(&argv, cwd);
+    let output = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 { return err("git_checkout", &output); }
+    ok("git_checkout", json!({ "restored": differing, "source": source.unwrap_or("index"), "output": output.trim() }))
+}
+
 fn git_checkout(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_checkout", body, &["ref", "create", "path", "paths", "files"]) { return refusal; }
     let cwd = body_cwd(body);
+    if let Some(requested) = body.get("paths").or_else(|| body.get("files")).or_else(|| body.get("path")) {
+        return git_checkout_paths(body, cwd, requested);
+    }
     let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("").trim();
     if refspec.is_empty() { return err("git_checkout", "ref required"); }
     let create = body.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -3906,7 +3975,7 @@ fn git_merge_abort(body: &Value) -> u64 {
 }
 
 const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &["SESSION_ID", "session_id", "sessionId", "cwd", "repo", "root", "projectPath", "_plan"];
-const GIT_STASH_PROTECTED_PATHSPECS: &[(&str, &str)] = &[(".gm", ":(top,exclude).gm"), (".agentplug*", ":(top,exclude).agentplug*")];
+const GIT_PROTECTED_PATHSPECS: &[(&str, &str)] = &[(".gm", ":(top,exclude).gm"), (".agentplug*", ":(top,exclude).agentplug*")];
 const GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD: usize = 2000;
 
 fn refuse_unknown_fields(verb: &str, body: &Value, accepted: &[&str]) -> Option<u64> {
@@ -3936,7 +4005,7 @@ fn git_stash(body: &Value) -> u64 {
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("gm shelf").trim();
     let paths = body_pathspecs(body);
     let mut scope: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
-    scope.extend(GIT_STASH_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
+    scope.extend(GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
     if include_untracked {
         let mut probe: Vec<&str> = vec!["ls-files", "--others", "--exclude-standard", "--"];
         probe.extend(scope.iter().copied());
@@ -3971,7 +4040,7 @@ fn git_stash(body: &Value) -> u64 {
         "stash": if stash.is_empty() { Value::Null } else { json!(stash) },
         "include_untracked": include_untracked,
         "paths": paths,
-        "excluded": GIT_STASH_PROTECTED_PATHSPECS.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+        "excluded": GIT_PROTECTED_PATHSPECS.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
         "output": output
     }))
 }
