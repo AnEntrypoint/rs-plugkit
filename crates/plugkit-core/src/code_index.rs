@@ -2207,6 +2207,45 @@ fn has_binary_extension(path: &str) -> bool {
     BINARY_EXTENSIONS.iter().any(|b| ext.eq_ignore_ascii_case(b))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScanOutput {
+    Matches,
+    Compact,
+    Files,
+    Count,
+}
+
+impl ScanOutput {
+    pub fn parse(name: &str) -> Option<ScanOutput> {
+        match name {
+            "matches" | "full" => Some(ScanOutput::Matches),
+            "compact" => Some(ScanOutput::Compact),
+            "files" => Some(ScanOutput::Files),
+            "count" => Some(ScanOutput::Count),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ScanOutput::Matches => "matches",
+            ScanOutput::Compact => "compact",
+            ScanOutput::Files => "files",
+            ScanOutput::Count => "count",
+        }
+    }
+}
+
+pub const SCAN_OUTPUT_NAMES: &str = "\"matches\" (default, one object per match), \"compact\" (path:line: trimmed text), \"files\" (matching paths only), \"count\" (totals and the busiest files)";
+pub const DEFAULT_REPLY_MAX_CHARS: usize = 24_000;
+pub const MAX_REPLY_MAX_CHARS: usize = 400_000;
+const COMPACT_TEXT_CHARS: usize = 160;
+const FILES_OUTPUT_DEFAULT_LIMIT: usize = 200;
+const COUNT_OUTPUT_DEFAULT_LIMIT: usize = 20;
+const REPLY_METADATA_RESERVE_CHARS: usize = 3_000;
+const UNREADABLE_SAMPLE_LEN: usize = 5;
+const DEPENDENCY_STORE_SEGMENTS: &[&str] = &["node_modules", ".pnpm", ".yarn", "site-packages", ".venv", "target"];
+
 pub struct LiteralScan<'a> {
     pub pattern: &'a str,
     pub root: Option<&'a str>,
@@ -2214,9 +2253,52 @@ pub struct LiteralScan<'a> {
     pub regex: bool,
     pub case_insensitive: bool,
     pub whole_word: bool,
-    pub path_glob: Option<&'a str>,
+    pub include_globs: Vec<String>,
+    pub exclude_globs: Vec<String>,
     pub max_matches: usize,
     pub max_files: usize,
+    pub output: ScanOutput,
+    pub list_limit: Option<usize>,
+    pub max_chars: usize,
+    pub spill_name: String,
+}
+
+fn path_is_inside_dependency_store(path: &str) -> bool {
+    path.split(['/', '\\']).any(|segment| DEPENDENCY_STORE_SEGMENTS.contains(&segment))
+}
+
+fn parse_globs(patterns: &[String]) -> Result<Vec<crate::path_glob::PathGlob>, String> {
+    patterns.iter().map(|g| crate::path_glob::PathGlob::parse(g)).collect()
+}
+
+fn spill_lines_to_out_file(spill_name: &str, lines: &[String]) -> Option<String> {
+    if lines.is_empty() { return None; }
+    let relative = format!(".gm/exec-spool/out/{spill_name}");
+    let mut body = lines.join("\n");
+    body.push('\n');
+    if crate::pkfs::write(&relative, &body) { Some(crate::pkfs::anchor(&relative)) } else { None }
+}
+
+fn split_lines_at_budget(lines: Vec<String>, budget: usize) -> (Vec<String>, Vec<String>) {
+    let mut used = 0usize;
+    let mut cut = lines.len();
+    for (i, line) in lines.iter().enumerate() {
+        used += line.chars().count() + 3;
+        if used > budget && i > 0 {
+            cut = i;
+            break;
+        }
+    }
+    let mut shown = lines;
+    let spilled = shown.split_off(cut);
+    (shown, spilled)
+}
+
+fn compact_match_line(path: &str, line_no: usize, text: &str) -> String {
+    let trimmed = text.trim();
+    let shown: String = trimmed.chars().take(COMPACT_TEXT_CHARS).collect();
+    let ellipsis = if trimmed.chars().count() > COMPACT_TEXT_CHARS { "..." } else { "" };
+    format!("{path}:{line_no}: {shown}{ellipsis}")
 }
 
 enum LiteralMatcher {
@@ -2320,12 +2402,18 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     } else {
         crate::scan_universe::TargetOrigin::ProjectDefault
     };
-    let glob = match req.path_glob.filter(|g| !g.is_empty()) {
-        Some(g) => match crate::path_glob::PathGlob::parse(g) {
-            Ok(parsed) => Some(parsed),
-            Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
-        },
-        None => None,
+    let include_globs = match parse_globs(&req.include_globs) {
+        Ok(parsed) => parsed,
+        Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
+    };
+    let exclude_globs = match parse_globs(&req.exclude_globs) {
+        Ok(parsed) => parsed,
+        Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
+    };
+    let has_glob_filter = !include_globs.is_empty() || !exclude_globs.is_empty();
+    let admitted = |path: &str| -> bool {
+        (include_globs.is_empty() || include_globs.iter().any(|g| g.admits(root, scope, path)))
+            && !exclude_globs.iter().any(|g| g.admits(root, scope, path))
     };
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let listing_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
@@ -2336,11 +2424,8 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let listed = universe.files;
     let files_truncated = listed.len() > file_cap;
     let files: &[String] = if files_truncated { &listed[..file_cap] } else { &listed[..] };
-    let files_matching_glob = match &glob {
-        Some(g) => files.iter().filter(|p| g.admits(root, scope, p)).count(),
-        None => files.len(),
-    };
-    let glob_matched_no_files = glob.is_some() && !files.is_empty() && files_matching_glob == 0;
+    let files_matching_glob = files.iter().filter(|p| admitted(p)).count();
+    let glob_matched_no_files = has_glob_filter && !files.is_empty() && files_matching_glob == 0;
 
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let listing_ms = started_ms.saturating_sub(listing_started_ms);
@@ -2349,6 +2434,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut read_ms = 0u64;
 
     let mut matches: Vec<Value> = Vec::new();
+    let mut compact_lines: Vec<String> = Vec::new();
+    let mut file_line_counts: Vec<(String, usize)> = Vec::new();
+    let mut unreadable_dependency_files = 0usize;
+    let mut unreadable_sample: Vec<String> = Vec::new();
+    let mut emitted_matches = 0usize;
     let mut files_scanned = 0usize;
     let mut files_with_matches = 0usize;
     let mut files_skipped_too_large: Vec<String> = Vec::new();
@@ -2366,9 +2456,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             budget_exhausted = true;
             break;
         }
-        if let Some(g) = &glob {
-            if !g.admits(root, scope, path) { continue; }
-        }
+        if !admitted(path) { continue; }
         if has_binary_extension(path) { files_skipped_binary_extension += 1; continue; }
         let stat_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let stat = host_stat(path);
@@ -2386,19 +2474,34 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         let content = host_read(path);
         read_ms += unsafe { crate::wasm_dispatch::host_now_ms() } - read_started;
         let Some(content) = content else {
-            if stat.is_some() { files_skipped_binary += 1 } else { files_unreadable += 1 }
+            if stat.is_some() {
+                files_skipped_binary += 1;
+            } else if path_is_inside_dependency_store(path) {
+                unreadable_dependency_files += 1;
+            } else {
+                files_unreadable += 1;
+                if unreadable_sample.len() < UNREADABLE_SAMPLE_LEN { unreadable_sample.push(path.clone()); }
+            }
             continue;
         };
         if content.as_bytes().contains(&0u8) { files_skipped_binary += 1; continue; }
         files_scanned += 1;
         let mut this_file_matched = false;
+        let mut this_file_lines = 0usize;
         for (idx, line) in content.lines().enumerate() {
             let found = matcher.find_all(line);
             if found.is_empty() { continue; }
             this_file_matched = true;
+            this_file_lines += 1;
             lines_with_matches += 1;
             occurrence_count += found.len();
-            if matches.len() >= req.max_matches { matches_truncated = true; break; }
+            if matches!(req.output, ScanOutput::Files | ScanOutput::Count) { continue; }
+            if emitted_matches >= req.max_matches { matches_truncated = true; break; }
+            emitted_matches += 1;
+            if req.output == ScanOutput::Compact {
+                compact_lines.push(compact_match_line(path, idx + 1, line));
+                continue;
+            }
             let (start, end) = found[0];
             let text_truncated = line.len() > LITERAL_SCAN_MAX_LINE_BYTES;
             let shown: String = if text_truncated {
@@ -2417,7 +2520,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             matches.push(Value::Object(hit));
             if matches_truncated { break; }
         }
-        if this_file_matched { files_with_matches += 1; }
+        if this_file_matched {
+            files_with_matches += 1;
+            file_line_counts.push((path.clone(), this_file_lines));
+        }
         if matches_truncated { break; }
     }
 
@@ -2432,13 +2538,15 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), json!(true));
     out.insert("mode".to_string(), json!(if req.regex { "regex" } else { "literal" }));
+    if req.output != ScanOutput::Matches { out.insert("output".to_string(), json!(req.output.label())); }
     out.insert("pattern".to_string(), json!(req.pattern));
     out.insert("root".to_string(), json!(root));
     if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
     out.insert("case_insensitive".to_string(), json!(req.case_insensitive));
     if !req.regex { out.insert("whole_word".to_string(), json!(req.whole_word)); }
-    if let Some(g) = req.path_glob { out.insert("path_glob".to_string(), json!(g)); }
-    if glob.is_some() { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
+    if !req.include_globs.is_empty() { out.insert("path_glob".to_string(), json!(req.include_globs.join(", "))); }
+    if !req.exclude_globs.is_empty() { out.insert("exclude_glob".to_string(), json!(req.exclude_globs.join(", "))); }
+    if has_glob_filter { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
     out.insert("file_source".to_string(), json!(universe.source.label()));
     if !universe.listing_complete {
@@ -2462,7 +2570,12 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("excluded_by_rule_summary".to_string(), Value::Object(paths_by_rule));
         out.insert("excluded_by_rule_count".to_string(), json!(universe.excluded.len()));
     }
-    out.insert("match_count".to_string(), json!(matches.len()));
+    let match_count = match req.output {
+        ScanOutput::Matches => matches.len(),
+        ScanOutput::Compact => compact_lines.len(),
+        ScanOutput::Files | ScanOutput::Count => lines_with_matches,
+    };
+    out.insert("match_count".to_string(), json!(match_count));
     out.insert("occurrence_count".to_string(), json!(occurrence_count));
     out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
     out.insert("files_with_matches".to_string(), json!(files_with_matches));
@@ -2496,13 +2609,86 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     }
     if files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
     if files_skipped_binary > 0 { out.insert("files_skipped_binary".to_string(), json!(files_skipped_binary)); }
-    if files_unreadable > 0 { out.insert("files_unreadable".to_string(), json!(files_unreadable)); }
+    if files_unreadable > 0 {
+        out.insert("files_unreadable".to_string(), json!(files_unreadable));
+        out.insert("files_unreadable_sample".to_string(), json!(unreadable_sample));
+    }
+    if unreadable_dependency_files > 0 {
+        out.insert("files_unreadable_in_dependency_dirs".to_string(), json!(unreadable_dependency_files));
+    }
     if !exhaustive {
         out.insert("exhaustive_note".to_string(), json!(
             "at least one bound fired -- this is NOT every match in the tree; the files_truncated/matches_truncated/budget_exhausted/files_skipped_* fields above name which"
         ));
     }
-    out.insert("matches".to_string(), Value::Array(matches));
+    let budget = req.max_chars.saturating_sub(REPLY_METADATA_RESERVE_CHARS).max(1_000);
+    let mut spilled: Vec<String> = Vec::new();
+    match req.output {
+        ScanOutput::Matches => {
+            let mut used = 0usize;
+            let mut cut = matches.len();
+            for (i, m) in matches.iter().enumerate() {
+                used += m.to_string().chars().count() + 2;
+                if used > budget && i > 0 {
+                    cut = i;
+                    break;
+                }
+            }
+            let rest = matches.split_off(cut);
+            spilled = rest.iter().map(|m| {
+                format!(
+                    "{}:{}:{}: {}",
+                    m.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                    m.get("line").and_then(|v| v.as_u64()).unwrap_or(0),
+                    m.get("column").and_then(|v| v.as_u64()).unwrap_or(0),
+                    m.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                )
+            }).collect();
+            out.insert("matches".to_string(), Value::Array(matches));
+        }
+        ScanOutput::Compact => {
+            let (shown, rest) = split_lines_at_budget(compact_lines, budget);
+            spilled = rest;
+            out.insert("matches".to_string(), json!(shown));
+        }
+        ScanOutput::Files => {
+            let cap = req.list_limit.unwrap_or(FILES_OUTPUT_DEFAULT_LIMIT).max(1);
+            let all: Vec<String> = file_line_counts.iter().map(|(p, _)| p.clone()).collect();
+            if all.len() > cap { out.insert("files_truncated_at_limit".to_string(), json!(cap)); }
+            let listed: Vec<String> = all.into_iter().take(cap).collect();
+            let (shown, rest) = split_lines_at_budget(listed, budget);
+            spilled = rest;
+            out.insert("files".to_string(), json!(shown));
+        }
+        ScanOutput::Count => {
+            let cap = req.list_limit.unwrap_or(COUNT_OUTPUT_DEFAULT_LIMIT).max(1);
+            let mut busiest = file_line_counts.clone();
+            busiest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let rows: Vec<String> = busiest.into_iter().take(cap).map(|(p, n)| format!("{n} {p}")).collect();
+            out.insert("busiest_files".to_string(), json!(rows));
+        }
+    }
+    if !spilled.is_empty() {
+        let spilled_count = spilled.len();
+        out.insert("reply_truncated".to_string(), json!(true));
+        out.insert("max_chars".to_string(), json!(req.max_chars));
+        out.insert("spilled_count".to_string(), json!(spilled_count));
+        match spill_lines_to_out_file(&req.spill_name, &spilled) {
+            Some(file) => {
+                out.insert("spill_file".to_string(), json!(file));
+                out.insert("reply_note".to_string(), json!(format!(
+                    "the reply hit max_chars={}; {spilled_count} more entries (still part of this exhaustive result) are one per line in spill_file, readable directly; raise max_chars, narrow path/glob, or use output \"files\"/\"count\" to see less",
+                    req.max_chars
+                )));
+            }
+            None => {
+                out.insert("reply_note".to_string(), json!(format!(
+                    "the reply hit max_chars={} and {spilled_count} entries were dropped because the spill file could not be written; narrow path/glob or raise max_chars",
+                    req.max_chars
+                )));
+            }
+        }
+    }
     Value::Object(out)
 }
 
