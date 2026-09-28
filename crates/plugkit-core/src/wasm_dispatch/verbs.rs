@@ -611,7 +611,7 @@ fn lang(body: &Value) -> u64 {
     }
 }
 
-const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "timeoutMs=<ms>\\n<code>";
+const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "[timeoutMs=<ms>\\n]<code> (timeoutMs is the enforced wall-clock limit: default 300000, hard ceiling 900000, the process tree is killed at expiry)";
 
 fn exec_js(body: &Value, body_s: &str) -> u64 {
     if body.is_object() {
@@ -628,21 +628,16 @@ fn exec_js(body: &Value, body_s: &str) -> u64 {
         "error_code": ERR_CODE_INVALID_ARGS,
         "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
     })); }
-    let timeout_ms = match prefix_timeout_ms {
-        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
+    let opts = match prefix_timeout_ms {
+        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => json!({"timeoutMs": n}),
         Some(n) => return err_json("exec_js", json!({
             "error": "timeoutMs below floor",
             "error_code": ERR_CODE_INVALID_ARGS,
             "min": crate::validation::MIN_TIMEOUT_MS,
             "received": n,
         })),
-        None => return err_json("exec_js", json!({
-            "error": "missing timeoutMs -- prefix the body with a timeoutMs=<ms> line naming a positive integer millisecond budget",
-            "error_code": ERR_CODE_INVALID_ARGS,
-            "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
-        })),
-    };
-    let opts = json!({"timeoutMs": timeout_ms}).to_string();
+        None => json!({}),
+    }.to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok("exec_js", Value::String(s)),
@@ -1538,7 +1533,12 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
 
 const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 
-const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit"];
+const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
+    "query", "mode", "path", "glob", "path_glob", "exclude_glob", "exclude_globs", "case_insensitive", "whole_word",
+    "k", "max_results", "maxResults", "limit", "head_limit", "max_matches", "max_files", "output", "max_chars",
+];
+
+const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit", "head_limit"];
 
 fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> Result<(u32, bool), String> {
     let mut seen: Vec<(&str, u64)> = Vec::new();
@@ -1564,6 +1564,24 @@ fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> R
             Ok((*first as u32, true))
         }
     }
+}
+
+fn glob_patterns_from(value: Option<&Value>) -> Result<Vec<String>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::String(s)) => Ok(Some(s.clone()).filter(|g| !g.is_empty()).into_iter().collect()),
+        Some(Value::Array(items)) => items.iter().map(|item| match item.as_str() {
+            Some(s) => Ok(s.to_string()),
+            None => Err("array entries must all be glob strings".to_string()),
+        }).map(|r| r.map(|s| s.trim().to_string())).filter(|r| !matches!(r, Ok(s) if s.is_empty())).collect(),
+        Some(_) => Err("must be a glob string or an array of glob strings".to_string()),
+    }
+}
+
+fn dispatch_task_id() -> Option<String> {
+    let key = "AGENTPLUG_DISPATCH_TASK";
+    let packed = unsafe { host_env_get(key.as_ptr(), key.len() as u32) };
+    unpack_to_string(packed).map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
 }
 
 fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ragconfig::RagConfig, explicit_limit: Option<u32>) -> u64 {
@@ -1598,6 +1616,46 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         },
         None => explicit_limit.map(|limit| limit as usize).unwrap_or(usize::MAX),
     };
+    let output = match body.get("output") {
+        None | Some(Value::Null) => crate::code_index::ScanOutput::Matches,
+        Some(raw) => match raw.as_str().and_then(crate::code_index::ScanOutput::parse) {
+            Some(mode) => mode,
+            None => return err("codesearch", &format!("output {raw} is not an output mode -- valid modes are {}", crate::code_index::SCAN_OUTPUT_NAMES)),
+        },
+    };
+    let max_chars = match body.get("max_chars") {
+        None | Some(Value::Null) => crate::code_index::DEFAULT_REPLY_MAX_CHARS,
+        Some(value) => match value.as_u64() {
+            Some(n) if n > 0 => (n as usize).min(crate::code_index::MAX_REPLY_MAX_CHARS),
+            _ => return err("codesearch", "max_chars must be a positive integer number of characters"),
+        },
+    };
+    let list_output = matches!(output, crate::code_index::ScanOutput::Files | crate::code_index::ScanOutput::Count);
+    let (max_matches, list_limit) = if list_output {
+        (body.get("max_matches").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(usize::MAX), explicit_limit.map(|n| n as usize))
+    } else {
+        (max_matches, None)
+    };
+    let mut include_globs: Vec<String> = Vec::new();
+    let mut exclude_globs: Vec<String> = Vec::new();
+    for key in ["path_glob", "glob"] {
+        match glob_patterns_from(body.get(key)) {
+            Ok(patterns) => for pattern in patterns {
+                match pattern.strip_prefix('!') {
+                    Some(negated) => exclude_globs.push(negated.to_string()),
+                    None => include_globs.push(pattern),
+                }
+            },
+            Err(e) => return err("codesearch", &format!("{key} {e}")),
+        }
+    }
+    for key in ["exclude_glob", "exclude_globs"] {
+        match glob_patterns_from(body.get(key)) {
+            Ok(patterns) => exclude_globs.extend(patterns.into_iter().map(|p| p.strip_prefix('!').map(str::to_string).unwrap_or(p))),
+            Err(e) => return err("codesearch", &format!("{key} {e}")),
+        }
+    }
+    let spill_name = format!("codesearch-{}.txt", dispatch_task_id().unwrap_or_else(|| unsafe { host_now_ms() }.to_string()));
     let scan = crate::code_index::LiteralScan {
         pattern: query,
         root,
@@ -1605,12 +1663,15 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         regex,
         case_insensitive: body.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false),
         whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
-        path_glob: body.get("path_glob").and_then(|v| v.as_str())
-            .or_else(|| body.get("glob").and_then(|v| v.as_str()))
-            .filter(|g| !g.is_empty()),
+        include_globs,
+        exclude_globs,
         max_matches,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
+        output,
+        list_limit,
+        max_chars,
+        spill_name,
     };
     let out = crate::code_index::scan_literal(&scan, cfg);
     if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
@@ -1640,6 +1701,7 @@ fn codesearch(body: &Value) -> u64 {
         Err(e) => return err("codesearch", &e),
     };
     if mode == "literal" || mode == "regex" {
+        if let Some(refusal) = refuse_unknown_fields("codesearch", body, CODESEARCH_EXHAUSTIVE_FIELDS) { return refusal; }
         let explicit = if limit_was_explicit { Some(k) } else { None };
         return codesearch_exhaustive(body, query, mode == "regex", &cfg, explicit);
     }
@@ -2823,10 +2885,21 @@ fn run_git_checked(argv: &[&str], cwd: Option<&str>, verb: &str, fallback: &str)
     Ok(r)
 }
 
+const GIT_STATUS_SUMMARY_DEFAULT_PATHS: usize = 20;
+
 fn git_status(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_status", body, &["path", "paths", "files", "summary", "limit"]) { return refusal; }
     git_async_entry("git_status", body, |body, plan| {
         let cwd = body_cwd(body);
-        let r = git_step_replayed_by_call_order(plan, &["status", "--porcelain"], cwd)?;
+        let paths = body_pathspecs(body);
+        let summary = body.get("summary").and_then(|v| v.as_bool()).unwrap_or(false);
+        let limit = body.get("limit").and_then(|v| v.as_u64()).map(|n| n.max(1) as usize);
+        let mut argv: Vec<&str> = vec!["status", "--porcelain"];
+        if !paths.is_empty() {
+            argv.push("--");
+            for p in &paths { argv.push(p.as_str()); }
+        }
+        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let porcelain = super::host_abi::porcelain_or_dirty(r);
         let mut modified: Vec<String> = vec![];
         let mut untracked: Vec<String> = vec![];
@@ -2844,13 +2917,46 @@ fn git_status(body: &Value) -> u64 {
             if y == 'D' || x == 'D' { deleted.push(path.clone()); }
         }
         let dirty = !porcelain.trim().is_empty();
-        Ok(ok("git_status", json!({
+        if summary {
+            let first_n = limit.unwrap_or(GIT_STATUS_SUMMARY_DEFAULT_PATHS);
+            let entries: Vec<&str> = porcelain.lines().filter(|l| l.len() >= 3).collect();
+            let first_paths: Vec<String> = entries.iter().take(first_n).map(|l| format!("{} {}", &l[..2], l[3..].trim())).collect();
+            return Ok(ok("git_status", json!({
+                "dirty": dirty,
+                "summary": true,
+                "counts": {
+                    "changed_paths": entries.len(),
+                    "modified": modified.len(),
+                    "staged": staged.len(),
+                    "deleted": deleted.len(),
+                    "untracked": untracked.len(),
+                },
+                "first_paths": first_paths,
+                "first_paths_note": "each entry is the two-column porcelain status, a space, then the path",
+                "truncated": entries.len() > first_n,
+                "scoped_to": paths,
+            })));
+        }
+        let mut lists = json!({
             "dirty": dirty,
             "modified": modified,
             "untracked": untracked,
             "deleted": deleted,
             "staged": staged,
-        })))
+        });
+        if let Some(cap) = limit {
+            let mut truncated = serde_json::Map::new();
+            for key in ["modified", "untracked", "deleted", "staged"] {
+                let total = lists[key].as_array().map(|a| a.len()).unwrap_or(0);
+                if total > cap {
+                    lists[key] = Value::Array(lists[key].as_array().cloned().unwrap_or_default().into_iter().take(cap).collect());
+                    truncated.insert(key.to_string(), json!(total));
+                }
+            }
+            if !truncated.is_empty() { lists["truncated_totals"] = Value::Object(truncated); }
+        }
+        if !paths.is_empty() { lists["scoped_to"] = json!(paths); }
+        Ok(ok("git_status", lists))
     })
 }
 
