@@ -284,6 +284,11 @@ impl RuleRecordingWalk<'_> {
     }
 }
 
+fn absolute_root_for_message(root: &str) -> String {
+    if crate::pkfs::is_absolute(root) { return root.to_string(); }
+    crate::pkfs::anchor(root).trim_end_matches("/.").to_string()
+}
+
 pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin) -> Result<ScanUniverse, String> {
     let rel = match scope {
         Some(s) => relative_scope(root, s)?,
@@ -299,7 +304,11 @@ pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg
     }
     if rel.is_some() {
         match stat_is_directory(&target) {
-            None => return Err(format!("path '{}' does not exist under search root '{root}'", scope.unwrap_or(""))),
+            None => return Err(format!(
+                "path '{}' does not exist under search root '{}' -- paths resolve relative to that root, which is the dispatch project unless `root` names another directory; if the path lives in a different project, pass that project's directory as `root` (or dispatch with its cwd)",
+                scope.unwrap_or(""),
+                absolute_root_for_message(root),
+            )),
             Some(false) => return Ok(universe(vec![target.clone()], FileSource::SingleFile, true, Vec::new(), None)),
             Some(true) => {}
         }
