@@ -3905,12 +3905,55 @@ fn git_merge_abort(body: &Value) -> u64 {
     ok("git_merge_abort", json!({ "aborted": true, "head": exec_git_in(cwd, "rev-parse HEAD").trim() }))
 }
 
+const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &["SESSION_ID", "session_id", "sessionId", "cwd", "repo", "root", "projectPath", "_plan"];
+const GIT_STASH_PROTECTED_PATHSPECS: &[(&str, &str)] = &[(".gm", ":(top,exclude).gm"), (".agentplug*", ":(top,exclude).agentplug*")];
+const GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD: usize = 2000;
+
+fn refuse_unknown_fields(verb: &str, body: &Value, accepted: &[&str]) -> Option<u64> {
+    let unknown: Vec<&String> = body.as_object()?.keys()
+        .filter(|k| !GIT_BODY_ENVELOPE_FIELDS.contains(&k.as_str()) && !accepted.contains(&k.as_str()))
+        .collect();
+    if unknown.is_empty() { return None; }
+    Some(err_json(verb, json!({
+        "error": format!("unknown body fields for {}: {}", verb, unknown.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")),
+        "unknown_fields": unknown,
+        "accepted_fields": accepted,
+    })))
+}
+
+fn body_pathspecs(body: &Value) -> Vec<String> {
+    body.get("paths").or_else(|| body.get("files"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_else(|| body.get("path").and_then(|v| v.as_str())
+            .map(|s| vec![s.to_string()]).unwrap_or_default())
+}
+
 fn git_stash(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_stash", body, &["include_untracked", "message", "path", "paths", "files"]) { return refusal; }
     let cwd = body_cwd(body);
     let include_untracked = body.get("include_untracked").and_then(|v| v.as_bool()).unwrap_or(true);
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("gm shelf").trim();
+    let paths = body_pathspecs(body);
+    let mut scope: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+    scope.extend(GIT_STASH_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
+    if include_untracked {
+        let mut probe: Vec<&str> = vec!["ls-files", "--others", "--exclude-standard", "--"];
+        probe.extend(scope.iter().copied());
+        let untracked = git_call_argv(&probe, cwd).get("stdout").and_then(|x| x.as_str()).unwrap_or("").lines().count();
+        if untracked > GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD {
+            return err_json("git_stash", json!({
+                "error": format!("refusing to stash {} untracked files (limit {}): a stash that size runs for minutes and its clean phase deletes them from the worktree", untracked, GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD),
+                "untracked_count": untracked,
+                "threshold": GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD,
+                "hint": "pass paths:[...] to shelve only the files you mean, or include_untracked:false to shelve tracked changes only"
+            }));
+        }
+    }
     let mut argv = vec!["stash", "push", "--message", message];
     if include_untracked { argv.push("--include-untracked"); }
+    argv.push("--");
+    argv.extend(scope.iter().copied());
     let r = git_call_argv(&argv, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let output = format!("{}{}",
@@ -3927,11 +3970,47 @@ fn git_stash(body: &Value) -> u64 {
         "created": created,
         "stash": if stash.is_empty() { Value::Null } else { json!(stash) },
         "include_untracked": include_untracked,
+        "paths": paths,
+        "excluded": GIT_STASH_PROTECTED_PATHSPECS.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
         "output": output
     }))
 }
 
+fn git_stash_list(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_stash_list", body, &[]) { return refusal; }
+    let cwd = body_cwd(body);
+    let r = git_call_argv(&["stash", "list", "--format=%gd\u{1f}%h\u{1f}%aI\u{1f}%gs"], cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 0 { return err("git_stash_list", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("stash list failed")); }
+    let stashes: Vec<Value> = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("")
+        .lines().filter(|l| !l.is_empty()).map(|l| {
+            let mut it = l.splitn(4, '\u{1f}');
+            let stash = it.next().unwrap_or("").to_string();
+            let sha = it.next().unwrap_or("").to_string();
+            let date = it.next().unwrap_or("").to_string();
+            let subject = it.next().unwrap_or("").to_string();
+            json!({ "stash": stash, "sha": sha, "date": date, "subject": subject })
+        }).collect();
+    ok("git_stash_list", json!({ "count": stashes.len(), "stashes": stashes }))
+}
+
+fn git_stash_drop(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_stash_drop", body, &["ref"]) { return refusal; }
+    let cwd = body_cwd(body);
+    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("stash@{0}").trim();
+    if refspec.is_empty() || refspec.starts_with('-') { return err("git_stash_drop", "ref must name a stash such as stash@{0}"); }
+    let r = git_call_argv(&["stash", "drop", refspec], cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let output = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 { return err("git_stash_drop", &output); }
+    let remaining = exec_git_in(cwd, "stash list --format=%gd").lines().filter(|l| !l.trim().is_empty()).count();
+    ok("git_stash_drop", json!({ "dropped": refspec, "remaining": remaining, "output": output }))
+}
+
 fn git_stash_pop(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_stash_pop", body, &["ref"]) { return refusal; }
     let cwd = body_cwd(body);
     let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("stash@{0}").trim();
     let r = git_call_argv(&["stash", "pop", refspec], cwd);
@@ -4373,6 +4452,8 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_merge_abort" => git_merge_abort(&body),
         "git_stash" => git_stash(&body),
         "git_stash_pop" => git_stash_pop(&body),
+        "git_stash_drop" => git_stash_drop(&body),
+        "git_stash_list" => git_stash_list(&body),
         "git_branch_delete" => git_branch_delete(&body),
         "git_rm" => git_rm(&body),
         "git_revert" => git_revert(&body),
