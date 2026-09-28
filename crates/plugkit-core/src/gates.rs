@@ -116,6 +116,20 @@ fn is_longgap_refresh(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> 
     policy.longgap_refresh_verbs.iter().any(|v| v == verb)
 }
 
+fn dispatch_submitted_at_ms() -> Option<u64> {
+    let key = "AGENTPLUG_DISPATCH_SUBMITTED_AT_MS";
+    let packed = unsafe { crate::wasm_dispatch::host_env_get(key.as_ptr(), key.len() as u32) };
+    crate::wasm_dispatch::unpack_to_string_pub(packed)?.trim().parse::<u64>().ok().filter(|ms| *ms > 0)
+}
+
+pub fn restamp_last_dispatch_to_completion(verb: &str) {
+    let policy = crate::orchestrator::fsm::graph().policy;
+    if is_longgap_exempt(verb, &policy) {
+        return;
+    }
+    let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-dispatch-ts"), &now_ms().to_string());
+}
+
 fn long_gap_should_fire(last_instruction_ms: u64, prev_dispatch_ms: u64, now: u64, threshold: u64) -> bool {
     if last_instruction_ms == 0 { return false; }
     let idle_since_instruction = now.saturating_sub(last_instruction_ms) > threshold;
@@ -316,29 +330,30 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         }
     }
 
+    let claim_ms = now_ms();
+    let submitted_at_ms = dispatch_submitted_at_ms().map(|ms| ms.min(claim_ms)).unwrap_or(claim_ms);
+
     let prev_dispatch_ms: u64 = if !is_longgap_exempt(verb, &policy) {
         let p = host_read(&crate::pkfs::anchor(".gm/last-dispatch-ts")).unwrap_or_default().trim().parse().unwrap_or(0);
-        let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-dispatch-ts"), &now_ms().to_string());
+        let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-dispatch-ts"), &claim_ms.to_string());
         p
     } else { 0 };
 
     if is_longgap_refresh(verb, &policy) {
-        let now = now_ms();
-        let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-instruction-ts"), &now.to_string());
+        let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-instruction-ts"), &claim_ms.to_string());
         let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/long-gap-retry-state"), "");
     } else if !is_longgap_exempt(verb, &policy) {
         let last = host_read(&crate::pkfs::anchor(".gm/last-instruction-ts")).unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
-        let now = now_ms();
         let longgap_threshold_ms = policy.longgap_threshold_ms;
-        if long_gap_should_fire(last_ms, prev_dispatch_ms, now, longgap_threshold_ms) {
-            let gap_ms = now - last_ms;
+        if long_gap_should_fire(last_ms, prev_dispatch_ms, submitted_at_ms, longgap_threshold_ms) {
+            let gap_ms = submitted_at_ms.saturating_sub(last_ms);
             let retry_state = host_read(&crate::pkfs::anchor(".gm/long-gap-retry-state")).unwrap_or_default();
             let (last_verb, count, last_denial_ts) = parse_retry_state_v2(&retry_state);
-            let since_last_denial = now.saturating_sub(last_denial_ts);
+            let since_last_denial = submitted_at_ms.saturating_sub(last_denial_ts);
             let same_burst = last_denial_ts > 0 && since_last_denial <= policy.long_gap_same_burst_ms;
             let new_count = if last_verb == verb && since_last_denial > policy.long_gap_same_burst_ms { count + 1 } else if last_verb == verb { count } else { 1u32 };
-            let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/long-gap-retry-state"), &format!("{}|{}|{}", verb, new_count, now));
+            let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/long-gap-retry-state"), &format!("{}|{}|{}", verb, new_count, claim_ms));
             if new_count >= policy.long_gap_retry_escalate_after {
                 if !same_burst {
                     log_deviation("long-gap-retry-without-instruction", &format!("verb={} consecutive_retries={} gap_ms={}", verb, new_count, gap_ms));
