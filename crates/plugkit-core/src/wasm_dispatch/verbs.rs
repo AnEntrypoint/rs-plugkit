@@ -4381,7 +4381,15 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         .filter(|s| !s.is_empty())
         .or_else(|| extract_session_id_from_plain_text_body(&body_s));
     super::events::set_dispatch_session_id(dispatch_session_id.clone());
-    let result_packed = dispatch_gated_verb(&verb, &body, &body_s);
+    if let Some(root_override) = body.get("git_root_override").and_then(|v| v.as_str()) {
+        crate::orchestrator::seed_project_root_override(root_override);
+    }
+    let root_rejection = reject_if_project_root_unresolvable_before_gm_dir_panics(&verb);
+    let root_resolved = root_rejection.is_none();
+    let result_packed = match root_rejection {
+        Some(rejection) => rejection,
+        None => dispatch_gated_verb(&verb, &body, &body_s),
+    };
     super::events::set_dispatch_session_id(None);
     let result_value = super::host_abi::unpack_to_value(result_packed);
     #[cfg(target_arch = "wasm32")]
@@ -4389,7 +4397,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
         let exit_code = if result_value.get("ok").and_then(|v| v.as_bool()).unwrap_or(true) { 0 } else { 1 };
         let dream_rsi_vetoed = result_value.get("dream_rsi_vetoed").and_then(|v| v.as_bool()).unwrap_or(false);
-        if dream_rsi_vetoed {
+        if dream_rsi_vetoed || !root_resolved {
             None
         } else {
             let dispatch_id = crate::dispatch_ledger::record(cwd, &verb, &fingerprint, exit_code, dispatch_session_id.as_deref());
@@ -4455,13 +4463,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
     }
     let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
     crate::browser_witness::record_from_body(cwd_for_witness, body);
-    if let Some(root_override) = body.get("git_root_override").and_then(|v| v.as_str()) {
-        crate::orchestrator::seed_project_root_override(root_override);
-    }
     if crate::orchestrator::is_orchestrator_verb(verb) {
-        if let Some(unresolvable) = reject_if_project_root_unresolvable_before_gm_dir_panics(verb) {
-            return unresolvable;
-        }
         let (out, err_msg, code) = crate::orchestrator::dispatch(verb, "", body_s);
         #[cfg(target_arch = "wasm32")]
         {
