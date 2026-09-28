@@ -242,6 +242,67 @@ fn is_test_scoped_path(path: &str) -> bool {
     lower.contains(".test.") || lower.contains(".spec.") || lower.contains("/test/") || lower.contains("/tests/") || lower.contains("/__tests__/")
 }
 
+/// Best-effort brace-balance scope walk: starting just before a `throw` statement,
+/// scan the preceding file text backward one enclosing block at a time. A block
+/// whose opening-brace text names a `catch` (`catch (...) {` or `.catch(...) {`)
+/// means the throw is lexically handled. A block that itself opens a function
+/// (`function ...`/`=>`) with no `catch` in its own opener ends the walk at that
+/// function's own scope boundary -- an outer catch cannot lexically reach across it.
+/// Character-level (not line-level) so a same-line `} catch (e) {` pairs its own
+/// `{` to the throw's block without misreading the leading `}` of the closed `try`.
+fn js_throw_has_enclosing_catch(full_text: &str, throw_line_no: usize) -> bool {
+    let lines: Vec<&str> = full_text.lines().collect();
+    if throw_line_no == 0 || throw_line_no > lines.len() {
+        return false;
+    }
+    let throw_line = lines[throw_line_no - 1];
+    let throw_pos_in_line = throw_line.find("throw").unwrap_or(0);
+    let mut preceding = String::new();
+    for l in &lines[..throw_line_no - 1] {
+        preceding.push_str(l);
+        preceding.push('\n');
+    }
+    preceding.push_str(&throw_line[..throw_pos_in_line]);
+    let chars: Vec<char> = preceding.chars().collect();
+
+    let mut cursor = chars.len();
+    let mut hops = 0;
+    loop {
+        hops += 1;
+        if hops > 25 {
+            return false;
+        }
+        let mut depth: i32 = 0;
+        let mut open_idx: Option<usize> = None;
+        let mut j = cursor;
+        while j > 0 {
+            j -= 1;
+            match chars[j] {
+                '}' => depth += 1,
+                '{' => {
+                    if depth == 0 {
+                        open_idx = Some(j);
+                        break;
+                    } else {
+                        depth -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(idx) = open_idx else { return false };
+        let window_start = idx.saturating_sub(80);
+        let window: String = chars[window_start..idx].iter().collect();
+        if window.contains("catch") {
+            return true;
+        }
+        if window.contains("function") || window.contains("=>") {
+            return false;
+        }
+        cursor = idx;
+    }
+}
+
 fn needle_first_occurrence_sits_inside_quoted_string_literal(text: &str, needle: &str) -> bool {
     let Some(idx) = text.find(needle) else { return false };
     let before = &text[..idx];
@@ -328,7 +389,12 @@ fn pred_no_unchecked_panics_in_diff() -> bool {
             }
         } else if is_js_like {
             if trimmed.starts_with("throw ") && !trimmed.contains("//") {
-                found.push(format!("{path}:{line_no}: {trimmed}"));
+                let handled = crate::pkfs::read_to_string(&path)
+                    .map(|content| js_throw_has_enclosing_catch(&content, line_no))
+                    .unwrap_or(false);
+                if !handled {
+                    found.push(format!("{path}:{line_no}: {trimmed}"));
+                }
             }
         }
     }
