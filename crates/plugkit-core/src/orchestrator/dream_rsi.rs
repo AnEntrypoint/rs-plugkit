@@ -182,10 +182,8 @@ pub fn failure_is_gate_drift(result: &Value) -> bool {
         result.get("error_code").and_then(Value::as_str),
         Some(
             crate::wasm_dispatch::ERR_CODE_GATE_DENIED
-                | crate::wasm_dispatch::ERR_CODE_INVALID_ARGS
                 | crate::wasm_dispatch::ERR_CODE_UNKNOWN_VERB
                 | crate::wasm_dispatch::ERR_CODE_RETIRED_VERB
-                | crate::wasm_dispatch::ERR_CODE_UNSUPPORTED
         )
     )
 }
