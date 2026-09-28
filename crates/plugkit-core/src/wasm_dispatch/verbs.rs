@@ -3972,7 +3972,7 @@ fn git_merge_abort(body: &Value) -> u64 {
     ok("git_merge_abort", json!({ "aborted": true, "head": exec_git_in(cwd, "rev-parse HEAD").trim() }))
 }
 
-const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &["SESSION_ID", "session_id", "sessionId", "cwd", "repo", "root", "projectPath", "_plan"];
+const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &["SESSION_ID", "session_id", "sessionId", "cwd", "repo", "root", "projectPath", "git_root_override", "_plan"];
 const GIT_PROTECTED_PATHSPECS: &[(&str, &str)] = &[(".gm", ":(top,exclude).gm"), (".agentplug*", ":(top,exclude).agentplug*")];
 const GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD: usize = 2000;
 
