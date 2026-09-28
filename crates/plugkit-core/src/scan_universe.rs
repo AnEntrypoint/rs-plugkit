@@ -30,6 +30,34 @@ impl FileSource {
 pub struct RuleExclusion {
     pub path: String,
     pub rule: &'static str,
+    pub files: Option<usize>,
+}
+
+pub const OWN_STATE_RULE: &str = "gm_state_dir";
+
+pub fn is_own_state_name(name: &str) -> bool {
+    name == ".gm" || name.starts_with(".agentplug")
+}
+
+fn own_state_entry_under_root(root: &str, path: &str) -> Option<String> {
+    let prefix = join_under(root, "");
+    let first = path.strip_prefix(prefix.as_str())?.split('/').next()?;
+    is_own_state_name(first).then(|| format!("{prefix}{first}"))
+}
+
+fn prune_own_state(root: &str, files: Vec<String>) -> (Vec<String>, Vec<RuleExclusion>) {
+    let mut kept = Vec::with_capacity(files.len());
+    let mut pruned: Vec<RuleExclusion> = Vec::new();
+    for file in files {
+        match own_state_entry_under_root(root, &file) {
+            None => kept.push(file),
+            Some(entry) => match pruned.iter_mut().find(|p| p.path == entry) {
+                Some(p) => p.files = Some(p.files.unwrap_or(0) + 1),
+                None => pruned.push(RuleExclusion { path: entry, rule: OWN_STATE_RULE, files: Some(1) }),
+            },
+        }
+    }
+    (kept, pruned)
 }
 
 pub struct ScanUniverse {
@@ -237,7 +265,7 @@ impl RuleRecordingWalk<'_> {
             let is_dir = stat_is_directory(&next).unwrap_or(false);
             let rule = if self.cfg.is_force_included(&next) { None } else { self.exclusion_rule(&name, &next, is_dir) };
             match (rule, is_dir) {
-                (Some(rule), _) => self.excluded.push(RuleExclusion { path: next, rule }),
+                (Some(rule), _) => self.excluded.push(RuleExclusion { path: next, rule, files: None }),
                 (None, true) => self.descend(&next),
                 (None, false) => self.files.push(next),
             }
@@ -266,6 +294,9 @@ pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg
         files, source, listing_complete, excluded, walk_reason,
         target: target.clone(),
     };
+    if let Some(first) = rel.as_deref().and_then(|r| r.split('/').next()).filter(|s| is_own_state_name(s)) {
+        return Err(format!("path '{}' is inside {first}, gm's own state directory, which is never a search target", scope.unwrap_or("")));
+    }
     if rel.is_some() {
         match stat_is_directory(&target) {
             None => return Err(format!("path '{}' does not exist under search root '{root}'", scope.unwrap_or(""))),
@@ -275,7 +306,10 @@ pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg
     }
     let cause = match directory_is_gitignored(&target) {
         Ok(false) => match git_worktree_files(&target, 0) {
-            Ok((files, complete)) => return Ok(universe(files, FileSource::Git, complete, Vec::new(), None)),
+            Ok((files, complete)) => {
+                let (files, pruned) = prune_own_state(root, files);
+                return Ok(universe(files, FileSource::Git, complete, pruned, None));
+            }
             Err(e) => WalkCause::GitListingFailed(e),
         },
         Ok(true) => WalkCause::TargetGitignored,
