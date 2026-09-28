@@ -192,6 +192,7 @@ fn persisted_paths_compatibility_surface_report() -> Value {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Capability {
     ProjectPath,
+    ProjectPathOrGrantedRoot,
     EnvAllowlist,
     KvNamespace,
     Unguarded,
@@ -202,7 +203,7 @@ const VERB_CAPABILITIES: &[(&str, Capability)] = &[
     ("fs_write", Capability::ProjectPath),
     ("fs_stat", Capability::ProjectPath),
     ("fs_readdir", Capability::ProjectPath),
-    ("scan_deps", Capability::ProjectPath),
+    ("scan_deps", Capability::ProjectPathOrGrantedRoot),
     ("env_get", Capability::EnvAllowlist),
     ("kv_put", Capability::KvNamespace),
     ("fetch", Capability::Unguarded),
@@ -243,6 +244,10 @@ fn guard_surface_report() -> Value {
         "path_within_project": {
             "rejects": ["any .. segment", "absolute paths", "paths containing a drive colon"],
             "applied_to": verbs_with_capability(Capability::ProjectPath),
+        },
+        "project_path_or_granted_root": {
+            "accepts": ["a relative path within the project", "an absolute directory the host grants (an existing directory holding .git, .gm, package.json, Cargo.toml, go.mod or pyproject.toml)"],
+            "applied_to": verbs_with_capability(Capability::ProjectPathOrGrantedRoot),
         },
         "env_get": {
             "applied_to": verbs_with_capability(Capability::EnvAllowlist),
@@ -453,10 +458,21 @@ fn fs_stat(body: &Value) -> u64 {
     }
 }
 
+fn path_is_absolute(path: &str) -> bool {
+    path.starts_with('/') || path.starts_with('\\') || path.as_bytes().get(1) == Some(&b':')
+}
+
 fn scan_deps(body: &Value) -> u64 {
-    let root = body.get("root").and_then(|v| v.as_str()).unwrap_or(".");
-    if !path_within_project(root) {
-        return err("scan_deps", "root must be relative and within the project");
+    let root = body.get("root").and_then(|v| v.as_str())
+        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty())
+        .unwrap_or(".");
+    if path_is_absolute(root) {
+        if !crate::wasm_dispatch::host_allow_root(root) {
+            return err("scan_deps", &format!("root '{root}' is not a real, existing project directory the host will grant access to"));
+        }
+    } else if !path_within_project(root) {
+        return err("scan_deps", "root must be within the project (relative, no '..') or an absolute project directory the host grants");
     }
     ok("scan_deps", crate::scan_deps::scan_deps(body))
 }
@@ -4378,7 +4394,8 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         } else {
             let dispatch_id = crate::dispatch_ledger::record(cwd, &verb, &fingerprint, exit_code, dispatch_session_id.as_deref());
             if let Some(session_id) = dispatch_session_id.as_deref() {
-                crate::orchestrator::dream_rsi::observe_dispatch(session_id, &dispatch_id, &verb, &fingerprint, exit_code);
+                let gate_drift = exit_code != 0 && crate::orchestrator::dream_rsi::failure_is_gate_drift(&result_value);
+                crate::orchestrator::dream_rsi::observe_dispatch(session_id, &dispatch_id, &verb, &fingerprint, exit_code, gate_drift);
             }
             Some(dispatch_id)
         }
