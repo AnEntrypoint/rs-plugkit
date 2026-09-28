@@ -43,7 +43,8 @@ enum RootProbe {
 }
 
 fn stderr_says_not_a_repo(stderr: &str) -> bool {
-    stderr.to_ascii_lowercase().contains("not a git repository")
+    let lowered = stderr.to_ascii_lowercase();
+    lowered.contains("not a git repository") || lowered.contains("gitfile")
 }
 
 #[cfg(target_arch = "wasm32")]
