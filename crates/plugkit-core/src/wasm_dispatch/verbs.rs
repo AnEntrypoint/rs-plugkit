@@ -4123,16 +4123,6 @@ fn git_init(body: &Value) -> u64 {
     let shown = cwd.unwrap_or("the dispatch working directory");
     let user_name = match git_init_config_value(body, "user_name") { Ok(v) => v, Err(reason) => return err("git_init", &reason) };
     let user_email = match git_init_config_value(body, "user_email") { Ok(v) => v, Err(reason) => return err("git_init", &reason) };
-    let branch_arg = match git_init_config_value(body, "initial_branch") {
-        Ok(Some(b)) if b.starts_with('-') => return err("git_init", "initial_branch must not start with '-'"),
-        Ok(Some(b)) => {
-            let valid = git_call_argv(&["check-ref-format", "--branch", &b], cwd).get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0;
-            if !valid { return err("git_init", &format!("initial_branch {:?} is not a valid branch name", b)); }
-            Some(format!("--initial-branch={}", b))
-        }
-        Ok(None) => None,
-        Err(reason) => return err("git_init", &reason),
-    };
     let probe = git_call_argv(&["rev-parse", "--show-toplevel"], cwd);
     let probe_code = probe.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1);
     let probe_err = probe.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
@@ -4146,6 +4136,16 @@ fn git_init(body: &Value) -> u64 {
     }
     if probe_err.contains("git cwd does not exist") { return err("git_init", &format!("path does not exist or is not a directory: {}", shown)); }
     if !probe_err.to_lowercase().contains("not a git repository") { return err("git_init", probe_err); }
+    let branch_arg = match git_init_config_value(body, "initial_branch") {
+        Ok(Some(b)) if b.starts_with('-') => return err("git_init", "initial_branch must not start with '-'"),
+        Ok(Some(b)) => {
+            let valid = git_call_argv(&["check-ref-format", "--branch", &b], cwd).get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0;
+            if !valid { return err("git_init", &format!("initial_branch {:?} is not a valid branch name", b)); }
+            Some(format!("--initial-branch={}", b))
+        }
+        Ok(None) => None,
+        Err(reason) => return err("git_init", &reason),
+    };
     let mut argv: Vec<&str> = vec!["init"];
     if let Some(a) = &branch_arg { argv.push(a.as_str()); }
     if let Err(e) = run_git_checked(&argv, cwd, "git_init", "git init failed") { return e; }
