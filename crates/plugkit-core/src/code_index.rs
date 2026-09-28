@@ -2190,6 +2190,23 @@ const LITERAL_SCAN_MAX_LINE_BYTES: usize = 512;
 
 const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
+const SKIPPED_SAMPLE_LEN: usize = 10;
+
+const BINARY_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "icns", "tif", "tiff", "psd", "avif", "heic",
+    "mp3", "mp4", "m4a", "mov", "avi", "mkv", "wav", "ogg", "flac", "webm",
+    "woff", "woff2", "ttf", "otf", "eot",
+    "zip", "gz", "tgz", "bz2", "xz", "7z", "rar", "tar", "zst", "jar", "war", "whl", "nupkg", "cab", "msi", "dmg", "iso",
+    "exe", "dll", "so", "dylib", "o", "rlib", "rmeta", "pdb", "class", "pyc", "node", "wasm", "bin",
+    "sqlite", "sqlite3", "pack", "idx", "lockb", "pdf",
+];
+
+fn has_binary_extension(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let Some((_, ext)) = name.rsplit_once('.') else { return false };
+    BINARY_EXTENSIONS.iter().any(|b| ext.eq_ignore_ascii_case(b))
+}
+
 pub struct LiteralScan<'a> {
     pub pattern: &'a str,
     pub root: Option<&'a str>,
@@ -2311,6 +2328,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         None => None,
     };
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
+    let listing_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let universe = match crate::scan_universe::list_scan_universe(root, scope, file_cap.saturating_add(1), &cfg.index, origin) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
@@ -2325,12 +2343,17 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let glob_matched_no_files = glob.is_some() && !files.is_empty() && files_matching_glob == 0;
 
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let listing_ms = started_ms.saturating_sub(listing_started_ms);
     let budget_ms = cfg.index.wall_budget_ms;
+    let mut stat_ms = 0u64;
+    let mut read_ms = 0u64;
 
     let mut matches: Vec<Value> = Vec::new();
     let mut files_scanned = 0usize;
     let mut files_with_matches = 0usize;
     let mut files_skipped_too_large: Vec<String> = Vec::new();
+    let mut files_skipped_too_large_count = 0usize;
+    let mut files_skipped_binary_extension = 0usize;
     let mut files_skipped_binary = 0usize;
     let mut files_unreadable = 0usize;
     let mut lines_with_matches = 0usize;
@@ -2346,15 +2369,23 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         if let Some(g) = &glob {
             if !g.admits(root, scope, path) { continue; }
         }
+        if has_binary_extension(path) { files_skipped_binary_extension += 1; continue; }
+        let stat_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let stat = host_stat(path);
+        let read_started = unsafe { crate::wasm_dispatch::host_now_ms() };
+        stat_ms += read_started - stat_started;
         if let Some(stat) = &stat {
             let size = stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
             if size > LITERAL_SCAN_MAX_FILE_BYTES {
-                files_skipped_too_large.push(path.clone());
+                files_skipped_too_large_count += 1;
+                if files_skipped_too_large.len() < SKIPPED_SAMPLE_LEN { files_skipped_too_large.push(path.clone()); }
                 continue;
             }
+            if size == 0 { files_scanned += 1; continue; }
         }
-        let Some(content) = host_read(path) else {
+        let content = host_read(path);
+        read_ms += unsafe { crate::wasm_dispatch::host_now_ms() } - read_started;
+        let Some(content) = content else {
             if stat.is_some() { files_skipped_binary += 1 } else { files_unreadable += 1 }
             continue;
         };
@@ -2393,7 +2424,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let exhaustive = !files_truncated
         && !matches_truncated
         && !budget_exhausted
-        && files_skipped_too_large.is_empty()
+        && files_skipped_too_large_count == 0
         && files_unreadable == 0
         && universe.listing_complete
         && !glob_matched_no_files;
@@ -2417,9 +2448,18 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     if !universe.excluded.is_empty() {
         let cap = 200usize;
         let shown: Vec<Value> = universe.excluded.iter().take(cap)
-            .map(|e| json!({ "path": e.path, "rule": e.rule }))
+            .map(|e| match e.files {
+                Some(files) => json!({ "path": e.path, "rule": e.rule, "files": files }),
+                None => json!({ "path": e.path, "rule": e.rule }),
+            })
             .collect();
+        let mut paths_by_rule = serde_json::Map::new();
+        for e in &universe.excluded {
+            let seen = paths_by_rule.get(e.rule).and_then(|v| v.as_u64()).unwrap_or(0);
+            paths_by_rule.insert(e.rule.to_string(), json!(seen + 1));
+        }
         out.insert("excluded_by_rule".to_string(), json!(shown));
+        out.insert("excluded_by_rule_summary".to_string(), Value::Object(paths_by_rule));
         out.insert("excluded_by_rule_count".to_string(), json!(universe.excluded.len()));
     }
     out.insert("match_count".to_string(), json!(matches.len()));
@@ -2428,7 +2468,14 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     out.insert("files_with_matches".to_string(), json!(files_with_matches));
     out.insert("files_scanned".to_string(), json!(files_scanned));
     out.insert("files_listed".to_string(), json!(files.len()));
-    out.insert("elapsed_ms".to_string(), json!(unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms)));
+    let elapsed_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms);
+    out.insert("elapsed_ms".to_string(), json!(elapsed_ms));
+    out.insert("phase_ms".to_string(), json!({
+        "listing": listing_ms,
+        "stat": stat_ms,
+        "read": read_ms,
+        "match_and_other": elapsed_ms.saturating_sub(stat_ms + read_ms),
+    }));
     out.insert("exhaustive".to_string(), json!(exhaustive));
     if files_truncated {
         out.insert("files_truncated".to_string(), json!(true));
@@ -2442,10 +2489,12 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("budget_exhausted".to_string(), json!(true));
         out.insert("budget_ms".to_string(), json!(budget_ms));
     }
-    if !files_skipped_too_large.is_empty() {
+    if files_skipped_too_large_count > 0 {
+        out.insert("files_skipped_too_large_count".to_string(), json!(files_skipped_too_large_count));
         out.insert("files_skipped_too_large".to_string(), json!(files_skipped_too_large));
         out.insert("max_file_bytes".to_string(), json!(LITERAL_SCAN_MAX_FILE_BYTES));
     }
+    if files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
     if files_skipped_binary > 0 { out.insert("files_skipped_binary".to_string(), json!(files_skipped_binary)); }
     if files_unreadable > 0 { out.insert("files_unreadable".to_string(), json!(files_unreadable)); }
     if !exhaustive {

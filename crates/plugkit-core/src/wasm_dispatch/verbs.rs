@@ -3429,20 +3429,15 @@ fn git_finalize(body: &Value) -> u64 {
 }
 
 fn git_log(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_log", body, &["limit", "count", "range", "ref", "rev", "path", "paths", "files"]) { return refusal; }
     git_async_entry("git_log", body, |body, plan| {
         let cwd = body_cwd(body);
         let count = body.get("limit").and_then(|v| v.as_u64())
             .or_else(|| body.get("count").and_then(|v| v.as_u64()))
             .unwrap_or(10);
         let nflag = format!("-{}", count);
-        let range = body.get("range").and_then(|v| v.as_str())
-            .or_else(|| body.get("ref").and_then(|v| v.as_str()))
-            .unwrap_or("").trim();
-        let paths: Vec<String> = body.get("paths").or_else(|| body.get("files"))
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-            .unwrap_or_else(|| body.get("path").and_then(|v| v.as_str())
-                .map(|s| vec![s.to_string()]).unwrap_or_default());
+        let range = body_revision(body);
+        let paths = body_pathspecs(body);
         let pretty = "--pretty=format:%h\u{1f}%H\u{1f}%an\u{1f}%ae\u{1f}%aI\u{1f}%s";
         let mut argv: Vec<&str> = vec!["log", &nflag, pretty, "--no-color"];
         if !range.is_empty() { argv.push(range); }
@@ -3481,19 +3476,21 @@ fn git_log(body: &Value) -> u64 {
 }
 
 fn git_diff(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_diff", body, &["range", "ref", "rev", "staged", "stat", "path", "paths", "files"]) { return refusal; }
     git_async_entry("git_diff", body, |body, plan| {
         let cwd = body_cwd(body);
         let staged = body.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
-        let path = body.get("path").and_then(|v| v.as_str());
-        let range = body.get("range").and_then(|v| v.as_str())
-            .or_else(|| body.get("ref").and_then(|v| v.as_str()))
-            .unwrap_or("").trim();
+        let paths = body_pathspecs(body);
+        let range = body_revision(body);
         let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
         let mut argv: Vec<&str> = vec!["diff", "--no-color"];
         if staged { argv.push("--staged"); }
         if stat { argv.push("--stat"); }
         if !range.is_empty() { argv.push(range); }
-        if let Some(p) = path { argv.push("--"); argv.push(p); }
+        if !paths.is_empty() {
+            argv.push("--");
+            argv.extend(paths.iter().map(String::as_str));
+        }
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
@@ -3507,18 +3504,19 @@ fn git_diff(body: &Value) -> u64 {
         let mut diff = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
         let truncated = diff.len() > 60000;
         if truncated { diff.truncate(60000); }
-        Ok(ok("git_diff", json!({ "diff": diff, "truncated": truncated, "range": range })))
+        Ok(ok("git_diff", json!({ "diff": diff, "truncated": truncated, "range": range, "paths": paths })))
     })
 }
 
 fn git_show(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_show", body, &["rev", "ref", "sha", "commit", "stat", "path", "paths", "files"]) { return refusal; }
     let cwd = body_cwd(body);
-    let refspec = body.get("rev").and_then(|v| v.as_str())
-        .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+    let refspec = ["rev", "ref", "sha", "commit"].iter()
+        .find_map(|k| body.get(*k).and_then(|v| v.as_str()))
         .unwrap_or("HEAD");
     let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
     let path = body.get("path").and_then(|v| v.as_str());
-    let paths: Vec<String> = body.get("paths")
+    let paths: Vec<String> = body.get("paths").or_else(|| body.get("files"))
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
@@ -3990,12 +3988,24 @@ fn refuse_unknown_fields(verb: &str, body: &Value, accepted: &[&str]) -> Option<
     })))
 }
 
+fn body_revision(body: &Value) -> &str {
+    ["range", "ref", "rev"].iter()
+        .find_map(|k| body.get(*k).and_then(|v| v.as_str()))
+        .unwrap_or("").trim()
+}
+
 fn body_pathspecs(body: &Value) -> Vec<String> {
-    body.get("paths").or_else(|| body.get("files"))
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-        .unwrap_or_else(|| body.get("path").and_then(|v| v.as_str())
-            .map(|s| vec![s.to_string()]).unwrap_or_default())
+    let mut specs: Vec<String> = Vec::new();
+    for key in ["path", "paths", "files"] {
+        match body.get(key) {
+            Some(Value::String(s)) => specs.push(s.clone()),
+            Some(Value::Array(arr)) => specs.extend(arr.iter().filter_map(|x| x.as_str().map(String::from))),
+            _ => {}
+        }
+    }
+    specs.retain(|s| !s.is_empty());
+    specs.dedup();
+    specs
 }
 
 fn git_stash(body: &Value) -> u64 {
