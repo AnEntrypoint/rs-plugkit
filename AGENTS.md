@@ -307,6 +307,12 @@ changes.
 - `host_abi::git_call` turns an async `{pending, token}` envelope into
   `ok:false` (`porcelain_or_dirty` would read a shapeless value as a clean
   tree); only `git_step`/`git_poll` call `git_call_async`.
+- `host_abi::git_call_async` retries once with `-c safe.directory=<repo>` when
+  git refuses with "dubious ownership", and only when `<repo>` (the path git
+  itself names) contains the git cwd. Windows worktrees created by an elevated
+  process have a `.git` owned by BUILTIN/Administrators, so every git call --
+  including `gm_dir`'s `rev-parse --show-toplevel` -- failed and `gm_dir`
+  panicked (`wasm unreachable`) on every stateful verb, codesearch included.
 
 ### plugin_abi.rs
 
