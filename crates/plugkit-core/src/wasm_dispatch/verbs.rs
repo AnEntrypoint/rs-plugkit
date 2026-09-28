@@ -4451,6 +4451,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
             let ms = unsafe { host_now_ms() }.saturating_sub(dispatch_start_ms);
             emit_event("dispatch.end", serde_json::json!({ "verb": verb, "ms": ms }));
             restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb);
+            crate::gates::restamp_last_dispatch_to_completion(verb);
         }
         if code == 0 {
             let data: Value = serde_json::from_str(&out).unwrap_or(Value::String(out));
@@ -4548,6 +4549,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
     {
         let ms = unsafe { host_now_ms() }.saturating_sub(dispatch_start_ms);
         emit_event("dispatch.end", serde_json::json!({ "verb": verb, "ms": ms }));
+        crate::gates::restamp_last_dispatch_to_completion(verb);
     }
     result
 }
