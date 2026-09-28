@@ -4089,6 +4089,100 @@ fn git_stash_list(body: &Value) -> u64 {
     ok("git_stash_list", json!({ "count": stashes.len(), "stashes": stashes }))
 }
 
+const GIT_INIT_GITIGNORE_ENTRY: &str = ".gm/exec-spool/";
+const GIT_INIT_GITIGNORE_COVERING_ENTRIES: &[&str] = &[".gm", ".gm/", ".gm/*", ".gm/exec-spool", ".gm/exec-spool/", ".gm/exec-spool/*"];
+
+fn git_init_target(body: &Value) -> Result<Option<String>, String> {
+    let base = body_cwd(body).map(|c| c.trim()).filter(|c| !c.is_empty());
+    let requested = body.get("path").map(|v| v.as_str().map(str::trim).ok_or("path must be a string")).transpose()?;
+    let joined = match (requested, base) {
+        (Some(""), _) => return Err("path must not be empty".to_string()),
+        (Some(p), Some(b)) if !crate::pkfs::is_absolute(p) => format!("{}/{}", b.trim_end_matches(['/', '\\']), p),
+        (Some(p), _) => p.to_string(),
+        (None, Some(b)) => b.to_string(),
+        (None, None) => return Ok(None),
+    };
+    let unified = joined.replace('\\', "/");
+    if unified.split('/').any(|segment| segment == "..") { return Err("'..' traversal is refused".to_string()); }
+    if unified.char_indices().any(|(i, c)| c == ':' && i != 1) { return Err("':' is refused (alternate data streams)".to_string()); }
+    let protected = unified.split('/').any(|segment| {
+        let lower = segment.to_ascii_lowercase();
+        GIT_PROTECTED_PATHSPECS.iter().any(|(name, _)| if name.ends_with('*') { lower.starts_with(name.trim_end_matches('*')) } else { lower == *name })
+    });
+    if protected { return Err("a path inside the project's own .gm/ or .agentplug* is never initialised as a repository".to_string()); }
+    Ok(Some(joined))
+}
+
+fn git_init_config_value(body: &Value, key: &str) -> Result<Option<String>, String> {
+    let Some(raw) = body.get(key) else { return Ok(None); };
+    let value = raw.as_str().map(str::trim).ok_or_else(|| format!("{} must be a string", key))?;
+    if value.is_empty() { return Err(format!("{} must not be empty", key)); }
+    if value.chars().any(|c| c.is_control()) { return Err(format!("{} must not contain control characters", key)); }
+    Ok(Some(value.to_string()))
+}
+
+fn git_init_gitignore(root: &str) -> &'static str {
+    if !crate::wasm_dispatch::host_allow_root(root) { return "unwritable"; }
+    let file = format!("{}/.gitignore", root.trim_end_matches('/'));
+    let existing = super::host_abi::host_read(&file).unwrap_or_default();
+    let covered = existing.lines().map(|l| l.trim().trim_start_matches('/')).any(|l| GIT_INIT_GITIGNORE_COVERING_ENTRIES.contains(&l));
+    if covered { return "present"; }
+    let separator = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
+    let updated = format!("{}{}{}\n", existing, separator, GIT_INIT_GITIGNORE_ENTRY);
+    if super::host_abi::host_write(&file, &updated) { "added" } else { "unwritable" }
+}
+
+fn git_init(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_init", body, &["path", "user_name", "user_email", "initial_branch"]) { return refusal; }
+    let target = match git_init_target(body) { Ok(t) => t, Err(reason) => return err("git_init", &reason) };
+    let cwd = target.as_deref();
+    let shown = cwd.unwrap_or("the dispatch working directory");
+    let user_name = match git_init_config_value(body, "user_name") { Ok(v) => v, Err(reason) => return err("git_init", &reason) };
+    let user_email = match git_init_config_value(body, "user_email") { Ok(v) => v, Err(reason) => return err("git_init", &reason) };
+    let branch_arg = match git_init_config_value(body, "initial_branch") {
+        Ok(Some(b)) if b.starts_with('-') => return err("git_init", "initial_branch must not start with '-'"),
+        Ok(Some(b)) => {
+            let valid = git_call_argv(&["check-ref-format", "--branch", &b], cwd).get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0;
+            if !valid { return err("git_init", &format!("initial_branch {:?} is not a valid branch name", b)); }
+            Some(format!("--initial-branch={}", b))
+        }
+        Ok(None) => None,
+        Err(reason) => return err("git_init", &reason),
+    };
+    let probe = git_call_argv(&["rev-parse", "--show-toplevel"], cwd);
+    let probe_code = probe.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1);
+    let probe_err = probe.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+    if probe_code == 0 {
+        let existing_root = probe.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().replace('\\', "/");
+        return err_json("git_init", json!({
+            "error": format!("{} is already inside a git repository", shown),
+            "root": existing_root,
+            "hint": "git_init only turns a non-repository directory into a repository"
+        }));
+    }
+    if probe_err.contains("git cwd does not exist") { return err("git_init", &format!("path does not exist or is not a directory: {}", shown)); }
+    if !probe_err.to_lowercase().contains("not a git repository") { return err("git_init", probe_err); }
+    let mut argv: Vec<&str> = vec!["init"];
+    if let Some(a) = &branch_arg { argv.push(a.as_str()); }
+    if let Err(e) = run_git_checked(&argv, cwd, "git_init", "git init failed") { return e; }
+    for (key, value) in [("user.name", &user_name), ("user.email", &user_email)] {
+        if let Some(v) = value {
+            if let Err(e) = run_git_checked(&["config", "--local", key, v.as_str()], cwd, "git_init", "git config failed") { return e; }
+        }
+    }
+    let root = exec_git_in(cwd, "rev-parse --show-toplevel").trim().replace('\\', "/");
+    let branch = exec_git_in(cwd, "symbolic-ref --short HEAD").trim().to_string();
+    let gitignore = git_init_gitignore(&root);
+    ok("git_init", json!({
+        "root": root,
+        "branch": branch,
+        "created": true,
+        "gitignore": gitignore,
+        "user_name": user_name,
+        "user_email": user_email
+    }))
+}
+
 fn git_stash_drop(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields("git_stash_drop", body, &["ref"]) { return refusal; }
     let cwd = body_cwd(body);
@@ -4551,6 +4645,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_stash_pop" => git_stash_pop(&body),
         "git_stash_drop" => git_stash_drop(&body),
         "git_stash_list" => git_stash_list(&body),
+        "git_init" => git_init(&body),
         "git_branch_delete" => git_branch_delete(&body),
         "git_rm" => git_rm(&body),
         "git_revert" => git_revert(&body),
