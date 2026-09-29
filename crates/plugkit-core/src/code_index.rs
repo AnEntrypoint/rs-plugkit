@@ -2192,6 +2192,10 @@ const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 const SKIPPED_SAMPLE_LEN: usize = 10;
 
+const LITERAL_SCAN_PREWARM_CHUNK: usize = 256;
+
+const PREWARM_TASK_ACTION: &str = "fs_prewarm";
+
 const BINARY_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "icns", "tif", "tiff", "psd", "avif", "heic",
     "mp3", "mp4", "m4a", "mov", "avi", "mkv", "wav", "ogg", "flac", "webm",
@@ -2433,6 +2437,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let budget_ms = cfg.index.wall_budget_ms;
     let mut stat_ms = 0u64;
     let mut read_ms = 0u64;
+    let mut prewarm_ms = 0u64;
 
     let mut matches: Vec<Value> = Vec::new();
     let mut compact_lines: Vec<String> = Vec::new();
@@ -2453,10 +2458,21 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut matches_truncated = false;
     let mut budget_exhausted = false;
 
-    for path in files {
+    let wanted = |path: &String| admitted(path) && !has_binary_extension(path);
+    let mut prewarmed_until = 0usize;
+    for (index, path) in files.iter().enumerate() {
         if unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms) >= budget_ms {
             budget_exhausted = true;
             break;
+        }
+        if index >= prewarmed_until {
+            prewarmed_until = (index + LITERAL_SCAN_PREWARM_CHUNK).min(files.len());
+            let chunk: Vec<&String> = files[index..prewarmed_until].iter().filter(|p| wanted(p)).collect();
+            if !chunk.is_empty() {
+                let prewarm_started = unsafe { crate::wasm_dispatch::host_now_ms() };
+                crate::wasm_dispatch::host_task(PREWARM_TASK_ACTION, &json!({ "paths": chunk }));
+                prewarm_ms += unsafe { crate::wasm_dispatch::host_now_ms() } - prewarm_started;
+            }
         }
         if !admitted(path) { continue; }
         if has_binary_extension(path) { files_skipped_binary_extension += 1; continue; }
@@ -2608,7 +2624,8 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         "listing": listing_ms,
         "stat": stat_ms,
         "read": read_ms,
-        "match_and_other": elapsed_ms.saturating_sub(stat_ms + read_ms),
+        "prewarm": prewarm_ms,
+        "match_and_other": elapsed_ms.saturating_sub(stat_ms + read_ms + prewarm_ms),
     }));
     out.insert("exhaustive".to_string(), json!(exhaustive));
     if files_truncated {
