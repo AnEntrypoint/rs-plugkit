@@ -20,6 +20,8 @@ pub mod scan_deps;
 #[cfg(target_arch = "wasm32")]
 pub mod scan_universe;
 
+pub mod comment_spans;
+
 #[cfg(target_arch = "wasm32")]
 pub mod path_glob;
 
