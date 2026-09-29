@@ -21,6 +21,8 @@ sessionId=<id>\n<any shape below>
 session new
 session list
 session close <id>
+session close
+session close-all
 <arbitrary JS expression evaluated in page context>
 <https://... bare URL>
 url=<url>\n<expression>
@@ -51,7 +53,7 @@ dom=<css-selector>\n
 
 **`dom=<css-selector>\n` is the zero-boilerplate element probe.** Returns `{selector, match_count, elements:[{tag, text, attrs, visible, rect}]}` for up to 20 matches -- the fastest answer to "is this element there and what does it say." An invalid selector returns `result.error` (no crash). Composes with `url=`.
 
-**One session per run -- reuse it, then close it.** A browser session is keyed by its spool `sessionId`; every dispatch carrying the SAME sessionId reuses the SAME chromium. A DIFFERENT sessionId opens its OWN chromium -- so a run that invents `probe`/`w2`/`w3`/... names leaks one browser per name. Pick one sessionId, use it for every dispatch, and end with `session close` so nothing is left open; the eval envelope carries a `multi_session_warning` the moment a second distinct session opens. The idle reaper (closes sessions unused past the idle window) and the OS-orphan reaper (kills managed chromiums no live session owns, sparing in-use ones and your own Chrome) are backstops for crashes, not a license to leave sessions open -- close yours.
+**One session per run -- reuse it, then close it.** A browser session is keyed by its spool `sessionId`; every dispatch carrying the SAME sessionId reuses the SAME chromium. A DIFFERENT sessionId opens its OWN chromium -- so a run that invents `probe`/`w2`/`w3`/... names leaks one browser per name. Pick one sessionId, use it for every dispatch, and end with `session close-all` (every Chrome owned by your gm session) then `session list` to confirm nothing remains; before launching, `session list` and reuse a live session, and parallel workers of one task share the parent's `sessionId=`; the eval envelope carries a `multi_session_warning` the moment a second distinct session opens. The idle reaper (closes sessions unused past the idle window) and the OS-orphan reaper (kills managed chromiums no live session owns, sparing in-use ones and your own Chrome) are backstops for crashes, not a license to leave sessions open -- close yours.
 
 **The session closes when YOU expect it to, not under you.** A session stays open across turns and think-gaps -- the idle window is generous (15 min of no use), measured from the END of your last dispatch, so a long read or a slow eval never shortens it. A dispatch in flight is never closed mid-run: the idle reaper and the orphan reaper both skip a session while its eval is executing, and a just-launched browser has a grace period before any reaper can touch it. An explicit `session close` is immediate. If the idle/orphan backstop did close a session and you dispatch to it again, it transparently re-launches and the envelope carries `session_relaunched: true` with a `relaunch_note` -- your in-page `window.*` state was reset, so re-establish it; you are told, never silently surprised.
 
