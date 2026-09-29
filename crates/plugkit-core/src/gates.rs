@@ -108,12 +108,27 @@ const LONGGAP_EXEMPT_READ_ONLY_VERBS: &[&str] = &[
     "branch_status", "ci-status", "fs_read", "fs_stat", "fs_readdir", "status",
 ];
 
+const LONGGAP_EXEMPT_WORK_VERBS: &[&str] = &[
+    "exec_js", "nodejs", "javascript", "node", "js", "typescript", "bash", "sh", "shell", "zsh",
+    "python", "py", "powershell", "ps1", "go", "rust", "c", "cpp", "java", "deno",
+    "git_add", "git_commit", "git_fetch", "git_push", "git_finalize",
+];
+
+fn long_gap_chain_belongs_to_this_session(policy: &crate::orchestrator::fsm::Policy) -> bool {
+    let state = crate::orchestrator::state::read_state();
+    if state.phase.as_str() == policy.terminal_phase { return false; }
+    match (&state.session_id, crate::orchestrator::state::dispatch_session_id()) {
+        (Some(owner), Some(caller)) => *owner == caller,
+        _ => true,
+    }
+}
+
 fn is_longgap_activity_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
     policy.longgap_exempt_verbs.iter().any(|v| v == verb)
 }
 
 fn is_longgap_denial_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
-    LONGGAP_EXEMPT_READ_ONLY_VERBS.contains(&verb) || is_longgap_activity_exempt(verb, policy)
+    LONGGAP_EXEMPT_READ_ONLY_VERBS.contains(&verb) || LONGGAP_EXEMPT_WORK_VERBS.contains(&verb) || is_longgap_activity_exempt(verb, policy)
 }
 
 fn is_longgap_refresh(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
@@ -350,7 +365,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
         let last = host_read(&crate::pkfs::anchor(".gm/last-instruction-ts")).unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let longgap_threshold_ms = policy.longgap_threshold_ms;
-        if long_gap_should_fire(last_ms, prev_dispatch_ms, submitted_at_ms, longgap_threshold_ms) {
+        if long_gap_should_fire(last_ms, prev_dispatch_ms, submitted_at_ms, longgap_threshold_ms) && long_gap_chain_belongs_to_this_session(&policy) {
             let gap_ms = submitted_at_ms.saturating_sub(last_ms);
             let retry_state = host_read(&crate::pkfs::anchor(".gm/long-gap-retry-state")).unwrap_or_default();
             let (last_verb, count, last_denial_ts) = parse_retry_state_v2(&retry_state);
