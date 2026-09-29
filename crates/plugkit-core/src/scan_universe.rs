@@ -41,8 +41,11 @@ pub fn is_own_state_name(name: &str) -> bool {
 
 fn own_state_entry_under_root(root: &str, path: &str) -> Option<String> {
     let prefix = join_under(root, "");
-    let first = path.strip_prefix(prefix.as_str())?.split('/').next()?;
-    is_own_state_name(first).then(|| format!("{prefix}{first}"))
+    let rel = path.strip_prefix(prefix.as_str())?;
+    let mut dirs: Vec<&str> = rel.split('/').collect();
+    dirs.pop();
+    let own_state_at = dirs.iter().position(|segment| is_own_state_name(segment))?;
+    Some(format!("{prefix}{}", dirs[..=own_state_at].join("/")))
 }
 
 fn prune_own_state(root: &str, files: Vec<String>) -> (Vec<String>, Vec<RuleExclusion>) {
@@ -299,8 +302,8 @@ pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg
         files, source, listing_complete, excluded, walk_reason,
         target: target.clone(),
     };
-    if let Some(first) = rel.as_deref().and_then(|r| r.split('/').next()).filter(|s| is_own_state_name(s)) {
-        return Err(format!("path '{}' is inside {first}, gm's own state directory, which is never a search target", scope.unwrap_or("")));
+    if let Some(own_state) = rel.as_deref().and_then(|r| r.split('/').find(|s| is_own_state_name(s))) {
+        return Err(format!("path '{}' is inside {own_state}, gm's own state directory, which is never a search target", scope.unwrap_or("")));
     }
     if rel.is_some() {
         match stat_is_directory(&target) {
