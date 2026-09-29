@@ -2995,8 +2995,69 @@ fn resolve_ref(cwd: Option<&str>, refspec: &str) -> Option<String> {
     if sha.is_empty() { None } else { Some(sha) }
 }
 
-fn verify_push_landed(cwd: Option<&str>, branch: &str, local_head: &str, remote_before: Option<&str>) -> Result<(String, bool), String> {
-    let _ = git_call_argv(&["fetch", "origin", branch], cwd);
+struct SshHttpsFallback {
+    config_args: Vec<String>,
+    ssh_url: String,
+    https_url: String,
+}
+
+impl SshHttpsFallback {
+    fn call(&self, argv: &[&str], cwd: Option<&str>) -> Value {
+        let mut full: Vec<&str> = self.config_args.iter().map(String::as_str).collect();
+        full.extend_from_slice(argv);
+        git_call_argv(&full, cwd)
+    }
+}
+
+fn ssh_origin_https_equivalent(url: &str) -> Option<(String, String, String)> {
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let (authority, path) = rest.split_once('/')?;
+        let host = authority.rsplit('@').next()?.split(':').next()?;
+        if host.is_empty() { return None; }
+        let https_prefix = format!("https://{}/", host);
+        return Some((format!("ssh://{}/", authority), https_prefix.clone(), format!("{}{}", https_prefix, path)));
+    }
+    if url.contains("://") { return None; }
+    let (user_host, path) = url.split_once(':')?;
+    let host = user_host.split_once('@')?.1;
+    if host.is_empty() || user_host.contains('/') { return None; }
+    let https_prefix = format!("https://{}/", host);
+    Some((format!("{}:", user_host), https_prefix.clone(), format!("{}{}", https_prefix, path.trim_start_matches('/'))))
+}
+
+fn push_output_is_ssh_auth_failure(output: &str) -> bool {
+    output.contains("Permission denied") || output.contains("publickey") || output.contains("Host key verification failed") || output.contains("Could not read from remote repository")
+}
+
+fn ssh_https_fallback_for_origin(repo: Option<&str>) -> Option<SshHttpsFallback> {
+    let url = exec_git_in(repo, "remote get-url origin").trim().to_string();
+    let (ssh_prefix, https_prefix, https_url) = ssh_origin_https_equivalent(&url)?;
+    let fallback = SshHttpsFallback {
+        config_args: vec![
+            "-c".to_string(), format!("url.{}.insteadOf={}", https_prefix, ssh_prefix),
+            "-c".to_string(), "credential.helper=!gh auth git-credential".to_string(),
+        ],
+        ssh_url: url,
+        https_url,
+    };
+    let reachable = fallback.call(&["ls-remote", "origin"], repo)
+        .get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1) == 0;
+    if reachable { Some(fallback) } else { None }
+}
+
+fn git_fetch_and_resolve_remote(repo: Option<&str>, branch: &str, fallback: Option<&SshHttpsFallback>) -> Option<String> {
+    match fallback {
+        Some(f) => { let _ = f.call(&["fetch", "origin", branch], repo); }
+        None => { let _ = git_call_argv(&["fetch", "origin", branch], repo); }
+    }
+    resolve_ref(repo, &format!("origin/{}", branch))
+}
+
+fn verify_push_landed(cwd: Option<&str>, branch: &str, local_head: &str, remote_before: Option<&str>, fallback: Option<&SshHttpsFallback>) -> Result<(String, bool), String> {
+    let _ = match fallback {
+        Some(f) => f.call(&["fetch", "origin", branch], cwd),
+        None => git_call_argv(&["fetch", "origin", branch], cwd),
+    };
     let remote_after = resolve_ref(cwd, &format!("origin/{}", branch));
     let remote_after = match remote_after {
         Some(s) => s,
@@ -3081,9 +3142,25 @@ fn git_push(body: &Value) -> u64 {
             "branch": branch,
         }));
     }
-    let _ = git_call_argv(&["fetch", "origin", &branch], repo.as_deref());
-    let remote_before = resolve_ref(repo.as_deref(), &format!("origin/{}", branch));
-    let (mut push_out, mut push_succeeded) = exec_git_push_in(repo.as_deref(), source_ref, &branch);
+    let mut ssh_fallback: Option<SshHttpsFallback> = None;
+    let mut remote_before = git_fetch_and_resolve_remote(repo.as_deref(), &branch, None);
+    let (mut push_out, mut push_succeeded) = exec_git_push_in(repo.as_deref(), source_ref, &branch, None);
+    if !push_succeeded && push_output_is_ssh_auth_failure(&push_out) {
+        if let Some(fallback) = ssh_https_fallback_for_origin(repo.as_deref()) {
+            remote_before = git_fetch_and_resolve_remote(repo.as_deref(), &branch, Some(&fallback));
+            let (retry_out, retry_ok) = exec_git_push_in(repo.as_deref(), source_ref, &branch, Some(&fallback));
+            if retry_ok {
+                push_out = retry_out;
+                push_succeeded = true;
+                if body.get("persist_https_remote").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let _ = git_call_argv(&["remote", "set-url", "origin", fallback.https_url.as_str()], repo.as_deref());
+                }
+                ssh_fallback = Some(fallback);
+            } else {
+                push_out = format!("{}\n[https fallback via {} also failed]\n{}", push_out, fallback.https_url, retry_out);
+            }
+        }
+    }
     let mut attempts = 0u32;
     let mut rebased = false;
     if !push_succeeded && explicit_source_ref.is_some() {
@@ -3107,7 +3184,11 @@ fn git_push(body: &Value) -> u64 {
     }
     while !push_succeeded && attempts < 3 {
         attempts += 1;
-        let rebase_out = exec_git_in(repo.as_deref(), &format!("pull --rebase origin {}", branch));
+        let rebase_argv = ["pull", "--rebase", "origin", branch.as_str()];
+        let rebase_out = match ssh_fallback.as_ref() {
+            Some(f) => f.call(&rebase_argv, repo.as_deref()),
+            None => git_call_argv(&rebase_argv, repo.as_deref()),
+        }.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
         if rebase_failed(&rebase_out) || !git_porcelain_in(repo.as_deref()).trim().is_empty() {
             let _ = exec_git_in(repo.as_deref(), "rebase --abort");
             log_deviation_push("push-rebase-conflict", &branch);
@@ -3125,7 +3206,7 @@ fn git_push(body: &Value) -> u64 {
             }).to_string());
         }
         rebased = true;
-        let (out, ok_now) = exec_git_push_in(repo.as_deref(), source_ref, &branch);
+        let (out, ok_now) = exec_git_push_in(repo.as_deref(), source_ref, &branch, ssh_fallback.as_ref());
         push_out = out;
         push_succeeded = ok_now;
     }
@@ -3148,7 +3229,7 @@ fn git_push(body: &Value) -> u64 {
         Some(sha) => sha,
         None => return err("git_push", &format!("source ref '{}' disappeared after push", source_ref)),
     };
-    match verify_push_landed(repo.as_deref(), &branch, &local_source_after, remote_before.as_deref()) {
+    match verify_push_landed(repo.as_deref(), &branch, &local_source_after, remote_before.as_deref(), ssh_fallback.as_ref()) {
         Err(reason) => {
             log_deviation_push("push-claimed-success-unverified", &branch);
             pack(json!({
@@ -3177,6 +3258,13 @@ fn git_push(body: &Value) -> u64 {
             "source_ref": source_ref,
             "source_sha": local_source_after,
             "preserved_dirty_worktree": preserved_dirty_worktree,
+            "ssh_fallback": ssh_fallback.as_ref().map(|f| json!({
+                "used": true,
+                "reason": "origin is an SSH URL that refused authentication while an https route was reachable",
+                "from": f.ssh_url,
+                "via": f.https_url,
+                "remote_rewritten": body.get("persist_https_remote").and_then(|v| v.as_bool()).unwrap_or(false),
+            })),
         })),
     }
 }
@@ -3190,16 +3278,16 @@ fn git_add(body: &Value) -> u64 {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let argv = git_stage_argv(&paths);
+        let argv_owned = git_stage_argv(&paths, cwd);
+        let argv = as_argv(&argv_owned);
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
             return Ok(err("git_add", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("git add failed")));
         }
-        Ok(ok("git_add", json!({
+        Ok(ok("git_add", with_exclusion_report(json!({
             "staged": if paths.is_empty() { vec!["-A".to_string()] } else { paths },
-            "excluded": git_protected_names(),
-        })))
+        }), cwd)))
     })
 }
 
@@ -3253,16 +3341,16 @@ fn git_commit(body: &Value) -> u64 {
                 "replayed_from_recent_identical_dispatch": true,
             })));
         }
-        let status_r = git_step_replayed_by_call_order(plan, &git_porcelain_argv(&[]), cwd)?;
+        let status_r = git_step_replayed_by_call_order(plan, &as_argv(&git_porcelain_argv(&[], cwd)), cwd)?;
         let porcelain = super::host_abi::porcelain_or_dirty(status_r);
         if porcelain.trim().is_empty() && !allow_empty {
-            return Ok(ok("git_commit", json!({ "nothing_to_commit": true, "excluded": git_protected_names() })));
+            return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true }), cwd)));
         }
         let head_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
         let head_before = head_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         if add_all || !paths.is_empty() {
             let staged_paths: &[String] = if add_all { &[] } else { &paths };
-            let _ = git_step_replayed_by_call_order(plan, &git_stage_argv(staged_paths), cwd)?;
+            let _ = git_step_replayed_by_call_order(plan, &as_argv(&git_stage_argv(staged_paths, cwd)), cwd)?;
         }
         let bundled_message = bundle_prd_commit_comments(cwd, message);
         let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
@@ -3273,7 +3361,7 @@ fn git_commit(body: &Value) -> u64 {
             let serr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
             let sout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
             if git_commit_found_nothing_staged(sout, serr, cwd) {
-                return Ok(ok("git_commit", json!({ "nothing_to_commit": true, "excluded": git_protected_names() })));
+                return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true }), cwd)));
             }
             return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
         }
@@ -3287,7 +3375,7 @@ fn git_commit(body: &Value) -> u64 {
         git_commit_dedup_record(&dedup_key, &head_after, &sha, &summary);
         emit_event("git_commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary }));
         record_commit_in_liqology(&summary, &head_after);
-        Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary, "excluded": git_protected_names() })))
+        Ok(ok("git_commit", with_exclusion_report(json!({ "committed": true, "sha": sha, "summary": summary }), cwd)))
     })
 }
 
@@ -3390,7 +3478,7 @@ fn git_finalize(body: &Value) -> u64 {
         if message.is_empty() {
             return err("git_finalize", "worktree dirty but no commit message provided -- pass {message}");
         }
-        let _ = git_call_argv(&git_stage_argv(&paths), cwd_ref);
+        let _ = git_call_argv(&as_argv(&git_stage_argv(&paths, cwd_ref)), cwd_ref);
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
         let cr = git_call_argv(&["commit", "-m", bundled_message.as_str()], cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -3417,7 +3505,7 @@ fn git_finalize(body: &Value) -> u64 {
         if !pending_notes.is_empty() {
             let flush_message = if message.is_empty() { "chore: flush resolved PRD notes".to_string() } else { message.clone() };
             let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
-            let _ = git_call_argv(&git_stage_argv(&[]), cwd_ref);
+            let _ = git_call_argv(&as_argv(&git_stage_argv(&[], cwd_ref)), cwd_ref);
             let cr = git_call_argv(&["commit", "--allow-empty", "-m", bundled_message.as_str()], cwd_ref);
             let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
             let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
@@ -3439,12 +3527,12 @@ fn git_finalize(body: &Value) -> u64 {
         let no_upstream = ahead_code != 0 && (ahead_stderr.contains("no upstream") || ahead_stderr.contains("unknown revision") || ahead_stderr.contains("@{u}"));
         let ahead_n: u64 = ahead_result.get("stdout").and_then(|x| x.as_str()).unwrap_or("0").trim().parse().unwrap_or(0);
         if !dirty && !no_upstream && ahead_n == 0 {
-            return ok("git_finalize", json!({
+            return ok("git_finalize", with_exclusion_report(json!({
                 "nothing_to_commit": true,
                 "committed": false,
                 "pushed": false,
                 "steps": [{"step": "commit", "nothing_to_commit": true}],
-            }));
+            }), cwd_ref));
         }
         sha = head_before_any_commit[..head_before_any_commit.len().min(10)].to_string();
         summary = exec_git_in(cwd_ref, "log -1 --pretty=%s").trim().to_string();
@@ -3464,7 +3552,7 @@ fn git_finalize(body: &Value) -> u64 {
     if dirty_only_from_concurrent_writer_on_just_committed_files {
         leftover = git_porcelain_scoped(cwd_ref, &paths);
         if !leftover.trim().is_empty() && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref)) {
-            let _ = git_call_argv(&git_stage_argv(&paths), cwd_ref);
+            let _ = git_call_argv(&as_argv(&git_stage_argv(&paths, cwd_ref)), cwd_ref);
             let amend = git_call_argv(&["commit", "--amend", "--no-edit"], cwd_ref);
             if amend.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0 {
                 let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
@@ -3519,7 +3607,7 @@ fn git_finalize(body: &Value) -> u64 {
     let (ci_status_summary, ci_validated_written) = check_ci_status_and_write_validated_marker_if_green(repo.as_deref(), &head_sha);
     steps.push(json!({ "step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written }));
 
-    ok("git_finalize", json!({
+    ok("git_finalize", with_exclusion_report(json!({
         "committed": committed,
         "pushed": true,
         "sha": sha,
@@ -3529,10 +3617,10 @@ fn git_finalize(body: &Value) -> u64 {
         "already_current": already_current,
         "remote_sha": remote_sha,
         "steps": steps,
-        "excluded": git_protected_names(),
+        "ssh_fallback": push_data.and_then(|d| d.get("ssh_fallback")).cloned().unwrap_or(Value::Null),
         "ci_validated_marker_written": ci_validated_written,
         "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
-    }))
+    }), cwd_ref))
 }
 
 fn git_log(body: &Value) -> u64 {
@@ -4404,29 +4492,81 @@ fn git_porcelain_in(repo: Option<&str>) -> String {
 }
 
 fn git_porcelain_scoped(repo: Option<&str>, paths: &[String]) -> String {
-    super::host_abi::porcelain_or_dirty(git_call_argv(&git_porcelain_argv(paths), repo))
+    super::host_abi::porcelain_or_dirty(git_call_argv(&as_argv(&git_porcelain_argv(paths, repo)), repo))
 }
 
-fn git_pathspec_scope<'a>(paths: &'a [String]) -> Vec<&'a str> {
-    let mut scope: Vec<&str> = if paths.is_empty() { vec![":/"] } else { paths.iter().map(String::as_str).collect() };
-    scope.extend(GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
+fn as_argv(owned: &[String]) -> Vec<&str> {
+    owned.iter().map(String::as_str).collect()
+}
+
+fn tracked_by_design(path: &str) -> bool {
+    crate::gitignore::MUST_STAY_TRACKED.iter().any(|entry| {
+        entry.starts_with(".gm/") && (path == *entry || (entry.ends_with('/') && path.starts_with(entry)))
+    })
+}
+
+fn dirty_protected_entries(cwd: Option<&str>) -> Vec<(String, String)> {
+    let r = git_call_argv(&["status", "--porcelain", "-z", "-uall", "--", ":(top).gm", ":(top).agentplug*"], cwd);
+    let stdout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let mut records = stdout.split(' ').filter(|record| record.len() > 3);
+    let mut entries = vec![];
+    while let Some(record) = records.next() {
+        let status = record[..2].trim().to_string();
+        let path = record[3..].to_string();
+        if status.starts_with('R') || status.starts_with('C') {
+            records.next();
+        }
+        entries.push((if status.is_empty() { "M".to_string() } else { status }, path));
+    }
+    entries
+}
+
+fn withheld_dirty_entries(cwd: Option<&str>) -> Vec<(String, String)> {
+    dirty_protected_entries(cwd).into_iter().filter(|(_, path)| !tracked_by_design(path)).collect()
+}
+
+fn git_pathspec_scope(paths: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut scope: Vec<String> = if paths.is_empty() { vec![":/".to_string()] } else { paths.to_vec() };
+    scope.push(":(top,exclude).agentplug*".to_string());
+    for (_, path) in withheld_dirty_entries(cwd) {
+        if !path.starts_with(".agentplug") {
+            scope.push(format!(":(top,exclude,literal){}", path));
+        }
+    }
     scope
 }
 
-fn git_stage_argv<'a>(paths: &'a [String]) -> Vec<&'a str> {
-    let mut argv: Vec<&str> = vec!["add", "--"];
-    argv.extend(git_pathspec_scope(paths));
+fn git_stage_argv(paths: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut argv: Vec<String> = vec!["add".to_string(), "--".to_string()];
+    argv.extend(git_pathspec_scope(paths, cwd));
     argv
 }
 
-fn git_porcelain_argv<'a>(paths: &'a [String]) -> Vec<&'a str> {
-    let mut argv: Vec<&str> = vec!["status", "--porcelain", "--"];
-    argv.extend(git_pathspec_scope(paths));
+fn git_porcelain_argv(paths: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut argv: Vec<String> = vec!["status".to_string(), "--porcelain".to_string(), "--".to_string()];
+    argv.extend(git_pathspec_scope(paths, cwd));
     argv
 }
 
 fn git_protected_names() -> Vec<&'static str> {
-    GIT_PROTECTED_PATHSPECS.iter().map(|(name, _)| *name).collect()
+    vec![".agentplug*", ".gm (everything not tracked-by-design)"]
+}
+
+fn with_exclusion_report(mut data: Value, cwd: Option<&str>) -> Value {
+    let withheld = withheld_dirty_entries(cwd);
+    let listed: Vec<String> = withheld.iter().take(50).map(|(status, path)| format!("{} {}", status, path)).collect();
+    if let Some(map) = data.as_object_mut() {
+        map.insert("excluded".to_string(), json!(git_protected_names()));
+        map.insert("excluded_but_dirty".to_string(), json!(listed));
+        map.insert("excluded_but_dirty_count".to_string(), json!(withheld.len()));
+        if !withheld.is_empty() {
+            map.insert("excluded_but_dirty_warning".to_string(), json!(format!(
+                "{} dirty path(s) under .gm/.agentplug* are NOT committed: they are runtime/transient state, not tracked-by-design (memories, disciplines, prd.yml, mutables.yml, config, code-search). If any are real work, stage them explicitly or add them to the tracked-by-design set.",
+                withheld.len()
+            )));
+        }
+    }
+    data
 }
 
 fn files_in_commit(repo: Option<&str>) -> Vec<String> {
@@ -4456,9 +4596,13 @@ fn porcelain_dirty_paths_all_within_committed_set(porcelain: &str, committed: &[
     any
 }
 
-fn exec_git_push_in(repo: Option<&str>, source_ref: &str, branch: &str) -> (String, bool) {
+fn exec_git_push_in(repo: Option<&str>, source_ref: &str, branch: &str, fallback: Option<&SshHttpsFallback>) -> (String, bool) {
     let refspec = format!("{}:{}", source_ref, branch);
-    let v = git_call_argv(&["push", "origin", refspec.as_str()], repo);
+    let push_argv = ["push", "origin", refspec.as_str()];
+    let v = match fallback {
+        Some(f) => f.call(&push_argv, repo),
+        None => git_call_argv(&push_argv, repo),
+    };
     let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
     let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
     let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1);
