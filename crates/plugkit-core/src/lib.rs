@@ -15,6 +15,11 @@ pub mod shared_db;
 pub mod code_index;
 
 #[cfg(target_arch = "wasm32")]
+pub mod codesearch_rank;
+
+pub mod recall_compact;
+
+#[cfg(target_arch = "wasm32")]
 pub mod scan_deps;
 
 #[cfg(target_arch = "wasm32")]

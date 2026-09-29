@@ -789,7 +789,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "prd_total_count": prd_items.len(),
         "prd_pending_count": prd_pending,
         "next_phase_hint": next,
-        "recall_hits": recall_hits,
+        "recall_hits": crate::recall_compact::compact_hits(&recall_hits, false),
         "recall_embed_failed": recall_embed_failed,
         "orient_nouns": nouns,
         "codeinsight_start": codeinsight_start,
