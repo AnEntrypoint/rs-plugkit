@@ -1534,7 +1534,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
 const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 
 const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
-    "query", "mode", "path", "glob", "path_glob", "exclude_glob", "exclude_globs", "case_insensitive", "whole_word",
+    "query", "mode", "path", "glob", "path_glob", "exclude_glob", "exclude_globs", "case_insensitive", "whole_word", "comments_only",
     "k", "max_results", "maxResults", "limit", "head_limit", "max_matches", "max_files", "output", "max_chars",
 ];
 
@@ -1663,6 +1663,7 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         regex,
         case_insensitive: body.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false),
         whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
+        comments_only: body.get("comments_only").and_then(|v| v.as_bool()).unwrap_or(false),
         include_globs,
         exclude_globs,
         max_matches,

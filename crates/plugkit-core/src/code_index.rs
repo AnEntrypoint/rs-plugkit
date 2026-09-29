@@ -2253,6 +2253,7 @@ pub struct LiteralScan<'a> {
     pub regex: bool,
     pub case_insensitive: bool,
     pub whole_word: bool,
+    pub comments_only: bool,
     pub include_globs: Vec<String>,
     pub exclude_globs: Vec<String>,
     pub max_matches: usize,
@@ -2445,6 +2446,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut files_skipped_too_large_count = 0usize;
     let mut files_skipped_binary_extension = 0usize;
     let mut files_skipped_binary = 0usize;
+    let mut files_without_comment_syntax = 0usize;
     let mut files_unreadable = 0usize;
     let mut lines_with_matches = 0usize;
     let mut occurrence_count = 0usize;
@@ -2486,10 +2488,25 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         };
         if content.as_bytes().contains(&0u8) { files_skipped_binary += 1; continue; }
         files_scanned += 1;
+        let comment_spans = if req.comments_only {
+            match crate::comment_spans::comment_spans(path, &content) {
+                Some(spans) => Some(spans),
+                None => { files_without_comment_syntax += 1; continue; }
+            }
+        } else {
+            None
+        };
         let mut this_file_matched = false;
         let mut this_file_lines = 0usize;
-        for (idx, line) in content.lines().enumerate() {
-            let found = matcher.find_all(line);
+        let mut line_start_offset = 0usize;
+        for (idx, raw_line) in content.split_inclusive('\n').enumerate() {
+            let line = raw_line.trim_end_matches(['\n', '\r']);
+            let line_offset = line_start_offset;
+            line_start_offset += raw_line.len();
+            let mut found = matcher.find_all(line);
+            if let Some(spans) = &comment_spans {
+                found.retain(|&(start, _)| crate::comment_spans::span_contains(spans, line_offset + start));
+            }
             if found.is_empty() { continue; }
             this_file_matched = true;
             this_file_lines += 1;
@@ -2543,6 +2560,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     out.insert("root".to_string(), json!(root));
     if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
     out.insert("case_insensitive".to_string(), json!(req.case_insensitive));
+    if req.comments_only {
+        out.insert("comments_only".to_string(), json!(true));
+        out.insert("files_without_comment_syntax".to_string(), json!(files_without_comment_syntax));
+    }
     if !req.regex { out.insert("whole_word".to_string(), json!(req.whole_word)); }
     if !req.include_globs.is_empty() { out.insert("path_glob".to_string(), json!(req.include_globs.join(", "))); }
     if !req.exclude_globs.is_empty() { out.insert("exclude_glob".to_string(), json!(req.exclude_globs.join(", "))); }
