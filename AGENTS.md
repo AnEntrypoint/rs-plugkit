@@ -151,6 +151,11 @@ changes.
 
 ### code_index.rs
 
+- One gm wasm instance serves every project the daemon knows (the gm pool is
+  process-wide), so any in-instance static cache must key on the dispatch's
+  project: `project_scoped_cache_key` folds `host_cwd` in when no explicit root
+  is given. A `""` key once served one project's BM25 corpus to another.
+
 - `SKIP_FILE_SUFFIXES`: `.rlib`/`.rmeta`/`.pdb` are the only exclusion for
   build output in dirs not named exactly `target` (e.g. `target-foo/`); they
   hold readable symbol names that pollute literal scans.

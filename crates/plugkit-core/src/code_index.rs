@@ -1579,8 +1579,15 @@ struct DigestCacheEntry {
 static DIGEST_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, DigestCacheEntry>>> =
     std::sync::Mutex::new(None);
 
+fn project_scoped_cache_key(project_path: Option<&str>) -> String {
+    match project_path.filter(|p| !p.is_empty()) {
+        Some(p) => format!("root:{}", p.trim_end_matches(['/', '\\'])),
+        None => format!("cwd:{}", crate::wasm_dispatch::host_cwd_string().unwrap_or_default().trim_end_matches(['/', '\\'])),
+    }
+}
+
 pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> String {
-    let cache_key = project_path.unwrap_or("").to_string();
+    let cache_key = project_scoped_cache_key(project_path);
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     if let Ok(cache) = DIGEST_CACHE.lock() {
         if let Some(entry) = cache.as_ref().and_then(|m| m.get(&cache_key)) {
@@ -1815,7 +1822,7 @@ static FUSION_CORPUS_CACHE: std::sync::Mutex<Option<std::collections::HashMap<St
     std::sync::Mutex::new(None);
 
 fn fusion_corpus_cache_key(project_path: Option<&str>) -> String {
-    project_path.unwrap_or("").to_string()
+    project_scoped_cache_key(project_path)
 }
 
 fn fusion_corpus_cache_invalidate(project_path: Option<&str>) {
