@@ -16,7 +16,7 @@ extern "C" {
 
 use crate::libsql_wasm;
 
-fn fv_put(ns: &str, key: &str, val: &str) -> bool {
+pub(crate) fn fv_put(ns: &str, key: &str, val: &str) -> bool {
     let rc = unsafe { host_kv_put(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32, val.as_ptr(), val.len() as u32) };
     let succeeded = rc != 0;
     if !succeeded {
@@ -28,12 +28,12 @@ fn fv_put(ns: &str, key: &str, val: &str) -> bool {
     succeeded
 }
 
-fn fv_query(ns: &str, q: &str) -> Value {
+pub(crate) fn fv_query(ns: &str, q: &str) -> Value {
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, q.as_ptr(), q.len() as u32) };
     unpack_to_value_pub(packed)
 }
 
-fn fv_delete(ns: &str, key: &str) {
+pub(crate) fn fv_delete(ns: &str, key: &str) {
     let _ = unsafe { host_kv_delete(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32) };
 }
 
@@ -68,15 +68,6 @@ pub fn clear_codeinsight_cfg(cfg: &crate::ragconfig::RagConfig) -> u32 {
             }
         }
     }
-    let edge_ns = edges_ns();
-    let edge_rows = fv_query(&edge_ns, "");
-    if let Some(arr) = edge_rows.as_array() {
-        for row in arr {
-            if let Some(key) = row.get("key").and_then(|k| k.as_str()) {
-                fv_delete(&edge_ns, key);
-            }
-        }
-    }
     bm25_doc_cache_clear();
     fusion_corpus_cache_clear();
     cleared
@@ -99,6 +90,7 @@ pub fn clear_codeinsight_full_cfg(cfg: &crate::ragconfig::RagConfig) -> u32 {
     }
     let db_path = project_db_path(None);
     let _ = libsql_wasm::exec(&db_path, &format!("DELETE FROM {}", cfg.code_chunks.table));
+    crate::code_symbols::clear(None);
     cleared
 }
 
@@ -141,7 +133,7 @@ fn clear_codeinsight_if_dim_mismatch_cfg(cfg: &crate::ragconfig::RagConfig, proj
     true
 }
 
-fn lang_for_ext(ext: &str) -> Option<&'static str> {
+pub(crate) fn lang_for_ext(ext: &str) -> Option<&'static str> {
     let e = ext.to_lowercase();
     match e.as_str() {
         ".js" | ".mjs" | ".jsx" => Some("javascript"),
@@ -319,7 +311,7 @@ pub(crate) fn project_db_path(project_path: Option<&str>) -> String {
     }
 }
 
-fn crc32(s: &str) -> u32 {
+pub(crate) fn crc32(s: &str) -> u32 {
     let mut h: u32 = 0xffffffff;
     for b in s.bytes() {
         h ^= b as u32;
@@ -472,7 +464,9 @@ pub fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String
     extract_chunks_reporting_plugin_failure(_path, source, lang_name).0
 }
 
-pub fn extract_chunks_reporting_plugin_failure(_path: &str, source: &str, lang_name: &str) -> (Vec<(String, String, usize, usize, String)>, bool) {
+type ChunkTuple = (String, String, usize, usize, String);
+
+fn parse_nodes(source: &str, lang_name: &str) -> Option<Vec<Value>> {
     let resp = plugin_call("treesitter", "parse", &json!({ "lang": lang_name, "source": source }));
     if !plugin_ok(&resp) {
         crate::wasm_dispatch::emit_event("code_index_treesitter_failed", json!({
@@ -480,19 +474,22 @@ pub fn extract_chunks_reporting_plugin_failure(_path: &str, source: &str, lang_n
             "plugin_failure": plugin_failure_code(&resp),
             "source_len": source.len(),
         }));
-        return (Vec::new(), true);
+        return None;
     }
-    let nodes = match resp.get("nodes").and_then(|v| v.as_array()) {
-        Some(n) => n,
+    match resp.get("nodes").and_then(|v| v.as_array()) {
+        Some(n) => Some(n.clone()),
         None => {
             crate::wasm_dispatch::emit_event("code_index_treesitter_failed", json!({
                 "lang": lang_name,
                 "plugin_failure": crate::wasm_dispatch::PLUGIN_FAIL_MALFORMED,
                 "source_len": source.len(),
             }));
-            return (Vec::new(), true);
+            None
         }
-    };
+    }
+}
+
+fn chunk_spans(source: &str, nodes: &[Value]) -> Vec<(ChunkTuple, (usize, usize))> {
     let src_bytes = source.as_bytes();
     let mut out = Vec::new();
     for node in nodes {
@@ -505,9 +502,231 @@ pub fn extract_chunks_reporting_plugin_failure(_path: &str, source: &str, lang_n
         let line_start = node.get("start_row").and_then(|v| v.as_u64()).unwrap_or(0) as usize + 1;
         let line_end = node.get("end_row").and_then(|v| v.as_u64()).unwrap_or(0) as usize + 1;
         let name = node.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        out.push((kind.to_string(), name, line_start, line_end, body));
+        out.push(((kind.to_string(), name, line_start, line_end, body), (start, end)));
     }
-    (out, false)
+    out
+}
+
+fn chunks_from_nodes(source: &str, nodes: &[Value]) -> Vec<ChunkTuple> {
+    chunk_spans(source, nodes).into_iter().map(|(chunk, _)| chunk).collect()
+}
+
+pub fn extract_chunks_reporting_plugin_failure(_path: &str, source: &str, lang_name: &str) -> (Vec<ChunkTuple>, bool) {
+    match parse_nodes(source, lang_name) {
+        Some(nodes) => (chunks_from_nodes(source, &nodes), false),
+        None => (Vec::new(), true),
+    }
+}
+
+pub(crate) struct FunctionMetrics {
+    pub cx: u32,
+    pub nesting: u32,
+    pub params: u32,
+    pub sloc: u32,
+    pub node_count: u32,
+    pub shape_hash: u64,
+}
+
+pub(crate) struct ImportRef {
+    pub spec: String,
+    pub line: usize,
+}
+
+pub(crate) struct SourceAnalysis {
+    pub chunks: Vec<ChunkTuple>,
+    pub metrics: Vec<Option<FunctionMetrics>>,
+    pub edges: Vec<CallEdge>,
+    pub imports: Vec<ImportRef>,
+    pub parse_failed: bool,
+}
+
+const DECISION_NODE_TYPES: &[&str] = &[
+    "if_statement", "if_expression", "elif_clause", "else_if_clause",
+    "for_statement", "for_in_statement", "for_of_statement", "for_expression",
+    "while_statement", "while_expression", "loop_expression", "do_statement",
+    "catch_clause", "except_clause", "case_statement", "switch_case", "switch_section",
+    "match_arm", "expression_case", "type_case", "communication_case",
+    "conditional_expression", "ternary_expression", "boolean_operator", "comprehension",
+];
+
+const NESTING_NODE_TYPES: &[&str] = &[
+    "if_statement", "if_expression", "for_statement", "for_in_statement", "for_of_statement",
+    "for_expression", "while_statement", "while_expression", "loop_expression", "do_statement",
+    "match_expression", "switch_statement", "try_statement", "closure_expression",
+    "arrow_function", "lambda", "lambda_expression",
+];
+
+const MIN_SHAPE_NODES: u32 = 40;
+
+fn is_function_like_kind(kind: &str) -> bool {
+    kind.contains("function") || kind.contains("method")
+}
+
+fn leading_parameter_count(body: &str) -> u32 {
+    let Some(open) = body.find('(') else { return 0 };
+    let mut depth = 1i32;
+    let mut previous = '(';
+    let mut inner = String::new();
+    for c in body[open + 1..].chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '<' => depth += 1,
+            '>' if previous != '-' && previous != '=' => depth -= 1,
+            _ => {}
+        }
+        if depth <= 0 { break; }
+        inner.push(c);
+        previous = c;
+    }
+    let trimmed = inner.trim().trim_end_matches(',').trim();
+    if trimmed.is_empty() { return 0; }
+    let first = trimmed.split(',').next().unwrap_or("").trim();
+    let receiver = matches!(first, "self" | "&self" | "&mut self" | "mut self" | "this" | "cls");
+    let total = trimmed.matches(',').count() as u32 + 1;
+    total - receiver as u32
+}
+
+fn shape_hash_and_count(sorted_nodes: &[RawNode], start: usize, end: usize) -> (u64, u32) {
+    let first = sorted_nodes.partition_point(|n| n.start_byte < start);
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut count = 0u32;
+    for n in sorted_nodes[first..].iter().take_while(|n| n.start_byte < end).filter(|n| n.end_byte <= end) {
+        count += 1;
+        if n.kind.contains("identifier") || n.kind.contains("comment") { continue; }
+        for byte in n.kind.bytes().chain(std::iter::once(b'|')) {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    (hash, count)
+}
+
+fn function_metrics(sorted_nodes: &[RawNode], decisions: &[RawNode], nesting_nodes: &[RawNode], start: usize, end: usize, body: &str) -> FunctionMetrics {
+    let decision_start = decisions.partition_point(|n| n.start_byte < start);
+    let cx = 1 + decisions[decision_start..].iter().take_while(|n| n.start_byte < end).filter(|n| n.end_byte <= end).count() as u32;
+    let nesting_start = nesting_nodes.partition_point(|n| n.start_byte < start);
+    let mut open_ends: Vec<usize> = Vec::new();
+    let mut nesting = 0u32;
+    for n in nesting_nodes[nesting_start..].iter().take_while(|n| n.start_byte < end).filter(|n| n.end_byte <= end && n.end_byte - n.start_byte < end - start) {
+        while open_ends.last().is_some_and(|e| *e <= n.start_byte) { open_ends.pop(); }
+        open_ends.push(n.end_byte);
+        nesting = nesting.max(open_ends.len() as u32);
+    }
+    let (shape_hash, node_count) = shape_hash_and_count(sorted_nodes, start, end);
+    FunctionMetrics {
+        cx,
+        nesting,
+        params: leading_parameter_count(body),
+        sloc: body.lines().filter(|l| !l.trim().is_empty()).count() as u32,
+        node_count,
+        shape_hash: if node_count >= MIN_SHAPE_NODES { shape_hash } else { 0 },
+    }
+}
+
+fn first_quoted(text: &str) -> Option<String> {
+    let open = text.find(['\'', '"', '`'])?;
+    let quote = text[open..].chars().next()?;
+    let rest = &text[open + 1..];
+    let close = rest.find(quote)?;
+    Some(rest[..close].to_string())
+}
+
+fn import_specs(kind: &str, lang_name: &str, text: &str) -> Vec<String> {
+    let text = text.trim();
+    match (lang_name, kind) {
+        ("javascript" | "typescript" | "tsx", "import_statement") => first_quoted(text).into_iter().collect(),
+        ("javascript" | "typescript" | "tsx", "export_statement") if text.contains(" from ") => first_quoted(text).into_iter().collect(),
+        ("javascript" | "typescript" | "tsx", "call_expression") if text.starts_with("require(") || text.starts_with("import(") => first_quoted(text).into_iter().collect(),
+        ("python", "import_statement") => text
+            .strip_prefix("import")
+            .unwrap_or("")
+            .split(',')
+            .filter_map(|part| part.trim().split_whitespace().next().map(str::to_string))
+            .collect(),
+        ("python", "import_from_statement") => text
+            .strip_prefix("from")
+            .and_then(|rest| rest.trim().split_whitespace().next())
+            .map(str::to_string)
+            .into_iter()
+            .collect(),
+        ("rust", "use_declaration") => {
+            let after = text.find("use ").map(|i| &text[i + 4..]).unwrap_or("");
+            let path = after.split(['{', ';', ' ']).next().unwrap_or("").trim_end_matches("::");
+            if path.is_empty() { Vec::new() } else { vec![path.to_string()] }
+        }
+        ("rust", "mod_item") if text.ends_with(';') => text
+            .trim_end_matches(';')
+            .rsplit(' ')
+            .next()
+            .map(|name| format!("self::{name}"))
+            .into_iter()
+            .collect(),
+        ("go", "import_spec") => first_quoted(text).into_iter().collect(),
+        ("java" | "kotlin", "import_declaration") => {
+            let path = text.strip_prefix("import").unwrap_or("").trim().trim_start_matches("static ").trim().trim_end_matches(';').trim();
+            if path.is_empty() { Vec::new() } else { vec![path.to_string()] }
+        }
+        ("c" | "cpp", "preproc_include") if text.contains('"') => first_quoted(text).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn inline_crate_path_imports(source: &str, sorted_nodes: &[RawNode], already: &[ImportRef]) -> Vec<ImportRef> {
+    let mut seen: std::collections::HashSet<String> = already.iter().map(|i| i.spec.clone()).collect();
+    let mut out = Vec::new();
+    for n in sorted_nodes.iter().filter(|n| matches!(n.kind, "scoped_identifier" | "scoped_type_identifier")) {
+        let window_end = n.end_byte.min(n.start_byte + 200);
+        let Some(text) = source.get(n.start_byte..window_end) else { continue };
+        if !(text.starts_with("crate::") || text.starts_with("super::") || text.starts_with("self::")) { continue; }
+        let spec: String = text.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':').collect();
+        if seen.insert(spec.clone()) {
+            out.push(ImportRef { spec, line: n.start_row + 1 });
+        }
+    }
+    out
+}
+
+const IMPORT_NODE_TYPES: &[&str] = &[
+    "import_statement", "import_from_statement", "export_statement", "use_declaration", "mod_item",
+    "import_spec", "import_declaration", "preproc_include", "call_expression",
+];
+
+fn imports_from_nodes(source: &str, lang_name: &str, sorted_nodes: &[RawNode]) -> Vec<ImportRef> {
+    let mut out = Vec::new();
+    for n in sorted_nodes.iter().filter(|n| IMPORT_NODE_TYPES.contains(&n.kind)) {
+        let window_end = (n.end_byte).min(n.start_byte + 400);
+        let Some(text) = source.get(n.start_byte..window_end).or_else(|| source.get(n.start_byte..n.end_byte.min(source.len()))) else { continue };
+        for spec in import_specs(n.kind, lang_name, text) {
+            out.push(ImportRef { spec, line: n.start_row + 1 });
+        }
+    }
+    out
+}
+
+pub(crate) fn analyze_source(source: &str, lang_name: &str) -> SourceAnalysis {
+    let Some(nodes) = parse_nodes(source, lang_name) else {
+        return SourceAnalysis { chunks: Vec::new(), metrics: Vec::new(), edges: Vec::new(), imports: Vec::new(), parse_failed: true };
+    };
+    let spans = chunk_spans(source, &nodes);
+    let chunks: Vec<ChunkTuple> = spans.iter().map(|(chunk, _)| chunk.clone()).collect();
+    let edges = call_edges_from_nodes(source, lang_name, &nodes, &chunks);
+    let mut sorted = parsed_nodes(&nodes);
+    sorted.sort_by_key(|n| (n.start_byte, std::cmp::Reverse(n.end_byte)));
+    let decisions: Vec<RawNode> = sorted.iter().filter(|n| DECISION_NODE_TYPES.contains(&n.kind)).copied().collect();
+    let continues_else_chain = |n: &RawNode| source.get(..n.start_byte).is_some_and(|before| before.trim_end().ends_with("else"));
+    let nesting_nodes: Vec<RawNode> = sorted.iter().filter(|n| NESTING_NODE_TYPES.contains(&n.kind) && !continues_else_chain(n)).copied().collect();
+    let metrics = spans
+        .iter()
+        .map(|((kind, _, _, _, body), (start, end))| {
+            is_function_like_kind(kind).then(|| function_metrics(&sorted, &decisions, &nesting_nodes, *start, *end, body))
+        })
+        .collect();
+    let mut imports = imports_from_nodes(source, lang_name, &sorted);
+    if lang_name == "rust" {
+        imports.extend(inline_crate_path_imports(source, &sorted, &imports));
+    }
+    SourceAnalysis { chunks, metrics, edges, imports, parse_failed: false }
 }
 
 const CALL_NODE_TYPES: &[&str] = &[
@@ -542,43 +761,27 @@ fn parsed_nodes<'a>(nodes: &'a [Value]) -> Vec<RawNode<'a>> {
     }).collect()
 }
 
-const CALL_ARGUMENT_LIST_NODE_TYPES: &[&str] = &[
-    "arguments",
-    "argument_list",
-];
-
-fn strictly_inside(candidate: &RawNode, call: &RawNode) -> bool {
-    candidate.start_byte >= call.start_byte
-        && candidate.end_byte <= call.end_byte
-        && !(candidate.start_byte == call.start_byte && candidate.end_byte == call.end_byte)
-}
-
-fn callee_leaf_before_argument_list<'a>(call: &RawNode<'a>, all: &[RawNode<'a>]) -> Option<RawNode<'a>> {
-    let argument_list_start = all.iter()
-        .filter(|n| strictly_inside(n, call) && CALL_ARGUMENT_LIST_NODE_TYPES.contains(&n.kind))
-        .map(|n| n.start_byte)
-        .min()?;
-    all.iter()
-        .filter(|n| strictly_inside(n, call) && CALLEE_LEAF_NODE_TYPES.contains(&n.kind) && n.end_byte <= argument_list_start)
-        .max_by_key(|n| (n.end_byte, n.start_byte))
-        .copied()
-}
-
-fn first_ending_callee_leaf<'a>(call: &RawNode<'a>, all: &[RawNode<'a>]) -> Option<RawNode<'a>> {
-    all.iter()
-        .filter(|n| strictly_inside(n, call) && CALLEE_LEAF_NODE_TYPES.contains(&n.kind))
-        .min_by_key(|n| n.end_byte)
-        .copied()
-}
-
-fn callee_name_for_call(call: &RawNode, all: &[RawNode], src_bytes: &[u8]) -> Option<String> {
-    let leaf = callee_leaf_before_argument_list(call, all).or_else(|| first_ending_callee_leaf(call, all))?;
-    let end = leaf.end_byte.min(src_bytes.len());
-    if end <= leaf.start_byte { return None; }
-    let text = String::from_utf8_lossy(&src_bytes[leaf.start_byte..end]).into_owned();
+fn callee_name_for_call(call: &RawNode, sorted_nodes: &[RawNode], src_bytes: &[u8]) -> Option<String> {
+    let first = sorted_nodes.partition_point(|n| n.start_byte < call.start_byte);
+    let callee_expression_end = sorted_nodes[first..]
+        .iter()
+        .take_while(|n| n.start_byte == call.start_byte)
+        .filter(|n| n.end_byte < call.end_byte)
+        .map(|n| n.end_byte)
+        .max()?;
+    let last_leaf = sorted_nodes[first..]
+        .iter()
+        .take_while(|n| n.start_byte < callee_expression_end)
+        .filter(|n| n.end_byte <= callee_expression_end && CALLEE_LEAF_NODE_TYPES.contains(&n.kind))
+        .max_by_key(|n| (n.end_byte, n.start_byte))?;
+    let end = last_leaf.end_byte.min(src_bytes.len());
+    if end <= last_leaf.start_byte { return None; }
+    let text = String::from_utf8_lossy(&src_bytes[last_leaf.start_byte..end]).into_owned();
     let simple_name = text.rsplit(['.', ':']).next().unwrap_or(&text).to_string();
     if simple_name.is_empty() { None } else { Some(simple_name) }
 }
+
+pub(crate) const MODULE_LEVEL_CALLER: &str = "<module>";
 
 pub struct CallEdge {
     pub caller_symbol: String,
@@ -586,17 +789,12 @@ pub struct CallEdge {
     pub line: usize,
 }
 
-pub fn extract_call_edges(source: &str, lang_name: &str, chunks: &[(String, String, usize, usize, String)]) -> Vec<CallEdge> {
-    let resp = plugin_call("treesitter", "parse", &json!({ "lang": lang_name, "source": source }));
-    if !plugin_ok(&resp) { return Vec::new(); }
-    let nodes_json = match resp.get("nodes").and_then(|v| v.as_array()) {
-        Some(n) => n,
-        None => return Vec::new(),
-    };
-    let all = parsed_nodes(nodes_json);
+fn call_edges_from_nodes(source: &str, lang_name: &str, nodes_json: &[Value], chunks: &[ChunkTuple]) -> Vec<CallEdge> {
+    let mut all = parsed_nodes(nodes_json);
+    all.sort_by_key(|n| (n.start_byte, std::cmp::Reverse(n.end_byte)));
     let src_bytes = source.as_bytes();
     let mut enclosing_by_line: Vec<(usize, usize, &str)> = chunks.iter()
-        .filter(|(kind, _, _, _, _)| kind.contains("function") || kind.contains("method"))
+        .filter(|(kind, name, _, _, _)| !name.is_empty() && (kind.contains("function") || kind.contains("method")))
         .map(|(_, name, ls, le, _)| (*ls, *le, name.as_str()))
         .collect();
     enclosing_by_line.sort_by_key(|(ls, le, _)| (*ls, *le));
@@ -609,108 +807,41 @@ pub fn extract_call_edges(source: &str, lang_name: &str, chunks: &[(String, Stri
     let mut out = Vec::new();
     for call in all.iter().filter(|n| CALL_NODE_TYPES.contains(&n.kind)) {
         let line = call.start_row + 1;
-        let Some(caller_symbol) = find_enclosing(line) else { continue };
-        if caller_symbol.is_empty() { continue; }
+        let caller_symbol = find_enclosing(line).unwrap_or(MODULE_LEVEL_CALLER);
         let Some(callee_symbol) = callee_name_for_call(call, &all, src_bytes) else { continue };
+        let is_rust_constructor = lang_name == "rust" && callee_symbol.chars().next().is_some_and(char::is_uppercase);
+        if is_rust_constructor { continue; }
         out.push(CallEdge { caller_symbol: caller_symbol.to_string(), callee_symbol, line });
+    }
+    if lang_name == "rust" {
+        out.extend(macro_argument_call_edges(source, &all, &find_enclosing));
     }
     out
 }
 
-fn edges_ns() -> String {
-    format!("{}-edges", code_ns())
-}
-
-fn edge_key(path: &str, line: usize, callee: &str, idx: usize) -> String {
-    format!("ce-{:x}-{}-{}-{}", crc32(path), line, callee, idx)
-}
-
-pub fn write_call_edges(path: &str, edges: &[CallEdge]) {
-    let ns = edges_ns();
-    for (idx, e) in edges.iter().enumerate() {
-        let key = edge_key(path, e.line, &e.callee_symbol, idx);
-        let val = json!({
-            "caller_path": path,
-            "caller_symbol": e.caller_symbol,
-            "callee_symbol": e.callee_symbol,
-            "line": e.line,
-        }).to_string();
-        fv_put(&ns, &key, &val);
+fn macro_argument_call_edges<'a>(source: &str, sorted_nodes: &[RawNode], find_enclosing: &dyn Fn(usize) -> Option<&'a str>) -> Vec<CallEdge> {
+    let mut outer_trees: Vec<(usize, usize)> = Vec::new();
+    for tree in sorted_nodes.iter().filter(|n| n.kind == "token_tree") {
+        if outer_trees.last().is_some_and(|(_, end)| tree.end_byte <= *end) { continue; }
+        outer_trees.push((tree.start_byte, tree.end_byte));
     }
-}
-
-pub fn delete_call_edges_for_path(path: &str) {
-    let ns = edges_ns();
-    let rows = fv_query(&ns, "");
-    if let Some(arr) = rows.as_array() {
-        for row in arr {
-            let key = match row.get("key").and_then(|k| k.as_str()) { Some(k) => k, None => continue };
-            let matches_path = row.get("value")
-                .and_then(|v| v.as_str())
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .and_then(|parsed| parsed.get("caller_path").and_then(|p| p.as_str()).map(|p| p == path))
-                .unwrap_or(false);
-            if matches_path { fv_delete(&ns, key); }
-        }
+    let inside_macro_arguments = |pos: usize| {
+        let i = outer_trees.partition_point(|(start, _)| *start <= pos);
+        i > 0 && pos < outer_trees[i - 1].1
+    };
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    for id in sorted_nodes.iter().filter(|n| n.kind == "identifier" && bytes.get(n.end_byte) == Some(&b'(')) {
+        if !inside_macro_arguments(id.start_byte) { continue; }
+        let Some(name) = source.get(id.start_byte..id.end_byte) else { continue };
+        let is_constructor = name.chars().next().is_some_and(char::is_uppercase);
+        let is_declaration = source.get(..id.start_byte).is_some_and(|before| before.ends_with("fn "));
+        if name.is_empty() || is_constructor || is_declaration { continue; }
+        let line = id.start_row + 1;
+        let caller = find_enclosing(line).unwrap_or(MODULE_LEVEL_CALLER);
+        out.push(CallEdge { caller_symbol: caller.to_string(), callee_symbol: name.to_string(), line });
     }
-}
-
-fn all_call_edges() -> Vec<Value> {
-    let ns = edges_ns();
-    let rows = fv_query(&ns, "");
-    rows.as_array()
-        .map(|arr| arr.iter().filter_map(|row| {
-            row.get("value").and_then(|v| v.as_str()).and_then(|s| serde_json::from_str::<Value>(s).ok())
-        }).collect())
-        .unwrap_or_default()
-}
-
-pub fn callers_of(symbol: &str) -> Value {
-    let edges = all_call_edges();
-    let hits: Vec<Value> = edges.into_iter()
-        .filter(|e| e.get("callee_symbol").and_then(|v| v.as_str()) == Some(symbol))
-        .collect();
-    json!({ "symbol": symbol, "edges": hits })
-}
-
-pub fn callees_of(symbol: &str) -> Value {
-    let edges = all_call_edges();
-    let hits: Vec<Value> = edges.into_iter()
-        .filter(|e| e.get("caller_symbol").and_then(|v| v.as_str()) == Some(symbol))
-        .collect();
-    json!({ "symbol": symbol, "edges": hits })
-}
-
-pub fn impact_of(symbol: &str, max_depth: usize) -> Value {
-    let depth_cap = max_depth.clamp(1, 10);
-    let edges = all_call_edges();
-    let mut visited: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    visited.insert(symbol.to_string(), 0);
-    let mut frontier = vec![symbol.to_string()];
-    for depth in 1..=depth_cap {
-        let mut next_frontier = Vec::new();
-        for caller in &frontier {
-            for e in &edges {
-                let Some(caller_symbol) = e.get("caller_symbol").and_then(|v| v.as_str()) else { continue };
-                if caller_symbol != caller { continue };
-                let Some(callee_symbol) = e.get("callee_symbol").and_then(|v| v.as_str()) else { continue };
-                if visited.contains_key(callee_symbol) { continue; }
-                visited.insert(callee_symbol.to_string(), depth);
-                next_frontier.push(callee_symbol.to_string());
-            }
-        }
-        if next_frontier.is_empty() { break; }
-        frontier = next_frontier;
-    }
-    let mut reachable: Vec<Value> = visited.into_iter()
-        .filter(|(sym, _)| sym != symbol)
-        .map(|(sym, depth)| json!({ "symbol": sym, "depth": depth }))
-        .collect();
-    reachable.sort_by_key(|v| (
-        v.get("depth").and_then(|d| d.as_u64()).unwrap_or(0),
-        v.get("symbol").and_then(|s| s.as_str()).unwrap_or("").to_string(),
-    ));
-    json!({ "symbol": symbol, "max_depth": depth_cap, "reachable": reachable })
+    out
 }
 
 fn oversized_chunk_overlap(threshold: usize) -> usize {
@@ -797,7 +928,7 @@ fn manifest_ns_for(project_path: Option<&str>) -> String {
     format!("{}{}", indexing_pipeline_namespace_config_unthreaded_default().manifest_namespace(), root_ns_suffix(project_path))
 }
 
-fn code_ns_for(project_path: Option<&str>) -> String {
+pub(crate) fn code_ns_for(project_path: Option<&str>) -> String {
     format!("{}{}", indexing_pipeline_namespace_config_unthreaded_default().code, root_ns_suffix(project_path))
 }
 
@@ -1181,6 +1312,8 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     }
     let index_wall_budget_ms: u64 = cfg.index.wall_budget_ms;
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let enumeration_was_complete = full_files.len() < limit.max(prune_enumeration_cap);
+    let symbol_sync = crate::code_symbols::sync_files(&full_files, project_path, started, index_wall_budget_ms / 2, cfg.index.max_file_bytes, enumeration_was_complete);
     let mut indexed = 0;
     let mut chunked = 0;
     let mut embedded = 0;
@@ -1333,12 +1466,8 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         if libsql_ok {
             let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
         }
-        delete_call_edges_for_path(fp);
         if treesitter_failed {
             treesitter_failures += 1;
-        } else {
-            let edges = extract_call_edges(&content, lang_name, &chunks);
-            write_call_edges(fp, &edges);
         }
         let deferred_in_file = chunk_plan.iter().filter(|p| **p == ChunkEmbedPlan::DeferToNextPass).count();
         if deferred_in_file > 0 {
@@ -1461,7 +1590,6 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     for (fp, m) in &prior {
         if !seen.contains(fp) && !files_set.contains(fp.as_str()) {
             delete_chunk_keys(&m.chunks, project_path);
-            delete_call_edges_for_path(fp);
             fv_delete(&manifest_ns_for(project_path), fp);
             fusion_corpus_cache_invalidate(project_path);
             removed_files += 1;
@@ -1520,6 +1648,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         "treesitter_failures": treesitter_failures,
         "kvvec_cleared_dim_mismatch": kvvec_cleared,
         "by_language": langs,
+        "symbols": symbol_sync,
         "likely_orphaned": if include_dead_code {
             likely_orphaned_symbols(&db_path, orphan_scan_limit)
         } else {
@@ -1595,12 +1724,14 @@ pub fn ensure_current_insight() -> Value {
             index_topup(".", cfg.index.prune_pass_file_limit_ceiling, cfg.index.incremental_topup_wall_budget_ms)
         }
     } else {
+        let symbols = if stale { crate::code_symbols::sync_tree(&cfg, None) } else { Value::Null };
         json!({
             "ok": true,
             "reused": true,
             "digest": stored,
             "complete": !prior_partial,
             "partial": prior_partial,
+            "symbols": symbols,
         })
     };
     let refreshed = index.get("digest").and_then(|v| v.as_str()).map(str::to_owned);
@@ -1747,81 +1878,20 @@ pub fn store_digest_at(digest: &str, project_path: Option<&str>) {
 }
 
 pub fn overview() -> Value {
-    if stored_digest().is_none() {
-        return Value::Null;
-    }
-    let db_path = project_db_path(None);
-    let mut count_error: Option<String> = None;
-    let mut count_via = |sql: String| -> Option<u64> {
-        match libsql_wasm::query_params(&db_path, &sql, &[]) {
-            Ok(rows) => rows
-                .as_array()
-                .and_then(|a| a.first().cloned())
-                .and_then(|row| row.get("c").and_then(|v| v.as_u64())),
-            Err(e) => {
-                if count_error.is_none() {
-                    count_error = Some(e);
-                }
-                None
-            }
-        }
+    crate::code_symbols::lean_overview(stored_digest())
+}
+
+pub(crate) fn embedded_coverage(db_path: &str) -> (u64, u64) {
+    let count_via = |sql: String| -> u64 {
+        libsql_wasm::query_params(db_path, &sql, &[])
+            .ok()
+            .and_then(|rows| rows.as_array().and_then(|a| a.first().cloned()))
+            .and_then(|row| row.get("c").and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))))
+            .unwrap_or(0)
     };
-    let file_count_opt = count_via(format!(
-        "SELECT COUNT(*) AS c FROM (SELECT path FROM {} GROUP BY path)",
-        chunks_table()
-    ));
-    let file_count = file_count_opt.unwrap_or(0);
-    let symbol_count_opt = count_via(format!(
-        "SELECT SUM(c) AS c FROM (SELECT COUNT(*) AS c FROM {} GROUP BY path)",
-        chunks_table()
-    ));
-    let symbol_count = symbol_count_opt.unwrap_or(0);
-    if let Some(ref e) = count_error {
-        let unavailable_reason = if e.trim().eq_ignore_ascii_case("unknown_plugin")
-            || e.to_ascii_lowercase().contains("unknown plugin")
-        {
-            "libsql_plugin_unavailable"
-        } else {
-            "libsql_query_failed"
-        };
-        crate::wasm_dispatch::emit_event("codeinsight_overview_counts_failed", json!({
-            "error": e,
-            "unavailable_reason": unavailable_reason,
-        }));
-        return json!({
-            "codeinsight_available": false,
-            "codeinsight_unavailable_reason": unavailable_reason,
-            "counts_unavailable": true,
-            "file_count": serde_json::Value::Null,
-            "symbol_count": serde_json::Value::Null,
-            "by_kind": [],
-            "largest_files": [],
-            "digest": stored_digest(),
-            "likely_orphaned": [],
-        });
-    }
-    let by_kind = libsql_wasm::query_params(
-        &db_path,
-        &format!("SELECT kind, COUNT(*) AS c FROM {} GROUP BY kind ORDER BY c DESC LIMIT 10", chunks_table()),
-        &[],
-    )
-    .unwrap_or(Value::Array(Vec::new()));
-    let largest_files = libsql_wasm::query_params(
-        &db_path,
-        &format!("SELECT path, COUNT(*) AS c FROM {} GROUP BY path ORDER BY c DESC LIMIT 10", chunks_table()),
-        &[],
-    )
-    .unwrap_or(Value::Array(Vec::new()));
-    let out = json!({
-        "codeinsight_available": true,
-        "file_count": file_count,
-        "symbol_count": symbol_count,
-        "by_kind": by_kind,
-        "largest_files": largest_files,
-        "digest": stored_digest(),
-        "likely_orphaned": likely_orphaned_symbols(&db_path, 20),
-    });
-    out
+    let files = count_via(format!("SELECT COUNT(*) AS c FROM (SELECT path FROM {} GROUP BY path)", chunks_table()));
+    let chunks = count_via(format!("SELECT SUM(c) AS c FROM (SELECT COUNT(*) AS c FROM {} GROUP BY path)", chunks_table()));
+    (files, chunks)
 }
 
 fn likely_orphaned_symbols(db_path: &str, limit: usize) -> Value {
@@ -2558,6 +2628,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut files_skipped_too_large_count = 0usize;
     let mut files_skipped_binary_extension = 0usize;
     let mut files_skipped_binary = 0usize;
+    let mut files_with_nul_scanned = 0usize;
     let mut files_without_comment_syntax = 0usize;
     let mut files_unreadable = 0usize;
     let mut lines_with_matches = 0usize;
@@ -2609,7 +2680,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             }
             continue;
         };
-        if content.as_bytes().contains(&0u8) { files_skipped_binary += 1; continue; }
+        if content.as_bytes().contains(&0u8) {
+            let has_source_extension = path.rfind('.').and_then(|dot| lang_for_ext(&path[dot..])).is_some();
+            if !has_source_extension { files_skipped_binary += 1; continue; }
+            files_with_nul_scanned += 1;
+        }
         files_scanned += 1;
         let comment_spans = if req.comments_only {
             match crate::comment_spans::comment_spans(path, &content) {
@@ -2771,6 +2846,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     }
     if req.verbose && files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
     if files_skipped_binary > 0 { out.insert("files_skipped_binary".to_string(), json!(files_skipped_binary)); }
+    if files_with_nul_scanned > 0 { out.insert("files_with_nul_scanned".to_string(), json!(files_with_nul_scanned)); }
     if files_unreadable > 0 {
         out.insert("files_unreadable".to_string(), json!(files_unreadable));
         out.insert("files_unreadable_sample".to_string(), json!(unreadable_sample));
