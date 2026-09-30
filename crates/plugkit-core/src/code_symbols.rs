@@ -26,6 +26,7 @@ const ACTIONS: &[&str] = &[
 ];
 const RISK_CANDIDATE_POOL: usize = 100;
 const COMMON_STD_NAMES: &[&str] = &[
+    "path", "parent", "as_path", "to_path_buf", "file_stem", "components", "metadata", "store", "load", "set", "update", "run", "call", "apply", "size", "name", "id",
     "read_to_string", "exists", "trim_start_matches", "trim_end_matches", "trim_start", "trim_end", "strip_prefix", "strip_suffix", "split_once", "rsplit",
     "to_lowercase", "to_uppercase", "to_ascii_lowercase", "is_file", "is_dir", "create_dir_all", "canonicalize", "file_name", "extension", "display", "borrow",
     "borrow_mut", "unwrap_err", "ok_or", "ok_or_else", "position", "retain", "truncate", "clear", "resize", "reserve", "with_capacity", "from_utf8_lossy", "to_vec",
@@ -1004,6 +1005,14 @@ fn importers(db: &str, path: &str, limit: usize) -> Value {
     })
 }
 
+const CYCLE_MEMBERS_SHOWN: usize = 12;
+
+fn cycle_summary(component: &[String]) -> String {
+    let shown = component.iter().take(CYCLE_MEMBERS_SHOWN).cloned().collect::<Vec<_>>().join(" <-> ");
+    let more = component.len().saturating_sub(CYCLE_MEMBERS_SHOWN);
+    if more == 0 { format!("{} files: {shown}", component.len()) } else { format!("{} files: {shown} (+{more} more)", component.len()) }
+}
+
 fn cycles(db: &str, limit: usize) -> Value {
     let graph = load_import_graph(db);
     let components = strongly_connected_components(&graph.forward);
@@ -1012,7 +1021,7 @@ fn cycles(db: &str, limit: usize) -> Value {
         "import_edges_resolved": graph.forward.values().map(BTreeSet::len).sum::<usize>(),
         "cycle_count": components.len(),
         "truncated": components.len() > limit,
-        "cycles": components.iter().take(limit).map(|c| format!("{} files: {}", c.len(), c.join(" <-> "))).collect::<Vec<_>>(),
+        "cycles": components.iter().take(limit).map(|c| cycle_summary(c)).collect::<Vec<_>>(),
     })
 }
 
