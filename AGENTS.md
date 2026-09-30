@@ -231,6 +231,16 @@ changes.
   per line rather than the first, since two matches on one line are two real
   call sites for a call-graph trace.
 
+### code_symbols.rs
+
+- `sync_files` runs at the top of `index_cfg_impl` (half the wall budget) and from `ensure_current_insight` when the digest is stale but a partial embed pass is pending, because that branch never re-indexes. It is gated by size, mtime and `SCHEMA_VERSION`: change the stored row shape, bump the version, and every file re-syncs once.
+- Symbols, metrics and imports live in plain libsql tables (`code_symbols`, `code_symbol_files`, `code_imports`), never in the `F32_BLOB` chunk table, so ordinary `COUNT(*)` works. Multi-row inserts stay under SQLite's 999-parameter limit (`columns x rows`).
+- Call edges are one KV row per file (`cef-<crc32(path)>` in `<code_ns>-edges-by-file`); the old per-edge namespace is purged by the first sync. Edge callee names are the last leaf of the callee expression (`a.b.c()` records `c`); `callee_name_for_call` finds that expression as the widest node that starts where the call starts, over nodes sorted by start and width.
+- Import specs are stored raw and resolved at query time against the indexed file set, so an edit to one file never stales another file's edges. Only specs that resolve to an indexed file count as edges.
+- `find` escapes `%`, `_` and `\` with `ESCAPE '\'`; stripping them made every snake_case query match nothing.
+- `impact` does not expand through a name with several definitions (name-keyed edges would merge unrelated functions); `through_ambiguous` opts in.
+- `cx` counts decision nodes inside the function byte range, nested closures included; boolean operators are not counted except Python's `boolean_operator`.
+
 ### ragconfig.rs
 
 - `IndexConfig::pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound`

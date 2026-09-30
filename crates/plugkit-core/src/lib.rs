@@ -13,6 +13,7 @@ pub mod shared_db;
 
 #[cfg(target_arch = "wasm32")]
 pub mod code_index;
+pub mod code_symbols;
 
 #[cfg(target_arch = "wasm32")]
 pub mod codesearch_rank;
