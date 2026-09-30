@@ -2273,6 +2273,7 @@ pub struct LiteralScan<'a> {
     pub list_limit: Option<usize>,
     pub max_chars: usize,
     pub spill_name: String,
+    pub verbose: bool,
 }
 
 fn path_is_inside_dependency_store(path: &str) -> bool {
@@ -2578,26 +2579,37 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), json!(true));
     out.insert("mode".to_string(), json!(if req.regex { "regex" } else { "literal" }));
-    if req.output != ScanOutput::Matches { out.insert("output".to_string(), json!(req.output.label())); }
-    out.insert("pattern".to_string(), json!(req.pattern));
-    out.insert("root".to_string(), json!(root));
-    if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
-    out.insert("case_insensitive".to_string(), json!(req.case_insensitive));
+    if req.verbose {
+        if req.output != ScanOutput::Matches { out.insert("output".to_string(), json!(req.output.label())); }
+        out.insert("pattern".to_string(), json!(req.pattern));
+        out.insert("root".to_string(), json!(root));
+        if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
+        out.insert("case_insensitive".to_string(), json!(req.case_insensitive));
+        if !req.regex { out.insert("whole_word".to_string(), json!(req.whole_word)); }
+        if !req.include_globs.is_empty() { out.insert("path_glob".to_string(), json!(req.include_globs.join(", "))); }
+        if !req.exclude_globs.is_empty() { out.insert("exclude_glob".to_string(), json!(req.exclude_globs.join(", "))); }
+    }
     if req.comments_only {
         out.insert("comments_only".to_string(), json!(true));
-        out.insert("files_without_comment_syntax".to_string(), json!(files_without_comment_syntax));
+        if req.verbose || files_without_comment_syntax > 0 {
+            out.insert("files_without_comment_syntax".to_string(), json!(files_without_comment_syntax));
+        }
     }
-    if !req.regex { out.insert("whole_word".to_string(), json!(req.whole_word)); }
-    if !req.include_globs.is_empty() { out.insert("path_glob".to_string(), json!(req.include_globs.join(", "))); }
-    if !req.exclude_globs.is_empty() { out.insert("exclude_glob".to_string(), json!(req.exclude_globs.join(", "))); }
-    if has_glob_filter { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
+    if has_glob_filter && (req.verbose || glob_matched_no_files) { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
-    out.insert("file_source".to_string(), json!(universe.source.label()));
+    let file_source = universe.source.label();
+    if req.verbose || file_source != "git" { out.insert("file_source".to_string(), json!(file_source)); }
     if !universe.listing_complete {
         out.insert("listing_incomplete".to_string(), json!(true));
         if let Some(reason) = &universe.walk_reason { out.insert("walk_reason".to_string(), json!(reason)); }
     }
-    if !universe.excluded.is_empty() {
+    let pruned_by_foreign_rule = universe.excluded.iter()
+        .filter(|e| e.rule != crate::scan_universe::OWN_STATE_RULE)
+        .count();
+    if !req.verbose && pruned_by_foreign_rule > 0 {
+        out.insert("excluded_by_rule_count".to_string(), json!(pruned_by_foreign_rule));
+    }
+    if req.verbose && !universe.excluded.is_empty() {
         let cap = 200usize;
         let shown: Vec<Value> = universe.excluded.iter().take(cap)
             .map(|e| match e.files {
@@ -2619,21 +2631,27 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         ScanOutput::Compact => compact_lines.len(),
         ScanOutput::Files | ScanOutput::Count => lines_with_matches,
     };
-    out.insert("match_count".to_string(), json!(match_count));
-    out.insert("occurrence_count".to_string(), json!(occurrence_count));
-    out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
-    out.insert("files_with_matches".to_string(), json!(files_with_matches));
-    out.insert("files_scanned".to_string(), json!(files_scanned));
-    out.insert("files_listed".to_string(), json!(files.len()));
     let elapsed_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms);
-    out.insert("elapsed_ms".to_string(), json!(elapsed_ms));
-    out.insert("phase_ms".to_string(), json!({
-        "listing": listing_ms,
-        "stat": stat_ms,
-        "read": read_ms,
-        "prewarm": prewarm_ms,
-        "match_and_other": elapsed_ms.saturating_sub(stat_ms + read_ms + prewarm_ms),
-    }));
+    if req.verbose {
+        out.insert("match_count".to_string(), json!(match_count));
+        out.insert("occurrence_count".to_string(), json!(occurrence_count));
+        out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
+        out.insert("files_with_matches".to_string(), json!(files_with_matches));
+        out.insert("files_scanned".to_string(), json!(files_scanned));
+        out.insert("files_listed".to_string(), json!(files.len()));
+        out.insert("elapsed_ms".to_string(), json!(elapsed_ms));
+        out.insert("phase_ms".to_string(), json!({
+            "listing": listing_ms,
+            "stat": stat_ms,
+            "read": read_ms,
+            "prewarm": prewarm_ms,
+            "match_and_other": elapsed_ms.saturating_sub(stat_ms + read_ms + prewarm_ms),
+        }));
+    } else {
+        out.insert("count".to_string(), json!(format!(
+            "{lines_with_matches} lines, {occurrence_count} occurrences, {files_with_matches} files of {files_scanned} scanned"
+        )));
+    }
     out.insert("exhaustive".to_string(), json!(exhaustive));
     if files_truncated {
         out.insert("files_truncated".to_string(), json!(true));
@@ -2652,7 +2670,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("files_skipped_too_large".to_string(), json!(files_skipped_too_large));
         out.insert("max_file_bytes".to_string(), json!(LITERAL_SCAN_MAX_FILE_BYTES));
     }
-    if files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
+    if req.verbose && files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
     if files_skipped_binary > 0 { out.insert("files_skipped_binary".to_string(), json!(files_skipped_binary)); }
     if files_unreadable > 0 {
         out.insert("files_unreadable".to_string(), json!(files_unreadable));
