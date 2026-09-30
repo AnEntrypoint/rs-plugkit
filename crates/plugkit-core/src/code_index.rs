@@ -542,19 +542,37 @@ fn parsed_nodes<'a>(nodes: &'a [Value]) -> Vec<RawNode<'a>> {
     }).collect()
 }
 
+const CALL_ARGUMENT_LIST_NODE_TYPES: &[&str] = &[
+    "arguments",
+    "argument_list",
+];
+
+fn strictly_inside(candidate: &RawNode, call: &RawNode) -> bool {
+    candidate.start_byte >= call.start_byte
+        && candidate.end_byte <= call.end_byte
+        && !(candidate.start_byte == call.start_byte && candidate.end_byte == call.end_byte)
+}
+
+fn callee_leaf_before_argument_list<'a>(call: &RawNode<'a>, all: &[RawNode<'a>]) -> Option<RawNode<'a>> {
+    let argument_list_start = all.iter()
+        .filter(|n| strictly_inside(n, call) && CALL_ARGUMENT_LIST_NODE_TYPES.contains(&n.kind))
+        .map(|n| n.start_byte)
+        .min()?;
+    all.iter()
+        .filter(|n| strictly_inside(n, call) && CALLEE_LEAF_NODE_TYPES.contains(&n.kind) && n.end_byte <= argument_list_start)
+        .max_by_key(|n| (n.end_byte, n.start_byte))
+        .copied()
+}
+
+fn first_ending_callee_leaf<'a>(call: &RawNode<'a>, all: &[RawNode<'a>]) -> Option<RawNode<'a>> {
+    all.iter()
+        .filter(|n| strictly_inside(n, call) && CALLEE_LEAF_NODE_TYPES.contains(&n.kind))
+        .min_by_key(|n| n.end_byte)
+        .copied()
+}
+
 fn callee_name_for_call(call: &RawNode, all: &[RawNode], src_bytes: &[u8]) -> Option<String> {
-    let mut best: Option<RawNode> = None;
-    for candidate in all {
-        if candidate.start_byte < call.start_byte || candidate.end_byte > call.end_byte { continue; }
-        if candidate.start_byte == call.start_byte && candidate.end_byte == call.end_byte { continue; }
-        if !CALLEE_LEAF_NODE_TYPES.contains(&candidate.kind) { continue; }
-        let is_earlier = match &best {
-            Some(b) => candidate.end_byte < b.end_byte,
-            None => true,
-        };
-        if is_earlier { best = Some(*candidate); }
-    }
-    let leaf = best?;
+    let leaf = callee_leaf_before_argument_list(call, all).or_else(|| first_ending_callee_leaf(call, all))?;
     let end = leaf.end_byte.min(src_bytes.len());
     if end <= leaf.start_byte { return None; }
     let text = String::from_utf8_lossy(&src_bytes[leaf.start_byte..end]).into_owned();
