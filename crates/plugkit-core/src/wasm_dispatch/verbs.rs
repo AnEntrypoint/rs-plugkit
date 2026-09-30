@@ -4928,23 +4928,35 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     stamp_request_identity(result_value, &fingerprint, body_parse_failed, dispatch_id.as_deref())
 }
 
+fn codeinsight_action(verb: &str, action: &str, body: &Value) -> u64 {
+    let mut routed = body.clone();
+    if let Some(map) = routed.as_object_mut() {
+        map.entry("action").or_insert_with(|| json!(action));
+    }
+    match crate::code_symbols::handle(&routed) {
+        Ok(data) => ok(verb, data),
+        Err(reason) => err(verb, &reason),
+    }
+}
+
+fn codeinsight(body: &Value) -> u64 {
+    codeinsight_action("codeinsight", "overview", body)
+}
+
 fn callers(body: &Value) -> u64 {
-    let symbol = body.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-    if symbol.is_empty() { return err("callers", "symbol required"); }
-    ok("callers", crate::code_index::callers_of(symbol))
+    codeinsight_action("callers", "callers", body)
 }
 
 fn callees(body: &Value) -> u64 {
-    let symbol = body.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-    if symbol.is_empty() { return err("callees", "symbol required"); }
-    ok("callees", crate::code_index::callees_of(symbol))
+    codeinsight_action("callees", "callees", body)
 }
 
 fn impact(body: &Value) -> u64 {
-    let symbol = body.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-    if symbol.is_empty() { return err("impact", "symbol required"); }
-    let max_depth = body.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-    ok("impact", crate::code_index::impact_of(symbol, max_depth))
+    let mut routed = body.clone();
+    if let Some(map) = routed.as_object_mut() {
+        map.entry("direction").or_insert_with(|| json!("callees"));
+    }
+    codeinsight_action("impact", "impact", &routed)
 }
 
 fn reject_if_project_root_unresolvable_before_gm_dir_panics(verb: &str) -> Option<u64> {
@@ -5030,6 +5042,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "cache_invalidate" => cache_invalidate(&body),
         "cache_stats" => cache_stats(&body),
         "codeinsight_index" => codeinsight_index(&body),
+        "codeinsight" => codeinsight(&body),
         "codesearch" | "code_search" | "search" => codesearch(&body),
         "callers" => callers(&body),
         "callees" => callees(&body),
