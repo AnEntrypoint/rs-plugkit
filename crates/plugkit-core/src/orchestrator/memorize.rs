@@ -34,33 +34,42 @@ fn parsed_kind_or_default(content: &str) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn strip_sha_shaped_tokens(text: &str) -> String {
-    text.split_whitespace()
-        .filter(|tok| {
-            let cleaned = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-            !(cleaned.len() >= 7 && cleaned.len() <= 40
-                && cleaned.chars().all(|c| c.is_ascii_hexdigit())
-                && cleaned.chars().any(|c| c.is_ascii_digit())
-                && cleaned.chars().any(|c| c.is_ascii_alphabetic()))
-        })
+fn filter_tokens_keeping_lines(text: &str, keep: impl Fn(&str) -> bool) -> String {
+    text.lines()
+        .map(|line| line.split_whitespace().filter(|tok| keep(tok)).collect::<Vec<_>>().join(" "))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join("\n")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn strip_sha_shaped_tokens(text: &str) -> String {
+    filter_tokens_keeping_lines(text, |tok| {
+        let cleaned = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        !(cleaned.len() >= 7 && cleaned.len() <= 40
+            && cleaned.chars().all(|c| c.is_ascii_hexdigit())
+            && cleaned.chars().any(|c| c.is_ascii_digit())
+            && cleaned.chars().any(|c| c.is_ascii_alphabetic()))
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
 fn strip_version_shaped_tokens(text: &str) -> String {
-    text.split_whitespace()
-        .filter(|tok| {
-            let cleaned = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
-            let digits_dotted = cleaned.strip_prefix('v').unwrap_or(cleaned);
-            let looks_semver = digits_dotted.split('.').count() >= 2
-                && digits_dotted.len() >= 3
-                && digits_dotted.chars().all(|c| c.is_ascii_digit() || c == '.')
-                && digits_dotted.chars().any(|c| c.is_ascii_digit());
-            !looks_semver
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    filter_tokens_keeping_lines(text, |tok| {
+        let cleaned = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
+        let digits_dotted = cleaned.strip_prefix('v').unwrap_or(cleaned);
+        let looks_semver = digits_dotted.split('.').count() >= 2
+            && digits_dotted.len() >= 3
+            && digits_dotted.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && digits_dotted.chars().any(|c| c.is_ascii_digit());
+        !looks_semver
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn contains_whole_word(haystack: &str, word: &str) -> bool {
+    haystack
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| w == word)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -76,7 +85,7 @@ fn strip_dated_audit_lines(text: &str) -> String {
                         && w[7] == b'-'
                         && w[8..10].iter().all(|c| c.is_ascii_digit())
                 }));
-            let audit_shaped = l.contains("audit") || l.contains("(fixed)");
+            let audit_shaped = contains_whole_word(&l, "audit") || l.contains("(fixed)");
             !(has_date && audit_shaped)
         })
         .collect::<Vec<_>>()
@@ -356,15 +365,25 @@ pub fn handle_backfill(_content: &str) -> (String, String, i32) {
 }
 
 #[cfg(target_arch = "wasm32")]
+const MEMO_TEXT_FIELDS: &[&str] = &["text", "fact", "memo", "content"];
+
+#[cfg(target_arch = "wasm32")]
 pub fn handle_fire(content: &str) -> (String, String, i32) {
     if content.trim().is_empty() {
         return (String::new(), "empty memorize body".to_string(), 1);
     }
     let parsed: Option<serde_json::Value> = serde_json::from_str(content).ok();
-    let (text, namespace) = match parsed {
+    let (text, namespace) = match parsed.as_ref().filter(|v| v.is_object()) {
         Some(v) => {
-            let t = v.get("text").and_then(|x| x.as_str()).map(String::from)
-                .unwrap_or_else(|| content.trim().to_string());
+            let fact = MEMO_TEXT_FIELDS.iter()
+                .find_map(|field| v.get(*field).and_then(|x| x.as_str()))
+                .map(String::from);
+            let Some(t) = fact else {
+                return (String::new(), format!(
+                    "memorize-fire: JSON body carries no memo text field; put the fact in one of {:?} (metadata such as session_id is never part of the memo)",
+                    MEMO_TEXT_FIELDS
+                ), 1);
+            };
             let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("default").to_string();
             (t, ns)
         }
