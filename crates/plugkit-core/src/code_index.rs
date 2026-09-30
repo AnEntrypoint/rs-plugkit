@@ -801,7 +801,8 @@ fn code_vec_ns() -> String {
     ns.vec_namespace(&ns.code)
 }
 
-const MANIFEST_VERSION: u64 = 6;
+const MANIFEST_VERSION: u64 = 7;
+const FIRST_MANIFEST_VERSION_RECORDING_DEFERRED_CHUNKS: u64 = 7;
 
 #[derive(Clone)]
 struct ChunkRecord {
@@ -822,6 +823,13 @@ struct FileManifest {
     commit_overview: Option<String>,
     chunks: Vec<ChunkRecord>,
     skipped_no_embed: u32,
+    version: u64,
+}
+
+impl FileManifest {
+    fn holds_every_chunk(&self) -> bool {
+        self.skipped_no_embed == 0 && self.version >= FIRST_MANIFEST_VERSION_RECORDING_DEFERRED_CHUNKS
+    }
 }
 
 fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, size: u64, commit_overview: &Option<String>, chunks: &[ChunkRecord], skipped_no_embed: u32) -> String {
@@ -840,10 +848,10 @@ fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, size: 
 fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     let parsed: Value = serde_json::from_str(val).ok()?;
     const MIN_READABLE_MANIFEST_VERSION: u64 = 4;
-    match parsed.get("v").and_then(|v| v.as_u64()) {
-        Some(v) if v >= MIN_READABLE_MANIFEST_VERSION && v <= MANIFEST_VERSION => {}
+    let version = match parsed.get("v").and_then(|v| v.as_u64()) {
+        Some(v) if v >= MIN_READABLE_MANIFEST_VERSION && v <= MANIFEST_VERSION => v,
         _ => return None,
-    }
+    };
     let fp = parsed.get("path").and_then(|p| p.as_str())?.to_string();
     let hash = parsed.get("hash").and_then(|h| h.as_u64())? as u32;
     let digest_hash = parsed.get("digest_hash").and_then(|h| h.as_u64()).map(|h| h as u32);
@@ -863,7 +871,7 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
         chunks.push(ChunkRecord { key, kind, name, ls, le, emb, content_hash });
     }
     let skipped_no_embed = parsed.get("skipped_no_embed").and_then(|s| s.as_u64()).unwrap_or(0) as u32;
-    Some((fp, FileManifest { hash, digest_hash, mtime_ms, size, commit_overview, chunks, skipped_no_embed }))
+    Some((fp, FileManifest { hash, digest_hash, mtime_ms, size, commit_overview, chunks, skipped_no_embed, version }))
 }
 
 fn is_submodule_path(fp: &str) -> bool {
@@ -1116,8 +1124,12 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         .max(cfg.index.prune_pass_file_limit_floor)
         .min(cfg.index.prune_pass_file_limit_ceiling);
     let prune_enumeration_cap = cfg.index.prune_enumeration_file_cap;
-    let full_files = collect_files(r, limit.max(prune_enumeration_cap), &cfg.index);
-    let files: Vec<String> = full_files.iter().take(limit).cloned().collect();
+    let mut full_files = collect_files(r, limit.max(prune_enumeration_cap), &cfg.index);
+    full_files.sort_by(|a, b| canonical_index_path(a).cmp(canonical_index_path(b)));
+    let resume_cursor = stored_index_cursor_at(project_path);
+    let files = rotated_from_cursor(&full_files, resume_cursor.as_deref());
+    let mut first_deferred: Option<String> = None;
+    let mut fresh_files_this_pass = 0usize;
     {
         let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
@@ -1157,6 +1169,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     let mut reused = 0;
     let mut reused_files = 0;
     let mut skipped_no_embed = 0u32;
+    let mut deferred_chunks = 0u32;
     let mut deferred_files = 0u32;
     let mut floor_grace_used_this_pass = false;
     let pessimistic_ms_per_chunk = cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound.max(1);
@@ -1166,16 +1179,17 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     let mut digest_entries: Vec<(String, u32)> = Vec::with_capacity(files.len());
 
     for raw_fp in &files {
-        let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        if elapsed > index_wall_budget_ms {
-            deferred_files += 1;
-            continue;
-        }
-        let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();
+        let canon = canonical_index_path(raw_fp).to_string();
         let fp = &canon;
         let dot = fp.rfind('.');
         let ext = match dot { Some(i) => &fp[i..], None => "" };
         let lang_name = match lang_for_ext(ext) { Some(x) => x, None => continue };
+        let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+        if elapsed > index_wall_budget_ms {
+            deferred_files += 1;
+            first_deferred.get_or_insert_with(|| fp.clone());
+            continue;
+        }
 
         if let Some(m) = prior.get(fp) {
             if let Some(stat) = crate::wasm_dispatch::host_stat(fp)
@@ -1185,7 +1199,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                 let stat_size = stat.get("size").and_then(|v| v.as_u64());
                 let size_matches = m.size.is_none() || stat_size == m.size;
                 if let (Some(mtime), Some(dh)) = (stat_mtime, m.digest_hash) {
-                    if mtime == m.mtime_ms && size_matches && m.skipped_no_embed == 0 && libsql_ok && chunk_rows(fp) == m.chunks.len() {
+                    if mtime == m.mtime_ms && size_matches && m.holds_every_chunk() && libsql_ok && chunk_rows(fp) == m.chunks.len() {
                         seen.insert(fp.clone());
                         indexed += 1;
                         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
@@ -1197,16 +1211,6 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                     }
                 }
             }
-        }
-
-        let elapsed_before_extraction = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        let remaining_before_extraction = index_wall_budget_ms.saturating_sub(elapsed_before_extraction);
-        if remaining_before_extraction < pessimistic_ms_per_chunk {
-            if floor_grace_used_this_pass {
-                deferred_files += 1;
-                continue;
-            }
-            floor_grace_used_this_pass = true;
         }
 
         let content = match host_read(fp)
@@ -1228,37 +1232,27 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         digest_entries.push((fp.clone(), file_digest_hash));
 
         if let Some(m) = prior.get(fp) {
-            if m.hash == file_hash && m.skipped_no_embed == 0 {
-                if libsql_ok && chunk_rows(fp) == m.chunks.len() {
-                    chunked += m.chunks.len() as i32;
-                    reused += m.chunks.len() as i32;
-                    reused_files += 1;
-                    continue;
-                }
-                if libsql_ok {
-                    let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
-                }
+            if m.hash == file_hash && m.holds_every_chunk() {
                 let mut all_persisted = true;
-                for c in &m.chunks {
-                    let body = slice_lines(&content, c.ls, c.le);
-                    all_persisted &= write_chunk(libsql_ok, &db_path, fp, c, &body, project_path);
-                    chunked += 1;
-                    reused += 1;
+                if !(libsql_ok && chunk_rows(fp) == m.chunks.len()) {
+                    if libsql_ok {
+                        let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
+                    }
+                    for c in &m.chunks {
+                        let body = slice_lines(&content, c.ls, c.le);
+                        all_persisted &= write_chunk(libsql_ok, &db_path, fp, c, &body, project_path);
+                    }
                 }
-                if !all_persisted {
+                chunked += m.chunks.len() as i32;
+                reused += m.chunks.len() as i32;
+                reused_files += 1;
+                if all_persisted {
+                    fv_put(&manifest_ns_for(project_path), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, file_size, &m.commit_overview, &m.chunks, m.skipped_no_embed));
+                } else {
                     fv_delete(&manifest_ns_for(project_path), fp);
                 }
-                reused_files += 1;
                 continue;
             }
-            if libsql_ok {
-                let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
-            }
-            delete_chunk_keys(&m.chunks, project_path);
-            delete_call_edges_for_path(fp);
-        } else if libsql_ok {
-            let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
-            delete_call_edges_for_path(fp);
         }
 
         let prior_chunk_by_identity: std::collections::HashMap<(String, String, u32), &ChunkRecord> = prior
@@ -1272,12 +1266,6 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             .unwrap_or_default();
 
         let (mut chunks, treesitter_failed) = extract_chunks_reporting_plugin_failure(fp, &content, lang_name);
-        if treesitter_failed {
-            treesitter_failures += 1;
-        } else {
-            let edges = extract_call_edges(&content, lang_name, &chunks);
-            write_call_edges(fp, &edges);
-        }
         if chunks.is_empty() && lang_name == "markdown" && !content.trim().is_empty() {
             let whole = content.chars().take(4000).collect::<String>();
             let line_end = content.lines().count().max(1);
@@ -1294,26 +1282,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         let elapsed_now = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
         let remaining_ms = index_wall_budget_ms.saturating_sub(elapsed_now);
         let budget_chunks = (remaining_ms / pessimistic_ms_per_chunk).max(1) as usize;
-        let cap = max_chunks_per_file_per_pass.min(budget_chunks);
-        let oversized = chunks.len() > cap;
-        if oversized {
-            let full = chunks.len();
-            chunks.truncate(cap);
-            let msg = format!(
-                "code_index: capping {} chunks={} -> {} (count_cap={} budget_chunks={} remaining_ms={}; file still indexed and marked seen)",
-                fp, full, cap, max_chunks_per_file_per_pass, budget_chunks, remaining_ms
-            );
-            let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
-            crate::wasm_dispatch::emit_event("code_index_chunk_cap", json!({
-                "path": fp,
-                "chunks_total": full,
-                "chunks_indexed": cap,
-                "count_cap": max_chunks_per_file_per_pass,
-                "budget_chunks": budget_chunks,
-                "remaining_ms": remaining_ms,
-                "pessimistic_ms_per_chunk": pessimistic_ms_per_chunk,
-            }));
-        }
+        let cap = max_chunks_per_file_per_pass.min(budget_chunks).max(1);
 
         let chunk_content_hashes: Vec<u32> = chunks.iter()
             .map(|(_, _, _, _, body)| crate::hash::fnv1a64(body.as_bytes()) as u32)
@@ -1323,9 +1292,58 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                 prior_chunk_by_identity.get(&(kind.clone(), name.clone(), *ch)).map(|c| c.emb.clone())
             })
             .collect();
+        let chunk_plan = plan_chunk_embeds(&reused_embs, cap);
+        let fresh_needed = chunk_plan.iter().filter(|p| **p != ChunkEmbedPlan::Reuse).count();
 
-        let embed_inputs: Vec<String> = chunks.iter().zip(reused_embs.iter())
-            .filter(|(_, reused)| reused.is_none())
+        if fresh_needed > 0 {
+            let fresh_file_allowance_spent = fresh_files_this_pass >= limit;
+            let under_floor = remaining_ms < pessimistic_ms_per_chunk;
+            if fresh_file_allowance_spent || (under_floor && floor_grace_used_this_pass) {
+                deferred_files += 1;
+                first_deferred.get_or_insert_with(|| fp.clone());
+                continue;
+            }
+            if under_floor {
+                floor_grace_used_this_pass = true;
+            }
+            fresh_files_this_pass += 1;
+        }
+
+        if let Some(m) = prior.get(fp) {
+            delete_chunk_keys(&m.chunks, project_path);
+        }
+        if libsql_ok {
+            let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
+        }
+        delete_call_edges_for_path(fp);
+        if treesitter_failed {
+            treesitter_failures += 1;
+        } else {
+            let edges = extract_call_edges(&content, lang_name, &chunks);
+            write_call_edges(fp, &edges);
+        }
+        let deferred_in_file = chunk_plan.iter().filter(|p| **p == ChunkEmbedPlan::DeferToNextPass).count();
+        if deferred_in_file > 0 {
+            let msg = format!(
+                "code_index: capping {} fresh_chunks={} -> {} (count_cap={} budget_chunks={} remaining_ms={}; the rest resume next pass)",
+                fp, fresh_needed, cap, max_chunks_per_file_per_pass, budget_chunks, remaining_ms
+            );
+            let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+            crate::wasm_dispatch::emit_event("code_index_chunk_cap", json!({
+                "path": fp,
+                "chunks_total": chunks.len(),
+                "chunks_fresh": fresh_needed,
+                "chunks_embedded_now": fresh_needed - deferred_in_file,
+                "chunks_deferred": deferred_in_file,
+                "count_cap": max_chunks_per_file_per_pass,
+                "budget_chunks": budget_chunks,
+                "remaining_ms": remaining_ms,
+                "pessimistic_ms_per_chunk": pessimistic_ms_per_chunk,
+            }));
+        }
+
+        let embed_inputs: Vec<String> = chunks.iter().zip(chunk_plan.iter())
+            .filter(|(_, plan)| **plan == ChunkEmbedPlan::EmbedNow)
             .map(|((_, name, _, _, body), _)| format!("{} {}", name, truncate_for_embed(body)))
             .collect();
         let reused_chunk_count = reused_embs.iter().filter(|r| r.is_some()).count();
@@ -1351,10 +1369,11 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             }));
         }
 
-        let embed_results: Vec<(Option<Vec<f32>>, bool)> = reused_embs.into_iter()
-            .map(|reused| match reused {
-                Some(v) => (Some(v), true),
-                None => (fresh_embeds.next().unwrap_or(None), false),
+        let embed_results: Vec<(Option<Vec<f32>>, ChunkEmbedPlan)> = reused_embs.into_iter().zip(chunk_plan.into_iter())
+            .map(|(reused, plan)| match plan {
+                ChunkEmbedPlan::Reuse => (reused, plan),
+                ChunkEmbedPlan::EmbedNow => (fresh_embeds.next().unwrap_or(None), plan),
+                ChunkEmbedPlan::DeferToNextPass => (None, plan),
             })
             .collect();
 
@@ -1363,14 +1382,19 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         let mut file_skipped_no_embed: u32 = 0;
         let chunk_write_loop_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let chunks_in_this_file = chunk_content_hashes.len();
-        for (idx, (((kind, name, ls, le, body), (emb_opt, was_reused)), content_hash)) in chunks.into_iter().zip(embed_results.into_iter()).zip(chunk_content_hashes.into_iter()).enumerate() {
+        for (idx, (((kind, name, ls, le, body), (emb_opt, plan)), content_hash)) in chunks.into_iter().zip(embed_results.into_iter()).zip(chunk_content_hashes.into_iter()).enumerate() {
+            let was_reused = plan == ChunkEmbedPlan::Reuse;
             let v = match emb_opt {
                 Some(v) => v,
                 None => {
-                    skipped_no_embed += 1;
                     file_skipped_no_embed += 1;
-                    let msg = format!("code_index: embed failed for {}:{} ({}); skipping chunk to avoid NULL-embedding row", fp, ls, name);
-                    let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+                    if plan == ChunkEmbedPlan::DeferToNextPass {
+                        deferred_chunks += 1;
+                    } else {
+                        skipped_no_embed += 1;
+                        let msg = format!("code_index: embed failed for {}:{} ({}); skipping chunk to avoid NULL-embedding row", fp, ls, name);
+                        let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+                    }
                     continue;
                 }
             };
@@ -1441,19 +1465,23 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             }));
         }
     }
-    if deferred_files == 0 {
+    let pass_complete = deferred_files == 0 && deferred_chunks == 0 && skipped_no_embed == 0;
+    store_index_cursor_at(first_deferred.as_deref(), project_path);
+    if pass_complete {
         let digest = digest_from_entries(digest_entries);
         store_digest_at(&digest, project_path);
         let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} removed_files={} skipped_no_embed={} digest={}", indexed, chunked, embedded, reused, reused_files, removed_files, skipped_no_embed, digest);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     } else {
-        let partial_digest = format!("{}:partial={}", digest_from_entries(digest_entries), deferred_files);
+        let partial_digest = format!("{}:partial={}", digest_from_entries(digest_entries), deferred_files + deferred_chunks + skipped_no_embed);
         store_digest_at(&partial_digest, project_path);
-        let msg = format!("code_index: partial pass (wall budget) files_indexed={} deferred_files={} embedded={} reused={} removed_files={} -- partial digest stored, next call resumes", indexed, deferred_files, embedded, reused, removed_files);
+        let msg = format!("code_index: partial pass files_indexed={} deferred_files={} deferred_chunks={} embedded={} reused={} removed_files={} resume_at={:?} -- partial digest stored, next call resumes there", indexed, deferred_files, deferred_chunks, embedded, reused, removed_files, first_deferred);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
         crate::wasm_dispatch::emit_event("codeinsight_index_partial", json!({
             "files_indexed": indexed,
             "deferred_files": deferred_files,
+            "deferred_chunks": deferred_chunks,
+            "resume_at": first_deferred,
             "embedded": embedded,
         }));
     }
@@ -1469,6 +1497,8 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         "removed_files": removed_files,
         "skipped_no_embed": skipped_no_embed,
         "deferred_files": deferred_files,
+        "deferred_chunks": deferred_chunks,
+        "resume_at": first_deferred,
         "treesitter_failures": treesitter_failures,
         "kvvec_cleared_dim_mismatch": kvvec_cleared,
         "by_language": langs,
@@ -1478,8 +1508,59 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             Value::Array(Vec::new())
         },
         "digest": stored_digest_at(project_path),
-        "complete": deferred_files == 0,
+        "complete": pass_complete,
     })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ChunkEmbedPlan {
+    Reuse,
+    EmbedNow,
+    DeferToNextPass,
+}
+
+fn plan_chunk_embeds(reused: &[Option<Vec<f32>>], fresh_allowance: usize) -> Vec<ChunkEmbedPlan> {
+    let mut granted = 0usize;
+    reused.iter().map(|r| {
+        if r.is_some() { return ChunkEmbedPlan::Reuse; }
+        if granted < fresh_allowance {
+            granted += 1;
+            ChunkEmbedPlan::EmbedNow
+        } else {
+            ChunkEmbedPlan::DeferToNextPass
+        }
+    }).collect()
+}
+
+fn canonical_index_path(raw: &str) -> &str {
+    raw.trim_start_matches("./").trim_start_matches('/')
+}
+
+fn rotated_from_cursor(sorted: &[String], cursor: Option<&str>) -> Vec<String> {
+    let start = match cursor {
+        Some(c) => sorted.partition_point(|p| canonical_index_path(p) < c),
+        None => 0,
+    };
+    sorted[start..].iter().chain(sorted[..start].iter()).cloned().collect()
+}
+
+const INDEX_CURSOR_PATH: &str = ".gm/exec-spool/.codeinsight-cursor";
+
+fn index_cursor_path_for(project_path: Option<&str>) -> String {
+    match project_path {
+        Some(p) if !p.is_empty() => format!("{}/{}", p.trim_end_matches(['/', '\\']), INDEX_CURSOR_PATH),
+        _ => INDEX_CURSOR_PATH.to_string(),
+    }
+}
+
+fn stored_index_cursor_at(project_path: Option<&str>) -> Option<String> {
+    crate::wasm_dispatch::host_read(&index_cursor_path_for(project_path))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn store_index_cursor_at(cursor: Option<&str>, project_path: Option<&str>) {
+    let _ = crate::wasm_dispatch::host_write(&index_cursor_path_for(project_path), cursor.unwrap_or(""));
 }
 
 pub fn ensure_current_insight() -> Value {
