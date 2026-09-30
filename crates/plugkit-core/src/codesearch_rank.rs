@@ -250,7 +250,7 @@ pub fn identifier_report(identifier: &str, scan: &ScanLines, opts: &RankOptions,
     if shown_references.len() < references.len() || shown_definitions.len() < definitions.len() {
         out.insert("top_files".into(), json!(top_files));
         let all_matches = if substring { "mode=regex query=(?i)<query> output=compact" } else { "mode=literal whole_word=true output=compact" };
-        out.insert("more".into(), json!(format!("all matches: {all_matches}; include docs: docs=true; raw BM25/vector/commit channels: verbose=true")));
+        out.insert("more".into(), json!(format!("all matches (docs included): {all_matches}; docs in this ranked view: docs=true; raw BM25/vector/commit channels: verbose=true")));
     }
     Some(Value::Object(out))
 }

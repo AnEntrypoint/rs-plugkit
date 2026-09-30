@@ -1585,7 +1585,7 @@ const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 
 const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "query", "mode", "path", "glob", "path_glob", "exclude_glob", "exclude_globs", "case_insensitive", "whole_word", "comments_only",
-    "k", "max_results", "maxResults", "limit", "head_limit", "max_matches", "max_files", "output", "max_chars",
+    "k", "max_results", "maxResults", "limit", "head_limit", "max_matches", "max_files", "output", "max_chars", "verbose", "docs",
 ];
 
 const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit", "head_limit"];
@@ -1705,6 +1705,12 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
             Err(e) => return err("codesearch", &format!("{key} {e}")),
         }
     }
+    if body.get("docs").is_some_and(|v| !v.is_boolean()) {
+        return err("codesearch", "docs must be a boolean -- literal/regex scans include docs by default; docs=false excludes *.md/*.mdx/*.rst/*.adoc and docs/ trees");
+    }
+    if body.get("docs").and_then(|v| v.as_bool()) == Some(false) {
+        exclude_globs.extend(crate::codesearch_rank::DOC_EXCLUDE_GLOBS.iter().map(|g| g.to_string()));
+    }
     let spill_name = format!("codesearch-{}.txt", dispatch_task_id().unwrap_or_else(|| unsafe { host_now_ms() }.to_string()));
     let scan = crate::code_index::LiteralScan {
         pattern: query,
@@ -1723,6 +1729,7 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         list_limit,
         max_chars,
         spill_name,
+        verbose: body.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false),
     };
     let out = crate::code_index::scan_literal(&scan, cfg);
     if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
@@ -1754,6 +1761,7 @@ fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: Option<&str>
         list_limit: None,
         max_chars: usize::MAX,
         spill_name: String::new(),
+        verbose: false,
     };
     let out = crate::code_index::scan_literal(&request, cfg);
     if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
@@ -4667,7 +4675,7 @@ fn tracked_by_design(path: &str) -> bool {
 fn dirty_protected_entries(cwd: Option<&str>) -> Vec<(String, String)> {
     let r = git_call_argv(&["status", "--porcelain", "-z", "-uall", "--", ":(top).gm", ":(top).agentplug*"], cwd);
     let stdout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-    let mut records = stdout.split(' ').filter(|record| record.len() > 3);
+    let mut records = stdout.split('\0').filter(|record| record.len() > 3);
     let mut entries = vec![];
     while let Some(record) = records.next() {
         let status = record[..2].trim().to_string();
