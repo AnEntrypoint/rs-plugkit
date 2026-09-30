@@ -389,13 +389,18 @@ fn idev(event: &str, detail: &str) {
 #[cfg(not(target_arch = "wasm32"))]
 fn idev(_event: &str, _detail: &str) {}
 
-#[cfg(target_arch = "wasm32")]
 const INVESTIGATE_READONLY_MODES: &[&str] =
     &["investigate_readonly", "readonly", "read_only", "investigate", "readonly_investigate"];
 
-#[cfg(target_arch = "wasm32")]
 fn is_investigate_readonly_mode(mode: &str) -> bool {
     INVESTIGATE_READONLY_MODES.contains(&mode)
+}
+
+pub(crate) fn body_requests_investigate_readonly(body: &serde_json::Value) -> bool {
+    body.get("mode")
+        .and_then(|m| m.as_str())
+        .map(|m| is_investigate_readonly_mode(&m.trim().to_ascii_lowercase()))
+        .unwrap_or(false)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -432,6 +437,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let mut asserted_policy_hash: Option<String> = None;
     let mut mode_opt: Option<String> = None;
     let mut prd_full_detail = false;
+    let mut full_reply_requested = false;
+    let mut asserted_reply_hash: Option<String> = None;
     let raw_phase_opt = if trimmed.is_empty() {
         None
     } else if let Some(stripped) = trimmed.strip_prefix("phase=") {
@@ -463,6 +470,12 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         }
         if let Some(b) = v.get("prd_full_detail").and_then(|s| s.as_bool()) {
             prd_full_detail = b;
+        }
+        if let Some(b) = v.get("full").and_then(|s| s.as_bool()) {
+            full_reply_requested = b;
+        }
+        if let Some(h) = v.get("known_reply_hash").and_then(|s| s.as_str()) {
+            asserted_reply_hash = Some(h.trim().to_string());
         }
         if let Some(s) = v.as_str() {
             Some(s.to_string())
@@ -815,6 +828,10 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
             fields.insert("discipline_policies".to_string(), discipline_policies);
         }
     }
+    if let Some(sid) = notify_session.as_deref() {
+        let delta_allowed = instruction_unchanged && !full_reply_requested && !session_mismatch && session_id_opt.is_some();
+        payload = elide_fields_the_caller_already_holds(payload, sid, asserted_reply_hash.as_deref(), delta_allowed);
+    }
     let s = payload.to_string();
     ilog(&format!("instruction::handle done out_len={}", s.len()));
     #[cfg(target_arch = "wasm32")]
@@ -824,4 +841,74 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "mutables_pending_count": mutables_pending_count,
     }));
     (s, String::new(), 0)
+}
+
+#[cfg(target_arch = "wasm32")]
+const FIELDS_ALWAYS_RESTATED_IN_A_DELTA_REPLY: &[&str] = &[
+    "phase", "session_id", "instruction_hash", "instruction_unchanged", "policy_hash",
+    "prd_pending_count", "mutables_pending_count", "next_phase_hint",
+    "sub_phase", "await_result", "prd_items",
+];
+
+#[cfg(target_arch = "wasm32")]
+const FIELDS_PRESENT_ONLY_WHEN_THEIR_OWN_HASH_IS_UNASSERTED: &[&str] = &["discipline_policies"];
+
+#[cfg(target_arch = "wasm32")]
+fn last_reply_path(sid: &str) -> String {
+    super::gm_dir().join("exec-spool").join(format!(".last-instruction-reply-{sid}.json")).to_string_lossy().to_string()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn reply_hash_of(payload: &serde_json::Value) -> String {
+    format!("{:016x}", fnv1a64(&payload.to_string()))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn elide_fields_the_caller_already_holds(
+    mut payload: serde_json::Value,
+    sid: &str,
+    asserted_reply_hash: Option<&str>,
+    delta_allowed: bool,
+) -> serde_json::Value {
+    let path = last_reply_path(sid);
+    let previous: serde_json::Value = pkfs::read_to_string(&path)
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let reply_hash = reply_hash_of(&payload);
+    if let Some(fields) = payload.as_object_mut() {
+        fields.insert("reply_hash".to_string(), json!(reply_hash));
+    }
+    let _ = pkfs::write(&path, &payload.to_string());
+    let caller_holds_previous = delta_allowed
+        && asserted_reply_hash.is_some()
+        && previous.get("reply_hash").and_then(|h| h.as_str()) == asserted_reply_hash;
+    if !caller_holds_previous {
+        return payload;
+    }
+    let (Some(current), Some(prior)) = (payload.as_object(), previous.as_object()) else { return payload };
+    let mut delta = serde_json::Map::new();
+    let mut unchanged: Vec<String> = Vec::new();
+    for (key, value) in current {
+        let restated = FIELDS_ALWAYS_RESTATED_IN_A_DELTA_REPLY.contains(&key.as_str()) || key == "reply_hash";
+        if !restated && prior.get(key) == Some(value) {
+            unchanged.push(key.clone());
+        } else {
+            delta.insert(key.clone(), value.clone());
+        }
+    }
+    let removed: Vec<String> = prior
+        .keys()
+        .filter(|k| !current.contains_key(*k) && k.as_str() != "reply_hash")
+        .filter(|k| !FIELDS_PRESENT_ONLY_WHEN_THEIR_OWN_HASH_IS_UNASSERTED.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    if unchanged.is_empty() {
+        return payload;
+    }
+    delta.insert("unchanged_since_last_reply".to_string(), json!(unchanged));
+    if !removed.is_empty() {
+        delta.insert("removed_since_last_reply".to_string(), json!(removed));
+    }
+    delta.insert("full_reply_at".to_string(), json!(path));
+    serde_json::Value::Object(delta)
 }

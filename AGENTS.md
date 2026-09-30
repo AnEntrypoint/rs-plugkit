@@ -175,6 +175,28 @@ changes.
   resumes. It must still be written; a missing digest forces a full re-index
   that is itself partial. A tree that never fits re-runs every dispatch until
   `IndexConfig::wall_budget_ms` / `MemorySyncBudgetConfig` is raised.
+- `index_cfg_impl` walks the whole sorted listing every pass, starting at the
+  path in `.gm/exec-spool/.codeinsight-cursor` (the first file the previous pass
+  deferred) and wrapping. `max_files` bounds freshly extracted files per pass,
+  never the listing: slicing the first N paths of the DFS listing meant a tree
+  past N files (spoint: `packages/` after 500 `apps/`/`client/` paths) was never
+  indexed, and a budget that always ran out in the same prefix starved the rest.
+- The per-file chunk cap defers fresh embeds instead of truncating: every chunk
+  whose embedding is reusable is kept, at most `cap` new ones are embedded, the
+  rest count into the manifest's `skipped_no_embed` so the next pass re-extracts
+  and continues. Truncating stored a 1-of-28-chunk file as complete forever.
+  Embed failures also keep the pass partial, so they are retried next pass.
+- The fresh-file allowance and the one-file floor grace are charged only after
+  extraction shows the file needs a fresh embed; a reuse-only re-extraction (an
+  older manifest, a touched mtime) costs no allowance, and the hash-match branch
+  rewrites the manifest's mtime/size so the stat fast path hits next time.
+  Otherwise N touched files took N top-up passes and never reached complete.
+- Throughput bound, measured on spoint: bge-small in wasm embeds a 512-token
+  chunk in ~5-7 s (opt-level z ~7 s, opt-level 3 + simd128 ~5 s), and the
+  codesearch top-up budget is 4 s, so a cold 7000-chunk tree advances about one
+  file per codesearch call; `codeinsight_index` (wall budget) is the bulk path.
+  Manifests older than `FIRST_MANIFEST_VERSION_RECORDING_DEFERRED_CHUNKS` could
+  be silently truncated, so they are re-extracted once (embeddings reused).
 - `root_ns_suffix`: host KV rows are keyed by namespace string alone, not by
   libsql db path, so every per-root db also salts its KV namespaces; the
   no-root namespace stays unsalted.
@@ -445,6 +467,23 @@ changes.
 - `instructions::handle` suppresses prose only when the caller asserts the hash
   it holds; `.last-instruction-hash-<sid>.json` records what was sent, not what
   arrived.
+- Every non-read-only reply carries `reply_hash` (fnv of the full payload),
+  stored in `.last-instruction-reply-<sid>.json`. A caller that asserts both the
+  current instruction hash and `known_reply_hash` equal to that stored hash gets
+  a delta: fields equal to the stored reply are elided and listed in
+  `unchanged_since_last_reply`, dropped ones in `removed_since_last_reply`,
+  `FIELDS_ALWAYS_RESTATED_IN_A_DELTA_REPLY` stay inline, `full_reply_at` names
+  the file. Keying on the caller's assertion, never on what the server last
+  wrote, is what keeps a fork sharing the sid, a lost response or a retry from
+  eliding live state the caller never received; gm-mcp asserts the hash of the
+  last reply it actually delivered. `{"full":true}` forces the whole envelope;
+  a request with no `session_id` never gets a delta. This keeps the long-gap
+  re-check cheap (an unchanged 12 KB reply measured ~1.4-2.5 KB).
+- `gates::dispatch_serves_no_phase_prose`: an `instruction` in
+  `investigate_readonly` mode serves no phase prose, so it neither refreshes
+  `last-instruction-ts` nor stamps `last-dispatch-ts`; otherwise a 2 KB
+  read-only call satisfied the long-gap gate mid-chain without delivering the
+  recovery prose the gate exists for.
 - `instructions::handle` inlines only `instruction_payload.mutables_pending_rows_inlined_limit`
   / `prd_items_rows_inlined_limit` rows; the counts (`mutables_pending_count`,
   `epistemic_gap`, `prd_open_count`) stay exact and a `*_truncated` block names
