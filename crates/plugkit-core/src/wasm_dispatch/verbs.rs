@@ -154,6 +154,7 @@ pub const ERR_CODE_INVALID_ARGS: &str = "invalid_args";
 pub const ERR_CODE_PANIC: &str = "panic";
 pub const ERR_CODE_GATE_DENIED: &str = "gate_denied";
 pub const ERR_CODE_DANGLING_REFERENCE: &str = "dangling_reference";
+pub const ERR_CODE_DANGLING_SCAN_UNREADABLE: &str = "dangling_scan_unreadable";
 
 fn shared_store_contract() -> Value {
     json!({
@@ -3260,6 +3261,9 @@ fn git_commit(body: &Value) -> u64 {
         let head_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
         let head_before = head_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         let scan = super::dangling_refs::scan_commit(cwd, &paths, add_all, body);
+        if super::dangling_refs::scan_unreadable(&scan) {
+            return Ok(err_json("git_commit", super::dangling_refs::unreadable_detail("git_commit", &scan)));
+        }
         if !scan.offenders.is_empty() {
             return Ok(err_json("git_commit", super::dangling_refs::refusal_detail("git_commit", &scan)));
         }
@@ -3442,6 +3446,9 @@ fn git_finalize(body: &Value) -> u64 {
             return err("git_finalize", "worktree dirty but no commit message provided -- pass {message}");
         }
         let scan = super::dangling_refs::scan_commit(cwd_ref, &paths, !scoped, body);
+        if super::dangling_refs::scan_unreadable(&scan) {
+            return err_json("git_finalize", super::dangling_refs::unreadable_detail("git_finalize", &scan));
+        }
         if !scan.offenders.is_empty() {
             return err_json("git_finalize", super::dangling_refs::refusal_detail("git_finalize", &scan));
         }
