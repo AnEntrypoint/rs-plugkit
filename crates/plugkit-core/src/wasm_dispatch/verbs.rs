@@ -3448,6 +3448,10 @@ fn git_add(body: &Value) -> u64 {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default();
+        let blocked_paths = hard_excluded_pathspecs(&paths);
+        if !blocked_paths.is_empty() {
+            return Ok(err_json("git_add", protected_pathspec_refusal("git_add", &blocked_paths)));
+        }
         let argv_owned = git_stage_argv(&paths, cwd);
         let argv = as_argv(&argv_owned);
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
@@ -3455,9 +3459,33 @@ fn git_add(body: &Value) -> u64 {
         if code != 0 {
             return Ok(err("git_add", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("git add failed")));
         }
-        Ok(ok("git_add", with_exclusion_report(json!({
-            "staged": if paths.is_empty() { vec!["-A".to_string()] } else { paths },
-        }), cwd)))
+        let mut staged: Vec<String> = if paths.is_empty() {
+            let out = git_step_replayed_by_call_order(plan, &["diff", "--cached", "--name-only", "-z"], cwd)?;
+            out.get("stdout").and_then(|v| v.as_str()).unwrap_or("")
+                .split('\0').filter(|e| !e.is_empty()).map(String::from).collect()
+        } else {
+            let mut check: Vec<String> = vec!["diff".to_string(), "--cached".to_string(), "--name-only".to_string(), "-z".to_string(), "--".to_string()];
+            check.extend(paths.iter().cloned());
+            let out = git_step_replayed_by_call_order(plan, &as_argv(&check), cwd)?;
+            out.get("stdout").and_then(|v| v.as_str()).unwrap_or("")
+                .split('\0').filter(|e| !e.is_empty()).map(String::from).collect()
+        };
+        staged.sort();
+        staged.dedup();
+        let unmatched = pathspecs_matching_nothing(cwd, &paths);
+        if !paths.is_empty() && staged.is_empty() && !unmatched.is_empty() && unmatched.len() == paths.len() {
+            return Ok(err_json("git_add", pathspec_matches_nothing_refusal("git_add", &paths, &unmatched)));
+        }
+        let mut payload = json!({ "staged": staged });
+        if !paths.is_empty() && staged.is_empty() {
+            payload["staged_nothing_for"] = json!(paths);
+            payload["error_code"] = json!("pathspec_staged_nothing");
+            payload["error"] = json!(format!(
+                "git add ran clean but nothing is staged for {} -- the pathspec is empty, already committed, or excluded as not tracked-by-design",
+                paths.join(", ")
+            ));
+        }
+        Ok(ok("git_add", with_exclusion_report(payload, cwd, &paths)))
     })
 }
 
@@ -3503,11 +3531,7 @@ fn git_commit(body: &Value) -> u64 {
         let add_all = body.get("add_all").and_then(|v| v.as_bool()).unwrap_or(false);
         let blocked_paths = hard_excluded_pathspecs(&paths);
         if !blocked_paths.is_empty() {
-            return Ok(err_json("git_commit", json!({
-                "error": format!("refusing to stage protected pathspec(s): {}", blocked_paths.join(", ")),
-                "error_code": ERR_CODE_INVALID_ARGS,
-                "blocked_paths": blocked_paths,
-            })));
+            return Ok(err_json("git_commit", protected_pathspec_refusal("git_commit", &blocked_paths)));
         }
         let allow_whole_index = body.get("allow_whole_index").and_then(|v| v.as_bool()).unwrap_or(false);
         let staged_before = if add_all || !paths.is_empty() {
@@ -3530,7 +3554,23 @@ fn git_commit(body: &Value) -> u64 {
         let status_r = git_step_replayed_by_call_order(plan, &as_argv(&git_porcelain_argv(&[], cwd)), cwd)?;
         let porcelain = super::host_abi::porcelain_or_dirty(status_r);
         if porcelain.trim().is_empty() && !allow_empty {
-            return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true }), cwd)));
+            return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true }), cwd, &paths)));
+        }
+        if !paths.is_empty() {
+            let scoped_r = git_step_replayed_by_call_order(plan, &as_argv(&git_porcelain_argv(&paths, cwd)), cwd)?;
+            let scoped_porcelain = super::host_abi::porcelain_or_dirty(scoped_r);
+            if scoped_porcelain.trim().is_empty() && !allow_empty {
+                let unmatched = pathspecs_matching_nothing(cwd, &paths);
+                if !unmatched.is_empty() && unmatched.len() == paths.len() {
+                    return Ok(err_json("git_commit", pathspec_matches_nothing_refusal("git_commit", &paths, &unmatched)));
+                }
+                return Ok(err_json("git_commit", json!({
+                    "error": format!("nothing to commit in the requested pathspec(s): {} -- the whole repo has other dirty paths, so this refusal is scoped to what you named", paths.join(", ")),
+                    "error_code": "nothing_to_commit_for_paths",
+                    "requested_paths": paths,
+                    "next_dispatch": "git_commit",
+                })));
+            }
         }
         let head_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
         let head_before = head_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
@@ -3574,7 +3614,7 @@ fn git_commit(body: &Value) -> u64 {
             let serr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
             let sout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
             if git_commit_found_nothing_staged(sout, serr, cwd) {
-                return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true }), cwd)));
+                return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true }), cwd, &paths)));
             }
             return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
         }
@@ -3601,7 +3641,7 @@ fn git_commit(body: &Value) -> u64 {
                 staged_before.len()
             ));
         }
-        Ok(ok("git_commit", with_exclusion_report(payload, cwd)))
+        Ok(ok("git_commit", with_exclusion_report(payload, cwd, &paths)))
     })
 }
 
@@ -3695,11 +3735,7 @@ fn git_finalize(body: &Value) -> u64 {
     let scoped = !paths.is_empty();
     let blocked_paths = hard_excluded_pathspecs(&paths);
     if !blocked_paths.is_empty() {
-        return err_json("git_finalize", json!({
-            "error": format!("refusing to stage protected pathspec(s): {}", blocked_paths.join(", ")),
-            "error_code": ERR_CODE_INVALID_ARGS,
-            "blocked_paths": blocked_paths,
-        }));
+        return err_json("git_finalize", protected_pathspec_refusal("git_finalize", &blocked_paths));
     }
     let mut steps: Vec<Value> = vec![];
     let mut committed = false;
@@ -3783,6 +3819,23 @@ fn git_finalize(body: &Value) -> u64 {
     }
 
     if !committed {
+        if scoped {
+            let unmatched = pathspecs_matching_nothing(cwd_ref, &paths);
+            if !unmatched.is_empty() && unmatched.len() == paths.len() {
+                return err_json("git_finalize", pathspec_matches_nothing_refusal("git_finalize", &paths, &unmatched));
+            }
+            let ahead_probe = git_call("rev-list --count @{u}..HEAD", cwd_ref);
+            let ahead_n: u64 = ahead_probe.get("stdout").and_then(|v| v.as_str()).unwrap_or("0").trim().parse().unwrap_or(0);
+            return err_json("git_finalize", json!({
+                "error": format!("no commit was produced for the requested pathspec(s): {} -- refusing to push, because pushing here would publish an unrelated commit under this message", paths.join(", ")),
+                "error_code": "nothing_to_commit_for_paths",
+                "requested_paths": paths,
+                "committed": false,
+                "pushed": false,
+                "unpushed_commits_ahead_of_upstream": ahead_n,
+                "next_dispatch": "git_commit",
+            }));
+        }
         let ahead_result = git_call("rev-list --count @{u}..HEAD", cwd_ref);
         let ahead_code = ahead_result.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         let ahead_stderr = ahead_result.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
@@ -3794,7 +3847,7 @@ fn git_finalize(body: &Value) -> u64 {
                 "committed": false,
                 "pushed": false,
                 "steps": [{"step": "commit", "nothing_to_commit": true}],
-            }), cwd_ref));
+            }), cwd_ref, &paths));
         }
         sha = head_before_any_commit[..head_before_any_commit.len().min(10)].to_string();
         summary = exec_git_in(cwd_ref, "log -1 --pretty=%s").trim().to_string();
@@ -3901,7 +3954,7 @@ fn git_finalize(body: &Value) -> u64 {
             staged_before.len()
         ));
     }
-    ok("git_finalize", with_exclusion_report(finalize_payload, cwd_ref))
+    ok("git_finalize", with_exclusion_report(finalize_payload, cwd_ref, &paths))
 }
 
 fn git_log(body: &Value) -> u64 {
@@ -4800,6 +4853,26 @@ fn tracked_by_design(path: &str) -> bool {
     })
 }
 
+fn git_tracked_protected_paths(cwd: Option<&str>) -> Vec<String> {
+    let r = git_call_argv(&["ls-files", "-z", "--", ":(top).gm", ":(top).agentplug*"], cwd);
+    r.get("stdout").and_then(|v| v.as_str()).unwrap_or("")
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn tracked_by_design_in(tracked: &[String], path: &str) -> bool {
+    if tracked_by_design(path) {
+        return true;
+    }
+    let path = path.replace('\\', "/");
+    tracked.iter().any(|entry| {
+        let entry = entry.replace('\\', "/");
+        entry == path || entry.starts_with(&format!("{path}/"))
+    })
+}
+
 fn dirty_protected_entries(cwd: Option<&str>) -> Vec<(String, String)> {
     let r = git_call_argv(&["status", "--porcelain", "-z", "-uall", "--", ":(top).gm", ":(top).agentplug*"], cwd);
     let stdout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
@@ -4817,13 +4890,47 @@ fn dirty_protected_entries(cwd: Option<&str>) -> Vec<(String, String)> {
 }
 
 fn withheld_dirty_entries(cwd: Option<&str>) -> Vec<(String, String)> {
-    dirty_protected_entries(cwd).into_iter().filter(|(_, path)| !tracked_by_design(path)).collect()
+    let tracked = git_tracked_protected_paths(cwd);
+    dirty_protected_entries(cwd)
+        .into_iter()
+        .filter(|(_, path)| !tracked_by_design_in(&tracked, path))
+        .collect()
+}
+
+fn caller_pathspec_covers(paths: &[String], candidate: &str) -> bool {
+    paths.iter().any(|spec| {
+        let spec = spec.replace('\\', "/");
+        let spec = spec.trim_end_matches('/');
+        if spec.is_empty() {
+            return false;
+        }
+        if spec == candidate || candidate.starts_with(&format!("{spec}/")) {
+            return true;
+        }
+        if !spec.contains('*') && !spec.contains('?') && !spec.contains('[') {
+            return false;
+        }
+        match spec.rfind('/') {
+            Some(slash) => candidate.starts_with(&format!("{}/", &spec[..slash])),
+            None => true,
+        }
+    })
+}
+
+fn excluded_pathspecs(paths: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut out = vec![".agentplug*".to_string()];
+    for (_, path) in withheld_dirty_entries(cwd) {
+        if !path.starts_with(".agentplug") && !caller_pathspec_covers(paths, &path) {
+            out.push(path);
+        }
+    }
+    out
 }
 
 fn git_pathspec_scope(paths: &[String], cwd: Option<&str>) -> Vec<String> {
     let mut scope: Vec<String> = vec![":(top,exclude).agentplug*".to_string()];
     for (_, path) in withheld_dirty_entries(cwd) {
-        if !path.starts_with(".agentplug") && !caller_pathspec_names(paths, &path) {
+        if !path.starts_with(".agentplug") && !caller_pathspec_covers(paths, &path) {
             scope.push(format!(":(top,exclude,literal){}", path));
         }
     }
@@ -4835,19 +4942,44 @@ fn git_pathspec_scope(paths: &[String], cwd: Option<&str>) -> Vec<String> {
     scope
 }
 
-fn caller_pathspec_names(paths: &[String], candidate: &str) -> bool {
-    paths.iter().any(|spec| {
-        let spec = spec.replace('\\', "/");
-        let spec = spec.trim_end_matches('/');
-        !spec.is_empty() && (spec == candidate || candidate.starts_with(&format!("{spec}/")))
-    })
-}
-
 fn hard_excluded_pathspecs(paths: &[String]) -> Vec<String> {
     paths.iter()
         .filter(|spec| spec.replace('\\', "/").starts_with(".agentplug"))
         .cloned()
         .collect()
+}
+
+fn protected_pathspec_refusal(verb: &str, blocked: &[String]) -> Value {
+    json!({
+        "error": format!("refusing to stage protected pathspec(s): {} -- .agentplug* is runtime state and is never staged", blocked.join(", ")),
+        "error_code": ERR_CODE_INVALID_ARGS,
+        "blocked_paths": blocked,
+        "next_dispatch": verb,
+    })
+}
+
+fn pathspecs_matching_nothing(cwd: Option<&str>, paths: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for spec in paths {
+        let listed = git_call_argv(&["ls-files", "-z", "--", spec.as_str()], cwd);
+        let has_tracked = !listed.get("stdout").and_then(|v| v.as_str()).unwrap_or("").trim().is_empty();
+        let status = git_call_argv(&["status", "--porcelain", "-uall", "-z", "--", spec.as_str()], cwd);
+        let has_dirty = !status.get("stdout").and_then(|v| v.as_str()).unwrap_or("").trim().is_empty();
+        if !has_tracked && !has_dirty {
+            out.push(spec.clone());
+        }
+    }
+    out
+}
+
+fn pathspec_matches_nothing_refusal(verb: &str, paths: &[String], unmatched: &[String]) -> Value {
+    json!({
+        "error": format!("no such path in this repo, so nothing was staged or committed: {} -- pass paths relative to the repo root, or stage the file first", unmatched.join(", ")),
+        "error_code": "pathspec_matches_nothing",
+        "requested_paths": paths,
+        "unmatched_paths": unmatched,
+        "next_dispatch": verb,
+    })
 }
 
 fn paths_staged_nothing(cwd: Option<&str>, paths: &[String]) -> bool {
@@ -4871,15 +5003,16 @@ fn git_porcelain_argv(paths: &[String], cwd: Option<&str>) -> Vec<String> {
     argv
 }
 
-fn git_protected_names() -> Vec<&'static str> {
-    vec![".agentplug*", ".gm (everything not tracked-by-design)"]
-}
-
-fn with_exclusion_report(mut data: Value, cwd: Option<&str>) -> Value {
+fn with_exclusion_report(mut data: Value, cwd: Option<&str>, paths: &[String]) -> Value {
     let withheld = withheld_dirty_entries(cwd);
     let listed: Vec<String> = withheld.iter().take(50).map(|(status, path)| format!("{} {}", status, path)).collect();
+    let active = excluded_pathspecs(paths, cwd);
     if let Some(map) = data.as_object_mut() {
-        map.insert("excluded".to_string(), json!(git_protected_names()));
+        map.insert("excluded".to_string(), json!(active));
+        map.insert("excluded_count".to_string(), json!(active.len()));
+        if !paths.is_empty() {
+            map.insert("requested_paths".to_string(), json!(paths));
+        }
         map.insert("excluded_but_dirty".to_string(), json!(listed));
         map.insert("excluded_but_dirty_count".to_string(), json!(withheld.len()));
         if !withheld.is_empty() {
