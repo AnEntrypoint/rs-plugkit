@@ -240,8 +240,9 @@ size/line-ratio disproportion + dense `\uXXXX`-escape-run detection across
 git-tracked source and a bounded `node_modules` walk), `kv`/`kv_get`/
 `kv_put`/`kv_delete`, `exec`/`exec_js`, `fetch`, `env_get`, `recall`,
 `codesearch`, `callers`/`callees`/`impact`, `memorize`/`memorize-prune`, `health`, `filter`, the full git
-verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`,
-`git_add`, `git_commit`, `git_finalize`, `git_push`, `git_checkout`,
+    verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git_remote`,
+    `git_add`, `git_commit`, `git_finalize`, `git_push`, `git_checkout`, `git_merge`,
+    `git_cherry_pick`,
 `git_fetch`, `git_pull`, `git_stash`, `git_stash_pop`, `git_rm`, `git_revert`, `git_reset`, `git_poll`,
 `git_worktree {action: add|remove|list|prune, path?, ref?, detach?, force?}`), plus `ci-status` (real
 GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
@@ -279,7 +280,12 @@ reported rather than reconciled. `paths` together with `rev` on
 `git_finalize` is refused, as is an empty or non-string `paths`. Resolved-PRD
 `commit_comment` notes are bundled only by a commit whose scope covers
 `.gm/prd.yml` (no `paths`, or `paths` naming it or `.gm`); a narrower scoped
-commit leaves them pending so the row removal and its note land together.
+    commit leaves them pending so the row removal and its note land together.
+
+    `git_cherry_pick {rev, cwd?|repo?|root?|projectPath?}` first requires a clean
+    worktree, applies one existing commit without merging unrelated history, and
+    returns both before and after HEAD values. A conflict lists its paths and is
+    automatically aborted, so the target is not left in a cherry-pick state.
 
 Async git hosts use a pending-token protocol shaped like `host_fetch`'s. A
 host that cannot block the wasm call (a browser driving isomorphic-git on the
