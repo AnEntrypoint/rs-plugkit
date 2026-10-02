@@ -427,14 +427,41 @@ fn fs_read(body: &Value) -> u64 {
 
 fn fs_write(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let data = body.get("content").and_then(|v| v.as_str())
-        .or_else(|| body.get("data").and_then(|v| v.as_str()))
-        .unwrap_or("");
+    let content = ["content", "data", "text"].iter()
+        .find_map(|key| body.get(*key).and_then(|v| v.as_str()));
+    let allow_empty = body.get("allow_empty").and_then(|v| v.as_bool()).unwrap_or(false);
     if path.is_empty() { return err("fs_write", "path required"); }
     if !path_within_project(path) {
         return err("fs_write", "path must be relative and within the project");
     }
-    if super::host_abi::host_write(path, data) { ok("fs_write", json!({ "bytes": data.len() })) } else { err("fs_write", "write failed") }
+    let received_keys: Vec<String> = body.as_object()
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default();
+    let Some(content) = content else {
+        return err_json("fs_write", json!({
+            "error": format!(
+                "fs_write needs the file contents as a string under one of content|data|text -- the body carried {}",
+                if received_keys.is_empty() { "<no keys>".to_string() } else { received_keys.join(", ") }
+            ),
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "accepted_content_keys": ["content", "data", "text"],
+            "received_keys": received_keys,
+            "next_dispatch": "fs_write",
+        }));
+    };
+    if content.is_empty() && !allow_empty {
+        return err_json("fs_write", json!({
+            "error": "refusing to write empty content -- pass allow_empty: true to truncate the file on purpose",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "path": path,
+            "next_dispatch": "fs_write",
+        }));
+    }
+    if super::host_abi::host_write(path, content) {
+        ok("fs_write", json!({ "bytes": content.len(), "path": path }))
+    } else {
+        err("fs_write", "write failed")
+    }
 }
 
 fn fs_readdir(body: &Value) -> u64 {
@@ -1836,6 +1863,23 @@ fn codesearch_identifier(body: &Value, query: &str, root: Option<&str>, cfg: &cr
 }
 
 fn codesearch(body: &Value) -> u64 {
+    let packed = codesearch_dispatch(body);
+    let mut v = unpack_to_value(packed);
+    if !v.is_object() { return packed; }
+    if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
+        if let Some(obj) = v.as_object_mut() {
+            obj.entry("modes".to_string()).or_insert_with(|| json!({
+                "literal": "exhaustive path:line substring search -- pass mode:\"literal\" when you can name the symbol or string exactly",
+                "regex": "the same, with a regex query",
+                "filename": "path-only match",
+                "dual": "ranked BM25+vector retrieval (the default)"
+            }));
+        }
+    }
+    pack(v.to_string())
+}
+
+fn codesearch_dispatch(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     if query.is_empty() { return err("codesearch", "query required"); }
@@ -1911,7 +1955,7 @@ fn codesearch(body: &Value) -> u64 {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
             obj.insert("rebuild".to_string(), Value::Bool(false));
         }
-        return codesearch(&retry);
+        return codesearch_dispatch(&retry);
     }
     let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
     if !already_indexed {
@@ -1931,7 +1975,7 @@ fn codesearch(body: &Value) -> u64 {
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
             }
-            return codesearch(&retry);
+            return codesearch_dispatch(&retry);
         }
     }
     let cand_k = cfg.budget.pool(k as usize).max(50) as u32;
@@ -2000,7 +2044,7 @@ fn codesearch(body: &Value) -> u64 {
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
         }
-        return codesearch(&retry);
+        return codesearch_dispatch(&retry);
     }
     let vec_unavailable = vector_ranked.is_empty();
     let kv_empty_now = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
