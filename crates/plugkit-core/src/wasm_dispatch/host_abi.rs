@@ -86,10 +86,30 @@ pub fn git_porcelain() -> String {
     porcelain_or_dirty(git_call("status --porcelain", None))
 }
 
+pub(crate) fn git_response_is_not_repository(v: &Value) -> bool {
+    let failed = !v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true)
+        || v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0;
+    if !failed {
+        return false;
+    }
+    let output = format!("{}{}",
+        v.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        v.get("stderr").and_then(|x| x.as_str()).unwrap_or(""),
+    );
+    output.to_ascii_lowercase().contains("not a git repository")
+}
+
+pub fn git_repository_absent() -> bool {
+    git_response_is_not_repository(&git_call("rev-parse --is-inside-work-tree", None))
+}
+
 pub(crate) fn porcelain_or_dirty(v: Value) -> String {
     let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
     let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     if !ok || exit_code != 0 {
+        if git_response_is_not_repository(&v) {
+            return String::new();
+        }
         let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
         let detail = if stderr.is_empty() {
             format!("exit_code={exit_code}")
