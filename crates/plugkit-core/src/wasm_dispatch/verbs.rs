@@ -2713,9 +2713,10 @@ fn git_async_reenter(verb: &str, body: &Value) -> u64 {
         "git_status" => git_status(body),
         "git_add" => git_add(body),
         "git_commit" => git_commit(body),
-        "git_log" => git_log(body),
-        "git_diff" => git_diff(body),
-        _ => err("git_poll", "parked plan names a verb with no async-resume support"),
+            "git_log" => git_log(body),
+            "git_diff" => git_diff(body),
+            "git_remote" => git_remote(body),
+            _ => err("git_poll", "parked plan names a verb with no async-resume support"),
     }
 }
 
@@ -3012,8 +3013,7 @@ fn git_push(body: &Value) -> u64 {
 
 fn git_add(body: &Value) -> u64 {
     git_async_entry("git_add", body, |body, plan| {
-        let repo = body.get("repo").and_then(|v| v.as_str());
-        let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
+        let cwd = body_cwd(body);
         let paths: Vec<String> = body.get("paths")
             .or_else(|| body.get("files"))
             .and_then(|v| v.as_array())
@@ -3062,8 +3062,7 @@ fn bundle_prd_commit_comments(cwd: Option<&str>, message: &str) -> String {
 
 fn git_commit(body: &Value) -> u64 {
     git_async_entry("git_commit", body, |body, plan| {
-        let repo = body.get("repo").and_then(|v| v.as_str());
-        let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
+        let cwd = body_cwd(body);
         let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
         if message.is_empty() {
             return Ok(err("git_commit", "message required"));
@@ -3792,16 +3791,51 @@ fn ci_status(body: &Value) -> u64 {
     }
 }
 
-fn git_branch(body: &Value) -> u64 {
-    let cwd = body_cwd(body);
-    let current = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
+    fn git_branch(body: &Value) -> u64 {
+        let cwd = body_cwd(body);
+        let current = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
     let listing = exec_git_in(cwd, "branch --no-color");
     let branches: Vec<String> = listing.lines()
         .map(|l| l.trim_start_matches('*').trim().to_string())
         .filter(|l| !l.is_empty())
         .collect();
-    ok("git_branch", json!({ "current": current, "branches": branches }))
-}
+        ok("git_branch", json!({ "current": current, "branches": branches }))
+    }
+
+    fn git_remote(body: &Value) -> u64 {
+        git_async_entry("git_remote", body, |body, plan| {
+            let cwd = body_cwd(body);
+            let requested = body.get("remote").and_then(|value| value.as_str()).unwrap_or("").trim();
+            let listed = git_step_replayed_by_call_order(plan, &["remote"], cwd)?;
+            let names: Vec<String> = listed.get("stdout").and_then(|value| value.as_str()).unwrap_or("")
+                .lines().map(str::trim).filter(|name| !name.is_empty()).map(str::to_owned).collect();
+            let selected: Vec<String> = if requested.is_empty() {
+                names
+            } else if names.iter().any(|name| name == requested) {
+                vec![requested.to_owned()]
+            } else {
+                return Ok(err("git_remote", "requested remote does not exist"));
+            };
+            let branch_result = git_step_replayed_by_call_order(plan, &["branch", "--show-current"], cwd)?;
+            let branch = branch_result.get("stdout").and_then(|value| value.as_str()).unwrap_or("").trim().to_owned();
+            let upstream_result = if branch.is_empty() {
+                Value::Null
+            } else {
+                git_step_replayed_by_call_order(plan, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], cwd)?
+            };
+            let upstream = upstream_result.get("stdout").and_then(|value| value.as_str()).map(str::trim)
+                .filter(|value| !value.is_empty()).map(str::to_owned);
+            let mut remotes = Vec::with_capacity(selected.len());
+            for name in selected {
+                let fetch_result = git_step_replayed_by_call_order(plan, &["remote", "get-url", name.as_str()], cwd)?;
+                let push_result = git_step_replayed_by_call_order(plan, &["remote", "get-url", "--push", name.as_str()], cwd)?;
+                let fetch_url = fetch_result.get("stdout").and_then(|value| value.as_str()).unwrap_or("").trim();
+                let push_url = push_result.get("stdout").and_then(|value| value.as_str()).unwrap_or("").trim();
+                remotes.push(json!({ "name": name, "fetch_url": fetch_url, "push_url": push_url }));
+            }
+            Ok(ok("git_remote", json!({ "branch": branch, "upstream": upstream, "remotes": remotes })))
+        })
+    }
 
 fn git_checkout(body: &Value) -> u64 {
     let cwd = body_cwd(body);
@@ -3855,6 +3889,56 @@ fn git_merge_abort(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     if let Err(e) = run_git_checked(&["merge", "--abort"], cwd, "git_merge_abort", "merge abort failed") { return e; }
     ok("git_merge_abort", json!({ "aborted": true, "head": exec_git_in(cwd, "rev-parse HEAD").trim() }))
+}
+
+fn git_cherry_pick(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let refspec = body.get("rev").or_else(|| body.get("ref"))
+        .and_then(|v| v.as_str()).unwrap_or("").trim();
+    if refspec.is_empty() { return err("git_cherry_pick", "rev required"); }
+    let porcelain = git_porcelain_in(cwd);
+    if !porcelain.trim().is_empty() {
+        return err_json("git_cherry_pick", json!({
+            "clean_worktree_required": true,
+            "porcelain": porcelain,
+            "hint": "commit, stash, or revert the current changes before cherry-picking"
+        }));
+    }
+    let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    let result = git_call_argv(&["cherry-pick", refspec], cwd);
+    let code = result.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let output = format!("{}{}",
+        result.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        result.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 {
+        let conflicts: Vec<String> = exec_git_in(cwd, "diff --name-only --diff-filter=U")
+            .lines().map(|line| line.trim().to_string()).filter(|line| !line.is_empty()).collect();
+        let cherry_pick_head = exec_git_in(cwd, "rev-parse --verify -q CHERRY_PICK_HEAD").trim().to_string();
+        let aborted = if cherry_pick_head.is_empty() {
+            false
+        } else {
+            git_call_argv(&["cherry-pick", "--abort"], cwd)
+                .get("exit_code").and_then(|x| x.as_i64()) == Some(0)
+        };
+        return err_json("git_cherry_pick", json!({
+            "error": output,
+            "conflicted": !conflicts.is_empty(),
+            "conflicts": conflicts,
+            "aborted": aborted,
+            "head_before": head_before,
+            "hint": if aborted { "cherry-pick was aborted; resolve the listed conflicts before retrying" } else { "cherry-pick did not complete; inspect git status before retrying" }
+        }));
+    }
+    let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    if head_after.is_empty() || head_after == head_before {
+        return err("git_cherry_pick", "cherry-pick reported success but HEAD did not move");
+    }
+    ok("git_cherry_pick", json!({
+        "cherry_picked": refspec,
+        "head_before": head_before,
+        "head_after": head_after,
+        "output": output
+    }))
 }
 
 fn git_stash(body: &Value) -> u64 {
@@ -4318,11 +4402,13 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_show" => git_show(&body),
         "git_fetch" => git_fetch(&body),
         "git_pull" => git_pull(&body),
-        "ci-status" | "ci_status" => ci_status(&body),
-        "git_branch" => git_branch(&body),
-        "git_checkout" => git_checkout(&body),
+            "ci-status" | "ci_status" => ci_status(&body),
+            "git_branch" => git_branch(&body),
+            "git_remote" => git_remote(&body),
+            "git_checkout" => git_checkout(&body),
         "git_merge" => git_merge(&body),
         "git_merge_abort" => git_merge_abort(&body),
+        "git_cherry_pick" => git_cherry_pick(&body),
         "git_stash" => git_stash(&body),
         "git_stash_pop" => git_stash_pop(&body),
         "git_branch_delete" => git_branch_delete(&body),
