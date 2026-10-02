@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use super::host_abi::{git_call_argv, host_exists, host_read};
-use super::verbs::ERR_CODE_DANGLING_REFERENCE;
+use super::verbs::{ERR_CODE_DANGLING_REFERENCE, ERR_CODE_DANGLING_SCAN_UNREADABLE};
 
 const MAX_SCAN_BYTES: usize = 512 * 1024;
 const MAX_SCAN_FILES: usize = 400;
@@ -22,6 +22,8 @@ pub struct DanglingScan {
     pub offenders: Vec<Value>,
     pub waived: Vec<String>,
     pub scanned_files: usize,
+    pub readable_files: usize,
+    pub scannable_files: usize,
 }
 
 pub fn scan_commit(cwd: Option<&str>, paths: &[String], add_all: bool, body: &Value) -> DanglingScan {
@@ -31,10 +33,12 @@ pub fn scan_commit(cwd: Option<&str>, paths: &[String], add_all: bool, body: &Va
     let committed: HashSet<String> = ordered.iter().cloned().collect();
     let mut candidates: Vec<(String, String, usize, String)> = Vec::new();
     let mut scanned_files = 0usize;
+    let mut scannable_files = 0usize;
 
     for path in ordered.iter() {
         if scanned_files >= MAX_SCAN_FILES || candidates.len() >= MAX_CANDIDATES { break; }
         if !is_scannable(path) { continue; }
+        scannable_files += 1;
         let Some(source) = read_text(&root, path) else { continue; };
         if source.len() > MAX_SCAN_BYTES { continue; }
         scanned_files += 1;
@@ -71,7 +75,21 @@ pub fn scan_commit(cwd: Option<&str>, paths: &[String], add_all: bool, body: &Va
     }
     offenders.sort_by(|a, b| a["from"].as_str().unwrap_or("").cmp(b["from"].as_str().unwrap_or(""))
         .then(a["line"].as_u64().unwrap_or(0).cmp(&b["line"].as_u64().unwrap_or(0))));
-    DanglingScan { offenders, waived, scanned_files }
+    let readable_files = scanned_files;
+    DanglingScan { offenders, waived, scanned_files, readable_files, scannable_files }
+}
+
+pub fn scan_unreadable(scan: &DanglingScan) -> bool {
+    scan.scannable_files > 0 && scan.readable_files == 0
+}
+
+pub fn unreadable_detail(verb: &str, scan: &DanglingScan) -> Value {
+    json!({
+        "error": format!("dangling-reference scan could not read any of the {} scannable file(s) in this commit", scan.scannable_files),
+        "error_code": ERR_CODE_DANGLING_SCAN_UNREADABLE,
+        "scannable_files": scan.scannable_files,
+        "next_dispatch": verb,
+    })
 }
 
 pub fn refusal_detail(verb: &str, scan: &DanglingScan) -> Value {
@@ -118,13 +136,14 @@ fn exec_git(argv: &[&str], cwd: Option<&str>) -> String {
 }
 
 fn read_text(root: &str, relative: &str) -> Option<String> {
-    if root.is_empty() { return host_read(relative); }
-    host_read(&format!("{root}/{relative}")).or_else(|| host_read(relative))
+    let direct = host_read(relative).filter(|text| !text.is_empty());
+    if direct.is_some() || root.is_empty() { return direct; }
+    host_read(&format!("{root}/{relative}")).filter(|text| !text.is_empty())
 }
 
 fn file_present(root: &str, relative: &str) -> bool {
-    if root.is_empty() { return host_exists(relative); }
-    host_exists(&format!("{root}/{relative}")) || host_exists(relative)
+    if host_exists(relative) { return true; }
+    !root.is_empty() && host_exists(&format!("{root}/{relative}"))
 }
 
 fn commit_path_set(cwd: Option<&str>, paths: &[String], add_all: bool) -> Vec<String> {
@@ -312,7 +331,7 @@ fn specifier_in_literal(literal: &str, context: &[char], preceding_literal: &str
     if EXTERNAL_SCHEMES.iter().any(|scheme| specifier.starts_with(scheme)) { return None; }
     let tail: String = context.iter().collect();
     let trimmed = tail.trim_end();
-    let keyword = trimmed.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '$' && c != '_');
+    let keyword = trailing_word(trimmed);
     let keyword = if keyword.is_empty() { preceding_literal.trim() } else { keyword };
     if is_json {
         let path_valued = (specifier.starts_with("./") || specifier.starts_with("../")) && has_code_extension(specifier);
@@ -325,6 +344,13 @@ fn specifier_in_literal(literal: &str, context: &[char], preceding_literal: &str
         }
         _ => None,
     }
+}
+
+fn trailing_word(text: &str) -> &str {
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '$' && c != '_')
+        .filter(|token| !token.is_empty())
+        .next_back()
+        .unwrap_or("")
 }
 
 fn declares_type_only(context: &str) -> bool {
