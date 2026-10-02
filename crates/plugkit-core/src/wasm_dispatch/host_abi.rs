@@ -71,10 +71,57 @@ pub fn git_call(args: &str, cwd: Option<&str>) -> Value {
     }
 }
 
-pub fn git_call_async(args: &str, cwd: Option<&str>) -> Value {
+const DUBIOUS_OWNERSHIP_MARKER: &str = "detected dubious ownership in repository at '";
+
+fn dubious_ownership_repository(stderr: &str) -> Option<String> {
+    let rest = stderr.split_once(DUBIOUS_OWNERSHIP_MARKER)?.1;
+    let repository = rest.split('\'').next()?.trim();
+    if repository.is_empty() { None } else { Some(repository.to_string()) }
+}
+
+fn comparable_path(path: &str) -> String {
+    path.replace('\\', "/").trim_end_matches('/').to_ascii_lowercase()
+}
+
+fn is_absolute_path(path: &str) -> bool {
+    path.starts_with('/') || path.starts_with('\\') || path.as_bytes().get(1) == Some(&b':')
+}
+
+fn repository_contains_git_cwd(repository: &str, cwd: Option<&str>) -> bool {
+    let dispatch_cwd = host_cwd_string().unwrap_or_default();
+    let git_cwd = match cwd.filter(|c| !c.is_empty()) {
+        None => dispatch_cwd,
+        Some(c) if is_absolute_path(c) => c.to_string(),
+        Some(c) => format!("{dispatch_cwd}/{c}"),
+    };
+    let repository = comparable_path(repository);
+    let git_cwd = comparable_path(&git_cwd);
+    git_cwd == repository || git_cwd.starts_with(&format!("{repository}/"))
+}
+
+fn argv_trusting_repository(args: &str, repository: &str) -> String {
+    let trimmed = args.trim();
+    let split_on_whitespace = || trimmed.split_whitespace().map(String::from).collect::<Vec<String>>();
+    let mut argv: Vec<String> = if trimmed.starts_with('[') {
+        serde_json::from_str(trimmed).unwrap_or_else(|_| split_on_whitespace())
+    } else {
+        split_on_whitespace()
+    };
+    argv.splice(0..0, ["-c".to_string(), format!("safe.directory={repository}")]);
+    serde_json::to_string(&argv).unwrap_or_default()
+}
+
+fn git_call_host(args: &str, cwd: Option<&str>) -> Value {
     let cwd_s = cwd.unwrap_or("");
     let packed = unsafe { host_git(args.as_ptr(), args.len() as u32, cwd_s.as_ptr(), cwd_s.len() as u32) };
     unpack_to_value(packed)
+}
+
+pub fn git_call_async(args: &str, cwd: Option<&str>) -> Value {
+    let first = git_call_host(args, cwd);
+    let Some(repository) = first.get("stderr").and_then(|s| s.as_str()).and_then(dubious_ownership_repository) else { return first };
+    if !repository_contains_git_cwd(&repository, cwd) { return first; }
+    git_call_host(&argv_trusting_repository(args, &repository), cwd)
 }
 
 pub fn git_pending_token(v: &Value) -> Option<String> {
