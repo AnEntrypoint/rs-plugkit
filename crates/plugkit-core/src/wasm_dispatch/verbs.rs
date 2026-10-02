@@ -153,6 +153,7 @@ pub const ERR_CODE_UNKNOWN_VERB: &str = "unknown_verb";
 pub const ERR_CODE_INVALID_ARGS: &str = "invalid_args";
 pub const ERR_CODE_PANIC: &str = "panic";
 pub const ERR_CODE_GATE_DENIED: &str = "gate_denied";
+pub const ERR_CODE_DANGLING_REFERENCE: &str = "dangling_reference";
 
 fn shared_store_contract() -> Value {
     json!({
@@ -2112,6 +2113,7 @@ fn health(_body: &Value) -> u64 {
         "error_codes": [
             ERR_CODE_FAILED, ERR_CODE_RETIRED_VERB, ERR_CODE_UNSUPPORTED,
             ERR_CODE_UNKNOWN_VERB, ERR_CODE_INVALID_ARGS, ERR_CODE_PANIC, ERR_CODE_GATE_DENIED,
+            ERR_CODE_DANGLING_REFERENCE,
         ],
         "plugin_failure_codes": [
             PLUGIN_FAIL_UNKNOWN_PLUGIN, PLUGIN_FAIL_NOT_LOADED, PLUGIN_FAIL_DEADLINE,
@@ -3498,6 +3500,22 @@ fn git_commit(body: &Value) -> u64 {
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default();
         let add_all = body.get("add_all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let blocked_paths = hard_excluded_pathspecs(&paths);
+        if !blocked_paths.is_empty() {
+            return Ok(err_json("git_commit", json!({
+                "error": format!("refusing to stage protected pathspec(s): {}", blocked_paths.join(", ")),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "blocked_paths": blocked_paths,
+            })));
+        }
+        let allow_whole_index = body.get("allow_whole_index").and_then(|v| v.as_bool()).unwrap_or(false);
+        let staged_before = if add_all || !paths.is_empty() {
+            Vec::new()
+        } else {
+            let stdout = git_step_replayed_by_call_order(plan, &["diff", "--cached", "--name-only", "-z"], cwd)?
+                .get("stdout").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            stdout.split('\0').filter(|entry| !entry.is_empty()).map(String::from).collect()
+        };
         let head_before_probe = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
         let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message, &paths, add_all);
         if let Some(prior) = git_commit_dedup_lookup(&dedup_key, cwd) {
@@ -3515,13 +3533,37 @@ fn git_commit(body: &Value) -> u64 {
         }
         let head_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
         let head_before = head_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let scan = super::dangling_refs::scan_commit(cwd, &paths, add_all, body);
+        if !scan.offenders.is_empty() {
+            return Ok(err_json("git_commit", super::dangling_refs::refusal_detail("git_commit", &scan)));
+        }
         if add_all || !paths.is_empty() {
             let staged_paths: &[String] = if add_all { &[] } else { &paths };
             let _ = git_step_replayed_by_call_order(plan, &as_argv(&git_stage_argv(staged_paths, cwd)), cwd)?;
         }
+        let scoped_paths: &[String] = if add_all { &[] } else { &paths };
+        if !scoped_paths.is_empty() {
+            let mut check: Vec<String> = vec![
+                "diff".to_string(), "--cached".to_string(), "--name-only".to_string(), "--".to_string(),
+            ];
+            check.extend(scoped_paths.iter().cloned());
+            let r = git_step_replayed_by_call_order(plan, &as_argv(&check), cwd)?;
+            if r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().is_empty() {
+                return Ok(err_json("git_commit", json!({
+                    "error": format!("no staged content for the requested pathspec(s): {}", scoped_paths.join(", ")),
+                    "error_code": ERR_CODE_INVALID_ARGS,
+                    "requested_paths": scoped_paths,
+                })));
+            }
+        }
         let bundled_message = bundle_prd_commit_comments(cwd, message);
-        let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
-        if allow_empty { argv.push("--allow-empty"); }
+        let mut argv: Vec<String> = vec!["commit".to_string(), "-m".to_string(), bundled_message];
+        if allow_empty { argv.push("--allow-empty".to_string()); }
+        if !scoped_paths.is_empty() {
+            argv.push("--".to_string());
+            argv.extend(scoped_paths.iter().cloned());
+        }
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
@@ -3542,7 +3584,20 @@ fn git_commit(body: &Value) -> u64 {
         git_commit_dedup_record(&dedup_key, &head_after, &sha, &summary);
         emit_event("git_commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary }));
         record_commit_in_liqology(&summary, &head_after);
-        Ok(ok("git_commit", with_exclusion_report(json!({ "committed": true, "sha": sha, "summary": summary }), cwd)))
+        let mut payload = json!({ "committed": true, "sha": sha, "summary": summary });
+        if !scan.waived.is_empty() {
+            payload["dangling_waived"] = json!(scan.waived);
+        }
+        if !allow_whole_index && !staged_before.is_empty() {
+            payload["whole_index_commit"] = json!(true);
+            payload["staged_count"] = json!(staged_before.len());
+            payload["staged_paths"] = json!(staged_before);
+            payload["warning"] = json!(format!(
+                "this commit took the whole index ({} path(s)) because no paths were given; pass paths to scope it or allow_whole_index: true to accept it explicitly",
+                staged_before.len()
+            ));
+        }
+        Ok(ok("git_commit", with_exclusion_report(payload, cwd)))
     })
 }
 
@@ -3634,20 +3689,53 @@ fn git_finalize(body: &Value) -> u64 {
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
     let scoped = !paths.is_empty();
+    let blocked_paths = hard_excluded_pathspecs(&paths);
+    if !blocked_paths.is_empty() {
+        return err_json("git_finalize", json!({
+            "error": format!("refusing to stage protected pathspec(s): {}", blocked_paths.join(", ")),
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "blocked_paths": blocked_paths,
+        }));
+    }
     let mut steps: Vec<Value> = vec![];
     let mut committed = false;
     let mut sha = String::new();
     let mut summary = String::new();
     let head_before_any_commit = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
 
+    let allow_whole_index = body.get("allow_whole_index").and_then(|v| v.as_bool()).unwrap_or(false);
+    let staged_before: Vec<String> = if scoped {
+        Vec::new()
+    } else {
+        exec_git_in(cwd_ref, "diff --cached --name-only -z").split('\0').filter(|e| !e.is_empty()).map(String::from).collect()
+    };
     let dirty = !git_porcelain_scoped(cwd_ref, &paths).trim().is_empty();
+    let mut dangling_waived: Vec<String> = Vec::new();
     if dirty {
         if message.is_empty() {
             return err("git_finalize", "worktree dirty but no commit message provided -- pass {message}");
         }
+        let scan = super::dangling_refs::scan_commit(cwd_ref, &paths, !scoped, body);
+        if !scan.offenders.is_empty() {
+            return err_json("git_finalize", super::dangling_refs::refusal_detail("git_finalize", &scan));
+        }
+        dangling_waived = scan.waived;
         let _ = git_call_argv(&as_argv(&git_stage_argv(&paths, cwd_ref)), cwd_ref);
+        if scoped && paths_staged_nothing(cwd_ref, &paths) {
+            return err_json("git_finalize", json!({
+                "error": format!("no staged content for the requested pathspec(s): {}", paths.join(", ")),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "requested_paths": paths,
+            }));
+        }
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
-        let cr = git_call_argv(&["commit", "-m", bundled_message.as_str()], cwd_ref);
+        let mut commit_argv: Vec<String> = vec!["commit".to_string(), "-m".to_string(), bundled_message];
+        if scoped {
+            commit_argv.push("--".to_string());
+            commit_argv.extend(paths.iter().cloned());
+        }
+        let commit_argv: Vec<&str> = commit_argv.iter().map(String::as_str).collect();
+        let cr = git_call_argv(&commit_argv, cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if ccode != 0 {
             let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
@@ -3667,7 +3755,7 @@ fn git_finalize(body: &Value) -> u64 {
             record_commit_in_liqology(&summary, &head_after);
             steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
         }
-    } else {
+    } else if !scoped {
         let pending_notes = crate::orchestrator::prd::peek_pending_commit_comments(cwd_ref);
         if !pending_notes.is_empty() {
             let flush_message = if message.is_empty() { "chore: flush resolved PRD notes".to_string() } else { message.clone() };
@@ -3720,7 +3808,13 @@ fn git_finalize(body: &Value) -> u64 {
         leftover = git_porcelain_scoped(cwd_ref, &paths);
         if !leftover.trim().is_empty() && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref)) {
             let _ = git_call_argv(&as_argv(&git_stage_argv(&paths, cwd_ref)), cwd_ref);
-            let amend = git_call_argv(&["commit", "--amend", "--no-edit"], cwd_ref);
+            let mut amend: Vec<String> = vec!["commit".to_string(), "--amend".to_string(), "--no-edit".to_string()];
+            if scoped {
+                amend.push("--".to_string());
+                amend.extend(paths.iter().cloned());
+            }
+            let amend_argv: Vec<&str> = amend.iter().map(String::as_str).collect();
+            let amend = git_call_argv(&amend_argv, cwd_ref);
             if amend.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0 {
                 let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
                 sha = head_after[..head_after.len().min(10)].to_string();
@@ -3774,7 +3868,7 @@ fn git_finalize(body: &Value) -> u64 {
     let (ci_status_summary, ci_validated_written) = check_ci_status_and_write_validated_marker_if_green(repo.as_deref(), &head_sha);
     steps.push(json!({ "step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written }));
 
-    ok("git_finalize", with_exclusion_report(json!({
+    let mut finalize_payload = json!({
         "committed": committed,
         "pushed": true,
         "sha": sha,
@@ -3787,7 +3881,20 @@ fn git_finalize(body: &Value) -> u64 {
         "ssh_fallback": push_data.and_then(|d| d.get("ssh_fallback")).cloned().unwrap_or(Value::Null),
         "ci_validated_marker_written": ci_validated_written,
         "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
-    }), cwd_ref))
+    });
+    if !dangling_waived.is_empty() {
+        finalize_payload["dangling_waived"] = json!(dangling_waived);
+    }
+    if !allow_whole_index && !staged_before.is_empty() {
+        finalize_payload["whole_index_commit"] = json!(true);
+        finalize_payload["staged_count"] = json!(staged_before.len());
+        finalize_payload["staged_paths"] = json!(staged_before);
+        finalize_payload["warning"] = json!(format!(
+            "this commit took the whole index ({} path(s)) because no paths were given; pass paths to scope it or allow_whole_index: true to accept it explicitly",
+            staged_before.len()
+        ));
+    }
+    ok("git_finalize", with_exclusion_report(finalize_payload, cwd_ref))
 }
 
 fn git_log(body: &Value) -> u64 {
@@ -4693,14 +4800,42 @@ fn withheld_dirty_entries(cwd: Option<&str>) -> Vec<(String, String)> {
 }
 
 fn git_pathspec_scope(paths: &[String], cwd: Option<&str>) -> Vec<String> {
-    let mut scope: Vec<String> = if paths.is_empty() { vec![":/".to_string()] } else { paths.to_vec() };
-    scope.push(":(top,exclude).agentplug*".to_string());
+    let mut scope: Vec<String> = vec![":(top,exclude).agentplug*".to_string()];
     for (_, path) in withheld_dirty_entries(cwd) {
-        if !path.starts_with(".agentplug") {
+        if !path.starts_with(".agentplug") && !caller_pathspec_names(paths, &path) {
             scope.push(format!(":(top,exclude,literal){}", path));
         }
     }
+    if paths.is_empty() {
+        scope.push(":/".to_string());
+    } else {
+        scope.extend(paths.iter().cloned());
+    }
     scope
+}
+
+fn caller_pathspec_names(paths: &[String], candidate: &str) -> bool {
+    paths.iter().any(|spec| {
+        let spec = spec.replace('\\', "/");
+        let spec = spec.trim_end_matches('/');
+        !spec.is_empty() && (spec == candidate || candidate.starts_with(&format!("{spec}/")))
+    })
+}
+
+fn hard_excluded_pathspecs(paths: &[String]) -> Vec<String> {
+    paths.iter()
+        .filter(|spec| spec.replace('\\', "/").starts_with(".agentplug"))
+        .cloned()
+        .collect()
+}
+
+fn paths_staged_nothing(cwd: Option<&str>, paths: &[String]) -> bool {
+    let mut argv: Vec<String> = vec![
+        "diff".to_string(), "--cached".to_string(), "--name-only".to_string(), "--".to_string(),
+    ];
+    argv.extend(paths.iter().cloned());
+    let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+    git_call_argv(&argv, cwd).get("stdout").and_then(|v| v.as_str()).unwrap_or("").trim().is_empty()
 }
 
 fn git_stage_argv(paths: &[String], cwd: Option<&str>) -> Vec<String> {
