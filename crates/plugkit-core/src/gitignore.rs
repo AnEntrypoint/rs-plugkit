@@ -44,6 +44,7 @@ pub const MANAGED_ENTRIES: &[&str] = &[
 
 pub const MUST_STAY_TRACKED: &[&str] = &[
     ".gm/code-search/",
+    ".gm/memories/",
     ".gm/disciplines/",
     ".gm/prd.yml",
     ".gm/mutables.yml",

@@ -269,6 +269,94 @@ struct PackageWalkResult {
     total_size: u64,
     file_count: usize,
     candidates: Vec<String>,
+    escapes: Vec<String>,
+}
+
+struct Containment {
+    allowed_canonical_roots: Vec<String>,
+}
+
+fn comparable_canonical_path(path: &str) -> String {
+    let unified = path.replace('\\', "/");
+    let without_verbatim_prefix = unified.strip_prefix("//?/").unwrap_or(&unified);
+    let trimmed = without_verbatim_prefix.trim_end_matches('/');
+    let has_drive_letter = trimmed.as_bytes().get(1) == Some(&b':');
+    if has_drive_letter {
+        trimmed.to_ascii_lowercase()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn canonical_path_of(stat: &Value) -> Option<String> {
+    stat.get("canonicalPath")
+        .and_then(|v| v.as_str())
+        .map(comparable_canonical_path)
+}
+
+impl Containment {
+    fn around(directories: &[&str]) -> Self {
+        let allowed_canonical_roots = directories
+            .iter()
+            .filter_map(|dir| crate::wasm_dispatch::host_stat(dir))
+            .filter_map(|stat| canonical_path_of(&stat))
+            .collect();
+        Containment { allowed_canonical_roots }
+    }
+
+    fn admits(&self, stat: &Value) -> bool {
+        if self.allowed_canonical_roots.is_empty() {
+            return true;
+        }
+        let Some(canonical) = canonical_path_of(stat) else {
+            return true;
+        };
+        self.allowed_canonical_roots.iter().any(|root| {
+            canonical == *root
+                || canonical
+                    .strip_prefix(root.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+    }
+}
+
+fn dependency_scan_base(root: &str) -> &str {
+    if is_absolute_root(root) {
+        root
+    } else {
+        "."
+    }
+}
+
+fn node_modules_directory(base: &str) -> String {
+    if base == "." {
+        "node_modules".to_string()
+    } else {
+        crate::scan_universe::join_under(base, "node_modules")
+    }
+}
+
+fn normalized_root(raw: &str) -> String {
+    let unified = raw.replace('\\', "/");
+    let trimmed = unified.trim_end_matches('/');
+    if trimmed.is_empty() {
+        ".".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn is_absolute_root(root: &str) -> bool {
+    root.starts_with('/') || root.as_bytes().get(1) == Some(&b':')
+}
+
+struct NodeModulesScan {
+    findings: Vec<FileFinding>,
+    blocked: Vec<BlockedRead>,
+    scanned: usize,
+    present: bool,
+    truncated: bool,
+    escapes: Vec<String>,
 }
 
 fn package_directory_identity(dir: &str) -> Option<String> {
@@ -292,6 +380,7 @@ fn package_directory_identity(dir: &str) -> Option<String> {
 fn walk_package(
     dir: &str,
     budget: usize,
+    containment: &Containment,
     visited_directories: &mut std::collections::HashSet<String>,
     r: &mut PackageWalkResult,
 ) {
@@ -306,6 +395,10 @@ fn walk_package(
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {
+        return;
+    }
+    if !containment.admits(&stat) {
+        r.escapes.push(dir.to_string());
         return;
     }
     let directory_identity = stat
@@ -331,6 +424,10 @@ fn walk_package(
         if stat.is_null() {
             continue;
         }
+        if !containment.admits(&stat) {
+            r.escapes.push(next);
+            continue;
+        }
         let is_dir = stat
             .get("isDirectory")
             .and_then(|b| b.as_bool())
@@ -339,7 +436,7 @@ fn walk_package(
             if entry == "node_modules" || is_noise_dir_segment(&entry) {
                 continue;
             }
-            walk_package(&next, budget, visited_directories, r);
+            walk_package(&next, budget, containment, visited_directories, r);
         } else {
             r.file_count += 1;
             if let Some(m) = stat.get("mtime_ms").and_then(|v| v.as_f64()) {
@@ -355,26 +452,33 @@ fn walk_package(
     }
 }
 
-fn scan_node_modules(max_files: usize) -> (Vec<FileFinding>, Vec<BlockedRead>, usize, bool, bool) {
-    let mut findings = Vec::new();
-    let mut blocked = Vec::new();
-    let mut scanned = 0usize;
-    let node_modules_present = crate::wasm_dispatch::host_exists("node_modules");
-    if !node_modules_present {
-        return (findings, blocked, scanned, false, false);
+fn scan_node_modules(root: &str, max_files: usize) -> NodeModulesScan {
+    let mut scan = NodeModulesScan {
+        findings: Vec::new(),
+        blocked: Vec::new(),
+        scanned: 0,
+        present: false,
+        truncated: false,
+        escapes: Vec::new(),
+    };
+    let base = dependency_scan_base(root);
+    let store = node_modules_directory(base);
+    scan.present = crate::wasm_dispatch::host_exists(&store);
+    if !scan.present {
+        return scan;
     }
+    let containment = Containment::around(&[base, &store]);
 
     let mut prior_stamp = load_stamp();
     let mut new_stamp = std::collections::HashMap::new();
-    let mut truncated = false;
     let mut visited_directories = std::collections::HashSet::new();
 
     let mut package_dirs: Vec<String> = Vec::new();
-    for entry in crate::code_index::list_dir("node_modules") {
+    for entry in crate::code_index::list_dir(&store) {
         if entry.starts_with('.') {
             continue;
         }
-        let path = format!("node_modules/{entry}");
+        let path = format!("{store}/{entry}");
         if entry.starts_with('@') {
             for scoped in crate::code_index::list_dir(&path) {
                 package_dirs.push(format!("{path}/{scoped}"));
@@ -385,8 +489,8 @@ fn scan_node_modules(max_files: usize) -> (Vec<FileFinding>, Vec<BlockedRead>, u
     }
 
     for pkg_dir in package_dirs {
-        if scanned >= max_files {
-            truncated = true;
+        if scan.scanned >= max_files {
+            scan.truncated = true;
             break;
         }
         let mut r = PackageWalkResult {
@@ -394,27 +498,36 @@ fn scan_node_modules(max_files: usize) -> (Vec<FileFinding>, Vec<BlockedRead>, u
             total_size: 0,
             file_count: 0,
             candidates: Vec::new(),
+            escapes: Vec::new(),
         };
         walk_package(
             &pkg_dir,
-            max_files.saturating_sub(scanned),
+            max_files.saturating_sub(scan.scanned),
+            &containment,
             &mut visited_directories,
             &mut r,
         );
+        scan.escapes.append(&mut r.escapes);
         if r.file_count == 0 {
             continue;
         }
         let sig = (r.max_mtime, r.total_size);
-        new_stamp.insert(pkg_dir.clone(), sig);
         if prior_stamp.get(&pkg_dir) == Some(&sig) {
+            new_stamp.insert(pkg_dir.clone(), sig);
             continue;
         }
-        scanned += scan_file_list(
+        let failures_before = scan.findings.iter().filter(|f| f.severity == "fail").count();
+        let blocked_before = scan.blocked.len();
+        scan.scanned += scan_file_list(
             &r.candidates,
             r.candidates.len(),
-            &mut findings,
-            &mut blocked,
+            &mut scan.findings,
+            &mut scan.blocked,
         );
+        let failures_after = scan.findings.iter().filter(|f| f.severity == "fail").count();
+        if failures_after == failures_before && scan.blocked.len() == blocked_before {
+            new_stamp.insert(pkg_dir.clone(), sig);
+        }
     }
 
     for (k, v) in prior_stamp.drain() {
@@ -422,11 +535,20 @@ fn scan_node_modules(max_files: usize) -> (Vec<FileFinding>, Vec<BlockedRead>, u
     }
     save_stamp(&new_stamp);
 
-    (findings, blocked, scanned, true, truncated)
+    scan
 }
 
+const SYMLINK_ESCAPES_LISTED: usize = 20;
+
 pub fn scan_deps(body: &Value) -> Value {
-    let root = body.get("root").and_then(|v| v.as_str()).unwrap_or(".");
+    let requested_root = body
+        .get("root")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty())
+        .unwrap_or(".");
+    let root = normalized_root(requested_root);
+    let root = root.as_str();
     let force_full = body.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
     let mut cfg = IndexConfig::default();
     cfg.digest_max_files = 50_000;
@@ -434,21 +556,24 @@ pub fn scan_deps(body: &Value) -> Value {
     let mut findings: Vec<FileFinding> = Vec::new();
     let mut blocked: Vec<BlockedRead> = Vec::new();
 
-    let tracked = crate::code_index::collect_files(root, cfg.digest_max_files, &cfg);
+    let tracked = if is_absolute_root(root) {
+        crate::scan_universe::project_source_files(root, cfg.digest_max_files, &cfg)
+    } else {
+        crate::code_index::collect_files(root, cfg.digest_max_files, &cfg)
+    };
     let tracked_scanned = scan_file_list(&tracked, tracked.len(), &mut findings, &mut blocked);
 
     if force_full {
         let _ = crate::wasm_dispatch::host_remove_file_never_directory(STAMP_PATH);
     }
-    let (nm_findings, nm_blocked, nm_scanned, node_modules_present, node_modules_truncated) =
-        scan_node_modules(MAX_NODE_MODULES_FILES);
-    findings.extend(nm_findings);
-    blocked.extend(nm_blocked);
+    let node_modules = scan_node_modules(root, MAX_NODE_MODULES_FILES);
+    findings.extend(node_modules.findings);
+    blocked.extend(node_modules.blocked);
 
     let failing: Vec<&FileFinding> = findings.iter().filter(|f| f.severity == "fail").collect();
     let warnings: Vec<&FileFinding> = findings.iter().filter(|f| f.severity == "warn").collect();
 
-    let files_scanned = tracked_scanned + nm_scanned;
+    let files_scanned = tracked_scanned + node_modules.scanned;
     let ok = failing.is_empty() && blocked.is_empty();
 
     json!({
@@ -456,8 +581,10 @@ pub fn scan_deps(body: &Value) -> Value {
         "version": 1,
         "root": root,
         "filesScanned": files_scanned,
-        "nodeModulesPresent": node_modules_present,
-        "nodeModulesTruncated": node_modules_truncated,
+        "nodeModulesPresent": node_modules.present,
+        "nodeModulesTruncated": node_modules.truncated,
+        "symlinkEscapeCount": node_modules.escapes.len(),
+        "symlinkEscapes": node_modules.escapes.iter().take(SYMLINK_ESCAPES_LISTED).collect::<Vec<_>>(),
         "ok": ok,
         "failCount": failing.len(),
         "warnCount": warnings.len(),
