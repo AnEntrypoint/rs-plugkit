@@ -56,6 +56,118 @@ pub fn is_identifier(query: &str) -> bool {
         && !query.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
+/// Literal-evidence channel: a query word that is shaped like a code identifier
+/// (`uid_map`, `CLONE_NEWUSER`, `ForkPipeBridge`, `Credentials`). Such words are
+/// matched verbatim against the worktree so an exact name always outranks the
+/// semantic channels, which cannot be trusted when the chunk index is partial.
+pub const LITERAL_SCAN_MAX_MATCHES: usize = 600;
+const MAX_LITERAL_TOKENS: usize = 5;
+const LITERAL_PER_FILE_CAP: usize = 3;
+const LITERAL_DEFINITION_SCORE: f64 = 2.0;
+const LITERAL_TIER_PENALTY: f64 = 0.75;
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+pub fn looks_like_identifier_token(token: &str) -> bool {
+    if token.len() < 3 || token.len() > 96 { return false; }
+    if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') { return false; }
+    if token.chars().next().is_some_and(|c| c.is_ascii_digit()) { return false; }
+    if CONTROL_WORDS.contains(&token.to_ascii_lowercase().as_str()) { return false; }
+    if token.contains('_') { return true; }
+    let chars: Vec<char> = token.chars().collect();
+    let has_upper = chars.iter().any(|c| c.is_ascii_uppercase());
+    let has_lower = chars.iter().any(|c| c.is_ascii_lowercase());
+    // ALL_CAPS of 4+ (`SIGKILL`, `CLONE_NEWUSER`); three-letter caps (`EOF`, `API`,
+    // `TCP`) are too often incidental in a query to spend an exact-match channel on.
+    if has_upper && !has_lower && chars.len() >= 4 { return true; }
+    // camelCase (a mid-word rise) or PascalCase (leading capital + lowercase tail):
+    // the only way a bare word like `Credentials` is recognizable as a name.
+    if has_upper
+        && has_lower
+        && chars.len() >= 4
+        && (chars[0].is_ascii_uppercase() || chars.windows(2).any(|w| w[0].is_ascii_lowercase() && w[1].is_ascii_uppercase()))
+    {
+        return true;
+    }
+    false
+}
+
+pub fn identifier_tokens(query: &str) -> Vec<String> {
+    if query.is_empty() || query.len() > 512 { return Vec::new(); }
+    let mut out: Vec<String> = Vec::new();
+    for word in query.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$')) {
+        if word.is_empty() || out.iter().any(|t| t == word) { continue; }
+        if looks_like_identifier_token(word) {
+            out.push(word.to_string());
+            if out.len() >= MAX_LITERAL_TOKENS { break; }
+        }
+    }
+    out
+}
+
+/// Words that occur in nearly every file: a scan for them returns a wall of lines that
+/// buries the few which answer the query, so they never become literal-evidence tokens.
+const LITERAL_STOPWORDS: &[&str] = &[
+    "that", "this", "with", "from", "into", "when", "where", "what", "which", "then", "than",
+    "them", "they", "their", "there", "here", "your", "ours", "have", "has", "had", "was",
+    "were", "are", "not", "but", "can", "could", "should", "would", "will", "must", "does",
+    "did", "done", "just", "also", "only", "even", "each", "both", "same", "such", "other",
+    "about", "after", "before", "because", "while", "without", "within", "again", "once",
+    "over", "under", "some", "any", "all", "most", "more", "less", "very", "like", "want",
+    "need", "look", "find", "show", "give", "take", "make", "makes", "made", "used", "uses",
+    "using", "gets", "sets", "puts", "adds", "thing", "things", "part", "parts", "case",
+    "cases", "time", "times", "note", "notes", "file", "files", "code", "line", "lines",
+    "value", "values", "name", "names", "data", "text", "item", "items", "result", "results",
+    "error", "errors", "return", "returns", "function", "functions", "type", "types",
+];
+
+/// Fallback literal tokens for a query with no identifier-shaped word in it (`user namespace
+/// id map write`). Ordinary words are only worth an exact-match scan when the semantic
+/// channels came back empty, which on a large project means the chunk index has not reached
+/// these files yet: embedding a repo this size costs far more than one call can wait, so
+/// without the fallback a cold codesearch answers `hits: []` on every call. Longest first --
+/// the more specific the word, the likelier its matches are the answer.
+pub fn content_tokens(query: &str) -> Vec<String> {
+    if query.is_empty() || query.len() > 512 { return Vec::new(); }
+    let mut out: Vec<String> = Vec::new();
+    for word in query.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$')) {
+        if word.len() < 4 || word.len() > 96 { continue; }
+        if !word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') { continue; }
+        if word.chars().next().is_some_and(|c| c.is_ascii_digit()) { continue; }
+        let lower = word.to_ascii_lowercase();
+        if CONTROL_WORDS.contains(&lower.as_str()) || LITERAL_STOPWORDS.contains(&lower.as_str()) { continue; }
+        if out.iter().any(|t| t == word) { continue; }
+        out.push(word.to_string());
+    }
+    out.sort_by_key(|t| std::cmp::Reverse(t.len()));
+    out.truncate(3);
+    out
+}
+
+pub fn identifier_pattern_for(tokens: &[String]) -> String {
+    let alternatives: Vec<String> = tokens.iter().map(|t| regex::escape(t)).collect();
+    format!(r"\b(?:{})\b", alternatives.join("|"))
+}
+
+fn contains_token(text: &str, token: &str) -> bool {
+    let bytes = text.as_bytes();
+    let pat = token.as_bytes();
+    if pat.is_empty() { return false; }
+    let mut i = 0usize;
+    while i + pat.len() <= bytes.len() {
+        if bytes[i..i + pat.len()].eq_ignore_ascii_case(pat)
+            && (i == 0 || !is_ident_byte(bytes[i - 1]))
+            && (i + pat.len() >= bytes.len() || !is_ident_byte(bytes[i + pat.len()]))
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn normalized(path: &str) -> &str {
     path.strip_prefix("./").unwrap_or(path)
 }
@@ -262,6 +374,7 @@ struct MergedHit {
     name: String,
     snippet: String,
     score: f64,
+    literal: bool,
 }
 
 fn hit_location(hit: &Value) -> Option<(String, u64, String, String)> {
@@ -284,12 +397,88 @@ fn hit_snippet(hit: &Value, skip_header: bool) -> String {
     picked.join(" | ")
 }
 
+/// How many channel rows the reply would actually show. A row the docs filter hides is not
+/// evidence that the index answered the query -- a cold project whose only indexed chunks are
+/// its markdown answers `docs_hidden: 16, hits: []` -- and the literal fallback exists for
+/// exactly that case, so it keys off the visible count rather than the raw one.
+pub fn visible_channel_count(raw: &Value, opts: &RankOptions) -> usize {
+    let mut visible = 0usize;
+    for channel in ["bm25_hits", "vector_hits", "hits"] {
+        let Some(list) = raw.get(channel).and_then(|v| v.as_array()) else { continue };
+        for hit in list {
+            let Some((path, _line, kind, _name)) = hit_location(hit) else { continue };
+            let relative = opts.relative(&path);
+            if (kind == "section" || is_doc_path(relative)) && !opts.include_docs { continue; }
+            visible += 1;
+        }
+    }
+    visible
+}
+
 pub fn compact_dual(query: &str, raw: &Value, opts: &RankOptions) -> Value {
+    compact_dual_with_literal(query, raw, opts, &[], &[])
+}
+
+/// `literal_lines` are `path:line: text` strings from an exact-identifier scan of
+/// `literal_tokens`; they are seeded into the merge ahead of BM25/vector so a file
+/// that really contains the name is never beaten by a semantically-adjacent chunk.
+pub fn compact_dual_with_literal(
+    query: &str,
+    raw: &Value,
+    opts: &RankOptions,
+    literal_lines: &[String],
+    literal_tokens: &[String],
+) -> Value {
     let channels = ["bm25_hits", "vector_hits", "hits"];
     let mut merged: Vec<MergedHit> = Vec::new();
     let mut unlocated: Vec<Value> = Vec::new();
     let mut index_by_location: std::collections::HashMap<(String, u64), usize> = std::collections::HashMap::new();
     let mut docs_hidden = 0usize;
+    let mut literal_count = 0usize;
+    if !literal_tokens.is_empty() && !literal_lines.is_empty() {
+        let matchers: Vec<(String, DefinitionMatcher)> = literal_tokens
+            .iter()
+            .map(|t| (t.clone(), DefinitionMatcher::new(t, false)))
+            .collect();
+        let mut scored: std::collections::HashMap<(String, u64), (f64, String)> = std::collections::HashMap::new();
+        for raw_line in literal_lines {
+            let Some((path, line, text)) = parse_compact_line(raw_line) else { continue };
+            if is_doc_path(opts.relative(&path)) && !opts.include_docs { continue; }
+            let matched = matchers.iter().filter(|(t, _)| contains_token(&text, t)).count();
+            if matched == 0 { continue; }
+            let definition = matchers.iter().any(|(t, m)| m.strength(&text, t).is_some());
+            // Weight a token by its length, so the line carrying the most specific word of
+            // the query (`namespace`) beats one carrying only a common one (`write`); a flat
+            // per-match score instead filled a cold reply with every `fn write` in the tree.
+            let weight: f64 = matchers.iter().filter(|(t, _)| contains_token(&text, t)).map(|(t, _)| t.len() as f64).sum();
+            let score = weight
+                + if definition { LITERAL_DEFINITION_SCORE } else { 0.0 }
+                - LITERAL_TIER_PENALTY * path_tier(opts.relative(&path)) as f64;
+            let entry = scored.entry((path, line)).or_insert((0.0, String::new()));
+            if score > entry.0 {
+                *entry = (score, text);
+            }
+        }
+        let mut ranked: Vec<((String, u64), (f64, String))> = scored.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.0.partial_cmp(&a.1.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut per_file: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for ((path, line), (score, text)) in ranked {
+            let shown_from_file = per_file.entry(path.clone()).or_insert(0);
+            if *shown_from_file >= LITERAL_PER_FILE_CAP { continue; }
+            *shown_from_file += 1;
+            index_by_location.insert((path.clone(), line), merged.len());
+            merged.push(MergedHit {
+                snippet: squeeze(&text, SNIPPET_CHARS),
+                score,
+                path,
+                line,
+                kind: "literal".to_string(),
+                name: String::new(),
+                literal: true,
+            });
+        }
+        literal_count = merged.len();
+    }
     for channel in channels {
         let Some(list) = raw.get(channel).and_then(|v| v.as_array()) else { continue };
         for (rank, hit) in list.iter().enumerate() {
@@ -314,13 +503,18 @@ pub fn compact_dual(query: &str, raw: &Value, opts: &RankOptions) -> Value {
                         snippet: hit_snippet(hit, hit.get("text").is_some()),
                         score: contribution + if exact { EXACT_NAME_BONUS } else { 0.0 },
                         path, line, kind, name,
+                        literal: false,
                     });
                 }
             }
         }
     }
-    merged.sort_by(|a, b| path_tier(opts.relative(&a.path)).cmp(&path_tier(opts.relative(&b.path)))
-        .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)));
+    let promoted = |h: &MergedHit| h.literal && path_tier(opts.relative(&h.path)) < 2;
+    merged.sort_by(|a, b| promoted(b).cmp(&promoted(a))
+        .then_with(|| path_tier(opts.relative(&a.path)).cmp(&path_tier(opts.relative(&b.path))))
+        .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+        .then_with(|| a.path.cmp(&b.path))
+        .then_with(|| a.line.cmp(&b.line)));
     let total = merged.len();
     let shown: Vec<Value> = merged.into_iter().take(opts.limit.max(1))
         .map(|h| json!({
@@ -333,6 +527,10 @@ pub fn compact_dual(query: &str, raw: &Value, opts: &RankOptions) -> Value {
     out.insert("mode".into(), raw.get("mode").cloned().unwrap_or_else(|| json!("dual")));
     out.insert("hits".into(), json!(shown));
     out.insert("total_candidates".into(), json!(total));
+    if !literal_tokens.is_empty() {
+        out.insert("literal_tokens".into(), json!(literal_tokens));
+        out.insert("literal_matches".into(), json!(literal_count));
+    }
     if !unlocated.is_empty() {
         out.insert("unlocated_hits".into(), json!(unlocated));
     }
