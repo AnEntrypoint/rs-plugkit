@@ -47,6 +47,21 @@ fn git_project_root_once() -> Option<PathBuf> {
     parse_toplevel(out)
 }
 
+fn stateful_cwd_root_once() -> Option<PathBuf> {
+    let cwd = current_cwd_string();
+    let root = cwd.trim_end_matches(['/', '\\']);
+    if root.is_empty() { return None; }
+    #[cfg(target_arch = "wasm32")]
+    let has_gm_state = crate::wasm_dispatch::host_stat(&format!("{root}/.gm"))
+        .and_then(|stat| stat.get("isDirectory").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false);
+    #[cfg(not(target_arch = "wasm32"))]
+    let has_gm_state = std::fs::metadata(PathBuf::from(root).join(".gm"))
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
+    has_gm_state.then(|| PathBuf::from(root))
+}
+
 #[cfg(target_arch = "wasm32")]
 fn fs_walk_project_root() -> Option<PathBuf> {
     let cwd = current_cwd_string();
@@ -116,7 +131,7 @@ fn try_resolve_project_root() -> Result<PathBuf, u32> {
     }
     let mut last_err_attempts = 0u32;
     for attempt in 0..RESOLVE_MAX_ATTEMPTS {
-        if let Some(root) = git_project_root_once() {
+        if let Some(root) = git_project_root_once().or_else(stateful_cwd_root_once) {
             if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
                 cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd, root.clone());
             }

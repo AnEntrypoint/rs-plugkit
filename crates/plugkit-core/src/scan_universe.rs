@@ -167,6 +167,20 @@ fn git_worktree_files(dir: &str, nesting: usize) -> Result<(Vec<String>, bool), 
     Ok((files, complete))
 }
 
+fn runtime_artifact_rule(path: &str) -> Option<&'static str> {
+    let normalized_path = path.replace('\\', "/");
+    let mut segments = normalized_path.split('/');
+    while let Some(segment) = segments.next() {
+        if segment == ".agentplug-kv" {
+            return Some("agentplug_kv_cache");
+        }
+        if segment == ".gm" && segments.next() == Some("exec-spool") {
+            return Some("gm_exec_spool");
+        }
+    }
+    None
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TargetOrigin {
     ProjectDefault,
@@ -275,7 +289,17 @@ pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg
     }
     let cause = match directory_is_gitignored(&target) {
         Ok(false) => match git_worktree_files(&target, 0) {
-            Ok((files, complete)) => return Ok(universe(files, FileSource::Git, complete, Vec::new(), None)),
+            Ok((files, complete)) => {
+                let mut kept = Vec::with_capacity(files.len());
+                let mut excluded = Vec::new();
+                for path in files {
+                    match runtime_artifact_rule(&path) {
+                        Some(rule) => excluded.push(RuleExclusion { path, rule }),
+                        None => kept.push(path),
+                    }
+                }
+                return Ok(universe(kept, FileSource::Git, complete, excluded, None));
+            }
             Err(e) => WalkCause::GitListingFailed(e),
         },
         Ok(true) => WalkCause::TargetGitignored,
@@ -304,5 +328,28 @@ pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> 
     match list_scan_universe(base, scope, max_files, cfg, TargetOrigin::ProjectDefault) {
         Ok(u) => u.files.into_iter().filter(|p| !p.starts_with(&project_node_modules)).take(max_files).collect(),
         Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_artifact_rule;
+
+    #[test]
+    fn excludes_runtime_artifacts_without_hiding_source_paths() {
+        assert_eq!(
+            runtime_artifact_rule(".agentplug-kv/codeinsight/chunk.json"),
+            Some("agentplug_kv_cache")
+        );
+        assert_eq!(
+            runtime_artifact_rule("packages/.gm/exec-spool/out/result.json"),
+            Some("gm_exec_spool")
+        );
+        assert_eq!(
+            runtime_artifact_rule("packages\\.gm\\exec-spool\\out\\result.json"),
+            Some("gm_exec_spool")
+        );
+        assert_eq!(runtime_artifact_rule("packages/core/src/lib.rs"), None);
+        assert_eq!(runtime_artifact_rule(".gm/browser-config.json"), None);
     }
 }
