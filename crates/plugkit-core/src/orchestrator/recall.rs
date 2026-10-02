@@ -164,7 +164,7 @@ pub fn handle_auto_recall(content: &str) -> (String, String, i32) {
     let payload = serde_json::json!({
         "query": query,
         "limit": 3,
-        "results": results,
+        "results": crate::recall_compact::compact_hits(&results, false),
         "embed_failed": embed_failed,
     });
     let empty = results.as_array().map(|a| a.is_empty()).unwrap_or(true);

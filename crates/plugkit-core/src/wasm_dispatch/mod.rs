@@ -1,6 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
 pub(crate) mod host_abi;
+mod dangling_refs;
 mod events;
 mod verbs;
 
