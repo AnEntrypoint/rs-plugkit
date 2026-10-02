@@ -280,6 +280,27 @@ reported rather than reconciled. `paths` together with `rev` on
 `.gm/prd.yml` (no `paths`, or `paths` naming it or `.gm`); a narrower scoped
 commit leaves them pending so the row removal and its note land together.
 
+An explicit `paths` outranks the protected-path exclusion list: an entry the
+caller named is never withheld, and a request whose every pathspec resolves
+under `.agentplug*` is refused rather than silently widening. A scoped
+`git_commit`/`git_finalize` whose paths stage nothing fails with
+`error_code: invalid_args` and `requested_paths` instead of reporting
+`nothing_to_commit`, so a pathspec that no-ops cannot fall through to
+committing the rest of the index.
+
+`git_commit` and `git_finalize` refuse before staging anything when the commit
+would reference a file that exists on disk, is untracked, is not gitignored
+and is not part of this commit (`error_code: dangling_reference`, one
+`dangling_references` entry per offender naming `from`, `line`, `specifier`
+and `target`, plus a `fixes` list). Specifiers are resolved the way the
+runtime would: relative first, then bare against the nearest `package.json`
+`exports` map (string, conditional object and `"./*"` wildcard) and npm
+workspaces under `packages/*`. `allow_dangling: ["<target>"]` waives named
+targets and `allow_dangling: true` waives all; either way the waived targets
+come back in `dangling_waived`. Scanning skips `node_modules/`, `dist/`,
+`vendor/`, `build/`, `coverage/`, `.git/`, `.gm/` and `.agentplug-kv/`, files
+above 512 KiB, non-JS/TS/JSON extensions, and stops after 400 files.
+
 Async git hosts use a pending-token protocol shaped like `host_fetch`'s. A
 host that cannot block the wasm call (a browser driving isomorphic-git on the
 wasm's own thread) answers `host_git` with `{"pending": true, "token"}` and
