@@ -3886,7 +3886,7 @@ fn git_stash(body: &Value) -> u64 {
 fn git_stash_pop(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("stash@{0}").trim();
-    let r = git_call_argv(&["stash", "pop", refspec], cwd);
+    let r = git_call_argv(&["stash", "pop", "--index", refspec], cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let output = format!("{}{}",
         r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),

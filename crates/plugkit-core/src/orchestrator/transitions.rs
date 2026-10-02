@@ -84,7 +84,9 @@ fn pred_app_loads_witnessed() -> bool { crate::browser_witness::app_loads_witnes
 #[cfg(not(target_arch = "wasm32"))]
 fn pred_app_loads_witnessed() -> bool { true }
 #[cfg(target_arch = "wasm32")]
-fn pred_claim_audit_clean() -> bool { super::claim_audit::claim_audit_clean() }
+fn pred_claim_audit_clean() -> bool {
+    crate::wasm_dispatch::host_abi::git_repository_absent() || super::claim_audit::claim_audit_clean()
+}
 #[cfg(not(target_arch = "wasm32"))]
 fn pred_claim_audit_clean() -> bool { true }
 fn pred_submodules_clean() -> bool { super::submodule_drift::submodules_clean() }
@@ -424,6 +426,9 @@ fn pred_idempotent_dispatch_replay_safe() -> bool { true }
 
 #[cfg(target_arch = "wasm32")]
 fn ci_validation_fresh() -> bool {
+    if crate::wasm_dispatch::host_abi::git_repository_absent() {
+        return true;
+    }
     let raw = crate::pkfs::read_to_string(".gm/exec-spool/.ci-validated").unwrap_or_default();
     let trimmed = raw.trim();
     if trimmed.is_empty() { return false; }
