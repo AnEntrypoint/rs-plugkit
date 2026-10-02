@@ -1450,6 +1450,40 @@ fn memorize_prune(body: &Value) -> u64 {
 
 const UNINDEXED_CANDIDATE_MAX: usize = 500;
 
+/// BM25 and the vector channel both lose the phrase: BM25 scores each query term independently
+/// and the embedder scores meaning, not wording. A verbatim match is therefore found by an
+/// exhaustive scan of the tree, run here within its own wall budget so a ranked query still
+/// answers in seconds. 6s covers a full scan of a tree the size of litebox-main (measured 2.1s).
+const DUAL_PHRASE_SCAN_BUDGET_MS: u64 = 6_000;
+const DUAL_PHRASE_SCAN_MAX_MATCHES: usize = 20;
+
+/// First dispatch on a tree with no digest at all. Bounded, not the full 110s index budget: a
+/// search that answers in half a minute with a full index beats one that times out at 120s. Measured
+/// on litebox-main (1834 files) a 30s pass indexes the whole tree, so every dispatch after it needs
+/// no index pass at all.
+const COLD_INDEX_PASS_BUDGET_MS: u64 = 30_000;
+
+fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig) -> Vec<Value> {
+    if rs_search::tokenize::tokenize(query).len() < 2 { return Vec::new(); }
+    let scan = crate::code_index::LiteralScan {
+        pattern: query,
+        root,
+        path: None,
+        regex: false,
+        case_insensitive: true,
+        whole_word: false,
+        path_glob: None,
+        max_matches: DUAL_PHRASE_SCAN_MAX_MATCHES,
+        max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
+        context: 0,
+        term_combination: Some("phrase"),
+        budget_ms: Some(DUAL_PHRASE_SCAN_BUDGET_MS),
+    };
+    let out = crate::code_index::scan_literal(&scan, cfg);
+    if out.get("ok").and_then(|v| v.as_bool()) != Some(true) { return Vec::new(); }
+    out.get("matches").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+}
+
 fn unindexed_on_disk_candidates(namespace: &str) -> (Vec<Value>, usize) {
     let indexed = crate::rssearch_vectors::live_keys(namespace);
     let mut paths: Vec<(String, String)> = crate::memory_md::on_disk_memo_paths(namespace)
@@ -1483,8 +1517,11 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         let out = crate::code_index::search_filenames_at(query, k as usize, cfg, Some(root));
         return ok("codesearch", out);
     }
+    let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
+    let prior_stage_ms = body.get("stage_ms").cloned().unwrap_or_else(|| json!({}));
     if !already_indexed {
+        let digest_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let stored = crate::code_index::stored_digest_at(Some(root));
         let current = crate::code_index::current_digest_at(root);
         let stale = match &stored { Some(s) => s != &current, None => true };
@@ -1492,23 +1529,37 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
             let cold_start = stored.is_none();
             let reason = if cold_start { "digest-absent" } else { "digest-mismatch" };
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "root": root, "stored_then_current": current }));
+            let index_started = unsafe { crate::wasm_dispatch::host_now_ms() };
             if cold_start {
-                let _ = crate::code_index::index_at(root, 500, root);
+                let _ = crate::code_index::index_at_topup(root, cfg.index.prune_pass_file_limit_ceiling, root, COLD_INDEX_PASS_BUDGET_MS);
             } else {
-                let _ = crate::code_index::index_at_topup(root, 500, root, cfg.index.incremental_topup_wall_budget_ms);
+                let _ = crate::code_index::index_at_topup(root, cfg.index.prune_pass_file_limit_ceiling, root, cfg.index.incremental_topup_wall_budget_ms);
             }
+            let index_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(index_started);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
+                obj.insert("stage_ms".to_string(), json!({
+                    "digest": index_started.saturating_sub(digest_started),
+                    "index_pass": index_ms,
+                    "total": unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms),
+                }));
             }
             return codesearch_at_root(&retry, root, query, k, cfg);
         }
     }
+    let stage = |from: u64| unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(from);
+    let mut at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let embedding = embed_query(query);
+    let embed_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let vres = crate::code_index::search_at(query, k as usize, Some(&embedding), Some(root));
     let vector_hits = vres.get("rows").cloned().unwrap_or_else(|| json!([]));
+    let vector_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut corpus = crate::code_index::FusionCorpus::load_at(Some(root));
-    let bm25_hits: Vec<Value> = corpus.bm25_rank_cfg(query, k as usize, &cfg.scoring)
+    let corpus_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let bm25_ranked = corpus.bm25_rank_cfg(query, k as usize, &cfg.scoring);
+    let bm25_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let bm25_hits: Vec<Value> = bm25_ranked
         .into_iter()
         .map(|(key, score)| {
             let text = corpus.text_for_key(&key).unwrap_or_default();
@@ -1523,28 +1574,60 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         })
         .collect();
     let commits = crate::code_index::git_commit_rank_at(root, query, 10);
+    let commits_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let phrase_hits = dual_phrase_hits(query, Some(root), cfg);
+    let phrase_ms = stage(at);
+    let stage_ms = json!({
+        "embed_query": embed_ms,
+        "vector_search": vector_ms,
+        "corpus_load": corpus_ms,
+        "bm25_rank": bm25_ms,
+        "commits": commits_ms,
+        "phrase_scan": phrase_ms,
+        "total": unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms),
+    });
     ok("codesearch", json!({
         "mode": "dual",
         "root": root,
         "vector_hits": vector_hits,
         "bm25_hits": bm25_hits,
+        "phrase_hits": phrase_hits,
         "commits": commits,
         "channels": {
             "vector": { "independent": true, "indexed_root": root },
             "bm25": { "independent": true, "indexed_root": root },
+            "phrase": { "independent": true, "exhaustive": true, "budget_ms": DUAL_PHRASE_SCAN_BUDGET_MS, "root": root },
             "commits": { "independent": true, "indexed_root": root },
         },
+        "stage_ms": merge_stage_ms(prior_stage_ms, stage_ms),
         "degraded": vres.get("degraded").cloned().unwrap_or(json!(false)),
     }))
+}
+
+/// An index pass runs in the dispatch that discovered the stale digest and then recurses, so the
+/// stages measured before and after it are summed into one report.
+fn merge_stage_ms(prior: Value, now: Value) -> Value {
+    let mut out = match prior {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    if let Value::Object(m) = now {
+        for (k, v) in m {
+            let sum = out.get(&k).and_then(|p| p.as_u64()).unwrap_or(0)
+                + v.as_u64().unwrap_or(0);
+            out.insert(k, json!(sum));
+        }
+    }
+    Value::Object(out)
 }
 
 const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 
 const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit"];
 
-fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> Result<(u32, bool), String> {
+fn scan_result_limit(body: &Value, fields: &[&str], default: u32) -> Result<(u32, bool), String> {
     let mut seen: Vec<(&str, u64)> = Vec::new();
-    for field in CODESEARCH_LIMIT_FIELDS {
+    for field in fields {
         if let Some(v) = body.get(*field) {
             match v.as_u64() {
                 Some(n) if n > 0 => seen.push((field, n)),
@@ -1555,7 +1638,7 @@ fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> R
         }
     }
     match seen.first() {
-        None => Ok((cfg.budget.default_k as u32, false)),
+        None => Ok((default, false)),
         Some((_, first)) => {
             if let Some((other, other_n)) = seen.iter().find(|(_, n)| n != first) {
                 let (winner, _) = seen[0];
@@ -1568,7 +1651,11 @@ fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> R
     }
 }
 
-fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ragconfig::RagConfig, explicit_limit: Option<u32>) -> u64 {
+fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> Result<(u32, bool), String> {
+    scan_result_limit(body, CODESEARCH_LIMIT_FIELDS, cfg.budget.default_k as u32)
+}
+
+fn resolve_scan_target(body: &Value) -> Result<(Option<&str>, Option<String>), String> {
     let mut root = body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
         .filter(|p| !p.is_empty());
@@ -1589,10 +1676,18 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
                 });
                 root = None;
             } else {
-                return err("codesearch", &format!("root '{candidate}' is not a real, existing directory the host will grant access to"));
+                return Err(format!("root '{candidate}' is not a real, existing directory the host will grant access to"));
             }
         }
     }
+    Ok((root, path))
+}
+
+fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ragconfig::RagConfig, explicit_limit: Option<u32>) -> u64 {
+    let (root, path) = match resolve_scan_target(body) {
+        Ok(target) => target,
+        Err(e) => return err("codesearch", &e),
+    };
     let max_matches = match body.get("max_matches") {
         Some(value) => match value.as_u64() {
             Some(limit) if limit > 0 => limit as usize,
@@ -1600,6 +1695,16 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         },
         None => explicit_limit.map(|limit| limit as usize).unwrap_or(usize::MAX),
     };
+    let combine = body.get("combine").and_then(|v| v.as_str())
+        .or_else(|| body.get("term_combination").and_then(|v| v.as_str()))
+        .filter(|c| !c.is_empty());
+    if let Some(c) = combine {
+        if !["or", "and", "phrase"].contains(&c) {
+            return err("codesearch", &format!(
+                "combine \"{c}\" is not a term combination -- valid values are \"or\" (default: a multi-word query is split into terms and a line needs any of them, ranked by how many it carries), \"and\" (a line must carry every term) and \"phrase\" (the query is matched verbatim as one string)"
+            ));
+        }
+    }
     let scan = crate::code_index::LiteralScan {
         pattern: query,
         root,
@@ -1613,12 +1718,213 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         max_matches,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
+        term_combination: combine,
+        budget_ms: None,
+        context: 0,
     };
     let out = crate::code_index::scan_literal(&scan, cfg);
     if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
         return err("codesearch", out.get("error").and_then(|e| e.as_str()).unwrap_or("exhaustive scan failed"));
     }
     ok("codesearch", out)
+}
+
+const GREP_OUTPUT_MODES: &[&str] = &["content", "files_with_matches", "count"];
+
+const GREP_LIMIT_FIELDS: &[&str] = &["max_results", "maxResults", "limit", "max_matches", "k"];
+
+const GREP_DEFAULT_MAX_MATCHES: u32 = 200;
+
+const GREP_NON_CONTENT_SCAN_CAP: u32 = 50_000;
+
+const GREP_REGEX_CLASS_ESCAPES: &[u8] = &[b'b', b'B', b'd', b'D', b'w', b'W', b's', b'S'];
+
+/// A grep pattern is read as a regex when it carries a construct nobody means literally: an
+/// alternation bar, a class escape such as `\d`, a `[a-z]`-shaped range, or an anchor pinned to
+/// an edge. Anything else stays a substring, so a plain call keeps matching the text it names.
+/// A doubled `||` is left literal -- in source that is the logical-or operator, not a union with
+/// an empty branch. Callers who want the decision made for them pass `"regex": true` or
+/// `"regex": false` (or `"fixed_strings": true`) and skip this entirely.
+fn grep_regex_trigger(pattern: &str) -> Option<&'static str> {
+    let bytes = pattern.as_bytes();
+    let mut i = 0usize;
+    let mut alternation = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                if bytes.get(i + 1).is_some_and(|c| GREP_REGEX_CLASS_ESCAPES.contains(c)) {
+                    return Some("class escape");
+                }
+                i += 2;
+            }
+            b'|' => {
+                let doubled = bytes.get(i + 1) == Some(&b'|') || (i > 0 && bytes[i - 1] == b'|');
+                if !doubled { alternation = true; }
+                i += 1;
+            }
+            b'[' => {
+                let close = match bytes[i..].iter().position(|c| *c == b']') {
+                    Some(offset) => i + offset,
+                    None => { i += 1; continue }
+                };
+                let inner = &bytes[i + 1..close];
+                if inner.len() > 1 && inner.contains(&b'-') { return Some("character class range"); }
+                i = close + 1;
+            }
+            _ => i += 1,
+        }
+    }
+    if alternation { return Some("alternation"); }
+    let trimmed = pattern.trim();
+    if trimmed.starts_with('^') || trimmed.ends_with('$') { Some("anchor") } else { None }
+}
+
+fn grep_hit_path(hit: &Value) -> String {
+    hit.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
+fn grep_hit_line(hit: &Value) -> String {
+    hit.get("line").and_then(|v| v.as_u64()).unwrap_or(0).to_string()
+}
+
+fn grep_hit_text(hit: &Value) -> String {
+    hit.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
+fn grep_output_line(hit: &Value, output_mode: &str) -> String {
+    let path = grep_hit_path(hit);
+    match output_mode {
+        "files_with_matches" => path,
+        "count" => format!("{path}:{}", hit.get("count").and_then(|v| v.as_u64()).unwrap_or(0)),
+        _ => format!("{path}:{}: {}", grep_hit_line(hit), grep_hit_text(hit)),
+    }
+}
+
+fn grep_counted_files(matches: &[Value]) -> Vec<Value> {
+    let mut order: Vec<String> = Vec::new();
+    let mut counts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for hit in matches {
+        let path = grep_hit_path(hit);
+        if !counts.contains_key(&path) {
+            order.push(path.clone());
+        }
+        let seen = counts.entry(path).or_insert(0);
+        *seen += 1;
+    }
+    order.into_iter()
+        .map(|path| json!({ "path": path, "count": counts.get(&path).copied().unwrap_or(0) }))
+        .collect()
+}
+
+fn grep(body: &Value) -> u64 {
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    let pattern = body.get("pattern").and_then(|v| v.as_str())
+        .or_else(|| body.get("query").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    if pattern.is_empty() {
+        return err("grep", "pattern required -- pass {\"pattern\":\"<text>\"}, optionally narrowed by \"path\" (a file or directory under the project root) and \"glob\"");
+    }
+    let output_mode = body.get("output_mode").and_then(|v| v.as_str())
+        .or_else(|| body.get("outputMode").and_then(|v| v.as_str()))
+        .unwrap_or("content");
+    if !GREP_OUTPUT_MODES.contains(&output_mode) {
+        return err("grep", &format!(
+            "output_mode \"{output_mode}\" is not a grep output mode -- valid modes are {}. \
+             \"content\" returns every hit as path:line: text, \"files_with_matches\" returns each \
+             matching path once, \"count\" returns path:count.",
+            GREP_OUTPUT_MODES.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(", "),
+        ));
+    }
+    let (root, path) = match resolve_scan_target(body) {
+        Ok(target) => target,
+        Err(e) => return err("grep", &e),
+    };
+    let (max_matches, limit_was_explicit) = match scan_result_limit(body, GREP_LIMIT_FIELDS, GREP_DEFAULT_MAX_MATCHES) {
+        Ok(limit) => limit,
+        Err(e) => return err("grep", &e),
+    };
+    let scan_cap = match (limit_was_explicit, output_mode) {
+        (true, _) | (false, "content") => max_matches,
+        _ => GREP_NON_CONTENT_SCAN_CAP,
+    };
+    let fixed_strings = body.get("fixed_strings").and_then(|v| v.as_bool())
+        .or_else(|| body.get("fixedStrings").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    let regex_asked = body.get("regex").and_then(|v| v.as_bool());
+    let auto_trigger = match (regex_asked, fixed_strings) {
+        (None, false) => grep_regex_trigger(pattern),
+        _ => None,
+    };
+    let use_regex = match regex_asked {
+        Some(want) => want && !fixed_strings,
+        None => auto_trigger.is_some(),
+    };
+    let context = match body.get("context").and_then(|v| v.as_u64()) {
+        Some(n) => n as usize,
+        None => 0,
+    };
+    let scan = crate::code_index::LiteralScan {
+        pattern,
+        root,
+        path: path.as_deref(),
+        regex: use_regex,
+        case_insensitive: body.get("case_insensitive").and_then(|v| v.as_bool())
+            .or_else(|| body.get("ignore_case").and_then(|v| v.as_bool()))
+            .unwrap_or(false),
+        whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
+        path_glob: body.get("glob").and_then(|v| v.as_str())
+            .or_else(|| body.get("include").and_then(|v| v.as_str()))
+            .or_else(|| body.get("path_glob").and_then(|v| v.as_str()))
+            .filter(|g| !g.is_empty()),
+        max_matches: scan_cap as usize,
+        max_files: body.get("max_files").and_then(|v| v.as_u64())
+            .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
+        context,
+        term_combination: Some("phrase"),
+        budget_ms: None,
+    };
+    let scanned = crate::code_index::scan_literal(&scan, &cfg);
+    if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+        let base = scanned.get("error").and_then(|e| e.as_str()).unwrap_or("grep scan failed").to_string();
+        return match auto_trigger {
+            Some(reason) => err("grep", &format!(
+                "{base} -- the pattern was read as a regex because of its {reason}; \
+                 pass \"regex\": false (or \"fixed_strings\": true) to search for it literally"
+            )),
+            None => err("grep", &base),
+        };
+    }
+    let mut out = match scanned {
+        Value::Object(map) => map,
+        other => return ok("grep", other),
+    };
+    let matches: Vec<Value> = out.get("matches").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let counts = grep_counted_files(&matches);
+    out.insert("output_mode".to_string(), json!(output_mode));
+    out.insert("regex".to_string(), json!(use_regex));
+    if let Some(reason) = auto_trigger {
+        out.insert("regex_detected".to_string(), json!(reason));
+    }
+    out.insert("file_count".to_string(), json!(counts.len()));
+    out.insert("max_matches".to_string(), json!(scan_cap));
+    out.insert("context".to_string(), json!(context));
+    match output_mode {
+        "files_with_matches" => {
+            out.remove("matches");
+            out.insert("counts".to_string(), Value::Array(counts.clone()));
+            out.insert("output".to_string(), Value::Array(counts.iter().map(|c| json!(grep_hit_path(c))).collect()));
+        }
+        "count" => {
+            out.remove("matches");
+            out.insert("counts".to_string(), Value::Array(counts.clone()));
+            out.insert("output".to_string(), Value::Array(counts.iter().map(|c| json!(grep_output_line(c, "count"))).collect()));
+        }
+        _ => {
+            out.insert("files".to_string(), Value::Array(counts.iter().map(|c| json!(grep_hit_path(c))).collect()));
+            out.insert("output".to_string(), Value::Array(matches.iter().map(|m| json!(grep_output_line(m, "content"))).collect()));
+        }
+    }
+    ok("grep", Value::Object(out))
 }
 
 fn codesearch(body: &Value) -> u64 {
@@ -1676,7 +1982,7 @@ fn codesearch(body: &Value) -> u64 {
         && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
         let cleared = crate::code_index::clear_codeinsight_full_cfg(&cfg);
         emit_event("codeinsight_rebuild", json!({ "reason": "explicit-rebuild", "keys_cleared": cleared }));
-        let _ = crate::code_index::index(".", 500);
+        let _ = crate::code_index::index_topup(".", cfg.index.prune_pass_file_limit_ceiling, COLD_INDEX_PASS_BUDGET_MS);
         let mut retry = body.clone();
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -1694,9 +2000,9 @@ fn codesearch(body: &Value) -> u64 {
             let reason = if cold_start { "digest-absent" } else { "digest-mismatch" };
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "stored_then_current": current }));
             if cold_start {
-                let _ = crate::code_index::index(".", 500);
+                let _ = crate::code_index::index_topup(".", cfg.index.prune_pass_file_limit_ceiling, COLD_INDEX_PASS_BUDGET_MS);
             } else {
-                let _ = crate::code_index::index_topup(".", 500, cfg.index.incremental_topup_wall_budget_ms);
+                let _ = crate::code_index::index_topup(".", cfg.index.prune_pass_file_limit_ceiling, cfg.index.incremental_topup_wall_budget_ms);
             }
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
@@ -1736,6 +2042,7 @@ fn codesearch(body: &Value) -> u64 {
     let commits: Vec<Value> = commit_ranked.iter()
         .map(|(hash, message, score)| json!({ "hash": hash, "message": message, "score": score }))
         .collect();
+    let phrase_hits = dual_phrase_hits(query, None, &cfg);
     let build_hit = |corpus: &mut crate::code_index::FusionCorpus, key: &str, score: Option<f64>, fallback_text: Option<&str>| -> Value {
         let text = corpus.text_for_key(key)
             .or_else(|| fallback_text.map(String::from))
@@ -1755,9 +2062,13 @@ fn codesearch(body: &Value) -> u64 {
     let bm25_ranked_response: Vec<Value> = bm25_ranked.iter().take(k as usize)
         .map(|(key, score)| build_hit(&mut corpus, key, Some(*score), None))
         .collect();
-    if !vec_ids.is_empty() || !bm25_ids.is_empty() {
+    if !vec_ids.is_empty() || !bm25_ids.is_empty() || !phrase_hits.is_empty() {
         return ok("codesearch", json!({
-            "mode": "dual", "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response, "commits": commits,
+            "mode": "dual",
+            "vector_hits": vector_ranked,
+            "bm25_hits": bm25_ranked_response,
+            "phrase_hits": phrase_hits,
+            "commits": commits,
         }));
     }
     let ns = cfg.namespaces.code.as_str();
@@ -1765,7 +2076,7 @@ fn codesearch(body: &Value) -> u64 {
     let hits = unpack_to_value(packed);
     let kv_empty = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
     if kv_empty && !body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let _ = crate::code_index::index(".", 500);
+        let _ = crate::code_index::index_topup(".", cfg.index.prune_pass_file_limit_ceiling, COLD_INDEX_PASS_BUDGET_MS);
         let mut retry = body.clone();
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -1782,7 +2093,7 @@ fn codesearch(body: &Value) -> u64 {
         }));
     }
 
-    if vec_unavailable && kv_empty_now {
+    if vec_unavailable && kv_empty_now && phrase_hits.is_empty() {
         return err(
             "codesearch",
             "semantic retrieval unavailable (no vector hits and the embedder produced nothing) and the keyword fallback matched nothing -- this is NOT an empty-index result",
@@ -1792,6 +2103,7 @@ fn codesearch(body: &Value) -> u64 {
     ok("codesearch", json!({
         "mode": "fallback_kv", "degraded": vec_unavailable,
         "hits": hits, "commits": commits, "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response,
+        "phrase_hits": phrase_hits,
     }))
 }
 
@@ -4949,6 +5261,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "codeinsight_index" => codeinsight_index(&body),
         "codeinsight" => codeinsight(&body),
         "codesearch" | "code_search" | "search" => codesearch(&body),
+        "grep" | "rg" => grep(&body),
         "callers" => callers(&body),
         "callees" => callees(&body),
         "impact" => impact(&body),
