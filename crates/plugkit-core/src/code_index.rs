@@ -1245,6 +1245,7 @@ pub fn index_topup(root: &str, max_files: usize, cap_ms: u64) -> Value {
 }
 
 fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig, include_dead_code: bool, orphan_scan_limit: usize, project_path: Option<&str>) -> Value {
+    let pass_started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let db_path = project_db_path(project_path);
     let libsql_err = ensure_schema_at(&db_path).err().map(|e| e.to_string());
     let libsql_ok = libsql_err.is_none();
@@ -1277,10 +1278,11 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     full_files.sort_by(|a, b| canonical_index_path(a).cmp(canonical_index_path(b)));
     let resume_cursor = stored_index_cursor_at(project_path);
     let files = rotated_from_cursor(&full_files, resume_cursor.as_deref());
+    let enum_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(pass_started);
     let mut first_deferred: Option<String> = None;
     let mut fresh_files_this_pass = 0usize;
     {
-        let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={}", r, files.len(), libsql_ok, prior.len());
+        let msg = format!("code_index: indexing root={} files={} libsql_ok={} manifests={} enum_ms={}", r, files.len(), libsql_ok, prior.len(), enum_ms);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     }
     if full_files.is_empty() && !prior.is_empty() {
@@ -1313,7 +1315,19 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     let index_wall_budget_ms: u64 = cfg.index.wall_budget_ms;
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let enumeration_was_complete = full_files.len() < limit.max(prune_enumeration_cap);
-    let symbol_sync = crate::code_symbols::sync_files(&full_files, project_path, started, index_wall_budget_ms / 2, cfg.index.max_file_bytes, enumeration_was_complete);
+    // The symbol sync runs before the chunk loop and checks its budget only at
+    // the top of each file, so one slow parse/store can overrun it by a whole
+    // file. Cap it at a third of the pass, then give the chunk loop -- the only
+    // writer of the semantic index -- a floor of half the budget measured from
+    // its own start, so no pass can end having indexed zero files.
+    let symbol_sync_started = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let symbol_budget_ms = (index_wall_budget_ms / 3).max(1);
+    let symbol_sync = crate::code_symbols::sync_files(&full_files, project_path, symbol_sync_started, symbol_budget_ms, cfg.index.max_file_bytes, enumeration_was_complete);
+    let symbol_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(symbol_sync_started);
+    let chunk_started = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let chunk_budget_ms = index_wall_budget_ms
+        .saturating_sub(chunk_started.saturating_sub(started))
+        .max(index_wall_budget_ms / 2);
     let mut indexed = 0;
     let mut chunked = 0;
     let mut embedded = 0;
@@ -1323,7 +1337,19 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     let mut deferred_chunks = 0u32;
     let mut deferred_files = 0u32;
     let mut floor_grace_used_this_pass = false;
-    let pessimistic_ms_per_chunk = cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound.max(1);
+    // A 16s-per-chunk bound is sane for a full 110s pass but is larger than a
+    // short topup pass itself, which made `under_floor` true from the very first
+    // file and deferred every file after the single grace one. Clamp the bound
+    // to the pass it is bounding.
+    // `pessimistic_ms_per_chunk` has to stay pessimistic: clamping it below the real cost of
+    // one embed makes `budget_chunks` overestimate how many chunks fit and the pass then
+    // overruns its wall budget by a whole file -- measured 12-22s against a 4s topup, on
+    // every dispatch of every project. The floor keeps a short pass down to one embed; the
+    // ceiling keeps a full 110s pass budgeting as it always did.
+    let pessimistic_ms_per_chunk = cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound
+        .max(1)
+        .min((chunk_budget_ms / 4).max(1))
+        .max(MIN_MS_PER_CHUNK_EMBED);
     let mut treesitter_failures = 0u32;
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1335,8 +1361,8 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         let dot = fp.rfind('.');
         let ext = match dot { Some(i) => &fp[i..], None => "" };
         let lang_name = match lang_for_ext(ext) { Some(x) => x, None => continue };
-        let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        if elapsed > index_wall_budget_ms {
+        let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(chunk_started);
+        if elapsed > chunk_budget_ms {
             deferred_files += 1;
             first_deferred.get_or_insert_with(|| fp.clone());
             continue;
@@ -1357,7 +1383,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                         chunked += m.chunks.len() as i32;
                         reused += m.chunks.len() as i32;
                         reused_files += 1;
-                        digest_entries.push((fp.clone(), dh));
+                        digest_entries.push((fp.clone(), stat_digest_hash(&stat).unwrap_or(dh)));
                         continue;
                     }
                 }
@@ -1370,8 +1396,9 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         { Some(c) => c, None => continue };
         if content.len() > cfg.index.max_file_bytes { continue; }
         let file_size = content.len() as u64;
-        let file_mtime = crate::wasm_dispatch::host_stat(fp)
-            .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
+        let file_stat = crate::wasm_dispatch::host_stat(fp)
+            .or_else(|| crate::wasm_dispatch::host_stat(raw_fp));
+        let file_mtime = file_stat.as_ref()
             .and_then(|s| s.get("mtime_ms").and_then(|v| v.as_f64()))
             .unwrap_or(0.0);
         seen.insert(fp.clone());
@@ -1379,7 +1406,8 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
         let file_hash = crc32(&content);
         let path_hash = crc32(fp);
-        let file_digest_hash = crate::hash::fnv1a64(content.as_bytes()) as u32;
+        let file_digest_hash = file_stat.as_ref().and_then(stat_digest_hash)
+            .unwrap_or_else(|| crate::hash::fnv1a64(content.as_bytes()) as u32);
         digest_entries.push((fp.clone(), file_digest_hash));
 
         if let Some(m) = prior.get(fp) {
@@ -1430,8 +1458,8 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         }
 
         let max_chunks_per_file_per_pass = cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only;
-        let elapsed_now = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        let remaining_ms = index_wall_budget_ms.saturating_sub(elapsed_now);
+        let elapsed_now = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(chunk_started);
+        let remaining_ms = chunk_budget_ms.saturating_sub(elapsed_now);
         let budget_chunks = (remaining_ms / pessimistic_ms_per_chunk).max(1) as usize;
         let cap = max_chunks_per_file_per_pass.min(budget_chunks).max(1);
 
@@ -1584,6 +1612,8 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         }
         fusion_corpus_cache_invalidate(project_path);
     }
+    let chunk_loop_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(chunk_started);
+    let loop_ended_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
 
     let files_set: std::collections::HashSet<&str> = full_files.iter().map(|s| s.trim_start_matches("./").trim_start_matches('/')).collect();
     let mut removed_files = 0;
@@ -1616,12 +1646,12 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     if pass_complete {
         let digest = digest_from_entries(digest_entries);
         store_digest_at(&digest, project_path);
-        let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} removed_files={} skipped_no_embed={} digest={}", indexed, chunked, embedded, reused, reused_files, removed_files, skipped_no_embed, digest);
+        let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} removed_files={} skipped_no_embed={} pass_elapsed_ms={} symbol_ms={} chunk_loop_ms={} post_ms={} digest={}", indexed, chunked, embedded, reused, reused_files, removed_files, skipped_no_embed, unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(pass_started), symbol_ms, chunk_loop_ms, unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(loop_ended_ms), digest);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     } else {
         let partial_digest = format!("{}:partial={}", digest_from_entries(digest_entries), deferred_files + deferred_chunks + skipped_no_embed);
         store_digest_at(&partial_digest, project_path);
-        let msg = format!("code_index: partial pass files_indexed={} deferred_files={} deferred_chunks={} embedded={} reused={} removed_files={} resume_at={:?} -- partial digest stored, next call resumes there", indexed, deferred_files, deferred_chunks, embedded, reused, removed_files, first_deferred);
+        let msg = format!("code_index: partial pass files_indexed={} deferred_files={} deferred_chunks={} embedded={} reused={} removed_files={} pass_elapsed_ms={} symbol_ms={} chunk_loop_ms={} post_ms={} resume_at={:?} -- partial digest stored, next call resumes there", indexed, deferred_files, deferred_chunks, embedded, reused, removed_files, unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(pass_started), symbol_ms, chunk_loop_ms, unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(loop_ended_ms), first_deferred);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
         crate::wasm_dispatch::emit_event("codeinsight_index_partial", json!({
             "files_indexed": indexed,
@@ -1717,27 +1747,36 @@ pub fn ensure_current_insight() -> Value {
     let stale = stored.as_deref() != Some(current.as_str());
     let prior_partial = stored.as_deref().is_some_and(|digest| digest.contains(":partial="));
     let cold_start = stored.is_none();
-    let index = if stale && !prior_partial {
+    let index = if stale {
         if cold_start {
             index_cfg(".", cfg.index.prune_pass_file_limit_ceiling, &cfg)
         } else {
+            // A stored digest carrying ":partial=" can never equal the current
+            // one, so this branch used to be skipped in favour of a full symbol
+            // re-sync -- which never clears the partial digest and burned a whole
+            // wall budget on every dispatch, leaving the chunk index frozen at
+            // whatever the last pass managed. Spend the bounded topup instead: it
+            // resumes from the stored cursor, advances the chunk index and syncs
+            // symbols inside its own budget.
             index_topup(".", cfg.index.prune_pass_file_limit_ceiling, cfg.index.incremental_topup_wall_budget_ms)
         }
     } else {
-        let symbols = if stale { crate::code_symbols::sync_tree(&cfg, None) } else { Value::Null };
         json!({
             "ok": true,
             "reused": true,
             "digest": stored,
             "complete": !prior_partial,
             "partial": prior_partial,
-            "symbols": symbols,
+            "symbols": Value::Null,
         })
     };
     let refreshed = index.get("digest").and_then(|v| v.as_str()).map(str::to_owned);
     let complete = index.get("complete").and_then(|v| v.as_bool()).unwrap_or(false);
     let chunks = index.get("chunks").and_then(|v| v.as_u64()).unwrap_or(0);
-    let ready = index.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
+    // `prior_partial` used to short-circuit into an unconditional ok/reused
+    // reply; keep that tolerance so routing a partial pass through a real index
+    // pass cannot newly fail the task-spawn readiness gate.
+    let ready = (index.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) || prior_partial)
         && (chunks > 0 || prior_partial || !stale);
     let fresh = !stale || (complete && refreshed.as_deref() == Some(current.as_str()));
     json!({
@@ -1784,7 +1823,21 @@ fn digest_from_entries(mut entries: Vec<(String, u32)>) -> String {
         acc.push_str(&format!("{:08x}", hash));
         acc.push('\n');
     }
-    format!("v3:{:016x}:files={}", crate::hash::fnv1a64(acc.as_bytes()), entries.len())
+    format!("v4:{:016x}:files={}", crate::hash::fnv1a64(acc.as_bytes()), entries.len())
+}
+
+/// Hash a file's identity from its stat alone. Every dispatch that checks staleness recomputes
+/// the digest, and hashing a file's bytes meant reading it through the host: measured ~220ms per
+/// file, 419s for one cold `codesearch` on a 1834-file repo. Size plus mtime answers "did this
+/// file change" without the read. A stat with no mtime falls back to the content hash.
+fn stat_digest_hash(stat: &Value) -> Option<u32> {
+    let mtime_ms = stat.get("mtime_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    if mtime_ms <= 0.0 { return None; }
+    let size = stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+    let mut buf = [0u8; 16];
+    buf[..8].copy_from_slice(&size.to_le_bytes());
+    buf[8..].copy_from_slice(&mtime_ms.to_bits().to_le_bytes());
+    Some(crate::hash::fnv1a64(&buf) as u32)
 }
 
 pub fn current_digest() -> String {
@@ -1827,6 +1880,7 @@ pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Op
         }
     }
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
+    let digest_started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let files = collect_files(root, cfg.index.digest_max_files, &cfg.index);
     let mut entries: Vec<(String, u32)> = Vec::new();
     for raw_fp in &files {
@@ -1837,13 +1891,22 @@ pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Op
             .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
         { Some(s) => s, None => continue };
         if stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0) > cfg.index.max_file_bytes as u64 { continue; }
-        let content = match host_read(&canon)
-            .or_else(|| host_read(raw_fp))
-        { Some(c) => c, None => continue };
-        let content_hash = crate::hash::fnv1a64(content.as_bytes()) as u32;
+        let content_hash = match stat_digest_hash(&stat) {
+            Some(h) => h,
+            None => match host_read(&canon).or_else(|| host_read(raw_fp)) {
+                Some(c) => crate::hash::fnv1a64(c.as_bytes()) as u32,
+                None => continue,
+            },
+        };
         entries.push((canon, content_hash));
     }
+    let entry_count = entries.len();
     let digest = digest_from_entries(entries);
+    let digest_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(digest_started);
+    if digest_ms >= 500 {
+        let msg = format!("code_index: digest files={} entries={} digest_ms={}", files.len(), entry_count, digest_ms);
+        let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+    }
     if let Ok(mut cache) = DIGEST_CACHE.lock() {
         cache.get_or_insert_with(std::collections::HashMap::new)
             .insert(cache_key, DigestCacheEntry { ts_ms: now_ms, digest: digest.clone() });
@@ -2359,6 +2422,10 @@ pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagC
     }
     Value::Object(out)
 }
+
+/// Lower bound on what one chunk embedding costs, used only to keep a pass's chunk budget
+/// pessimistic. Measured on this host: 4-22s for 1-3 chunks through the bert plugin.
+const MIN_MS_PER_CHUNK_EMBED: u64 = 4_000;
 
 pub const LITERAL_SCAN_MAX_FILES: usize = 50_000;
 

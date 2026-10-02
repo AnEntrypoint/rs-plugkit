@@ -1513,7 +1513,44 @@ fn dual_channel_depth(body: &Value, k: u32) -> usize {
 fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) -> Value {
     let root = body.get("root").and_then(|v| v.as_str()).or_else(|| body.get("projectPath").and_then(|v| v.as_str()));
     let opts = crate::codesearch_rank::RankOptions::from_body(body, k as usize, root);
-    if opts.verbose { raw } else { crate::codesearch_rank::compact_dual(query, &raw, &opts) }
+    if opts.verbose { return raw; }
+    // worth an exact-match scan when nothing else would be shown anyway; otherwise the
+    // scan's noise would outrank the semantic hits.
+    let channels_empty = crate::codesearch_rank::visible_channel_count(&raw, &opts) == 0;
+    let (tokens, lines) = literal_channel(body, root, query, &opts, channels_empty);
+    crate::codesearch_rank::compact_dual_with_literal(query, &raw, &opts, &lines, &tokens)
+}
+
+/// Exact-name evidence for a `dual` query: the identifier-shaped words in the query
+/// are matched verbatim across the worktree, so a hit does not depend on the chunk
+/// index being complete (it never is on a large project, and files over
+/// `index.max_file_bytes` are not in it at all).
+fn literal_channel(
+    body: &Value,
+    root: Option<&str>,
+    query: &str,
+    opts: &crate::codesearch_rank::RankOptions,
+    allow_plain_words: bool,
+) -> (Vec<String>, Vec<String>) {
+    let mut tokens = crate::codesearch_rank::identifier_tokens(query);
+    if tokens.is_empty() && allow_plain_words {
+        tokens = crate::codesearch_rank::content_tokens(query);
+    }
+    if tokens.is_empty() {
+        return (tokens, Vec::new());
+    }
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    let (include_globs, exclude_globs) = match identifier_route_globs(body, opts.include_docs) {
+        Ok(globs) => globs,
+        Err(_) => return (tokens, Vec::new()),
+    };
+    let pattern = crate::codesearch_rank::identifier_pattern_for(&tokens);
+    let scan_root = root.filter(|r| *r != "." && *r != "./");
+    let scan = IdentifierScan { pattern: &pattern, regex: true, whole_word: false, max_matches: crate::codesearch_rank::LITERAL_SCAN_MAX_MATCHES };
+    match identifier_scan_lines(&scan, body, scan_root, &include_globs, &exclude_globs, &cfg) {
+        Ok((lines, _complete)) => (tokens, lines),
+        Err(_) => (tokens, Vec::new()),
+    }
 }
 
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
@@ -1526,18 +1563,30 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
     }
     let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
     if !already_indexed {
+        let stale_check_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let stored = crate::code_index::stored_digest_at(Some(root));
         let current = crate::code_index::current_digest_at(root);
+        let digest_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(stale_check_started);
         let stale = match &stored { Some(s) => s != &current, None => true };
         if stale {
             let cold_start = stored.is_none();
             let reason = if cold_start { "digest-absent" } else { "digest-mismatch" };
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "root": root, "stored_then_current": current }));
-            if cold_start {
-                let _ = crate::code_index::index_at(root, 500, root);
+            // Both stale cases get the bounded topup, never the full pass. A full pass is
+            // allowed 110s of the 120s a client waits for one dispatch, and it ran here
+            // before the reply, so a cold codesearch was itself the timeout. A bounded pass
+            // stores a partial digest and resumes from its cursor, so repeated calls
+            // converge instead of one call paying for the whole tree.
+            let budget_ms = if cold_start {
+                CODESEARCH_COLD_INDEX_BUDGET_MS
             } else {
-                let _ = crate::code_index::index_at_topup(root, 500, root, cfg.index.incremental_topup_wall_budget_ms);
-            }
+                cfg.index.incremental_topup_wall_budget_ms
+            };
+            let index_started = unsafe { crate::wasm_dispatch::host_now_ms() };
+            let _ = crate::code_index::index_at_topup(root, 500, root, budget_ms);
+            let index_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(index_started);
+            let msg = format!("codesearch: stale path root={} reason={} digest_ms={} index_ms={} budget_ms={}", root, reason, digest_ms, index_ms, budget_ms);
+            let _ = unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -1582,6 +1631,11 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
 }
 
 const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
+
+/// Ceiling on the index pass a `codesearch` runs for itself on a root whose digest is
+/// absent. It is deliberately far below the 110s a full pass is allowed: the reply is
+/// re-entered after this pass, so every millisecond here is paid by the caller waiting.
+const CODESEARCH_COLD_INDEX_BUDGET_MS: u64 = 8_000;
 
 const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "query", "mode", "path", "glob", "path_glob", "exclude_glob", "exclude_globs", "case_insensitive", "whole_word", "comments_only",
@@ -1742,6 +1796,7 @@ struct IdentifierScan<'a> {
     pattern: &'a str,
     regex: bool,
     whole_word: bool,
+    max_matches: usize,
 }
 
 fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: Option<&str>, include_globs: &[String], exclude_globs: &[String], cfg: &crate::ragconfig::RagConfig) -> Result<(Vec<String>, bool), String> {
@@ -1755,7 +1810,7 @@ fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: Option<&str>
         comments_only: false,
         include_globs: include_globs.to_vec(),
         exclude_globs: exclude_globs.to_vec(),
-        max_matches: crate::codesearch_rank::IDENTIFIER_SCAN_MAX_MATCHES,
+        max_matches: scan.max_matches,
         max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
         output: crate::code_index::ScanOutput::Compact,
         list_limit: None,
@@ -1806,8 +1861,8 @@ fn codesearch_identifier(body: &Value, query: &str, root: Option<&str>, cfg: &cr
     };
     let substring_pattern = format!("(?i){}", regex::escape(query));
     let passes = [
-        (IdentifierScan { pattern: query, regex: false, whole_word: true }, false),
-        (IdentifierScan { pattern: &substring_pattern, regex: true, whole_word: false }, true),
+        (IdentifierScan { pattern: query, regex: false, whole_word: true, max_matches: crate::codesearch_rank::IDENTIFIER_SCAN_MAX_MATCHES }, false),
+        (IdentifierScan { pattern: &substring_pattern, regex: true, whole_word: false, max_matches: crate::codesearch_rank::IDENTIFIER_SCAN_MAX_MATCHES }, true),
     ];
     for (scan, substring) in &passes {
         let (lines, complete) = match identifier_scan_lines(scan, body, scan_root, &include_globs, &exclude_globs, cfg) {
@@ -1819,7 +1874,7 @@ fn codesearch_identifier(body: &Value, query: &str, root: Option<&str>, cfg: &cr
             (Vec::new(), true)
         } else {
             let pattern = crate::codesearch_rank::any_definition_pattern(query, *substring);
-            let definitions_scan = IdentifierScan { pattern: &pattern, regex: true, whole_word: false };
+            let definitions_scan = IdentifierScan { pattern: &pattern, regex: true, whole_word: false, max_matches: crate::codesearch_rank::IDENTIFIER_SCAN_MAX_MATCHES };
             match identifier_scan_lines(&definitions_scan, body, scan_root, &include_globs, &exclude_globs, cfg) {
                 Ok(found) => found,
                 Err(e) => return Some(Err(e)),
@@ -2058,7 +2113,10 @@ fn health_probe_recall() -> Value {
 }
 
 fn health_probe_codesearch() -> Value {
-    let probe = json!({ "query": "health check probe query", "k": 1 });
+    // `auto_indexed` keeps the probe from paying for an index pass: health is a liveness
+    // check that clients dispatch constantly, and a stale root used to make it build the
+    // tree -- minutes of work that blocked the project's dispatch lane behind it.
+    let probe = json!({ "query": "health check probe query", "k": 1, "auto_indexed": true });
     let packed = codesearch(&probe);
     let v = unpack_to_value(packed);
     let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
@@ -4977,6 +5035,148 @@ fn restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb: &str) {
     }
 }
 
+/// Every verb `dispatch_gated_verb` serves, aliases included. It mirrors that match:
+/// the unknown-verb reply and the `verbs` verb both advertise from here, so a name added
+/// to the match alone stays undiscoverable.
+pub const SERVED_VERBS: &[&str] = &[
+    "fs_read", "fs_write", "fs_readdir", "fs_stat",
+    "scan_deps", "scan-deps", "fetch", "env_get",
+    "kv_get", "kv_put", "kv_query",
+    "exec_js", "nodejs", "javascript", "node", "js", "lang",
+    "serp", "browser", "cdp", "health", "verbs",
+    "config_resolve", "config-sync-now", "dataflow_resolve",
+    "sql_open", "sql_close", "sql_list_dbs", "sql_exec", "sql_query", "sql_smoke",
+    "sql_serialize", "sql_deserialize",
+    "cache_get", "cache_put", "cache_invalidate", "cache_stats",
+    "codeinsight_index", "codeinsight", "codesearch", "code_search", "search",
+    "callers", "callees", "impact",
+    "memorize", "memorize-prune", "memorize_prune", "memorize-vacuum", "memorize_vacuum",
+    "memorize-retention", "memorize_retention", "recall",
+    "tencentdb-compat-probe", "tencentdb-memory-import",
+    "python", "py", "bash", "sh", "shell", "zsh", "powershell", "ps1", "ssh",
+    "go", "rust", "c", "cpp", "java", "deno",
+    "status", "wait", "sleep", "close", "filter",
+    "git_status", "branch_status", "git_push", "git_add", "git_commit", "git_finalize",
+    "git_log", "git_diff", "git_show", "git_fetch", "git_pull",
+    "ci-status", "ci_status", "git_branch", "git_checkout", "git_merge", "git_merge_abort",
+    "git_stash", "git_stash_pop", "git_stash_drop", "git_stash_list", "git_init",
+    "git_branch_delete", "git_rm", "git_revert", "git_reset", "git_poll",
+    "forget", "learn", "discipline",
+];
+
+/// Names callers reach for that this plugin spells differently. Only pairs that cost a
+/// round trip in practice belong here; a name with no entry still gets edit-distance matches.
+const VERB_INTENT_HINTS: &[(&[&str], &str)] = &[
+    (&["grep", "rg", "ripgrep", "ag", "ack", "find", "locate", "lookup"], "codesearch"),
+    (&["ls", "dir", "list", "tree"], "fs_readdir"),
+    (&["cat", "read", "open", "show"], "fs_read"),
+    (&["save", "put", "touch"], "fs_write"),
+    (&["run", "exec", "cmd"], "bash"),
+    (&["index", "reindex"], "codeinsight_index"),
+    (&["symbols", "defs", "definitions"], "codeinsight"),
+    (&["history"], "git_log"),
+];
+
+const COMMON_VERBS: &[&str] = &[
+    "codesearch", "fs_read", "fs_readdir", "fs_write", "exec_js", "bash",
+    "git_status", "git_commit", "recall", "memorize", "verbs",
+];
+
+const MAX_VERB_SUGGESTION_DISTANCE: usize = 4;
+
+fn verb_edit_distance(a: &str, b: &str, cutoff: usize) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len().abs_diff(b.len()) > cutoff { return cutoff + 1; }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur: Vec<usize> = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        let mut row_min = cur[0];
+        for (j, cb) in b.iter().enumerate() {
+            let step = if ca == cb { 0 } else { 1 };
+            cur[j + 1] = (prev[j] + step).min(prev[j + 1] + 1).min(cur[j] + 1);
+            row_min = row_min.min(cur[j + 1]);
+        }
+        if row_min > cutoff { return cutoff + 1; }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+fn served_verbs_all() -> Vec<&'static str> {
+    let mut all: Vec<&'static str> = SERVED_VERBS.to_vec();
+    all.extend_from_slice(crate::orchestrator::ORCHESTRATOR_VERBS);
+    all.sort_unstable();
+    all.dedup();
+    all
+}
+
+fn verb_suggestions(verb: &str, limit: usize) -> Vec<&'static str> {
+    let lower = verb.to_ascii_lowercase();
+    let mut scored: Vec<(usize, &'static str)> = served_verbs_all()
+        .into_iter()
+        .map(|c| (verb_edit_distance(&lower, &c.to_ascii_lowercase(), MAX_VERB_SUGGESTION_DISTANCE), c))
+        .filter(|(d, _)| *d <= MAX_VERB_SUGGESTION_DISTANCE)
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+    scored.into_iter().take(limit).map(|(_, c)| c).collect()
+}
+
+fn verb_intent_hint(verb: &str) -> Option<&'static str> {
+    let lower = verb.to_ascii_lowercase();
+    VERB_INTENT_HINTS
+        .iter()
+        .find(|(names, _)| names.contains(&lower.as_str()))
+        .map(|(_, target)| *target)
+}
+
+fn unknown_verb_error(verb: &str) -> u64 {
+    let all = served_verbs_all();
+    let mut detail = json!({
+        "error": format!(
+            "unknown verb '{}': this plugin serves {} verbs; dispatch `verbs` to list them all",
+            verb, all.len()
+        ),
+        "error_code": ERR_CODE_UNKNOWN_VERB,
+        "known_verbs": verb_suggestions(verb, 6),
+        "common_verbs": COMMON_VERBS,
+        "served_verb_count": all.len(),
+    });
+    if let Some(target) = verb_intent_hint(verb) {
+        detail["did_you_mean"] = json!(target);
+    }
+    err_json(verb, detail)
+}
+
+fn verbs(_body: &Value) -> u64 {
+    let all = served_verbs_all();
+    ok("verbs", json!({
+        "verbs": all,
+        "served_verb_count": all.len(),
+        "plugin_verbs": SERVED_VERBS,
+        "orchestrator_verbs": crate::orchestrator::ORCHESTRATOR_VERBS,
+        "aliases": {
+            "code_search": "codesearch",
+            "search": "codesearch",
+            "scan-deps": "scan_deps",
+            "js": "exec_js",
+            "node": "exec_js",
+            "nodejs": "exec_js",
+            "javascript": "exec_js",
+            "py": "python",
+            "sh": "bash",
+            "shell": "bash",
+            "zsh": "bash",
+            "ps1": "powershell",
+            "ci_status": "ci-status",
+            "memorize_prune": "memorize-prune",
+            "memorize_vacuum": "memorize-vacuum",
+            "memorize_retention": "memorize-retention",
+        },
+    }))
+}
+
 fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
     #[cfg(target_arch = "wasm32")]
     let dispatch_start_ms = unsafe { host_now_ms() };
@@ -5026,6 +5226,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "browser" => browser_lightpanda_or_steel_cdp_engine(&body, &body_s),
         "cdp" => cdp_real_chrome_escape_hatch(&body, &body_s),
         "health" => health(&body),
+        "verbs" => verbs(&body),
         "config_resolve" => config_resolve_report_winning_tier_and_any_rejected_tier(&body),
         "config-sync-now" => config_sync_now_force_immediate_refresh(&body),
         "dataflow_resolve" => dataflow_resolve(&body),
@@ -5093,7 +5294,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "learn" => err_coded("learn", ERR_CODE_RETIRED_VERB, "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index)"),
         "discipline" => discipline(&body),
         "" => err_coded("", ERR_CODE_INVALID_ARGS, "verb required"),
-        _ => err_coded(&verb, ERR_CODE_UNKNOWN_VERB, "unknown verb"),
+        _ => unknown_verb_error(&verb),
     };
     #[cfg(target_arch = "wasm32")]
     {

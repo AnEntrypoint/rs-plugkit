@@ -254,17 +254,62 @@ fn write_edges(fp: &str, edges: &[CallEdge], project_path: Option<&str>) {
     code_index::fv_put(&ns, &edges_key(fp), &json!({ "path": fp, "edges": packed }).to_string());
 }
 
-fn purge_legacy_edges(started_ms: u64, budget_ms: u64) {
+fn kv_dir_leaf(ns: &str) -> String {
+    ns.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '_' })
+        .collect()
+}
+
+fn readdir_names(path: &str) -> Option<Vec<String>> {
+    let packed = unsafe { crate::wasm_dispatch::host_fs_readdir(path.as_ptr(), path.len() as u32) };
+    let value = crate::wasm_dispatch::unpack_to_value_pub(packed);
+    let names: Vec<String> = value
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    if names.is_empty() { None } else { Some(names) }
+}
+
+/// Legacy call edges lived in one global namespace before edges became per-project. Clearing it
+/// used to mean `fv_query(ns, "")`, which reads every entry's full value and ships the whole
+/// namespace into the guest: measured 19,669 entries and 211s on `litebox-main`, paid on every
+/// sync, inside a 2.6s budget that let it delete only a few hundred before returning, so it
+/// neither finished nor stopped paying. A directory listing reads names only, and the deletes
+/// remove exactly what was listed, so every pass shrinks the next one. Returns the number
+/// deleted; a smaller count than the listing means the budget cut the pass short.
+fn purge_legacy_edges(started_ms: u64, budget_ms: u64, project_path: Option<&str>) -> usize {
     let ns = legacy_edges_namespace();
-    let Some(legacy) = code_index::fv_query(&ns, "").as_array().cloned() else { return };
-    for row in legacy {
-        if host_now_ms().saturating_sub(started_ms) > budget_ms {
-            return;
-        }
-        if let Some(key) = row.get("key").and_then(|k| k.as_str()) {
-            code_index::fv_delete(&ns, key);
+    let leaf = kv_dir_leaf(&ns);
+    let mut dirs = vec![format!(".agentplug-kv/{}", leaf)];
+    if let Some(root) = project_path.filter(|p| !p.is_empty()) {
+        dirs.insert(0, format!("{}/.agentplug-kv/{}", root.trim_end_matches('/'), leaf));
+    }
+    let mut names: Vec<String> = Vec::new();
+    for dir in &dirs {
+        if let Some(found) = readdir_names(dir) {
+            names = found;
+            break;
         }
     }
+    let listed = names.len();
+    let mut deleted = 0usize;
+    for name in names {
+        if host_now_ms().saturating_sub(started_ms) > budget_ms {
+            break;
+        }
+        let Some(key) = name.strip_suffix(".json") else { continue };
+        code_index::fv_delete(&ns, key);
+        deleted += 1;
+    }
+    if listed > 0 && deleted > 0 && deleted < listed {
+        let msg = format!(
+            "code_symbols: legacy edge purge partial listed={} deleted={} budget_ms={}",
+            listed, deleted, budget_ms
+        );
+        let _ = unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
+    }
+    deleted
 }
 
 fn extract_file(fp: &str, lang: &str, content: &str, size: u64, mtime_ms: u64) -> (FileSymbols, u32) {
@@ -312,15 +357,19 @@ pub(crate) fn sync_files(
     max_file_bytes: usize,
     prune_absent: bool,
 ) -> Value {
+    let entered = host_now_ms();
     let db = db_path(project_path);
     if let Err(e) = ensure_schema(&db) {
         return json!({ "ok": false, "error": e });
     }
-    purge_legacy_edges(started_ms, budget_ms);
+    let schema_ms = host_now_ms().saturating_sub(entered);
+    purge_legacy_edges(started_ms, budget_ms, project_path);
+    let purge_ms = host_now_ms().saturating_sub(entered).saturating_sub(schema_ms);
     let known: HashMap<String, (u64, u64, u64)> = rows(&db, &format!("SELECT path, size, mtime_ms, schema FROM {FILES_TABLE}"), &[])
         .iter()
         .map(|r| (string(r, "path"), (number(r.get("size")), number(r.get("mtime_ms")), number(r.get("schema")))))
         .collect();
+    let known_ms = host_now_ms().saturating_sub(entered).saturating_sub(schema_ms).saturating_sub(purge_ms);
     let size_cap = max_file_bytes.saturating_mul(SOURCE_SIZE_CAP_MULTIPLIER);
     let (mut synced, mut unchanged, mut deferred, mut symbols_written, mut edges_written, mut parse_failures) = (0u32, 0u32, 0u32, 0usize, 0usize, 0u32);
     let mut seen: HashSet<String> = HashSet::new();
@@ -350,6 +399,13 @@ pub(crate) fn sync_files(
             symbols_written += file.symbols.len();
             edges_written += file.edges.len();
         }
+    }
+    let loop_ms = host_now_ms().saturating_sub(entered).saturating_sub(schema_ms).saturating_sub(purge_ms).saturating_sub(known_ms);
+    let total_ms = host_now_ms().saturating_sub(entered);
+    if total_ms >= 1000 {
+        let msg = format!("code_symbols: sync_files total_ms={} schema_ms={} purge_ms={} known_ms={} loop_ms={} budget_ms={} synced={} unchanged={} deferred={}",
+            total_ms, schema_ms, purge_ms, known_ms, loop_ms, budget_ms, synced, unchanged, deferred);
+        unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32); }
     }
     let mut removed = 0u32;
     if prune_absent && deferred == 0 && !seen.is_empty() {
