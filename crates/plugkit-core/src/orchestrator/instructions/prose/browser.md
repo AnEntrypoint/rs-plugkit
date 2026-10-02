@@ -59,9 +59,9 @@ dom=<css-selector>\n
 
 `{ok, stdout, stderr, exit_code, session_id?, navigation_requested, landed_on_blank?, hint?, multi_session_warning?}`. `stdout` = stringified eval result; `stderr` = page errors + launch diagnostics; `exit_code` non-zero = the dispatch did not land -- read `stderr` and re-dispatch, never blind. `navigation_requested` reflects whether the dispatch carried a `url=`/bare-URL navigation; `landed_on_blank: true` with a `hint` means the expression ran against `about:blank` -- prefix `url=<target>` and re-dispatch.
 
-## Headed by default
+## Display selection
 
-The window opens on the user's screen -- that IS the witness. `GM_BROWSER_HEADLESS=1` opts into headless; absent it, a session with no visible window is a launch you did not make. Do not assume or request headless to "be quiet"; the flash is the proof.
+The window opens on the user's screen when Linux has `DISPLAY` or `WAYLAND_DISPLAY`. A displayless Linux runner starts headless, so CDP can still start. Set `headless` in `.gm/browser-config.json` to select the engine mode explicitly. When that setting is absent, `GM_BROWSER_HEADLESS=1` forces headless and `GM_BROWSER_HEADLESS=0` forces a visible window.
 
 ## Profile
 
