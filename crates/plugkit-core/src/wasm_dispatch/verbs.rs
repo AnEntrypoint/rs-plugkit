@@ -3321,7 +3321,7 @@ fn git_push(body: &Value) -> u64 {
             "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
         }).to_string());
     }
-    let porcelain = git_porcelain_in(repo.as_deref());
+        let porcelain = git_push_porcelain_in(repo.as_deref());
     if !porcelain.trim().is_empty() && explicit_source_ref.is_none() {
         log_deviation_push("push-dirty", &branch);
         let porcelain_preview: String = porcelain.lines().take(8).collect::<Vec<_>>().join("\n");
@@ -3404,7 +3404,7 @@ fn git_push(body: &Value) -> u64 {
             Some(f) => f.call(&rebase_argv, repo.as_deref()),
             None => git_call_argv(&rebase_argv, repo.as_deref()),
         }.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        if rebase_failed(&rebase_out) || !git_porcelain_in(repo.as_deref()).trim().is_empty() {
+            if rebase_failed(&rebase_out) || !git_push_porcelain_in(repo.as_deref()).trim().is_empty() {
             let _ = exec_git_in(repo.as_deref(), "rebase --abort");
             log_deviation_push("push-rebase-conflict", &branch);
             return pack(json!({
@@ -4961,9 +4961,56 @@ fn exec_git_in(repo: Option<&str>, args: &str) -> String {
     v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
-fn git_porcelain_in(repo: Option<&str>) -> String {
-    git_porcelain_scoped(repo, &[])
-}
+    fn git_porcelain_in(repo: Option<&str>) -> String {
+        git_porcelain_scoped(repo, &[])
+    }
+
+
+    fn git_push_porcelain_in(repo: Option<&str>) -> String {
+        let porcelain = git_porcelain_in(repo);
+        porcelain
+            .lines()
+            .filter(|line| !is_transient_submodule_status(repo, line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+
+    fn is_transient_submodule_status(repo: Option<&str>, line: &str) -> bool {
+        if line.get(..2) != Some(" m") {
+            return false;
+        }
+        let Some(path) = line.get(3..) else {
+            return false;
+        };
+        let path = path.trim();
+        if path.is_empty() || path.starts_with('/') || path.split('/').any(|part| part == "..") {
+            return false;
+        }
+        let index = git_call_argv(&["ls-files", "--stage", "--", path], repo);
+        let gitlink = index
+            .get("stdout")
+            .and_then(|value| value.as_str())
+            .map(|stdout| stdout.lines().any(|entry| {
+                entry.starts_with("160000 ")
+                    && entry.split_once('\t').map(|(_, indexed_path)| indexed_path == path).unwrap_or(false)
+            }))
+            .unwrap_or(false);
+        if !gitlink {
+            return false;
+        }
+        let root = exec_git_in(repo, "rev-parse --show-toplevel");
+        let root = root.trim_end_matches(['\r', '\n']);
+        if root.is_empty() {
+            return false;
+        }
+        let submodule = format!("{}/{}", root.trim_end_matches(['/', '\\']), path);
+        let inside = git_call_argv(&["rev-parse", "--is-inside-work-tree"], Some(&submodule));
+        if inside.get("stdout").and_then(|value| value.as_str()).map(str::trim) != Some("true") {
+            return false;
+        }
+        git_porcelain_in(Some(&submodule)).trim().is_empty()
+    }
 
 fn git_porcelain_scoped(repo: Option<&str>, paths: &[String]) -> String {
     super::host_abi::porcelain_or_dirty(git_call_argv(&as_argv(&git_porcelain_argv(paths, repo)), repo))
