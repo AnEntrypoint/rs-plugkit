@@ -153,6 +153,8 @@ pub const ERR_CODE_UNKNOWN_VERB: &str = "unknown_verb";
 pub const ERR_CODE_INVALID_ARGS: &str = "invalid_args";
 pub const ERR_CODE_PANIC: &str = "panic";
 pub const ERR_CODE_GATE_DENIED: &str = "gate_denied";
+pub const ERR_CODE_DANGLING_REFERENCE: &str = "dangling_reference";
+pub const ERR_CODE_DANGLING_SCAN_UNREADABLE: &str = "dangling_scan_unreadable";
 
 fn shared_store_contract() -> Value {
     json!({
@@ -192,6 +194,7 @@ fn persisted_paths_compatibility_surface_report() -> Value {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Capability {
     ProjectPath,
+    ProjectPathOrGrantedRoot,
     EnvAllowlist,
     KvNamespace,
     Unguarded,
@@ -202,7 +205,7 @@ const VERB_CAPABILITIES: &[(&str, Capability)] = &[
     ("fs_write", Capability::ProjectPath),
     ("fs_stat", Capability::ProjectPath),
     ("fs_readdir", Capability::ProjectPath),
-    ("scan_deps", Capability::ProjectPath),
+    ("scan_deps", Capability::ProjectPathOrGrantedRoot),
     ("env_get", Capability::EnvAllowlist),
     ("kv_put", Capability::KvNamespace),
     ("fetch", Capability::Unguarded),
@@ -243,6 +246,10 @@ fn guard_surface_report() -> Value {
         "path_within_project": {
             "rejects": ["any .. segment", "absolute paths", "paths containing a drive colon"],
             "applied_to": verbs_with_capability(Capability::ProjectPath),
+        },
+        "project_path_or_granted_root": {
+            "accepts": ["a relative path within the project", "an absolute directory the host grants (an existing directory holding .git, .gm, package.json, Cargo.toml, go.mod or pyproject.toml)"],
+            "applied_to": verbs_with_capability(Capability::ProjectPathOrGrantedRoot),
         },
         "env_get": {
             "applied_to": verbs_with_capability(Capability::EnvAllowlist),
@@ -420,14 +427,41 @@ fn fs_read(body: &Value) -> u64 {
 
 fn fs_write(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let data = body.get("content").and_then(|v| v.as_str())
-        .or_else(|| body.get("data").and_then(|v| v.as_str()))
-        .unwrap_or("");
+    let content = ["content", "data", "text"].iter()
+        .find_map(|key| body.get(*key).and_then(|v| v.as_str()));
+    let allow_empty = body.get("allow_empty").and_then(|v| v.as_bool()).unwrap_or(false);
     if path.is_empty() { return err("fs_write", "path required"); }
     if !path_within_project(path) {
         return err("fs_write", "path must be relative and within the project");
     }
-    if super::host_abi::host_write(path, data) { ok("fs_write", json!({ "bytes": data.len() })) } else { err("fs_write", "write failed") }
+    let received_keys: Vec<String> = body.as_object()
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default();
+    let Some(content) = content else {
+        return err_json("fs_write", json!({
+            "error": format!(
+                "fs_write needs the file contents as a string under one of content|data|text -- the body carried {}",
+                if received_keys.is_empty() { "<no keys>".to_string() } else { received_keys.join(", ") }
+            ),
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "accepted_content_keys": ["content", "data", "text"],
+            "received_keys": received_keys,
+            "next_dispatch": "fs_write",
+        }));
+    };
+    if content.is_empty() && !allow_empty {
+        return err_json("fs_write", json!({
+            "error": "refusing to write empty content -- pass allow_empty: true to truncate the file on purpose",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "path": path,
+            "next_dispatch": "fs_write",
+        }));
+    }
+    if super::host_abi::host_write(path, content) {
+        ok("fs_write", json!({ "bytes": content.len(), "path": path }))
+    } else {
+        err("fs_write", "write failed")
+    }
 }
 
 fn fs_readdir(body: &Value) -> u64 {
@@ -453,10 +487,21 @@ fn fs_stat(body: &Value) -> u64 {
     }
 }
 
+fn path_is_absolute(path: &str) -> bool {
+    path.starts_with('/') || path.starts_with('\\') || path.as_bytes().get(1) == Some(&b':')
+}
+
 fn scan_deps(body: &Value) -> u64 {
-    let root = body.get("root").and_then(|v| v.as_str()).unwrap_or(".");
-    if !path_within_project(root) {
-        return err("scan_deps", "root must be relative and within the project");
+    let root = body.get("root").and_then(|v| v.as_str())
+        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty())
+        .unwrap_or(".");
+    if path_is_absolute(root) {
+        if !crate::wasm_dispatch::host_allow_root(root) {
+            return err("scan_deps", &format!("root '{root}' is not a real, existing project directory the host will grant access to"));
+        }
+    } else if !path_within_project(root) {
+        return err("scan_deps", "root must be within the project (relative, no '..') or an absolute project directory the host grants");
     }
     ok("scan_deps", crate::scan_deps::scan_deps(body))
 }
@@ -595,7 +640,7 @@ fn lang(body: &Value) -> u64 {
     }
 }
 
-const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "timeoutMs=<ms>\\n<code>";
+const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "[timeoutMs=<ms>\\n]<code> (timeoutMs is the enforced wall-clock limit: default 300000, hard ceiling 900000, the process tree is killed at expiry)";
 
 fn exec_js(body: &Value, body_s: &str) -> u64 {
     if body.is_object() {
@@ -612,21 +657,16 @@ fn exec_js(body: &Value, body_s: &str) -> u64 {
         "error_code": ERR_CODE_INVALID_ARGS,
         "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
     })); }
-    let timeout_ms = match prefix_timeout_ms {
-        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
+    let opts = match prefix_timeout_ms {
+        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => json!({"timeoutMs": n}),
         Some(n) => return err_json("exec_js", json!({
             "error": "timeoutMs below floor",
             "error_code": ERR_CODE_INVALID_ARGS,
             "min": crate::validation::MIN_TIMEOUT_MS,
             "received": n,
         })),
-        None => return err_json("exec_js", json!({
-            "error": "missing timeoutMs -- prefix the body with a timeoutMs=<ms> line naming a positive integer millisecond budget",
-            "error_code": ERR_CODE_INVALID_ARGS,
-            "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
-        })),
-    };
-    let opts = json!({"timeoutMs": timeout_ms}).to_string();
+        None => json!({}),
+    }.to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok("exec_js", Value::String(s)),
@@ -847,16 +887,58 @@ pub fn memory_recall_backend(query_embedding: &Value, namespace: &str, limit: u3
         .filter(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
 }
 
+fn recall_reply(body: &Value, mode: &str, namespace: &str, derived_query: &str, hits: &Value, vector_hits: &Value) -> Value {
+    let full = crate::recall_compact::wants_full(body);
+    let mut reply = json!({
+        "mode": mode,
+        "namespace": namespace,
+        "derived_query": derived_query,
+        "hits": crate::recall_compact::compact_hits(hits, full),
+    });
+    if body.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false) {
+        reply["vector_hits"] = vector_hits.clone();
+    }
+    if !full {
+        reply["expand"] = json!("recall {key:\"<hit key>\"} for one full memory; recall {query, full:true} for full text of all hits");
+    }
+    reply
+}
+
+fn recall_by_key(namespace: &str, key: &str) -> u64 {
+    let valid = !key.is_empty() && key.len() <= 128 && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid { return err("recall", "key must be 1-128 chars of [A-Za-z0-9_-], the mem-<hash>-<n> key a compact recall hit reports"); }
+    let Some(path) = crate::memory_md::md_path(namespace, key) else { return err("recall", &format!("namespace '{namespace}' has no memories directory")) };
+    match host_read(&path) {
+        Some(content) => ok("recall", match crate::memory_md::parse(&content) {
+            Some(doc) => json!({ "key": key, "namespace": namespace, "created": doc.created, "updated": doc.updated, "text": doc.text }),
+            None => json!({ "key": key, "namespace": namespace, "text": content.trim() }),
+        }),
+        None => err("recall", &format!("no memory file for key '{key}' in namespace '{namespace}'")),
+    }
+}
+
 fn recall(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_limit as u64) as u32;
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or(&cfg.namespaces.default);
+    let routed = crate::tencentdb_memory::namespace_is_routed(namespace);
+    match body.get("key") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(_)) if routed => return err("recall", &format!("namespace '{namespace}' is routed to the TencentDB backend, which has no per-key memory file -- use recall {{query, full:true}} instead")),
+        Some(Value::String(key)) => return recall_by_key(namespace, key),
+        Some(other) => return err("recall", &format!("key must be a memory key string such as \"mem-<hash>-<n>\", got {other}")),
+    }
     if query.is_empty() { return err("recall", "query required"); }
-    if crate::tencentdb_memory::namespace_is_routed(namespace) {
+    if routed {
         let embedding = embed_query(query);
         return match crate::tencentdb_memory::recall(&embedding, namespace, limit as usize) {
-            Ok(v) => ok("recall", v),
+            Ok(mut v) => {
+                if let Some(hits) = v.get("hits").filter(|h| h.is_array()).cloned() {
+                    v["hits"] = crate::recall_compact::compact_hits(&hits, crate::recall_compact::wants_full(body));
+                }
+                ok("recall", v)
+            }
             Err(e) => err("recall", &e),
         };
     }
@@ -883,26 +965,14 @@ fn recall(body: &Value) -> u64 {
         let now_ms = unsafe { host_now_ms() } as i64;
         if let Ok(md_hits) = crate::rssearch_vectors::search_memory_hits_cfg(&embedding, mem_ns, limit as usize, now_ms, &cfg) {
             if md_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
-                return ok("recall", json!({
-                    "mode": "vector_top_k",
-                    "namespace": namespace,
-                    "derived_query": derived_query,
-                    "hits": md_hits,
-                    "vector_hits": vector_hits,
-                }));
+                return ok("recall", recall_reply(body, "vector_top_k", namespace, &derived_query, &md_hits, &vector_hits));
             }
         }
     }
     let vec_hits = vec_search_local(&embedding, namespace, limit);
     if !vec_hits.is_null() && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
         let annotated = annotate_hits_with_score(vec_hits);
-        return ok("recall", json!({
-            "mode": "vector_top_k",
-            "namespace": namespace,
-            "derived_query": derived_query,
-            "hits": annotated,
-            "vector_hits": vector_hits,
-        }));
+        return ok("recall", recall_reply(body, "vector_top_k", namespace, &derived_query, &annotated, &vector_hits));
     }
     let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, query.as_ptr(), query.len() as u32) };
     let kv_hits = unpack_to_value(packed);
@@ -935,14 +1005,9 @@ fn recall(body: &Value) -> u64 {
         );
     }
 
-    ok("recall", json!({
-        "mode": "fallback_like",
-        "degraded": degraded,
-        "namespace": namespace,
-        "derived_query": derived_query,
-        "hits": annotated,
-        "vector_hits": vector_hits,
-    }))
+    let mut reply = recall_reply(body, "fallback_like", namespace, &derived_query, &annotated, &vector_hits);
+    reply["degraded"] = json!(degraded);
+    ok("recall", reply)
 }
 
 const DIAGNOSTIC_EVENT_COOLDOWN_MS: i64 = 5 * 60 * 1000;
@@ -1355,9 +1420,10 @@ fn memorize_prune(body: &Value) -> u64 {
             let flat_rc = unsafe { host_kv_delete(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
             let _ = unsafe { host_kv_delete(vec_ns.as_ptr(), vec_ns.len() as u32, key.as_ptr(), key.len() as u32) };
             let md_deleted = crate::memory_md::delete_memory(namespace, key);
-            if flat_rc != 0 || md_deleted || idx_marked {
+            let legacy_deleted = crate::memory_md::delete_legacy_flat(namespace, key);
+            if flat_rc != 0 || md_deleted || idx_marked || legacy_deleted {
                 deleted.push(key.clone());
-                emit_event("memory.pruned", json!({"key": key, "namespace": namespace, "mode": "explicit-key", "md_deleted": md_deleted, "index_marked": idx_marked}));
+                emit_event("memory.pruned", json!({"key": key, "namespace": namespace, "mode": "explicit-key", "md_deleted": md_deleted, "index_marked": idx_marked, "legacy_deleted": legacy_deleted}));
             } else {
                 not_found.push(key.clone());
                 emit_event("memory.prune-miss", json!({"key": key, "namespace": namespace, "mode": "explicit-key"}));
@@ -1399,14 +1465,84 @@ fn memorize_prune(body: &Value) -> u64 {
         };
     }
     let (vector_candidates, _) = rssearch_vector_hits(&embedding, namespace, k, true);
-    let candidates = vec_search_local(&embedding, namespace, k);
-    ok("memorize-prune", json!({
+    let mut candidates = vec_search_local(&embedding, namespace, k);
+    let (unindexed_listed, unindexed_total) = unindexed_on_disk_candidates(namespace);
+    let listed_keys: Vec<String> = candidates
+        .as_array()
+        .map(|a| a.iter().filter_map(|c| c.get("key").and_then(|v| v.as_str()).map(String::from)).collect())
+        .unwrap_or_default();
+    if let Some(arr) = candidates.as_array_mut() {
+        for entry in &unindexed_listed {
+            let Some(key) = entry.get("key").and_then(|v| v.as_str()) else { continue };
+            if listed_keys.iter().any(|listed| listed == key) {
+                continue;
+            }
+            arr.push(entry.clone());
+        }
+    }
+    let mut resp = json!({
         "namespace": namespace,
         "mode": "review",
         "candidates": candidates,
         "vector_candidates": vector_candidates,
-        "note": "Review-only: re-dispatch memorize-prune with {keys:[...]} naming the stale ones to delete. Pruning is agent-judged, never auto-similarity-deleted. candidates falls back to the libsql rssearch_vectors result when host_vec_search is unimplemented (both native runtimes stub it).",
-    }))
+        "unindexed_on_disk": unindexed_listed,
+        "unindexed_on_disk_total": unindexed_total,
+        "note": "Review-only: re-dispatch memorize-prune with {keys:[...]} naming the stale ones to delete. Pruning is agent-judged, never auto-similarity-deleted. candidates falls back to the libsql rssearch_vectors result when host_vec_search is unimplemented (both native runtimes stub it). Entries carrying source=on_disk_unindexed exist on disk with no vector row, so they never surface in recall and never appear in vector candidates; they are still real memos and are prunable by explicit key.",
+    });
+    if unindexed_total > unindexed_listed.len() {
+        resp["unindexed_on_disk_truncated"] = json!(unindexed_total - unindexed_listed.len());
+    }
+    ok("memorize-prune", resp)
+}
+
+const UNINDEXED_CANDIDATE_MAX: usize = 500;
+
+fn unindexed_on_disk_candidates(namespace: &str) -> (Vec<Value>, usize) {
+    let indexed = crate::rssearch_vectors::live_keys(namespace);
+    let mut paths: Vec<(String, String)> = crate::memory_md::on_disk_memo_paths(namespace)
+        .into_iter()
+        .filter(|(key, _)| !indexed.iter().any(|k| k == key))
+        .collect();
+    let total = paths.len();
+    paths.truncate(UNINDEXED_CANDIDATE_MAX);
+    let mut out = Vec::new();
+    for (key, path) in paths {
+        let Some(content) = host_read(&path) else { continue };
+        let text = crate::memory_md::parse(&content)
+            .map(|doc| doc.text)
+            .unwrap_or_else(|| content.trim().to_string());
+        out.push(json!({
+            "key": key,
+            "namespace": namespace,
+            "text": text,
+            "indexed": false,
+            "source": "on_disk_unindexed",
+        }));
+    }
+    (out, total)
+}
+
+const COMPACT_DUAL_CANDIDATE_MULTIPLIER: usize = 4;
+
+fn with_corpus_symbol(corpus: &crate::code_index::FusionCorpus, row: &Value) -> Value {
+    let mut row = row.clone();
+    if row.get("symbol").is_none() {
+        let symbol = row.get("key").and_then(|k| k.as_str()).and_then(|k| corpus.symbol_for_key(k));
+        if let (Some(symbol), Some(obj)) = (symbol, row.as_object_mut()) {
+            obj.insert("symbol".to_string(), symbol);
+        }
+    }
+    row
+}
+
+fn dual_channel_depth(body: &Value, k: u32) -> usize {
+    if body.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false) { k as usize } else { (k as usize).saturating_mul(COMPACT_DUAL_CANDIDATE_MULTIPLIER) }
+}
+
+fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) -> Value {
+    let root = body.get("root").and_then(|v| v.as_str()).or_else(|| body.get("projectPath").and_then(|v| v.as_str()));
+    let opts = crate::codesearch_rank::RankOptions::from_body(body, k as usize, root);
+    if opts.verbose { raw } else { crate::codesearch_rank::compact_dual(query, &raw, &opts) }
 }
 
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
@@ -1439,10 +1575,11 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         }
     }
     let embedding = embed_query(query);
-    let vres = crate::code_index::search_at(query, k as usize, Some(&embedding), Some(root));
+    let shown_k = dual_channel_depth(body, k);
+    let vres = crate::code_index::search_at(query, shown_k, Some(&embedding), Some(root));
     let vector_hits = vres.get("rows").cloned().unwrap_or_else(|| json!([]));
     let mut corpus = crate::code_index::FusionCorpus::load_at(Some(root));
-    let bm25_hits: Vec<Value> = corpus.bm25_rank_cfg(query, k as usize, &cfg.scoring)
+    let bm25_hits: Vec<Value> = corpus.bm25_rank_cfg(query, shown_k, &cfg.scoring)
         .into_iter()
         .map(|(key, score)| {
             let text = corpus.text_for_key(&key).unwrap_or_default();
@@ -1457,7 +1594,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         })
         .collect();
     let commits = crate::code_index::git_commit_rank_at(root, query, 10);
-    ok("codesearch", json!({
+    let raw = json!({
         "mode": "dual",
         "root": root,
         "vector_hits": vector_hits,
@@ -1469,12 +1606,18 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
             "commits": { "independent": true, "indexed_root": root },
         },
         "degraded": vres.get("degraded").cloned().unwrap_or(json!(false)),
-    }))
+    });
+    ok("codesearch", compact_dual_reply(body, query, k, raw))
 }
 
 const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 
-const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit"];
+const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
+    "query", "mode", "path", "glob", "path_glob", "exclude_glob", "exclude_globs", "case_insensitive", "whole_word", "comments_only",
+    "k", "max_results", "maxResults", "limit", "head_limit", "max_matches", "max_files", "output", "max_chars", "verbose", "docs",
+];
+
+const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit", "head_limit"];
 
 fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> Result<(u32, bool), String> {
     let mut seen: Vec<(&str, u64)> = Vec::new();
@@ -1500,6 +1643,24 @@ fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> R
             Ok((*first as u32, true))
         }
     }
+}
+
+fn glob_patterns_from(value: Option<&Value>) -> Result<Vec<String>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::String(s)) => Ok(Some(s.clone()).filter(|g| !g.is_empty()).into_iter().collect()),
+        Some(Value::Array(items)) => items.iter().map(|item| match item.as_str() {
+            Some(s) => Ok(s.to_string()),
+            None => Err("array entries must all be glob strings".to_string()),
+        }).map(|r| r.map(|s| s.trim().to_string())).filter(|r| !matches!(r, Ok(s) if s.is_empty())).collect(),
+        Some(_) => Err("must be a glob string or an array of glob strings".to_string()),
+    }
+}
+
+fn dispatch_task_id() -> Option<String> {
+    let key = "AGENTPLUG_DISPATCH_TASK";
+    let packed = unsafe { host_env_get(key.as_ptr(), key.len() as u32) };
+    unpack_to_string(packed).map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
 }
 
 fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ragconfig::RagConfig, explicit_limit: Option<u32>) -> u64 {
@@ -1534,6 +1695,52 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         },
         None => explicit_limit.map(|limit| limit as usize).unwrap_or(usize::MAX),
     };
+    let output = match body.get("output") {
+        None | Some(Value::Null) => crate::code_index::ScanOutput::Matches,
+        Some(raw) => match raw.as_str().and_then(crate::code_index::ScanOutput::parse) {
+            Some(mode) => mode,
+            None => return err("codesearch", &format!("output {raw} is not an output mode -- valid modes are {}", crate::code_index::SCAN_OUTPUT_NAMES)),
+        },
+    };
+    let max_chars = match body.get("max_chars") {
+        None | Some(Value::Null) => crate::code_index::DEFAULT_REPLY_MAX_CHARS,
+        Some(value) => match value.as_u64() {
+            Some(n) if n > 0 => (n as usize).min(crate::code_index::MAX_REPLY_MAX_CHARS),
+            _ => return err("codesearch", "max_chars must be a positive integer number of characters"),
+        },
+    };
+    let list_output = matches!(output, crate::code_index::ScanOutput::Files | crate::code_index::ScanOutput::Count);
+    let (max_matches, list_limit) = if list_output {
+        (body.get("max_matches").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(usize::MAX), explicit_limit.map(|n| n as usize))
+    } else {
+        (max_matches, None)
+    };
+    let mut include_globs: Vec<String> = Vec::new();
+    let mut exclude_globs: Vec<String> = Vec::new();
+    for key in ["path_glob", "glob"] {
+        match glob_patterns_from(body.get(key)) {
+            Ok(patterns) => for pattern in patterns {
+                match pattern.strip_prefix('!') {
+                    Some(negated) => exclude_globs.push(negated.to_string()),
+                    None => include_globs.push(pattern),
+                }
+            },
+            Err(e) => return err("codesearch", &format!("{key} {e}")),
+        }
+    }
+    for key in ["exclude_glob", "exclude_globs"] {
+        match glob_patterns_from(body.get(key)) {
+            Ok(patterns) => exclude_globs.extend(patterns.into_iter().map(|p| p.strip_prefix('!').map(str::to_string).unwrap_or(p))),
+            Err(e) => return err("codesearch", &format!("{key} {e}")),
+        }
+    }
+    if body.get("docs").is_some_and(|v| !v.is_boolean()) {
+        return err("codesearch", "docs must be a boolean -- literal/regex scans include docs by default; docs=false excludes *.md/*.mdx/*.rst/*.adoc and docs/ trees");
+    }
+    if body.get("docs").and_then(|v| v.as_bool()) == Some(false) {
+        exclude_globs.extend(crate::codesearch_rank::DOC_EXCLUDE_GLOBS.iter().map(|g| g.to_string()));
+    }
+    let spill_name = format!("codesearch-{}.txt", dispatch_task_id().unwrap_or_else(|| unsafe { host_now_ms() }.to_string()));
     let scan = crate::code_index::LiteralScan {
         pattern: query,
         root,
@@ -1541,12 +1748,17 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         regex,
         case_insensitive: body.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false),
         whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
-        path_glob: body.get("path_glob").and_then(|v| v.as_str())
-            .or_else(|| body.get("glob").and_then(|v| v.as_str()))
-            .filter(|g| !g.is_empty()),
+        comments_only: body.get("comments_only").and_then(|v| v.as_bool()).unwrap_or(false),
+        include_globs,
+        exclude_globs,
         max_matches,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
+        output,
+        list_limit,
+        max_chars,
+        spill_name,
+        verbose: body.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false),
     };
     let out = crate::code_index::scan_literal(&scan, cfg);
     if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
@@ -1555,7 +1767,119 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
     ok("codesearch", out)
 }
 
+struct IdentifierScan<'a> {
+    pattern: &'a str,
+    regex: bool,
+    whole_word: bool,
+}
+
+fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: Option<&str>, include_globs: &[String], exclude_globs: &[String], cfg: &crate::ragconfig::RagConfig) -> Result<(Vec<String>, bool), String> {
+    let request = crate::code_index::LiteralScan {
+        pattern: scan.pattern,
+        root,
+        path: body.get("path").and_then(|v| v.as_str()).filter(|p| !p.is_empty()),
+        regex: scan.regex,
+        case_insensitive: false,
+        whole_word: scan.whole_word,
+        comments_only: false,
+        include_globs: include_globs.to_vec(),
+        exclude_globs: exclude_globs.to_vec(),
+        max_matches: crate::codesearch_rank::IDENTIFIER_SCAN_MAX_MATCHES,
+        max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
+        output: crate::code_index::ScanOutput::Compact,
+        list_limit: None,
+        max_chars: usize::MAX,
+        spill_name: String::new(),
+        verbose: false,
+    };
+    let out = crate::code_index::scan_literal(&request, cfg);
+    if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+        return Err(out.get("error").and_then(|e| e.as_str()).unwrap_or("identifier scan failed").to_string());
+    }
+    let lines = out.get("matches").and_then(|m| m.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    Ok((lines, out.get("exhaustive").and_then(|b| b.as_bool()).unwrap_or(false)))
+}
+
+fn identifier_route_globs(body: &Value, include_docs: bool) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut include_globs: Vec<String> = Vec::new();
+    let mut exclude_globs: Vec<String> = if include_docs {
+        Vec::new()
+    } else {
+        crate::codesearch_rank::DOC_EXCLUDE_GLOBS.iter().map(|g| g.to_string()).collect()
+    };
+    for key in ["path_glob", "glob"] {
+        for pattern in glob_patterns_from(body.get(key)).map_err(|e| format!("{key} {e}"))? {
+            match pattern.strip_prefix('!') {
+                Some(negated) => exclude_globs.push(negated.to_string()),
+                None => include_globs.push(pattern),
+            }
+        }
+    }
+    for key in ["exclude_glob", "exclude_globs"] {
+        let patterns = glob_patterns_from(body.get(key)).map_err(|e| format!("{key} {e}"))?;
+        exclude_globs.extend(patterns.into_iter().map(|p| p.strip_prefix('!').map(str::to_string).unwrap_or(p)));
+    }
+    Ok((include_globs, exclude_globs))
+}
+
+fn codesearch_identifier(body: &Value, query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig, opts: &crate::codesearch_rank::RankOptions) -> Option<Result<Value, String>> {
+    if let Some(r) = root {
+        if r != "." && !crate::wasm_dispatch::host_allow_root(r) { return None; }
+    }
+    let scan_root = root.filter(|r| *r != "." && *r != "./");
+    let (include_globs, exclude_globs) = match identifier_route_globs(body, opts.include_docs) {
+        Ok(globs) => globs,
+        Err(e) => return Some(Err(e)),
+    };
+    let substring_pattern = format!("(?i){}", regex::escape(query));
+    let passes = [
+        (IdentifierScan { pattern: query, regex: false, whole_word: true }, false),
+        (IdentifierScan { pattern: &substring_pattern, regex: true, whole_word: false }, true),
+    ];
+    for (scan, substring) in &passes {
+        let (lines, complete) = match identifier_scan_lines(scan, body, scan_root, &include_globs, &exclude_globs, cfg) {
+            Ok(found) => found,
+            Err(e) => return Some(Err(e)),
+        };
+        if lines.is_empty() { continue; }
+        let (definition_lines, definitions_complete) = if complete {
+            (Vec::new(), true)
+        } else {
+            let pattern = crate::codesearch_rank::any_definition_pattern(query, *substring);
+            let definitions_scan = IdentifierScan { pattern: &pattern, regex: true, whole_word: false };
+            match identifier_scan_lines(&definitions_scan, body, scan_root, &include_globs, &exclude_globs, cfg) {
+                Ok(found) => found,
+                Err(e) => return Some(Err(e)),
+            }
+        };
+        let scan_lines = crate::codesearch_rank::ScanLines { lines: &lines, definition_lines: &definition_lines, complete, definitions_complete };
+        if let Some(report) = crate::codesearch_rank::identifier_report(query, &scan_lines, opts, *substring) {
+            return Some(Ok(report));
+        }
+    }
+    None
+}
+
 fn codesearch(body: &Value) -> u64 {
+    let packed = codesearch_dispatch(body);
+    let mut v = unpack_to_value(packed);
+    if !v.is_object() { return packed; }
+    if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
+        if let Some(obj) = v.as_object_mut() {
+            obj.entry("modes".to_string()).or_insert_with(|| json!({
+                "literal": "exhaustive path:line substring search -- pass mode:\"literal\" when you can name the symbol or string exactly",
+                "regex": "the same, with a regex query",
+                "filename": "path-only match",
+                "dual": "ranked BM25+vector retrieval (the default)"
+            }));
+        }
+    }
+    pack(v.to_string())
+}
+
+fn codesearch_dispatch(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     if query.is_empty() { return err("codesearch", "query required"); }
@@ -1576,12 +1900,27 @@ fn codesearch(body: &Value) -> u64 {
         Err(e) => return err("codesearch", &e),
     };
     if mode == "literal" || mode == "regex" {
+        if let Some(refusal) = refuse_unknown_fields("codesearch", body, CODESEARCH_EXHAUSTIVE_FIELDS) { return refusal; }
         let explicit = if limit_was_explicit { Some(k) } else { None };
         return codesearch_exhaustive(body, query, mode == "regex", &cfg, explicit);
     }
     let root = body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
         .filter(|p| !p.is_empty());
+    let rank_opts = crate::codesearch_rank::RankOptions::from_body(body, k as usize, root);
+    let identifier = query.trim();
+    let flag = |name: &str| body.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
+    let dataflow_override_active = crate::dataflow::document_detailed().1 != crate::dataflow::DataflowTier::CompiledDefault
+        && crate::dataflow::pipeline_for("codesearch").is_some();
+    let identifier_route = mode == "dual" && !rank_opts.verbose && !flag("rebuild") && !flag("auto_indexed")
+        && !dataflow_override_active && crate::codesearch_rank::is_identifier(identifier);
+    if identifier_route {
+        match codesearch_identifier(body, identifier, root, &cfg, &rank_opts) {
+            Some(Ok(report)) => return ok("codesearch", report),
+            Some(Err(e)) => return err("codesearch", &e),
+            None => {}
+        }
+    }
     if let Some(root) = root {
         return codesearch_at_root(body, root, query, k, &cfg);
     }
@@ -1616,7 +1955,7 @@ fn codesearch(body: &Value) -> u64 {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
             obj.insert("rebuild".to_string(), Value::Bool(false));
         }
-        return codesearch(&retry);
+        return codesearch_dispatch(&retry);
     }
     let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
     if !already_indexed {
@@ -1636,7 +1975,7 @@ fn codesearch(body: &Value) -> u64 {
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
             }
-            return codesearch(&retry);
+            return codesearch_dispatch(&retry);
         }
     }
     let cand_k = cfg.budget.pool(k as usize).max(50) as u32;
@@ -1682,17 +2021,18 @@ fn codesearch(body: &Value) -> u64 {
         if let Some(ov) = corpus.overview_for_key(key) { obj.insert("overview".to_string(), json!(ov)); }
         Value::Object(obj)
     };
+    let shown_k = dual_channel_depth(body, k);
     let vector_ranked: Vec<Value> = vec_hits.as_array()
         .filter(|a| !a.is_empty())
-        .map(|a| a.iter().take(k as usize).cloned().collect())
-        .unwrap_or_else(|| vec_ids.iter().take(k as usize).map(|key| build_hit(&mut corpus, key, None, None)).collect());
-    let bm25_ranked_response: Vec<Value> = bm25_ranked.iter().take(k as usize)
+        .map(|a| a.iter().take(shown_k).map(|row| with_corpus_symbol(&corpus, row)).collect())
+        .unwrap_or_else(|| vec_ids.iter().take(shown_k).map(|key| build_hit(&mut corpus, key, None, None)).collect());
+    let bm25_ranked_response: Vec<Value> = bm25_ranked.iter().take(shown_k)
         .map(|(key, score)| build_hit(&mut corpus, key, Some(*score), None))
         .collect();
     if !vec_ids.is_empty() || !bm25_ids.is_empty() {
-        return ok("codesearch", json!({
+        return ok("codesearch", compact_dual_reply(body, query, k, json!({
             "mode": "dual", "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response, "commits": commits,
-        }));
+        })));
     }
     let ns = cfg.namespaces.code.as_str();
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, query.as_ptr(), query.len() as u32) };
@@ -1704,7 +2044,7 @@ fn codesearch(body: &Value) -> u64 {
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
         }
-        return codesearch(&retry);
+        return codesearch_dispatch(&retry);
     }
     let vec_unavailable = vector_ranked.is_empty();
     let kv_empty_now = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
@@ -1723,10 +2063,10 @@ fn codesearch(body: &Value) -> u64 {
         );
     }
 
-    ok("codesearch", json!({
+    ok("codesearch", compact_dual_reply(body, query, k, json!({
         "mode": "fallback_kv", "degraded": vec_unavailable,
         "hits": hits, "commits": commits, "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response,
-    }))
+    })))
 }
 
 const LIFECYCLE_STALE_WARN_MS: u64 = 30 * 60 * 1000;
@@ -1818,6 +2158,7 @@ fn health(_body: &Value) -> u64 {
         "error_codes": [
             ERR_CODE_FAILED, ERR_CODE_RETIRED_VERB, ERR_CODE_UNSUPPORTED,
             ERR_CODE_UNKNOWN_VERB, ERR_CODE_INVALID_ARGS, ERR_CODE_PANIC, ERR_CODE_GATE_DENIED,
+            ERR_CODE_DANGLING_REFERENCE,
         ],
         "plugin_failure_codes": [
             PLUGIN_FAIL_UNKNOWN_PLUGIN, PLUGIN_FAIL_NOT_LOADED, PLUGIN_FAIL_DEADLINE,
@@ -2760,10 +3101,21 @@ fn run_git_checked(argv: &[&str], cwd: Option<&str>, verb: &str, fallback: &str)
     Ok(r)
 }
 
+const GIT_STATUS_SUMMARY_DEFAULT_PATHS: usize = 20;
+
 fn git_status(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_status", body, &["path", "paths", "files", "summary", "limit"]) { return refusal; }
     git_async_entry("git_status", body, |body, plan| {
         let cwd = body_cwd(body);
-        let r = git_step_replayed_by_call_order(plan, &["status", "--porcelain"], cwd)?;
+        let paths = body_pathspecs(body);
+        let summary = body.get("summary").and_then(|v| v.as_bool()).unwrap_or(false);
+        let limit = body.get("limit").and_then(|v| v.as_u64()).map(|n| n.max(1) as usize);
+        let mut argv: Vec<&str> = vec!["status", "--porcelain"];
+        if !paths.is_empty() {
+            argv.push("--");
+            for p in &paths { argv.push(p.as_str()); }
+        }
+        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let porcelain = super::host_abi::porcelain_or_dirty(r);
         let mut modified: Vec<String> = vec![];
         let mut untracked: Vec<String> = vec![];
@@ -2781,13 +3133,46 @@ fn git_status(body: &Value) -> u64 {
             if y == 'D' || x == 'D' { deleted.push(path.clone()); }
         }
         let dirty = !porcelain.trim().is_empty();
-        Ok(ok("git_status", json!({
+        if summary {
+            let first_n = limit.unwrap_or(GIT_STATUS_SUMMARY_DEFAULT_PATHS);
+            let entries: Vec<&str> = porcelain.lines().filter(|l| l.len() >= 3).collect();
+            let first_paths: Vec<String> = entries.iter().take(first_n).map(|l| format!("{} {}", &l[..2], l[3..].trim())).collect();
+            return Ok(ok("git_status", json!({
+                "dirty": dirty,
+                "summary": true,
+                "counts": {
+                    "changed_paths": entries.len(),
+                    "modified": modified.len(),
+                    "staged": staged.len(),
+                    "deleted": deleted.len(),
+                    "untracked": untracked.len(),
+                },
+                "first_paths": first_paths,
+                "first_paths_note": "each entry is the two-column porcelain status, a space, then the path",
+                "truncated": entries.len() > first_n,
+                "scoped_to": paths,
+            })));
+        }
+        let mut lists = json!({
             "dirty": dirty,
             "modified": modified,
             "untracked": untracked,
             "deleted": deleted,
             "staged": staged,
-        })))
+        });
+        if let Some(cap) = limit {
+            let mut truncated = serde_json::Map::new();
+            for key in ["modified", "untracked", "deleted", "staged"] {
+                let total = lists[key].as_array().map(|a| a.len()).unwrap_or(0);
+                if total > cap {
+                    lists[key] = Value::Array(lists[key].as_array().cloned().unwrap_or_default().into_iter().take(cap).collect());
+                    truncated.insert(key.to_string(), json!(total));
+                }
+            }
+            if !truncated.is_empty() { lists["truncated_totals"] = Value::Object(truncated); }
+        }
+        if !paths.is_empty() { lists["scoped_to"] = json!(paths); }
+        Ok(ok("git_status", lists))
     })
 }
 
@@ -2825,8 +3210,69 @@ fn resolve_ref(cwd: Option<&str>, refspec: &str) -> Option<String> {
     if sha.is_empty() { None } else { Some(sha) }
 }
 
-fn verify_push_landed(cwd: Option<&str>, branch: &str, local_head: &str, remote_before: Option<&str>) -> Result<(String, bool), String> {
-    let _ = git_call_argv(&["fetch", "origin", branch], cwd);
+struct SshHttpsFallback {
+    config_args: Vec<String>,
+    ssh_url: String,
+    https_url: String,
+}
+
+impl SshHttpsFallback {
+    fn call(&self, argv: &[&str], cwd: Option<&str>) -> Value {
+        let mut full: Vec<&str> = self.config_args.iter().map(String::as_str).collect();
+        full.extend_from_slice(argv);
+        git_call_argv(&full, cwd)
+    }
+}
+
+fn ssh_origin_https_equivalent(url: &str) -> Option<(String, String, String)> {
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let (authority, path) = rest.split_once('/')?;
+        let host = authority.rsplit('@').next()?.split(':').next()?;
+        if host.is_empty() { return None; }
+        let https_prefix = format!("https://{}/", host);
+        return Some((format!("ssh://{}/", authority), https_prefix.clone(), format!("{}{}", https_prefix, path)));
+    }
+    if url.contains("://") { return None; }
+    let (user_host, path) = url.split_once(':')?;
+    let host = user_host.split_once('@')?.1;
+    if host.is_empty() || user_host.contains('/') { return None; }
+    let https_prefix = format!("https://{}/", host);
+    Some((format!("{}:", user_host), https_prefix.clone(), format!("{}{}", https_prefix, path.trim_start_matches('/'))))
+}
+
+fn push_output_is_ssh_auth_failure(output: &str) -> bool {
+    output.contains("Permission denied") || output.contains("publickey") || output.contains("Host key verification failed") || output.contains("Could not read from remote repository")
+}
+
+fn ssh_https_fallback_for_origin(repo: Option<&str>) -> Option<SshHttpsFallback> {
+    let url = exec_git_in(repo, "remote get-url origin").trim().to_string();
+    let (ssh_prefix, https_prefix, https_url) = ssh_origin_https_equivalent(&url)?;
+    let fallback = SshHttpsFallback {
+        config_args: vec![
+            "-c".to_string(), format!("url.{}.insteadOf={}", https_prefix, ssh_prefix),
+            "-c".to_string(), "credential.helper=!gh auth git-credential".to_string(),
+        ],
+        ssh_url: url,
+        https_url,
+    };
+    let reachable = fallback.call(&["ls-remote", "origin"], repo)
+        .get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1) == 0;
+    if reachable { Some(fallback) } else { None }
+}
+
+fn git_fetch_and_resolve_remote(repo: Option<&str>, branch: &str, fallback: Option<&SshHttpsFallback>) -> Option<String> {
+    match fallback {
+        Some(f) => { let _ = f.call(&["fetch", "origin", branch], repo); }
+        None => { let _ = git_call_argv(&["fetch", "origin", branch], repo); }
+    }
+    resolve_ref(repo, &format!("origin/{}", branch))
+}
+
+fn verify_push_landed(cwd: Option<&str>, branch: &str, local_head: &str, remote_before: Option<&str>, fallback: Option<&SshHttpsFallback>) -> Result<(String, bool), String> {
+    let _ = match fallback {
+        Some(f) => f.call(&["fetch", "origin", branch], cwd),
+        None => git_call_argv(&["fetch", "origin", branch], cwd),
+    };
     let remote_after = resolve_ref(cwd, &format!("origin/{}", branch));
     let remote_after = match remote_after {
         Some(s) => s,
@@ -2911,9 +3357,25 @@ fn git_push(body: &Value) -> u64 {
             "branch": branch,
         }));
     }
-    let _ = git_call_argv(&["fetch", "origin", &branch], repo.as_deref());
-    let remote_before = resolve_ref(repo.as_deref(), &format!("origin/{}", branch));
-    let (mut push_out, mut push_succeeded) = exec_git_push_in(repo.as_deref(), source_ref, &branch);
+    let mut ssh_fallback: Option<SshHttpsFallback> = None;
+    let mut remote_before = git_fetch_and_resolve_remote(repo.as_deref(), &branch, None);
+    let (mut push_out, mut push_succeeded) = exec_git_push_in(repo.as_deref(), source_ref, &branch, None);
+    if !push_succeeded && push_output_is_ssh_auth_failure(&push_out) {
+        if let Some(fallback) = ssh_https_fallback_for_origin(repo.as_deref()) {
+            remote_before = git_fetch_and_resolve_remote(repo.as_deref(), &branch, Some(&fallback));
+            let (retry_out, retry_ok) = exec_git_push_in(repo.as_deref(), source_ref, &branch, Some(&fallback));
+            if retry_ok {
+                push_out = retry_out;
+                push_succeeded = true;
+                if body.get("persist_https_remote").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let _ = git_call_argv(&["remote", "set-url", "origin", fallback.https_url.as_str()], repo.as_deref());
+                }
+                ssh_fallback = Some(fallback);
+            } else {
+                push_out = format!("{}\n[https fallback via {} also failed]\n{}", push_out, fallback.https_url, retry_out);
+            }
+        }
+    }
     let mut attempts = 0u32;
     let mut rebased = false;
     if !push_succeeded && explicit_source_ref.is_some() {
@@ -2937,7 +3399,11 @@ fn git_push(body: &Value) -> u64 {
     }
     while !push_succeeded && attempts < 3 {
         attempts += 1;
-        let rebase_out = exec_git_in(repo.as_deref(), &format!("pull --rebase origin {}", branch));
+        let rebase_argv = ["pull", "--rebase", "origin", branch.as_str()];
+        let rebase_out = match ssh_fallback.as_ref() {
+            Some(f) => f.call(&rebase_argv, repo.as_deref()),
+            None => git_call_argv(&rebase_argv, repo.as_deref()),
+        }.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
         if rebase_failed(&rebase_out) || !git_porcelain_in(repo.as_deref()).trim().is_empty() {
             let _ = exec_git_in(repo.as_deref(), "rebase --abort");
             log_deviation_push("push-rebase-conflict", &branch);
@@ -2955,7 +3421,7 @@ fn git_push(body: &Value) -> u64 {
             }).to_string());
         }
         rebased = true;
-        let (out, ok_now) = exec_git_push_in(repo.as_deref(), source_ref, &branch);
+        let (out, ok_now) = exec_git_push_in(repo.as_deref(), source_ref, &branch, ssh_fallback.as_ref());
         push_out = out;
         push_succeeded = ok_now;
     }
@@ -2978,7 +3444,7 @@ fn git_push(body: &Value) -> u64 {
         Some(sha) => sha,
         None => return err("git_push", &format!("source ref '{}' disappeared after push", source_ref)),
     };
-    match verify_push_landed(repo.as_deref(), &branch, &local_source_after, remote_before.as_deref()) {
+    match verify_push_landed(repo.as_deref(), &branch, &local_source_after, remote_before.as_deref(), ssh_fallback.as_ref()) {
         Err(reason) => {
             log_deviation_push("push-claimed-success-unverified", &branch);
             pack(json!({
@@ -3007,6 +3473,13 @@ fn git_push(body: &Value) -> u64 {
             "source_ref": source_ref,
             "source_sha": local_source_after,
             "preserved_dirty_worktree": preserved_dirty_worktree,
+            "ssh_fallback": ssh_fallback.as_ref().map(|f| json!({
+                "used": true,
+                "reason": "origin is an SSH URL that refused authentication while an https route was reachable",
+                "from": f.ssh_url,
+                "via": f.https_url,
+                "remote_rewritten": body.get("persist_https_remote").and_then(|v| v.as_bool()).unwrap_or(false),
+            })),
         })),
     }
 }
@@ -3019,18 +3492,44 @@ fn git_add(body: &Value) -> u64 {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let mut argv: Vec<&str> = vec!["add"];
-        if paths.is_empty() {
-            argv.push("-A");
-        } else {
-            for p in &paths { argv.push(p.as_str()); }
+        let blocked_paths = hard_excluded_pathspecs(&paths);
+        if !blocked_paths.is_empty() {
+            return Ok(err_json("git_add", protected_pathspec_refusal("git_add", &blocked_paths)));
         }
+        let argv_owned = git_stage_argv(&paths, cwd);
+        let argv = as_argv(&argv_owned);
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
             return Ok(err("git_add", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("git add failed")));
         }
-        Ok(ok("git_add", json!({ "staged": if paths.is_empty() { vec!["-A".to_string()] } else { paths } })))
+        let mut staged: Vec<String> = if paths.is_empty() {
+            let out = git_step_replayed_by_call_order(plan, &["diff", "--cached", "--name-only", "-z"], cwd)?;
+            out.get("stdout").and_then(|v| v.as_str()).unwrap_or("")
+                .split('\0').filter(|e| !e.is_empty()).map(String::from).collect()
+        } else {
+            let mut check: Vec<String> = vec!["diff".to_string(), "--cached".to_string(), "--name-only".to_string(), "-z".to_string(), "--".to_string()];
+            check.extend(paths.iter().cloned());
+            let out = git_step_replayed_by_call_order(plan, &as_argv(&check), cwd)?;
+            out.get("stdout").and_then(|v| v.as_str()).unwrap_or("")
+                .split('\0').filter(|e| !e.is_empty()).map(String::from).collect()
+        };
+        staged.sort();
+        staged.dedup();
+        let unmatched = pathspecs_matching_nothing(cwd, &paths);
+        if !paths.is_empty() && staged.is_empty() && !unmatched.is_empty() && unmatched.len() == paths.len() {
+            return Ok(err_json("git_add", pathspec_matches_nothing_refusal("git_add", &paths, &unmatched)));
+        }
+        let mut payload = json!({ "staged": staged });
+        if !paths.is_empty() && staged.is_empty() {
+            payload["staged_nothing_for"] = json!(paths);
+            payload["error_code"] = json!("pathspec_staged_nothing");
+            payload["error"] = json!(format!(
+                "git add ran clean but nothing is staged for {} -- the pathspec is empty, already committed, or excluded as not tracked-by-design",
+                paths.join(", ")
+            ));
+        }
+        Ok(ok("git_add", with_exclusion_report(payload, cwd, &paths)))
     })
 }
 
@@ -3073,6 +3572,18 @@ fn git_commit(body: &Value) -> u64 {
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default();
         let add_all = body.get("add_all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let blocked_paths = hard_excluded_pathspecs(&paths);
+        if !blocked_paths.is_empty() {
+            return Ok(err_json("git_commit", protected_pathspec_refusal("git_commit", &blocked_paths)));
+        }
+        let allow_whole_index = body.get("allow_whole_index").and_then(|v| v.as_bool()).unwrap_or(false);
+        let staged_before = if add_all || !paths.is_empty() {
+            Vec::new()
+        } else {
+            let stdout = git_step_replayed_by_call_order(plan, &["diff", "--cached", "--name-only", "-z"], cwd)?
+                .get("stdout").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            stdout.split('\0').filter(|entry| !entry.is_empty()).map(String::from).collect()
+        };
         let head_before_probe = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
         let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message, &paths, add_all);
         if let Some(prior) = git_commit_dedup_lookup(&dedup_key, cwd) {
@@ -3083,30 +3594,70 @@ fn git_commit(body: &Value) -> u64 {
                 "replayed_from_recent_identical_dispatch": true,
             })));
         }
-        let status_r = git_step_replayed_by_call_order(plan, &["status", "--porcelain"], cwd)?;
+        let status_r = git_step_replayed_by_call_order(plan, &as_argv(&git_porcelain_argv(&[], cwd)), cwd)?;
         let porcelain = super::host_abi::porcelain_or_dirty(status_r);
         if porcelain.trim().is_empty() && !allow_empty {
-            return Ok(ok("git_commit", json!({ "nothing_to_commit": true })));
+            return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true }), cwd, &paths)));
+        }
+        if !paths.is_empty() {
+            let scoped_r = git_step_replayed_by_call_order(plan, &as_argv(&git_porcelain_argv(&paths, cwd)), cwd)?;
+            let scoped_porcelain = super::host_abi::porcelain_or_dirty(scoped_r);
+            if scoped_porcelain.trim().is_empty() && !allow_empty {
+                let unmatched = pathspecs_matching_nothing(cwd, &paths);
+                if !unmatched.is_empty() && unmatched.len() == paths.len() {
+                    return Ok(err_json("git_commit", pathspec_matches_nothing_refusal("git_commit", &paths, &unmatched)));
+                }
+                return Ok(err_json("git_commit", json!({
+                    "error": format!("nothing to commit in the requested pathspec(s): {} -- the whole repo has other dirty paths, so this refusal is scoped to what you named", paths.join(", ")),
+                    "error_code": "nothing_to_commit_for_paths",
+                    "requested_paths": paths,
+                    "next_dispatch": "git_commit",
+                })));
+            }
         }
         let head_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
         let head_before = head_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-        if add_all {
-            let _ = git_step_replayed_by_call_order(plan, &["add", "-A"], cwd)?;
-        } else if !paths.is_empty() {
-            let mut argv: Vec<&str> = vec!["add", "--"];
-            for p in &paths { argv.push(p.as_str()); }
-            let _ = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        let scan = super::dangling_refs::scan_commit(cwd, &paths, add_all, body);
+        if super::dangling_refs::scan_unreadable(&scan) {
+            return Ok(err_json("git_commit", super::dangling_refs::unreadable_detail("git_commit", &scan)));
+        }
+        if !scan.offenders.is_empty() {
+            return Ok(err_json("git_commit", super::dangling_refs::refusal_detail("git_commit", &scan)));
+        }
+        if add_all || !paths.is_empty() {
+            let staged_paths: &[String] = if add_all { &[] } else { &paths };
+            let _ = git_step_replayed_by_call_order(plan, &as_argv(&git_stage_argv(staged_paths, cwd)), cwd)?;
+        }
+        let scoped_paths: &[String] = if add_all { &[] } else { &paths };
+        if !scoped_paths.is_empty() {
+            let mut check: Vec<String> = vec![
+                "diff".to_string(), "--cached".to_string(), "--name-only".to_string(), "--".to_string(),
+            ];
+            check.extend(scoped_paths.iter().cloned());
+            let r = git_step_replayed_by_call_order(plan, &as_argv(&check), cwd)?;
+            if r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().is_empty() {
+                return Ok(err_json("git_commit", json!({
+                    "error": format!("no staged content for the requested pathspec(s): {}", scoped_paths.join(", ")),
+                    "error_code": ERR_CODE_INVALID_ARGS,
+                    "requested_paths": scoped_paths,
+                })));
+            }
         }
         let bundled_message = bundle_prd_commit_comments(cwd, message);
-        let mut argv: Vec<&str> = vec!["commit", "-m", bundled_message.as_str()];
-        if allow_empty { argv.push("--allow-empty"); }
+        let mut argv: Vec<String> = vec!["commit".to_string(), "-m".to_string(), bundled_message];
+        if allow_empty { argv.push("--allow-empty".to_string()); }
+        if !scoped_paths.is_empty() {
+            argv.push("--".to_string());
+            argv.extend(scoped_paths.iter().cloned());
+        }
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
             let serr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
             let sout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
             if git_commit_found_nothing_staged(sout, serr, cwd) {
-                return Ok(ok("git_commit", json!({ "nothing_to_commit": true })));
+                return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true }), cwd, &paths)));
             }
             return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
         }
@@ -3120,7 +3671,20 @@ fn git_commit(body: &Value) -> u64 {
         git_commit_dedup_record(&dedup_key, &head_after, &sha, &summary);
         emit_event("git_commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary }));
         record_commit_in_liqology(&summary, &head_after);
-        Ok(ok("git_commit", json!({ "committed": true, "sha": sha, "summary": summary })))
+        let mut payload = json!({ "committed": true, "sha": sha, "summary": summary });
+        if !scan.waived.is_empty() {
+            payload["dangling_waived"] = json!(scan.waived);
+        }
+        if !allow_whole_index && !staged_before.is_empty() {
+            payload["whole_index_commit"] = json!(true);
+            payload["staged_count"] = json!(staged_before.len());
+            payload["staged_paths"] = json!(staged_before);
+            payload["warning"] = json!(format!(
+                "this commit took the whole index ({} path(s)) because no paths were given; pass paths to scope it or allow_whole_index: true to accept it explicitly",
+                staged_before.len()
+            ));
+        }
+        Ok(ok("git_commit", with_exclusion_report(payload, cwd, &paths)))
     })
 }
 
@@ -3212,26 +3776,52 @@ fn git_finalize(body: &Value) -> u64 {
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
     let scoped = !paths.is_empty();
+    let blocked_paths = hard_excluded_pathspecs(&paths);
+    if !blocked_paths.is_empty() {
+        return err_json("git_finalize", protected_pathspec_refusal("git_finalize", &blocked_paths));
+    }
     let mut steps: Vec<Value> = vec![];
     let mut committed = false;
     let mut sha = String::new();
     let mut summary = String::new();
     let head_before_any_commit = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
 
+    let allow_whole_index = body.get("allow_whole_index").and_then(|v| v.as_bool()).unwrap_or(false);
+    let staged_before: Vec<String> = if scoped {
+        Vec::new()
+    } else {
+        exec_git_in(cwd_ref, "diff --cached --name-only -z").split('\0').filter(|e| !e.is_empty()).map(String::from).collect()
+    };
     let dirty = !git_porcelain_scoped(cwd_ref, &paths).trim().is_empty();
+    let mut dangling_waived: Vec<String> = Vec::new();
     if dirty {
         if message.is_empty() {
             return err("git_finalize", "worktree dirty but no commit message provided -- pass {message}");
         }
-        if scoped {
-            let mut add_argv: Vec<&str> = vec!["add", "--"];
-            for p in &paths { add_argv.push(p.as_str()); }
-            let _ = git_call_argv(&add_argv, cwd_ref);
-        } else {
-            let _ = git_call_argv(&["add", "-A"], cwd_ref);
+        let scan = super::dangling_refs::scan_commit(cwd_ref, &paths, !scoped, body);
+        if !scan.offenders.is_empty() {
+            return err_json("git_finalize", super::dangling_refs::refusal_detail("git_finalize", &scan));
+        }
+        if super::dangling_refs::scan_unreadable(&scan) {
+            return err_json("git_finalize", super::dangling_refs::unreadable_detail("git_finalize", &scan));
+        }
+        dangling_waived = scan.waived;
+        let _ = git_call_argv(&as_argv(&git_stage_argv(&paths, cwd_ref)), cwd_ref);
+        if scoped && paths_staged_nothing(cwd_ref, &paths) {
+            return err_json("git_finalize", json!({
+                "error": format!("no staged content for the requested pathspec(s): {}", paths.join(", ")),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "requested_paths": paths,
+            }));
         }
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
-        let cr = git_call_argv(&["commit", "-m", bundled_message.as_str()], cwd_ref);
+        let mut commit_argv: Vec<String> = vec!["commit".to_string(), "-m".to_string(), bundled_message];
+        if scoped {
+            commit_argv.push("--".to_string());
+            commit_argv.extend(paths.iter().cloned());
+        }
+        let commit_argv: Vec<&str> = commit_argv.iter().map(String::as_str).collect();
+        let cr = git_call_argv(&commit_argv, cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if ccode != 0 {
             let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
@@ -3251,12 +3841,12 @@ fn git_finalize(body: &Value) -> u64 {
             record_commit_in_liqology(&summary, &head_after);
             steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
         }
-    } else {
+    } else if !scoped {
         let pending_notes = crate::orchestrator::prd::peek_pending_commit_comments(cwd_ref);
         if !pending_notes.is_empty() {
             let flush_message = if message.is_empty() { "chore: flush resolved PRD notes".to_string() } else { message.clone() };
             let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
-            let _ = git_call_argv(&["add", "-A"], cwd_ref);
+            let _ = git_call_argv(&as_argv(&git_stage_argv(&[], cwd_ref)), cwd_ref);
             let cr = git_call_argv(&["commit", "--allow-empty", "-m", bundled_message.as_str()], cwd_ref);
             let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
             let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
@@ -3272,18 +3862,35 @@ fn git_finalize(body: &Value) -> u64 {
     }
 
     if !committed {
+        if scoped {
+            let unmatched = pathspecs_matching_nothing(cwd_ref, &paths);
+            if !unmatched.is_empty() && unmatched.len() == paths.len() {
+                return err_json("git_finalize", pathspec_matches_nothing_refusal("git_finalize", &paths, &unmatched));
+            }
+            let ahead_probe = git_call("rev-list --count @{u}..HEAD", cwd_ref);
+            let ahead_n: u64 = ahead_probe.get("stdout").and_then(|v| v.as_str()).unwrap_or("0").trim().parse().unwrap_or(0);
+            return err_json("git_finalize", json!({
+                "error": format!("no commit was produced for the requested pathspec(s): {} -- refusing to push, because pushing here would publish an unrelated commit under this message", paths.join(", ")),
+                "error_code": "nothing_to_commit_for_paths",
+                "requested_paths": paths,
+                "committed": false,
+                "pushed": false,
+                "unpushed_commits_ahead_of_upstream": ahead_n,
+                "next_dispatch": "git_commit",
+            }));
+        }
         let ahead_result = git_call("rev-list --count @{u}..HEAD", cwd_ref);
         let ahead_code = ahead_result.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         let ahead_stderr = ahead_result.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
         let no_upstream = ahead_code != 0 && (ahead_stderr.contains("no upstream") || ahead_stderr.contains("unknown revision") || ahead_stderr.contains("@{u}"));
         let ahead_n: u64 = ahead_result.get("stdout").and_then(|x| x.as_str()).unwrap_or("0").trim().parse().unwrap_or(0);
         if !dirty && !no_upstream && ahead_n == 0 {
-            return ok("git_finalize", json!({
+            return ok("git_finalize", with_exclusion_report(json!({
                 "nothing_to_commit": true,
                 "committed": false,
                 "pushed": false,
                 "steps": [{"step": "commit", "nothing_to_commit": true}],
-            }));
+            }), cwd_ref, &paths));
         }
         sha = head_before_any_commit[..head_before_any_commit.len().min(10)].to_string();
         summary = exec_git_in(cwd_ref, "log -1 --pretty=%s").trim().to_string();
@@ -3303,14 +3910,14 @@ fn git_finalize(body: &Value) -> u64 {
     if dirty_only_from_concurrent_writer_on_just_committed_files {
         leftover = git_porcelain_scoped(cwd_ref, &paths);
         if !leftover.trim().is_empty() && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref)) {
+            let _ = git_call_argv(&as_argv(&git_stage_argv(&paths, cwd_ref)), cwd_ref);
+            let mut amend: Vec<String> = vec!["commit".to_string(), "--amend".to_string(), "--no-edit".to_string()];
             if scoped {
-                let mut add_argv: Vec<&str> = vec!["add", "--"];
-                for p in &paths { add_argv.push(p.as_str()); }
-                let _ = git_call_argv(&add_argv, cwd_ref);
-            } else {
-                let _ = git_call_argv(&["add", "-A"], cwd_ref);
+                amend.push("--".to_string());
+                amend.extend(paths.iter().cloned());
             }
-            let amend = git_call_argv(&["commit", "--amend", "--no-edit"], cwd_ref);
+            let amend_argv: Vec<&str> = amend.iter().map(String::as_str).collect();
+            let amend = git_call_argv(&amend_argv, cwd_ref);
             if amend.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0 {
                 let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
                 sha = head_after[..head_after.len().min(10)].to_string();
@@ -3364,7 +3971,7 @@ fn git_finalize(body: &Value) -> u64 {
     let (ci_status_summary, ci_validated_written) = check_ci_status_and_write_validated_marker_if_green(repo.as_deref(), &head_sha);
     steps.push(json!({ "step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written }));
 
-    ok("git_finalize", json!({
+    let mut finalize_payload = json!({
         "committed": committed,
         "pushed": true,
         "sha": sha,
@@ -3374,26 +3981,35 @@ fn git_finalize(body: &Value) -> u64 {
         "already_current": already_current,
         "remote_sha": remote_sha,
         "steps": steps,
+        "ssh_fallback": push_data.and_then(|d| d.get("ssh_fallback")).cloned().unwrap_or(Value::Null),
         "ci_validated_marker_written": ci_validated_written,
         "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
-    }))
+    });
+    if !dangling_waived.is_empty() {
+        finalize_payload["dangling_waived"] = json!(dangling_waived);
+    }
+    if !allow_whole_index && !staged_before.is_empty() {
+        finalize_payload["whole_index_commit"] = json!(true);
+        finalize_payload["staged_count"] = json!(staged_before.len());
+        finalize_payload["staged_paths"] = json!(staged_before);
+        finalize_payload["warning"] = json!(format!(
+            "this commit took the whole index ({} path(s)) because no paths were given; pass paths to scope it or allow_whole_index: true to accept it explicitly",
+            staged_before.len()
+        ));
+    }
+    ok("git_finalize", with_exclusion_report(finalize_payload, cwd_ref, &paths))
 }
 
 fn git_log(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_log", body, &["limit", "count", "range", "ref", "rev", "path", "paths", "files"]) { return refusal; }
     git_async_entry("git_log", body, |body, plan| {
         let cwd = body_cwd(body);
         let count = body.get("limit").and_then(|v| v.as_u64())
             .or_else(|| body.get("count").and_then(|v| v.as_u64()))
             .unwrap_or(10);
         let nflag = format!("-{}", count);
-        let range = body.get("range").and_then(|v| v.as_str())
-            .or_else(|| body.get("ref").and_then(|v| v.as_str()))
-            .unwrap_or("").trim();
-        let paths: Vec<String> = body.get("paths").or_else(|| body.get("files"))
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-            .unwrap_or_else(|| body.get("path").and_then(|v| v.as_str())
-                .map(|s| vec![s.to_string()]).unwrap_or_default());
+        let range = body_revision(body);
+        let paths = body_pathspecs(body);
         let pretty = "--pretty=format:%h\u{1f}%H\u{1f}%an\u{1f}%ae\u{1f}%aI\u{1f}%s";
         let mut argv: Vec<&str> = vec!["log", &nflag, pretty, "--no-color"];
         if !range.is_empty() { argv.push(range); }
@@ -3432,19 +4048,21 @@ fn git_log(body: &Value) -> u64 {
 }
 
 fn git_diff(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_diff", body, &["range", "ref", "rev", "staged", "stat", "path", "paths", "files"]) { return refusal; }
     git_async_entry("git_diff", body, |body, plan| {
         let cwd = body_cwd(body);
         let staged = body.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
-        let path = body.get("path").and_then(|v| v.as_str());
-        let range = body.get("range").and_then(|v| v.as_str())
-            .or_else(|| body.get("ref").and_then(|v| v.as_str()))
-            .unwrap_or("").trim();
+        let paths = body_pathspecs(body);
+        let range = body_revision(body);
         let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
         let mut argv: Vec<&str> = vec!["diff", "--no-color"];
         if staged { argv.push("--staged"); }
         if stat { argv.push("--stat"); }
         if !range.is_empty() { argv.push(range); }
-        if let Some(p) = path { argv.push("--"); argv.push(p); }
+        if !paths.is_empty() {
+            argv.push("--");
+            argv.extend(paths.iter().map(String::as_str));
+        }
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
@@ -3458,18 +4076,19 @@ fn git_diff(body: &Value) -> u64 {
         let mut diff = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
         let truncated = diff.len() > 60000;
         if truncated { diff.truncate(60000); }
-        Ok(ok("git_diff", json!({ "diff": diff, "truncated": truncated, "range": range })))
+        Ok(ok("git_diff", json!({ "diff": diff, "truncated": truncated, "range": range, "paths": paths })))
     })
 }
 
 fn git_show(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_show", body, &["rev", "ref", "sha", "commit", "stat", "path", "paths", "files"]) { return refusal; }
     let cwd = body_cwd(body);
-    let refspec = body.get("rev").and_then(|v| v.as_str())
-        .or_else(|| body.get("ref").and_then(|v| v.as_str()))
+    let refspec = ["rev", "ref", "sha", "commit"].iter()
+        .find_map(|k| body.get(*k).and_then(|v| v.as_str()))
         .unwrap_or("HEAD");
     let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
     let path = body.get("path").and_then(|v| v.as_str());
-    let paths: Vec<String> = body.get("paths")
+    let paths: Vec<String> = body.get("paths").or_else(|| body.get("files"))
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
@@ -3615,7 +4234,20 @@ fn ci_status_resolve_sha(body: &Value, cwd: Option<&str>) -> Result<String, u64>
         }
         return Ok(sha);
     }
-    Ok(requested.to_string())
+    if is_full_sha(requested) {
+        return Ok(requested.to_string());
+    }
+    let resolved = exec_git_in(cwd, &format!("rev-parse --verify {}^{{commit}}", requested)).trim().to_string();
+    if is_full_sha(&resolved) {
+        return Ok(resolved);
+    }
+    Err(err("ci-status", &format!(
+        "{} is neither a 40-char commit sha nor a ref git can resolve here -- pass a full sha, or a ref git knows such as HEAD or a branch name",
+        requested)))
+}
+
+fn is_full_sha(candidate: &str) -> bool {
+    candidate.len() == 40 && candidate.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn ci_status_token() -> Option<String> {
@@ -3717,7 +4349,8 @@ fn ci_status_value(body: &Value) -> Result<Value, Value> {
                 "ok": true, "verb": "ci-status", "data": {
                     "status": "no_applicable_workflow", "repo": repo, "sha": sha,
                     "failed_jobs": [], "run_url": Value::Null,
-                    "reason": format!("zero workflow runs appeared for this sha after {}s -- a genuinely triggered workflow starts within seconds of the push, so this sha's changed paths did not match any workflow trigger (e.g. paths-ignore). Treated as a legitimate pass-through, not a pending/failed run.", commit_age_secs.unwrap()),
+                    "query": format!("head_sha={}", sha),
+                    "reason": format!("zero workflow runs matched head_sha={} after {}s -- this reports the miss, not its cause: a workflow that never triggered, a path filter, and a sha GitHub never saw are indistinguishable from this response alone", sha, commit_age_secs.unwrap()),
                 },
             }));
         }
@@ -3837,8 +4470,77 @@ fn ci_status(body: &Value) -> u64 {
         })
     }
 
+fn git_checkout_pathspec(raw: &str, top: &str, prefix: &str) -> Result<String, &'static str> {
+    let spec = raw.trim();
+    if spec.is_empty() { return Err("empty pathspec"); }
+    if spec.starts_with('-') { return Err("a leading '-' would be read as an option"); }
+    if spec.starts_with(':') { return Err("pathspec magic is refused"); }
+    let unified = spec.replace('\\', "/");
+    if unified.split('/').any(|segment| segment == "..") { return Err("'..' traversal is refused"); }
+    let (from_top, for_git) = if crate::pkfs::is_absolute(spec) {
+        let top_dir = top.trim_end_matches('/');
+        let inside = unified.len() >= top_dir.len()
+            && unified.is_char_boundary(top_dir.len())
+            && unified[..top_dir.len()].eq_ignore_ascii_case(top_dir)
+            && matches!(unified[top_dir.len()..].chars().next(), None | Some('/'));
+        if !inside { return Err("absolute path is outside the repository"); }
+        let rest = unified[top_dir.len()..].trim_start_matches('/').to_string();
+        let for_git = format!(":(top){}", if rest.is_empty() { "." } else { rest.as_str() });
+        (rest, for_git)
+    } else {
+        (format!("{}{}", prefix, unified), spec.to_string())
+    };
+    let top_segment = from_top.split('/').find(|segment| !segment.is_empty() && *segment != ".").unwrap_or("").to_ascii_lowercase();
+    if GIT_PROTECTED_PATHSPECS.iter().any(|(name, _)| top_segment == name.trim_end_matches('*') || (name.ends_with('*') && top_segment.starts_with(name.trim_end_matches('*')))) {
+        return Err("the project's own .gm/ and .agentplug* are never restored");
+    }
+    Ok(for_git)
+}
+
+fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Value) -> u64 {
+    if body.get("create").and_then(|v| v.as_bool()).unwrap_or(false) { return err("git_checkout", "create cannot be combined with paths"); }
+    let items: Vec<&Value> = match requested { Value::Array(a) => a.iter().collect(), single => vec![single] };
+    if items.is_empty() { return err("git_checkout", "paths must be a non-empty list of pathspecs"); }
+    let source = body.get("ref").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
+    if source.is_some_and(|s| s.starts_with('-')) { return err("git_checkout", "ref must not start with '-'"); }
+    let top = exec_git_in(cwd, "rev-parse --show-toplevel").trim().replace('\\', "/");
+    if top.is_empty() { return err("git_checkout", "not inside a git worktree"); }
+    let prefix = exec_git_in(cwd, "rev-parse --show-prefix").trim().replace('\\', "/");
+    let mut specs: Vec<String> = vec![];
+    for item in items {
+        let Some(raw) = item.as_str() else { return err("git_checkout", "every entry of paths must be a string"); };
+        match git_checkout_pathspec(raw, &top, &prefix) {
+            Ok(spec) => specs.push(spec),
+            Err(reason) => return err_json("git_checkout", json!({ "error": format!("refused pathspec {:?}: {}", raw, reason), "path": raw })),
+        }
+    }
+    let mut scope: Vec<&str> = specs.iter().map(|s| s.as_str()).collect();
+    scope.extend(GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
+    let mut diff_argv: Vec<&str> = vec!["diff", "--name-only"];
+    if let Some(s) = source { diff_argv.push(s); }
+    diff_argv.push("--");
+    diff_argv.extend(scope.iter().copied());
+    let differing: Vec<String> = git_call_argv(&diff_argv, cwd).get("stdout").and_then(|x| x.as_str()).unwrap_or("")
+        .lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+    let source_arg = source.map(|s| format!("--source={}", s));
+    let mut argv: Vec<&str> = vec!["restore"];
+    if let Some(a) = &source_arg { argv.push(a.as_str()); }
+    argv.push("--");
+    argv.extend(scope.iter().copied());
+    let r = git_call_argv(&argv, cwd);
+    let output = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 { return err("git_checkout", &output); }
+    ok("git_checkout", json!({ "restored": differing, "source": source.unwrap_or("index"), "output": output.trim() }))
+}
+
 fn git_checkout(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_checkout", body, &["ref", "create", "path", "paths", "files"]) { return refusal; }
     let cwd = body_cwd(body);
+    if let Some(requested) = body.get("paths").or_else(|| body.get("files")).or_else(|| body.get("path")) {
+        return git_checkout_paths(body, cwd, requested);
+    }
     let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("").trim();
     if refspec.is_empty() { return err("git_checkout", "ref required"); }
     let create = body.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -3939,14 +4641,67 @@ fn git_cherry_pick(body: &Value) -> u64 {
         "head_after": head_after,
         "output": output
     }))
+const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &["SESSION_ID", "session_id", "sessionId", "cwd", "repo", "root", "projectPath", "git_root_override", "_plan"];
+const GIT_PROTECTED_PATHSPECS: &[(&str, &str)] = &[(".gm", ":(top,exclude).gm"), (".agentplug*", ":(top,exclude).agentplug*")];
+const GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD: usize = 2000;
+
+fn refuse_unknown_fields(verb: &str, body: &Value, accepted: &[&str]) -> Option<u64> {
+    let unknown: Vec<&String> = body.as_object()?.keys()
+        .filter(|k| !GIT_BODY_ENVELOPE_FIELDS.contains(&k.as_str()) && !accepted.contains(&k.as_str()))
+        .collect();
+    if unknown.is_empty() { return None; }
+    Some(err_json(verb, json!({
+        "error": format!("unknown body fields for {}: {}", verb, unknown.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")),
+        "unknown_fields": unknown,
+        "accepted_fields": accepted,
+    })))
+}
+
+fn body_revision(body: &Value) -> &str {
+    ["range", "ref", "rev"].iter()
+        .find_map(|k| body.get(*k).and_then(|v| v.as_str()))
+        .unwrap_or("").trim()
+}
+
+fn body_pathspecs(body: &Value) -> Vec<String> {
+    let mut specs: Vec<String> = Vec::new();
+    for key in ["path", "paths", "files"] {
+        match body.get(key) {
+            Some(Value::String(s)) => specs.push(s.clone()),
+            Some(Value::Array(arr)) => specs.extend(arr.iter().filter_map(|x| x.as_str().map(String::from))),
+            _ => {}
+        }
+    }
+    specs.retain(|s| !s.is_empty());
+    specs.dedup();
+    specs
 }
 
 fn git_stash(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_stash", body, &["include_untracked", "message", "path", "paths", "files"]) { return refusal; }
     let cwd = body_cwd(body);
     let include_untracked = body.get("include_untracked").and_then(|v| v.as_bool()).unwrap_or(true);
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("gm shelf").trim();
+    let paths = body_pathspecs(body);
+    let mut scope: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+    scope.extend(GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
+    if include_untracked {
+        let mut probe: Vec<&str> = vec!["ls-files", "--others", "--exclude-standard", "--"];
+        probe.extend(scope.iter().copied());
+        let untracked = git_call_argv(&probe, cwd).get("stdout").and_then(|x| x.as_str()).unwrap_or("").lines().count();
+        if untracked > GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD {
+            return err_json("git_stash", json!({
+                "error": format!("refusing to stash {} untracked files (limit {}): a stash that size runs for minutes and its clean phase deletes them from the worktree", untracked, GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD),
+                "untracked_count": untracked,
+                "threshold": GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD,
+                "hint": "pass paths:[...] to shelve only the files you mean, or include_untracked:false to shelve tracked changes only"
+            }));
+        }
+    }
     let mut argv = vec!["stash", "push", "--message", message];
     if include_untracked { argv.push("--include-untracked"); }
+    argv.push("--");
+    argv.extend(scope.iter().copied());
     let r = git_call_argv(&argv, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let output = format!("{}{}",
@@ -3963,11 +4718,141 @@ fn git_stash(body: &Value) -> u64 {
         "created": created,
         "stash": if stash.is_empty() { Value::Null } else { json!(stash) },
         "include_untracked": include_untracked,
+        "paths": paths,
+        "excluded": GIT_PROTECTED_PATHSPECS.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
         "output": output
     }))
 }
 
+fn git_stash_list(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_stash_list", body, &[]) { return refusal; }
+    let cwd = body_cwd(body);
+    let r = git_call_argv(&["stash", "list", "--format=%gd\u{1f}%h\u{1f}%aI\u{1f}%gs"], cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 0 { return err("git_stash_list", r.get("stderr").and_then(|x| x.as_str()).unwrap_or("stash list failed")); }
+    let stashes: Vec<Value> = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("")
+        .lines().filter(|l| !l.is_empty()).map(|l| {
+            let mut it = l.splitn(4, '\u{1f}');
+            let stash = it.next().unwrap_or("").to_string();
+            let sha = it.next().unwrap_or("").to_string();
+            let date = it.next().unwrap_or("").to_string();
+            let subject = it.next().unwrap_or("").to_string();
+            json!({ "stash": stash, "sha": sha, "date": date, "subject": subject })
+        }).collect();
+    ok("git_stash_list", json!({ "count": stashes.len(), "stashes": stashes }))
+}
+
+const GIT_INIT_GITIGNORE_ENTRY: &str = ".gm/exec-spool/";
+const GIT_INIT_GITIGNORE_COVERING_ENTRIES: &[&str] = &[".gm", ".gm/", ".gm/*", ".gm/exec-spool", ".gm/exec-spool/", ".gm/exec-spool/*"];
+
+fn git_init_target(body: &Value) -> Result<Option<String>, String> {
+    let base = body_cwd(body).map(|c| c.trim()).filter(|c| !c.is_empty());
+    let requested = body.get("path").map(|v| v.as_str().map(str::trim).ok_or("path must be a string")).transpose()?;
+    let joined = match (requested, base) {
+        (Some(""), _) => return Err("path must not be empty".to_string()),
+        (Some(p), Some(b)) if !crate::pkfs::is_absolute(p) => format!("{}/{}", b.trim_end_matches(['/', '\\']), p),
+        (Some(p), _) => p.to_string(),
+        (None, Some(b)) => b.to_string(),
+        (None, None) => return Ok(None),
+    };
+    let unified = joined.replace('\\', "/");
+    if unified.split('/').any(|segment| segment == "..") { return Err("'..' traversal is refused".to_string()); }
+    if unified.char_indices().any(|(i, c)| c == ':' && i != 1) { return Err("':' is refused (alternate data streams)".to_string()); }
+    let protected = unified.split('/').any(|segment| {
+        let lower = segment.to_ascii_lowercase();
+        GIT_PROTECTED_PATHSPECS.iter().any(|(name, _)| if name.ends_with('*') { lower.starts_with(name.trim_end_matches('*')) } else { lower == *name })
+    });
+    if protected { return Err("a path inside the project's own .gm/ or .agentplug* is never initialised as a repository".to_string()); }
+    Ok(Some(joined))
+}
+
+fn git_init_config_value(body: &Value, key: &str) -> Result<Option<String>, String> {
+    let Some(raw) = body.get(key) else { return Ok(None); };
+    let value = raw.as_str().map(str::trim).ok_or_else(|| format!("{} must be a string", key))?;
+    if value.is_empty() { return Err(format!("{} must not be empty", key)); }
+    if value.chars().any(|c| c.is_control()) { return Err(format!("{} must not contain control characters", key)); }
+    Ok(Some(value.to_string()))
+}
+
+fn git_init_gitignore(root: &str) -> &'static str {
+    if !crate::wasm_dispatch::host_allow_root(root) { return "unwritable"; }
+    let file = format!("{}/.gitignore", root.trim_end_matches('/'));
+    let existing = super::host_abi::host_read(&file).unwrap_or_default();
+    let covered = existing.lines().map(|l| l.trim().trim_start_matches('/')).any(|l| GIT_INIT_GITIGNORE_COVERING_ENTRIES.contains(&l));
+    if covered { return "present"; }
+    let separator = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
+    let updated = format!("{}{}{}\n", existing, separator, GIT_INIT_GITIGNORE_ENTRY);
+    if super::host_abi::host_write(&file, &updated) { "added" } else { "unwritable" }
+}
+
+fn git_init(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_init", body, &["path", "user_name", "user_email", "initial_branch"]) { return refusal; }
+    let target = match git_init_target(body) { Ok(t) => t, Err(reason) => return err("git_init", &reason) };
+    let cwd = target.as_deref();
+    let shown = cwd.unwrap_or("the dispatch working directory");
+    let user_name = match git_init_config_value(body, "user_name") { Ok(v) => v, Err(reason) => return err("git_init", &reason) };
+    let user_email = match git_init_config_value(body, "user_email") { Ok(v) => v, Err(reason) => return err("git_init", &reason) };
+    let probe = git_call_argv(&["rev-parse", "--show-toplevel"], cwd);
+    let probe_code = probe.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1);
+    let probe_err = probe.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+    if probe_code == 0 {
+        let existing_root = probe.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().replace('\\', "/");
+        return err_json("git_init", json!({
+            "error": format!("{} is already inside a git repository", shown),
+            "root": existing_root,
+            "hint": "git_init only turns a non-repository directory into a repository"
+        }));
+    }
+    if probe_err.contains("git cwd does not exist") { return err("git_init", &format!("path does not exist or is not a directory: {}", shown)); }
+    if !probe_err.to_lowercase().contains("not a git repository") { return err("git_init", probe_err); }
+    let branch_arg = match git_init_config_value(body, "initial_branch") {
+        Ok(Some(b)) if b.starts_with('-') => return err("git_init", "initial_branch must not start with '-'"),
+        Ok(Some(b)) => {
+            let valid = git_call_argv(&["check-ref-format", "--branch", &b], cwd).get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0;
+            if !valid { return err("git_init", &format!("initial_branch {:?} is not a valid branch name", b)); }
+            Some(format!("--initial-branch={}", b))
+        }
+        Ok(None) => None,
+        Err(reason) => return err("git_init", &reason),
+    };
+    let mut argv: Vec<&str> = vec!["init"];
+    if let Some(a) = &branch_arg { argv.push(a.as_str()); }
+    if let Err(e) = run_git_checked(&argv, cwd, "git_init", "git init failed") { return e; }
+    for (key, value) in [("user.name", &user_name), ("user.email", &user_email)] {
+        if let Some(v) = value {
+            if let Err(e) = run_git_checked(&["config", "--local", key, v.as_str()], cwd, "git_init", "git config failed") { return e; }
+        }
+    }
+    let root = exec_git_in(cwd, "rev-parse --show-toplevel").trim().replace('\\', "/");
+    let branch = exec_git_in(cwd, "symbolic-ref --short HEAD").trim().to_string();
+    let gitignore = git_init_gitignore(&root);
+    ok("git_init", json!({
+        "root": root,
+        "branch": branch,
+        "created": true,
+        "gitignore": gitignore,
+        "user_name": user_name,
+        "user_email": user_email
+    }))
+}
+
+fn git_stash_drop(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_stash_drop", body, &["ref"]) { return refusal; }
+    let cwd = body_cwd(body);
+    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("stash@{0}").trim();
+    if refspec.is_empty() || refspec.starts_with('-') { return err("git_stash_drop", "ref must name a stash such as stash@{0}"); }
+    let r = git_call_argv(&["stash", "drop", refspec], cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let output = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 { return err("git_stash_drop", &output); }
+    let remaining = exec_git_in(cwd, "stash list --format=%gd").lines().filter(|l| !l.trim().is_empty()).count();
+    ok("git_stash_drop", json!({ "dropped": refspec, "remaining": remaining, "output": output }))
+}
+
 fn git_stash_pop(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_stash_pop", body, &["ref"]) { return refusal; }
     let cwd = body_cwd(body);
     let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("stash@{0}").trim();
     let r = git_call_argv(&["stash", "pop", "--index", refspec], cwd);
@@ -4077,14 +4962,193 @@ fn exec_git_in(repo: Option<&str>, args: &str) -> String {
 }
 
 fn git_porcelain_in(repo: Option<&str>) -> String {
-    super::host_abi::porcelain_or_dirty(git_call("status --porcelain", repo))
+    git_porcelain_scoped(repo, &[])
 }
 
 fn git_porcelain_scoped(repo: Option<&str>, paths: &[String]) -> String {
-    if paths.is_empty() { return git_porcelain_in(repo); }
-    let mut argv: Vec<&str> = vec!["status", "--porcelain", "--"];
-    for p in paths { argv.push(p.as_str()); }
-    super::host_abi::porcelain_or_dirty(git_call_argv(&argv, repo))
+    super::host_abi::porcelain_or_dirty(git_call_argv(&as_argv(&git_porcelain_argv(paths, repo)), repo))
+}
+
+fn as_argv(owned: &[String]) -> Vec<&str> {
+    owned.iter().map(String::as_str).collect()
+}
+
+fn tracked_by_design(path: &str) -> bool {
+    crate::gitignore::MUST_STAY_TRACKED.iter().any(|entry| {
+        entry.starts_with(".gm/") && (path == *entry || (entry.ends_with('/') && path.starts_with(entry)))
+    })
+}
+
+fn git_tracked_protected_paths(cwd: Option<&str>) -> Vec<String> {
+    let r = git_call_argv(&["ls-files", "-z", "--", ":(top).gm", ":(top).agentplug*"], cwd);
+    r.get("stdout").and_then(|v| v.as_str()).unwrap_or("")
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn tracked_by_design_in(tracked: &[String], path: &str) -> bool {
+    if tracked_by_design(path) {
+        return true;
+    }
+    let path = path.replace('\\', "/");
+    tracked.iter().any(|entry| {
+        let entry = entry.replace('\\', "/");
+        entry == path || entry.starts_with(&format!("{path}/"))
+    })
+}
+
+fn dirty_protected_entries(cwd: Option<&str>) -> Vec<(String, String)> {
+    let r = git_call_argv(&["status", "--porcelain", "-z", "-uall", "--", ":(top).gm", ":(top).agentplug*"], cwd);
+    let stdout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let mut records = stdout.split('\0').filter(|record| record.len() > 3);
+    let mut entries = vec![];
+    while let Some(record) = records.next() {
+        let status = record[..2].trim().to_string();
+        let path = record[3..].to_string();
+        if status.starts_with('R') || status.starts_with('C') {
+            records.next();
+        }
+        entries.push((if status.is_empty() { "M".to_string() } else { status }, path));
+    }
+    entries
+}
+
+fn withheld_dirty_entries(cwd: Option<&str>) -> Vec<(String, String)> {
+    let tracked = git_tracked_protected_paths(cwd);
+    dirty_protected_entries(cwd)
+        .into_iter()
+        .filter(|(_, path)| !tracked_by_design_in(&tracked, path))
+        .collect()
+}
+
+fn caller_pathspec_covers(paths: &[String], candidate: &str) -> bool {
+    paths.iter().any(|spec| {
+        let spec = spec.replace('\\', "/");
+        let spec = spec.trim_end_matches('/');
+        if spec.is_empty() {
+            return false;
+        }
+        if spec == candidate || candidate.starts_with(&format!("{spec}/")) {
+            return true;
+        }
+        if !spec.contains('*') && !spec.contains('?') && !spec.contains('[') {
+            return false;
+        }
+        match spec.rfind('/') {
+            Some(slash) => candidate.starts_with(&format!("{}/", &spec[..slash])),
+            None => true,
+        }
+    })
+}
+
+fn excluded_pathspecs(paths: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut out = vec![".agentplug*".to_string()];
+    for (_, path) in withheld_dirty_entries(cwd) {
+        if !path.starts_with(".agentplug") && !caller_pathspec_covers(paths, &path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn git_pathspec_scope(paths: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut scope: Vec<String> = vec![":(top,exclude).agentplug*".to_string()];
+    for (_, path) in withheld_dirty_entries(cwd) {
+        if !path.starts_with(".agentplug") && !caller_pathspec_covers(paths, &path) {
+            scope.push(format!(":(top,exclude,literal){}", path));
+        }
+    }
+    if paths.is_empty() {
+        scope.push(":/".to_string());
+    } else {
+        scope.extend(paths.iter().cloned());
+    }
+    scope
+}
+
+fn hard_excluded_pathspecs(paths: &[String]) -> Vec<String> {
+    paths.iter()
+        .filter(|spec| spec.replace('\\', "/").starts_with(".agentplug"))
+        .cloned()
+        .collect()
+}
+
+fn protected_pathspec_refusal(verb: &str, blocked: &[String]) -> Value {
+    json!({
+        "error": format!("refusing to stage protected pathspec(s): {} -- .agentplug* is runtime state and is never staged", blocked.join(", ")),
+        "error_code": ERR_CODE_INVALID_ARGS,
+        "blocked_paths": blocked,
+        "next_dispatch": verb,
+    })
+}
+
+fn pathspecs_matching_nothing(cwd: Option<&str>, paths: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for spec in paths {
+        let listed = git_call_argv(&["ls-files", "-z", "--", spec.as_str()], cwd);
+        let has_tracked = !listed.get("stdout").and_then(|v| v.as_str()).unwrap_or("").trim().is_empty();
+        let status = git_call_argv(&["status", "--porcelain", "-uall", "-z", "--", spec.as_str()], cwd);
+        let has_dirty = !status.get("stdout").and_then(|v| v.as_str()).unwrap_or("").trim().is_empty();
+        if !has_tracked && !has_dirty {
+            out.push(spec.clone());
+        }
+    }
+    out
+}
+
+fn pathspec_matches_nothing_refusal(verb: &str, paths: &[String], unmatched: &[String]) -> Value {
+    json!({
+        "error": format!("no such path in this repo, so nothing was staged or committed: {} -- pass paths relative to the repo root, or stage the file first", unmatched.join(", ")),
+        "error_code": "pathspec_matches_nothing",
+        "requested_paths": paths,
+        "unmatched_paths": unmatched,
+        "next_dispatch": verb,
+    })
+}
+
+fn paths_staged_nothing(cwd: Option<&str>, paths: &[String]) -> bool {
+    let mut argv: Vec<String> = vec![
+        "diff".to_string(), "--cached".to_string(), "--name-only".to_string(), "--".to_string(),
+    ];
+    argv.extend(paths.iter().cloned());
+    let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+    git_call_argv(&argv, cwd).get("stdout").and_then(|v| v.as_str()).unwrap_or("").trim().is_empty()
+}
+
+fn git_stage_argv(paths: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut argv: Vec<String> = vec!["add".to_string(), "--".to_string()];
+    argv.extend(git_pathspec_scope(paths, cwd));
+    argv
+}
+
+fn git_porcelain_argv(paths: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut argv: Vec<String> = vec!["status".to_string(), "--porcelain".to_string(), "--".to_string()];
+    argv.extend(git_pathspec_scope(paths, cwd));
+    argv
+}
+
+fn with_exclusion_report(mut data: Value, cwd: Option<&str>, paths: &[String]) -> Value {
+    let withheld = withheld_dirty_entries(cwd);
+    let listed: Vec<String> = withheld.iter().take(50).map(|(status, path)| format!("{} {}", status, path)).collect();
+    let active = excluded_pathspecs(paths, cwd);
+    if let Some(map) = data.as_object_mut() {
+        map.insert("excluded".to_string(), json!(active));
+        map.insert("excluded_count".to_string(), json!(active.len()));
+        if !paths.is_empty() {
+            map.insert("requested_paths".to_string(), json!(paths));
+        }
+        map.insert("excluded_but_dirty".to_string(), json!(listed));
+        map.insert("excluded_but_dirty_count".to_string(), json!(withheld.len()));
+        if !withheld.is_empty() {
+            map.insert("excluded_but_dirty_warning".to_string(), json!(format!(
+                "{} dirty path(s) under .gm/.agentplug* are NOT committed: they are runtime/transient state, not tracked-by-design (memories, disciplines, prd.yml, mutables.yml, config, code-search). If any are real work, stage them explicitly or add them to the tracked-by-design set.",
+                withheld.len()
+            )));
+        }
+    }
+    data
 }
 
 fn files_in_commit(repo: Option<&str>) -> Vec<String> {
@@ -4114,9 +5178,13 @@ fn porcelain_dirty_paths_all_within_committed_set(porcelain: &str, committed: &[
     any
 }
 
-fn exec_git_push_in(repo: Option<&str>, source_ref: &str, branch: &str) -> (String, bool) {
+fn exec_git_push_in(repo: Option<&str>, source_ref: &str, branch: &str, fallback: Option<&SshHttpsFallback>) -> (String, bool) {
     let refspec = format!("{}:{}", source_ref, branch);
-    let v = git_call_argv(&["push", "origin", refspec.as_str()], repo);
+    let push_argv = ["push", "origin", refspec.as_str()];
+    let v = match fallback {
+        Some(f) => f.call(&push_argv, repo),
+        None => git_call_argv(&push_argv, repo),
+    };
     let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
     let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
     let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1);
@@ -4243,7 +5311,15 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         .filter(|s| !s.is_empty())
         .or_else(|| extract_session_id_from_plain_text_body(&body_s));
     super::events::set_dispatch_session_id(dispatch_session_id.clone());
-    let result_packed = dispatch_gated_verb(&verb, &body, &body_s);
+    if let Some(root_override) = body.get("git_root_override").and_then(|v| v.as_str()) {
+        crate::orchestrator::seed_project_root_override(root_override);
+    }
+    let root_rejection = reject_if_project_root_unresolvable_before_gm_dir_panics(&verb);
+    let root_resolved = root_rejection.is_none();
+    let result_packed = match root_rejection {
+        Some(rejection) => rejection,
+        None => dispatch_gated_verb(&verb, &body, &body_s),
+    };
     super::events::set_dispatch_session_id(None);
     let result_value = super::host_abi::unpack_to_value(result_packed);
     #[cfg(target_arch = "wasm32")]
@@ -4251,12 +5327,13 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
         let exit_code = if result_value.get("ok").and_then(|v| v.as_bool()).unwrap_or(true) { 0 } else { 1 };
         let dream_rsi_vetoed = result_value.get("dream_rsi_vetoed").and_then(|v| v.as_bool()).unwrap_or(false);
-        if dream_rsi_vetoed {
+        if dream_rsi_vetoed || !root_resolved {
             None
         } else {
             let dispatch_id = crate::dispatch_ledger::record(cwd, &verb, &fingerprint, exit_code, dispatch_session_id.as_deref());
             if let Some(session_id) = dispatch_session_id.as_deref() {
-                crate::orchestrator::dream_rsi::observe_dispatch(session_id, &dispatch_id, &verb, &fingerprint, exit_code);
+                let gate_drift = exit_code != 0 && crate::orchestrator::dream_rsi::failure_is_gate_drift(&result_value);
+                crate::orchestrator::dream_rsi::observe_dispatch(session_id, &dispatch_id, &verb, &fingerprint, exit_code, gate_drift);
             }
             Some(dispatch_id)
         }
@@ -4266,23 +5343,35 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     stamp_request_identity(result_value, &fingerprint, body_parse_failed, dispatch_id.as_deref())
 }
 
+fn codeinsight_action(verb: &str, action: &str, body: &Value) -> u64 {
+    let mut routed = body.clone();
+    if let Some(map) = routed.as_object_mut() {
+        map.entry("action").or_insert_with(|| json!(action));
+    }
+    match crate::code_symbols::handle(&routed) {
+        Ok(data) => ok(verb, data),
+        Err(reason) => err(verb, &reason),
+    }
+}
+
+fn codeinsight(body: &Value) -> u64 {
+    codeinsight_action("codeinsight", "overview", body)
+}
+
 fn callers(body: &Value) -> u64 {
-    let symbol = body.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-    if symbol.is_empty() { return err("callers", "symbol required"); }
-    ok("callers", crate::code_index::callers_of(symbol))
+    codeinsight_action("callers", "callers", body)
 }
 
 fn callees(body: &Value) -> u64 {
-    let symbol = body.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-    if symbol.is_empty() { return err("callees", "symbol required"); }
-    ok("callees", crate::code_index::callees_of(symbol))
+    codeinsight_action("callees", "callees", body)
 }
 
 fn impact(body: &Value) -> u64 {
-    let symbol = body.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-    if symbol.is_empty() { return err("impact", "symbol required"); }
-    let max_depth = body.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-    ok("impact", crate::code_index::impact_of(symbol, max_depth))
+    let mut routed = body.clone();
+    if let Some(map) = routed.as_object_mut() {
+        map.entry("direction").or_insert_with(|| json!("callees"));
+    }
+    codeinsight_action("impact", "impact", &routed)
 }
 
 fn reject_if_project_root_unresolvable_before_gm_dir_panics(verb: &str) -> Option<u64> {
@@ -4316,19 +5405,16 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
     }
     let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
     crate::browser_witness::record_from_body(cwd_for_witness, body);
-    if let Some(root_override) = body.get("git_root_override").and_then(|v| v.as_str()) {
-        crate::orchestrator::seed_project_root_override(root_override);
-    }
     if crate::orchestrator::is_orchestrator_verb(verb) {
-        if let Some(unresolvable) = reject_if_project_root_unresolvable_before_gm_dir_panics(verb) {
-            return unresolvable;
-        }
         let (out, err_msg, code) = crate::orchestrator::dispatch(verb, "", body_s);
         #[cfg(target_arch = "wasm32")]
         {
             let ms = unsafe { host_now_ms() }.saturating_sub(dispatch_start_ms);
             emit_event("dispatch.end", serde_json::json!({ "verb": verb, "ms": ms }));
-            restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb);
+            if !crate::gates::dispatch_serves_no_phase_prose(verb, body) {
+                restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb);
+                crate::gates::restamp_last_dispatch_to_completion(verb);
+            }
         }
         if code == 0 {
             let data: Value = serde_json::from_str(&out).unwrap_or(Value::String(out));
@@ -4371,6 +5457,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "cache_invalidate" => cache_invalidate(&body),
         "cache_stats" => cache_stats(&body),
         "codeinsight_index" => codeinsight_index(&body),
+        "codeinsight" => codeinsight(&body),
         "codesearch" | "code_search" | "search" => codesearch(&body),
         "callers" => callers(&body),
         "callees" => callees(&body),
@@ -4411,6 +5498,9 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_cherry_pick" => git_cherry_pick(&body),
         "git_stash" => git_stash(&body),
         "git_stash_pop" => git_stash_pop(&body),
+        "git_stash_drop" => git_stash_drop(&body),
+        "git_stash_list" => git_stash_list(&body),
+        "git_init" => git_init(&body),
         "git_branch_delete" => git_branch_delete(&body),
         "git_rm" => git_rm(&body),
         "git_revert" => git_revert(&body),
@@ -4426,6 +5516,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
     {
         let ms = unsafe { host_now_ms() }.saturating_sub(dispatch_start_ms);
         emit_event("dispatch.end", serde_json::json!({ "verb": verb, "ms": ms }));
+        crate::gates::restamp_last_dispatch_to_completion(verb);
     }
     result
 }

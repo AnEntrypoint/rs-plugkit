@@ -108,12 +108,49 @@ const LONGGAP_EXEMPT_READ_ONLY_VERBS: &[&str] = &[
         "git_remote", "branch_status", "ci-status", "fs_read", "fs_stat", "fs_readdir", "status",
 ];
 
-fn is_longgap_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
-    LONGGAP_EXEMPT_READ_ONLY_VERBS.contains(&verb) || policy.longgap_exempt_verbs.iter().any(|v| v == verb)
+const LONGGAP_EXEMPT_WORK_VERBS: &[&str] = &[
+    "exec_js", "nodejs", "javascript", "node", "js", "typescript", "bash", "sh", "shell", "zsh",
+    "python", "py", "powershell", "ps1", "go", "rust", "c", "cpp", "java", "deno",
+    "git_add", "git_commit", "git_fetch", "git_push", "git_finalize",
+];
+
+fn long_gap_chain_belongs_to_this_session(policy: &crate::orchestrator::fsm::Policy) -> bool {
+    let state = crate::orchestrator::state::read_state();
+    if state.phase.as_str() == policy.terminal_phase { return false; }
+    match (&state.session_id, crate::orchestrator::state::dispatch_session_id()) {
+        (Some(owner), Some(caller)) => *owner == caller,
+        _ => true,
+    }
+}
+
+fn is_longgap_activity_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
+    policy.longgap_exempt_verbs.iter().any(|v| v == verb)
+}
+
+fn is_longgap_denial_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
+    LONGGAP_EXEMPT_READ_ONLY_VERBS.contains(&verb) || LONGGAP_EXEMPT_WORK_VERBS.contains(&verb) || is_longgap_activity_exempt(verb, policy)
 }
 
 fn is_longgap_refresh(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
     policy.longgap_refresh_verbs.iter().any(|v| v == verb)
+}
+
+pub fn dispatch_serves_no_phase_prose(verb: &str, body: &Value) -> bool {
+    verb == "instruction" && crate::orchestrator::instructions::body_requests_investigate_readonly(body)
+}
+
+fn dispatch_submitted_at_ms() -> Option<u64> {
+    let key = "AGENTPLUG_DISPATCH_SUBMITTED_AT_MS";
+    let packed = unsafe { crate::wasm_dispatch::host_env_get(key.as_ptr(), key.len() as u32) };
+    crate::wasm_dispatch::unpack_to_string_pub(packed)?.trim().parse::<u64>().ok().filter(|ms| *ms > 0)
+}
+
+pub fn restamp_last_dispatch_to_completion(verb: &str) {
+    let policy = crate::orchestrator::fsm::graph().policy;
+    if is_longgap_activity_exempt(verb, &policy) {
+        return;
+    }
+    let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-dispatch-ts"), &now_ms().to_string());
 }
 
 fn long_gap_should_fire(last_instruction_ms: u64, prev_dispatch_ms: u64, now: u64, threshold: u64) -> bool {
@@ -309,36 +346,38 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             log_deviation("bash-git-bypass", &format!("verb={} cmd={}", verb, cmd.chars().take(80).collect::<String>()));
             return GateVerdict::deny(format!(
                 "bash-git-bypass: a `{}` verb invoking `git` is denied - git is a first-class spool surface, not a shell command. Use the git verb instead: \
-                 git_status (porcelain), git_log, git_diff, git_show, git_branch (inspect); git_add, git_commit, git_finalize (stage/commit/push in one), git_push (push w/ rebase-retry); git_checkout, git_fetch, git_rm, git_revert, git_reset (mutate). \
+                 git_status (porcelain), git_log, git_diff, git_show, git_branch (inspect); git_add, git_commit, git_finalize (stage/commit/push in one), git_push (push w/ rebase-retry); git_checkout (switch a ref, or restore only the given paths), git_fetch, git_rm, git_revert, git_reset (mutate); git_stash, git_stash_pop, git_stash_drop, git_stash_list (shelve); git_init (turn a non-repo directory into a repo). \
                  git_finalize {{message}} bundles add->commit->porcelain-gate->push in ONE dispatch. The shell git bypasses the porcelain gate, the witness ledger, and is non-portable. Command was: `{}`",
                 verb, cmd.chars().take(120).collect::<String>()
             )).with_next("git_finalize");
         }
     }
 
-    let prev_dispatch_ms: u64 = if !is_longgap_exempt(verb, &policy) {
+    let claim_ms = now_ms();
+    let submitted_at_ms = dispatch_submitted_at_ms().map(|ms| ms.min(claim_ms)).unwrap_or(claim_ms);
+
+    let serves_no_phase_prose = dispatch_serves_no_phase_prose(verb, body);
+    let prev_dispatch_ms: u64 = if !is_longgap_activity_exempt(verb, &policy) && !serves_no_phase_prose {
         let p = host_read(&crate::pkfs::anchor(".gm/last-dispatch-ts")).unwrap_or_default().trim().parse().unwrap_or(0);
-        let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-dispatch-ts"), &now_ms().to_string());
+        let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-dispatch-ts"), &claim_ms.to_string());
         p
     } else { 0 };
 
-    if is_longgap_refresh(verb, &policy) {
-        let now = now_ms();
-        let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-instruction-ts"), &now.to_string());
+    if is_longgap_refresh(verb, &policy) && !serves_no_phase_prose {
+        let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-instruction-ts"), &claim_ms.to_string());
         let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/long-gap-retry-state"), "");
-    } else if !is_longgap_exempt(verb, &policy) {
+    } else if !is_longgap_denial_exempt(verb, &policy) && !serves_no_phase_prose {
         let last = host_read(&crate::pkfs::anchor(".gm/last-instruction-ts")).unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
-        let now = now_ms();
         let longgap_threshold_ms = policy.longgap_threshold_ms;
-        if long_gap_should_fire(last_ms, prev_dispatch_ms, now, longgap_threshold_ms) {
-            let gap_ms = now - last_ms;
+        if long_gap_should_fire(last_ms, prev_dispatch_ms, submitted_at_ms, longgap_threshold_ms) && long_gap_chain_belongs_to_this_session(&policy) {
+            let gap_ms = submitted_at_ms.saturating_sub(last_ms);
             let retry_state = host_read(&crate::pkfs::anchor(".gm/long-gap-retry-state")).unwrap_or_default();
             let (last_verb, count, last_denial_ts) = parse_retry_state_v2(&retry_state);
-            let since_last_denial = now.saturating_sub(last_denial_ts);
+            let since_last_denial = submitted_at_ms.saturating_sub(last_denial_ts);
             let same_burst = last_denial_ts > 0 && since_last_denial <= policy.long_gap_same_burst_ms;
             let new_count = if last_verb == verb && since_last_denial > policy.long_gap_same_burst_ms { count + 1 } else if last_verb == verb { count } else { 1u32 };
-            let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/long-gap-retry-state"), &format!("{}|{}|{}", verb, new_count, now));
+            let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/long-gap-retry-state"), &format!("{}|{}|{}", verb, new_count, claim_ms));
             if new_count >= policy.long_gap_retry_escalate_after {
                 if !same_burst {
                     log_deviation("long-gap-retry-without-instruction", &format!("verb={} consecutive_retries={} gap_ms={}", verb, new_count, gap_ms));

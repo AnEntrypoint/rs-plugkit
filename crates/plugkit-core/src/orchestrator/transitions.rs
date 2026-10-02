@@ -819,7 +819,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
             let payload = serde_json::json!({
                 "phase": s.phase.as_str(),
                 "phase_label": skill,
-                "recall_hits": hits,
+                "recall_hits": crate::recall_compact::compact_hits(&hits, false),
             });
             (payload.to_string(), String::new(), 0)
         }

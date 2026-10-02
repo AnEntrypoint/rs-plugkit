@@ -2,7 +2,7 @@ use super::gm_dir;
 use crate::pkfs;
 
 pub const RESIDUAL_PRD_OPEN_DEFAULT: &str = "PRD still has items; complete or remove them before residual scan.";
-pub const RESIDUAL_BROWSER_OPEN_DEFAULT: &str = "browser sessions still open -- dispatch `browser` with `session list` body to enumerate open ids, then `session close <id>` for each before retrying residual-scan";
+pub const RESIDUAL_BROWSER_OPEN_DEFAULT: &str = "browser sessions still open -- dispatch `browser` with `session close-all` body (closes every Chrome your gm session owns; `session close <id>` for a shared id), then `session list` to confirm none remain, before retrying residual-scan";
 pub const RESIDUAL_TASKS_RUNNING_DEFAULT: &str = "background tasks still running -- wait for completion or kill them via the host_exec_js interface before retrying residual-scan";
 pub const RESIDUAL_DIRTY_TREE_DEFAULT: &str = "worktree dirty -- modified={modified} untracked={untracked} -- commit or revert before residual scan; a push from a dirty tree orphans the unstaged delta";
 pub const RESIDUAL_IMPERATIVE_DEFAULT: &str = "Residual scan. Worktree clean, remote pushed, PRD empty, mutables witnessed -- the four checks. Anything reachable and in-spirit expands the PRD and runs. Out-of-reach is credentials, down service, product decision.";

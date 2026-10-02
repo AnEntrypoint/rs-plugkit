@@ -146,6 +146,31 @@ pub fn mark_deleted_reporting_match(namespace: &str, key: &str) -> Result<bool, 
     mark_deleted_reporting_match_cfg(namespace, key, &default_cfg())
 }
 
+pub fn live_keys(namespace: &str) -> Vec<String> {
+    live_keys_cfg(namespace, &default_cfg())
+}
+
+pub fn live_keys_cfg(namespace: &str, cfg: &RagConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    if ensure_schema_cfg(cfg).is_err() {
+        return out;
+    }
+    let Ok(rows) = shared_query_params(
+        &format!("SELECT key FROM {} WHERE namespace=?1 AND deleted=0", cfg.rssearch.table),
+        &[namespace],
+    ) else {
+        return out;
+    };
+    if let Some(arr) = rows.as_array() {
+        for row in arr {
+            if let Some(k) = row.get("key").and_then(|v| v.as_str()) {
+                out.push(k.to_string());
+            }
+        }
+    }
+    out
+}
+
 pub fn undelete(namespace: &str, key: &str, updated_at_ms: i64) -> Result<(), String> {
     undelete_cfg(namespace, key, updated_at_ms, &default_cfg())
 }

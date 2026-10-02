@@ -423,6 +423,17 @@ fn parse_resolve_target(trimmed: &str) -> (String, Option<String>, Option<String
     }
 }
 
+fn keeps_status(trimmed: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .map(|v| {
+            ["keep_status", "preserve_status", "leave_pending"]
+                .iter()
+                .any(|k| v.get(*k).and_then(|b| b.as_bool()) == Some(true))
+        })
+        .unwrap_or(false)
+}
+
 fn recover_truncated_envelope(s: &str) -> Option<(String, Option<String>)> {
     let s = s.trim_start();
     if !s.starts_with('{') { return None; }
@@ -478,8 +489,9 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     }
     let (id_target, witness, commit_comment, witness_dispatch_id, resolve_cwd) = parse_resolve_target(trimmed);
     let policy = super::fsm::graph().policy;
+    let status_kept = keeps_status(trimmed);
     let has_witness = witness.as_ref().map(|w| !w.trim().is_empty()).unwrap_or(false);
-    if policy.require_witness_evidence && !has_witness && deviation_refuses("prd-resolve-no-witness") {
+    if !status_kept && policy.require_witness_evidence && !has_witness && deviation_refuses("prd-resolve-no-witness") {
         let body = serde_json::json!({
             "error": format!("prd-resolve refused: no witness_evidence for {}", id_target),
             "deviation_kind": "prd-resolve-no-witness",
@@ -510,7 +522,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         return (String::new(), format!("{} does not exist", path.display()), 1);
     }
 
-    if policy.reject_duplicate_witness && deviation_refuses("prd-resolve-duplicate-witness") {
+    if !status_kept && policy.reject_duplicate_witness && deviation_refuses("prd-resolve-duplicate-witness") {
     if let Some(w) = witness.as_ref() {
         let trimmed_w = w.trim();
         if trimmed_w.len() >= 24 {
@@ -562,7 +574,9 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             for item in seq.iter_mut() {
                 if let Some(map) = item.as_mapping_mut() {
                     if map.get(&Value::String("id".to_string())).and_then(|v| v.as_str()) == Some(&id_target) {
-                        map.insert(Value::String("status".to_string()), Value::String(resolved_status.clone()));
+                        if !status_kept {
+                            map.insert(Value::String("status".to_string()), Value::String(resolved_status.clone()));
+                        }
                         if let Some(w) = witness.as_ref() {
                             map.insert(Value::String("witness".to_string()), Value::String(w.clone()));
                         }
@@ -595,7 +609,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 "prd_id": id_target,
                 "known_ids": known_ids,
                 "suggested_id": suggested_id,
-                "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\", \"commit_comment\": \"<optional one-line resolution note>\"}; aliases accepted: prd_id, mutable_id, item_id, slug, key (all map to id); commit_message, resolution_note (map to commit_comment). commit_comment is optional -- when present it rides on the row until the next git_commit/git_finalize bundles it into that commit's message and clears the row. A nested envelope (prd_id holding a stringified {\"key\":..,\"witness\":..} object) is unwrapped automatically and the inner key/id/prd_id/slug is recovered. Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If `suggested_id` is non-null it is the closest known id to what you passed -- likely a typo; re-dispatch with it. If the recovered id is not in `known_ids` above, the row was never `prd-add`ed in this chain -- your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added; never retry the same unknown id unchanged.",
+                "hint": "body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\", \"commit_comment\": \"<optional one-line resolution note>\", \"keep_status\": true (optional: record witness/commit_comment on the row WITHOUT completing it; status is left as-is and no witness is required; aliases preserve_status, leave_pending)}; aliases accepted: prd_id, mutable_id, item_id, slug, key (all map to id); commit_message, resolution_note (map to commit_comment). commit_comment is optional -- when present it rides on the row until the next git_commit/git_finalize bundles it into that commit's message and clears the row. A nested envelope (prd_id holding a stringified {\"key\":..,\"witness\":..} object) is unwrapped automatically and the inner key/id/prd_id/slug is recovered. Raw text body: first whitespace-delimited token = id, rest = witness_evidence. If `suggested_id` is non-null it is the closest known id to what you passed -- likely a typo; re-dispatch with it. If the recovered id is not in `known_ids` above, the row was never `prd-add`ed in this chain -- your next dispatch is `prd-add` with this id, THEN `prd-resolve`. Do not invent ids; resolve only what was added; never retry the same unknown id unchanged.",
             }).to_string();
             return cas::CasOutcome::Abort(body, format!("prd id not found: {}", id_target), 1);
         }
@@ -604,8 +618,9 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     match outcome {
         Ok(()) => {
             #[cfg(target_arch = "wasm32")]
-            crate::wasm_dispatch::emit_event("prd.resolved", serde_json::json!({ "id": id_target }));
-            (serde_json::json!({ "resolved": id_target, "commit_comment_attached": commit_comment.is_some(), "witness_dispatch_id_verified": witness_dispatch_id.is_some() }).to_string(), String::new(), 0)
+            crate::wasm_dispatch::emit_event(if status_kept { "prd.annotated" } else { "prd.resolved" }, serde_json::json!({ "id": id_target }));
+            let outcome_key = if status_kept { "annotated" } else { "resolved" };
+            (serde_json::json!({ outcome_key: id_target, "status_kept": status_kept, "commit_comment_attached": commit_comment.is_some(), "witness_dispatch_id_verified": witness_dispatch_id.is_some() }).to_string(), String::new(), 0)
         }
         Err((out, err, rc)) => (out, err, rc),
     }

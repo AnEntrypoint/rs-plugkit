@@ -239,12 +239,10 @@ Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir`, `scan_deps`
 size/line-ratio disproportion + dense `\uXXXX`-escape-run detection across
 git-tracked source and a bounded `node_modules` walk), `kv`/`kv_get`/
 `kv_put`/`kv_delete`, `exec`/`exec_js`, `fetch`, `env_get`, `recall`,
-`codesearch`, `callers`/`callees`/`impact`, `memorize`/`memorize-prune`, `health`, `filter`, the full git
-    verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git_remote`,
-    `git_add`, `git_commit`, `git_finalize`, `git_push`, `git_checkout`, `git_merge`,
-    `git_cherry_pick`,
-`git_fetch`, `git_pull`, `git_stash`, `git_stash_pop`, `git_rm`, `git_revert`, `git_reset`, `git_poll`,
-`git_worktree {action: add|remove|list|prune, path?, ref?, detach?, force?}`), plus `ci-status` (real
+`codesearch`, `codeinsight` (symbol, call, import, complexity and duplicate queries; `callers`/`callees`/`impact` are aliases), `memorize`/`memorize-prune`, `health`, `filter`, the full git
+verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git_remote`,
+`git_add`, `git_commit`, `git_finalize`, `git_push`, `git_checkout`, `git_merge`, `git_cherry_pick`,
+`git_fetch`, `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`, `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
 GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
 `prd-status`, `mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
 `fsm-validate`, `fsm-propose-override`, `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/
@@ -269,7 +267,7 @@ finishes.
 
 `git_add`, `git_commit`, `git_finalize`, `git_diff`, `git_stash` and
 `git_checkout` take an optional `paths` (alias `files`) pathspec list
-(`git_checkout {paths, ref?}` restores just those files). With it, `git_commit` and
+(`git_checkout {paths, ref?}` restores just those files in the working tree from `ref`, default the index; it refuses an empty list, a leading `-` or `:`, `..`, an absolute path outside the repo, and anything under `.gm/` or `.agentplug*`, and answers `{restored, source, output}`). With it, `git_commit` and
 `git_finalize` stage and commit exactly those pathspecs (`git commit -- <paths>`,
 so entries another writer staged stay staged and uncommitted), the
 post-commit porcelain gate considers only those paths, and when dirt remains
@@ -286,6 +284,27 @@ reported rather than reconciled. `paths` together with `rev` on
     worktree, applies one existing commit without merging unrelated history, and
     returns both before and after HEAD values. A conflict lists its paths and is
     automatically aborted, so the target is not left in a cherry-pick state.
+
+An explicit `paths` outranks the protected-path exclusion list: an entry the
+caller named is never withheld, and a request whose every pathspec resolves
+under `.agentplug*` is refused rather than silently widening. A scoped
+`git_commit`/`git_finalize` whose paths stage nothing fails with
+`error_code: invalid_args` and `requested_paths` instead of reporting
+`nothing_to_commit`, so a pathspec that no-ops cannot fall through to
+committing the rest of the index.
+
+`git_commit` and `git_finalize` refuse before staging anything when the commit
+would reference a file that exists on disk, is untracked, is not gitignored
+and is not part of this commit (`error_code: dangling_reference`, one
+`dangling_references` entry per offender naming `from`, `line`, `specifier`
+and `target`, plus a `fixes` list). Specifiers are resolved the way the
+runtime would: relative first, then bare against the nearest `package.json`
+`exports` map (string, conditional object and `"./*"` wildcard) and npm
+workspaces under `packages/*`. `allow_dangling: ["<target>"]` waives named
+targets and `allow_dangling: true` waives all; either way the waived targets
+come back in `dangling_waived`. Scanning skips `node_modules/`, `dist/`,
+`vendor/`, `build/`, `coverage/`, `.git/`, `.gm/` and `.agentplug-kv/`, files
+above 512 KiB, non-JS/TS/JSON extensions, and stops after 400 files.
 
 Async git hosts use a pending-token protocol shaped like `host_fetch`'s. A
 host that cannot block the wasm call (a browser driving isomorphic-git on the

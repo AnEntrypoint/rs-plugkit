@@ -30,6 +30,37 @@ impl FileSource {
 pub struct RuleExclusion {
     pub path: String,
     pub rule: &'static str,
+    pub files: Option<usize>,
+}
+
+pub const OWN_STATE_RULE: &str = "gm_state_dir";
+
+pub fn is_own_state_name(name: &str) -> bool {
+    name == ".gm" || name.starts_with(".agentplug")
+}
+
+fn own_state_entry_under_root(root: &str, path: &str) -> Option<String> {
+    let prefix = join_under(root, "");
+    let rel = path.strip_prefix(prefix.as_str())?;
+    let mut dirs: Vec<&str> = rel.split('/').collect();
+    dirs.pop();
+    let own_state_at = dirs.iter().position(|segment| is_own_state_name(segment))?;
+    Some(format!("{prefix}{}", dirs[..=own_state_at].join("/")))
+}
+
+fn prune_own_state(root: &str, files: Vec<String>) -> (Vec<String>, Vec<RuleExclusion>) {
+    let mut kept = Vec::with_capacity(files.len());
+    let mut pruned: Vec<RuleExclusion> = Vec::new();
+    for file in files {
+        match own_state_entry_under_root(root, &file) {
+            None => kept.push(file),
+            Some(entry) => match pruned.iter_mut().find(|p| p.path == entry) {
+                Some(p) => p.files = Some(p.files.unwrap_or(0) + 1),
+                None => pruned.push(RuleExclusion { path: entry, rule: OWN_STATE_RULE, files: Some(1) }),
+            },
+        }
+    }
+    (kept, pruned)
 }
 
 pub struct ScanUniverse {
@@ -251,7 +282,7 @@ impl RuleRecordingWalk<'_> {
             let is_dir = stat_is_directory(&next).unwrap_or(false);
             let rule = if self.cfg.is_force_included(&next) { None } else { self.exclusion_rule(&name, &next, is_dir) };
             match (rule, is_dir) {
-                (Some(rule), _) => self.excluded.push(RuleExclusion { path: next, rule }),
+                (Some(rule), _) => self.excluded.push(RuleExclusion { path: next, rule, files: None }),
                 (None, true) => self.descend(&next),
                 (None, false) => self.files.push(next),
             }
@@ -270,6 +301,11 @@ impl RuleRecordingWalk<'_> {
     }
 }
 
+fn absolute_root_for_message(root: &str) -> String {
+    if crate::pkfs::is_absolute(root) { return root.to_string(); }
+    crate::pkfs::anchor(root).trim_end_matches("/.").to_string()
+}
+
 pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin) -> Result<ScanUniverse, String> {
     let rel = match scope {
         Some(s) => relative_scope(root, s)?,
@@ -280,9 +316,16 @@ pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg
         files, source, listing_complete, excluded, walk_reason,
         target: target.clone(),
     };
+    if let Some(own_state) = rel.as_deref().and_then(|r| r.split('/').find(|s| is_own_state_name(s))) {
+        return Err(format!("path '{}' is inside {own_state}, gm's own state directory, which is never a search target", scope.unwrap_or("")));
+    }
     if rel.is_some() {
         match stat_is_directory(&target) {
-            None => return Err(format!("path '{}' does not exist under search root '{root}'", scope.unwrap_or(""))),
+            None => return Err(format!(
+                "path '{}' does not exist under search root '{}' -- paths resolve relative to that root, which is the dispatch project unless `root` names another directory; if the path lives in a different project, pass that project's directory as `root` (or dispatch with its cwd)",
+                scope.unwrap_or(""),
+                absolute_root_for_message(root),
+            )),
             Some(false) => return Ok(universe(vec![target.clone()], FileSource::SingleFile, true, Vec::new(), None)),
             Some(true) => {}
         }
@@ -299,6 +342,8 @@ pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg
                     }
                 }
                 return Ok(universe(kept, FileSource::Git, complete, excluded, None));
+                let (files, pruned) = prune_own_state(root, files);
+                return Ok(universe(files, FileSource::Git, complete, pruned, None));
             }
             Err(e) => WalkCause::GitListingFailed(e),
         },
@@ -325,7 +370,8 @@ pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> 
     let absolute = root.starts_with('/') || (bytes.len() >= 2 && bytes[1] == b':');
     let (base, scope) = if root.is_empty() || root == "." || absolute { (if root.is_empty() { "." } else { root }, None) } else { (".", Some(root)) };
     let project_node_modules = join_under(base, "node_modules/");
-    match list_scan_universe(base, scope, max_files, cfg, TargetOrigin::ProjectDefault) {
+    let origin = if absolute { TargetOrigin::CallerNamed } else { TargetOrigin::ProjectDefault };
+    match list_scan_universe(base, scope, max_files, cfg, origin) {
         Ok(u) => u.files.into_iter().filter(|p| !p.starts_with(&project_node_modules)).take(max_files).collect(),
         Err(_) => Vec::new(),
     }
