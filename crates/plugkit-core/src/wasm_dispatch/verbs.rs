@@ -4138,7 +4138,20 @@ fn ci_status_resolve_sha(body: &Value, cwd: Option<&str>) -> Result<String, u64>
         }
         return Ok(sha);
     }
-    Ok(requested.to_string())
+    if is_full_sha(requested) {
+        return Ok(requested.to_string());
+    }
+    let resolved = exec_git_in(cwd, &format!("rev-parse --verify {}^{{commit}}", requested)).trim().to_string();
+    if is_full_sha(&resolved) {
+        return Ok(resolved);
+    }
+    Err(err("ci-status", &format!(
+        "{} is neither a 40-char commit sha nor a ref git can resolve here -- pass a full sha, or a ref git knows such as HEAD or a branch name",
+        requested)))
+}
+
+fn is_full_sha(candidate: &str) -> bool {
+    candidate.len() == 40 && candidate.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn ci_status_token() -> Option<String> {
@@ -4240,7 +4253,8 @@ fn ci_status_value(body: &Value) -> Result<Value, Value> {
                 "ok": true, "verb": "ci-status", "data": {
                     "status": "no_applicable_workflow", "repo": repo, "sha": sha,
                     "failed_jobs": [], "run_url": Value::Null,
-                    "reason": format!("zero workflow runs appeared for this sha after {}s -- a genuinely triggered workflow starts within seconds of the push, so this sha's changed paths did not match any workflow trigger (e.g. paths-ignore). Treated as a legitimate pass-through, not a pending/failed run.", commit_age_secs.unwrap()),
+                    "query": format!("head_sha={}", sha),
+                    "reason": format!("zero workflow runs matched head_sha={} after {}s -- this reports the miss, not its cause: a workflow that never triggered, a path filter, and a sha GitHub never saw are indistinguishable from this response alone", sha, commit_age_secs.unwrap()),
                 },
             }));
         }
