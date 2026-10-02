@@ -322,8 +322,8 @@ checkout.
 cargo build --release
 ```
 
-Outputs `target/wasm32-wasip1/release/plugkit.wasm` (or `plugkit-slim.wasm`
-via the slim build profile). Release artifacts for the wasm target are
+Outputs `target/wasm32-wasip1/release/rs_plugkit.wasm`. The release workflow
+publishes that artifact as `plugkit-slim.wasm`. Release artifacts for the wasm target are
 produced by `.github/workflows/release.yml` on `git push` to `main`, and
 published to `AnEntrypoint/plugkit-bin` as GitHub Releases assets,
 sha256-verified alongside each resolved release tag. `agentplug-runner`
