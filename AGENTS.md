@@ -243,6 +243,16 @@ changes.
   nothing telling the caller its instruction was ignored; the limit function's
   bool return lets `codesearch_exhaustive` bound results only when the caller
   actually stated a limit.
+- `git_pathspec_scope` emits every exclude pathspec before the caller's own.
+  git 2.46 on Windows silently stages nothing for `git add -- <untracked> <exclude>`
+  (exit 0), so an exclude ordered last turns a scoped commit into a no-op
+  staging plus an unscoped `git commit -m`, which is how a commit came to hold
+  files nobody asked for. Excludes first is load-bearing, and
+  `caller_pathspec_names` keeps an explicit `paths` from being withheld.
+- A scoped `git_commit`/`git_finalize` passes `-- <paths>` to `git commit`
+  (and to the absorb-concurrent-write `--amend`) and refuses when the paths
+  stage nothing: the unscoped commit that used to follow an empty stage is
+  what made a narrowed request widen to the whole index.
 - `browser` and `cdp` share `host_browser_exec`; the engine travels in the opts
   JSON (`"engine"`), never inside the code body, so the host picks
   lightpanda/steel/chrome without re-escaping caller JS.
@@ -254,6 +264,12 @@ changes.
   TTL'd via `GIT_COMMIT_DEDUP_TTL_MS`) replays the one real sha instead of
   re-running `add`/`commit` when a caller or host re-dispatches one logical
   commit request twice.
+- Every staging path (`git_add`, `git_commit`, `git_finalize`, the porcelain
+  probes and `git_push`'s dirty gate) appends `GIT_PROTECTED_PATHSPECS`
+  (`:(top,exclude).gm`, `:(top,exclude).agentplug*`) after the caller's
+  pathspecs, so the project's own runtime state (Chrome profile dirs, KV
+  cache) is never staged, committed or counted as dirt whatever `paths` or
+  `.gitignore` say; receipts list them under `excluded`.
 - `git_finalize` given `paths` scopes its porcelain checks to those paths
   (`git_porcelain_scoped`) and pushes by explicit ref (its own new HEAD)
   instead of the unscoped push path, so another writer's pre-existing dirt
@@ -498,6 +514,19 @@ changes.
   the mean-score policy-evaluation rule, `seal()` tree topology, the
   `dream-replay-round` session-scoped windowed-replay protocol, and
   `max_online_rounds` admission-cap semantics.
+
+### wasm_dispatch/dangling_refs.rs
+
+- The guard runs inside `git_commit` and `git_finalize` before anything is
+  staged, so a refusal leaves the index untouched.
+- Only files already staged plus whatever `paths`/`add_all` would stage are
+  scanned: the working tree is usually dirty with another writer's edits and a
+  commit is only answerable for its own contents.
+- A resolved target counts as an offender only when it exists on disk, is not
+  tracked, is not gitignored, and is not in this commit's own path set -- an
+  untracked file being committed in the same dispatch is the fix, not an error.
+- `git check-ignore` filters generated-but-ignored targets so a build artifact
+  or a vendored blob never blocks a commit.
 
 ### Other modules
 
