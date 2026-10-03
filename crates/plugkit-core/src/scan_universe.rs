@@ -25,6 +25,14 @@ impl FileSource {
             FileSource::SingleFile => "file",
         }
     }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            FileSource::Git => "git ls-files --cached: tracked files only, so a file created since the last git add is not listed; pass \"refresh\": true to walk the disk instead",
+            FileSource::Walk => "filesystem walk under the target: every file on disk that no exclusion rule dropped",
+            FileSource::SingleFile => "one file named by \"path\", read straight from disk",
+        }
+    }
 }
 
 pub struct RuleExclusion {
@@ -211,6 +219,7 @@ enum WalkCause {
     TargetGitignored,
     OutsideWorktree(String),
     GitListingFailed(String),
+    CallerForcedDisk,
 }
 
 struct WalkPolicy {
@@ -225,6 +234,7 @@ fn walk_policy(cause: WalkCause, origin: TargetOrigin) -> WalkPolicy {
     let project = |reason: String| WalkPolicy { honour_gitignore: true, noise: NoiseDirs::ProjectNoiseList, reason };
     match (cause, origin) {
         (WalkCause::GitListingFailed(e), _) => project(format!("git could not list the worktree, so it was walked directly ({e})")),
+        (WalkCause::CallerForcedDisk, _) => project("the caller passed \"refresh\": true, so git ls-files was not consulted and the target was walked on disk".to_string()),
         (WalkCause::TargetGitignored, TargetOrigin::ProjectDefault) => project("the target is gitignored, so git lists nothing there and it was walked directly".to_string()),
         (WalkCause::OutsideWorktree(e), TargetOrigin::ProjectDefault) => project(format!("not inside a git worktree, so it was walked directly ({e})")),
         (WalkCause::TargetGitignored, TargetOrigin::CallerNamed) => WalkPolicy {
@@ -284,7 +294,7 @@ impl RuleRecordingWalk<'_> {
     }
 }
 
-pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin) -> Result<ScanUniverse, String> {
+pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool) -> Result<ScanUniverse, String> {
     let rel = match scope {
         Some(s) => relative_scope(root, s)?,
         None => None,
@@ -304,16 +314,20 @@ pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg
             Some(true) => {}
         }
     }
-    let cause = match directory_is_gitignored(&target) {
-        Ok(false) => match git_worktree_files(&target, 0) {
-            Ok((files, complete)) => {
-                let (files, pruned) = prune_own_state(root, files);
-                return Ok(universe(files, FileSource::Git, complete, pruned, None));
-            }
-            Err(e) => WalkCause::GitListingFailed(e),
-        },
-        Ok(true) => WalkCause::TargetGitignored,
-        Err(e) => WalkCause::OutsideWorktree(e),
+    let cause = if force_disk {
+        WalkCause::CallerForcedDisk
+    } else {
+        match directory_is_gitignored(&target) {
+            Ok(false) => match git_worktree_files(&target, 0) {
+                Ok((files, complete)) => {
+                    let (files, pruned) = prune_own_state(root, files);
+                    return Ok(universe(files, FileSource::Git, complete, pruned, None));
+                }
+                Err(e) => WalkCause::GitListingFailed(e),
+            },
+            Ok(true) => WalkCause::TargetGitignored,
+            Err(e) => WalkCause::OutsideWorktree(e),
+        }
     };
     let policy = walk_policy(cause, origin);
     let mut walk = RuleRecordingWalk {
@@ -336,7 +350,7 @@ pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> 
     let (base, scope) = if root.is_empty() || root == "." || absolute { (if root.is_empty() { "." } else { root }, None) } else { (".", Some(root)) };
     let project_node_modules = join_under(base, "node_modules/");
     let origin = if absolute { TargetOrigin::CallerNamed } else { TargetOrigin::ProjectDefault };
-    match list_scan_universe(base, scope, max_files, cfg, origin) {
+    match list_scan_universe(base, scope, max_files, cfg, origin, false) {
         Ok(u) => u.files.into_iter().filter(|p| !p.starts_with(&project_node_modules)).take(max_files).collect(),
         Err(_) => Vec::new(),
     }

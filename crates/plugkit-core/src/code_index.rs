@@ -2146,7 +2146,7 @@ pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagC
         crate::scan_universe::TargetOrigin::ProjectDefault
     };
     let file_cap = cfg.index.digest_max_files.max(20000).min(LITERAL_SCAN_MAX_FILES).max(1);
-    let universe = match crate::scan_universe::list_scan_universe(root, None, file_cap.saturating_add(1), &cfg.index, origin) {
+    let universe = match crate::scan_universe::list_scan_universe(root, None, file_cap.saturating_add(1), &cfg.index, origin, false) {
         Ok(e) => e,
         Err(e) => return json!({ "ok": false, "error": e, "mode": "filename" }),
     };
@@ -2222,6 +2222,9 @@ pub struct LiteralScan<'a> {
     /// Wall-clock ceiling for the scan. None means the configured `index.wall_budget_ms`; a
     /// caller that runs the scan as one channel of a ranked search passes a few seconds instead.
     pub budget_ms: Option<u64>,
+    /// Re-read rather than reuse: skip `git ls-files` for a directory walk of the target, and
+    /// serve every file from `host_read` instead of the mtime-keyed content cache.
+    pub refresh: bool,
 }
 
 enum LiteralMatcher {
@@ -2457,7 +2460,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let listing_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let universe = match crate::scan_universe::list_scan_universe(root, scope, file_cap.saturating_add(1), &cfg.index, origin) {
+    let universe = match crate::scan_universe::list_scan_universe(root, scope, file_cap.saturating_add(1), &cfg.index, origin, req.refresh) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
     };
@@ -2525,7 +2528,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut budget_exhausted = false;
     let mut term_lines: Vec<usize> = vec![0usize; term_matchers.len()];
     let mut term_files: Vec<usize> = vec![0usize; term_matchers.len()];
-    let mut cache = scan_cache_take(root);
+    let mut cache = if req.refresh { ScanCache::fresh(root) } else { scan_cache_take(root) };
 
     for path in files {
         if unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms) >= budget_ms {
@@ -2678,6 +2681,13 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     if glob.is_some() { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
     out.insert("file_source".to_string(), json!(universe.source.label()));
+    out.insert("file_source_detail".to_string(), json!(universe.source.detail()));
+    if req.refresh {
+        out.insert("refreshed".to_string(), json!(true));
+        out.insert("refreshed_note".to_string(), json!(
+            "this scan re-read from disk: git ls-files was skipped for a directory walk and the mtime-keyed content cache was bypassed, so edits and untracked files are visible"
+        ));
+    }
     if !universe.listing_complete {
         out.insert("listing_incomplete".to_string(), json!(true));
         if let Some(reason) = &universe.walk_reason { out.insert("walk_reason".to_string(), json!(reason)); }
@@ -2806,6 +2816,427 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         ));
     }
     out.insert("matches".to_string(), Value::Array(matches));
+    Value::Object(out)
+}
+
+pub struct CommentScan<'a> {
+    pub root: Option<&'a str>,
+    pub path: Option<&'a str>,
+    pub path_glob: Option<&'a str>,
+    pub max_matches: usize,
+    pub max_files: usize,
+    pub refresh: bool,
+}
+
+const COMMENT_TEXT_MAX_BYTES: usize = 2000;
+
+const COMMENT_SLASH_EXTENSIONS: &[&str] = &[
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts",
+    ".rs", ".go", ".c", ".h", ".cpp", ".cc", ".hpp", ".hh", ".cxx", ".hxx", ".ino",
+    ".glsl", ".vert", ".frag", ".comp", ".geom", ".tesc", ".tese", ".vsh", ".fsh", ".glslv", ".glslf",
+    ".java", ".cs", ".php", ".phtml", ".swift", ".kt", ".kts", ".scala", ".sc", ".zig",
+    ".d", ".groovy", ".gradle",
+    ".dsp", ".lib",
+    ".css", ".scss", ".sass", ".less",
+];
+
+const COMMENT_HASH_EXTENSIONS: &[&str] = &[
+    ".sh", ".bash", ".zsh", ".ksh", ".fish",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".properties", ".env",
+    ".py", ".pyi", ".rb", ".pl", ".pm", ".r", ".jl", ".ex", ".exs", ".tcl", ".awk",
+    ".ps1", ".psm1", ".psd1", ".nuspec",
+    ".makefile", ".mk", ".cmake", ".gitignore", ".gitattributes", ".dockerignore", ".editorconfig",
+];
+
+const COMMENT_HASH_FILENAMES: &[&str] = &[
+    "dockerfile", "makefile", "gnumakefile", "cmakelists.txt", "rakefile", "gemfile", "procfile",
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommentSyntax {
+    Slash,
+    Hash,
+}
+
+impl CommentSyntax {
+    fn label(self) -> &'static str {
+        match self {
+            CommentSyntax::Slash => "slash",
+            CommentSyntax::Hash => "hash",
+        }
+    }
+}
+
+fn comment_syntax_for_path(path: &str) -> Option<CommentSyntax> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let lowered_name = name.to_lowercase();
+    if COMMENT_HASH_FILENAMES.iter().any(|n| lowered_name == *n)
+        || lowered_name.starts_with("dockerfile")
+        || lowered_name.starts_with("makefile")
+        || lowered_name.starts_with("gnumakefile")
+    {
+        return Some(CommentSyntax::Hash);
+    }
+    let ext = match name.rsplit_once('.') {
+        Some((_, ext)) if !ext.is_empty() => format!(".{ext}").to_lowercase(),
+        _ => return None,
+    };
+    if COMMENT_SLASH_EXTENSIONS.iter().any(|e| ext == *e) { return Some(CommentSyntax::Slash); }
+    if COMMENT_HASH_EXTENSIONS.iter().any(|e| ext == *e) { return Some(CommentSyntax::Hash); }
+    None
+}
+
+const DIRECTIVE_BODY_PREFIXES: &[&str] = &[
+    "syntax=", "shellcheck", "noqa", "type:", "pylint:", "eslint", "prettier-ignore", "tslint:",
+    "rustfmt:", "clippy::", "clippy:", "golangci-lint", "hadolint", "yamllint", "ansible-lint",
+    "luacheck:", "rubocop:", "checkov:", "tfsec:", "dockerfile:", "editorconfig-checker",
+    "@ts-ignore", "@ts-expect-error", "@ts-nocheck", "@ts-check", "coverage:", "c8 ", "v8 ignore",
+    "istanbul ignore", "sourceMappingURL=", "region", "endregion", "pragma", "include",
+    "formatter:", "forbid", "allow", "deny", "warn", "expect", "cfg:", "tool:", "autopep8:",
+    "flake8:", "mypy:", "pyright:", "ruff:", "biome-ignore", "deno-lint-ignore",
+];
+
+fn comment_body_is_directive(body: &str) -> bool {
+    let trimmed = body.trim();
+    if trimmed.is_empty() { return false; }
+    if trimmed.starts_with('!') { return true; }
+    let lowered = trimmed.to_lowercase();
+    DIRECTIVE_BODY_PREFIXES.iter().any(|p| lowered.starts_with(p))
+}
+
+struct CommentSpan {
+    line: usize,
+    column: usize,
+    kind: &'static str,
+    text: String,
+    text_truncated: bool,
+    inline: bool,
+}
+
+fn push_span(comments: &mut Vec<CommentSpan>, directives: &mut Vec<CommentSpan>, span: CommentSpan) {
+    let body = if span.kind == "block" {
+        span.text.get(2..).and_then(|s| s.strip_suffix("*/")).unwrap_or("").to_string()
+    } else if let Some(rest) = span.text.strip_prefix("//") {
+        rest.to_string()
+    } else {
+        span.text.strip_prefix('#').unwrap_or("").to_string()
+    };
+    if comment_body_is_directive(&body) { directives.push(span) } else { comments.push(span) }
+}
+
+fn line_has_code_before(content: &str, line_start: usize, upto: usize) -> bool {
+    if upto <= line_start { return false }
+    content.get(line_start..upto).unwrap_or("").trim().chars().any(|c| !c.is_whitespace())
+}
+
+fn clipped_text(full: &str) -> (String, bool) {
+    if full.len() > COMMENT_TEXT_MAX_BYTES {
+        (full.chars().take(COMMENT_TEXT_MAX_BYTES).collect(), true)
+    } else {
+        (full.to_string(), false)
+    }
+}
+
+fn hash_opens_comment(bytes: &[u8], at: usize, line_start: usize) -> bool {
+    if at <= line_start { return true; }
+    bytes.get(at - 1).map(|b| b.is_ascii_whitespace()).unwrap_or(false)
+}
+
+fn scan_content_for_comments(content: &str, syntax: CommentSyntax) -> (Vec<CommentSpan>, Vec<CommentSpan>) {
+    let bytes = content.as_bytes();
+    let mut comments: Vec<CommentSpan> = Vec::new();
+    let mut directives: Vec<CommentSpan> = Vec::new();
+    let mut i = 0usize;
+    let mut line = 1usize;
+    let mut line_start = 0usize;
+    let mut in_block = false;
+    let mut block_start = 0usize;
+    let mut block_start_line = 0usize;
+    let mut block_start_column = 0usize;
+    let mut block_inline = false;
+    let mut string_delim: Option<u8> = None;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'\n' {
+            string_delim = None;
+            i += 1;
+            line += 1;
+            line_start = i;
+            continue;
+        }
+        if in_block {
+            if byte == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                let end = (i + 2).min(bytes.len());
+                let (text, text_truncated) = clipped_text(content.get(block_start..end).unwrap_or(""));
+                push_span(&mut comments, &mut directives, CommentSpan {
+                    line: block_start_line,
+                    column: block_start_column,
+                    kind: "block",
+                    text,
+                    text_truncated,
+                    inline: block_inline,
+                });
+                in_block = false;
+                i = end;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(delim) = string_delim {
+            if byte == b'\\' {
+                i += 1;
+                if let Some(next) = content.get(i..).and_then(|s| s.chars().next()) { i += next.len_utf8(); }
+                continue;
+            }
+            if byte == delim { string_delim = None; }
+            i += 1;
+            continue;
+        }
+        if byte == b'"' || byte == b'\'' || byte == b'`' {
+            string_delim = Some(byte);
+            i += 1;
+            continue;
+        }
+        let column = i - line_start + 1;
+        let starts_line_comment = match syntax {
+            CommentSyntax::Slash => byte == b'/' && bytes.get(i + 1) == Some(&b'/'),
+            CommentSyntax::Hash => byte == b'#' && hash_opens_comment(bytes, i, line_start),
+        };
+        if starts_line_comment {
+            let eol = content.get(i..).and_then(|s| s.find('\n')).map(|d| i + d).unwrap_or(bytes.len());
+            let (text, text_truncated) = clipped_text(content.get(i..eol).unwrap_or(""));
+            push_span(&mut comments, &mut directives, CommentSpan {
+                line,
+                column,
+                kind: "line",
+                text,
+                text_truncated,
+                inline: line_has_code_before(content, line_start, i),
+            });
+            i = eol;
+            continue;
+        }
+        if syntax == CommentSyntax::Slash && byte == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            in_block = true;
+            block_start = i;
+            block_start_line = line;
+            block_start_column = column;
+            block_inline = line_has_code_before(content, line_start, i);
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    if in_block {
+        let (text, text_truncated) = clipped_text(content.get(block_start..).unwrap_or(""));
+        push_span(&mut comments, &mut directives, CommentSpan {
+            line: block_start_line,
+            column: block_start_column,
+            kind: "block",
+            text,
+            text_truncated,
+            inline: block_inline,
+        });
+    }
+    (comments, directives)
+}
+
+fn comment_span_json(path: &str, syntax: CommentSyntax, span: &CommentSpan) -> Value {
+    let mut hit = serde_json::Map::new();
+    hit.insert("path".to_string(), json!(path));
+    hit.insert("line".to_string(), json!(span.line));
+    hit.insert("column".to_string(), json!(span.column));
+    hit.insert("kind".to_string(), json!(span.kind));
+    hit.insert("syntax".to_string(), json!(syntax.label()));
+    hit.insert("inline".to_string(), json!(span.inline));
+    hit.insert("text".to_string(), json!(span.text.trim_end()));
+    if span.text_truncated { hit.insert("text_truncated".to_string(), json!(true)); }
+    Value::Object(hit)
+}
+
+pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Value {
+    let root = req.root.filter(|p| !p.is_empty()).unwrap_or(".");
+    let scope = req.path.filter(|p| !p.is_empty());
+    let origin = if req.root.filter(|p| !p.is_empty()).is_some() {
+        crate::scan_universe::TargetOrigin::CallerNamed
+    } else {
+        crate::scan_universe::TargetOrigin::ProjectDefault
+    };
+    let glob = match req.path_glob.filter(|g| !g.is_empty()) {
+        Some(g) => match crate::path_glob::PathGlob::parse(g) {
+            Ok(parsed) => Some(parsed),
+            Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
+        },
+        None => None,
+    };
+    let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
+    let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let universe = match crate::scan_universe::list_scan_universe(root, scope, file_cap.saturating_add(1), &cfg.index, origin, req.refresh) {
+        Ok(u) => u,
+        Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
+    };
+    let listed = universe.files;
+    let files_truncated = listed.len() > file_cap;
+    let files: &[String] = if files_truncated { &listed[..file_cap] } else { &listed[..] };
+    let files_matching_glob = match &glob {
+        Some(g) => files.iter().filter(|p| g.admits(root, scope, p)).count(),
+        None => files.len(),
+    };
+    let glob_matched_no_files = glob.is_some() && !files.is_empty() && files_matching_glob == 0;
+    let mut cache = if req.refresh { ScanCache::fresh(root) } else { scan_cache_take(root) };
+    let max_matches = req.max_matches.max(1);
+    let mut comments: Vec<Value> = Vec::new();
+    let mut directives: Vec<Value> = Vec::new();
+    let mut files_scanned = 0usize;
+    let mut files_with_comments = 0usize;
+    let mut files_unreadable = 0usize;
+    let mut files_skipped_binary = 0usize;
+    let mut files_skipped_binary_extension = 0usize;
+    let mut files_skipped_too_large = 0usize;
+    let mut files_skipped_no_syntax: Vec<String> = Vec::new();
+    let mut matches_truncated = false;
+    for path in files {
+        if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
+        if let Some(g) = &glob {
+            if !g.admits(root, scope, path) { continue; }
+        }
+        if has_binary_extension(path) { files_skipped_binary_extension += 1; continue; }
+        let Some(syntax) = comment_syntax_for_path(path) else {
+            if files_skipped_no_syntax.len() < SKIPPED_SAMPLE_LEN { files_skipped_no_syntax.push(path.clone()); }
+            continue;
+        };
+        let stat = host_stat(path);
+        let (mtime_ms, size) = match &stat {
+            Some(stat) => (
+                stat.get("mtime_ms").and_then(|v| v.as_u64())
+                    .or_else(|| stat.get("mtimeMs").and_then(|v| v.as_u64()))
+                    .unwrap_or(0),
+                stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+            ),
+            None => (0, 0),
+        };
+        if stat.is_some() {
+            if size > LITERAL_SCAN_MAX_FILE_BYTES { files_skipped_too_large += 1; continue; }
+            if size == 0 { files_scanned += 1; continue; }
+        }
+        let content = if mtime_ms > 0 {
+            match cache.get(path, mtime_ms, size) {
+                Some(cached) => Some(cached),
+                None => {
+                    let fresh = host_read(path);
+                    if let Some(ref text) = fresh { cache.insert(path, mtime_ms, size, text); }
+                    fresh
+                }
+            }
+        } else {
+            host_read(path)
+        };
+        let Some(content) = content else {
+            if stat.is_some() { files_skipped_binary += 1 } else { files_unreadable += 1 }
+            continue;
+        };
+        if content.as_bytes().contains(&0u8) { files_skipped_binary += 1; continue; }
+        files_scanned += 1;
+        let (file_comments, file_directives) = scan_content_for_comments(&content, syntax);
+        if file_comments.is_empty() && file_directives.is_empty() { continue; }
+        files_with_comments += 1;
+        for span in &file_comments {
+            if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
+            comments.push(comment_span_json(path, syntax, span));
+        }
+        for span in &file_directives {
+            if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
+            directives.push(comment_span_json(path, syntax, span));
+        }
+    }
+    let cache_hits = cache.hits;
+    let cache_misses = cache.misses;
+    let cache_entries = cache.entries.len();
+    let cache_bytes = cache.bytes;
+    scan_cache_put(cache);
+    let exhaustive = !files_truncated && !matches_truncated && files_unreadable == 0
+        && files_skipped_too_large == 0 && universe.listing_complete && !glob_matched_no_files;
+    let mut out = serde_json::Map::new();
+    out.insert("ok".to_string(), json!(true));
+    out.insert("mode".to_string(), json!("comments"));
+    out.insert("root".to_string(), json!(root));
+    if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
+    if let Some(g) = req.path_glob { out.insert("path_glob".to_string(), json!(g)); }
+    if glob.is_some() { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
+    if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
+    out.insert("file_source".to_string(), json!(universe.source.label()));
+    out.insert("file_source_detail".to_string(), json!(universe.source.detail()));
+    if req.refresh {
+        out.insert("refreshed".to_string(), json!(true));
+        out.insert("refreshed_note".to_string(), json!(
+            "this scan re-read from disk: git ls-files was skipped for a directory walk and the mtime-keyed content cache was bypassed, so edits and untracked files are visible"
+        ));
+    }
+    if !universe.listing_complete {
+        out.insert("listing_incomplete".to_string(), json!(true));
+        if let Some(reason) = &universe.walk_reason { out.insert("walk_reason".to_string(), json!(reason)); }
+    }
+    out.insert("comment_count".to_string(), json!(comments.len()));
+    out.insert("directive_count".to_string(), json!(directives.len()));
+    out.insert("files_with_comments".to_string(), json!(files_with_comments));
+    out.insert("files_scanned".to_string(), json!(files_scanned));
+    out.insert("files_listed".to_string(), json!(files.len()));
+    let comment_paths: Vec<Value> = {
+        let mut seen: Vec<String> = Vec::new();
+        for hit in comments.iter().chain(directives.iter()) {
+            let p = hit.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !seen.contains(&p) { seen.push(p); }
+        }
+        seen.into_iter().map(|p| json!(p)).collect()
+    };
+    out.insert("files".to_string(), Value::Array(comment_paths));
+    out.insert("output".to_string(), Value::Array(
+        comments.iter().chain(directives.iter())
+            .map(|hit| json!(format!(
+                "{}:{}:{}: {}",
+                hit.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                hit.get("line").and_then(|v| v.as_u64()).unwrap_or(0),
+                hit.get("column").and_then(|v| v.as_u64()).unwrap_or(0),
+                hit.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+            )))
+            .collect(),
+    ));
+    if cache_hits + cache_misses > 0 {
+        out.insert("scan_cache".to_string(), json!({
+            "hits": cache_hits,
+            "misses": cache_misses,
+            "entries": cache_entries,
+            "cached_bytes": cache_bytes,
+        }));
+    }
+    if files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
+    if files_skipped_binary > 0 { out.insert("files_skipped_binary".to_string(), json!(files_skipped_binary)); }
+    if files_skipped_too_large > 0 {
+        out.insert("files_skipped_too_large_count".to_string(), json!(files_skipped_too_large));
+        out.insert("max_file_bytes".to_string(), json!(LITERAL_SCAN_MAX_FILE_BYTES));
+    }
+    if files_unreadable > 0 { out.insert("files_unreadable".to_string(), json!(files_unreadable)); }
+    if !files_skipped_no_syntax.is_empty() {
+        out.insert("files_skipped_no_syntax".to_string(), json!(files_skipped_no_syntax));
+        out.insert("files_skipped_no_syntax_note".to_string(), json!(
+            "no comment syntax is mapped for these extensions; narrow the scan with \"glob\" or \"path\" if a language here is missing"
+        ));
+    }
+    let elapsed_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms);
+    out.insert("elapsed_ms".to_string(), json!(elapsed_ms));
+    out.insert("max_matches".to_string(), json!(max_matches));
+    out.insert("exhaustive".to_string(), json!(exhaustive));
+    if files_truncated {
+        out.insert("files_truncated".to_string(), json!(true));
+        out.insert("files_truncated_at".to_string(), json!(file_cap));
+    }
+    if matches_truncated {
+        out.insert("matches_truncated".to_string(), json!(true));
+        out.insert("matches_truncated_at".to_string(), json!(max_matches));
+    }
+    out.insert("comments".to_string(), Value::Array(comments));
+    out.insert("directives".to_string(), Value::Array(directives));
     Value::Object(out)
 }
 
