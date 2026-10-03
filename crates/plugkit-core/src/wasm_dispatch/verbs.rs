@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use super::host_abi::{
     host_fs_readdir, host_fetch, host_kv_get, host_kv_put, host_kv_delete, host_kv_query,
-    host_exec_js, host_now_ms, host_env_get, host_browser_exec, host_oxi_exec,
+    host_exec_js, host_now_ms, host_env_get, host_browser_exec,
     pack, read_str, unpack_to_string, unpack_to_value,
     git_call, git_call_argv, host_read, plugin_call as call_plugin,
 };
@@ -373,11 +373,11 @@ fn next_dispatch_hint_for(verb: &str) -> Value {
     if verb == "instruction" { Value::Null } else { json!("instruction") }
 }
 
-fn err(verb: &str, reason: &str) -> u64 {
+pub(crate) fn err(verb: &str, reason: &str) -> u64 {
     err_coded(verb, ERR_CODE_FAILED, reason)
 }
 
-fn err_coded(verb: &str, code: &str, reason: &str) -> u64 {
+pub(crate) fn err_coded(verb: &str, code: &str, reason: &str) -> u64 {
     pack(json!({
         "ok": false,
         "verb": verb,
@@ -387,7 +387,7 @@ fn err_coded(verb: &str, code: &str, reason: &str) -> u64 {
     }).to_string())
 }
 
-fn err_json(verb: &str, detail: Value) -> u64 {
+pub(crate) fn err_json(verb: &str, detail: Value) -> u64 {
     let mut obj = json!({
         "ok": false,
         "verb": verb,
@@ -412,7 +412,7 @@ fn err_retry_same_verb(verb: &str, reason: &str) -> u64 {
     }).to_string())
 }
 
-fn ok(verb: &str, data: Value) -> u64 {
+pub(crate) fn ok(verb: &str, data: Value) -> u64 {
     pack(json!({ "ok": true, "verb": verb, "data": data }).to_string())
 }
 
@@ -1551,8 +1551,14 @@ const DUAL_PHRASE_SCAN_PER_FILE_MATCHES: usize = 8;
 const DUAL_PHRASE_SCAN_COLLECT_MATCHES: usize =
     DUAL_PHRASE_SCAN_MAX_MATCHES * DUAL_PHRASE_SCAN_PER_FILE_MATCHES;
 
-fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig) -> (Vec<Value>, u64, bool) {
-    if rs_search::tokenize::tokenize(query).len() < 2 { return (Vec::new(), 0, false); }
+fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig, glob: Option<&str>) -> (Vec<Value>, u64, bool) {
+    // The gate is on the query's own text, never on how many tokens it splits into: `sysvshm` is
+    // one token and is exactly the verbatim literal this channel exists to answer, so a
+    // token-count gate reported "absent" for it while `litebox_sysvshm` -- the same word with a
+    // separator, two tokens -- was scanned. Tokenization is a ranking concern (BM25, the
+    // embedder); matching a string verbatim is not, and a caller who reads `phrase_hits` before
+    // concluding a literal is absent has no way to tell "not scanned" from "not found".
+    if query.trim().chars().count() < 2 { return (Vec::new(), 0, false); }
     let scan = crate::code_index::LiteralScan {
         pattern: query,
         root,
@@ -1560,7 +1566,7 @@ fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::Rag
         regex: false,
         case_insensitive: true,
         whole_word: false,
-        path_glob: None,
+        path_glob: glob,
         max_matches: DUAL_PHRASE_SCAN_COLLECT_MATCHES,
         max_matches_per_file: Some(DUAL_PHRASE_SCAN_PER_FILE_MATCHES),
         max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
@@ -1609,6 +1615,24 @@ fn fair_share_phrase_hits(hits: Vec<Value>, cap: usize) -> Vec<Value> {
     out
 }
 
+/// A scan the walk did not finish is not a verdict: the budget, a file-size ceiling or a match cap
+/// stopped it before it reached every file, so an empty `phrase_hits` from it means "not reached",
+/// not "absent". Naming that is the whole difference between a caller concluding the literal does
+/// not exist and a caller narrowing the query or re-running it exhaustively. Null when the scan
+/// answered completely, so a finished scan costs the reply nothing.
+fn phrase_scan_note(total: u64, shown: usize, exhaustive: bool) -> Value {
+    if exhaustive && total <= shown as u64 { return Value::Null; }
+    Value::String(if exhaustive {
+        format!(
+            "the phrase scan matched {total} line(s) and returned {shown} (per-file quota) -- the rest exist but are not shown, so phrase_hits is a sample, not a count; mode:\"literal\" answers exhaustively"
+        )
+    } else {
+        format!(
+            "the phrase scan did not cover every file: the wall budget, a file-size ceiling or an unreadable file stopped the walk after it matched {total} line(s), {shown} of which are shown. Files it never reached are unsearched, so an empty or short phrase_hits here is NOT evidence the literal is absent; mode:\"literal\" answers exhaustively"
+        )
+    })
+}
+
 /// First dispatch on a tree with no digest at all. Bounded, not the full 110s index budget: a
 /// search that answers in half a minute with a full index beats one that times out at 120s. Measured
 /// on litebox-main (1834 files) a 30s pass indexes the whole tree, so every dispatch after it needs
@@ -1640,6 +1664,194 @@ fn unindexed_on_disk_candidates(namespace: &str) -> (Vec<Value>, usize) {
     (out, total)
 }
 
+/// The path a hit is filed under, wherever the channel put it: the vector channel's rows carry it
+/// at the top level, the BM25 channel's inside `symbol`.
+fn hit_scope_path(hit: &Value) -> Option<String> {
+    hit.get("path").and_then(|v| v.as_str())
+        .or_else(|| hit.get("symbol").and_then(|s| s.get("path")).and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+}
+
+fn normalized_scope_path(path: &str) -> String {
+    path.replace('\\', "/").trim_end_matches('/').to_string()
+}
+
+/// Indexed paths are written as `{root}/{relative}`, so a hit from this root's index starts with
+/// the root. A hit that does not is from another tree's index -- the corpus cache is shared by
+/// every root the module instance has served, and a namespace that does not exist yet reads back
+/// whatever the unscoped namespace holds.
+fn scope_path_under_root(root: &str, path: &str) -> bool {
+    let root = normalized_scope_path(root);
+    if root.is_empty() { return true; }
+    let path = normalized_scope_path(path);
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+fn retain_hits_in_scope(hits: &mut Vec<Value>, root: &str, scope: Option<&PathScope>) {
+    hits.retain(|hit| match hit_scope_path(hit) {
+        Some(path) => scope_path_under_root(root, &path)
+            && scope.map(|s| s.admits(root, &path)).unwrap_or(true),
+        None => scope.is_none(),
+    });
+}
+
+const PATH_SCOPE_FIELDS: &[&str] = &["paths", "path", "path_glob", "glob", "include"];
+
+const SCOPED_CANDIDATE_MULTIPLIER: usize = 8;
+
+const SCOPED_CANDIDATE_FLOOR: usize = 50;
+
+struct PathScope {
+    patterns: Vec<String>,
+    globs: Vec<crate::path_glob::PathGlob>,
+}
+
+impl PathScope {
+    fn from_body(body: &Value) -> Result<Option<PathScope>, String> {
+        let mut patterns: Vec<String> = Vec::new();
+        for field in PATH_SCOPE_FIELDS {
+            let Some(value) = body.get(*field) else { continue };
+            match value {
+                Value::String(text) => push_scope_pattern(&mut patterns, text, field)?,
+                Value::Array(entries) => {
+                    if entries.is_empty() {
+                        return Err(format!(
+                            "{field} is an empty array -- a blank scope is dropped before the scan runs and silently searches everything; omit the field to search unscoped"
+                        ));
+                    }
+                    for entry in entries {
+                        match entry.as_str() {
+                            Some(text) => push_scope_pattern(&mut patterns, text, field)?,
+                            None => return Err(format!(
+                                "{field} entries must all be non-empty path strings; got {entry}"
+                            )),
+                        }
+                    }
+                }
+                Value::Null => continue,
+                other => return Err(format!(
+                    "{field} must be a string or an array of strings; got {other}"
+                )),
+            }
+        }
+        if patterns.is_empty() { return Ok(None) }
+        let mut globs = Vec::with_capacity(patterns.len());
+        for pattern in &patterns {
+            match crate::path_glob::PathGlob::parse(pattern) {
+                Ok(glob) => globs.push(glob),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Some(PathScope { patterns, globs }))
+    }
+
+    fn admits(&self, root: &str, path: &str) -> bool {
+        self.globs.iter().any(|glob| glob.admits(root, None, path))
+    }
+
+    fn scan_glob(&self) -> Option<String> {
+        if self.patterns.len() == 1 { return Some(self.patterns[0].clone()) }
+        if self.patterns.iter().any(|p| p.contains([',', '{', '}'])) { return None }
+        Some(format!("{{{}}}", self.patterns.join(",")))
+    }
+
+    fn applied(&self) -> String {
+        self.scan_glob().unwrap_or_else(|| self.patterns.join(" "))
+    }
+}
+
+fn push_scope_pattern(out: &mut Vec<String>, raw: &str, field: &str) -> Result<(), String> {
+    let normalized = raw.trim().replace('\\', "/");
+    let normalized = normalized.trim_start_matches("./").trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        return Err(format!(
+            "{field} carries an empty path -- a blank scope is dropped before the scan runs and silently searches everything; omit the field to search unscoped"
+        ));
+    }
+    if normalized.starts_with('!') {
+        return Err(format!(
+            "{field} carries the negated pattern \"{normalized}\" -- there is no exclude filter in this build; scope positively and send one dispatch per subtree"
+        ));
+    }
+    if crate::path_glob::looks_like_glob(&normalized) {
+        if !out.contains(&normalized) { out.push(normalized) }
+        return Ok(());
+    }
+    let below = format!("{normalized}/**");
+    if !out.contains(&normalized) { out.push(normalized) }
+    if !out.contains(&below) { out.push(below) }
+    Ok(())
+}
+
+/// A scope is applied after retrieval, so the ranked channels must over-fetch: taking their top-k
+/// first and filtering second returns whatever survived out of a pool the scope never saw.
+fn scoped_candidate_k(k: u32, scope: Option<&PathScope>) -> usize {
+    match scope {
+        Some(_) => (k as usize).saturating_mul(SCOPED_CANDIDATE_MULTIPLIER).max(SCOPED_CANDIDATE_FLOOR),
+        None => k as usize,
+    }
+}
+
+fn apply_scope_echo(reply: &mut Value, scope: &PathScope, channels: &[&Vec<Value>]) {
+    let mut files: Vec<String> = Vec::new();
+    for channel in channels {
+        for hit in *channel {
+            let Some(path) = hit_scope_path(hit) else { continue };
+            let normalized = normalized_scope_path(&path);
+            if !files.contains(&normalized) { files.push(normalized) }
+        }
+    }
+    let Value::Object(map) = reply else { return };
+    map.insert("path_glob".to_string(), json!(scope.applied()));
+    map.insert("files_matching_glob".to_string(), json!(files.len()));
+    if files.is_empty() {
+        map.insert("glob_matched_no_files".to_string(), json!(true));
+    }
+}
+
+/// Paths carrying the query as a literal: the phrase channel's exact substring matches, plus every
+/// BM25 hit whose own text contains the query verbatim.
+fn literal_evidence_paths(query: &str, phrase_hits: &[Value], bm25_hits: &[Value]) -> std::collections::HashSet<String> {
+    let needle = query.trim().to_lowercase();
+    let mut out = std::collections::HashSet::new();
+    for hit in phrase_hits {
+        if let Some(path) = hit_scope_path(hit) {
+            out.insert(normalized_scope_path(&path));
+        }
+    }
+    if !needle.is_empty() {
+        for hit in bm25_hits {
+            let verbatim = hit.get("text").and_then(|v| v.as_str())
+                .map(|t| t.to_lowercase().contains(&needle))
+                .unwrap_or(false);
+            if verbatim {
+                if let Some(path) = hit_scope_path(hit) {
+                    out.insert(normalized_scope_path(&path));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Literal-token matches dominate fuzzy ones: a file carrying the query verbatim sorts ahead of a
+/// file the embedder merely finds nearby, while the order within each group is left alone.
+fn promote_literal_matches(hits: &mut Vec<Value>, literal: &std::collections::HashSet<String>) {
+    if literal.is_empty() || hits.len() < 2 { return; }
+    let mut order: Vec<(usize, u8)> = hits.iter().enumerate()
+        .map(|(i, hit)| {
+            let rank = match hit_scope_path(hit) {
+                Some(path) if literal.contains(&normalized_scope_path(&path)) => 0u8,
+                _ => 1u8,
+            };
+            (i, rank)
+        })
+        .collect();
+    order.sort_by_key(|(i, rank)| (*rank, *i));
+    *hits = order.into_iter().map(|(i, _)| hits[i].clone()).collect();
+}
+
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
     if !crate::wasm_dispatch::host_allow_root(root) {
         return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
@@ -1648,6 +1860,12 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         let out = crate::code_index::search_filenames_at(query, k as usize, cfg, Some(root));
         return ok("codesearch", out);
     }
+    let scope = match PathScope::from_body(body) {
+        Ok(scope) => scope,
+        Err(e) => return err("codesearch", &e),
+    };
+    let scan_k = scoped_candidate_k(k, scope.as_ref());
+    let scan_glob = scope.as_ref().and_then(|s| s.scan_glob());
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
     let prior_stage_ms = body.get("stage_ms").cloned().unwrap_or_else(|| json!({}));
@@ -1683,14 +1901,17 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
     let mut at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let embedding = embed_query(query);
     let embed_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let vres = crate::code_index::search_at(query, k as usize, Some(&embedding), Some(root));
-    let vector_hits = vres.get("rows").cloned().unwrap_or_else(|| json!([]));
+    let vres = crate::code_index::search_at(query, scan_k, Some(&embedding), Some(root));
+    let mut vector_hits: Vec<Value> = vres.get("rows")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
     let vector_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut corpus = crate::code_index::FusionCorpus::load_at(Some(root));
     let corpus_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let bm25_ranked = corpus.bm25_rank_cfg(query, k as usize, &cfg.scoring);
+    let bm25_ranked = corpus.bm25_rank_cfg(query, scan_k, &cfg.scoring);
     let bm25_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let bm25_hits: Vec<Value> = bm25_ranked
+    let mut bm25_hits: Vec<Value> = bm25_ranked
         .into_iter()
         .map(|(key, score)| {
             let text = corpus.text_for_key(&key).unwrap_or_default();
@@ -1706,8 +1927,17 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         .collect();
     let commits = crate::code_index::git_commit_rank_at(root, query, 10);
     let commits_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, Some(root), cfg);
+    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, Some(root), cfg, scan_glob.as_deref());
     let phrase_ms = stage(at);
+    let mut phrase_hits = phrase_hits;
+    retain_hits_in_scope(&mut vector_hits, root, scope.as_ref());
+    retain_hits_in_scope(&mut bm25_hits, root, scope.as_ref());
+    retain_hits_in_scope(&mut phrase_hits, root, scope.as_ref());
+    vector_hits.truncate(k as usize);
+    bm25_hits.truncate(k as usize);
+    let literal = literal_evidence_paths(query, &phrase_hits, &bm25_hits);
+    promote_literal_matches(&mut bm25_hits, &literal);
+    promote_literal_matches(&mut vector_hits, &literal);
     let stage_ms = json!({
         "embed_query": embed_ms,
         "vector_search": vector_ms,
@@ -1717,7 +1947,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         "phrase_scan": phrase_ms,
         "total": unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms),
     });
-    ok("codesearch", json!({
+    let mut reply = json!({
         "mode": "dual",
         "root": root,
         "vector_hits": vector_hits,
@@ -1725,6 +1955,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         "phrase_hits": phrase_hits,
         "phrase_hits_total": phrase_total,
         "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
+        "phrase_scan_note": phrase_scan_note(phrase_total, phrase_hits.len(), phrase_exhaustive),
         "commits": commits,
         "channels": {
             "vector": { "independent": true, "indexed_root": root },
@@ -1740,7 +1971,18 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         },
         "stage_ms": merge_stage_ms(prior_stage_ms, stage_ms),
         "degraded": vres.get("degraded").cloned().unwrap_or(json!(false)),
-    }))
+    });
+    if let Some(scope) = scope.as_ref() {
+        apply_scope_echo(&mut reply, scope, &[&vector_hits, &bm25_hits, &phrase_hits]);
+        if let Value::Object(map) = &mut reply {
+            if let Some(glob) = scan_glob.as_deref() {
+                if let Some(Value::Object(phrase)) = map.get_mut("channels").and_then(|c| c.get_mut("phrase")) {
+                    phrase.insert("path_glob".to_string(), json!(glob));
+                }
+            }
+        }
+    }
+    ok("codesearch", reply)
 }
 
 /// An index pass runs in the dispatch that discovered the stale digest and then recurses, so the
@@ -1758,6 +2000,19 @@ fn merge_stage_ms(prior: Value, now: Value) -> Value {
         }
     }
     Value::Object(out)
+}
+
+/// A dispatch that names no root still belongs to exactly one tree. Without one the ranked
+/// channels fall through to the un-suffixed index namespace, whose corpus cache is keyed by the
+/// empty root and therefore shared with every other tree this module instance has served: a
+/// dispatch for one project then returns another project's symbols, while the phrase scan beside
+/// it walks the real cwd. Resolving the git root (or the cwd itself) makes every channel agree.
+fn codesearch_default_root() -> Option<String> {
+    let root = crate::orchestrator::resolved_project_root()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|p| !p.is_empty())
+        .or_else(|| crate::wasm_dispatch::host_cwd_string().filter(|p| !p.is_empty()))?;
+    crate::wasm_dispatch::host_allow_root(&root).then_some(root)
 }
 
 const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
@@ -1936,7 +2191,10 @@ codesearch (aliases \"code_search\", \"search\") is the canonical search verb.
   {\"path\":\"<dir or file>\"}           narrow the scan
   {\"path_glob\":\"**/*.rs\"}            narrow by glob; \"glob\" is an alias
   {\"combine\":\"phrase\"}               \"phrase\" (default for a multi-word query), \"and\" (every term on one line),
-                                       \"or\" (ranked union of any term)
+                                       \"or\" (ranked union of any term); a \"regex\" pattern carrying a
+                                       metacharacter (| ( ) [ ] { } * + ? ^ $ \\ .) is compiled as ONE regex
+                                       and is never split -- combine then does not apply and the reply says
+                                       so in \"combine_requested\"/\"combine_applied\"/\"combine_note\"
   {\"case_insensitive\":true, \"whole_word\":true}
   {\"refresh\":true}                    re-read from disk for the exhaustive modes: walk instead of
                                        `git ls-files --cached` and bypass the content cache";
@@ -2346,11 +2604,13 @@ fn codesearch(body: &Value) -> u64 {
         let explicit = if limit_was_explicit { Some(k) } else { None };
         return codesearch_exhaustive(body, query, mode == "regex", &cfg, explicit);
     }
-    let root = body.get("root").and_then(|v| v.as_str())
+    if let Some(root) = body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
-        .filter(|p| !p.is_empty());
-    if let Some(root) = root {
+        .filter(|p| !p.is_empty()) {
         return codesearch_at_root(body, root, query, k, &cfg);
+    }
+    if let Some(root) = codesearch_default_root() {
+        return codesearch_at_root(body, &root, query, k, &cfg);
     }
     if mode == "filename" {
         let out = crate::code_index::search_filenames(query, k as usize, &cfg);
@@ -2412,7 +2672,13 @@ fn codesearch(body: &Value) -> u64 {
             return codesearch(&retry);
         }
     }
-    let cand_k = cfg.budget.pool(k as usize).max(50) as u32;
+    let scope = match PathScope::from_body(body) {
+        Ok(scope) => scope,
+        Err(e) => return err("codesearch", &e),
+    };
+    let scan_k = scoped_candidate_k(k, scope.as_ref());
+    let scan_glob = scope.as_ref().and_then(|s| s.scan_glob());
+    let cand_k = cfg.budget.pool(scan_k).max(50) as u32;
     let embedding = embed_query(query);
     let code_ns = cfg.namespaces.code.as_str();
     let vec_hits = vec_search_local(&embedding, code_ns, cand_k);
@@ -2438,12 +2704,11 @@ fn codesearch(body: &Value) -> u64 {
         vec_ids
     };
     let bm25_ranked = corpus.bm25_rank_cfg(query, cand_k as usize, &cfg.scoring);
-    let bm25_ids: Vec<String> = bm25_ranked.iter().map(|(key, _)| key.clone()).collect();
     let commit_ranked = crate::code_index::git_commit_rank(query, 10);
     let commits: Vec<Value> = commit_ranked.iter()
         .map(|(hash, message, score)| json!({ "hash": hash, "message": message, "score": score }))
         .collect();
-    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, None, &cfg);
+    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, None, &cfg, scan_glob.as_deref());
     let build_hit = |corpus: &mut crate::code_index::FusionCorpus, key: &str, score: Option<f64>, fallback_text: Option<&str>| -> Value {
         let text = corpus.text_for_key(key)
             .or_else(|| fallback_text.map(String::from))
@@ -2456,23 +2721,34 @@ fn codesearch(body: &Value) -> u64 {
         if let Some(ov) = corpus.overview_for_key(key) { obj.insert("overview".to_string(), json!(ov)); }
         Value::Object(obj)
     };
-    let vector_ranked: Vec<Value> = vec_hits.as_array()
-        .filter(|a| !a.is_empty())
-        .map(|a| a.iter().take(k as usize).cloned().collect())
-        .unwrap_or_else(|| vec_ids.iter().take(k as usize).map(|key| build_hit(&mut corpus, key, None, None)).collect());
-    let bm25_ranked_response: Vec<Value> = bm25_ranked.iter().take(k as usize)
+    let mut vector_ranked: Vec<Value> = match vec_hits.as_array().filter(|a| !a.is_empty()) {
+        Some(a) if scope.is_none() => a.iter().take(scan_k).cloned().collect(),
+        _ => vec_ids.iter().take(scan_k).map(|key| build_hit(&mut corpus, key, None, None)).collect(),
+    };
+    let mut bm25_ranked_response: Vec<Value> = bm25_ranked.iter().take(scan_k)
         .map(|(key, score)| build_hit(&mut corpus, key, Some(*score), None))
         .collect();
-    if !vec_ids.is_empty() || !bm25_ids.is_empty() || !phrase_hits.is_empty() {
-        return ok("codesearch", json!({
+    let mut phrase_hits = phrase_hits;
+    retain_hits_in_scope(&mut vector_ranked, "", scope.as_ref());
+    retain_hits_in_scope(&mut bm25_ranked_response, "", scope.as_ref());
+    retain_hits_in_scope(&mut phrase_hits, "", scope.as_ref());
+    vector_ranked.truncate(k as usize);
+    bm25_ranked_response.truncate(k as usize);
+    if !vector_ranked.is_empty() || !bm25_ranked_response.is_empty() || !phrase_hits.is_empty() || scope.is_some() {
+        let mut reply = json!({
             "mode": "dual",
             "vector_hits": vector_ranked,
             "bm25_hits": bm25_ranked_response,
             "phrase_hits": phrase_hits,
             "phrase_hits_total": phrase_total,
             "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
+            "phrase_scan_note": phrase_scan_note(phrase_total, phrase_hits.len(), phrase_exhaustive),
             "commits": commits,
-        }));
+        });
+        if let Some(scope) = scope.as_ref() {
+            apply_scope_echo(&mut reply, scope, &[&vector_ranked, &bm25_ranked_response, &phrase_hits]);
+        }
+        return ok("codesearch", reply);
     }
     let ns = cfg.namespaces.code.as_str();
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, query.as_ptr(), query.len() as u32) };
@@ -2746,98 +3022,6 @@ fn record_app_loads_witness_from_response(cwd: &str, v: &Value) {
 }
 
 const BROWSER_SUPPORTED_BODY_SHAPES: &str = "sessionId=<id>\\n<expr> (optional session-routing prefix, stacks with the rest), or a bare JS expression to evaluate";
-
-fn serp_default_oxibrowser_headless_engine(body: &Value, body_s: &str) -> u64 {
-    let envelope_code = body.get("code").or_else(|| body.get("body"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty());
-    let code = match envelope_code {
-        Some(c) => c,
-        None if body.is_object() => return err_json("serp", json!({
-            "error": "serp takes a plain-text body, never a JSON object. The supplied JSON object carries neither a `code` nor a `body` string field, so there is no script to run.",
-            "error_code": ERR_CODE_INVALID_ARGS,
-            "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
-            "received_keys": body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
-            "note": "for real-Chrome/playwright-style capabilities this verb does not yet cover, use the cdp verb (or the browser verb for lightpanda/steel CDP) instead",
-        })),
-        None => body_s.to_string(),
-    };
-    if code.trim().is_empty() { return err_json("serp", json!({
-        "error": "serp body is empty -- provide one of the supported plain-text shapes",
-        "error_code": ERR_CODE_INVALID_ARGS,
-        "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
-        "note": "for real-Chrome/playwright-style capabilities this verb does not yet cover, use the cdp verb (or the browser verb for lightpanda/steel CDP) instead",
-    })); }
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-    let explicit_sid = body.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-    let session_id = if !explicit_sid.is_empty() {
-        explicit_sid
-    } else if let Some(dispatch_sid) = super::events::current_dispatch_session_id().filter(|s| !s.trim().is_empty()) {
-        dispatch_sid
-    } else {
-        host_read(".gm/exec-spool/.session-current").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_default()
-    };
-    let timeout_ms = match body.get("timeoutMs") {
-        None | Some(Value::Null) => BROWSER_DEFAULT_TIMEOUT_MS,
-        Some(raw) => match raw.as_u64() {
-            Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
-            Some(n) => return err_json("serp", json!({
-                "error": "timeoutMs below floor",
-                "error_code": ERR_CODE_INVALID_ARGS,
-                "min": crate::validation::MIN_TIMEOUT_MS,
-                "received": n,
-            })),
-            None => return err_json("serp", json!({
-                "error": "timeoutMs must be a positive integer number of milliseconds -- a string, float or negative value is rejected rather than silently falling back to the default budget",
-                "error_code": ERR_CODE_INVALID_ARGS,
-                "min": crate::validation::MIN_TIMEOUT_MS,
-                "received": raw.clone(),
-            })),
-        },
-    };
-    let opts = json!({ "timeoutMs": timeout_ms }).to_string();
-    let packed = unsafe { host_oxi_exec(
-        code.as_ptr(), code.len() as u32,
-        cwd.as_ptr(), cwd.len() as u32,
-        session_id.as_ptr(), session_id.len() as u32,
-        opts.as_ptr(), opts.len() as u32,
-    ) };
-    match unpack_to_string(packed) {
-        Some(s) => {
-            let v: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
-            let transport_ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
-                && !v.get("timed_out").and_then(|b| b.as_bool()).unwrap_or(false)
-                && v.get("exit_code").and_then(|n| n.as_i64()).map(|c| c == 0).unwrap_or(true);
-            let mut v = v;
-            if transport_ok {
-                let witnessed = crate::browser_witness::witness_all_pending_edits_by_rehashing_current_content(&cwd);
-                if witnessed > 0 {
-                    if let Some(obj) = v.as_object_mut() {
-                        obj.insert("witness_marked".to_string(), json!(witnessed));
-                    }
-                }
-                record_app_loads_witness_from_response(cwd, &v);
-                ok("serp", v)
-            } else {
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("witness_skipped_transport_failure".to_string(), json!(true));
-                    obj.insert("note".to_string(), json!("serp (oxibrowser) dispatch failed transport-level checks -- if this is a capability oxibrowser does not support, retry via the cdp verb (real Chrome, playwright-style) or the browser verb (lightpanda/steel CDP)"));
-                }
-                record_app_loads_witness_from_response(cwd, &v);
-                err_json("serp", v)
-            }
-        }
-        None => err_json("serp", json!({
-            "error": "host_oxi_exec returned empty -- the oxibrowser host produced no bytes at all (NOT a script that returned undefined). Check .status.json ts freshness and reboot if stale, or re-dispatch. If oxibrowser cannot handle this workload, use the cdp verb (real Chrome) or the browser verb (lightpanda/steel CDP) instead.",
-            "error_code": ERR_CODE_FAILED,
-            "timeout_ms": timeout_ms,
-            "session_id": session_id,
-            "retryable": true,
-            "note": "for real-Chrome/playwright-style capabilities, use the cdp verb or the browser verb instead",
-        })),
-    }
-}
 
 fn browser_lightpanda_or_steel_cdp_engine(body: &Value, body_s: &str) -> u64 {
     let envelope_code = body.get("code").or_else(|| body.get("body"))
@@ -5652,7 +5836,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "kv_query" => kv_query(&body),
         "exec_js" | "nodejs" | "javascript" | "node" | "js" => exec_js(&body, &body_s),
         "lang" => lang(&body),
-        "serp" => serp_default_oxibrowser_headless_engine(&body, &body_s),
+        "serp" => super::serp::handle(&body, &body_s),
         "browser" => browser_lightpanda_or_steel_cdp_engine(&body, &body_s),
         "cdp" => cdp_real_chrome_escape_hatch(&body, &body_s),
         "health" => health(&body),
