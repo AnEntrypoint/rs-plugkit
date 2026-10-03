@@ -1533,14 +1533,26 @@ const UNINDEXED_CANDIDATE_MAX: usize = 500;
 const DUAL_PHRASE_SCAN_BUDGET_MS: u64 = 6_000;
 const DUAL_PHRASE_SCAN_MAX_MATCHES: usize = 20;
 
-/// First dispatch on a tree with no digest at all. Bounded, not the full 110s index budget: a
-/// search that answers in half a minute with a full index beats one that times out at 120s. Measured
-/// on litebox-main (1834 files) a 30s pass indexes the whole tree, so every dispatch after it needs
-/// no index pass at all.
-const COLD_INDEX_PASS_BUDGET_MS: u64 = 30_000;
+/// Matches the phrase scan may collect from one file before it moves on to the next. A scan that
+/// stops at its first `max_matches` hits answers with whatever the walk reached first, and the walk
+/// is ordered by path: on litebox-main a query for `cross_process_fork_slot` -- 43 matching lines --
+/// spent all 20 slots on `AGENTS.md`, `docs/*` and `litebox_shim_linux/src/lib.rs`, so
+/// `litebox_shim_linux/src/syscalls/process.rs`, which holds 19 of those 43 lines, answered with
+/// nothing at all and read to the caller as "this symbol does not exist". The phrase channel is the
+/// one channel that answers "which files contain this string verbatim", so a match-dense file must
+/// not be able to take another file's only slot.
+const DUAL_PHRASE_SCAN_PER_FILE_MATCHES: usize = 8;
 
-fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig) -> Vec<Value> {
-    if rs_search::tokenize::tokenize(query).len() < 2 { return Vec::new(); }
+/// Room to collect the per-file quota from each of the first `DUAL_PHRASE_SCAN_MAX_MATCHES`
+/// matching files. Only a phrase common enough to fill the old cap before the walk ends pays for
+/// the wider collection, and even then the scan early-exits at this cap and is wall-bounded by
+/// `DUAL_PHRASE_SCAN_BUDGET_MS`; a full scan of a tree the size of litebox-main measures under a
+/// second. A phrase rarer than the cap costs exactly what it cost before.
+const DUAL_PHRASE_SCAN_COLLECT_MATCHES: usize =
+    DUAL_PHRASE_SCAN_MAX_MATCHES * DUAL_PHRASE_SCAN_PER_FILE_MATCHES;
+
+fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig) -> (Vec<Value>, u64, bool) {
+    if rs_search::tokenize::tokenize(query).len() < 2 { return (Vec::new(), 0, false); }
     let scan = crate::code_index::LiteralScan {
         pattern: query,
         root,
@@ -1549,7 +1561,8 @@ fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::Rag
         case_insensitive: true,
         whole_word: false,
         path_glob: None,
-        max_matches: DUAL_PHRASE_SCAN_MAX_MATCHES,
+        max_matches: DUAL_PHRASE_SCAN_COLLECT_MATCHES,
+        max_matches_per_file: Some(DUAL_PHRASE_SCAN_PER_FILE_MATCHES),
         max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
         context: 0,
         term_combination: Some("phrase"),
@@ -1557,9 +1570,50 @@ fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::Rag
         refresh: false,
     };
     let out = crate::code_index::scan_literal(&scan, cfg);
-    if out.get("ok").and_then(|v| v.as_bool()) != Some(true) { return Vec::new(); }
-    out.get("matches").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+    if out.get("ok").and_then(|v| v.as_bool()) != Some(true) { return (Vec::new(), 0, false); }
+    // `phrase_match_count` is the lines the phrase itself matched, so it stays honest when the
+    // returned rows are capped: `match_count` is the length of the returned array and would report
+    // a capped scan as complete. `exhaustive` is the scan's own verdict and is false when the
+    // budget, a size ceiling or a match cap cut the walk short.
+    let total = out
+        .get("phrase_match_count")
+        .or_else(|| out.get("match_count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let exhaustive = out.get("exhaustive").and_then(|v| v.as_bool()).unwrap_or(false);
+    let hits = out.get("matches").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    (fair_share_phrase_hits(hits, DUAL_PHRASE_SCAN_MAX_MATCHES), total, exhaustive)
 }
+
+/// Take one hit from every path, then a second from every path that still has one, and so on until
+/// the cap is filled. Walk order still decides which paths are seen first but no longer decides
+/// which of them are represented: a file matching once is not crowded out by a file matching fifty
+/// times. The selection is re-sorted by path then line so the answer reads grouped per file.
+fn fair_share_phrase_hits(hits: Vec<Value>, cap: usize) -> Vec<Value> {
+    if hits.len() <= cap { return hits; }
+    let keep = crate::code_index::fair_share_indices(&hits, cap, |h| {
+        h.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    });
+    let mut out: Vec<Value> = keep.into_iter().map(|i| hits[i].clone()).collect();
+    out.sort_by(|a, b| {
+        let (pa, pb) = (
+            a.get("path").and_then(|x| x.as_str()).unwrap_or(""),
+            b.get("path").and_then(|x| x.as_str()).unwrap_or(""),
+        );
+        let (la, lb) = (
+            a.get("line").and_then(|x| x.as_u64()).unwrap_or(0),
+            b.get("line").and_then(|x| x.as_u64()).unwrap_or(0),
+        );
+        pa.cmp(pb).then(la.cmp(&lb))
+    });
+    out
+}
+
+/// First dispatch on a tree with no digest at all. Bounded, not the full 110s index budget: a
+/// search that answers in half a minute with a full index beats one that times out at 120s. Measured
+/// on litebox-main (1834 files) a 30s pass indexes the whole tree, so every dispatch after it needs
+/// no index pass at all.
+const COLD_INDEX_PASS_BUDGET_MS: u64 = 30_000;
 
 fn unindexed_on_disk_candidates(namespace: &str) -> (Vec<Value>, usize) {
     let indexed = crate::rssearch_vectors::live_keys(namespace);
@@ -1652,7 +1706,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         .collect();
     let commits = crate::code_index::git_commit_rank_at(root, query, 10);
     let commits_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let phrase_hits = dual_phrase_hits(query, Some(root), cfg);
+    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, Some(root), cfg);
     let phrase_ms = stage(at);
     let stage_ms = json!({
         "embed_query": embed_ms,
@@ -1669,11 +1723,19 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         "vector_hits": vector_hits,
         "bm25_hits": bm25_hits,
         "phrase_hits": phrase_hits,
+        "phrase_hits_total": phrase_total,
+        "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
         "commits": commits,
         "channels": {
             "vector": { "independent": true, "indexed_root": root },
             "bm25": { "independent": true, "indexed_root": root },
-            "phrase": { "independent": true, "exhaustive": true, "budget_ms": DUAL_PHRASE_SCAN_BUDGET_MS, "root": root },
+            "phrase": {
+                "independent": true,
+                "budget_ms": DUAL_PHRASE_SCAN_BUDGET_MS,
+                "root": root,
+                "per_file_matches": DUAL_PHRASE_SCAN_PER_FILE_MATCHES,
+                "exhaustive": phrase_exhaustive && phrase_total <= phrase_hits.len() as u64,
+            },
             "commits": { "independent": true, "indexed_root": root },
         },
         "stage_ms": merge_stage_ms(prior_stage_ms, stage_ms),
@@ -1804,6 +1866,7 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
         term_combination: combine,
         budget_ms: None,
+        max_matches_per_file: None,
         context: 0,
         refresh: scan_refresh_requested(body),
     };
@@ -2161,6 +2224,7 @@ fn grep(body: &Value) -> u64 {
         context,
         term_combination: Some("phrase"),
         budget_ms: None,
+        max_matches_per_file: None,
         refresh: scan_refresh_requested(body),
     };
     let scanned = crate::code_index::scan_literal(&scan, &cfg);
@@ -2379,7 +2443,7 @@ fn codesearch(body: &Value) -> u64 {
     let commits: Vec<Value> = commit_ranked.iter()
         .map(|(hash, message, score)| json!({ "hash": hash, "message": message, "score": score }))
         .collect();
-    let phrase_hits = dual_phrase_hits(query, None, &cfg);
+    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, None, &cfg);
     let build_hit = |corpus: &mut crate::code_index::FusionCorpus, key: &str, score: Option<f64>, fallback_text: Option<&str>| -> Value {
         let text = corpus.text_for_key(key)
             .or_else(|| fallback_text.map(String::from))
@@ -2405,6 +2469,8 @@ fn codesearch(body: &Value) -> u64 {
             "vector_hits": vector_ranked,
             "bm25_hits": bm25_ranked_response,
             "phrase_hits": phrase_hits,
+            "phrase_hits_total": phrase_total,
+            "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
             "commits": commits,
         }));
     }
@@ -2441,6 +2507,8 @@ fn codesearch(body: &Value) -> u64 {
         "mode": "fallback_kv", "degraded": vec_unavailable,
         "hits": hits, "commits": commits, "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response,
         "phrase_hits": phrase_hits,
+        "phrase_hits_total": phrase_total,
+        "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
     }))
 }
 

@@ -61,6 +61,22 @@ cargo check -p rs-plugkit --offline
 The first line is exactly what CI builds and publishes. The host `cargo check`
 is the only build that compiles `#[cfg(not(target_arch = "wasm32"))]` code.
 
+Omitting `--features slim` still builds, and produces a ~139MB module that
+embeds the model weights instead of fetching them -- never deploy that by
+hand.
+
+Deploying a local build: the live module is `~/.agentplug/plugins/gm.wasm`
+(`$AGENTPLUG_HOME/plugins/gm.wasm`), NOT `~/.gm-tools/plugkit.wasm` --
+`agentplug-runner` resolves `plugin_wasm_path("gm")` under the install dir,
+so overwriting the `.gm-tools` copy alone changes nothing a dispatch can
+observe. Copy the built `target/wasm32-wasip1/release/rs_plugkit.wasm` over
+`~/.agentplug/plugins/gm.wasm` (keep a `.pre-*` backup beside it, as the
+existing ones do). The daemon's `PluginModules::get_or_compile` compares the
+file's `(mtime, size)`, re-hashes it and recompiles on change, so no MCP or
+daemon restart is needed: the next dispatch picks the new module up, and the
+first one after a swap pays the recompile. Because `gm.version` there reads
+`local-dev-sideload-*`, the auto-updater never overwrites a sideload.
+
 There is no standalone way to "run" this crate outside a wasm host --
 verification means building, then dispatching real spool verbs against a
 project with `agentplug-runner` loaded (see gm's own `AGENTS.md` for the
