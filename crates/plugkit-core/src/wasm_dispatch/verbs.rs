@@ -413,7 +413,7 @@ fn err_retry_same_verb(verb: &str, reason: &str) -> u64 {
 }
 
 fn ok(verb: &str, data: Value) -> u64 {
-    pack(json!({ "ok": true, "verb": verb, "data": data, "next_dispatch_hint": next_dispatch_hint_for(verb) }).to_string())
+    pack(json!({ "ok": true, "verb": verb, "data": data }).to_string())
 }
 
 fn path_within_project(path: &str) -> bool {
