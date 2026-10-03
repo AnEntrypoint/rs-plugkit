@@ -413,14 +413,64 @@ fn path_within_project(path: &str) -> bool {
         && !normalized.contains(':')
 }
 
+fn paged_lines(content: &str, offset: usize, limit: usize) -> (String, usize, usize, usize) {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let total = lines.len();
+    let start = offset.min(total);
+    let end = match limit { 0 => total, n => (start + n).min(total) };
+    let selected = &lines[start..end];
+    let mut out = String::new();
+    for (i, line) in selected.iter().enumerate() {
+        if i > 0 { out.push('\n'); }
+        out.push_str(line);
+    }
+    (out, total, start, end.saturating_sub(start))
+}
+
 fn fs_read(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    if path.is_empty() { return err("fs_read", "path required"); }
+    if path.is_empty() { return err("fs_read", "path required -- pass {\"path\":\"<relative path>\"}; add \"offset\"/\"limit\" to read a line range and \"max_bytes\" to cap one chunk"); }
     if !path_within_project(path) {
         return err("fs_read", "path must be relative and within the project");
     }
+    let offset = match body.get("offset").and_then(|v| v.as_u64()) {
+        Some(n) => n as usize,
+        None => 0,
+    };
+    let limit = match body.get("limit").and_then(|v| v.as_u64()) {
+        Some(n) => n as usize,
+        None => 0,
+    };
+    let max_bytes = match body.get("max_bytes").and_then(|v| v.as_u64()) {
+        Some(n) if n > 0 => Some(n as usize),
+        _ => None,
+    };
     match host_read(path) {
-        Some(s) => ok("fs_read", Value::String(s)),
+        Some(content) => {
+            if offset == 0 && limit == 0 && max_bytes.is_none() {
+                return ok("fs_read", Value::String(content));
+            }
+            let (mut text, total_lines, from_line, returned_lines) = paged_lines(&content, offset, limit);
+            let mut truncated_at_bytes = false;
+            if let Some(cap) = max_bytes {
+                if text.len() > cap {
+                    let mut end = cap;
+                    while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+                    let kept = text[..end].to_string();
+                    truncated_at_bytes = true;
+                    text = kept;
+                }
+            }
+            ok("fs_read", json!({
+                "path": path,
+                "content": text,
+                "total_lines": total_lines,
+                "offset": from_line,
+                "returned_lines": returned_lines,
+                "has_more_lines": from_line + returned_lines < total_lines,
+                "truncated_at_bytes": truncated_at_bytes,
+            }))
+        }
         None => err("fs_read", "not found or empty"),
     }
 }
@@ -1478,6 +1528,7 @@ fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::Rag
         context: 0,
         term_combination: Some("phrase"),
         budget_ms: Some(DUAL_PHRASE_SCAN_BUDGET_MS),
+        refresh: false,
     };
     let out = crate::code_index::scan_literal(&scan, cfg);
     if out.get("ok").and_then(|v| v.as_bool()) != Some(true) { return Vec::new(); }
@@ -1728,15 +1779,148 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         term_combination: combine,
         budget_ms: None,
         context: 0,
+        refresh: scan_refresh_requested(body),
     };
-    let out = crate::code_index::scan_literal(&scan, cfg);
-    if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
-        return err("codesearch", out.get("error").and_then(|e| e.as_str()).unwrap_or("exhaustive scan failed"));
+    let scanned = crate::code_index::scan_literal(&scan, cfg);
+    if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+        return err("codesearch", scanned.get("error").and_then(|e| e.as_str()).unwrap_or("exhaustive scan failed"));
     }
-    ok("codesearch", out)
+    let mut out = match scanned {
+        Value::Object(map) => map,
+        other => return ok("codesearch", other),
+    };
+    apply_scan_guidance(&mut out, max_matches.min(u32::MAX as usize) as u32);
+    ok("codesearch", Value::Object(out))
 }
 
 const GREP_OUTPUT_MODES: &[&str] = &["content", "files_with_matches", "count"];
+
+const GREP_MODES: &[&str] = &["pattern", "comments"];
+
+const GREP_HELP: &str = "\
+grep (alias \"rg\") is an exhaustive literal/regex scan of the tree. Every reply is bounded; read
+\"exhaustive\" in the response to know whether it saw everything.
+
+  {\"pattern\":\"<text or regex>\"}                    required (unless mode:\"comments\"); \"query\" is accepted too
+  {\"path\":\"<dir or file>\"}                         narrow the scan to one subtree or one file
+  {\"glob\":\"**/*.rs\"}                               narrow by path glob; \"include\"/\"path_glob\" are aliases
+  {\"output_mode\":\"content\"}                        \"content\" (default): one hit per line; \"files_with_matches\"; \"count\"
+  {\"regex\":true}                                    force regex on/off; unset, the pattern is auto-read
+  {\"fixed_strings\":true}                            match the pattern literally, never as a regex
+  {\"case_insensitive\":true}                         \"ignore_case\" is an alias
+  {\"whole_word\":true}
+  {\"context\":2}                                     include N lines before and after each hit
+  {\"max_results\":200}                               hit cap (default 200); aliases: maxResults, limit, max_matches, k
+  {\"max_files\":50000}                               file cap (default 50000)
+  {\"refresh\":true}                                  re-read from disk: walk instead of `git ls-files --cached`,
+                                                     and bypass the mtime-keyed content cache, so uncommitted
+                                                     edits and untracked files are visible. \"file_source\":\"disk\"
+                                                     and \"no_cache\":true are aliases.
+  {\"mode\":\"comments\"}                              find comment spans instead of a pattern (no \"pattern\" needed)
+
+mode:\"comments\" -- one pass for every comment in the tree, column-1 and inline alike:
+  languages: C/C++/Java/Go/Rust/JS/TS/C#/PHP/Kotlin/Swift/Zig/Scala and Faust .dsp use // and /* */;
+             shell, YAML, TOML/INI/conf, Python, Ruby, Perl, PowerShell, Julia, Elixir, Dockerfile and
+             Makefile use #. String literals are respected, so \"http://x\" and '#' are not comments.
+  returns:   \"comments\":  [{path,line,column,kind:\"line\"|\"block\",syntax,inline,text}]
+             \"directives\": [{...same shape...}]  -- keepers, not prose to delete: #!/bin/sh shebangs,
+                            # syntax=docker/dockerfile:1 and # shellcheck disable=... land here, never in
+                            \"comments\". \"inline\":true marks a comment with code before it on the same line.
+             plus \"comment_count\", \"directive_count\", \"files\", \"output\" (path:line:column: text),
+             \"file_source\", \"file_source_detail\" and \"exhaustive\".
+
+Every scan reports \"file_source\" and \"file_source_detail\": \"git\" means `git ls-files --cached`
+(tracked files only), \"walk\" a filesystem walk and \"file\" a single file read straight from disk.
+When \"exhaustive\" is false the reply carries \"exhaustive_note\" and \"scope_hint\" naming how to reach
+full coverage: scope with \"path\"/\"glob\" and repeat per subtree, or raise \"max_results\".";
+
+const CODESEARCH_HELP: &str = "\
+codesearch (aliases \"code_search\", \"search\") is the canonical search verb.
+  {\"query\":\"<text>\"}                 required
+  {\"mode\":\"dual\"}                    \"dual\" (default): ranked BM25+vector retrieval;
+                                       \"literal\"/\"regex\": exhaustive, every match with path:line, no ranking;
+                                       \"filename\": matches paths only
+  {\"k\":10}                            result cap for \"dual\"; aliases: max_results, maxResults, limit
+  {\"max_matches\":1000}                hit cap for the exhaustive modes
+  {\"max_files\":50000}                 file cap
+  {\"path\":\"<dir or file>\"}           narrow the scan
+  {\"path_glob\":\"**/*.rs\"}            narrow by glob; \"glob\" is an alias
+  {\"combine\":\"phrase\"}               \"phrase\" (default for a multi-word query), \"and\" (every term on one line),
+                                       \"or\" (ranked union of any term)
+  {\"case_insensitive\":true, \"whole_word\":true}
+  {\"refresh\":true}                    re-read from disk for the exhaustive modes: walk instead of
+                                       `git ls-files --cached` and bypass the content cache";
+
+const FS_READ_HELP: &str = "\
+fs_read returns a file's contents.
+  {\"path\":\"<relative path>\"}     required, relative and within the project
+  {\"offset\":0, \"limit\":200}      read a line range; both clamp to the file's real line count, so an
+                                  offset past the end returns \"\" with \"returned_lines\":0 instead of failing.
+                                  Omit both for the whole file (the pre-existing behaviour).
+  {\"max_bytes\":65536}            cap the returned chunk; \"truncated_at_bytes\" reports whether it fired.
+Paged replies add \"total_lines\", \"offset\", \"returned_lines\" and \"has_more_lines\".";
+
+const FS_WRITE_HELP: &str = "\
+fs_write writes a file inside the project.
+  {\"path\":\"<relative path>\"}     required, relative and within the project
+  {\"content\":\"<text>\"}           required; \"data\" is an alias
+Returns {\"bytes\": <written>}.";
+
+const FS_READDIR_HELP: &str = "\
+fs_readdir lists one directory inside the project. {\"path\":\"<relative dir>\"} (default \".\").";
+
+const FS_STAT_HELP: &str = "\
+fs_stat stats one path inside the project. {\"path\":\"<relative path>\"}, required.";
+
+fn help_requested(body: &Value) -> bool {
+    match body.get("help") {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => {
+            let s = s.trim().to_lowercase();
+            !s.is_empty() && s != "false" && s != "0" && s != "no" && s != "off"
+        }
+        Some(Value::Number(n)) => n.as_u64().unwrap_or(0) > 0,
+        _ => false,
+    }
+}
+
+fn verb_help_doc(verb: &str) -> Option<&'static str> {
+    match verb {
+        "grep" | "rg" => Some(GREP_HELP),
+        "codesearch" | "code_search" | "search" => Some(CODESEARCH_HELP),
+        "fs_read" => Some(FS_READ_HELP),
+        "fs_write" => Some(FS_WRITE_HELP),
+        "fs_readdir" => Some(FS_READDIR_HELP),
+        "fs_stat" => Some(FS_STAT_HELP),
+        _ => None,
+    }
+}
+
+fn scan_refresh_requested(body: &Value) -> bool {
+    if body.get("refresh").and_then(|v| v.as_bool()).unwrap_or(false) { return true; }
+    if body.get("no_cache").and_then(|v| v.as_bool()).unwrap_or(false) { return true; }
+    if body.get("force_disk").and_then(|v| v.as_bool()).unwrap_or(false) { return true; }
+    body.get("file_source").and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("disk") || s.eq_ignore_ascii_case("walk"))
+        .unwrap_or(false)
+}
+
+fn scan_scope_hint(scan_cap: u32) -> String {
+    format!(
+        "to reach every match, scope the scan and repeat per subtree: pass \"path\":\"<dir-or-file>\" (e.g. {{\"path\":\"src\"}}) and/or \"glob\":\"**/*.rs\" (e.g. {{\"glob\":\"**/*.rs\"}}) -- a scoped scan's cap is per call, so union the per-scope results; or raise the cap with \"max_results\": <n> (this call used {}); \"output_mode\":\"files_with_matches\" or \"count\" also covers far more files per call than \"content\"",
+        scan_cap
+    )
+}
+
+fn apply_scan_guidance(out: &mut serde_json::Map<String, Value>, scan_cap: u32) {
+    if out.get("exhaustive").and_then(|v| v.as_bool()) == Some(false) {
+        let hint = scan_scope_hint(scan_cap);
+        let base = out.get("exhaustive_note").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let note = if base.is_empty() { hint.clone() } else { format!("{base} -- {hint}") };
+        out.insert("exhaustive_note".to_string(), json!(note));
+        out.insert("scope_hint".to_string(), json!(hint));
+    }
+}
 
 const GREP_LIMIT_FIELDS: &[&str] = &["max_results", "maxResults", "limit", "max_matches", "k"];
 
@@ -1825,11 +2009,23 @@ fn grep_counted_files(matches: &[Value]) -> Vec<Value> {
 
 fn grep(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
+    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let comments_flag = body.get("comments").and_then(|v| v.as_bool()).unwrap_or(false);
+    let want_comments = mode == "comments" || comments_flag;
+    if !mode.is_empty() && mode != "comments" && !comments_flag {
+        return err("grep", &format!(
+            "mode \"{mode}\" is not a grep mode -- valid modes are {}. \
+             \"pattern\" (the default) scans for a pattern; \"comments\" finds comment spans and \
+             needs no \"pattern\". Pass {{\"help\": true}} for the full parameter list.",
+            GREP_MODES.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(", "),
+        ));
+    }
+    if want_comments { return grep_comments(&body, &cfg); }
     let pattern = body.get("pattern").and_then(|v| v.as_str())
         .or_else(|| body.get("query").and_then(|v| v.as_str()))
         .unwrap_or("");
     if pattern.is_empty() {
-        return err("grep", "pattern required -- pass {\"pattern\":\"<text>\"}, optionally narrowed by \"path\" (a file or directory under the project root) and \"glob\"");
+        return err("grep", "pattern required -- pass {\"pattern\":\"<text>\"}, optionally narrowed by \"path\" (a file or directory under the project root) and \"glob\"; pass {\"mode\":\"comments\"} to find comment spans instead, or {\"help\": true} for the full parameter list");
     }
     let output_mode = body.get("output_mode").and_then(|v| v.as_str())
         .or_else(|| body.get("outputMode").and_then(|v| v.as_str()))
@@ -1889,6 +2085,7 @@ fn grep(body: &Value) -> u64 {
         context,
         term_combination: Some("phrase"),
         budget_ms: None,
+        refresh: scan_refresh_requested(body),
     };
     let scanned = crate::code_index::scan_literal(&scan, &cfg);
     if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
@@ -1931,6 +2128,42 @@ fn grep(body: &Value) -> u64 {
             out.insert("output".to_string(), Value::Array(matches.iter().map(|m| json!(grep_output_line(m, "content"))).collect()));
         }
     }
+    apply_scan_guidance(&mut out, scan_cap);
+    ok("grep", Value::Object(out))
+}
+
+fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
+    let (root, path) = match resolve_scan_target(body) {
+        Ok(target) => target,
+        Err(e) => return err("grep", &e),
+    };
+    let (max_matches, _) = match scan_result_limit(body, GREP_LIMIT_FIELDS, GREP_DEFAULT_MAX_MATCHES) {
+        Ok(limit) => limit,
+        Err(e) => return err("grep", &e),
+    };
+    let scan = crate::code_index::CommentScan {
+        root,
+        path: path.as_deref(),
+        path_glob: body.get("glob").and_then(|v| v.as_str())
+            .or_else(|| body.get("include").and_then(|v| v.as_str()))
+            .or_else(|| body.get("path_glob").and_then(|v| v.as_str()))
+            .filter(|g| !g.is_empty()),
+        max_matches: max_matches as usize,
+        max_files: body.get("max_files").and_then(|v| v.as_u64())
+            .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
+        refresh: scan_refresh_requested(body),
+    };
+    let scanned = crate::code_index::scan_comments(&scan, cfg);
+    if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+        let base = scanned.get("error").and_then(|e| e.as_str()).unwrap_or("comment scan failed").to_string();
+        return err("grep", &base);
+    }
+    let mut out = match scanned {
+        Value::Object(map) => map,
+        other => return ok("grep", other),
+    };
+    out.insert("verb_mode".to_string(), json!("comments"));
+    apply_scan_guidance(&mut out, max_matches);
     ok("grep", Value::Object(out))
 }
 
@@ -5233,6 +5466,14 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
     }
     let body = body.clone();
     let body_s = body_s.to_string();
+    if help_requested(&body) {
+        if let Some(doc) = verb_help_doc(verb) {
+            return ok(verb, json!({ "help": true, "verb": verb, "parameters": doc }));
+        }
+        return err(verb, &format!(
+            "no parameter documentation is published for verb \"{verb}\" -- pass the verb's own body without \"help\" to see its error text, which names the fields it accepts"
+        ));
+    }
     let result = match verb {
         "fs_read" => fs_read(&body),
         "fs_write" => fs_write(&body),
