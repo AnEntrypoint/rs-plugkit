@@ -1695,13 +1695,20 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         },
         None => explicit_limit.map(|limit| limit as usize).unwrap_or(usize::MAX),
     };
-    let combine = body.get("combine").and_then(|v| v.as_str())
+    let explicit_combine = body.get("combine").and_then(|v| v.as_str())
         .or_else(|| body.get("term_combination").and_then(|v| v.as_str()))
         .filter(|c| !c.is_empty());
+    // `verbatim` is the caller-facing spelling of "match the query as one string": it is the
+    // default for a multi-word query, so it is only named here to keep the intent in the body.
+    let combine = match explicit_combine {
+        Some(c) => Some(c),
+        None if body.get("verbatim").and_then(|v| v.as_bool()).unwrap_or(false) => Some("phrase"),
+        None => None,
+    };
     if let Some(c) = combine {
         if !["or", "and", "phrase"].contains(&c) {
             return err("codesearch", &format!(
-                "combine \"{c}\" is not a term combination -- valid values are \"or\" (default: a multi-word query is split into terms and a line needs any of them, ranked by how many it carries), \"and\" (a line must carry every term) and \"phrase\" (the query is matched verbatim as one string)"
+                "combine \"{c}\" is not a term combination -- valid values are \"phrase\" (default: a multi-word query is matched verbatim as one string, spaces included), \"and\" (a line must carry every term) and \"or\" (a multi-word query is split into terms and a line needs any of them, ranked by how many it carries -- lines carrying fewer terms rank strictly below lines carrying all of them)"
             ));
         }
     }
