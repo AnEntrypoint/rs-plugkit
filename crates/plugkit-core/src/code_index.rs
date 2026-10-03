@@ -630,6 +630,28 @@ fn split_oversized_chunk(
     out
 }
 
+type ChunkTuple = (String, String, usize, usize, String);
+
+/// Trims one file's chunks to the index budget and reports which bound bit, or `None` when the
+/// whole file fits. Chunks are kept in tree-sitter order, so a file that overflows keeps its head
+/// and loses its tail -- the same shape as before, at a bound real files no longer reach.
+fn trim_chunks_to_index_budget(chunks: &mut Vec<ChunkTuple>) -> Option<(&'static str, usize)> {
+    let mut bytes = 0usize;
+    let mut keep = chunks.len();
+    for (idx, (_, _, _, _, body)) in chunks.iter().enumerate() {
+        bytes += body.len();
+        if idx >= MAX_CHUNKS_INDEXED_PER_FILE || bytes > MAX_CHUNK_BYTES_INDEXED_PER_FILE {
+            keep = idx;
+            break;
+        }
+    }
+    if keep >= chunks.len() { return None; }
+    let full = chunks.len();
+    chunks.truncate(keep);
+    let bound = if full > MAX_CHUNKS_INDEXED_PER_FILE { "chunk_count" } else { "chunk_bytes" };
+    Some((bound, full))
+}
+
 fn embed_text(text: &str) -> Option<Vec<f32>> {
     let resp = plugin_call("bert", "embed", &json!({ "text": text }));
     if !plugin_ok(&resp) {
@@ -699,6 +721,32 @@ fn code_vec_ns() -> String {
 
 const MANIFEST_VERSION: u64 = 7;
 
+/// A chunk with no vector is still a BM25 document, so what is indexed is bounded by the tree, not
+/// by the embed budget. Reusing the 64-chunk embed allowance as the index bound dropped every
+/// symbol past the 64th of a large file: on litebox-main that hid `syscalls/process.rs` and
+/// `syscalls/file.rs` from every ranked query that named one of their later functions.
+///
+/// 256 was still under the symbol count of the tree's biggest sources, so it only moved the cliff:
+/// `litebox_platform_windows_userland/src/lib.rs` (15k lines) lost everything past its 256th
+/// symbol, including `spawn_cross_process_fork_child` at line 12066. One symbol per definition is
+/// the natural granularity of a source file, so the count bound is set where real files stop, not
+/// where a round number sits.
+const MAX_CHUNKS_INDEXED_PER_FILE: usize = 4096;
+
+/// Counting chunks alone lets a node-dense generated file -- one `arrow_function` per few bytes of
+/// a minified bundle -- spend a whole pass on a single file. Bodies are already split to
+/// `split_chunk_above_bytes`, so bounding indexed bytes as well as chunk count is what caps the
+/// work: text reaching BM25, manifest row size, and the chunk write loop are each bounded by this
+/// rather than by however many nodes tree-sitter happened to find.
+const MAX_CHUNK_BYTES_INDEXED_PER_FILE: usize = 4 * 1024 * 1024;
+
+/// BM25 adds one IDF-weighted contribution per query term, so a chunk carrying three ordinary
+/// query words outscores the single chunk carrying the rare identifier the query is really about:
+/// `pub(crate) fn sys_accept4 accept4 flags descriptor` ranked the only chunk in the tree holding
+/// `accept4` seventh of eight, behind chunks that merely held `flags` and `descriptor`. An
+/// identifier is worth more than a pile of ordinary words, so the rarest term a chunk matches adds
+/// its IDF again on top of the sum and cannot be out-argued by the rest.
+const RARE_TERM_DOMINANCE_WEIGHT: f64 = 1.5;
 /// A chunk record is written from treesitter output alone, so the reserve before extracting one
 /// more file covers a read plus an extraction: single-digit milliseconds measured on a <=256KB
 /// file. The old reserve was `pessimistic_ms_per_chunk` (16s, an embed-plus-write estimate),
@@ -896,9 +944,37 @@ fn load_manifests(project_path: Option<&str>) -> std::collections::HashMap<Strin
     out
 }
 
-fn slice_lines(content: &str, ls: usize, le: usize) -> String {
-    if ls == 0 || le < ls { return String::new(); }
-    content.lines().skip(ls - 1).take(le - ls + 1).collect::<Vec<_>>().join("\n")
+/// Line-start byte offsets for one file's content, so slicing a chunk out of it is two lookups
+/// instead of a rescan. `slice_lines` walked the file's whole `.lines()` iterator for every chunk:
+/// on a 15k-line file carrying ~500 indexed chunks that is ~7.5M line scans per pass, which is what
+/// turned indexing a large source file into a 70-second BM25 rank and an 87-second index walk.
+struct LineIndex {
+    content: String,
+    starts: Vec<usize>,
+}
+
+impl LineIndex {
+    fn new(content: String) -> Self {
+        let mut starts = Vec::with_capacity(content.len() / 48 + 2);
+        starts.push(0);
+        for (at, byte) in content.bytes().enumerate() {
+            if byte == b'\n' { starts.push(at + 1); }
+        }
+        LineIndex { content, starts }
+    }
+
+    /// Lines `ls..=le` exactly as `content.lines().skip(ls - 1).take(le - ls + 1).join("\n")`
+    /// produced them -- `\r\n` folded to `\n` and no trailing newline -- so a chunk's body stays
+    /// byte-identical to what is already stored and reuse is not invalidated.
+    fn slice(&self, ls: usize, le: usize) -> String {
+        if ls == 0 || le < ls { return String::new(); }
+        let begin = match self.starts.get(ls - 1) { Some(at) => *at, None => return String::new() };
+        let end = self.starts.get(le).copied().unwrap_or(self.content.len());
+        if end <= begin { return String::new(); }
+        let body = &self.content[begin..end];
+        let body = body.strip_suffix('\n').unwrap_or(body);
+        if body.contains('\r') { body.replace("\r\n", "\n") } else { body.to_string() }
+    }
 }
 
 fn chunk_rows_by_path(db_path: &str) -> std::collections::HashMap<String, usize> {
@@ -1176,7 +1252,7 @@ fn index_cfg_impl(
             floor_grace_used_this_pass = true;
         }
 
-        let content = match host_read(fp)
+        let mut content = match host_read(fp)
             .or_else(|| host_read(raw_fp))
             .or_else(|| host_read(&format!("/{}", fp)))
         { Some(c) => c, None => continue };
@@ -1207,8 +1283,9 @@ fn index_cfg_impl(
                     let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
                 }
                 let mut all_persisted = true;
+                let lines = LineIndex::new(std::mem::take(&mut content));
                 for c in &m.chunks {
-                    let body = slice_lines(&content, c.ls, c.le);
+                    let body = lines.slice(c.ls, c.le);
                     all_persisted &= write_chunk(libsql_ok, &db_path, fp, c, &body, project_path);
                     chunked += 1;
                     reused += 1;
@@ -1253,21 +1330,19 @@ fn index_cfg_impl(
                 .collect();
         }
 
-        let cap = max_chunks_per_file_per_pass;
-        let oversized = chunks.len() > cap;
-        if oversized {
-            let full = chunks.len();
-            chunks.truncate(cap);
+        if let Some((bound, full)) = trim_chunks_to_index_budget(&mut chunks) {
             let msg = format!(
-                "code_index: capping {} chunks={} -> {} (count_cap={}; file still indexed and marked seen)",
-                fp, full, cap, max_chunks_per_file_per_pass
+                "code_index: capping {} chunks={} -> {} (bound={}; file still indexed and marked seen)",
+                fp, full, chunks.len(), bound
             );
             let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
             crate::wasm_dispatch::emit_event("code_index_chunk_cap", json!({
                 "path": fp,
                 "chunks_total": full,
-                "chunks_indexed": cap,
-                "count_cap": max_chunks_per_file_per_pass,
+                "chunks_indexed": chunks.len(),
+                "bound": bound,
+                "count_cap": MAX_CHUNKS_INDEXED_PER_FILE,
+                "byte_cap": MAX_CHUNK_BYTES_INDEXED_PER_FILE,
             }));
         }
 
@@ -1748,7 +1823,7 @@ fn normalized_path(path: &str) -> &str {
 
 pub struct FusionCorpus {
     metas: std::sync::Arc<Vec<ChunkMeta>>,
-    file_cache: std::collections::HashMap<String, Option<String>>,
+    file_cache: std::collections::HashMap<String, Option<std::sync::Arc<LineIndex>>>,
     overview_by_path: std::sync::Arc<std::collections::HashMap<String, String>>,
     index_by_key: std::sync::Arc<std::collections::HashMap<String, usize>>,
     index_by_path_line: std::sync::Arc<std::collections::HashMap<(String, usize), usize>>,
@@ -1883,11 +1958,12 @@ impl FusionCorpus {
         }))
     }
 
-    fn file_content(&mut self, path: &str) -> Option<String> {
+    fn file_index(&mut self, path: &str) -> Option<std::sync::Arc<LineIndex>> {
         if let Some(cached) = self.file_cache.get(path) { return cached.clone(); }
         let content = host_read(path).or_else(|| host_read(&format!("/{}", path)));
-        self.file_cache.insert(path.to_string(), content.clone());
-        content
+        let index = content.map(LineIndex::new).map(std::sync::Arc::new);
+        self.file_cache.insert(path.to_string(), index.clone());
+        index
     }
 
     pub fn key_for_path_line(&self, path: &str, ls: usize) -> Option<String> {
@@ -1901,8 +1977,8 @@ impl FusionCorpus {
             let m = &self.metas[i];
             (m.path.clone(), m.name.clone(), m.ls, m.le)
         };
-        let content = self.file_content(&path)?;
-        let body = slice_lines(&content, ls, le);
+        let index = self.file_index(&path)?;
+        let body = index.slice(ls, le);
         let body_trunc = {
             let mut e = body.len().min(8192);
             while e > 0 && !body.is_char_boundary(e) { e -= 1; }
@@ -1996,8 +2072,8 @@ fn compute_doc_tf(corpus: &mut FusionCorpus, i: usize) -> Option<(std::collectio
         let m = &corpus.metas[i];
         (m.path.clone(), m.name.clone(), m.ls, m.le)
     };
-    let content = corpus.file_content(&path)?;
-    let body = slice_lines(&content, ls, le);
+    let index = corpus.file_index(&path)?;
+    let body = index.slice(ls, le);
     let tf = term_freqs(&format!("{} {} {}", path, name, body));
     let dl = tf.values().sum::<u32>() as f64;
     Some((tf, dl))
