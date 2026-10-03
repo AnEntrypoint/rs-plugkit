@@ -2298,6 +2298,14 @@ pub struct LiteralScan<'a> {
     /// Wall-clock ceiling for the scan. None means the configured `index.wall_budget_ms`; a
     /// caller that runs the scan as one channel of a ranked search passes a few seconds instead.
     pub budget_ms: Option<u64>,
+    /// Ceiling on matches collected from any one file. `None` keeps the historical shape: the
+    /// first `max_matches` hits in walk order, so one match-dense file can spend the whole budget
+    /// before the walk reaches a file that sorts later. A caller that has to answer "which files
+    /// contain this" -- the dual channel's phrase scan -- sets a quota so the budget is shared
+    /// across files instead of being spent by the first of them. A file that goes over quota is
+    /// left part-read, so `files_quota_truncated` counts those files and the reply's
+    /// `exhaustive` is false: the counts are a lower bound, never a claim of completeness.
+    pub max_matches_per_file: Option<usize>,
     /// Re-read rather than reuse: skip `git ls-files` for a directory walk of the target, and
     /// serve every file from `host_read` instead of the mtime-keyed content cache.
     pub refresh: bool,
@@ -2507,6 +2515,50 @@ fn scan_cache_put(cache: ScanCache) {
     if let Ok(mut guard) = SCAN_CACHE.lock() { *guard = Some(cache); }
 }
 
+/// Indices into `items` that keep at most one item per path per round, until `cap` is full: take
+/// item 0 of every path, then item 1 of every path that still has one, and so on. A cap spent in
+/// walk order lets one match-dense file near the front of the walk consume the whole budget, so a
+/// file that sorts later -- and holds the symbol the caller asked about -- answers with nothing at
+/// all and reads as "this does not exist". Round-robin costs a path representation to every file
+/// that matched, and only then spends the remainder on seconds and thirds.
+pub fn fair_share_indices<T, F>(items: &[T], cap: usize, path_of: F) -> Vec<usize>
+where
+    F: Fn(&T) -> String,
+{
+    if items.len() <= cap { return (0..items.len()).collect(); }
+    let mut queues: Vec<Vec<usize>> = Vec::new();
+    let mut slot_of_path: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, item) in items.iter().enumerate() {
+        let path = path_of(item);
+        let slot = match slot_of_path.get(&path) {
+            Some(&s) => s,
+            None => {
+                let s = queues.len();
+                slot_of_path.insert(path, s);
+                queues.push(Vec::new());
+                s
+            }
+        };
+        queues[slot].push(i);
+    }
+    let mut out: Vec<usize> = Vec::with_capacity(cap);
+    let mut round = 0usize;
+    while out.len() < cap {
+        let mut took_this_round = false;
+        for queue in queues.iter() {
+            if out.len() >= cap { break; }
+            if let Some(&i) = queue.get(round) {
+                out.push(i);
+                took_this_round = true;
+            }
+        }
+        if !took_this_round { break; }
+        round += 1;
+    }
+    out.sort_unstable();
+    out
+}
+
 pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
     if req.pattern.is_empty() {
         return json!({ "ok": false, "error": "pattern required -- an exhaustive scan needs something to match" });
@@ -2585,11 +2637,22 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         TermCombination::Or
     };
     let max_matches = if multi { req.max_matches.min(MULTI_TERM_MAX_MATCHES) } else { req.max_matches };
-    let hit_cap = if multi { max_matches.saturating_mul(6).clamp(200, 2_000) } else { max_matches };
+    let per_file_quota = req.max_matches_per_file.filter(|q| *q > 0);
+    // The 6x headroom exists so the relevance sort has a pool to choose from. A per-file quota
+    // already spends `max_matches` across paths, so the pool buys nothing and only makes the walk
+    // read more files: collect to `max_matches` and stop.
+    let hit_cap = if per_file_quota.is_some() {
+        max_matches
+    } else if multi {
+        max_matches.saturating_mul(6).clamp(200, 2_000)
+    } else {
+        max_matches
+    };
 
     let mut candidates: Vec<(usize, usize, usize, Value)> = Vec::new();
     let mut files_scanned = 0usize;
     let mut files_with_matches = 0usize;
+    let mut files_quota_truncated = 0usize;
     let mut files_skipped_too_large: Vec<String> = Vec::new();
     let mut files_skipped_too_large_count = 0usize;
     let mut files_skipped_binary_extension = 0usize;
@@ -2660,6 +2723,8 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         }
         files_scanned += 1;
         let mut this_file_matched = false;
+        let mut this_file_quota_hit = false;
+        let mut this_file_collected = 0usize;
         let mut term_seen_in_file: Vec<bool> = vec![false; term_matchers.len()];
         let all_lines: Vec<&str> = if req.context > 0 { content.lines().collect() } else { Vec::new() };
         for (idx, line) in content.lines().enumerate() {
@@ -2688,6 +2753,18 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             this_file_matched = true;
             lines_with_matches += 1;
             occurrence_count += found.len();
+            // Over quota for this file: stop reading it instead of letting it take a slot another
+            // file's only match needs. Leaving the rest of this file unread also leaves the scan's
+            // own wall budget for files the walk has not reached yet, which is the whole point --
+            // a match-dense file early in the walk otherwise spends the budget that would have
+            // reached every file after it.
+            if let Some(quota) = per_file_quota {
+                if this_file_collected >= quota {
+                    this_file_quota_hit = true;
+                    break;
+                }
+                this_file_collected += 1;
+            }
             if candidates.len() >= hit_cap { matches_truncated = true; break; }
             let (start, end) = found[0];
             let text_truncated = line.len() > LITERAL_SCAN_MAX_LINE_BYTES;
@@ -2718,14 +2795,29 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             if *seen { term_files[ti] += 1; }
         }
         if this_file_matched { files_with_matches += 1; }
-        if matches_truncated { break; }
+        if this_file_quota_hit {
+            files_quota_truncated += 1;
+            matches_truncated = true;
+        }
+        if matches_truncated && candidates.len() >= hit_cap { break; }
     }
 
     let matches: Vec<Value> = if multi {
         candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)).then_with(|| a.2.cmp(&b.2)));
         if candidates.len() > max_matches {
             matches_truncated = true;
-            candidates.truncate(max_matches);
+            if per_file_quota.is_some() {
+                // Same rule as collection: spend the returned rows across paths, not down the walk
+                // order. A relevance sort that ties (same distinct-term count, same occurrence
+                // count) falls back to insertion order, which is the walk order -- so a plain
+                // truncate would silently reintroduce the bias the per-file quota removed.
+                let keep = fair_share_indices(&candidates, max_matches, |c| {
+                    c.3.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string()
+                });
+                candidates = keep.into_iter().map(|i| candidates[i].clone()).collect();
+            } else {
+                candidates.truncate(max_matches);
+            }
         }
         candidates.into_iter().map(|(_, _, _, hit)| hit).collect()
     } else {
@@ -2786,6 +2878,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("excluded_by_rule_count".to_string(), json!(universe.excluded.len()));
     }
     out.insert("term_combination".to_string(), json!(combination.label()));
+    if let Some(quota) = per_file_quota {
+        out.insert("max_matches_per_file".to_string(), json!(quota));
+        out.insert("files_quota_truncated".to_string(), json!(files_quota_truncated));
+    }
     if multi {
         let per_term: Vec<Value> = term_matchers.iter().enumerate()
             .zip(terms.iter())
