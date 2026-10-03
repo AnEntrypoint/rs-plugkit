@@ -416,6 +416,14 @@ fn ok(verb: &str, data: Value) -> u64 {
     pack(json!({ "ok": true, "verb": verb, "data": data }).to_string())
 }
 
+/// A scan that did not see every file still answers, so it stays `ok` -- a caller who read
+/// `ok: true` as "the whole tree was searched" would take a partial answer for a complete one.
+/// The bound that fired rides beside `ok` instead of inside `data`, where it used to sit behind
+/// a page of counters.
+fn ok_partial(verb: &str, data: Value, partial_reason: &str) -> u64 {
+    pack(json!({ "ok": true, "verb": verb, "partial": true, "partial_reason": partial_reason, "data": data }).to_string())
+}
+
 fn path_within_project(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     !normalized.split('/').any(|seg| seg == "..")
@@ -1807,8 +1815,8 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         Value::Object(map) => map,
         other => return ok("codesearch", other),
     };
-    apply_scan_guidance(&mut out, max_matches.min(u32::MAX as usize) as u32);
-    ok("codesearch", Value::Object(out))
+    let partial = finish_scan_reply(&mut out, max_matches.min(u32::MAX as usize) as u32);
+    answer_scan("codesearch", out, partial)
 }
 
 const GREP_OUTPUT_MODES: &[&str] = &["content", "files_with_matches", "count"];
@@ -1849,8 +1857,9 @@ mode:\"comments\" -- one pass for every comment in the tree, column-1 and inline
 
 Every scan reports \"file_source\" and \"file_source_detail\": \"git\" means `git ls-files --cached`
 (tracked files only), \"walk\" a filesystem walk and \"file\" a single file read straight from disk.
-When \"exhaustive\" is false the reply carries \"exhaustive_note\" and \"scope_hint\" naming how to reach
-full coverage: scope with \"path\"/\"glob\" and repeat per subtree, or raise \"max_results\".";
+When \"exhaustive\" is false the reply also carries \"partial\": true and a \"partial_reason\" naming the
+bound that fired, plus \"exhaustive_note\" on how to reach full coverage: scope with \"path\"/\"glob\" and
+repeat per subtree, or raise \"max_results\".";
 
 const CODESEARCH_HELP: &str = "\
 codesearch (aliases \"code_search\", \"search\") is the canonical search verb.
@@ -1925,19 +1934,52 @@ fn scan_refresh_requested(body: &Value) -> bool {
 
 fn scan_scope_hint(scan_cap: u32) -> String {
     format!(
-        "to reach every match, scope the scan and repeat per subtree: pass \"path\":\"<dir-or-file>\" (e.g. {{\"path\":\"src\"}}) and/or \"glob\":\"**/*.rs\" (e.g. {{\"glob\":\"**/*.rs\"}}) -- a scoped scan's cap is per call, so union the per-scope results; or raise the cap with \"max_results\": <n> (this call used {}); \"output_mode\":\"files_with_matches\" or \"count\" also covers far more files per call than \"content\"",
-        scan_cap
+        "to reach every match, scope the scan and repeat per subtree: pass \"path\":\"<dir-or-file>\" and/or \"glob\":\"**/*.rs\" -- a scoped scan's cap is per call, so union the per-scope results; or raise the cap with \"max_results\": <n> (this call used {scan_cap}); \"output_mode\":\"files_with_matches\" or \"count\" covers far more files per call than \"content\""
     )
 }
 
-fn apply_scan_guidance(out: &mut serde_json::Map<String, Value>, scan_cap: u32) {
-    if out.get("exhaustive").and_then(|v| v.as_bool()) == Some(false) {
-        let hint = scan_scope_hint(scan_cap);
-        let base = out.get("exhaustive_note").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let note = if base.is_empty() { hint.clone() } else { format!("{base} -- {hint}") };
-        out.insert("exhaustive_note".to_string(), json!(note));
-        out.insert("scope_hint".to_string(), json!(hint));
+/// A bounded scan still answers, so it stays `ok` -- and `ok: true` beside an empty `matches` reads
+/// as "there is nothing there" when it means "this did not look at everything". The bound that fired
+/// rides at the top of the envelope, where a caller meets it before the answer.
+fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Option<String> {
+    if out.get("exhaustive").and_then(|v| v.as_bool()) != Some(false) {
+        return None;
     }
+    let num = |key: &str| out.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+    let mut bounds: Vec<String> = Vec::new();
+    if out.get("budget_exhausted").and_then(|v| v.as_bool()) == Some(true) {
+        bounds.push(format!(
+            "the {} ms wall budget ran out after {} of {} listed files",
+            num("budget_ms"), num("files_scanned"), num("files_listed")
+        ));
+    }
+    if out.get("matches_truncated").and_then(|v| v.as_bool()) == Some(true) {
+        bounds.push(format!("the hit cap cut at {} matches", num("matches_truncated_at")));
+    }
+    if out.get("files_truncated").and_then(|v| v.as_bool()) == Some(true) {
+        bounds.push(format!("the file cap cut at {} files", num("files_truncated_at")));
+    }
+    let unreadable = num("files_unreadable");
+    if unreadable > 0 { bounds.push(format!("{unreadable} listed files could not be read")); }
+    let too_large = num("files_skipped_too_large_count");
+    if too_large > 0 { bounds.push(format!("{too_large} files were skipped as over the size ceiling")); }
+    let untyped = num("files_skipped_untyped_oversize_count");
+    if untyped > 0 { bounds.push(format!("{untyped} oversize files with no extension were skipped before reading")); }
+    let reason = if bounds.is_empty() {
+        "the scan did not cover the whole scope".to_string()
+    } else {
+        bounds.join("; ")
+    };
+    Some(format!("{reason} -- the matches below are NOT every match in the scope"))
+}
+
+fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_cap: u32) -> Option<String> {
+    let partial = scan_partial_reason(out);
+    if partial.is_some() {
+        out.insert("exhaustive_note".to_string(), json!(scan_scope_hint(scan_cap)));
+    }
+    out.remove("scope_hint");
+    partial
 }
 
 const GREP_LIMIT_FIELDS: &[&str] = &["max_results", "maxResults", "limit", "max_matches", "k"];
@@ -2146,8 +2188,15 @@ fn grep(body: &Value) -> u64 {
             out.insert("output".to_string(), Value::Array(matches.iter().map(|m| json!(grep_output_line(m, "content"))).collect()));
         }
     }
-    apply_scan_guidance(&mut out, scan_cap);
-    ok("grep", Value::Object(out))
+    let partial = finish_scan_reply(&mut out, scan_cap);
+    answer_scan("grep", out, partial)
+}
+
+fn answer_scan(verb: &str, out: serde_json::Map<String, Value>, partial: Option<String>) -> u64 {
+    match partial {
+        Some(reason) => ok_partial(verb, Value::Object(out), &reason),
+        None => ok(verb, Value::Object(out)),
+    }
 }
 
 fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
@@ -2181,8 +2230,8 @@ fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
         other => return ok("grep", other),
     };
     out.insert("verb_mode".to_string(), json!("comments"));
-    apply_scan_guidance(&mut out, max_matches);
-    ok("grep", Value::Object(out))
+    let partial = finish_scan_reply(&mut out, max_matches);
+    answer_scan("grep", out, partial)
 }
 
 const CODESEARCH_QUERY_SHAPE: &str = "query required -- pass {\"query\":\"<the text to search for>\"}: a plain STRING of text, never an object, array or path list; \"dual\" (the default) embeds it and ranks BM25+vector hits, \"literal\"/\"regex\" match it verbatim, \"filename\" matches it as a path substring or glob. Optional {\"mode\":\"dual\"|\"literal\"|\"regex\"|\"filename\"}, {\"k\":10} result cap for \"dual\", {\"max_matches\":1000} for the exhaustive modes, {\"path\":\"<dir or file>\"}, {\"path_glob\":\"**/*.rs\"}. There is no query-less listing mode, so a body without query is always a caller mistake";
@@ -2225,7 +2274,13 @@ fn codesearch(body: &Value) -> u64 {
     }
     if mode == "filename" {
         let out = crate::code_index::search_filenames(query, k as usize, &cfg);
-        return ok("codesearch", out);
+        return match out {
+            Value::Object(mut map) => {
+                let partial = finish_scan_reply(&mut map, k);
+                answer_scan("codesearch", map, partial)
+            }
+            other => ok("codesearch", other),
+        };
     }
     let (_dataflow_doc, dataflow_tier, dataflow_path) = crate::dataflow::document_detailed();
     if dataflow_tier != crate::dataflow::DataflowTier::CompiledDefault {
