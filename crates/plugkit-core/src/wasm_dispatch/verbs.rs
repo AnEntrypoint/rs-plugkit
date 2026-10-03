@@ -1938,6 +1938,20 @@ fn scan_scope_hint(scan_cap: u32) -> String {
     )
 }
 
+/// Counters that describe the scan to a human sitting in front of it and nothing else: the cache is
+/// internal, the phase split is profiling, and the listed/unreadable counts are already folded into
+/// `partial_reason` on the scans where they left the answer incomplete. `excluded_by_rule_summary`
+/// stays -- it names which rule hid which subtree, which is the one a caller can act on.
+const SCAN_TELEMETRY_DROPPED: &[&str] = &[
+    "scan_cache",
+    "phase_ms",
+    "files_listed",
+    "files_unreadable",
+    "files_with_nul_scanned",
+    "excluded_by_rule",
+    "excluded_by_rule_count",
+];
+
 /// A bounded scan still answers, so it stays `ok` -- and `ok: true` beside an empty `matches` reads
 /// as "there is nothing there" when it means "this did not look at everything". The bound that fired
 /// rides at the top of the envelope, where a caller meets it before the answer.
@@ -1975,6 +1989,8 @@ fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Option<String> {
 
 fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_cap: u32) -> Option<String> {
     let partial = scan_partial_reason(out);
+    for key in SCAN_TELEMETRY_DROPPED { out.remove(*key); }
+    if out.contains_key("hint") { out.remove("query_note"); }
     if partial.is_some() {
         out.insert("exhaustive_note".to_string(), json!(scan_scope_hint(scan_cap)));
     }
