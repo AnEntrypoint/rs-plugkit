@@ -269,7 +269,9 @@ changes.
   over-fetch under a scope (`scoped_candidate_k`) because filtering happens
   after retrieval -- top-k first would answer from a pool the scope never saw.
   A bare path expands to itself plus `<path>/**`, so a directory scope admits
-  the files under it and a file scope admits the file.
+  the files under it and a file scope admits the file. The `commits` channel
+  stays unscoped: `git_commit_rank` answers (hash, message, score) with no
+  touched-path set to filter on.
 - `CODESEARCH_MODES`/`CODESEARCH_LIMIT_FIELDS`/`codesearch_result_limit` exist
   because an unrecognized `mode` and an unread `max_results` both used to be
   silently dropped (falling through to `mode: "dual"` / the default `k`) with
