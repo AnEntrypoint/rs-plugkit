@@ -402,6 +402,16 @@ fn err_json(verb: &str, detail: Value) -> u64 {
     pack(obj.to_string())
 }
 
+fn err_retry_same_verb(verb: &str, reason: &str) -> u64 {
+    pack(json!({
+        "ok": false,
+        "verb": verb,
+        "error": reason,
+        "error_code": ERR_CODE_INVALID_ARGS,
+        "next_dispatch_hint": verb,
+    }).to_string())
+}
+
 fn ok(verb: &str, data: Value) -> u64 {
     pack(json!({ "ok": true, "verb": verb, "data": data, "next_dispatch_hint": next_dispatch_hint_for(verb) }).to_string())
 }
@@ -915,12 +925,20 @@ pub fn memory_recall_backend(query_embedding: &Value, namespace: &str, limit: u3
         .filter(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
 }
 
+const RECALL_QUERY_SHAPE: &str = "query required -- pass {\"query\":\"<the concept to recall>\"}: a plain STRING of prose, not an object, array or path; recall embeds that text and ranks stored memories by cosine times recency. Optional {\"limit\":8} row cap, {\"namespace\":\"default\"} for another namespace. There is no query-less listing mode, so a body without query is always a caller mistake";
+
 fn recall(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
-    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_limit as u64) as u32;
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or(&cfg.namespaces.default);
-    if query.is_empty() { return err("recall", "query required"); }
+    let Some(raw_query) = body.get("query") else {
+        return err_retry_same_verb("recall", RECALL_QUERY_SHAPE);
+    };
+    let Some(query) = raw_query.as_str() else {
+        let shown: String = raw_query.to_string().chars().take(80).collect();
+        return err_retry_same_verb("recall", &format!("{}; got non-string JSON under \"query\": {}", RECALL_QUERY_SHAPE, shown));
+    };
+    if query.is_empty() { return err_retry_same_verb("recall", RECALL_QUERY_SHAPE); }
     if crate::tencentdb_memory::namespace_is_routed(namespace) {
         let embedding = embed_query(query);
         return match crate::tencentdb_memory::recall(&embedding, namespace, limit as usize) {
