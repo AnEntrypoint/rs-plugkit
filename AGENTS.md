@@ -250,9 +250,26 @@ changes.
   cross-namespace access, they are not a security boundary.
 - `codesearch_at_root` skips the cwd-bound fusion/BM25/dataflow machinery on
   purpose; it is tied to the current project's db and would mix roots.
+- A `codesearch` body naming no `root` resolves one (`git rev-parse
+  --show-toplevel`, else the host cwd) and dispatches through
+  `codesearch_at_root`. Nothing may fall through to the un-suffixed index
+  namespace: `FusionCorpus`'s cache lives in a module instance that serves
+  every tree the daemon dispatches for, so a corpus cached under the empty
+  root is handed to the next project's dispatch and its symbols come back
+  filed under paths that project never had. `retain_hits_in_scope` is the
+  backstop for an index that already holds foreign paths.
 - `codesearch_exhaustive` (literal/regex) is dispatched before the root branch
   and every digest/index/embedding step, none of which it reads; routed later,
   a literal query on a large workspace took minutes.
+- A `codesearch` path scope (`paths`, `path`, `path_glob`, `glob`, `include`)
+  is applied in `dual` too, not only by `scan_literal`: `PathScope::from_body`
+  is the single reader of all five spellings, and a `dual` reply echoes
+  `path_glob`/`files_matching_glob`/`glob_matched_no_files` so a filter that
+  admitted nothing cannot be mistaken for an empty index. Ranked channels
+  over-fetch under a scope (`scoped_candidate_k`) because filtering happens
+  after retrieval -- top-k first would answer from a pool the scope never saw.
+  A bare path expands to itself plus `<path>/**`, so a directory scope admits
+  the files under it and a file scope admits the file.
 - `CODESEARCH_MODES`/`CODESEARCH_LIMIT_FIELDS`/`codesearch_result_limit` exist
   because an unrecognized `mode` and an unread `max_results` both used to be
   silently dropped (falling through to `mode: "dual"` / the default `k`) with
@@ -272,6 +289,13 @@ changes.
 - `browser` and `cdp` share `host_browser_exec`; the engine travels in the opts
   JSON (`"engine"`), never inside the code body, so the host picks
   lightpanda/steel/chrome without re-escaping caller JS.
+- `serp` is an HTTP scrape, not a browser: it queries DuckDuckGo's lite endpoint
+  through `host_fetch` and extracts results from that endpoint's markup
+  (`result-link` anchors, `result-snippet` cells, target inside the redirect's
+  `uddg=` parameter). There is no API key or structured endpoint behind it, so an
+  upstream markup change shows up as `count: 0` with `status: 200` -- treat a zero
+  result count as an extraction failure and check the live page before assuming
+  the query had no hits.
 - `git_commit`/`git_finalize` default to committing exactly what is already
   staged; blanket `git add -A` needs `add_all: true` (or, for `git_finalize`
   with no `paths`, stays the default there); `paths`/`files` stages only those
@@ -342,6 +366,15 @@ changes.
   frozen `AbiErrorKind` wire strings with their text-sniffing fallback.
 
 ### scan_deps.rs
+
+- `scan_file_list` skips a path whose segments hit `BUNDLED_OUTPUT_SKIP_DIRS`
+  or `BUNDLED_OUTPUT_SKIP_PREFIXES` (run/output dirs, browser profile and
+  extension dirs, caches). A bundled Chrome profile under `runs/` is hundreds
+  of third-party files that are not this project's dependencies, and they used
+  to flood `instruction`'s `supply_chain_scan` with ~283 warnings.
+- `WARNINGS_LISTED` caps the inlined `warnings` array; `warnCount` stays the
+  true count and `warningsOmitted` says how much was dropped, like
+  `SYMLINK_ESCAPES_LISTED` does for `symlinkEscapeCount`.
 
 - Drained to gm recall (`mem-73c705bb66f60897-863`, query "scan_deps
   find_suspicious_escapes walk_package is_force_included"):
@@ -543,7 +576,6 @@ changes.
   untracked file being committed in the same dispatch is the fix, not an error.
 - `git check-ignore` filters generated-but-ignored targets so a build artifact
   or a vendored blob never blocks a commit.
-
 
 ### gates.rs
 
