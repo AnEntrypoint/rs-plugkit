@@ -2215,8 +2215,9 @@ pub struct LiteralScan<'a> {
     pub max_matches: usize,
     pub max_files: usize,
     pub context: usize,
-    /// How to combine a multi-term query: Some("or") (default, ranked union), Some("and")
-    /// (every term on one line) or Some("phrase") (match the query verbatim as one string).
+    /// How to combine a multi-term query: Some("phrase") (match the query verbatim as one
+    /// string -- the default whenever the query splits into two or more terms), Some("and")
+    /// (every term on one line) or Some("or") (a ranked union of any term).
     pub term_combination: Option<&'a str>,
     /// Wall-clock ceiling for the scan. None means the configured `index.wall_budget_ms`; a
     /// caller that runs the scan as one channel of a ranked search passes a few seconds instead.
@@ -2325,9 +2326,14 @@ fn query_terms(pattern: &str, regex: bool) -> Vec<String> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TermCombination {
+    /// One matcher: the query is a single term, or an unsplittable regex.
     Single,
+    /// Terms are matched independently and ranked by how many of them a line carries.
     Or,
+    /// A line must carry every term.
     And,
+    /// The whole query is matched verbatim as one string, spaces included.
+    Phrase,
 }
 
 impl TermCombination {
@@ -2336,6 +2342,7 @@ impl TermCombination {
             TermCombination::Single => "single_term",
             TermCombination::Or => "or_any_term_ranked_union",
             TermCombination::And => "and_all_terms_on_one_line",
+            TermCombination::Phrase => "phrase_all_terms_verbatim",
         }
     }
 }
@@ -2471,7 +2478,14 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
 
     let terms = query_terms(req.pattern, req.regex);
     let want_and = req.term_combination == Some("and");
-    let want_phrase = req.term_combination == Some("phrase");
+    // A multi-word query is ONE phrase unless the caller asks for the loose union: ranking
+    // "fn sys_wait4" by how many of its terms a line carries answers with every `fn` in the tree
+    // and buries the definition the caller asked for.
+    let want_phrase = match req.term_combination {
+        Some("phrase") => true,
+        Some(_) => false,
+        None => !terms.is_empty(),
+    };
     let mut term_matchers: Vec<LiteralMatcher> = Vec::new();
     if !terms.is_empty() && !want_phrase {
         for term in &terms {
@@ -2482,7 +2496,15 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         }
     }
     let multi = !term_matchers.is_empty();
-    let combination = if !multi { TermCombination::Single } else if want_and { TermCombination::And } else { TermCombination::Or };
+    let combination = if want_phrase {
+        TermCombination::Phrase
+    } else if !multi {
+        TermCombination::Single
+    } else if want_and {
+        TermCombination::And
+    } else {
+        TermCombination::Or
+    };
     let max_matches = if multi { req.max_matches.min(MULTI_TERM_MAX_MATCHES) } else { req.max_matches };
     let hit_cap = if multi { max_matches.saturating_mul(6).clamp(200, 2_000) } else { max_matches };
 
@@ -2686,15 +2708,20 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("terms".to_string(), Value::Array(per_term));
         out.insert("lines_matching_all_terms".to_string(), json!(lines_all_terms));
         out.insert("phrase_match_count".to_string(), json!(lines_phrase_matched));
-        if lines_all_terms == 0 && !matches.is_empty() {
-            out.insert("query_note".to_string(), json!(format!(
-                "no line carries all {} terms -- these hits are the ranked union (lines matching the most terms first); combine:\"and\" keeps only lines with every term",
+        out.insert("query_note".to_string(), json!(if lines_all_terms == 0 {
+            format!(
+                "no line carries all {} terms -- these hits are the ranked union (lines matching the most terms first); combine:\"phrase\" (the default for a multi-word query) matches the query verbatim instead, combine:\"and\" would return nothing here",
                 term_matchers.len()
-            )));
-        }
+            )
+        } else {
+            format!(
+                "ranked union (combine:\"or\"): lines carrying all {} terms come first, every line carrying fewer ranks strictly below them; combine:\"and\" keeps only the all-terms lines, combine:\"phrase\" (the default) matches the query verbatim",
+                term_matchers.len()
+            )
+        }));
     } else if req.pattern.split_whitespace().count() > 1 {
         out.insert("query_note".to_string(), json!(
-            "the query was matched as ONE phrase: a line must contain it verbatim, spaces included -- pass combine:\"or\" (the default for a multi-word query) to match any term, or combine:\"and\" to require all of them on one line"
+            "the query was matched as ONE phrase: a line must contain it verbatim, spaces included -- pass combine:\"or\" to split it into terms and rank by how many a line carries, or combine:\"and\" to require all of them on one line"
         ));
     }
     if matches.is_empty() {
@@ -2710,17 +2737,17 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             let detail = detail.join(", ");
             match combination {
                 TermCombination::And => format!(
-                    "no line matched all {} terms (combine:\"and\"); per term: {}; pass combine:\"or\" for a ranked union of any term, or combine:\"phrase\" for the query verbatim",
+                    "no line matched all {} terms (combine:\"and\"); per term: {}; pass combine:\"or\" for a ranked union of any term, or combine:\"phrase\" (the default for a multi-word query) for the query verbatim",
                     term_matchers.len(), detail
                 ),
                 _ => format!(
-                    "no line matched any of the {} terms (combine:\"or\"); per term: {}; the query was split on whitespace -- pass combine:\"phrase\" to match it verbatim as one string",
+                    "no line matched any of the {} terms (combine:\"or\"); per term: {}; the query was split on whitespace -- the default combine:\"phrase\" matches it verbatim as one string",
                     term_matchers.len(), detail
                 ),
             }
         } else if req.pattern.split_whitespace().count() > 1 {
             format!(
-                "no line matched the query as ONE phrase: \"{}\" was matched verbatim, spaces included; split it into terms and pass combine:\"or\" (default) or combine:\"and\"",
+                "no line matched the query as ONE phrase: \"{}\" was matched verbatim, spaces included; split it into terms and pass combine:\"or\", or combine:\"and\" to require all of them on one line",
                 req.pattern
             )
         } else {
