@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 use crate::config::{RepoFetcher, RepoSource};
 
@@ -62,6 +63,21 @@ impl SyncState {
 
 fn now_ms() -> u64 {
     crate::orchestrator::state::now_ms() as u64
+}
+
+static REMEMBERED_PROBE_MS: std::sync::Mutex<Option<HashMap<String, u64>>> = std::sync::Mutex::new(None);
+
+fn remembered_probe_ms(src: &RepoSource) -> u64 {
+    match REMEMBERED_PROBE_MS.lock() {
+        Ok(guard) => guard.as_ref().and_then(|m| m.get(&source_key(src))).copied().unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+fn remember_probe_ms(src: &RepoSource, now: u64) {
+    if let Ok(mut guard) = REMEMBERED_PROBE_MS.lock() {
+        guard.get_or_insert_with(HashMap::new).insert(source_key(src), now);
+    }
 }
 
 fn source_key(src: &RepoSource) -> String {
@@ -311,11 +327,12 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
     let now = now_ms();
     let have_local = local_sha(src);
 
-    if have_local.is_some() {
-        let elapsed = now.saturating_sub(st.last_checked_ms);
+    let last_probe = st.last_checked_ms.max(remembered_probe_ms(src));
+    let clock_sane = last_probe > 0 && last_probe <= now;
+    if clock_sane {
+        let elapsed = now.saturating_sub(last_probe);
         let required = st.next_probe_delay_ms(debounce_ms);
-        let clock_sane = st.last_checked_ms <= now;
-        if clock_sane && elapsed < required {
+        if elapsed < required {
             return Ok(SyncOutcome {
                 sha: have_local,
                 changed: false,
@@ -357,6 +374,8 @@ fn refresh_locked(
     have_local: Option<String>,
 ) -> Result<SyncOutcome, String> {
     recover_stranded(src);
+    st.last_checked_ms = now;
+    remember_probe_ms(src, now);
     let have_local = local_sha(src).or(have_local);
 
     let remote = match probe_remote_sha(src) {
