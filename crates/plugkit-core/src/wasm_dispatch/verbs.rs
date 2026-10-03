@@ -2185,10 +2185,18 @@ fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
     ok("grep", Value::Object(out))
 }
 
+const CODESEARCH_QUERY_SHAPE: &str = "query required -- pass {\"query\":\"<the text to search for>\"}: a plain STRING of text, never an object, array or path list; \"dual\" (the default) embeds it and ranks BM25+vector hits, \"literal\"/\"regex\" match it verbatim, \"filename\" matches it as a path substring or glob. Optional {\"mode\":\"dual\"|\"literal\"|\"regex\"|\"filename\"}, {\"k\":10} result cap for \"dual\", {\"max_matches\":1000} for the exhaustive modes, {\"path\":\"<dir or file>\"}, {\"path_glob\":\"**/*.rs\"}. There is no query-less listing mode, so a body without query is always a caller mistake";
+
 fn codesearch(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
-    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
-    if query.is_empty() { return err("codesearch", "query required"); }
+    let Some(raw_query) = body.get("query") else {
+        return err_retry_same_verb("codesearch", CODESEARCH_QUERY_SHAPE);
+    };
+    let Some(query) = raw_query.as_str() else {
+        let shown: String = raw_query.to_string().chars().take(80).collect();
+        return err_retry_same_verb("codesearch", &format!("{}; got non-string JSON under \"query\": {}", CODESEARCH_QUERY_SHAPE, shown));
+    };
+    if query.is_empty() { return err_retry_same_verb("codesearch", CODESEARCH_QUERY_SHAPE); }
     let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("dual");
     if !CODESEARCH_MODES.contains(&mode) {
         return err("codesearch", &format!(
