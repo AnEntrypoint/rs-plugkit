@@ -528,6 +528,30 @@ changes.
 - `git check-ignore` filters generated-but-ignored targets so a build artifact
   or a vendored blob never blocks a commit.
 
+
+### gates.rs
+
+- `LONGGAP_GATED_STATE_CHANGING_VERBS` is the entire long-gap gate surface:
+  `is_longgap_denial_exempt` exempts every verb NOT on it, so a verb added
+  later is ungated by default. The previous shape was an exempt read-only
+  allowlist, which inverted that default, and every read verb missing from it
+  was denied after `policy.longgap_threshold_ms` of idle -- `search`, an
+  alias of `codesearch`, among them. Denying a read verb guards nothing: it
+  neither loses state nor advances the phase, and the gate still fires on the
+  next state-changing verb.
+- `exec_js` and the shell stems stay ungated on purpose. One verb body carries
+  both `tar -tf` and `rm -rf`, and the friction that drove this was a
+  read-only `bash` denied with no way to tell the two apart; `deny_shell_git`
+  is the gate that governs shell verbs, runs before this one, and is
+  unaffected.
+- `is_longgap_activity_exempt` is a different notion from denial exemption and
+  still means "does not count as activity": such a verb neither reads nor
+  rewrites `.gm/last-dispatch-ts`, so it never restarts the idle clock for
+  the verbs that follow it, and it leaves `prev_dispatch_ms == 0`, which
+  satisfies `idle_since_any` on its own. Adding a verb to
+  `policy.longgap_exempt_verbs` to silence a denial therefore makes the gate
+  fire more readily, not less.
+
 ### Other modules
 
 - `dataflow::default_document` is never executed: `verbs.rs` runs

@@ -103,9 +103,15 @@ fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
     (verb, count, ts)
 }
 
-const LONGGAP_EXEMPT_READ_ONLY_VERBS: &[&str] = &[
-    "codesearch", "recall", "memorize-fire", "git_status", "git_log", "git_diff", "git_show",
-    "branch_status", "ci-status", "fs_read", "fs_stat", "fs_readdir", "status",
+const LONGGAP_GATED_STATE_CHANGING_VERBS: &[&str] = &[
+    "fs_write", "kv_put", "cache_put", "cache_invalidate",
+    "sql_open", "sql_close", "sql_exec", "sql_serialize", "sql_deserialize", "sql_smoke",
+    "memorize", "memorize-prune", "memorize_prune", "memorize-vacuum", "memorize_vacuum",
+    "memorize-retention", "memorize_retention", "forget", "codeinsight_index",
+    "tencentdb-memory-import", "config-sync-now", "discipline", "close",
+    "git_add", "git_commit", "git_finalize", "git_push", "git_fetch", "git_pull",
+    "git_checkout", "git_merge", "git_merge_abort", "git_branch_delete", "git_rm",
+    "git_revert", "git_reset", "git_stash", "git_stash_pop", "git_stash_drop",
 ];
 
 fn is_longgap_activity_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
@@ -113,7 +119,11 @@ fn is_longgap_activity_exempt(verb: &str, policy: &crate::orchestrator::fsm::Pol
 }
 
 fn is_longgap_denial_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
-    LONGGAP_EXEMPT_READ_ONLY_VERBS.contains(&verb) || is_longgap_activity_exempt(verb, policy)
+    if is_longgap_activity_exempt(verb, policy) {
+        return true;
+    }
+    !LONGGAP_GATED_STATE_CHANGING_VERBS.contains(&verb)
+        && !crate::orchestrator::is_orchestrator_verb(verb)
 }
 
 fn is_longgap_refresh(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
