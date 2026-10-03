@@ -162,6 +162,15 @@ pub struct IndexConfig {
     pub likely_orphaned_symbol_scan_enabled: bool,
 }
 
+/// The floor under `index.max_file_bytes`. The cap is a guard against one pathological file eating
+/// a pass, but at 256 KiB -- what gm-config shipped -- it was below the size of ordinary source
+/// files and silently removed them from the index instead: on litebox-main every file over 256 KiB
+/// was skipped whole at `code_index`'s size check, so `litebox_platform_windows_userland/src/lib.rs`
+/// (890 KB) answered no ranked query for any symbol it defines. Files this size are bounded by the
+/// pass wall budget and by `MAX_CHUNK_BYTES_INDEXED_PER_FILE`, so config may raise the cap above
+/// this floor but never lower it into the range where real sources disappear.
+const MIN_INDEXED_FILE_BYTES: usize = 2 * 1024 * 1024;
+
 impl Default for IndexConfig {
     fn default() -> Self {
         IndexConfig {
@@ -624,6 +633,7 @@ impl RagConfig {
         overwrite_present_u64_or_record_problem("index", "wall_budget_ms", &mut cfg.index.wall_budget_ms, &mut problems);
         overwrite_present_u64_or_record_problem("index", "incremental_topup_wall_budget_ms", &mut cfg.index.incremental_topup_wall_budget_ms, &mut problems);
         overwrite_present_usize_or_record_problem("index", "max_file_bytes", &mut cfg.index.max_file_bytes, &mut problems);
+        cfg.index.max_file_bytes = cfg.index.max_file_bytes.max(MIN_INDEXED_FILE_BYTES);
         overwrite_present_usize_or_record_problem("index", "max_chunks_per_file_per_pass", &mut cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only, &mut problems);
         overwrite_present_u64_or_record_problem("index", "pessimistic_ms_per_chunk", &mut cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound, &mut problems);
         overwrite_present_usize_or_record_problem("index", "oversized_chunk_split_threshold", &mut cfg.index.split_chunk_above_bytes, &mut problems);
