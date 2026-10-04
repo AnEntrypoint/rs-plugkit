@@ -13,12 +13,20 @@ pub mod shared_db;
 
 #[cfg(target_arch = "wasm32")]
 pub mod code_index;
+pub mod code_symbols;
+
+#[cfg(target_arch = "wasm32")]
+pub mod codesearch_rank;
+
+pub mod recall_compact;
 
 #[cfg(target_arch = "wasm32")]
 pub mod scan_deps;
 
 #[cfg(target_arch = "wasm32")]
 pub mod scan_universe;
+
+pub mod comment_spans;
 
 #[cfg(target_arch = "wasm32")]
 pub mod path_glob;

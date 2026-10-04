@@ -681,7 +681,7 @@ fn lang(body: &Value) -> u64 {
     }
 }
 
-const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "timeoutMs=<ms>\\n<code>";
+const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "[timeoutMs=<ms>\\n]<code> (timeoutMs is the enforced wall-clock limit: default 300000, hard ceiling 900000, the process tree is killed at expiry)";
 
 fn exec_js(body: &Value, body_s: &str) -> u64 {
     if body.is_object() {
@@ -698,21 +698,16 @@ fn exec_js(body: &Value, body_s: &str) -> u64 {
         "error_code": ERR_CODE_INVALID_ARGS,
         "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
     })); }
-    let timeout_ms = match prefix_timeout_ms {
-        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
+    let opts = match prefix_timeout_ms {
+        Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => json!({"timeoutMs": n}),
         Some(n) => return err_json("exec_js", json!({
             "error": "timeoutMs below floor",
             "error_code": ERR_CODE_INVALID_ARGS,
             "min": crate::validation::MIN_TIMEOUT_MS,
             "received": n,
         })),
-        None => return err_json("exec_js", json!({
-            "error": "missing timeoutMs -- prefix the body with a timeoutMs=<ms> line naming a positive integer millisecond budget",
-            "error_code": ERR_CODE_INVALID_ARGS,
-            "supported_shapes": EXEC_JS_SUPPORTED_BODY_SHAPES,
-        })),
-    };
-    let opts = json!({"timeoutMs": timeout_ms}).to_string();
+        None => json!({}),
+    }.to_string();
     let packed = unsafe { host_exec_js(code.as_ptr(), code.len() as u32, opts.as_ptr(), opts.len() as u32) };
     match unpack_to_string(packed) {
         Some(s) => ok("exec_js", Value::String(s)),
@@ -935,10 +930,47 @@ pub fn memory_recall_backend(query_embedding: &Value, namespace: &str, limit: u3
 
 const RECALL_QUERY_SHAPE: &str = "query required -- pass {\"query\":\"<the concept to recall>\"}: a plain STRING of prose, not an object, array or path; recall embeds that text and ranks stored memories by cosine times recency. Optional {\"limit\":8} row cap, {\"namespace\":\"default\"} for another namespace. There is no query-less listing mode, so a body without query is always a caller mistake";
 
+fn recall_reply(body: &Value, mode: &str, namespace: &str, derived_query: &str, hits: &Value, vector_hits: &Value) -> Value {
+    let full = crate::recall_compact::wants_full(body);
+    let mut reply = json!({
+        "mode": mode,
+        "namespace": namespace,
+        "derived_query": derived_query,
+        "hits": crate::recall_compact::compact_hits(hits, full),
+    });
+    if body.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false) {
+        reply["vector_hits"] = vector_hits.clone();
+    }
+    if !full {
+        reply["expand"] = json!("recall {key:\"<hit key>\"} for one full memory; recall {query, full:true} for full text of all hits");
+    }
+    reply
+}
+
+fn recall_by_key(namespace: &str, key: &str) -> u64 {
+    let valid = !key.is_empty() && key.len() <= 128 && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid { return err("recall", "key must be 1-128 chars of [A-Za-z0-9_-], the mem-<hash>-<n> key a compact recall hit reports"); }
+    let Some(path) = crate::memory_md::md_path(namespace, key) else { return err("recall", &format!("namespace '{namespace}' has no memories directory")) };
+    match host_read(&path) {
+        Some(content) => ok("recall", match crate::memory_md::parse(&content) {
+            Some(doc) => json!({ "key": key, "namespace": namespace, "created": doc.created, "updated": doc.updated, "text": doc.text }),
+            None => json!({ "key": key, "namespace": namespace, "text": content.trim() }),
+        }),
+        None => err("recall", &format!("no memory file for key '{key}' in namespace '{namespace}'")),
+    }
+}
+
 fn recall(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
     let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_limit as u64) as u32;
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or(&cfg.namespaces.default);
+    let routed = crate::tencentdb_memory::namespace_is_routed(namespace);
+    match body.get("key") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(_)) if routed => return err("recall", &format!("namespace '{namespace}' is routed to the TencentDB backend, which has no per-key memory file -- use recall {{query, full:true}} instead")),
+        Some(Value::String(key)) => return recall_by_key(namespace, key),
+        Some(other) => return err("recall", &format!("key must be a memory key string such as \"mem-<hash>-<n>\", got {other}")),
+    }
     let Some(raw_query) = body.get("query") else {
         return err_retry_same_verb("recall", RECALL_QUERY_SHAPE);
     };
@@ -947,10 +979,15 @@ fn recall(body: &Value) -> u64 {
         return err_retry_same_verb("recall", &format!("{}; got non-string JSON under \"query\": {}", RECALL_QUERY_SHAPE, shown));
     };
     if query.is_empty() { return err_retry_same_verb("recall", RECALL_QUERY_SHAPE); }
-    if crate::tencentdb_memory::namespace_is_routed(namespace) {
+    if routed {
         let embedding = embed_query(query);
         return match crate::tencentdb_memory::recall(&embedding, namespace, limit as usize) {
-            Ok(v) => ok("recall", v),
+            Ok(mut v) => {
+                if let Some(hits) = v.get("hits").filter(|h| h.is_array()).cloned() {
+                    v["hits"] = crate::recall_compact::compact_hits(&hits, crate::recall_compact::wants_full(body));
+                }
+                ok("recall", v)
+            }
             Err(e) => err("recall", &e),
         };
     }
@@ -977,26 +1014,14 @@ fn recall(body: &Value) -> u64 {
         let now_ms = unsafe { host_now_ms() } as i64;
         if let Ok(md_hits) = crate::rssearch_vectors::search_memory_hits_cfg(&embedding, mem_ns, limit as usize, now_ms, &cfg) {
             if md_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
-                return ok("recall", json!({
-                    "mode": "vector_top_k",
-                    "namespace": namespace,
-                    "derived_query": derived_query,
-                    "hits": md_hits,
-                    "vector_hits": vector_hits,
-                }));
+                return ok("recall", recall_reply(body, "vector_top_k", namespace, &derived_query, &md_hits, &vector_hits));
             }
         }
     }
     let vec_hits = vec_search_local(&embedding, namespace, limit);
     if !vec_hits.is_null() && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
         let annotated = annotate_hits_with_score(vec_hits);
-        return ok("recall", json!({
-            "mode": "vector_top_k",
-            "namespace": namespace,
-            "derived_query": derived_query,
-            "hits": annotated,
-            "vector_hits": vector_hits,
-        }));
+        return ok("recall", recall_reply(body, "vector_top_k", namespace, &derived_query, &annotated, &vector_hits));
     }
     let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, query.as_ptr(), query.len() as u32) };
     let kv_hits = unpack_to_value(packed);
@@ -1029,14 +1054,9 @@ fn recall(body: &Value) -> u64 {
         );
     }
 
-    ok("recall", json!({
-        "mode": "fallback_like",
-        "degraded": degraded,
-        "namespace": namespace,
-        "derived_query": derived_query,
-        "hits": annotated,
-        "vector_hits": vector_hits,
-    }))
+    let mut reply = recall_reply(body, "fallback_like", namespace, &derived_query, &annotated, &vector_hits);
+    reply["degraded"] = json!(degraded);
+    ok("recall", reply)
 }
 
 const DIAGNOSTIC_EVENT_COOLDOWN_MS: i64 = 5 * 60 * 1000;
@@ -1560,7 +1580,9 @@ fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::Rag
         regex: false,
         case_insensitive: true,
         whole_word: false,
-        path_glob: None,
+        comments_only: false,
+        include_globs: Vec::new(),
+        exclude_globs: Vec::new(),
         max_matches: DUAL_PHRASE_SCAN_COLLECT_MATCHES,
         max_matches_per_file: Some(DUAL_PHRASE_SCAN_PER_FILE_MATCHES),
         max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
@@ -1568,6 +1590,11 @@ fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::Rag
         term_combination: Some("phrase"),
         budget_ms: Some(DUAL_PHRASE_SCAN_BUDGET_MS),
         refresh: false,
+        output: crate::code_index::ScanOutput::Matches,
+        list_limit: None,
+        max_chars: usize::MAX,
+        spill_name: String::new(),
+        verbose: false,
     };
     let out = crate::code_index::scan_literal(&scan, cfg);
     if out.get("ok").and_then(|v| v.as_bool()) != Some(true) { return (Vec::new(), 0, false); }
@@ -1640,6 +1667,29 @@ fn unindexed_on_disk_candidates(namespace: &str) -> (Vec<Value>, usize) {
     (out, total)
 }
 
+const COMPACT_DUAL_CANDIDATE_MULTIPLIER: usize = 4;
+
+fn with_corpus_symbol(corpus: &crate::code_index::FusionCorpus, row: &Value) -> Value {
+    let mut row = row.clone();
+    if row.get("symbol").is_none() {
+        let symbol = row.get("key").and_then(|k| k.as_str()).and_then(|k| corpus.symbol_for_key(k));
+        if let (Some(symbol), Some(obj)) = (symbol, row.as_object_mut()) {
+            obj.insert("symbol".to_string(), symbol);
+        }
+    }
+    row
+}
+
+fn dual_channel_depth(body: &Value, k: u32) -> usize {
+    if body.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false) { k as usize } else { (k as usize).saturating_mul(COMPACT_DUAL_CANDIDATE_MULTIPLIER) }
+}
+
+fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) -> Value {
+    let root = body.get("root").and_then(|v| v.as_str()).or_else(|| body.get("projectPath").and_then(|v| v.as_str()));
+    let opts = crate::codesearch_rank::RankOptions::from_body(body, k as usize, root);
+    if opts.verbose { raw } else { crate::codesearch_rank::compact_dual(query, &raw, &opts) }
+}
+
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
     if !crate::wasm_dispatch::host_allow_root(root) {
         return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
@@ -1683,12 +1733,13 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
     let mut at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let embedding = embed_query(query);
     let embed_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let vres = crate::code_index::search_at(query, k as usize, Some(&embedding), Some(root));
+    let shown_k = dual_channel_depth(body, k);
+    let vres = crate::code_index::search_at(query, shown_k, Some(&embedding), Some(root));
     let vector_hits = vres.get("rows").cloned().unwrap_or_else(|| json!([]));
     let vector_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut corpus = crate::code_index::FusionCorpus::load_at(Some(root));
     let corpus_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let bm25_ranked = corpus.bm25_rank_cfg(query, k as usize, &cfg.scoring);
+    let bm25_ranked = corpus.bm25_rank_cfg(query, shown_k, &cfg.scoring);
     let bm25_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let bm25_hits: Vec<Value> = bm25_ranked
         .into_iter()
@@ -1717,7 +1768,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         "phrase_scan": phrase_ms,
         "total": unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms),
     });
-    ok("codesearch", json!({
+    let raw = json!({
         "mode": "dual",
         "root": root,
         "vector_hits": vector_hits,
@@ -1740,7 +1791,8 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         },
         "stage_ms": merge_stage_ms(prior_stage_ms, stage_ms),
         "degraded": vres.get("degraded").cloned().unwrap_or(json!(false)),
-    }))
+    });
+    ok("codesearch", compact_dual_reply(body, query, k, raw))
 }
 
 /// An index pass runs in the dispatch that discovered the stale digest and then recurses, so the
@@ -1762,7 +1814,12 @@ fn merge_stage_ms(prior: Value, now: Value) -> Value {
 
 const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 
-const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit"];
+const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
+    "query", "mode", "path", "glob", "path_glob", "exclude_glob", "exclude_globs", "case_insensitive", "whole_word", "comments_only",
+    "k", "max_results", "maxResults", "limit", "head_limit", "max_matches", "max_files", "output", "max_chars", "verbose", "docs",
+];
+
+const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit", "head_limit"];
 
 fn scan_result_limit(body: &Value, fields: &[&str], default: u32) -> Result<(u32, bool), String> {
     let mut seen: Vec<(&str, u64)> = Vec::new();
@@ -1822,6 +1879,24 @@ fn resolve_scan_target(body: &Value) -> Result<(Option<&str>, Option<String>), S
     Ok((root, path))
 }
 
+fn glob_patterns_from(value: Option<&Value>) -> Result<Vec<String>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::String(s)) => Ok(Some(s.clone()).filter(|g| !g.is_empty()).into_iter().collect()),
+        Some(Value::Array(items)) => items.iter().map(|item| match item.as_str() {
+            Some(s) => Ok(s.to_string()),
+            None => Err("array entries must all be glob strings".to_string()),
+        }).map(|r| r.map(|s| s.trim().to_string())).filter(|r| !matches!(r, Ok(s) if s.is_empty())).collect(),
+        Some(_) => Err("must be a glob string or an array of glob strings".to_string()),
+    }
+}
+
+fn dispatch_task_id() -> Option<String> {
+    let key = "AGENTPLUG_DISPATCH_TASK";
+    let packed = unsafe { host_env_get(key.as_ptr(), key.len() as u32) };
+    unpack_to_string(packed).map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+}
+
 fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ragconfig::RagConfig, explicit_limit: Option<u32>) -> u64 {
     let (root, path) = match resolve_scan_target(body) {
         Ok(target) => target,
@@ -1851,6 +1926,52 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
             ));
         }
     }
+    let output = match body.get("output") {
+        None | Some(Value::Null) => crate::code_index::ScanOutput::Matches,
+        Some(raw) => match raw.as_str().and_then(crate::code_index::ScanOutput::parse) {
+            Some(mode) => mode,
+            None => return err("codesearch", &format!("output {raw} is not an output mode -- valid modes are {}", crate::code_index::SCAN_OUTPUT_NAMES)),
+        },
+    };
+    let max_chars = match body.get("max_chars") {
+        None | Some(Value::Null) => crate::code_index::DEFAULT_REPLY_MAX_CHARS,
+        Some(value) => match value.as_u64() {
+            Some(n) if n > 0 => (n as usize).min(crate::code_index::MAX_REPLY_MAX_CHARS),
+            _ => return err("codesearch", "max_chars must be a positive integer number of characters"),
+        },
+    };
+    let list_output = matches!(output, crate::code_index::ScanOutput::Files | crate::code_index::ScanOutput::Count);
+    let (max_matches, list_limit) = if list_output {
+        (body.get("max_matches").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(usize::MAX), explicit_limit.map(|n| n as usize))
+    } else {
+        (max_matches, None)
+    };
+    let mut include_globs: Vec<String> = Vec::new();
+    let mut exclude_globs: Vec<String> = Vec::new();
+    for key in ["path_glob", "glob"] {
+        match glob_patterns_from(body.get(key)) {
+            Ok(patterns) => for pattern in patterns {
+                match pattern.strip_prefix('!') {
+                    Some(negated) => exclude_globs.push(negated.to_string()),
+                    None => include_globs.push(pattern),
+                }
+            },
+            Err(e) => return err("codesearch", &format!("{key} {e}")),
+        }
+    }
+    for key in ["exclude_glob", "exclude_globs"] {
+        match glob_patterns_from(body.get(key)) {
+            Ok(patterns) => exclude_globs.extend(patterns.into_iter().map(|p| p.strip_prefix('!').map(str::to_string).unwrap_or(p))),
+            Err(e) => return err("codesearch", &format!("{key} {e}")),
+        }
+    }
+    if body.get("docs").is_some_and(|v| !v.is_boolean()) {
+        return err("codesearch", "docs must be a boolean -- literal/regex scans include docs by default; docs=false excludes *.md/*.mdx/*.rst/*.adoc and docs/ trees");
+    }
+    if body.get("docs").and_then(|v| v.as_bool()) == Some(false) {
+        exclude_globs.extend(crate::codesearch_rank::DOC_EXCLUDE_GLOBS.iter().map(|g| g.to_string()));
+    }
+    let spill_name = format!("codesearch-{}.txt", dispatch_task_id().unwrap_or_else(|| unsafe { host_now_ms() }.to_string()));
     let scan = crate::code_index::LiteralScan {
         pattern: query,
         root,
@@ -1858,9 +1979,9 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         regex,
         case_insensitive: body.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false),
         whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
-        path_glob: body.get("path_glob").and_then(|v| v.as_str())
-            .or_else(|| body.get("glob").and_then(|v| v.as_str()))
-            .filter(|g| !g.is_empty()),
+        comments_only: body.get("comments_only").and_then(|v| v.as_bool()).unwrap_or(false),
+        include_globs,
+        exclude_globs,
         max_matches,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
@@ -1869,6 +1990,11 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         max_matches_per_file: None,
         context: 0,
         refresh: scan_refresh_requested(body),
+        output,
+        list_limit,
+        max_chars,
+        spill_name,
+        verbose: body.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false),
     };
     let scanned = crate::code_index::scan_literal(&scan, cfg);
     if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
@@ -2205,6 +2331,12 @@ fn grep(body: &Value) -> u64 {
         Some(n) => n as usize,
         None => 0,
     };
+    let include_globs = match glob_patterns_from(
+        body.get("glob").or_else(|| body.get("include")).or_else(|| body.get("path_glob"))
+    ) {
+        Ok(patterns) => patterns,
+        Err(e) => return err("grep", &format!("glob {e}")),
+    };
     let scan = crate::code_index::LiteralScan {
         pattern,
         root,
@@ -2214,10 +2346,9 @@ fn grep(body: &Value) -> u64 {
             .or_else(|| body.get("ignore_case").and_then(|v| v.as_bool()))
             .unwrap_or(false),
         whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
-        path_glob: body.get("glob").and_then(|v| v.as_str())
-            .or_else(|| body.get("include").and_then(|v| v.as_str()))
-            .or_else(|| body.get("path_glob").and_then(|v| v.as_str()))
-            .filter(|g| !g.is_empty()),
+        comments_only: false,
+        include_globs,
+        exclude_globs: Vec::new(),
         max_matches: scan_cap as usize,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
@@ -2226,6 +2357,11 @@ fn grep(body: &Value) -> u64 {
         budget_ms: None,
         max_matches_per_file: None,
         refresh: scan_refresh_requested(body),
+        output: crate::code_index::ScanOutput::Matches,
+        list_limit: None,
+        max_chars: usize::MAX,
+        spill_name: String::new(),
+        verbose: false,
     };
     let scanned = crate::code_index::scan_literal(&scan, &cfg);
     if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
@@ -2316,6 +2452,106 @@ fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
 
 const CODESEARCH_QUERY_SHAPE: &str = "query required -- pass {\"query\":\"<the text to search for>\"}: a plain STRING of text, never an object, array or path list; \"dual\" (the default) embeds it and ranks BM25+vector hits, \"literal\"/\"regex\" match it verbatim, \"filename\" matches it as a path substring or glob. Optional {\"mode\":\"dual\"|\"literal\"|\"regex\"|\"filename\"}, {\"k\":10} result cap for \"dual\", {\"max_matches\":1000} for the exhaustive modes, {\"path\":\"<dir or file>\"}, {\"path_glob\":\"**/*.rs\"}. There is no query-less listing mode, so a body without query is always a caller mistake";
 
+struct IdentifierScan<'a> {
+    pattern: &'a str,
+    regex: bool,
+    whole_word: bool,
+}
+
+fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: Option<&str>, include_globs: &[String], exclude_globs: &[String], cfg: &crate::ragconfig::RagConfig) -> Result<(Vec<String>, bool), String> {
+    let request = crate::code_index::LiteralScan {
+        pattern: scan.pattern,
+        root,
+        path: body.get("path").and_then(|v| v.as_str()).filter(|p| !p.is_empty()),
+        regex: scan.regex,
+        case_insensitive: false,
+        whole_word: scan.whole_word,
+        comments_only: false,
+        include_globs: include_globs.to_vec(),
+        exclude_globs: exclude_globs.to_vec(),
+        max_matches: crate::codesearch_rank::IDENTIFIER_SCAN_MAX_MATCHES,
+        max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
+        term_combination: None,
+        budget_ms: None,
+        max_matches_per_file: None,
+        context: 0,
+        refresh: scan_refresh_requested(body),
+        output: crate::code_index::ScanOutput::Compact,
+        list_limit: None,
+        max_chars: usize::MAX,
+        spill_name: String::new(),
+        verbose: false,
+    };
+    let out = crate::code_index::scan_literal(&request, cfg);
+    if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+        return Err(out.get("error").and_then(|e| e.as_str()).unwrap_or("identifier scan failed").to_string());
+    }
+    let lines = out.get("matches").and_then(|m| m.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    Ok((lines, out.get("exhaustive").and_then(|b| b.as_bool()).unwrap_or(false)))
+}
+
+fn identifier_route_globs(body: &Value, include_docs: bool) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut include_globs: Vec<String> = Vec::new();
+    let mut exclude_globs: Vec<String> = if include_docs {
+        Vec::new()
+    } else {
+        crate::codesearch_rank::DOC_EXCLUDE_GLOBS.iter().map(|g| g.to_string()).collect()
+    };
+    for key in ["path_glob", "glob"] {
+        for pattern in glob_patterns_from(body.get(key)).map_err(|e| format!("{key} {e}"))? {
+            match pattern.strip_prefix('!') {
+                Some(negated) => exclude_globs.push(negated.to_string()),
+                None => include_globs.push(pattern),
+            }
+        }
+    }
+    for key in ["exclude_glob", "exclude_globs"] {
+        let patterns = glob_patterns_from(body.get(key)).map_err(|e| format!("{key} {e}"))?;
+        exclude_globs.extend(patterns.into_iter().map(|p| p.strip_prefix('!').map(str::to_string).unwrap_or(p)));
+    }
+    Ok((include_globs, exclude_globs))
+}
+
+fn codesearch_identifier(body: &Value, query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig, opts: &crate::codesearch_rank::RankOptions) -> Option<Result<Value, String>> {
+    if let Some(r) = root {
+        if r != "." && !crate::wasm_dispatch::host_allow_root(r) { return None; }
+    }
+    let scan_root = root.filter(|r| *r != "." && *r != "./");
+    let (include_globs, exclude_globs) = match identifier_route_globs(body, opts.include_docs) {
+        Ok(globs) => globs,
+        Err(e) => return Some(Err(e)),
+    };
+    let substring_pattern = format!("(?i){}", regex::escape(query));
+    let passes = [
+        (IdentifierScan { pattern: query, regex: false, whole_word: true }, false),
+        (IdentifierScan { pattern: &substring_pattern, regex: true, whole_word: false }, true),
+    ];
+    for (scan, substring) in &passes {
+        let (lines, complete) = match identifier_scan_lines(scan, body, scan_root, &include_globs, &exclude_globs, cfg) {
+            Ok(found) => found,
+            Err(e) => return Some(Err(e)),
+        };
+        if lines.is_empty() { continue; }
+        let (definition_lines, definitions_complete) = if complete {
+            (Vec::new(), true)
+        } else {
+            let pattern = crate::codesearch_rank::any_definition_pattern(query, *substring);
+            let definitions_scan = IdentifierScan { pattern: &pattern, regex: true, whole_word: false };
+            match identifier_scan_lines(&definitions_scan, body, scan_root, &include_globs, &exclude_globs, cfg) {
+                Ok(found) => found,
+                Err(e) => return Some(Err(e)),
+            }
+        };
+        let scan_lines = crate::codesearch_rank::ScanLines { lines: &lines, definition_lines: &definition_lines, complete, definitions_complete };
+        if let Some(report) = crate::codesearch_rank::identifier_report(query, &scan_lines, opts, *substring) {
+            return Some(Ok(report));
+        }
+    }
+    None
+}
+
 fn codesearch(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
     let Some(raw_query) = body.get("query") else {
@@ -2343,12 +2579,27 @@ fn codesearch(body: &Value) -> u64 {
         Err(e) => return err("codesearch", &e),
     };
     if mode == "literal" || mode == "regex" {
+        if let Some(refusal) = refuse_unknown_fields("codesearch", body, CODESEARCH_EXHAUSTIVE_FIELDS) { return refusal; }
         let explicit = if limit_was_explicit { Some(k) } else { None };
         return codesearch_exhaustive(body, query, mode == "regex", &cfg, explicit);
     }
     let root = body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
         .filter(|p| !p.is_empty());
+    let rank_opts = crate::codesearch_rank::RankOptions::from_body(body, k as usize, root);
+    let identifier = query.trim();
+    let flag = |name: &str| body.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
+    let dataflow_override_active = crate::dataflow::document_detailed().1 != crate::dataflow::DataflowTier::CompiledDefault
+        && crate::dataflow::pipeline_for("codesearch").is_some();
+    let identifier_route = mode == "dual" && !rank_opts.verbose && !flag("rebuild") && !flag("auto_indexed")
+        && !dataflow_override_active && crate::codesearch_rank::is_identifier(identifier);
+    if identifier_route {
+        match codesearch_identifier(body, identifier, root, &cfg, &rank_opts) {
+            Some(Ok(report)) => return ok("codesearch", report),
+            Some(Err(e)) => return err("codesearch", &e),
+            None => {}
+        }
+    }
     if let Some(root) = root {
         return codesearch_at_root(body, root, query, k, &cfg);
     }
@@ -2456,15 +2707,16 @@ fn codesearch(body: &Value) -> u64 {
         if let Some(ov) = corpus.overview_for_key(key) { obj.insert("overview".to_string(), json!(ov)); }
         Value::Object(obj)
     };
+    let shown_k = dual_channel_depth(body, k);
     let vector_ranked: Vec<Value> = vec_hits.as_array()
         .filter(|a| !a.is_empty())
-        .map(|a| a.iter().take(k as usize).cloned().collect())
-        .unwrap_or_else(|| vec_ids.iter().take(k as usize).map(|key| build_hit(&mut corpus, key, None, None)).collect());
-    let bm25_ranked_response: Vec<Value> = bm25_ranked.iter().take(k as usize)
+        .map(|a| a.iter().take(shown_k).map(|row| with_corpus_symbol(&corpus, row)).collect())
+        .unwrap_or_else(|| vec_ids.iter().take(shown_k).map(|key| build_hit(&mut corpus, key, None, None)).collect());
+    let bm25_ranked_response: Vec<Value> = bm25_ranked.iter().take(shown_k)
         .map(|(key, score)| build_hit(&mut corpus, key, Some(*score), None))
         .collect();
     if !vec_ids.is_empty() || !bm25_ids.is_empty() || !phrase_hits.is_empty() {
-        return ok("codesearch", json!({
+        return ok("codesearch", compact_dual_reply(body, query, k, json!({
             "mode": "dual",
             "vector_hits": vector_ranked,
             "bm25_hits": bm25_ranked_response,
@@ -2472,7 +2724,7 @@ fn codesearch(body: &Value) -> u64 {
             "phrase_hits_total": phrase_total,
             "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
             "commits": commits,
-        }));
+        })));
     }
     let ns = cfg.namespaces.code.as_str();
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, query.as_ptr(), query.len() as u32) };
@@ -2503,13 +2755,13 @@ fn codesearch(body: &Value) -> u64 {
         );
     }
 
-    ok("codesearch", json!({
+    ok("codesearch", compact_dual_reply(body, query, k, json!({
         "mode": "fallback_kv", "degraded": vec_unavailable,
         "hits": hits, "commits": commits, "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response,
         "phrase_hits": phrase_hits,
         "phrase_hits_total": phrase_total,
         "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
-    }))
+    })))
 }
 
 const LIFECYCLE_STALE_WARN_MS: u64 = 30 * 60 * 1000;
@@ -3543,10 +3795,21 @@ fn run_git_checked(argv: &[&str], cwd: Option<&str>, verb: &str, fallback: &str)
     Ok(r)
 }
 
+const GIT_STATUS_SUMMARY_DEFAULT_PATHS: usize = 20;
+
 fn git_status(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_status", body, &["path", "paths", "files", "summary", "limit"]) { return refusal; }
     git_async_entry("git_status", body, |body, plan| {
         let cwd = body_cwd(body);
-        let r = git_step_replayed_by_call_order(plan, &["status", "--porcelain"], cwd)?;
+        let paths = body_pathspecs(body);
+        let summary = body.get("summary").and_then(|v| v.as_bool()).unwrap_or(false);
+        let limit = body.get("limit").and_then(|v| v.as_u64()).map(|n| n.max(1) as usize);
+        let mut argv: Vec<&str> = vec!["status", "--porcelain"];
+        if !paths.is_empty() {
+            argv.push("--");
+            for p in &paths { argv.push(p.as_str()); }
+        }
+        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let porcelain = super::host_abi::porcelain_or_dirty(r);
         let mut modified: Vec<String> = vec![];
         let mut untracked: Vec<String> = vec![];
@@ -3564,13 +3827,46 @@ fn git_status(body: &Value) -> u64 {
             if y == 'D' || x == 'D' { deleted.push(path.clone()); }
         }
         let dirty = !porcelain.trim().is_empty();
-        Ok(ok("git_status", json!({
+        if summary {
+            let first_n = limit.unwrap_or(GIT_STATUS_SUMMARY_DEFAULT_PATHS);
+            let entries: Vec<&str> = porcelain.lines().filter(|l| l.len() >= 3).collect();
+            let first_paths: Vec<String> = entries.iter().take(first_n).map(|l| format!("{} {}", &l[..2], l[3..].trim())).collect();
+            return Ok(ok("git_status", json!({
+                "dirty": dirty,
+                "summary": true,
+                "counts": {
+                    "changed_paths": entries.len(),
+                    "modified": modified.len(),
+                    "staged": staged.len(),
+                    "deleted": deleted.len(),
+                    "untracked": untracked.len(),
+                },
+                "first_paths": first_paths,
+                "first_paths_note": "each entry is the two-column porcelain status, a space, then the path",
+                "truncated": entries.len() > first_n,
+                "scoped_to": paths,
+            })));
+        }
+        let mut lists = json!({
             "dirty": dirty,
             "modified": modified,
             "untracked": untracked,
             "deleted": deleted,
             "staged": staged,
-        })))
+        });
+        if let Some(cap) = limit {
+            let mut truncated = serde_json::Map::new();
+            for key in ["modified", "untracked", "deleted", "staged"] {
+                let total = lists[key].as_array().map(|a| a.len()).unwrap_or(0);
+                if total > cap {
+                    lists[key] = Value::Array(lists[key].as_array().cloned().unwrap_or_default().into_iter().take(cap).collect());
+                    truncated.insert(key.to_string(), json!(total));
+                }
+            }
+            if !truncated.is_empty() { lists["truncated_totals"] = Value::Object(truncated); }
+        }
+        if !paths.is_empty() { lists["scoped_to"] = json!(paths); }
+        Ok(ok("git_status", lists))
     })
 }
 
@@ -4944,7 +5240,7 @@ fn git_merge_abort(body: &Value) -> u64 {
     ok("git_merge_abort", json!({ "aborted": true, "head": exec_git_in(cwd, "rev-parse HEAD").trim() }))
 }
 
-const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &["SESSION_ID", "session_id", "sessionId", "cwd", "repo", "root", "projectPath", "_plan"];
+const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &["SESSION_ID", "session_id", "sessionId", "cwd", "repo", "root", "projectPath", "git_root_override", "_plan"];
 const GIT_PROTECTED_PATHSPECS: &[(&str, &str)] = &[(".gm", ":(top,exclude).gm"), (".agentplug*", ":(top,exclude).agentplug*")];
 const GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD: usize = 2000;
 
@@ -5043,6 +5339,100 @@ fn git_stash_list(body: &Value) -> u64 {
             json!({ "stash": stash, "sha": sha, "date": date, "subject": subject })
         }).collect();
     ok("git_stash_list", json!({ "count": stashes.len(), "stashes": stashes }))
+}
+
+const GIT_INIT_GITIGNORE_ENTRY: &str = ".gm/exec-spool/";
+const GIT_INIT_GITIGNORE_COVERING_ENTRIES: &[&str] = &[".gm", ".gm/", ".gm/*", ".gm/exec-spool", ".gm/exec-spool/", ".gm/exec-spool/*"];
+
+fn git_init_target(body: &Value) -> Result<Option<String>, String> {
+    let base = body_cwd(body).map(|c| c.trim()).filter(|c| !c.is_empty());
+    let requested = body.get("path").map(|v| v.as_str().map(str::trim).ok_or("path must be a string")).transpose()?;
+    let joined = match (requested, base) {
+        (Some(""), _) => return Err("path must not be empty".to_string()),
+        (Some(p), Some(b)) if !crate::pkfs::is_absolute(p) => format!("{}/{}", b.trim_end_matches(['/', '\\']), p),
+        (Some(p), _) => p.to_string(),
+        (None, Some(b)) => b.to_string(),
+        (None, None) => return Ok(None),
+    };
+    let unified = joined.replace('\\', "/");
+    if unified.split('/').any(|segment| segment == "..") { return Err("'..' traversal is refused".to_string()); }
+    if unified.char_indices().any(|(i, c)| c == ':' && i != 1) { return Err("':' is refused (alternate data streams)".to_string()); }
+    let protected = unified.split('/').any(|segment| {
+        let lower = segment.to_ascii_lowercase();
+        GIT_PROTECTED_PATHSPECS.iter().any(|(name, _)| if name.ends_with('*') { lower.starts_with(name.trim_end_matches('*')) } else { lower == *name })
+    });
+    if protected { return Err("a path inside the project's own .gm/ or .agentplug* is never initialised as a repository".to_string()); }
+    Ok(Some(joined))
+}
+
+fn git_init_config_value(body: &Value, key: &str) -> Result<Option<String>, String> {
+    let Some(raw) = body.get(key) else { return Ok(None); };
+    let value = raw.as_str().map(str::trim).ok_or_else(|| format!("{} must be a string", key))?;
+    if value.is_empty() { return Err(format!("{} must not be empty", key)); }
+    if value.chars().any(|c| c.is_control()) { return Err(format!("{} must not contain control characters", key)); }
+    Ok(Some(value.to_string()))
+}
+
+fn git_init_gitignore(root: &str) -> &'static str {
+    if !crate::wasm_dispatch::host_allow_root(root) { return "unwritable"; }
+    let file = format!("{}/.gitignore", root.trim_end_matches('/'));
+    let existing = super::host_abi::host_read(&file).unwrap_or_default();
+    let covered = existing.lines().map(|l| l.trim().trim_start_matches('/')).any(|l| GIT_INIT_GITIGNORE_COVERING_ENTRIES.contains(&l));
+    if covered { return "present"; }
+    let separator = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
+    let updated = format!("{}{}{}\n", existing, separator, GIT_INIT_GITIGNORE_ENTRY);
+    if super::host_abi::host_write(&file, &updated) { "added" } else { "unwritable" }
+}
+
+fn git_init(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_init", body, &["path", "user_name", "user_email", "initial_branch"]) { return refusal; }
+    let target = match git_init_target(body) { Ok(t) => t, Err(reason) => return err("git_init", &reason) };
+    let cwd = target.as_deref();
+    let shown = cwd.unwrap_or("the dispatch working directory");
+    let user_name = match git_init_config_value(body, "user_name") { Ok(v) => v, Err(reason) => return err("git_init", &reason) };
+    let user_email = match git_init_config_value(body, "user_email") { Ok(v) => v, Err(reason) => return err("git_init", &reason) };
+    let probe = git_call_argv(&["rev-parse", "--show-toplevel"], cwd);
+    let probe_code = probe.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1);
+    let probe_err = probe.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+    if probe_code == 0 {
+        let existing_root = probe.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().replace('\\', "/");
+        return err_json("git_init", json!({
+            "error": format!("{} is already inside a git repository", shown),
+            "root": existing_root,
+            "hint": "git_init only turns a non-repository directory into a repository"
+        }));
+    }
+    if probe_err.contains("git cwd does not exist") { return err("git_init", &format!("path does not exist or is not a directory: {}", shown)); }
+    if !probe_err.to_lowercase().contains("not a git repository") { return err("git_init", probe_err); }
+    let branch_arg = match git_init_config_value(body, "initial_branch") {
+        Ok(Some(b)) if b.starts_with('-') => return err("git_init", "initial_branch must not start with '-'"),
+        Ok(Some(b)) => {
+            let valid = git_call_argv(&["check-ref-format", "--branch", &b], cwd).get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0;
+            if !valid { return err("git_init", &format!("initial_branch {:?} is not a valid branch name", b)); }
+            Some(format!("--initial-branch={}", b))
+        }
+        Ok(None) => None,
+        Err(reason) => return err("git_init", &reason),
+    };
+    let mut argv: Vec<&str> = vec!["init"];
+    if let Some(a) = &branch_arg { argv.push(a.as_str()); }
+    if let Err(e) = run_git_checked(&argv, cwd, "git_init", "git init failed") { return e; }
+    for (key, value) in [("user.name", &user_name), ("user.email", &user_email)] {
+        if let Some(v) = value {
+            if let Err(e) = run_git_checked(&["config", "--local", key, v.as_str()], cwd, "git_init", "git config failed") { return e; }
+        }
+    }
+    let root = exec_git_in(cwd, "rev-parse --show-toplevel").trim().replace('\\', "/");
+    let branch = exec_git_in(cwd, "symbolic-ref --short HEAD").trim().to_string();
+    let gitignore = git_init_gitignore(&root);
+    ok("git_init", json!({
+        "root": root,
+        "branch": branch,
+        "created": true,
+        "gitignore": gitignore,
+        "user_name": user_name,
+        "user_email": user_email
+    }))
 }
 
 fn git_stash_drop(body: &Value) -> u64 {
@@ -5620,8 +6010,10 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         {
             let ms = unsafe { host_now_ms() }.saturating_sub(dispatch_start_ms);
             emit_event("dispatch.end", serde_json::json!({ "verb": verb, "ms": ms }));
-            restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb);
-            crate::gates::restamp_last_dispatch_to_completion(verb);
+            if !crate::gates::dispatch_serves_no_phase_prose(verb, body) {
+                restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb);
+                crate::gates::restamp_last_dispatch_to_completion(verb);
+            }
         }
         if code == 0 {
             let data: Value = serde_json::from_str(&out).unwrap_or(Value::String(out));
@@ -5714,6 +6106,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_stash_pop" => git_stash_pop(&body),
         "git_stash_drop" => git_stash_drop(&body),
         "git_stash_list" => git_stash_list(&body),
+        "git_init" => git_init(&body),
         "git_branch_delete" => git_branch_delete(&body),
         "git_rm" => git_rm(&body),
         "git_revert" => git_revert(&body),

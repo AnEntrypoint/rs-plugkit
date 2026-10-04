@@ -239,10 +239,10 @@ Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir`, `scan_deps`
 size/line-ratio disproportion + dense `\uXXXX`-escape-run detection across
 git-tracked source and a bounded `node_modules` walk), `kv`/`kv_get`/
 `kv_put`/`kv_delete`, `exec`/`exec_js`, `fetch`, `env_get`, `recall`,
-`codesearch`, `callers`/`callees`/`impact`, `memorize`/`memorize-prune`, `health`, `filter`, the full git
+`codesearch`, `codeinsight` (symbol, call, import, complexity and duplicate queries; `callers`/`callees`/`impact` are aliases), `memorize`/`memorize-prune`, `health`, `filter`, the full git
 verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`,
 `git_add`, `git_commit`, `git_finalize`, `git_push`, `git_checkout`,
-`git_fetch`, `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
+`git_fetch`, `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`, `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
 GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
 `prd-status`, `mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
 `fsm-validate`, `fsm-propose-override`, `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/

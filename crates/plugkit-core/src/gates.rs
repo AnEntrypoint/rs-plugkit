@@ -114,6 +114,21 @@ const LONGGAP_GATED_STATE_CHANGING_VERBS: &[&str] = &[
     "git_revert", "git_reset", "git_stash", "git_stash_pop", "git_stash_drop",
 ];
 
+const LONGGAP_EXEMPT_WORK_VERBS: &[&str] = &[
+    "exec_js", "nodejs", "javascript", "node", "js", "typescript", "bash", "sh", "shell", "zsh",
+    "python", "py", "powershell", "ps1", "go", "rust", "c", "cpp", "java", "deno",
+    "git_add", "git_commit", "git_fetch", "git_push", "git_finalize",
+];
+
+fn long_gap_chain_belongs_to_this_session(policy: &crate::orchestrator::fsm::Policy) -> bool {
+    let state = crate::orchestrator::state::read_state();
+    if state.phase.as_str() == policy.terminal_phase { return false; }
+    match (&state.session_id, crate::orchestrator::state::dispatch_session_id()) {
+        (Some(owner), Some(caller)) => *owner == caller,
+        _ => true,
+    }
+}
+
 fn is_longgap_activity_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
     policy.longgap_exempt_verbs.iter().any(|v| v == verb)
 }
@@ -122,12 +137,19 @@ fn is_longgap_denial_exempt(verb: &str, policy: &crate::orchestrator::fsm::Polic
     if is_longgap_activity_exempt(verb, policy) {
         return true;
     }
+    if LONGGAP_EXEMPT_WORK_VERBS.contains(&verb) {
+        return true;
+    }
     !LONGGAP_GATED_STATE_CHANGING_VERBS.contains(&verb)
         && !crate::orchestrator::is_orchestrator_verb(verb)
 }
 
 fn is_longgap_refresh(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
     policy.longgap_refresh_verbs.iter().any(|v| v == verb)
+}
+
+pub fn dispatch_serves_no_phase_prose(verb: &str, body: &Value) -> bool {
+    verb == "instruction" && crate::orchestrator::instructions::body_requests_investigate_readonly(body)
 }
 
 fn dispatch_submitted_at_ms() -> Option<u64> {
@@ -337,7 +359,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             log_deviation("bash-git-bypass", &format!("verb={} cmd={}", verb, cmd.chars().take(80).collect::<String>()));
             return GateVerdict::deny(format!(
                 "bash-git-bypass: a `{}` verb invoking `git` is denied - git is a first-class spool surface, not a shell command. Use the git verb instead: \
-                 git_status (porcelain), git_log, git_diff, git_show, git_branch (inspect); git_add, git_commit, git_finalize (stage/commit/push in one), git_push (push w/ rebase-retry); git_checkout (switch a ref, or restore only the given paths), git_fetch, git_rm, git_revert, git_reset (mutate); git_stash, git_stash_pop, git_stash_drop, git_stash_list (shelve). \
+                 git_status (porcelain), git_log, git_diff, git_show, git_branch (inspect); git_add, git_commit, git_finalize (stage/commit/push in one), git_push (push w/ rebase-retry); git_checkout (switch a ref, or restore only the given paths), git_fetch, git_rm, git_revert, git_reset (mutate); git_stash, git_stash_pop, git_stash_drop, git_stash_list (shelve); git_init (turn a non-repo directory into a repo). \
                  git_finalize {{message}} bundles add->commit->porcelain-gate->push in ONE dispatch. The shell git bypasses the porcelain gate, the witness ledger, and is non-portable. Command was: `{}`",
                 verb, cmd.chars().take(120).collect::<String>()
             )).with_next("git_finalize");
@@ -347,20 +369,21 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     let claim_ms = now_ms();
     let submitted_at_ms = dispatch_submitted_at_ms().map(|ms| ms.min(claim_ms)).unwrap_or(claim_ms);
 
-    let prev_dispatch_ms: u64 = if !is_longgap_activity_exempt(verb, &policy) {
+    let serves_no_phase_prose = dispatch_serves_no_phase_prose(verb, body);
+    let prev_dispatch_ms: u64 = if !is_longgap_activity_exempt(verb, &policy) && !serves_no_phase_prose {
         let p = host_read(&crate::pkfs::anchor(".gm/last-dispatch-ts")).unwrap_or_default().trim().parse().unwrap_or(0);
         let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-dispatch-ts"), &claim_ms.to_string());
         p
     } else { 0 };
 
-    if is_longgap_refresh(verb, &policy) {
+    if is_longgap_refresh(verb, &policy) && !serves_no_phase_prose {
         let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-instruction-ts"), &claim_ms.to_string());
         let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/long-gap-retry-state"), "");
-    } else if !is_longgap_denial_exempt(verb, &policy) {
+    } else if !is_longgap_denial_exempt(verb, &policy) && !serves_no_phase_prose {
         let last = host_read(&crate::pkfs::anchor(".gm/last-instruction-ts")).unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let longgap_threshold_ms = policy.longgap_threshold_ms;
-        if long_gap_should_fire(last_ms, prev_dispatch_ms, submitted_at_ms, longgap_threshold_ms) {
+        if long_gap_should_fire(last_ms, prev_dispatch_ms, submitted_at_ms, longgap_threshold_ms) && long_gap_chain_belongs_to_this_session(&policy) {
             let gap_ms = submitted_at_ms.saturating_sub(last_ms);
             let retry_state = host_read(&crate::pkfs::anchor(".gm/long-gap-retry-state")).unwrap_or_default();
             let (last_verb, count, last_denial_ts) = parse_retry_state_v2(&retry_state);

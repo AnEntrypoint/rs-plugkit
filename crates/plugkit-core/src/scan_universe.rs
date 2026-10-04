@@ -49,8 +49,11 @@ pub fn is_own_state_name(name: &str) -> bool {
 
 fn own_state_entry_under_root(root: &str, path: &str) -> Option<String> {
     let prefix = join_under(root, "");
-    let first = path.strip_prefix(prefix.as_str())?.split('/').next()?;
-    is_own_state_name(first).then(|| format!("{prefix}{first}"))
+    let rel = path.strip_prefix(prefix.as_str())?;
+    let mut dirs: Vec<&str> = rel.split('/').collect();
+    dirs.pop();
+    let own_state_at = dirs.iter().position(|segment| is_own_state_name(segment))?;
+    Some(format!("{prefix}{}", dirs[..=own_state_at].join("/")))
 }
 
 fn prune_own_state(root: &str, files: Vec<String>) -> (Vec<String>, Vec<RuleExclusion>) {
@@ -294,6 +297,11 @@ impl RuleRecordingWalk<'_> {
     }
 }
 
+fn absolute_root_for_message(root: &str) -> String {
+    if crate::pkfs::is_absolute(root) { return root.to_string(); }
+    crate::pkfs::anchor(root).trim_end_matches("/.").to_string()
+}
+
 pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool) -> Result<ScanUniverse, String> {
     let rel = match scope {
         Some(s) => relative_scope(root, s)?,
@@ -304,12 +312,16 @@ pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg
         files, source, listing_complete, excluded, walk_reason,
         target: target.clone(),
     };
-    if let Some(first) = rel.as_deref().and_then(|r| r.split('/').next()).filter(|s| is_own_state_name(s)) {
-        return Err(format!("path '{}' is inside {first}, gm's own state directory, which is never a search target", scope.unwrap_or("")));
+    if let Some(own_state) = rel.as_deref().and_then(|r| r.split('/').find(|s| is_own_state_name(s))) {
+        return Err(format!("path '{}' is inside {own_state}, gm's own state directory, which is never a search target", scope.unwrap_or("")));
     }
     if rel.is_some() {
         match stat_is_directory(&target) {
-            None => return Err(format!("path '{}' does not exist under search root '{root}'", scope.unwrap_or(""))),
+            None => return Err(format!(
+                "path '{}' does not exist under search root '{}' -- paths resolve relative to that root, which is the dispatch project unless `root` names another directory; if the path lives in a different project, pass that project's directory as `root` (or dispatch with its cwd)",
+                scope.unwrap_or(""),
+                absolute_root_for_message(root),
+            )),
             Some(false) => return Ok(universe(vec![target.clone()], FileSource::SingleFile, true, Vec::new(), None)),
             Some(true) => {}
         }
