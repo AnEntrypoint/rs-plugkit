@@ -3376,7 +3376,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     if req.verbose {
         if req.output != ScanOutput::Matches { out.insert("output".to_string(), json!(req.output.label())); }
         out.insert("pattern".to_string(), json!(req.pattern));
-        out.insert("root".to_string(), json!(root));
+        out.insert("root".to_string(), json!(crate::scan_universe::absolute_root_for_message(root)));
         if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
         out.insert("case_insensitive".to_string(), json!(req.case_insensitive));
         if !req.regex { out.insert("whole_word".to_string(), json!(req.whole_word)); }
