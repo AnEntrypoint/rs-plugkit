@@ -113,13 +113,41 @@ fn stat_is_directory(path: &str) -> Option<bool> {
         .and_then(|v| v.get("isDirectory").and_then(|b| b.as_bool()))
 }
 
+/// A caller who spells out the whole location still means a place inside the search root, so an
+/// absolute `path` under that root is rewritten to the relative scope the rest of the scan works
+/// with. `None` means the location is not under the root at all.
+fn scope_inside_root(root: &str, scope: &str) -> Option<String> {
+    let abs_root = absolute_root_for_message(root).replace('\\', "/");
+    let abs_root = abs_root.trim_end_matches('/');
+    if abs_root.is_empty() { return None; }
+    // Both folds are byte-length preserving and `scope` already uses '/' separators, so the tail
+    // can be cut out of `scope` by length and keep the case the caller wrote.
+    let folded_root = abs_root.to_ascii_lowercase();
+    let folded_scope = scope.to_ascii_lowercase();
+    let rest = match folded_scope.strip_prefix(&folded_root) {
+        Some(rest) => rest,
+        None => return None,
+    };
+    if !rest.is_empty() && !rest.starts_with('/') { return None; }
+    let tail = rest.trim_start_matches('/');
+    Some(scope[scope.len() - tail.len()..].to_string())
+}
+
 fn relative_scope(root: &str, scope: &str) -> Result<Option<String>, String> {
     let normalized = scope.replace('\\', "/");
     let bytes = normalized.as_bytes();
-    if normalized.starts_with('/') || (bytes.len() >= 2 && bytes[1] == b':') {
-        return Err(format!("path '{scope}' must be relative to the search root '{root}' -- pass another project as \"root\", and a location inside it as \"path\""));
-    }
-    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+    let rooted = if normalized.starts_with('/') || (bytes.len() >= 2 && bytes[1] == b':') {
+        match scope_inside_root(root, &normalized) {
+            Some(rel) => rel,
+            None => return Err(format!(
+                "path '{scope}' is outside the search root '{}' -- the root actually searched is the dispatch project (the cwd this dispatch ran in) unless body \"root\" names another directory; to search another project pass its directory as \"root\" with a path relative to it, or dispatch with that project as cwd",
+                absolute_root_for_message(root),
+            )),
+        }
+    } else {
+        normalized
+    };
+    let segments: Vec<&str> = rooted.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
     if segments.iter().any(|s| *s == "..") {
         return Err(format!("path '{scope}' may not climb out of the search root with '..'"));
     }
@@ -297,7 +325,10 @@ impl RuleRecordingWalk<'_> {
     }
 }
 
-fn absolute_root_for_message(root: &str) -> String {
+/// The root as a directory a caller can recognise: `root` defaults to `.`, which is the dispatch
+/// project, so a reply or an error that prints it verbatim tells the caller nothing about which
+/// project was searched.
+pub fn absolute_root_for_message(root: &str) -> String {
     if crate::pkfs::is_absolute(root) { return root.to_string(); }
     crate::pkfs::anchor(root).trim_end_matches("/.").to_string()
 }

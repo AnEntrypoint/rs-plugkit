@@ -590,6 +590,39 @@ changes.
   the mean-score policy-evaluation rule, `seal()` tree topology, the
   `dream-replay-round` session-scoped windowed-replay protocol, and
   `max_online_rounds` admission-cap semantics.
+- `admit_dispatch` RANKS, IT NEVER REFUSES. It returns `Admission::Allow` or
+  `Admission::Advisory`, and the advisory is attached to a dispatch that ran
+  (`dream_rsi_advisory`). It used to return `Err` for
+  `codesearch|fetch|serp|browser|cdp|exec_js` once any gate-drift failure
+  (`gate_denied`/`unknown_verb`/`retired_verb`) armed
+  `replay-recorded-successes-first` for the session and that verb had no
+  success newer than its own last such failure -- and a refused dispatch was
+  never recorded as an observation, so the verb could never produce the
+  success that cleared the refusal: a livelock, not a preference. The safety
+  property the refusal was standing in for is already enforced one line
+  earlier, because `gates::check_dispatch` runs first and denies on its own
+  (long-gap, gate-repeat escalation), so the ranking layer only ever saw
+  dispatches the gates had admitted.
+- A successful `instruction` clears the ranking by stamping
+  `.gm/dream-rsi/<sid>/reorientation-ts` AND the project-wide
+  `.gm/dream-rsi/_any-session/reorientation-ts`
+  (`PROJECT_WIDE_MARKER_SESSION`). The project-wide one is what makes the
+  remedy reachable: the MCP `gm_instruction` tool dispatches under a
+  server-local session id (`mcp-instruction-<pid>-<ts>`, gm-mcp
+  `src/index.js`), while a `codesearch` body carries the caller's own
+  session id, so a per-session marker alone could never clear a veto armed
+  under the other id. `.gm/last-instruction-ts` is NOT a clearing path for
+  the ranking either -- `gates::dispatch_serves_no_phase_prose` deliberately
+  withholds it from `instruction` in `investigate_readonly` mode (a 2 KB
+  read-only reply would otherwise satisfy the long-gap gate without
+  delivering the prose that gate exists for); it is still read, because a
+  non-readonly `instruction` does stamp it. The ranking also lapses
+  `VETO_MAX_AGE_MS` (600 s) after the failure so a stale one cannot strand
+  the verb for a whole session. `veto_reason`/`newest_marker` hold the
+  decision with no host behind them so it can be tested: `cargo test -p
+  rs-plugkit --lib` runs those four tests natively (`wasm_dispatch` is
+  wasm-only, so a native test covers everything except the host reads and
+  the verbs themselves).
 
 ### wasm_dispatch/dangling_refs.rs
 
