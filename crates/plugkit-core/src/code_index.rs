@@ -464,7 +464,9 @@ pub fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String
     extract_chunks_reporting_plugin_failure(_path, source, lang_name).0
 }
 
-pub fn extract_chunks_reporting_plugin_failure(_path: &str, source: &str, lang_name: &str) -> (Vec<(String, String, usize, usize, String)>, bool) {
+type ChunkTuple = (String, String, usize, usize, String);
+
+fn parse_nodes(source: &str, lang_name: &str) -> Option<Vec<Value>> {
     let resp = plugin_call("treesitter", "parse", &json!({ "lang": lang_name, "source": source }));
     if !plugin_ok(&resp) {
         crate::wasm_dispatch::emit_event("code_index_treesitter_failed", json!({
@@ -472,19 +474,22 @@ pub fn extract_chunks_reporting_plugin_failure(_path: &str, source: &str, lang_n
             "plugin_failure": plugin_failure_code(&resp),
             "source_len": source.len(),
         }));
-        return (Vec::new(), true);
+        return None;
     }
-    let nodes = match resp.get("nodes").and_then(|v| v.as_array()) {
-        Some(n) => n,
+    match resp.get("nodes").and_then(|v| v.as_array()) {
+        Some(n) => Some(n.clone()),
         None => {
             crate::wasm_dispatch::emit_event("code_index_treesitter_failed", json!({
                 "lang": lang_name,
                 "plugin_failure": crate::wasm_dispatch::PLUGIN_FAIL_MALFORMED,
                 "source_len": source.len(),
             }));
-            return (Vec::new(), true);
+            None
         }
-    };
+    }
+}
+
+fn chunk_spans(source: &str, nodes: &[Value]) -> Vec<(ChunkTuple, (usize, usize))> {
     let src_bytes = source.as_bytes();
     let mut out = Vec::new();
     for node in nodes {
@@ -497,9 +502,231 @@ pub fn extract_chunks_reporting_plugin_failure(_path: &str, source: &str, lang_n
         let line_start = node.get("start_row").and_then(|v| v.as_u64()).unwrap_or(0) as usize + 1;
         let line_end = node.get("end_row").and_then(|v| v.as_u64()).unwrap_or(0) as usize + 1;
         let name = node.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        out.push((kind.to_string(), name, line_start, line_end, body));
+        out.push(((kind.to_string(), name, line_start, line_end, body), (start, end)));
     }
-    (out, false)
+    out
+}
+
+fn chunks_from_nodes(source: &str, nodes: &[Value]) -> Vec<ChunkTuple> {
+    chunk_spans(source, nodes).into_iter().map(|(chunk, _)| chunk).collect()
+}
+
+pub fn extract_chunks_reporting_plugin_failure(_path: &str, source: &str, lang_name: &str) -> (Vec<ChunkTuple>, bool) {
+    match parse_nodes(source, lang_name) {
+        Some(nodes) => (chunks_from_nodes(source, &nodes), false),
+        None => (Vec::new(), true),
+    }
+}
+
+pub(crate) struct FunctionMetrics {
+    pub cx: u32,
+    pub nesting: u32,
+    pub params: u32,
+    pub sloc: u32,
+    pub node_count: u32,
+    pub shape_hash: u64,
+}
+
+pub(crate) struct ImportRef {
+    pub spec: String,
+    pub line: usize,
+}
+
+pub(crate) struct SourceAnalysis {
+    pub chunks: Vec<ChunkTuple>,
+    pub metrics: Vec<Option<FunctionMetrics>>,
+    pub edges: Vec<CallEdge>,
+    pub imports: Vec<ImportRef>,
+    pub parse_failed: bool,
+}
+
+const DECISION_NODE_TYPES: &[&str] = &[
+    "if_statement", "if_expression", "elif_clause", "else_if_clause",
+    "for_statement", "for_in_statement", "for_of_statement", "for_expression",
+    "while_statement", "while_expression", "loop_expression", "do_statement",
+    "catch_clause", "except_clause", "case_statement", "switch_case", "switch_section",
+    "match_arm", "expression_case", "type_case", "communication_case",
+    "conditional_expression", "ternary_expression", "boolean_operator", "comprehension",
+];
+
+const NESTING_NODE_TYPES: &[&str] = &[
+    "if_statement", "if_expression", "for_statement", "for_in_statement", "for_of_statement",
+    "for_expression", "while_statement", "while_expression", "loop_expression", "do_statement",
+    "match_expression", "switch_statement", "try_statement", "closure_expression",
+    "arrow_function", "lambda", "lambda_expression",
+];
+
+const MIN_SHAPE_NODES: u32 = 40;
+
+fn is_function_like_kind(kind: &str) -> bool {
+    kind.contains("function") || kind.contains("method")
+}
+
+fn leading_parameter_count(body: &str) -> u32 {
+    let Some(open) = body.find('(') else { return 0 };
+    let mut depth = 1i32;
+    let mut previous = '(';
+    let mut inner = String::new();
+    for c in body[open + 1..].chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '<' => depth += 1,
+            '>' if previous != '-' && previous != '=' => depth -= 1,
+            _ => {}
+        }
+        if depth <= 0 { break; }
+        inner.push(c);
+        previous = c;
+    }
+    let trimmed = inner.trim().trim_end_matches(',').trim();
+    if trimmed.is_empty() { return 0; }
+    let first = trimmed.split(',').next().unwrap_or("").trim();
+    let receiver = matches!(first, "self" | "&self" | "&mut self" | "mut self" | "this" | "cls");
+    let total = trimmed.matches(',').count() as u32 + 1;
+    total - receiver as u32
+}
+
+fn shape_hash_and_count(sorted_nodes: &[RawNode], start: usize, end: usize) -> (u64, u32) {
+    let first = sorted_nodes.partition_point(|n| n.start_byte < start);
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut count = 0u32;
+    for n in sorted_nodes[first..].iter().take_while(|n| n.start_byte < end).filter(|n| n.end_byte <= end) {
+        count += 1;
+        if n.kind.contains("identifier") || n.kind.contains("comment") { continue; }
+        for byte in n.kind.bytes().chain(std::iter::once(b'|')) {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    (hash, count)
+}
+
+fn function_metrics(sorted_nodes: &[RawNode], decisions: &[RawNode], nesting_nodes: &[RawNode], start: usize, end: usize, body: &str) -> FunctionMetrics {
+    let decision_start = decisions.partition_point(|n| n.start_byte < start);
+    let cx = 1 + decisions[decision_start..].iter().take_while(|n| n.start_byte < end).filter(|n| n.end_byte <= end).count() as u32;
+    let nesting_start = nesting_nodes.partition_point(|n| n.start_byte < start);
+    let mut open_ends: Vec<usize> = Vec::new();
+    let mut nesting = 0u32;
+    for n in nesting_nodes[nesting_start..].iter().take_while(|n| n.start_byte < end).filter(|n| n.end_byte <= end && n.end_byte - n.start_byte < end - start) {
+        while open_ends.last().is_some_and(|e| *e <= n.start_byte) { open_ends.pop(); }
+        open_ends.push(n.end_byte);
+        nesting = nesting.max(open_ends.len() as u32);
+    }
+    let (shape_hash, node_count) = shape_hash_and_count(sorted_nodes, start, end);
+    FunctionMetrics {
+        cx,
+        nesting,
+        params: leading_parameter_count(body),
+        sloc: body.lines().filter(|l| !l.trim().is_empty()).count() as u32,
+        node_count,
+        shape_hash: if node_count >= MIN_SHAPE_NODES { shape_hash } else { 0 },
+    }
+}
+
+fn first_quoted(text: &str) -> Option<String> {
+    let open = text.find(['\'', '"', '`'])?;
+    let quote = text[open..].chars().next()?;
+    let rest = &text[open + 1..];
+    let close = rest.find(quote)?;
+    Some(rest[..close].to_string())
+}
+
+fn import_specs(kind: &str, lang_name: &str, text: &str) -> Vec<String> {
+    let text = text.trim();
+    match (lang_name, kind) {
+        ("javascript" | "typescript" | "tsx", "import_statement") => first_quoted(text).into_iter().collect(),
+        ("javascript" | "typescript" | "tsx", "export_statement") if text.contains(" from ") => first_quoted(text).into_iter().collect(),
+        ("javascript" | "typescript" | "tsx", "call_expression") if text.starts_with("require(") || text.starts_with("import(") => first_quoted(text).into_iter().collect(),
+        ("python", "import_statement") => text
+            .strip_prefix("import")
+            .unwrap_or("")
+            .split(',')
+            .filter_map(|part| part.trim().split_whitespace().next().map(str::to_string))
+            .collect(),
+        ("python", "import_from_statement") => text
+            .strip_prefix("from")
+            .and_then(|rest| rest.trim().split_whitespace().next())
+            .map(str::to_string)
+            .into_iter()
+            .collect(),
+        ("rust", "use_declaration") => {
+            let after = text.find("use ").map(|i| &text[i + 4..]).unwrap_or("");
+            let path = after.split(['{', ';', ' ']).next().unwrap_or("").trim_end_matches("::");
+            if path.is_empty() { Vec::new() } else { vec![path.to_string()] }
+        }
+        ("rust", "mod_item") if text.ends_with(';') => text
+            .trim_end_matches(';')
+            .rsplit(' ')
+            .next()
+            .map(|name| format!("self::{name}"))
+            .into_iter()
+            .collect(),
+        ("go", "import_spec") => first_quoted(text).into_iter().collect(),
+        ("java" | "kotlin", "import_declaration") => {
+            let path = text.strip_prefix("import").unwrap_or("").trim().trim_start_matches("static ").trim().trim_end_matches(';').trim();
+            if path.is_empty() { Vec::new() } else { vec![path.to_string()] }
+        }
+        ("c" | "cpp", "preproc_include") if text.contains('"') => first_quoted(text).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn inline_crate_path_imports(source: &str, sorted_nodes: &[RawNode], already: &[ImportRef]) -> Vec<ImportRef> {
+    let mut seen: std::collections::HashSet<String> = already.iter().map(|i| i.spec.clone()).collect();
+    let mut out = Vec::new();
+    for n in sorted_nodes.iter().filter(|n| matches!(n.kind, "scoped_identifier" | "scoped_type_identifier")) {
+        let window_end = n.end_byte.min(n.start_byte + 200);
+        let Some(text) = source.get(n.start_byte..window_end) else { continue };
+        if !(text.starts_with("crate::") || text.starts_with("super::") || text.starts_with("self::")) { continue; }
+        let spec: String = text.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':').collect();
+        if seen.insert(spec.clone()) {
+            out.push(ImportRef { spec, line: n.start_row + 1 });
+        }
+    }
+    out
+}
+
+const IMPORT_NODE_TYPES: &[&str] = &[
+    "import_statement", "import_from_statement", "export_statement", "use_declaration", "mod_item",
+    "import_spec", "import_declaration", "preproc_include", "call_expression",
+];
+
+fn imports_from_nodes(source: &str, lang_name: &str, sorted_nodes: &[RawNode]) -> Vec<ImportRef> {
+    let mut out = Vec::new();
+    for n in sorted_nodes.iter().filter(|n| IMPORT_NODE_TYPES.contains(&n.kind)) {
+        let window_end = (n.end_byte).min(n.start_byte + 400);
+        let Some(text) = source.get(n.start_byte..window_end).or_else(|| source.get(n.start_byte..n.end_byte.min(source.len()))) else { continue };
+        for spec in import_specs(n.kind, lang_name, text) {
+            out.push(ImportRef { spec, line: n.start_row + 1 });
+        }
+    }
+    out
+}
+
+pub(crate) fn analyze_source(source: &str, lang_name: &str) -> SourceAnalysis {
+    let Some(nodes) = parse_nodes(source, lang_name) else {
+        return SourceAnalysis { chunks: Vec::new(), metrics: Vec::new(), edges: Vec::new(), imports: Vec::new(), parse_failed: true };
+    };
+    let spans = chunk_spans(source, &nodes);
+    let chunks: Vec<ChunkTuple> = spans.iter().map(|(chunk, _)| chunk.clone()).collect();
+    let edges = call_edges_from_nodes(source, lang_name, &nodes, &chunks);
+    let mut sorted = parsed_nodes(&nodes);
+    sorted.sort_by_key(|n| (n.start_byte, std::cmp::Reverse(n.end_byte)));
+    let decisions: Vec<RawNode> = sorted.iter().filter(|n| DECISION_NODE_TYPES.contains(&n.kind)).copied().collect();
+    let continues_else_chain = |n: &RawNode| source.get(..n.start_byte).is_some_and(|before| before.trim_end().ends_with("else"));
+    let nesting_nodes: Vec<RawNode> = sorted.iter().filter(|n| NESTING_NODE_TYPES.contains(&n.kind) && !continues_else_chain(n)).copied().collect();
+    let metrics = spans
+        .iter()
+        .map(|((kind, _, _, _, body), (start, end))| {
+            is_function_like_kind(kind).then(|| function_metrics(&sorted, &decisions, &nesting_nodes, *start, *end, body))
+        })
+        .collect();
+    let mut imports = imports_from_nodes(source, lang_name, &sorted);
+    if lang_name == "rust" {
+        imports.extend(inline_crate_path_imports(source, &sorted, &imports));
+    }
+    SourceAnalysis { chunks, metrics, edges, imports, parse_failed: false }
 }
 
 const CALL_NODE_TYPES: &[&str] = &[
@@ -534,25 +761,27 @@ fn parsed_nodes<'a>(nodes: &'a [Value]) -> Vec<RawNode<'a>> {
     }).collect()
 }
 
-fn callee_name_for_call(call: &RawNode, all: &[RawNode], src_bytes: &[u8]) -> Option<String> {
-    let mut best: Option<RawNode> = None;
-    for candidate in all {
-        if candidate.start_byte < call.start_byte || candidate.end_byte > call.end_byte { continue; }
-        if candidate.start_byte == call.start_byte && candidate.end_byte == call.end_byte { continue; }
-        if !CALLEE_LEAF_NODE_TYPES.contains(&candidate.kind) { continue; }
-        let is_earlier = match &best {
-            Some(b) => candidate.end_byte < b.end_byte,
-            None => true,
-        };
-        if is_earlier { best = Some(*candidate); }
-    }
-    let leaf = best?;
-    let end = leaf.end_byte.min(src_bytes.len());
-    if end <= leaf.start_byte { return None; }
-    let text = String::from_utf8_lossy(&src_bytes[leaf.start_byte..end]).into_owned();
+fn callee_name_for_call(call: &RawNode, sorted_nodes: &[RawNode], src_bytes: &[u8]) -> Option<String> {
+    let first = sorted_nodes.partition_point(|n| n.start_byte < call.start_byte);
+    let callee_expression_end = sorted_nodes[first..]
+        .iter()
+        .take_while(|n| n.start_byte == call.start_byte)
+        .filter(|n| n.end_byte < call.end_byte)
+        .map(|n| n.end_byte)
+        .max()?;
+    let last_leaf = sorted_nodes[first..]
+        .iter()
+        .take_while(|n| n.start_byte < callee_expression_end)
+        .filter(|n| n.end_byte <= callee_expression_end && CALLEE_LEAF_NODE_TYPES.contains(&n.kind))
+        .max_by_key(|n| (n.end_byte, n.start_byte))?;
+    let end = last_leaf.end_byte.min(src_bytes.len());
+    if end <= last_leaf.start_byte { return None; }
+    let text = String::from_utf8_lossy(&src_bytes[last_leaf.start_byte..end]).into_owned();
     let simple_name = text.rsplit(['.', ':']).next().unwrap_or(&text).to_string();
     if simple_name.is_empty() { None } else { Some(simple_name) }
 }
+
+pub(crate) const MODULE_LEVEL_CALLER: &str = "<module>";
 
 pub struct CallEdge {
     pub caller_symbol: String,
@@ -560,17 +789,12 @@ pub struct CallEdge {
     pub line: usize,
 }
 
-pub fn extract_call_edges(source: &str, lang_name: &str, chunks: &[(String, String, usize, usize, String)]) -> Vec<CallEdge> {
-    let resp = plugin_call("treesitter", "parse", &json!({ "lang": lang_name, "source": source }));
-    if !plugin_ok(&resp) { return Vec::new(); }
-    let nodes_json = match resp.get("nodes").and_then(|v| v.as_array()) {
-        Some(n) => n,
-        None => return Vec::new(),
-    };
-    let all = parsed_nodes(nodes_json);
+fn call_edges_from_nodes(source: &str, lang_name: &str, nodes_json: &[Value], chunks: &[ChunkTuple]) -> Vec<CallEdge> {
+    let mut all = parsed_nodes(nodes_json);
+    all.sort_by_key(|n| (n.start_byte, std::cmp::Reverse(n.end_byte)));
     let src_bytes = source.as_bytes();
     let mut enclosing_by_line: Vec<(usize, usize, &str)> = chunks.iter()
-        .filter(|(kind, _, _, _, _)| kind.contains("function") || kind.contains("method"))
+        .filter(|(kind, name, _, _, _)| !name.is_empty() && (kind.contains("function") || kind.contains("method")))
         .map(|(_, name, ls, le, _)| (*ls, *le, name.as_str()))
         .collect();
     enclosing_by_line.sort_by_key(|(ls, le, _)| (*ls, *le));
@@ -583,10 +807,39 @@ pub fn extract_call_edges(source: &str, lang_name: &str, chunks: &[(String, Stri
     let mut out = Vec::new();
     for call in all.iter().filter(|n| CALL_NODE_TYPES.contains(&n.kind)) {
         let line = call.start_row + 1;
-        let Some(caller_symbol) = find_enclosing(line) else { continue };
-        if caller_symbol.is_empty() { continue; }
+        let caller_symbol = find_enclosing(line).unwrap_or(MODULE_LEVEL_CALLER);
         let Some(callee_symbol) = callee_name_for_call(call, &all, src_bytes) else { continue };
+        let is_rust_constructor = lang_name == "rust" && callee_symbol.chars().next().is_some_and(char::is_uppercase);
+        if is_rust_constructor { continue; }
         out.push(CallEdge { caller_symbol: caller_symbol.to_string(), callee_symbol, line });
+    }
+    if lang_name == "rust" {
+        out.extend(macro_argument_call_edges(source, &all, &find_enclosing));
+    }
+    out
+}
+
+fn macro_argument_call_edges<'a>(source: &str, sorted_nodes: &[RawNode], find_enclosing: &dyn Fn(usize) -> Option<&'a str>) -> Vec<CallEdge> {
+    let mut outer_trees: Vec<(usize, usize)> = Vec::new();
+    for tree in sorted_nodes.iter().filter(|n| n.kind == "token_tree") {
+        if outer_trees.last().is_some_and(|(_, end)| tree.end_byte <= *end) { continue; }
+        outer_trees.push((tree.start_byte, tree.end_byte));
+    }
+    let inside_macro_arguments = |pos: usize| {
+        let i = outer_trees.partition_point(|(start, _)| *start <= pos);
+        i > 0 && pos < outer_trees[i - 1].1
+    };
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    for id in sorted_nodes.iter().filter(|n| n.kind == "identifier" && bytes.get(n.end_byte) == Some(&b'(')) {
+        if !inside_macro_arguments(id.start_byte) { continue; }
+        let Some(name) = source.get(id.start_byte..id.end_byte) else { continue };
+        let is_constructor = name.chars().next().is_some_and(char::is_uppercase);
+        let is_declaration = source.get(..id.start_byte).is_some_and(|before| before.ends_with("fn "));
+        if name.is_empty() || is_constructor || is_declaration { continue; }
+        let line = id.start_row + 1;
+        let caller = find_enclosing(line).unwrap_or(MODULE_LEVEL_CALLER);
+        out.push(CallEdge { caller_symbol: caller.to_string(), callee_symbol: name.to_string(), line });
     }
     out
 }
@@ -629,8 +882,6 @@ fn split_oversized_chunk(
     }
     out
 }
-
-type ChunkTuple = (String, String, usize, usize, String);
 
 /// Trims one file's chunks to the index budget and reports which bound bit, or `None` when the
 /// whole file fits. Chunks are kept in tree-sitter order, so a file that overflows keeps its head
@@ -720,6 +971,7 @@ fn code_vec_ns() -> String {
 }
 
 const MANIFEST_VERSION: u64 = 7;
+const FIRST_MANIFEST_VERSION_RECORDING_DEFERRED_CHUNKS: u64 = 7;
 
 /// A chunk with no vector is still a BM25 document, so what is indexed is bounded by the tree, not
 /// by the embed budget. Reusing the 64-chunk embed allowance as the index bound dropped every
@@ -776,6 +1028,7 @@ const SYMBOL_SYNC_BUDGET_DIVISOR: u64 = 4;
 /// the walk eats the whole budget -- indexes text first and vectors on a later pass.
 const EMBED_WALK_HEADROOM_DIVISOR: u64 = 2;
 
+
 #[derive(Clone)]
 struct ChunkRecord {
     key: String,
@@ -797,6 +1050,13 @@ struct FileManifest {
     commit_overview: Option<String>,
     chunks: Vec<ChunkRecord>,
     skipped_no_embed: u32,
+    version: u64,
+}
+
+impl FileManifest {
+    fn holds_every_chunk(&self) -> bool {
+        self.skipped_no_embed == 0 && self.version >= FIRST_MANIFEST_VERSION_RECORDING_DEFERRED_CHUNKS
+    }
 }
 
 fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, size: u64, commit_overview: &Option<String>, chunks: &[ChunkRecord], skipped_no_embed: u32) -> String {
@@ -815,10 +1075,10 @@ fn manifest_to_json(fp: &str, hash: u32, digest_hash: u32, mtime_ms: f64, size: 
 fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
     let parsed: Value = serde_json::from_str(val).ok()?;
     const MIN_READABLE_MANIFEST_VERSION: u64 = 4;
-    match parsed.get("v").and_then(|v| v.as_u64()) {
-        Some(v) if v >= MIN_READABLE_MANIFEST_VERSION && v <= MANIFEST_VERSION => {}
+    let version = match parsed.get("v").and_then(|v| v.as_u64()) {
+        Some(v) if v >= MIN_READABLE_MANIFEST_VERSION && v <= MANIFEST_VERSION => v,
         _ => return None,
-    }
+    };
     let fp = parsed.get("path").and_then(|p| p.as_str())?.to_string();
     let hash = parsed.get("hash").and_then(|h| h.as_u64())? as u32;
     let digest_hash = parsed.get("digest_hash").and_then(|h| h.as_u64()).map(|h| h as u32);
@@ -838,7 +1098,7 @@ fn parse_manifest(val: &str) -> Option<(String, FileManifest)> {
         chunks.push(ChunkRecord { key, kind, name, ls, le, emb, content_hash });
     }
     let skipped_no_embed = parsed.get("skipped_no_embed").and_then(|s| s.as_u64()).unwrap_or(0) as u32;
-    Some((fp, FileManifest { hash, digest_hash, mtime_ms, size, commit_overview, chunks, skipped_no_embed }))
+    Some((fp, FileManifest { hash, digest_hash, mtime_ms, size, commit_overview, chunks, skipped_no_embed, version }))
 }
 
 fn is_submodule_path(fp: &str) -> bool {
@@ -975,6 +1235,11 @@ impl LineIndex {
         let body = body.strip_suffix('\n').unwrap_or(body);
         if body.contains('\r') { body.replace("\r\n", "\n") } else { body.to_string() }
     }
+}
+
+fn slice_lines(content: &str, ls: usize, le: usize) -> String {
+    if ls == 0 || le < ls { return String::new(); }
+    content.lines().skip(ls - 1).take(le - ls + 1).collect::<Vec<_>>().join("\n")
 }
 
 fn chunk_rows_by_path(db_path: &str) -> std::collections::HashMap<String, usize> {
@@ -1142,8 +1407,12 @@ fn index_cfg_impl(
         .max(cfg.index.prune_pass_file_limit_floor)
         .min(cfg.index.prune_pass_file_limit_ceiling);
     let prune_enumeration_cap = cfg.index.prune_enumeration_file_cap;
-    let full_files = collect_files(r, limit.max(prune_enumeration_cap), &cfg.index);
-    let files: Vec<String> = full_files.iter().take(limit).cloned().collect();
+    let mut full_files = collect_files(r, limit.max(prune_enumeration_cap), &cfg.index);
+    full_files.sort_by(|a, b| canonical_index_path(a).cmp(canonical_index_path(b)));
+    let resume_cursor = stored_index_cursor_at(project_path);
+    let files = rotated_from_cursor(&full_files, resume_cursor.as_deref());
+    let mut first_deferred: Option<String> = None;
+    let mut fresh_files_this_pass = 0usize;
     let collect_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(at);
     at = unsafe { crate::wasm_dispatch::host_now_ms() };
     {
@@ -1188,6 +1457,7 @@ fn index_cfg_impl(
     let mut skipped_no_embed = 0u32;
     let mut embed_requests = 0u32;
     let mut embed_failed = 0u32;
+    let mut deferred_chunks = 0u32;
     let mut deferred_files = 0u32;
     let mut floor_grace_used_this_pass = false;
     let pessimistic_ms_per_chunk = cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound.max(1);
@@ -1198,23 +1468,23 @@ fn index_cfg_impl(
         0
     };
     let mut measured_embed_ms_per_chunk = pessimistic_ms_per_chunk;
-    let max_chunks_per_file_per_pass = cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only;
     let mut treesitter_failures = 0u32;
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut digest_entries: Vec<(String, u32)> = Vec::with_capacity(files.len());
 
     for raw_fp in &files {
-        let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        if elapsed > index_wall_budget_ms {
-            deferred_files += 1;
-            continue;
-        }
-        let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();
+        let canon = canonical_index_path(raw_fp).to_string();
         let fp = &canon;
         let dot = fp.rfind('.');
         let ext = match dot { Some(i) => &fp[i..], None => "" };
         let lang_name = match lang_for_ext(ext) { Some(x) => x, None => continue };
+        let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+        if elapsed > index_wall_budget_ms {
+            deferred_files += 1;
+            first_deferred.get_or_insert_with(|| fp.clone());
+            continue;
+        }
 
         if let Some(m) = prior.get(fp) {
             if let Some(stat) = crate::wasm_dispatch::host_stat(fp)
@@ -1226,8 +1496,12 @@ fn index_cfg_impl(
                 let embed_budget_left = embed_budget_ms.saturating_sub(embed_ms_spent);
                 if let (Some(mtime), Some(dh)) = (stat_mtime, m.digest_hash) {
                     let chunks_missing_vectors = m.skipped_no_embed > 0 && embed_budget_left > 0;
-                    if mtime == m.mtime_ms && size_matches && libsql_ok && !chunks_missing_vectors
-                        && chunk_rows(fp) + m.skipped_no_embed as usize >= m.chunks.len()
+                    let chunks_present = if m.holds_every_chunk() {
+                        chunk_rows(fp) == m.chunks.len()
+                    } else {
+                        chunk_rows(fp) + m.skipped_no_embed as usize >= m.chunks.len()
+                    };
+                    if mtime == m.mtime_ms && size_matches && libsql_ok && !chunks_missing_vectors && chunks_present
                     {
                         seen.insert(fp.clone());
                         indexed += 1;
@@ -1247,12 +1521,13 @@ fn index_cfg_impl(
         if remaining_before_extraction < EXTRACTION_RESERVE_MS {
             if floor_grace_used_this_pass {
                 deferred_files += 1;
+                first_deferred.get_or_insert_with(|| fp.clone());
                 continue;
             }
             floor_grace_used_this_pass = true;
         }
 
-        let mut content = match host_read(fp)
+        let content = match host_read(fp)
             .or_else(|| host_read(raw_fp))
             .or_else(|| host_read(&format!("/{}", fp)))
         { Some(c) => c, None => continue };
@@ -1271,37 +1546,33 @@ fn index_cfg_impl(
         digest_entries.push((fp.clone(), file_digest_hash));
 
         if let Some(m) = prior.get(fp) {
-            if m.hash == file_hash {
-                let chunks_missing_vectors = m.skipped_no_embed > 0 && embed_budget_ms.saturating_sub(embed_ms_spent) > 0;
-                if libsql_ok && !chunks_missing_vectors && chunk_rows(fp) + m.skipped_no_embed as usize >= m.chunks.len() {
-                    chunked += m.chunks.len() as i32;
-                    reused += m.chunks.len() as i32;
-                    reused_files += 1;
-                    continue;
-                }
-                if libsql_ok {
-                    let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
-                }
+            let chunks_missing_vectors = m.skipped_no_embed > 0 && embed_budget_ms.saturating_sub(embed_ms_spent) > 0;
+            if m.hash == file_hash && !chunks_missing_vectors && m.version >= FIRST_MANIFEST_VERSION_RECORDING_DEFERRED_CHUNKS {
+                let chunks_present = if m.holds_every_chunk() {
+                    chunk_rows(fp) == m.chunks.len()
+                } else {
+                    chunk_rows(fp) + m.skipped_no_embed as usize >= m.chunks.len()
+                };
                 let mut all_persisted = true;
-                let lines = LineIndex::new(std::mem::take(&mut content));
-                for c in &m.chunks {
-                    let body = lines.slice(c.ls, c.le);
-                    all_persisted &= write_chunk(libsql_ok, &db_path, fp, c, &body, project_path);
-                    chunked += 1;
-                    reused += 1;
+                if !(libsql_ok && chunks_present) {
+                    if libsql_ok {
+                        let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
+                    }
+                    for c in &m.chunks {
+                        let body = slice_lines(&content, c.ls, c.le);
+                        all_persisted &= write_chunk(libsql_ok, &db_path, fp, c, &body, project_path);
+                    }
                 }
-                if !all_persisted {
+                chunked += m.chunks.len() as i32;
+                reused += m.chunks.len() as i32;
+                reused_files += 1;
+                if all_persisted {
+                    fv_put(&manifest_ns_for(project_path), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, file_size, &m.commit_overview, &m.chunks, m.skipped_no_embed));
+                } else {
                     fv_delete(&manifest_ns_for(project_path), fp);
                 }
-                reused_files += 1;
                 continue;
             }
-            if libsql_ok {
-                let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
-            }
-            delete_chunk_keys(&m.chunks, project_path);
-        } else if libsql_ok {
-            let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
         }
 
         let prior_chunk_by_identity: std::collections::HashMap<(String, String, u32), &ChunkRecord> = prior
@@ -1315,9 +1586,6 @@ fn index_cfg_impl(
             .unwrap_or_default();
 
         let (mut chunks, treesitter_failed) = extract_chunks_reporting_plugin_failure(fp, &content, lang_name);
-        if treesitter_failed {
-            treesitter_failures += 1;
-        }
         if chunks.is_empty() && lang_name == "markdown" && !content.trim().is_empty() {
             let whole = content.chars().take(4000).collect::<String>();
             let line_end = content.lines().count().max(1);
@@ -1345,16 +1613,10 @@ fn index_cfg_impl(
                 "byte_cap": MAX_CHUNK_BYTES_INDEXED_PER_FILE,
             }));
         }
-
-        let chunk_content_hashes: Vec<u32> = chunks.iter()
-            .map(|(_, _, _, _, body)| crate::hash::fnv1a64(body.as_bytes()) as u32)
-            .collect();
-        let reused_embs: Vec<Option<Vec<f32>>> = chunks.iter().zip(chunk_content_hashes.iter())
-            .map(|((kind, name, _, _, _), ch)| {
-                prior_chunk_by_identity.get(&(kind.clone(), name.clone(), *ch)).and_then(|c| c.emb.clone())
-            })
-            .collect();
-
+        let max_chunks_per_file_per_pass = cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only;
+        let elapsed_now = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+        let remaining_ms = index_wall_budget_ms.saturating_sub(elapsed_now);
+        let budget_chunks = (remaining_ms / pessimistic_ms_per_chunk).max(1) as usize;
         let embed_remaining = embed_budget_ms.saturating_sub(embed_ms_spent);
         let walk_ahead_of_schedule = elapsed_before_extraction
             .saturating_mul(EMBED_WALK_HEADROOM_DIVISOR)
@@ -1364,15 +1626,66 @@ fn index_cfg_impl(
         } else {
             ((embed_remaining / measured_embed_ms_per_chunk) as usize).clamp(1, max_chunks_per_file_per_pass)
         };
-        let mut embed_inputs: Vec<String> = Vec::new();
-        let mut embed_taken: Vec<bool> = Vec::with_capacity(chunks.len());
-        for ((_, name, _, _, body), reused) in chunks.iter().zip(reused_embs.iter()) {
-            let take = reused.is_none() && embed_inputs.len() < embed_allowance;
-            embed_taken.push(take);
-            if take {
-                embed_inputs.push(format!("{} {}", name, truncate_for_embed(body)));
+        let cap = max_chunks_per_file_per_pass.min(embed_allowance);
+
+        let chunk_content_hashes: Vec<u32> = chunks.iter()
+            .map(|(_, _, _, _, body)| crate::hash::fnv1a64(body.as_bytes()) as u32)
+            .collect();
+        let reused_embs: Vec<Option<Vec<f32>>> = chunks.iter().zip(chunk_content_hashes.iter())
+            .map(|((kind, name, _, _, _), ch)| {
+                prior_chunk_by_identity.get(&(kind.clone(), name.clone(), *ch)).and_then(|c| c.emb.clone())
+            })
+            .collect();
+        let chunk_plan = plan_chunk_embeds(&reused_embs, cap);
+        let fresh_needed = chunk_plan.iter().filter(|p| **p != ChunkEmbedPlan::Reuse).count();
+
+        if fresh_needed > 0 {
+            let fresh_file_allowance_spent = fresh_files_this_pass >= limit;
+            let under_floor = remaining_ms < pessimistic_ms_per_chunk;
+            if fresh_file_allowance_spent || (under_floor && floor_grace_used_this_pass) {
+                deferred_files += 1;
+                first_deferred.get_or_insert_with(|| fp.clone());
+                continue;
             }
+            if under_floor {
+                floor_grace_used_this_pass = true;
+            }
+            fresh_files_this_pass += 1;
         }
+
+        if let Some(m) = prior.get(fp) {
+            delete_chunk_keys(&m.chunks, project_path);
+        }
+        if libsql_ok {
+            let _ = libsql_wasm::exec_params(&db_path, &format!("DELETE FROM {} WHERE path=?1", chunks_table()), &[fp]);
+        }
+        if treesitter_failed {
+            treesitter_failures += 1;
+        }
+        let deferred_in_file = chunk_plan.iter().filter(|p| **p == ChunkEmbedPlan::DeferToNextPass).count();
+        if deferred_in_file > 0 {
+            let msg = format!(
+                "code_index: capping {} fresh_chunks={} -> {} (count_cap={} budget_chunks={} remaining_ms={}; the rest resume next pass)",
+                fp, fresh_needed, cap, max_chunks_per_file_per_pass, budget_chunks, remaining_ms
+            );
+            let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+            crate::wasm_dispatch::emit_event("code_index_chunk_cap", json!({
+                "path": fp,
+                "chunks_total": chunks.len(),
+                "chunks_fresh": fresh_needed,
+                "chunks_embedded_now": fresh_needed - deferred_in_file,
+                "chunks_deferred": deferred_in_file,
+                "count_cap": max_chunks_per_file_per_pass,
+                "budget_chunks": budget_chunks,
+                "remaining_ms": remaining_ms,
+                "pessimistic_ms_per_chunk": pessimistic_ms_per_chunk,
+            }));
+        }
+
+        let embed_inputs: Vec<String> = chunks.iter().zip(chunk_plan.iter())
+            .filter(|(_, plan)| **plan == ChunkEmbedPlan::EmbedNow)
+            .map(|((_, name, _, _, body), _)| format!("{} {}", name, truncate_for_embed(body)))
+            .collect();
         embed_requests += embed_inputs.len() as u32;
         let reused_chunk_count = reused_embs.iter().filter(|r| r.is_some()).count();
         let embed_started = unsafe { crate::wasm_dispatch::host_now_ms() };
@@ -1401,16 +1714,15 @@ fn index_cfg_impl(
             }));
         }
 
-        let embed_results: Vec<(Option<Vec<f32>>, bool)> = reused_embs.into_iter()
-            .zip(embed_taken.into_iter())
-            .map(|(reused, take)| match reused {
-                Some(v) => (Some(v), true),
-                None if take => {
+        let embed_results: Vec<(Option<Vec<f32>>, ChunkEmbedPlan)> = reused_embs.into_iter().zip(chunk_plan.into_iter())
+            .map(|(reused, plan)| match plan {
+                ChunkEmbedPlan::Reuse => (reused, plan),
+                ChunkEmbedPlan::EmbedNow => {
                     let got = fresh_embeds.next().unwrap_or(None);
                     if got.is_none() { embed_failed += 1; }
-                    (got, false)
+                    (got, plan)
                 }
-                None => (None, false),
+                ChunkEmbedPlan::DeferToNextPass => (None, plan),
             })
             .collect();
 
@@ -1419,11 +1731,18 @@ fn index_cfg_impl(
         let mut file_skipped_no_embed: u32 = 0;
         let chunk_write_loop_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let chunks_in_this_file = chunk_content_hashes.len();
-        for (idx, (((kind, name, ls, le, body), (emb_opt, was_reused)), content_hash)) in chunks.into_iter().zip(embed_results.into_iter()).zip(chunk_content_hashes.into_iter()).enumerate() {
+        for (idx, (((kind, name, ls, le, body), (emb_opt, plan)), content_hash)) in chunks.into_iter().zip(embed_results.into_iter()).zip(chunk_content_hashes.into_iter()).enumerate() {
+            let was_reused = plan == ChunkEmbedPlan::Reuse;
             chunked += 1;
             if emb_opt.is_none() {
-                skipped_no_embed += 1;
                 file_skipped_no_embed += 1;
+                if plan == ChunkEmbedPlan::DeferToNextPass {
+                    deferred_chunks += 1;
+                } else {
+                    skipped_no_embed += 1;
+                    let msg = format!("code_index: no vector for {}:{} ({}); the chunk stays in the manifest and is findable as text, with no embedding row", fp, ls, name);
+                    let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
+                }
             } else if was_reused {
                 reused += 1;
             } else {
@@ -1541,19 +1860,23 @@ fn index_cfg_impl(
         "cleanup": cleanup_ms,
         "total": unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(pass_started),
     });
-    if deferred_files == 0 {
+    let pass_complete = deferred_files == 0 && deferred_chunks == 0 && skipped_no_embed == 0;
+    store_index_cursor_at(first_deferred.as_deref(), project_path);
+    if pass_complete {
         let digest = digest_from_entries(digest_entries);
         store_digest_at(&digest, project_path);
         let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} removed_files={} skipped_no_embed={} embed_budget_ms={} embed_requests={} embed_failed={} digest={} pass_ms={}", indexed, chunked, embedded, reused, reused_files, removed_files, skipped_no_embed, embed_budget_ms, embed_requests, embed_failed, digest, pass_ms);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     } else {
-        let partial_digest = format!("{}:partial={}", digest_from_entries(digest_entries), deferred_files);
+        let partial_digest = format!("{}:partial={}", digest_from_entries(digest_entries), deferred_files + deferred_chunks + skipped_no_embed);
         store_digest_at(&partial_digest, project_path);
-        let msg = format!("code_index: partial pass (wall budget) files_indexed={} deferred_files={} embedded={} reused={} removed_files={} skipped_no_embed={} embed_budget_ms={} embed_requests={} embed_failed={} pass_ms={} -- partial digest stored, next call resumes", indexed, deferred_files, embedded, reused, removed_files, skipped_no_embed, embed_budget_ms, embed_requests, embed_failed, pass_ms);
+        let msg = format!("code_index: partial pass files_indexed={} deferred_files={} deferred_chunks={} embedded={} reused={} removed_files={} skipped_no_embed={} embed_requests={} embed_failed={} resume_at={:?} pass_ms={} -- partial digest stored, next call resumes there", indexed, deferred_files, deferred_chunks, embedded, reused, removed_files, skipped_no_embed, embed_requests, embed_failed, first_deferred, pass_ms);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
         crate::wasm_dispatch::emit_event("codeinsight_index_partial", json!({
             "files_indexed": indexed,
             "deferred_files": deferred_files,
+            "deferred_chunks": deferred_chunks,
+            "resume_at": first_deferred,
             "embedded": embedded,
         }));
     }
@@ -1571,9 +1894,12 @@ fn index_cfg_impl(
         "embed_requests": embed_requests,
         "embed_failed": embed_failed,
         "deferred_files": deferred_files,
+        "deferred_chunks": deferred_chunks,
+        "resume_at": first_deferred,
         "treesitter_failures": treesitter_failures,
         "kvvec_cleared_dim_mismatch": kvvec_cleared,
         "by_language": langs,
+        "symbols": symbol_sync,
         "likely_orphaned": if include_dead_code {
             likely_orphaned_symbols(&db_path, orphan_scan_limit)
         } else {
@@ -1581,9 +1907,59 @@ fn index_cfg_impl(
         },
         "digest": stored_digest_at(project_path),
         "pass_ms": pass_ms,
-        "complete": deferred_files == 0,
-        "symbols": symbol_sync,
+        "complete": pass_complete,
     })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ChunkEmbedPlan {
+    Reuse,
+    EmbedNow,
+    DeferToNextPass,
+}
+
+fn plan_chunk_embeds(reused: &[Option<Vec<f32>>], fresh_allowance: usize) -> Vec<ChunkEmbedPlan> {
+    let mut granted = 0usize;
+    reused.iter().map(|r| {
+        if r.is_some() { return ChunkEmbedPlan::Reuse; }
+        if granted < fresh_allowance {
+            granted += 1;
+            ChunkEmbedPlan::EmbedNow
+        } else {
+            ChunkEmbedPlan::DeferToNextPass
+        }
+    }).collect()
+}
+
+fn canonical_index_path(raw: &str) -> &str {
+    raw.trim_start_matches("./").trim_start_matches('/')
+}
+
+fn rotated_from_cursor(sorted: &[String], cursor: Option<&str>) -> Vec<String> {
+    let start = match cursor {
+        Some(c) => sorted.partition_point(|p| canonical_index_path(p) < c),
+        None => 0,
+    };
+    sorted[start..].iter().chain(sorted[..start].iter()).cloned().collect()
+}
+
+const INDEX_CURSOR_PATH: &str = ".gm/exec-spool/.codeinsight-cursor";
+
+fn index_cursor_path_for(project_path: Option<&str>) -> String {
+    match project_path {
+        Some(p) if !p.is_empty() => format!("{}/{}", p.trim_end_matches(['/', '\\']), INDEX_CURSOR_PATH),
+        _ => INDEX_CURSOR_PATH.to_string(),
+    }
+}
+
+fn stored_index_cursor_at(project_path: Option<&str>) -> Option<String> {
+    crate::wasm_dispatch::host_read(&index_cursor_path_for(project_path))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn store_index_cursor_at(cursor: Option<&str>, project_path: Option<&str>) {
+    let _ = crate::wasm_dispatch::host_write(&index_cursor_path_for(project_path), cursor.unwrap_or(""));
 }
 
 pub fn ensure_current_insight() -> Value {
@@ -1685,8 +2061,15 @@ struct DigestCacheEntry {
 static DIGEST_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, DigestCacheEntry>>> =
     std::sync::Mutex::new(None);
 
+fn project_scoped_cache_key(project_path: Option<&str>) -> String {
+    match project_path.filter(|p| !p.is_empty()) {
+        Some(p) => format!("root:{}", p.trim_end_matches(['/', '\\'])),
+        None => format!("cwd:{}", crate::wasm_dispatch::host_cwd_string().unwrap_or_default().trim_end_matches(['/', '\\'])),
+    }
+}
+
 pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> String {
-    let cache_key = project_path.unwrap_or("").to_string();
+    let cache_key = project_scoped_cache_key(project_path);
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     if let Ok(cache) = DIGEST_CACHE.lock() {
         if let Some(entry) = cache.as_ref().and_then(|m| m.get(&cache_key)) {
@@ -1862,7 +2245,7 @@ static FUSION_CORPUS_CACHE: std::sync::Mutex<Option<std::collections::HashMap<St
     std::sync::Mutex::new(None);
 
 fn fusion_corpus_cache_key(project_path: Option<&str>) -> String {
-    project_path.unwrap_or("").to_string()
+    project_scoped_cache_key(project_path)
 }
 
 fn fusion_corpus_cache_invalidate(project_path: Option<&str>) {
@@ -2037,14 +2420,17 @@ impl FusionCorpus {
         let mut scored: Vec<(usize, f64)> = Vec::new();
         for (i, e) in &doc_tfs {
             let mut score = 0.0;
+            let mut rarest_matched_idf = 0.0f64;
             let dl = e.dl;
             for t in &q_tokens {
                 let f = *e.tf.get(t).unwrap_or(&0) as f64;
                 if f == 0.0 { continue; }
                 let d = *df.get(t.as_str()).unwrap_or(&0) as f64;
                 let idf = (1.0 + (n - d + 0.5) / (d + 0.5)).ln();
+                rarest_matched_idf = rarest_matched_idf.max(idf);
                 score += idf * (f * (k1 + 1.0)) / (f + k1 * (1.0 - b + b * dl / avgdl));
             }
+            score += RARE_TERM_DOMINANCE_WEIGHT * rarest_matched_idf;
             if score > 0.0 { scored.push((*i, score)); }
         }
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -2265,6 +2651,10 @@ const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 const SKIPPED_SAMPLE_LEN: usize = 10;
 
+const LITERAL_SCAN_PREWARM_CHUNK: usize = 256;
+
+const PREWARM_TASK_ACTION: &str = "fs_prewarm";
+
 const BINARY_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "icns", "tif", "tiff", "psd", "avif", "heic",
     "mp3", "mp4", "m4a", "mov", "avi", "mkv", "wav", "ogg", "flac", "webm",
@@ -2280,6 +2670,45 @@ fn has_binary_extension(path: &str) -> bool {
     BINARY_EXTENSIONS.iter().any(|b| ext.eq_ignore_ascii_case(b))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScanOutput {
+    Matches,
+    Compact,
+    Files,
+    Count,
+}
+
+impl ScanOutput {
+    pub fn parse(name: &str) -> Option<ScanOutput> {
+        match name {
+            "matches" | "full" => Some(ScanOutput::Matches),
+            "compact" => Some(ScanOutput::Compact),
+            "files" => Some(ScanOutput::Files),
+            "count" => Some(ScanOutput::Count),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ScanOutput::Matches => "matches",
+            ScanOutput::Compact => "compact",
+            ScanOutput::Files => "files",
+            ScanOutput::Count => "count",
+        }
+    }
+}
+
+pub const SCAN_OUTPUT_NAMES: &str = "\"matches\" (default, one object per match), \"compact\" (path:line: trimmed text), \"files\" (matching paths only), \"count\" (totals and the busiest files)";
+pub const DEFAULT_REPLY_MAX_CHARS: usize = 24_000;
+pub const MAX_REPLY_MAX_CHARS: usize = 400_000;
+const COMPACT_TEXT_CHARS: usize = 160;
+const FILES_OUTPUT_DEFAULT_LIMIT: usize = 200;
+const COUNT_OUTPUT_DEFAULT_LIMIT: usize = 20;
+const REPLY_METADATA_RESERVE_CHARS: usize = 3_000;
+const UNREADABLE_SAMPLE_LEN: usize = 5;
+const DEPENDENCY_STORE_SEGMENTS: &[&str] = &["node_modules", ".pnpm", ".yarn", "site-packages", ".venv", "target"];
+
 pub struct LiteralScan<'a> {
     pub pattern: &'a str,
     pub root: Option<&'a str>,
@@ -2287,7 +2716,9 @@ pub struct LiteralScan<'a> {
     pub regex: bool,
     pub case_insensitive: bool,
     pub whole_word: bool,
-    pub path_glob: Option<&'a str>,
+    pub comments_only: bool,
+    pub include_globs: Vec<String>,
+    pub exclude_globs: Vec<String>,
     pub max_matches: usize,
     pub max_files: usize,
     pub context: usize,
@@ -2309,6 +2740,49 @@ pub struct LiteralScan<'a> {
     /// Re-read rather than reuse: skip `git ls-files` for a directory walk of the target, and
     /// serve every file from `host_read` instead of the mtime-keyed content cache.
     pub refresh: bool,
+    pub output: ScanOutput,
+    pub list_limit: Option<usize>,
+    pub max_chars: usize,
+    pub spill_name: String,
+    pub verbose: bool,
+}
+
+fn path_is_inside_dependency_store(path: &str) -> bool {
+    path.split(['/', '\\']).any(|segment| DEPENDENCY_STORE_SEGMENTS.contains(&segment))
+}
+
+fn parse_globs(patterns: &[String]) -> Result<Vec<crate::path_glob::PathGlob>, String> {
+    patterns.iter().map(|g| crate::path_glob::PathGlob::parse(g)).collect()
+}
+
+fn spill_lines_to_out_file(spill_name: &str, lines: &[String]) -> Option<String> {
+    if lines.is_empty() { return None; }
+    let relative = format!(".gm/exec-spool/out/{spill_name}");
+    let mut body = lines.join("\n");
+    body.push('\n');
+    if crate::pkfs::write(&relative, &body) { Some(crate::pkfs::anchor(&relative)) } else { None }
+}
+
+fn split_lines_at_budget(lines: Vec<String>, budget: usize) -> (Vec<String>, Vec<String>) {
+    let mut used = 0usize;
+    let mut cut = lines.len();
+    for (i, line) in lines.iter().enumerate() {
+        used += line.chars().count() + 3;
+        if used > budget && i > 0 {
+            cut = i;
+            break;
+        }
+    }
+    let mut shown = lines;
+    let spilled = shown.split_off(cut);
+    (shown, spilled)
+}
+
+fn compact_match_line(path: &str, line_no: usize, text: &str) -> String {
+    let trimmed = text.trim();
+    let shown: String = trimmed.chars().take(COMPACT_TEXT_CHARS).collect();
+    let ellipsis = if trimmed.chars().count() > COMPACT_TEXT_CHARS { "..." } else { "" };
+    format!("{path}:{line_no}: {shown}{ellipsis}")
 }
 
 enum LiteralMatcher {
@@ -2579,12 +3053,18 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     } else {
         crate::scan_universe::TargetOrigin::ProjectDefault
     };
-    let glob = match req.path_glob.filter(|g| !g.is_empty()) {
-        Some(g) => match crate::path_glob::PathGlob::parse(g) {
-            Ok(parsed) => Some(parsed),
-            Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
-        },
-        None => None,
+    let include_globs = match parse_globs(&req.include_globs) {
+        Ok(parsed) => parsed,
+        Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
+    };
+    let exclude_globs = match parse_globs(&req.exclude_globs) {
+        Ok(parsed) => parsed,
+        Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
+    };
+    let has_glob_filter = !include_globs.is_empty() || !exclude_globs.is_empty();
+    let admitted = |path: &str| -> bool {
+        (include_globs.is_empty() || include_globs.iter().any(|g| g.admits(root, scope, path)))
+            && !exclude_globs.iter().any(|g| g.admits(root, scope, path))
     };
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let listing_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
@@ -2595,17 +3075,15 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let listed = universe.files;
     let files_truncated = listed.len() > file_cap;
     let files: &[String] = if files_truncated { &listed[..file_cap] } else { &listed[..] };
-    let files_matching_glob = match &glob {
-        Some(g) => files.iter().filter(|p| g.admits(root, scope, p)).count(),
-        None => files.len(),
-    };
-    let glob_matched_no_files = glob.is_some() && !files.is_empty() && files_matching_glob == 0;
+    let files_matching_glob = files.iter().filter(|p| admitted(p)).count();
+    let glob_matched_no_files = has_glob_filter && !files.is_empty() && files_matching_glob == 0;
 
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let listing_ms = started_ms.saturating_sub(listing_started_ms);
     let budget_ms = req.budget_ms.unwrap_or(cfg.index.wall_budget_ms);
     let mut stat_ms = 0u64;
     let mut read_ms = 0u64;
+    let mut prewarm_ms = 0u64;
 
     let terms = query_terms(req.pattern, req.regex);
     let want_and = req.term_combination == Some("and");
@@ -2650,6 +3128,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
 
     let mut candidates: Vec<(usize, usize, usize, Value)> = Vec::new();
+    let mut compact_lines: Vec<String> = Vec::new();
+    let mut file_line_counts: Vec<(String, usize)> = Vec::new();
+    let mut unreadable_dependency_files = 0usize;
+    let mut unreadable_sample: Vec<String> = Vec::new();
+    let mut emitted_matches = 0usize;
     let mut files_scanned = 0usize;
     let mut files_with_matches = 0usize;
     let mut files_quota_truncated = 0usize;
@@ -2658,6 +3141,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut files_skipped_binary_extension = 0usize;
     let mut files_skipped_binary = 0usize;
     let mut files_with_nul_scanned = 0usize;
+    let mut files_without_comment_syntax = 0usize;
     let mut files_unreadable = 0usize;
     let mut lines_with_matches = 0usize;
     let mut occurrence_count = 0usize;
@@ -2669,14 +3153,23 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut term_files: Vec<usize> = vec![0usize; term_matchers.len()];
     let mut cache = if req.refresh { ScanCache::fresh(root) } else { scan_cache_take(root) };
 
-    for path in files {
+    let wanted = |path: &String| admitted(path) && !has_binary_extension(path);
+    let mut prewarmed_until = 0usize;
+    for (index, path) in files.iter().enumerate() {
         if unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms) >= budget_ms {
             budget_exhausted = true;
             break;
         }
-        if let Some(g) = &glob {
-            if !g.admits(root, scope, path) { continue; }
+        if index >= prewarmed_until {
+            prewarmed_until = (index + LITERAL_SCAN_PREWARM_CHUNK).min(files.len());
+            let chunk: Vec<&String> = files[index..prewarmed_until].iter().filter(|p| wanted(p)).collect();
+            if !chunk.is_empty() {
+                let prewarm_started = unsafe { crate::wasm_dispatch::host_now_ms() };
+                crate::wasm_dispatch::host_task(PREWARM_TASK_ACTION, &json!({ "paths": chunk }));
+                prewarm_ms += unsafe { crate::wasm_dispatch::host_now_ms() } - prewarm_started;
+            }
         }
+        if !admitted(path) { continue; }
         if has_binary_extension(path) { files_skipped_binary_extension += 1; continue; }
         let stat_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let stat = host_stat(path);
@@ -2713,7 +3206,14 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         };
         read_ms += unsafe { crate::wasm_dispatch::host_now_ms() } - read_started;
         let Some(content) = content else {
-            if stat.is_some() { files_skipped_binary += 1 } else { files_unreadable += 1 }
+            if stat.is_some() {
+                files_skipped_binary += 1;
+            } else if path_is_inside_dependency_store(path) {
+                unreadable_dependency_files += 1;
+            } else {
+                files_unreadable += 1;
+                if unreadable_sample.len() < UNREADABLE_SAMPLE_LEN { unreadable_sample.push(path.clone()); }
+            }
             continue;
         };
         if content.as_bytes().contains(&0u8) {
@@ -2722,21 +3222,40 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             files_with_nul_scanned += 1;
         }
         files_scanned += 1;
+        let comment_spans = if req.comments_only {
+            match crate::comment_spans::comment_spans(path, &content) {
+                Some(spans) => Some(spans),
+                None => { files_without_comment_syntax += 1; continue; }
+            }
+        } else {
+            None
+        };
         let mut this_file_matched = false;
         let mut this_file_quota_hit = false;
         let mut this_file_collected = 0usize;
+        let mut this_file_lines = 0usize;
         let mut term_seen_in_file: Vec<bool> = vec![false; term_matchers.len()];
         let all_lines: Vec<&str> = if req.context > 0 { content.lines().collect() } else { Vec::new() };
-        for (idx, line) in content.lines().enumerate() {
+        let mut line_start_offset = 0usize;
+        for (idx, raw_line) in content.split_inclusive('\n').enumerate() {
+            let line = raw_line.trim_end_matches(['\n', '\r']);
+            let line_offset = line_start_offset;
+            line_start_offset += raw_line.len();
             let (found, distinct) = if !multi {
-                let found = matcher.find_all(line);
+                let mut found = matcher.find_all(line);
+                if let Some(spans) = &comment_spans {
+                    found.retain(|&(start, _)| crate::comment_spans::span_contains(spans, line_offset + start));
+                }
                 if found.is_empty() { continue; }
                 (found, 1usize)
             } else {
                 let mut found: Vec<(usize, usize)> = Vec::new();
                 let mut distinct = 0usize;
                 for (ti, term_matcher) in term_matchers.iter().enumerate() {
-                    let hits = term_matcher.find_all(line);
+                    let mut hits = term_matcher.find_all(line);
+                    if let Some(spans) = &comment_spans {
+                        hits.retain(|&(start, _)| crate::comment_spans::span_contains(spans, line_offset + start));
+                    }
                     if hits.is_empty() { continue; }
                     distinct += 1;
                     term_lines[ti] += 1;
@@ -2751,8 +3270,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 (found, distinct)
             };
             this_file_matched = true;
+            this_file_lines += 1;
             lines_with_matches += 1;
             occurrence_count += found.len();
+            if matches!(req.output, ScanOutput::Files | ScanOutput::Count) { continue; }
             // Over quota for this file: stop reading it instead of letting it take a slot another
             // file's only match needs. Leaving the rest of this file unread also leaves the scan's
             // own wall budget for files the walk has not reached yet, which is the whole point --
@@ -2764,6 +3285,12 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                     break;
                 }
                 this_file_collected += 1;
+            }
+            if req.output == ScanOutput::Compact {
+                if emitted_matches >= req.max_matches { matches_truncated = true; break; }
+                emitted_matches += 1;
+                compact_lines.push(compact_match_line(path, idx + 1, line));
+                continue;
             }
             if candidates.len() >= hit_cap { matches_truncated = true; break; }
             let (start, end) = found[0];
@@ -2794,15 +3321,21 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         for (ti, seen) in term_seen_in_file.iter().enumerate() {
             if *seen { term_files[ti] += 1; }
         }
-        if this_file_matched { files_with_matches += 1; }
+        if this_file_matched {
+            files_with_matches += 1;
+            file_line_counts.push((path.clone(), this_file_lines));
+        }
         if this_file_quota_hit {
             files_quota_truncated += 1;
             matches_truncated = true;
         }
-        if matches_truncated && candidates.len() >= hit_cap { break; }
+        // A quota hit is not a full pool: it only stopped this file, and every later file still
+        // needs its slot. Files/Count and Compact never fill `candidates`, so their cap is the
+        // emitted-match counter instead.
+        if matches_truncated && (req.output != ScanOutput::Matches || candidates.len() >= hit_cap) { break; }
     }
 
-    let matches: Vec<Value> = if multi {
+    let mut matches: Vec<Value> = if multi {
         candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)).then_with(|| a.2.cmp(&b.2)));
         if candidates.len() > max_matches {
             matches_truncated = true;
@@ -2840,16 +3373,29 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), json!(true));
     out.insert("mode".to_string(), json!(if req.regex { "regex" } else { "literal" }));
-    out.insert("pattern".to_string(), json!(req.pattern));
-    out.insert("root".to_string(), json!(root));
-    if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
-    out.insert("case_insensitive".to_string(), json!(req.case_insensitive));
-    if !req.regex { out.insert("whole_word".to_string(), json!(req.whole_word)); }
-    if let Some(g) = req.path_glob { out.insert("path_glob".to_string(), json!(g)); }
-    if glob.is_some() { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
+    if req.verbose {
+        if req.output != ScanOutput::Matches { out.insert("output".to_string(), json!(req.output.label())); }
+        out.insert("pattern".to_string(), json!(req.pattern));
+        out.insert("root".to_string(), json!(root));
+        if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
+        out.insert("case_insensitive".to_string(), json!(req.case_insensitive));
+        if !req.regex { out.insert("whole_word".to_string(), json!(req.whole_word)); }
+        if !req.include_globs.is_empty() { out.insert("path_glob".to_string(), json!(req.include_globs.join(", "))); }
+        if !req.exclude_globs.is_empty() { out.insert("exclude_glob".to_string(), json!(req.exclude_globs.join(", "))); }
+    }
+    if req.comments_only {
+        out.insert("comments_only".to_string(), json!(true));
+        if req.verbose || files_without_comment_syntax > 0 {
+            out.insert("files_without_comment_syntax".to_string(), json!(files_without_comment_syntax));
+        }
+    }
+    if has_glob_filter && (req.verbose || glob_matched_no_files) { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
-    out.insert("file_source".to_string(), json!(universe.source.label()));
-    out.insert("file_source_detail".to_string(), json!(universe.source.detail()));
+    let file_source = universe.source.label();
+    if req.verbose || file_source != "git" {
+        out.insert("file_source".to_string(), json!(file_source));
+        out.insert("file_source_detail".to_string(), json!(universe.source.detail()));
+    }
     if req.refresh {
         out.insert("refreshed".to_string(), json!(true));
         out.insert("refreshed_note".to_string(), json!(
@@ -2860,7 +3406,13 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("listing_incomplete".to_string(), json!(true));
         if let Some(reason) = &universe.walk_reason { out.insert("walk_reason".to_string(), json!(reason)); }
     }
-    if !universe.excluded.is_empty() {
+    let pruned_by_foreign_rule = universe.excluded.iter()
+        .filter(|e| e.rule != crate::scan_universe::OWN_STATE_RULE)
+        .count();
+    if !req.verbose && pruned_by_foreign_rule > 0 {
+        out.insert("excluded_by_rule_count".to_string(), json!(pruned_by_foreign_rule));
+    }
+    if req.verbose && !universe.excluded.is_empty() {
         let cap = 200usize;
         let shown: Vec<Value> = universe.excluded.iter().take(cap)
             .map(|e| match e.files {
@@ -2906,7 +3458,12 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             "the query was matched as ONE phrase: a line must contain it verbatim, spaces included -- pass combine:\"or\" to split it into terms and rank by how many a line carries, or combine:\"and\" to require all of them on one line"
         ));
     }
-    if matches.is_empty() {
+    let match_count = match req.output {
+        ScanOutput::Matches => matches.len(),
+        ScanOutput::Compact => compact_lines.len(),
+        ScanOutput::Files | ScanOutput::Count => lines_with_matches,
+    };
+    if match_count == 0 {
         let mut hint = if multi {
             let mut detail: Vec<String> = Vec::new();
             let mut used = 0usize;
@@ -2946,20 +3503,27 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             "cached_bytes": cache_bytes,
         }));
     }
-    out.insert("match_count".to_string(), json!(matches.len()));
-    out.insert("occurrence_count".to_string(), json!(occurrence_count));
-    out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
-    out.insert("files_with_matches".to_string(), json!(files_with_matches));
-    out.insert("files_scanned".to_string(), json!(files_scanned));
-    out.insert("files_listed".to_string(), json!(files.len()));
     let elapsed_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms);
-    out.insert("elapsed_ms".to_string(), json!(elapsed_ms));
-    out.insert("phase_ms".to_string(), json!({
-        "listing": listing_ms,
-        "stat": stat_ms,
-        "read": read_ms,
-        "match_and_other": elapsed_ms.saturating_sub(stat_ms + read_ms),
-    }));
+    if req.verbose {
+        out.insert("match_count".to_string(), json!(match_count));
+        out.insert("occurrence_count".to_string(), json!(occurrence_count));
+        out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
+        out.insert("files_with_matches".to_string(), json!(files_with_matches));
+        out.insert("files_scanned".to_string(), json!(files_scanned));
+        out.insert("files_listed".to_string(), json!(files.len()));
+        out.insert("elapsed_ms".to_string(), json!(elapsed_ms));
+        out.insert("phase_ms".to_string(), json!({
+            "listing": listing_ms,
+            "stat": stat_ms,
+            "read": read_ms,
+            "prewarm": prewarm_ms,
+            "match_and_other": elapsed_ms.saturating_sub(stat_ms + read_ms + prewarm_ms),
+        }));
+    } else {
+        out.insert("count".to_string(), json!(format!(
+            "{lines_with_matches} lines, {occurrence_count} occurrences, {files_with_matches} files of {files_scanned} scanned"
+        )));
+    }
     out.insert("exhaustive".to_string(), json!(exhaustive));
     if files_truncated {
         out.insert("files_truncated".to_string(), json!(true));
@@ -2978,16 +3542,89 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("files_skipped_too_large".to_string(), json!(files_skipped_too_large));
         out.insert("max_file_bytes".to_string(), json!(LITERAL_SCAN_MAX_FILE_BYTES));
     }
-    if files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
+    if req.verbose && files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
     if files_skipped_binary > 0 { out.insert("files_skipped_binary".to_string(), json!(files_skipped_binary)); }
     if files_with_nul_scanned > 0 { out.insert("files_with_nul_scanned".to_string(), json!(files_with_nul_scanned)); }
-    if files_unreadable > 0 { out.insert("files_unreadable".to_string(), json!(files_unreadable)); }
+    if files_unreadable > 0 {
+        out.insert("files_unreadable".to_string(), json!(files_unreadable));
+        out.insert("files_unreadable_sample".to_string(), json!(unreadable_sample));
+    }
+    if unreadable_dependency_files > 0 {
+        out.insert("files_unreadable_in_dependency_dirs".to_string(), json!(unreadable_dependency_files));
+    }
     if !exhaustive {
         out.insert("exhaustive_note".to_string(), json!(
             "at least one bound fired -- this is NOT every match in the tree; the files_truncated/matches_truncated/budget_exhausted/files_skipped_* fields above name which"
         ));
     }
-    out.insert("matches".to_string(), Value::Array(matches));
+    let budget = req.max_chars.saturating_sub(REPLY_METADATA_RESERVE_CHARS).max(1_000);
+    let mut spilled: Vec<String> = Vec::new();
+    match req.output {
+        ScanOutput::Matches => {
+            let mut used = 0usize;
+            let mut cut = matches.len();
+            for (i, m) in matches.iter().enumerate() {
+                used += m.to_string().chars().count() + 2;
+                if used > budget && i > 0 {
+                    cut = i;
+                    break;
+                }
+            }
+            let rest = matches.split_off(cut);
+            spilled = rest.iter().map(|m| {
+                format!(
+                    "{}:{}:{}: {}",
+                    m.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                    m.get("line").and_then(|v| v.as_u64()).unwrap_or(0),
+                    m.get("column").and_then(|v| v.as_u64()).unwrap_or(0),
+                    m.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                )
+            }).collect();
+            out.insert("matches".to_string(), Value::Array(matches));
+        }
+        ScanOutput::Compact => {
+            let (shown, rest) = split_lines_at_budget(compact_lines, budget);
+            spilled = rest;
+            out.insert("matches".to_string(), json!(shown));
+        }
+        ScanOutput::Files => {
+            let cap = req.list_limit.unwrap_or(FILES_OUTPUT_DEFAULT_LIMIT).max(1);
+            let all: Vec<String> = file_line_counts.iter().map(|(p, _)| p.clone()).collect();
+            if all.len() > cap { out.insert("files_truncated_at_limit".to_string(), json!(cap)); }
+            let listed: Vec<String> = all.into_iter().take(cap).collect();
+            let (shown, rest) = split_lines_at_budget(listed, budget);
+            spilled = rest;
+            out.insert("files".to_string(), json!(shown));
+        }
+        ScanOutput::Count => {
+            let cap = req.list_limit.unwrap_or(COUNT_OUTPUT_DEFAULT_LIMIT).max(1);
+            let mut busiest = file_line_counts.clone();
+            busiest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let rows: Vec<String> = busiest.into_iter().take(cap).map(|(p, n)| format!("{n} {p}")).collect();
+            out.insert("busiest_files".to_string(), json!(rows));
+        }
+    }
+    if !spilled.is_empty() {
+        let spilled_count = spilled.len();
+        out.insert("reply_truncated".to_string(), json!(true));
+        out.insert("max_chars".to_string(), json!(req.max_chars));
+        out.insert("spilled_count".to_string(), json!(spilled_count));
+        match spill_lines_to_out_file(&req.spill_name, &spilled) {
+            Some(file) => {
+                out.insert("spill_file".to_string(), json!(file));
+                out.insert("reply_note".to_string(), json!(format!(
+                    "the reply hit max_chars={}; {spilled_count} more entries (still part of this exhaustive result) are one per line in spill_file, readable directly; raise max_chars, narrow path/glob, or use output \"files\"/\"count\" to see less",
+                    req.max_chars
+                )));
+            }
+            None => {
+                out.insert("reply_note".to_string(), json!(format!(
+                    "the reply hit max_chars={} and {spilled_count} entries were dropped because the spill file could not be written; narrow path/glob or raise max_chars",
+                    req.max_chars
+                )));
+            }
+        }
+    }
     Value::Object(out)
 }
 

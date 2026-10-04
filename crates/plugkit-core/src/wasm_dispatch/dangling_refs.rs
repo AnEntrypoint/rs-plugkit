@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use super::host_abi::{git_call_argv, host_exists, host_read};
-use super::verbs::ERR_CODE_DANGLING_REFERENCE;
+use super::verbs::{ERR_CODE_DANGLING_REFERENCE, ERR_CODE_DANGLING_SCAN_UNREADABLE};
 
 const MAX_SCAN_BYTES: usize = 512 * 1024;
 const MAX_SCAN_FILES: usize = 400;
@@ -21,6 +21,7 @@ const CONDITION_KEYS: &[&str] = &["import", "default", "require", "node", "brows
 pub struct DanglingScan {
     pub offenders: Vec<Value>,
     pub waived: Vec<String>,
+    pub unreadable: Vec<String>,
     pub scanned_files: usize,
 }
 
@@ -31,11 +32,15 @@ pub fn scan_commit(cwd: Option<&str>, paths: &[String], add_all: bool, body: &Va
     let committed: HashSet<String> = ordered.iter().cloned().collect();
     let mut candidates: Vec<(String, String, usize, String)> = Vec::new();
     let mut scanned_files = 0usize;
+    let mut unreadable: Vec<String> = Vec::new();
 
     for path in ordered.iter() {
         if scanned_files >= MAX_SCAN_FILES || candidates.len() >= MAX_CANDIDATES { break; }
         if !is_scannable(path) { continue; }
-        let Some(source) = read_text(&root, path) else { continue; };
+        let Some(source) = read_text(&root, path) else {
+            if file_present(&root, path) && !waivers.waive_all { unreadable.push(path.clone()); }
+            continue;
+        };
         if source.len() > MAX_SCAN_BYTES { continue; }
         scanned_files += 1;
         let is_json = extension_of(path) == "json";
@@ -71,7 +76,31 @@ pub fn scan_commit(cwd: Option<&str>, paths: &[String], add_all: bool, body: &Va
     }
     offenders.sort_by(|a, b| a["from"].as_str().unwrap_or("").cmp(b["from"].as_str().unwrap_or(""))
         .then(a["line"].as_u64().unwrap_or(0).cmp(&b["line"].as_u64().unwrap_or(0))));
-    DanglingScan { offenders, waived, scanned_files }
+    DanglingScan { offenders, waived, unreadable, scanned_files }
+}
+
+/// A file the scan could not read is not a clean scan: its references were never extracted, so a
+/// dangling one inside it would pass the check that exists to stop it.
+pub fn scan_unreadable(scan: &DanglingScan) -> bool {
+    !scan.unreadable.is_empty()
+}
+
+pub fn unreadable_detail(verb: &str, scan: &DanglingScan) -> Value {
+    let mut fixes: Vec<String> = Vec::new();
+    for path in &scan.unreadable {
+        fixes.push(format!("make {} readable and repeat this commit, or leave it out of the commit's paths", path));
+    }
+    fixes.dedup();
+    json!({
+        "error": format!("commit includes {} file(s) that cannot be read, so their references were never checked", scan.unreadable.len()),
+        "error_code": ERR_CODE_DANGLING_SCAN_UNREADABLE,
+        "unreadable": scan.unreadable,
+        "fixes": fixes,
+        "scanned_files": scan.scanned_files,
+        "waived": scan.waived,
+        "allow_dangling_hint": "pass allow_dangling: true to waive the whole dangling-reference check for this commit",
+        "next_dispatch": verb,
+    })
 }
 
 pub fn refusal_detail(verb: &str, scan: &DanglingScan) -> Value {
