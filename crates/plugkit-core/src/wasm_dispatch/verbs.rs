@@ -1817,6 +1817,10 @@ const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "query", "mode", "path", "glob", "path_glob", "exclude_glob", "exclude_globs", "case_insensitive", "whole_word", "comments_only",
     "k", "max_results", "maxResults", "limit", "head_limit", "max_matches", "max_files", "output", "max_chars", "verbose", "docs",
+    // `resolve_scan_target` reads these, and "root" is the escape hatch the out-of-root error tells
+    // the caller to use, so refusing it here would leave that advice unusable. "cwd" is the
+    // spelling an MCP client already has in hand for the same thing.
+    "root", "projectPath", "cwd",
 ];
 
 const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit", "head_limit"];
@@ -1851,10 +1855,17 @@ fn codesearch_result_limit(body: &Value, cfg: &crate::ragconfig::RagConfig) -> R
     scan_result_limit(body, CODESEARCH_LIMIT_FIELDS, cfg.budget.default_k as u32)
 }
 
-fn resolve_scan_target(body: &Value) -> Result<(Option<&str>, Option<String>), String> {
-    let mut root = body.get("root").and_then(|v| v.as_str())
+/// The directory a scan searches. `root` and its alias `projectPath` win; `cwd` is the spelling an
+/// MCP client already has in hand for the same thing, so it is read rather than silently ignored.
+fn scan_root(body: &Value) -> Option<&str> {
+    body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
-        .filter(|p| !p.is_empty());
+        .or_else(|| body.get("cwd").and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty())
+}
+
+fn resolve_scan_target(body: &Value) -> Result<(Option<&str>, Option<String>), String> {
+    let mut root = scan_root(body);
     let mut path = body.get("path").and_then(|v| v.as_str())
         .filter(|p| !p.is_empty())
         .map(str::to_owned);
@@ -2059,7 +2070,10 @@ codesearch (aliases \"code_search\", \"search\") is the canonical search verb.
   {\"k\":10}                            result cap for \"dual\"; aliases: max_results, maxResults, limit
   {\"max_matches\":1000}                hit cap for the exhaustive modes
   {\"max_files\":50000}                 file cap
-  {\"path\":\"<dir or file>\"}           narrow the scan
+  {\"path\":\"<dir or file>\"}           narrow the scan; may be absolute when it is inside the search root
+  {\"root\":\"<project dir>\"}           search another project; \"path\" is then relative to it
+  {\"projectPath\":\"<project dir>\"}    alias of \"root\"
+  {\"cwd\":\"<project dir>\"}            alias of \"root\", lowest precedence of the three
   {\"path_glob\":\"**/*.rs\"}            narrow by glob; \"glob\" is an alias
   {\"combine\":\"phrase\"}               \"phrase\" (default for a multi-word query), \"and\" (every term on one line),
                                        \"or\" (ranked union of any term)
@@ -2583,9 +2597,7 @@ fn codesearch(body: &Value) -> u64 {
         let explicit = if limit_was_explicit { Some(k) } else { None };
         return codesearch_exhaustive(body, query, mode == "regex", &cfg, explicit);
     }
-    let root = body.get("root").and_then(|v| v.as_str())
-        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
-        .filter(|p| !p.is_empty());
+    let root = scan_root(body);
     let rank_opts = crate::codesearch_rank::RankOptions::from_body(body, k as usize, root);
     let identifier = query.trim();
     let flag = |name: &str| body.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -5925,8 +5937,9 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     let dispatch_id = {
         let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
         let exit_code = if result_value.get("ok").and_then(|v| v.as_bool()).unwrap_or(true) { 0 } else { 1 };
-        let dream_rsi_vetoed = result_value.get("dream_rsi_vetoed").and_then(|v| v.as_bool()).unwrap_or(false);
-        if dream_rsi_vetoed || !root_resolved {
+        // A dispatch the strategy only advised against still ran, so it is still evidence: that is
+        // what lets a verb record the success that clears the ranking it was advised under.
+        if !root_resolved {
             None
         } else {
             let dispatch_id = crate::dispatch_ledger::record(cwd, &verb, &fingerprint, exit_code, dispatch_session_id.as_deref());
@@ -5991,16 +6004,40 @@ fn restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb: &str) {
     }
 }
 
+fn attach_dream_rsi_advisory(packed: u64, verb: &str, reason: &str, next_dispatch_hint: &str) -> u64 {
+    let mut value = super::host_abi::unpack_to_value(packed);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("dream_rsi_advisory".to_string(), json!({
+            "strategy": "replay-recorded-successes-first",
+            "verb": verb,
+            "next_dispatch_hint": next_dispatch_hint,
+            "admitted_anyway": true,
+            "reason": reason,
+        }));
+    }
+    pack(value.to_string())
+}
+
+/// The Dream-RSI ranking is advice attached to a dispatch that runs, never a refusal: it is
+/// consulted before the dispatch so it reads the state that produced it, and attached after so
+/// every arm of `dispatch_verb_unranked` carries it.
 fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
+    let admission = crate::orchestrator::dream_rsi::admit_dispatch(verb);
+    let packed = dispatch_verb_unranked(verb, body, body_s);
+    match admission {
+        crate::orchestrator::dream_rsi::Admission::Allow => packed,
+        crate::orchestrator::dream_rsi::Admission::Advisory { reason, next_dispatch_hint } => {
+            attach_dream_rsi_advisory(packed, verb, &reason, next_dispatch_hint)
+        }
+    }
+}
+
+fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
     #[cfg(target_arch = "wasm32")]
     let dispatch_start_ms = unsafe { host_now_ms() };
     let gate = crate::gates::check_dispatch(verb, body);
     if !gate.allowed {
         return pack(gate.to_denial_json(verb).to_string());
-    }
-    #[cfg(target_arch = "wasm32")]
-    if let Err(error) = crate::orchestrator::dream_rsi::admit_dispatch(verb) {
-        return err_json(verb, json!({ "error": error, "dream_rsi_vetoed": true }));
     }
     let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
     crate::browser_witness::record_from_body(cwd_for_witness, body);
@@ -6010,6 +6047,9 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         {
             let ms = unsafe { host_now_ms() }.saturating_sub(dispatch_start_ms);
             emit_event("dispatch.end", serde_json::json!({ "verb": verb, "ms": ms }));
+            if verb == "instruction" && code == 0 {
+                crate::orchestrator::dream_rsi::stamp_reorientation();
+            }
             if !crate::gates::dispatch_serves_no_phase_prose(verb, body) {
                 restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb);
                 crate::gates::restamp_last_dispatch_to_completion(verb);
