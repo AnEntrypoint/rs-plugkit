@@ -2,7 +2,7 @@ const MAX_COMPONENT_LEN: usize = 128;
 
 const MAX_PATH_LEN: usize = 512;
 
-const ALLOWED_URL_SCHEMES: &[&str] = &["https://", "http://", "ssh://", "git://"];
+const ALLOWED_URL_SCHEMES: &[&str] = &["https://", "ssh://"];
 
 fn check_component(component: &str, what: &str) -> Result<(), String> {
     if component.is_empty() {
@@ -156,10 +156,11 @@ pub fn validate_repo_url(url: &str) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "{what}: {:?} does not use an allowed transport. Permitted: {} or git's user@host:path form. \
-         Local paths and file:// are refused because a repo-backed tier exists to fetch from \
-         elsewhere, and ext:// is refused because git executes it as a command rather than \
-         fetching from it.",
+            "{what}: {:?} does not use an authenticated transport. Permitted: {} or git's user@host:path form. \
+             Local paths and file:// are refused because a repo-backed tier exists to fetch from \
+             elsewhere; http:// and git:// are refused because a config repo can carry executable \
+             hooks and must not be mutable by a network observer; ext:// is refused because git \
+             executes it as a command rather than fetching from it.",
         u,
         ALLOWED_URL_SCHEMES.join(", ")
     ))
