@@ -201,25 +201,24 @@ fn try_resolve_project_root() -> Result<PathBuf, u32> {
                 return Ok(root.clone());
             }
         }
-    }
-    set_nonrepo_fallback(&cwd, false);
-    let mut last_err_attempts = 0u32;
-    for attempt in 0..RESOLVE_MAX_ATTEMPTS {
-        if let Some(root) = git_project_root_once().or_else(stateful_cwd_root_once) {
-            if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
-                cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd, root.clone());
-        match git_project_root_once() {
-            RootProbe::Root(root) => {
-                if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
-                    cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd, root.clone());
+        }
+        set_nonrepo_fallback(&cwd, false);
+        let mut last_err_attempts = 0u32;
+        for attempt in 0..RESOLVE_MAX_ATTEMPTS {
+            match git_project_root_once() {
+                RootProbe::Root(root) => {
+                    if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
+                        cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd, root.clone());
+                    }
+                    return Ok(root);
                 }
-                return Ok(root);
-            }
-            RootProbe::NotARepo => {
-                let Some(root) = nonrepo_fallback_root(&cwd) else { return Err(attempt + 1) };
-                if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
-                    cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd.clone(), root.clone());
-                }
+                RootProbe::NotARepo => {
+                    let Some(root) = stateful_cwd_root_once().or_else(|| nonrepo_fallback_root(&cwd)) else {
+                        return Err(attempt + 1);
+                    };
+                    if let Ok(mut cache) = PROJECT_ROOT_CACHE.lock() {
+                        cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd.clone(), root.clone());
+                    }
                 set_nonrepo_fallback(&cwd, true);
                 return Ok(root);
             }
