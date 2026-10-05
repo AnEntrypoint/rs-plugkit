@@ -4942,6 +4942,16 @@ fn push_output_is_ssh_auth_failure(output: &str) -> bool {
         || output.contains("Could not read from remote repository")
 }
 
+fn push_output_is_github_auth_failure(output: &str) -> bool {
+    let output = output.to_ascii_lowercase();
+    output.contains("could not read username")
+        || output.contains("authentication failed")
+        || output.contains("http basic: access denied")
+        || output.contains("invalid username or token")
+        || output.contains("terminal prompts disabled")
+        || output.contains("password authentication is not supported")
+}
+
 fn ssh_https_fallback_for_origin(repo: Option<&str>) -> Option<SshHttpsFallback> {
     let url = exec_git_in(repo, "remote get-url origin")
         .trim()
@@ -5142,6 +5152,24 @@ fn git_push(body: &Value) -> u64 {
     let mut attempts = 0u32;
     let mut rebased = false;
     if !push_succeeded && explicit_source_ref.is_some() {
+        if push_output_is_github_auth_failure(&push_out) {
+            return pack(json!({
+                "ok": false,
+                "verb": "git_push",
+                "gate_denied": true,
+                "repo": repo,
+                "branch": branch,
+                "source_ref": source_ref,
+                "source_sha": local_source_before,
+                "preserved_dirty_worktree": preserved_dirty_worktree,
+                "reason": format!(
+                    "push of explicit source ref '{}' to {} failed because GitHub authentication did not complete; this is not evidence that the remote moved. AgentPlug supplies GitHub credentials through its automatic bridge. Complete the normal GitHub CLI sign-in for this origin (for example, `gh auth login`), then re-dispatch the same git_push request. Do not copy a token or change git credential configuration. Output:\\n{}",
+                    source_ref, branch, push_out
+                ),
+                "next_dispatch": "instruction",
+                "next_action_hint": "Complete normal GitHub CLI sign-in, then re-dispatch the same git_push request; do not copy tokens or change git credential configuration.",
+            }).to_string());
+        }
         log_deviation_push("push-explicit-ref-remote-moved", &branch);
         return pack(json!({
             "ok": false,
