@@ -7837,7 +7837,21 @@ fn is_transient_submodule_status(repo: Option<&str>, line: &str) -> bool {
     {
         return false;
     }
-    git_porcelain_in(Some(&submodule)).trim().is_empty()
+    let nested_porcelain = git_porcelain_in(Some(&submodule));
+    !nested_porcelain.trim().is_empty()
+        && nested_porcelain
+            .lines()
+            .all(is_transient_submodule_runtime_status)
+}
+
+fn is_transient_submodule_runtime_status(line: &str) -> bool {
+    let Some(path) = line.get(3..) else {
+        return false;
+    };
+    let path = path.trim();
+    matches!(path, ".gm" | ".agentplug-kv")
+        || path.starts_with(".gm/")
+        || path.starts_with(".agentplug-kv/")
 }
 
 fn git_porcelain_scoped(repo: Option<&str>, paths: &[String]) -> String {
