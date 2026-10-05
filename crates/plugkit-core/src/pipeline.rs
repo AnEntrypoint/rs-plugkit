@@ -65,19 +65,33 @@ pub fn mint_token(step_id: &str, kv_key: &str, deadline_ms: u64) -> Result<Strin
     Ok(format!("tkn_{}.{}", step_id, keyed_hash(&key, &payload)))
 }
 
-pub fn verify_token(token: &str, step_id: &str, kv_key: &str, deadline_ms: u64) -> Result<bool, String> {
+pub fn verify_token(
+    token: &str,
+    step_id: &str,
+    kv_key: &str,
+    deadline_ms: u64,
+) -> Result<bool, String> {
     let expected = mint_token(step_id, kv_key, deadline_ms)?;
     Ok(token.len() == expected.len() && constant_time_eq(token.as_bytes(), expected.as_bytes()))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() { return false; }
+    if a.len() != b.len() {
+        return false;
+    }
     let mut diff: u8 = 0;
-    for i in 0..a.len() { diff |= a[i] ^ b[i]; }
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
     diff == 0
 }
 
-pub fn persist_state(step_id: &str, state: &Value, deadline_ms: u64, created_ms: u64) -> Result<(), String> {
+pub fn persist_state(
+    step_id: &str,
+    state: &Value,
+    deadline_ms: u64,
+    created_ms: u64,
+) -> Result<(), String> {
     ensure_pipeline_schema()?;
     let state_s = state.to_string();
     let dl = deadline_ms.to_string();
@@ -95,7 +109,8 @@ pub fn load_state(step_id: &str) -> Option<Value> {
         &pipeline_db_path(),
         "SELECT state, deadline_ms FROM pipeline_state WHERE step_id=?1",
         &[step_id],
-    ).ok()?;
+    )
+    .ok()?;
     let arr = rows.as_array()?;
     let row = arr.first()?;
     let state_s = row.get("state").and_then(|v| v.as_str())?;
@@ -103,14 +118,22 @@ pub fn load_state(step_id: &str) -> Option<Value> {
 }
 
 pub fn delete_state(step_id: &str) {
-    let _ = libsql_wasm::exec_params(&pipeline_db_path(), "DELETE FROM pipeline_state WHERE step_id=?1", &[step_id]);
+    let _ = libsql_wasm::exec_params(
+        &pipeline_db_path(),
+        "DELETE FROM pipeline_state WHERE step_id=?1",
+        &[step_id],
+    );
 }
 
 pub fn evict_expired() {
     let _ = ensure_pipeline_schema();
     let now = unsafe { host_now_ms() } as u64;
     let now_s = now.to_string();
-    let _ = libsql_wasm::exec_params(&pipeline_db_path(), "DELETE FROM pipeline_state WHERE deadline_ms < ?1", &[&now_s]);
+    let _ = libsql_wasm::exec_params(
+        &pipeline_db_path(),
+        "DELETE FROM pipeline_state WHERE deadline_ms < ?1",
+        &[&now_s],
+    );
 }
 
 pub fn needs_summarize(text: &str) -> bool {
@@ -207,7 +230,11 @@ fn clear_turn_pending() {
 fn validate_result(result: &Value, schema: &Value, max_bytes: usize) -> Result<(), String> {
     let serialized = result.to_string();
     if serialized.len() > max_bytes {
-        return Err(format!("result exceeds max_result_bytes ({} > {})", serialized.len(), max_bytes));
+        return Err(format!(
+            "result exceeds max_result_bytes ({} > {})",
+            serialized.len(),
+            max_bytes
+        ));
     }
     let obj = match result.as_object() {
         Some(o) => o,
@@ -273,7 +300,10 @@ pub fn handle_continue(body: &Value) -> Value {
     };
 
     let kv_key = state.get("kv_key").and_then(|v| v.as_str()).unwrap_or("");
-    let deadline_ms = state.get("deadline_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+    let deadline_ms = state
+        .get("deadline_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     match verify_token(token, step_id, kv_key, deadline_ms) {
         Ok(true) => {}
         Ok(false) => return json!({ "ok": false, "error": "invalid_token" }),
@@ -288,9 +318,18 @@ pub fn handle_continue(body: &Value) -> Value {
     }
 
     let schema = state.get("result_schema").cloned().unwrap_or(json!({}));
-    if let Err(e) = validate_result(result, &schema, pipeline_cfg().max_result_bytes_advertised_and_enforced_by_one_field) {
-        let attempts_used = state.get("attempts_used").and_then(|v| v.as_u64()).unwrap_or(0);
-        let attempts_remaining = pipeline_cfg().max_attempts.saturating_sub(attempts_used + 1);
+    if let Err(e) = validate_result(
+        result,
+        &schema,
+        pipeline_cfg().max_result_bytes_advertised_and_enforced_by_one_field,
+    ) {
+        let attempts_used = state
+            .get("attempts_used")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let attempts_remaining = pipeline_cfg()
+            .max_attempts
+            .saturating_sub(attempts_used + 1);
         if attempts_remaining == 0 {
             delete_state(step_id);
             clear_turn_pending();
@@ -321,11 +360,18 @@ pub fn handle_continue(body: &Value) -> Value {
 
     let original = state.get("original_body").cloned().unwrap_or(Value::Null);
     let text = original.get("text").and_then(|v| v.as_str()).unwrap_or("");
-    let namespace = original.get("namespace").and_then(|v| v.as_str()).unwrap_or("default");
+    let namespace = original
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
     let project_path = original.get("project_path").and_then(|v| v.as_str());
-    let summary = result.get("summary").and_then(|v| v.as_str()).unwrap_or(text);
+    let summary = result
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or(text);
 
-    let finalize = crate::code_index::memorize_at_finalize(summary, text, namespace, None, project_path);
+    let finalize =
+        crate::code_index::memorize_at_finalize(summary, text, namespace, None, project_path);
 
     delete_state(step_id);
     clear_turn_pending();

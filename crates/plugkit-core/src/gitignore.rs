@@ -1,6 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 
-use crate::wasm_dispatch::{host_read, host_write, host_log};
+use crate::wasm_dispatch::{host_log, host_read, host_write};
 
 pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/exec-spool/",
@@ -60,11 +60,15 @@ const LEGACY_START_GM: &str = "# >>> gm managed";
 const LEGACY_END_GM: &str = "# <<< gm managed";
 
 fn log_warn(msg: &str) {
-    unsafe { host_log(2, msg.as_ptr(), msg.len() as u32); }
+    unsafe {
+        host_log(2, msg.as_ptr(), msg.len() as u32);
+    }
 }
 
 fn log_info(msg: &str) {
-    unsafe { host_log(1, msg.as_ptr(), msg.len() as u32); }
+    unsafe {
+        host_log(1, msg.as_ptr(), msg.len() as u32);
+    }
 }
 
 fn strip_block(content: &str, start: &str, end: &str) -> String {
@@ -72,7 +76,10 @@ fn strip_block(content: &str, start: &str, end: &str) -> String {
     let mut rest = content;
     loop {
         match rest.find(start) {
-            None => { out.push_str(rest); return out; }
+            None => {
+                out.push_str(rest);
+                return out;
+            }
             Some(si) => {
                 out.push_str(&rest[..si]);
                 let after = &rest[si..];
@@ -83,10 +90,15 @@ fn strip_block(content: &str, start: &str, end: &str) -> String {
                     Some(ei) => {
                         let cut = ei + end.len();
                         let mut tail = &after[cut..];
-                        if tail.starts_with("\r\n") { tail = &tail[2..]; }
-                        else if tail.starts_with('\n') { tail = &tail[1..]; }
+                        if tail.starts_with("\r\n") {
+                            tail = &tail[2..];
+                        } else if tail.starts_with('\n') {
+                            tail = &tail[1..];
+                        }
                         rest = tail;
-                        while out.ends_with("\n\n") { out.pop(); }
+                        while out.ends_with("\n\n") {
+                            out.pop();
+                        }
                     }
                 }
             }
@@ -181,7 +193,10 @@ pub fn ensure_managed_gitignore(cwd: &str) -> Result<bool, String> {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let mut cleaned = stripped_of_hostile.trim_end_matches('\n').trim_end_matches('\r').to_string();
+    let mut cleaned = stripped_of_hostile
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .to_string();
     if cleaned.is_empty() {
         cleaned = block;
     } else {
@@ -198,7 +213,11 @@ pub fn ensure_managed_gitignore(cwd: &str) -> Result<bool, String> {
         if !host_write(&path, &cleaned) {
             return Err(format!("host_fs_write failed for {}", path));
         }
-        log_info(&format!("plugkit gitignore: updated {} ({} entries)", path, MANAGED_ENTRIES.len()));
+        log_info(&format!(
+            "plugkit gitignore: updated {} ({} entries)",
+            path,
+            MANAGED_ENTRIES.len()
+        ));
     }
     Ok(changed)
 }

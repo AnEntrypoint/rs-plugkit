@@ -26,7 +26,8 @@ pub fn valid_component(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 200
         && !s.contains("..")
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
 pub fn md_dir(ns: &str) -> Option<String> {
@@ -48,7 +49,10 @@ pub fn md_path(ns: &str, key: &str) -> Option<String> {
 }
 
 fn normalize_text(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n").trim_end_matches('\n').to_string()
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim_end_matches('\n')
+        .to_string()
 }
 
 pub fn compose(key: &str, ns: &str, created: i64, updated: i64, text: &str) -> String {
@@ -90,7 +94,13 @@ pub fn parse(content: &str) -> Option<MemoryDoc> {
     let created = created?;
     let updated = updated?;
     let text = normalize_text(body.strip_prefix('\n').unwrap_or(body));
-    Some(MemoryDoc { key, ns, created, updated, text })
+    Some(MemoryDoc {
+        key,
+        ns,
+        created,
+        updated,
+        text,
+    })
 }
 
 pub fn memory_text_matches(ns: &str, key: &str, text: &str) -> bool {
@@ -102,7 +112,9 @@ pub fn memory_text_matches(ns: &str, key: &str, text: &str) -> bool {
         Some(c) => c,
         None => return false,
     };
-    parse(&content).map(|doc| doc.text == normalize_text(text)).unwrap_or(false)
+    parse(&content)
+        .map(|doc| doc.text == normalize_text(text))
+        .unwrap_or(false)
 }
 
 fn tmp_path_for(path: &str) -> String {
@@ -116,7 +128,10 @@ fn rename_batch(pairs: &[(String, String)]) -> usize {
     }
     let mut total = 0usize;
     for chunk in pairs.chunks(rename_batch_chunk()) {
-        let list: Vec<Value> = chunk.iter().map(|(t, p)| json!({ "t": t, "p": p })).collect();
+        let list: Vec<Value> = chunk
+            .iter()
+            .map(|(t, p)| json!({ "t": t, "p": p }))
+            .collect();
         let payload = match serde_json::to_string(&Value::Array(list)) {
             Ok(s) => s,
             Err(_) => continue,
@@ -128,8 +143,10 @@ fn rename_batch(pairs: &[(String, String)]) -> usize {
         let opts = "{\"timeoutMs\":30000}";
         let packed = unsafe {
             crate::wasm_dispatch::host_exec_js(
-                code.as_ptr(), code.len() as u32,
-                opts.as_ptr(), opts.len() as u32,
+                code.as_ptr(),
+                code.len() as u32,
+                opts.as_ptr(),
+                opts.len() as u32,
             )
         };
         let out = crate::wasm_dispatch::unpack_to_string_pub(packed).unwrap_or_default();
@@ -147,18 +164,24 @@ fn rename_batch(pairs: &[(String, String)]) -> usize {
 fn atomic_write(path: &str, content: &str) -> bool {
     let tmp = tmp_path_for(path);
     if !crate::wasm_dispatch::host_write(&tmp, content) {
-        crate::wasm_dispatch::emit_event("memory_md_write_failed", json!({
-            "path": path,
-            "step": "tmp-write",
-        }));
+        crate::wasm_dispatch::emit_event(
+            "memory_md_write_failed",
+            json!({
+                "path": path,
+                "step": "tmp-write",
+            }),
+        );
         return false;
     }
     let renamed = rename_batch(&[(tmp, path.to_string())]) == 1;
     if !renamed {
-        crate::wasm_dispatch::emit_event("memory_md_write_failed", json!({
-            "path": path,
-            "step": "rename",
-        }));
+        crate::wasm_dispatch::emit_event(
+            "memory_md_write_failed",
+            json!({
+                "path": path,
+                "step": "rename",
+            }),
+        );
     }
     renamed
 }
@@ -188,7 +211,11 @@ pub fn write_memory(ns: &str, key: &str, text: &str, now_ms: i64) -> WriteOutcom
     if !atomic_write(&path, &content) {
         return WriteOutcome::Failed(path);
     }
-    if existed { WriteOutcome::Updated(path) } else { WriteOutcome::Created(path) }
+    if existed {
+        WriteOutcome::Updated(path)
+    } else {
+        WriteOutcome::Created(path)
+    }
 }
 
 pub fn delete_memory(ns: &str, key: &str) -> bool {
@@ -214,7 +241,12 @@ pub fn legacy_flat_paths(ns: &str, key: &str) -> Option<(String, String)> {
     if !valid_component(key) {
         return None;
     }
-    legacy_flat_dir(ns).map(|d| (format!("{}/{}.json", d, key), format!("{}-vec/{}.json", d, key)))
+    legacy_flat_dir(ns).map(|d| {
+        (
+            format!("{}/{}.json", d, key),
+            format!("{}-vec/{}.json", d, key),
+        )
+    })
 }
 
 pub fn delete_legacy_flat(ns: &str, key: &str) -> bool {
@@ -239,7 +271,11 @@ fn memo_file_names(dir: &str, suffix: &str) -> Vec<String> {
     };
     let mut names: Vec<String> = entries
         .iter()
-        .filter_map(|e| e.get("name").and_then(|n| n.as_str()).or_else(|| e.as_str()))
+        .filter_map(|e| {
+            e.get("name")
+                .and_then(|n| n.as_str())
+                .or_else(|| e.as_str())
+        })
         .filter(|n| n.ends_with(suffix))
         .map(|n| n.to_string())
         .collect();
@@ -252,7 +288,10 @@ pub fn on_disk_memo_paths(ns: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     if let Some(dir) = md_dir(ns) {
         for name in memo_file_names(&dir, ".md") {
-            out.push((name.trim_end_matches(".md").to_string(), format!("{}/{}", dir, name)));
+            out.push((
+                name.trim_end_matches(".md").to_string(),
+                format!("{}/{}", dir, name),
+            ));
         }
     }
     if let Some(dir) = legacy_flat_dir(ns) {
@@ -260,7 +299,10 @@ pub fn on_disk_memo_paths(ns: &str) -> Vec<(String, String)> {
             if !name.starts_with("mem-") {
                 continue;
             }
-            out.push((name.trim_end_matches(".json").to_string(), format!("{}/{}", dir, name)));
+            out.push((
+                name.trim_end_matches(".json").to_string(),
+                format!("{}/{}", dir, name),
+            ));
         }
     }
     out
@@ -271,26 +313,36 @@ fn vector_table() -> String {
 }
 
 fn meta_table() -> String {
-    crate::ragconfig::RagConfig::resolved().memory_md_tables.meta
+    crate::ragconfig::RagConfig::resolved()
+        .memory_md_tables
+        .meta
 }
 
 fn files_table() -> String {
-    crate::ragconfig::RagConfig::resolved().memory_md_tables.files
+    crate::ragconfig::RagConfig::resolved()
+        .memory_md_tables
+        .files
 }
 
 fn ensure_meta_table() -> Result<(), String> {
     crate::rssearch_vectors::ensure_schema()?;
-    crate::shared_db::shared_exec(
-        &format!("CREATE TABLE IF NOT EXISTS {} (namespace TEXT PRIMARY KEY, digest TEXT)", meta_table()),
-    )
+    crate::shared_db::shared_exec(&format!(
+        "CREATE TABLE IF NOT EXISTS {} (namespace TEXT PRIMARY KEY, digest TEXT)",
+        meta_table()
+    ))
 }
 
 fn meta_digest(ns: &str) -> Option<String> {
     let rows = crate::shared_db::shared_query_params(
         &format!("SELECT digest FROM {} WHERE namespace=?1", meta_table()),
         &[ns],
-    ).ok()?;
-    rows.as_array()?.first()?.get("digest")?.as_str().map(String::from)
+    )
+    .ok()?;
+    rows.as_array()?
+        .first()?
+        .get("digest")?
+        .as_str()
+        .map(String::from)
 }
 
 fn store_meta_digest(ns: &str, digest: &str) {
@@ -315,13 +367,14 @@ pub fn has_stored_digest(namespaces: &[String]) -> bool {
     true
 }
 
-
 const KEYWORD_SCAN_MAX_FILES: usize = 2000;
 const KEYWORD_SCAN_MIN_TERM_LEN: usize = 3;
 const KEYWORD_SCAN_MAX_TERMS: usize = 12;
 
 pub fn keyword_scan(ns: &str, query: &str, limit: usize) -> Value {
-    let Some(dir) = md_dir(ns) else { return Value::Array(Vec::new()) };
+    let Some(dir) = md_dir(ns) else {
+        return Value::Array(Vec::new());
+    };
     let mut terms: Vec<String> = Vec::new();
     for raw in query.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_') {
         let t = raw.to_lowercase();
@@ -341,7 +394,11 @@ pub fn keyword_scan(ns: &str, query: &str, limit: usize) -> Value {
     };
     let mut names: Vec<String> = entries
         .iter()
-        .filter_map(|e| e.get("name").and_then(|n| n.as_str()).or_else(|| e.as_str()))
+        .filter_map(|e| {
+            e.get("name")
+                .and_then(|n| n.as_str())
+                .or_else(|| e.as_str())
+        })
         .filter(|n| n.ends_with(".md"))
         .map(|n| n.to_string())
         .collect();
@@ -355,7 +412,10 @@ pub fn keyword_scan(ns: &str, query: &str, limit: usize) -> Value {
         };
         let Some(doc) = parse(&content) else { continue };
         let lowered = doc.text.to_lowercase();
-        let matched = terms.iter().filter(|t| lowered.contains(t.as_str())).count();
+        let matched = terms
+            .iter()
+            .filter(|t| lowered.contains(t.as_str()))
+            .count();
         if matched == 0 {
             continue;
         }
@@ -379,10 +439,13 @@ pub fn keyword_scan(ns: &str, query: &str, limit: usize) -> Value {
 
 fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>, Vec<(String, String)>), String> {
     let Some(dir) = md_dir(ns) else {
-        crate::wasm_dispatch::emit_event("memory_md_namespace_invalid", json!({
-            "namespace": ns,
-            "reason": "namespace failed valid_component; it has no memories directory",
-        }));
+        crate::wasm_dispatch::emit_event(
+            "memory_md_namespace_invalid",
+            json!({
+                "namespace": ns,
+                "reason": "namespace failed valid_component; it has no memories directory",
+            }),
+        );
         return Err(format!(
             "namespace {:?} is not a valid path component (non-empty, <=200 chars, no \"..\", ASCII alphanumeric plus . _ -)",
             ns
@@ -394,7 +457,11 @@ fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>, Vec<(String, String)
     };
     let mut names: Vec<String> = entries
         .iter()
-        .filter_map(|e| e.get("name").and_then(|n| n.as_str()).or_else(|| e.as_str()))
+        .filter_map(|e| {
+            e.get("name")
+                .and_then(|n| n.as_str())
+                .or_else(|| e.as_str())
+        })
         .filter(|n| n.ends_with(".md"))
         .map(|n| n.to_string())
         .collect();
@@ -417,15 +484,22 @@ fn scan_corpus(ns: &str) -> Result<(String, Vec<MemoryDoc>, Vec<(String, String)
         match parse(&content) {
             Some(doc) => docs.push(doc),
             None => {
-                crate::wasm_dispatch::emit_event("memory_md_parse_failed", json!({
-                    "path": path,
-                    "namespace": ns,
-                }));
+                crate::wasm_dispatch::emit_event(
+                    "memory_md_parse_failed",
+                    json!({
+                        "path": path,
+                        "namespace": ns,
+                    }),
+                );
             }
         }
     }
     docs.sort_by(|a, b| a.key.cmp(&b.key));
-    Ok((format!("{:016x}", crate::hash::fnv1a64(acc.as_bytes())), docs, file_hashes))
+    Ok((
+        format!("{:016x}", crate::hash::fnv1a64(acc.as_bytes())),
+        docs,
+        file_hashes,
+    ))
 }
 
 fn is_malformed(err: &str) -> bool {
@@ -440,9 +514,13 @@ pub fn find_body_hash_duplicate(ns: &str, text: &str) -> Option<String> {
     let normalized = normalize_text(text);
     let own_key = content_key(ns, &normalized);
     let rows = crate::shared_db::shared_query_params(
-        &format!("SELECT key, text FROM {} WHERE namespace=?1 AND deleted=0", vector_table()),
+        &format!(
+            "SELECT key, text FROM {} WHERE namespace=?1 AND deleted=0",
+            vector_table()
+        ),
         &[ns],
-    ).ok()?;
+    )
+    .ok()?;
     for row in rows.as_array()? {
         let key = row.get("key").and_then(|v| v.as_str())?;
         if key == own_key {
@@ -463,12 +541,23 @@ pub fn content_key(ns: &str, text: &str) -> String {
 }
 
 fn extract_embedding(v: &Value) -> Option<Value> {
-    if v.is_array() { return Some(v.clone()); }
-    if let Some(arr) = v.get("embedding") {
-        if arr.is_array() { return Some(arr.clone()); }
+    if v.is_array() {
+        return Some(v.clone());
     }
-    if let Some(emb) = v.get("data").and_then(|d| d.as_array()).and_then(|a| a.first()).and_then(|e| e.get("embedding")) {
-        if emb.is_array() { return Some(emb.clone()); }
+    if let Some(arr) = v.get("embedding") {
+        if arr.is_array() {
+            return Some(arr.clone());
+        }
+    }
+    if let Some(emb) = v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|a| a.first())
+        .and_then(|e| e.get("embedding"))
+    {
+        if emb.is_array() {
+            return Some(emb.clone());
+        }
     }
     None
 }
@@ -479,7 +568,11 @@ fn flat_vec_embedding(ns: &str, key: &str) -> Option<Value> {
     let raw = crate::wasm_dispatch::host_kv_read(&vec_ns, key)?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;
     let emb = extract_embedding(&parsed)?;
-    if emb.as_array().map(|a| a.len()).unwrap_or(0) == cfg.dim() { Some(emb) } else { None }
+    if emb.as_array().map(|a| a.len()).unwrap_or(0) == cfg.dim() {
+        Some(emb)
+    } else {
+        None
+    }
 }
 
 fn remove_batch(paths: &[String]) -> usize {
@@ -491,12 +584,18 @@ fn remove_batch(paths: &[String]) -> usize {
 
 fn recover_malformed_db() -> bool {
     let path = crate::code_index::project_db_path(None);
-    crate::wasm_dispatch::emit_event("memory_md_db_recreated", json!({
-        "path": path,
-        "reason": "database disk image is malformed; derived state dropped for full rebuild",
-    }));
+    crate::wasm_dispatch::emit_event(
+        "memory_md_db_recreated",
+        json!({
+            "path": path,
+            "reason": "database disk image is malformed; derived state dropped for full rebuild",
+        }),
+    );
     if let Err(e) = crate::shared_db::recreate_shared_db(&path) {
-        crate::wasm_dispatch::emit_event("memory_md_db_recreate_failed", json!({ "path": path, "error": e }));
+        crate::wasm_dispatch::emit_event(
+            "memory_md_db_recreate_failed",
+            json!({ "path": path, "error": e }),
+        );
         return false;
     }
     crate::rssearch_vectors::ensure_schema().is_ok() && ensure_meta_table().is_ok()
@@ -514,8 +613,10 @@ fn scan_manifest(ns: &str) -> Option<(String, Vec<(String, String)>)> {
     let opts = "{\"timeoutMs\":30000}";
     let packed = unsafe {
         crate::wasm_dispatch::host_exec_js(
-            code.as_ptr(), code.len() as u32,
-            opts.as_ptr(), opts.len() as u32,
+            code.as_ptr(),
+            code.len() as u32,
+            opts.as_ptr(),
+            opts.len() as u32,
         )
     };
     let out = crate::wasm_dispatch::unpack_to_string_pub(packed).unwrap_or_default();
@@ -530,7 +631,10 @@ fn scan_manifest(ns: &str) -> Option<(String, Vec<(String, String)>)> {
     let mut files = Vec::new();
     for f in manifest.get("files").and_then(|f| f.as_array())? {
         let pair = f.as_array()?;
-        files.push((pair.first()?.as_str()?.to_string(), pair.get(1)?.as_str()?.to_string()));
+        files.push((
+            pair.first()?.as_str()?.to_string(),
+            pair.get(1)?.as_str()?.to_string(),
+        ));
     }
     Some((digest, files))
 }
@@ -544,7 +648,10 @@ fn ensure_files_table() -> Result<(), String> {
 fn stored_file_hashes(ns: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     if let Ok(rows) = crate::shared_db::shared_query_params(
-        &format!("SELECT name, hash FROM {} WHERE namespace=?1", files_table()),
+        &format!(
+            "SELECT name, hash FROM {} WHERE namespace=?1",
+            files_table()
+        ),
         &[ns],
     ) {
         if let Some(arr) = rows.as_array() {
@@ -570,7 +677,10 @@ fn store_file_hash(ns: &str, name: &str, hash: &str) {
 
 fn drop_file_hash(ns: &str, name: &str) {
     let _ = crate::shared_db::shared_exec_params(
-        &format!("DELETE FROM {} WHERE namespace=?1 AND name=?2", files_table()),
+        &format!(
+            "DELETE FROM {} WHERE namespace=?1 AND name=?2",
+            files_table()
+        ),
         &[ns, name],
     );
 }
@@ -606,7 +716,8 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
         }
         converged = false;
         let known = stored_file_hashes(ns);
-        let manifest_names: std::collections::HashSet<String> = files.iter().map(|(n, _)| n.clone()).collect();
+        let manifest_names: std::collections::HashSet<String> =
+            files.iter().map(|(n, _)| n.clone()).collect();
         let mut removed_keys = 0u32;
         for (name, _) in &known {
             if !manifest_names.contains(name) {
@@ -634,7 +745,9 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
         let mut rekey_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut processed_hashes: Vec<(String, String)> = Vec::new();
         let mut flat_by_content: Option<std::collections::HashMap<String, String>> = None;
-        let flat_embedding_for = |doc_key: &str, cache: &mut Option<std::collections::HashMap<String, String>>| -> Option<Value> {
+        let flat_embedding_for = |doc_key: &str,
+                                  cache: &mut Option<std::collections::HashMap<String, String>>|
+         -> Option<Value> {
             if let Some(e) = flat_vec_embedding(ns, doc_key) {
                 return Some(e);
             }
@@ -647,43 +760,74 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                 }
                 *cache = Some(map);
             }
-            cache.as_ref()
+            cache
+                .as_ref()
                 .and_then(|m| m.get(doc_key))
                 .and_then(|old_key| flat_vec_embedding(ns, old_key))
         };
-        let write_row = |key: &str, text: &str, emb: &Value, updated: i64,
-                         upserted: &mut u32, failed: &mut u32, shadow_failed: &mut u32| -> i8 {
+        let write_row = |key: &str,
+                         text: &str,
+                         emb: &Value,
+                         updated: i64,
+                         upserted: &mut u32,
+                         failed: &mut u32,
+                         shadow_failed: &mut u32|
+         -> i8 {
             match crate::rssearch_vectors::write(ns, key, text, emb, updated) {
-                Ok(()) => { *upserted += 1; 0 }
+                Ok(()) => {
+                    *upserted += 1;
+                    0
+                }
                 Err(e) => {
-                    if is_malformed(&e) { return 1; }
+                    if is_malformed(&e) {
+                        return 1;
+                    }
                     *failed += 1;
-                    if is_shadow_row(&e) { *shadow_failed += 1; }
-                    crate::wasm_dispatch::emit_event("memory_md_sync_row_failed", json!({
-                        "namespace": ns, "key": key, "error": e,
-                    }));
-                    if *shadow_failed >= budget_shadow_abort { 2 } else { 0 }
+                    if is_shadow_row(&e) {
+                        *shadow_failed += 1;
+                    }
+                    crate::wasm_dispatch::emit_event(
+                        "memory_md_sync_row_failed",
+                        json!({
+                            "namespace": ns, "key": key, "error": e,
+                        }),
+                    );
+                    if *shadow_failed >= budget_shadow_abort {
+                        2
+                    } else {
+                        0
+                    }
                 }
             }
         };
         for (name, hash) in &changed {
-            let total_elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+            let total_elapsed =
+                unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
             if total_elapsed > budget.total_budget_ms {
                 deferred += 1;
                 continue;
             }
-            let dir = match md_dir(ns) { Some(d) => d, None => break };
+            let dir = match md_dir(ns) {
+                Some(d) => d,
+                None => break,
+            };
             let path = format!("{}/{}", dir, name);
             let content = match host_read(&path) {
                 Some(c) => c,
-                None => { deferred += 1; continue; }
+                None => {
+                    deferred += 1;
+                    continue;
+                }
             };
             let doc = match parse(&content) {
                 Some(d) => d,
                 None => {
-                    crate::wasm_dispatch::emit_event("memory_md_parse_failed", json!({
-                        "path": path, "namespace": ns,
-                    }));
+                    crate::wasm_dispatch::emit_event(
+                        "memory_md_parse_failed",
+                        json!({
+                            "path": path, "namespace": ns,
+                        }),
+                    );
                     processed_hashes.push((name.to_string(), hash.to_string()));
                     continue;
                 }
@@ -697,12 +841,18 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                 rekeyed += 1;
                 let new_path = match md_path(ns, &expected) {
                     Some(p) => p,
-                    None => { failed += 1; continue; }
+                    None => {
+                        failed += 1;
+                        continue;
+                    }
                 };
                 rekey_pairs.push((path.clone(), new_path.clone()));
                 if rekey_targets.insert(expected.clone()) {
                     if host_read(&new_path).is_none() {
-                        rekey_new_files.push((new_path, compose(&expected, ns, doc.created, doc.updated, &doc.text)));
+                        rekey_new_files.push((
+                            new_path,
+                            compose(&expected, ns, doc.created, doc.updated, &doc.text),
+                        ));
                     }
                     if let Some(emb) = flat_embedding_for(&doc.key, &mut flat_by_content) {
                         rekey_rows.push((expected.clone(), doc.text.clone(), emb, doc.updated));
@@ -718,7 +868,9 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                     vector_table()
                 ),
                 &[ns, &doc.key],
-            ).ok().and_then(|r| r.as_array().and_then(|a| a.first().cloned()));
+            )
+            .ok()
+            .and_then(|r| r.as_array().and_then(|a| a.first().cloned()));
             match row {
                 Some(r) => {
                     let text = r.get("text").and_then(|v| v.as_str()).unwrap_or("");
@@ -739,21 +891,28 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                         processed_hashes.push((name.to_string(), hash.to_string()));
                     } else if text == doc.text {
                         match crate::rssearch_vectors::undelete(ns, &doc.key, doc.updated) {
-                            Ok(()) => { resurrected += 1; processed_hashes.push((name.to_string(), hash.to_string())); }
+                            Ok(()) => {
+                                resurrected += 1;
+                                processed_hashes.push((name.to_string(), hash.to_string()));
+                            }
                             Err(_) => failed += 1,
                         }
                     } else {
                         failed += 1;
-                        crate::wasm_dispatch::emit_event("memory_md_key_text_mismatch", json!({
-                            "namespace": ns, "key": doc.key,
-                        }));
+                        crate::wasm_dispatch::emit_event(
+                            "memory_md_key_text_mismatch",
+                            json!({
+                                "namespace": ns, "key": doc.key,
+                            }),
+                        );
                     }
                 }
                 None => {
                     let emb = match flat_embedding_for(&doc.key, &mut flat_by_content) {
                         Some(e) => Some(e),
                         None => {
-                            let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+                            let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }
+                                .saturating_sub(started);
                             if elapsed > budget.embed_budget_ms && embeds > 0 {
                                 deferred += 1;
                                 continue;
@@ -764,25 +923,38 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                     };
                     match emb {
                         Some(emb) => {
-                            match write_row(&doc.key, &doc.text, &emb, doc.updated, &mut upserted, &mut failed, &mut shadow_failed) {
+                            match write_row(
+                                &doc.key,
+                                &doc.text,
+                                &emb,
+                                doc.updated,
+                                &mut upserted,
+                                &mut failed,
+                                &mut shadow_failed,
+                            ) {
                                 0 => processed_hashes.push((name.to_string(), hash.to_string())),
                                 1 => {
                                     converged = false;
                                     if !recreated {
                                         recreated = true;
                                         if recover_malformed_db() {
-                                            report.push(json!({ "namespace": ns, "recreated": true }));
+                                            report.push(
+                                                json!({ "namespace": ns, "recreated": true }),
+                                            );
                                             continue 'ns;
                                         }
                                     }
                                     break 'ns;
                                 }
                                 _ => {
-                                    crate::wasm_dispatch::emit_event("memory_md_sync_aborted", json!({
-                                        "namespace": ns,
-                                        "reason": "repeated vector-index shadow-row failures; pass abandoned without digest store, will retry next sync",
-                                        "shadow_failed": shadow_failed,
-                                    }));
+                                    crate::wasm_dispatch::emit_event(
+                                        "memory_md_sync_aborted",
+                                        json!({
+                                            "namespace": ns,
+                                            "reason": "repeated vector-index shadow-row failures; pass abandoned without digest store, will retry next sync",
+                                            "shadow_failed": shadow_failed,
+                                        }),
+                                    );
                                     report.push(json!({ "namespace": ns, "aborted": true, "shadow_failed": shadow_failed }));
                                     continue 'ns;
                                 }
@@ -790,9 +962,12 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                         }
                         None => {
                             failed += 1;
-                            crate::wasm_dispatch::emit_event("memory_md_sync_embed_failed", json!({
-                                "namespace": ns, "key": doc.key,
-                            }));
+                            crate::wasm_dispatch::emit_event(
+                                "memory_md_sync_embed_failed",
+                                json!({
+                                    "namespace": ns, "key": doc.key,
+                                }),
+                            );
                         }
                     }
                 }
@@ -806,19 +981,31 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                 .map(|(old_path, _)| old_path.clone())
                 .collect();
             let removed = remove_batch(&verified_removals);
-            crate::wasm_dispatch::emit_event("memory_md_rekeyed_batch", json!({
-                "namespace": ns,
-                "rekeyed": rekeyed,
-                "files_written": wrote,
-                "files_removed": removed,
-                "removals_skipped_unverified": rekey_pairs.len().saturating_sub(verified_removals.len()),
-            }));
+            crate::wasm_dispatch::emit_event(
+                "memory_md_rekeyed_batch",
+                json!({
+                    "namespace": ns,
+                    "rekeyed": rekeyed,
+                    "files_written": wrote,
+                    "files_removed": removed,
+                    "removals_skipped_unverified": rekey_pairs.len().saturating_sub(verified_removals.len()),
+                }),
+            );
             for (key, text, emb, updated) in &rekey_rows {
-                let total_elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
+                let total_elapsed =
+                    unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
                 if total_elapsed > budget.rekey_rows_deadline_within_total() {
                     break;
                 }
-                let rc = write_row(key, text, emb, *updated, &mut upserted, &mut failed, &mut shadow_failed);
+                let rc = write_row(
+                    key,
+                    text,
+                    emb,
+                    *updated,
+                    &mut upserted,
+                    &mut failed,
+                    &mut shadow_failed,
+                );
                 if rc != 0 {
                     break;
                 }
@@ -833,7 +1020,10 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                 .map(|n| n.trim_end_matches(".md").to_string())
                 .collect();
             if let Ok(rows) = crate::shared_db::shared_query_params(
-                &format!("SELECT key FROM {} WHERE namespace=?1 AND deleted=0", vector_table()),
+                &format!(
+                    "SELECT key FROM {} WHERE namespace=?1 AND deleted=0",
+                    vector_table()
+                ),
                 &[ns],
             ) {
                 if let Some(arr) = rows.as_array() {
@@ -849,20 +1039,26 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
             store_meta_digest(ns, &digest);
         } else if deferred > 0 && failed == 0 && rekeyed == 0 {
             store_meta_digest(ns, &format!("{}:partial={}", digest, deferred));
-            crate::wasm_dispatch::emit_event("memory_md_sync_partial", json!({
-                "namespace": ns,
-                "deferred": deferred,
-                "rekeyed": rekeyed,
-                "upserted": upserted,
-                "note": "partial digest stored; orphan prune withheld until a fully converged pass",
-            }));
+            crate::wasm_dispatch::emit_event(
+                "memory_md_sync_partial",
+                json!({
+                    "namespace": ns,
+                    "deferred": deferred,
+                    "rekeyed": rekeyed,
+                    "upserted": upserted,
+                    "note": "partial digest stored; orphan prune withheld until a fully converged pass",
+                }),
+            );
         } else if deferred > 0 || rekeyed > 0 {
-            crate::wasm_dispatch::emit_event("memory_md_sync_partial", json!({
-                "namespace": ns,
-                "deferred": deferred,
-                "rekeyed": rekeyed,
-                "upserted": upserted,
-            }));
+            crate::wasm_dispatch::emit_event(
+                "memory_md_sync_partial",
+                json!({
+                    "namespace": ns,
+                    "deferred": deferred,
+                    "rekeyed": rekeyed,
+                    "upserted": upserted,
+                }),
+            );
         }
         report.push(json!({
             "namespace": ns,
@@ -878,7 +1074,9 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
     }
     let _ = now_ms;
     match crate::vecns::index_left_dirty_by_shadow_rows() {
-        Some(index) => json!({ "converged": converged, "report": report, "vector_index_rebuilt": index }),
+        Some(index) => {
+            json!({ "converged": converged, "report": report, "vector_index_rebuilt": index })
+        }
         None => json!({ "converged": converged, "report": report }),
     }
 }
@@ -903,7 +1101,10 @@ pub fn flat_kv_entries(ns: &str) -> Vec<(String, String)> {
 }
 
 fn flat_mtime_ms(ns: &str, key: &str) -> Option<i64> {
-    for dir in [format!(".gm/disciplines/{}-vec", ns), format!(".gm/disciplines/{}", ns)] {
+    for dir in [
+        format!(".gm/disciplines/{}-vec", ns),
+        format!(".gm/disciplines/{}", ns),
+    ] {
         let path = format!("{}/{}.json", dir, key);
         if let Some(st) = host_stat(&path) {
             if let Some(m) = st.get("mtime_ms").and_then(|v| v.as_f64()) {
@@ -917,7 +1118,9 @@ fn flat_mtime_ms(ns: &str, key: &str) -> Option<i64> {
 const EXPORT_BATCH_MAX: usize = 200;
 
 fn rename_batch_chunk() -> usize {
-    crate::ragconfig::RagConfig::resolved().memory_sync.rename_batch_chunk
+    crate::ragconfig::RagConfig::resolved()
+        .memory_sync
+        .rename_batch_chunk
 }
 
 fn flat_store_digest(entries: &[(String, String)]) -> (String, usize) {
@@ -934,12 +1137,22 @@ fn flat_store_digest(entries: &[(String, String)]) -> (String, usize) {
         acc.push_str(&format!("{:016x}", crate::hash::fnv1a64(v.as_bytes())));
         acc.push('\0');
     }
-    (format!("{:016x}:n={}", crate::hash::fnv1a64(acc.as_bytes()), keyed.len()), keyed.len())
+    (
+        format!(
+            "{:016x}:n={}",
+            crate::hash::fnv1a64(acc.as_bytes()),
+            keyed.len()
+        ),
+        keyed.len(),
+    )
 }
 
 fn export_marker_digest(marker_body: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(marker_body).ok()?;
-    parsed.get("digest").and_then(|v| v.as_str()).map(String::from)
+    parsed
+        .get("digest")
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 fn atomic_write_batch(files: &[(String, String)]) -> usize {
@@ -979,7 +1192,10 @@ pub fn export_flat_json(ns: &str, now_ms: i64) -> Value {
         }
         let path = match md_path(ns, key) {
             Some(p) => p,
-            None => { skipped += 1; continue; }
+            None => {
+                skipped += 1;
+                continue;
+            }
         };
         if host_read(&path).is_some() {
             skipped += 1;
@@ -997,20 +1213,26 @@ pub fn export_flat_json(ns: &str, now_ms: i64) -> Value {
     if complete {
         let marker_body = json!({ "digest": current_digest, "total": total }).to_string();
         if atomic_write(&marker, &marker_body) {
-            crate::wasm_dispatch::emit_event("memory_md_exported", json!({
-                "namespace": ns,
-                "exported": exported,
-                "skipped": skipped,
-                "total": total,
-            }));
+            crate::wasm_dispatch::emit_event(
+                "memory_md_exported",
+                json!({
+                    "namespace": ns,
+                    "exported": exported,
+                    "skipped": skipped,
+                    "total": total,
+                }),
+            );
         }
     } else if deferred > 0 {
-        crate::wasm_dispatch::emit_event("memory_md_export_partial", json!({
-            "namespace": ns,
-            "exported": exported,
-            "deferred": deferred,
-            "total": total,
-        }));
+        crate::wasm_dispatch::emit_event(
+            "memory_md_export_partial",
+            json!({
+                "namespace": ns,
+                "exported": exported,
+                "deferred": deferred,
+                "total": total,
+            }),
+        );
     }
     json!({ "exported": exported, "skipped": skipped, "deferred": deferred, "namespace": ns, "total": total })
 }

@@ -1,7 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
+use crate::wasm_dispatch::{host_log, host_read, host_write};
 use serde_json::{json, Value};
-use crate::wasm_dispatch::{host_read, host_log, host_write};
 
 pub const GATE_LONG_GAP_NO_INSTRUCTION_DEFAULT: &str = "long-gap-no-instruction: {gap_ms}ms since last `instruction` dispatch (threshold {threshold_ms}ms). Idle mid-chain is a deviation. Dispatch `instruction` for recovery prose before any other verb.";
 
@@ -47,17 +47,40 @@ pub struct GateVerdict {
 
 impl GateVerdict {
     fn allow() -> Self {
-        Self { allowed: true, reason: None, await_result: false, pending_step_id: None, pending_step_full: None, residuals: vec![], next_dispatch: None }
+        Self {
+            allowed: true,
+            reason: None,
+            await_result: false,
+            pending_step_id: None,
+            pending_step_full: None,
+            residuals: vec![],
+            next_dispatch: None,
+        }
     }
     fn deny(reason: String) -> Self {
-        Self { allowed: false, reason: Some(reason), await_result: false, pending_step_id: None, pending_step_full: None, residuals: vec![], next_dispatch: None }
+        Self {
+            allowed: false,
+            reason: Some(reason),
+            await_result: false,
+            pending_step_id: None,
+            pending_step_full: None,
+            residuals: vec![],
+            next_dispatch: None,
+        }
     }
     fn with_next(mut self, next: &str) -> Self {
         self.next_dispatch = Some(next.to_string());
         self
     }
     pub fn to_denial_json(&self, verb: &str) -> Value {
-        let next: &str = self.next_dispatch.as_deref().unwrap_or(if self.await_result { "memorize-continue" } else { "instruction" });
+        let next: &str = self
+            .next_dispatch
+            .as_deref()
+            .unwrap_or(if self.await_result {
+                "memorize-continue"
+            } else {
+                "instruction"
+            });
         let reason_with_hint = format!(
             "{} - dispatch `{}` for recovery; do not improvise around this denial.",
             self.reason.clone().unwrap_or_default(),
@@ -95,30 +118,78 @@ fn now_ms() -> u64 {
 
 fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
     let s = s.trim();
-    if s.is_empty() { return (String::new(), 0, 0); }
+    if s.is_empty() {
+        return (String::new(), 0, 0);
+    }
     let mut parts = s.splitn(3, '|');
     let verb = parts.next().unwrap_or("").to_string();
-    let count = parts.next().and_then(|c| c.trim().parse::<u32>().ok()).unwrap_or(0);
-    let ts = parts.next().and_then(|t| t.trim().parse::<u64>().ok()).unwrap_or(0);
+    let count = parts
+        .next()
+        .and_then(|c| c.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    let ts = parts
+        .next()
+        .and_then(|t| t.trim().parse::<u64>().ok())
+        .unwrap_or(0);
     (verb, count, ts)
 }
 
 const LONGGAP_EXEMPT_READ_ONLY_VERBS: &[&str] = &[
-    "codesearch", "search", "code_search", "recall", "memorize-fire", "git_status", "git_log", "git_diff", "git_show",
+    "codesearch",
+    "search",
+    "code_search",
+    "recall",
+    "memorize-fire",
+    "git_status",
+    "git_log",
+    "git_diff",
+    "git_show",
     "git_remote",
-    "branch_status", "ci-status", "fs_read", "fs_stat", "fs_readdir", "status",
+    "branch_status",
+    "ci-status",
+    "fs_read",
+    "fs_stat",
+    "fs_readdir",
+    "status",
 ];
 
 const LONGGAP_EXEMPT_WORK_VERBS: &[&str] = &[
-    "exec_js", "nodejs", "javascript", "node", "js", "typescript", "bash", "sh", "shell", "zsh",
-    "python", "py", "powershell", "ps1", "go", "rust", "c", "cpp", "java", "deno",
-    "git_add", "git_commit", "git_fetch", "git_push", "git_finalize",
+    "exec_js",
+    "nodejs",
+    "javascript",
+    "node",
+    "js",
+    "typescript",
+    "bash",
+    "sh",
+    "shell",
+    "zsh",
+    "python",
+    "py",
+    "powershell",
+    "ps1",
+    "go",
+    "rust",
+    "c",
+    "cpp",
+    "java",
+    "deno",
+    "git_add",
+    "git_commit",
+    "git_fetch",
+    "git_push",
+    "git_finalize",
 ];
 
 fn long_gap_chain_belongs_to_this_session(policy: &crate::orchestrator::fsm::Policy) -> bool {
     let state = crate::orchestrator::state::read_state();
-    if state.phase.as_str() == policy.terminal_phase { return false; }
-    match (&state.session_id, crate::orchestrator::state::dispatch_session_id()) {
+    if state.phase.as_str() == policy.terminal_phase {
+        return false;
+    }
+    match (
+        &state.session_id,
+        crate::orchestrator::state::dispatch_session_id(),
+    ) {
         (Some(owner), Some(caller)) => *owner == caller,
         _ => true,
     }
@@ -129,7 +200,9 @@ fn is_longgap_activity_exempt(verb: &str, policy: &crate::orchestrator::fsm::Pol
 }
 
 fn is_longgap_denial_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
-    LONGGAP_EXEMPT_READ_ONLY_VERBS.contains(&verb) || LONGGAP_EXEMPT_WORK_VERBS.contains(&verb) || is_longgap_activity_exempt(verb, policy)
+    LONGGAP_EXEMPT_READ_ONLY_VERBS.contains(&verb)
+        || LONGGAP_EXEMPT_WORK_VERBS.contains(&verb)
+        || is_longgap_activity_exempt(verb, policy)
 }
 
 fn is_longgap_refresh(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
@@ -137,13 +210,18 @@ fn is_longgap_refresh(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> 
 }
 
 pub fn dispatch_serves_no_phase_prose(verb: &str, body: &Value) -> bool {
-    verb == "instruction" && crate::orchestrator::instructions::body_requests_investigate_readonly(body)
+    verb == "instruction"
+        && crate::orchestrator::instructions::body_requests_investigate_readonly(body)
 }
 
 fn dispatch_submitted_at_ms() -> Option<u64> {
     let key = "AGENTPLUG_DISPATCH_SUBMITTED_AT_MS";
     let packed = unsafe { crate::wasm_dispatch::host_env_get(key.as_ptr(), key.len() as u32) };
-    crate::wasm_dispatch::unpack_to_string_pub(packed)?.trim().parse::<u64>().ok().filter(|ms| *ms > 0)
+    crate::wasm_dispatch::unpack_to_string_pub(packed)?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|ms| *ms > 0)
 }
 
 pub fn restamp_last_dispatch_to_completion(verb: &str) {
@@ -151,11 +229,21 @@ pub fn restamp_last_dispatch_to_completion(verb: &str) {
     if is_longgap_activity_exempt(verb, &policy) {
         return;
     }
-    let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-dispatch-ts"), &now_ms().to_string());
+    let _ = crate::wasm_dispatch::host_write(
+        &crate::pkfs::anchor(".gm/last-dispatch-ts"),
+        &now_ms().to_string(),
+    );
 }
 
-fn long_gap_should_fire(last_instruction_ms: u64, prev_dispatch_ms: u64, now: u64, threshold: u64) -> bool {
-    if last_instruction_ms == 0 { return false; }
+fn long_gap_should_fire(
+    last_instruction_ms: u64,
+    prev_dispatch_ms: u64,
+    now: u64,
+    threshold: u64,
+) -> bool {
+    if last_instruction_ms == 0 {
+        return false;
+    }
     let idle_since_instruction = now.saturating_sub(last_instruction_ms) > threshold;
     let idle_since_any = prev_dispatch_ms == 0 || now.saturating_sub(prev_dispatch_ms) > threshold;
     idle_since_instruction && idle_since_any
@@ -163,7 +251,9 @@ fn long_gap_should_fire(last_instruction_ms: u64, prev_dispatch_ms: u64, now: u6
 
 fn log_deviation(event: &str, detail: &str) {
     let msg = format!("plugkit gate: {} {}", event, detail);
-    unsafe { host_log(2, msg.as_ptr(), msg.len() as u32); }
+    unsafe {
+        host_log(2, msg.as_ptr(), msg.len() as u32);
+    }
     let registered = crate::orchestrator::deviations::kind_is_known(event);
     let severity = crate::orchestrator::deviations::effective_severity(event);
     let mut payload = json!({
@@ -181,17 +271,31 @@ fn log_deviation(event: &str, detail: &str) {
         }
     }
     let evt_line = format!("evt: {}", payload);
-    unsafe { host_log(1, evt_line.as_ptr(), evt_line.len() as u32); }
+    unsafe {
+        host_log(1, evt_line.as_ptr(), evt_line.len() as u32);
+    }
 }
 
 fn parse_pending_step() -> Option<(String, u64)> {
     let content = host_read(&crate::pkfs::anchor(".gm/turn-state.json")).unwrap_or_default();
-    if content.is_empty() { return None; }
+    if content.is_empty() {
+        return None;
+    }
     let v: Value = serde_json::from_str(&content).ok()?;
-    let step_id = v.get("pending_step_id").and_then(|s| s.as_str())?.to_string();
-    if step_id.is_empty() { return None; }
-    let deadline = v.get("pending_step_deadline_ms").and_then(|n| n.as_u64()).unwrap_or(0);
-    if deadline > 0 && now_ms() > deadline { return None; }
+    let step_id = v
+        .get("pending_step_id")
+        .and_then(|s| s.as_str())?
+        .to_string();
+    if step_id.is_empty() {
+        return None;
+    }
+    let deadline = v
+        .get("pending_step_deadline_ms")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0);
+    if deadline > 0 && now_ms() > deadline {
+        return None;
+    }
     Some((step_id, deadline))
 }
 
@@ -216,14 +320,19 @@ fn read_pending_step_full() -> Option<Value> {
 fn body_path_field(body: &Value) -> Option<String> {
     for k in &["file_path", "filePath", "path"] {
         if let Some(s) = body.get(*k).and_then(|v| v.as_str()) {
-            if !s.is_empty() { return Some(s.to_string()); }
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
         }
     }
     None
 }
 
 fn current_phase_key() -> String {
-    crate::orchestrator::state::read_state().phase.as_str().to_string()
+    crate::orchestrator::state::read_state()
+        .phase
+        .as_str()
+        .to_string()
 }
 
 fn is_transition_to_complete(verb: &str, body: &Value) -> bool {
@@ -243,21 +352,39 @@ fn effective_severity_is_deny(kind: &str) -> bool {
 fn is_synthetic_test_path(rel: &str) -> bool {
     let norm = rel.replace('\\', "/").to_lowercase();
     let segments: Vec<&str> = norm.split('/').filter(|s| !s.is_empty()).collect();
-    let Some(file) = segments.last() else { return false };
-    if segments.iter().rev().skip(1).any(|s| *s == "test" || *s == "tests" || *s == "__tests__" || *s == "spec") {
+    let Some(file) = segments.last() else {
+        return false;
+    };
+    if segments
+        .iter()
+        .rev()
+        .skip(1)
+        .any(|s| *s == "test" || *s == "tests" || *s == "__tests__" || *s == "spec")
+    {
         return true;
     }
     let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
-    stem.ends_with(".test") || stem.ends_with(".spec")
-        || stem.ends_with("_test") || stem.ends_with("_spec")
+    stem.ends_with(".test")
+        || stem.ends_with(".spec")
+        || stem.ends_with("_test")
+        || stem.ends_with("_spec")
 }
 
 fn is_unsolicited_toplevel_doc(rel: &str) -> bool {
     let norm = rel.replace('\\', "/");
-    if norm.contains('/') { return false; }
-    let lower_ext_is_doc = norm.to_lowercase().ends_with(".md") || norm.to_lowercase().ends_with(".txt");
-    if !lower_ext_is_doc { return false; }
-    !crate::orchestrator::fsm::graph().policy.toplevel_doc_allowlist.iter().any(|a| a.eq_ignore_ascii_case(&norm))
+    if norm.contains('/') {
+        return false;
+    }
+    let lower_ext_is_doc =
+        norm.to_lowercase().ends_with(".md") || norm.to_lowercase().ends_with(".txt");
+    if !lower_ext_is_doc {
+        return false;
+    }
+    !crate::orchestrator::fsm::graph()
+        .policy
+        .toplevel_doc_allowlist
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(&norm))
 }
 
 fn extract_substitution_bodies(cmd: &str) -> Vec<String> {
@@ -275,7 +402,9 @@ fn extract_substitution_bodies(cmd: &str) -> Vec<String> {
                     ')' => depth -= 1,
                     _ => {}
                 }
-                if depth > 0 { j += 1; }
+                if depth > 0 {
+                    j += 1;
+                }
             }
             bodies.push(bytes[start..j.min(bytes.len())].iter().collect());
             i = if j < bytes.len() { j + 1 } else { bytes.len() };
@@ -299,7 +428,10 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     let policy = crate::orchestrator::fsm::graph().policy;
     if let Some(step_id) = read_pending_step() {
         if !policy.await_allowed_verbs.iter().any(|v| v == verb) {
-            log_deviation("await-result-violation", &format!("verb={} step={}", verb, step_id));
+            log_deviation(
+                "await-result-violation",
+                &format!("verb={} step={}", verb, step_id),
+            );
             let mut v = GateVerdict::deny(format!(
                 "pipeline suspended at step_id={}; only memorize-continue advances state. \
                  The full pending_step recovery payload is embedded in this response as `pending_step_full` \
@@ -318,14 +450,19 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
 
     let shell_policy = policy.clone();
     if shell_policy.deny_shell_git && shell_policy.shell_verbs.iter().any(|v| v == verb) {
-        let cmd = body.get("command").and_then(|v| v.as_str())
+        let cmd = body
+            .get("command")
+            .and_then(|v| v.as_str())
             .or_else(|| body.get("code").and_then(|v| v.as_str()))
             .or_else(|| body.get("script").and_then(|v| v.as_str()))
             .unwrap_or("");
         let is_git_token = |first: &str| {
-            first == "git" || first == "git.exe"
-                || first.ends_with("/git") || first.ends_with("\\git")
-                || first.ends_with("/git.exe") || first.ends_with("\\git.exe")
+            first == "git"
+                || first == "git.exe"
+                || first.ends_with("/git")
+                || first.ends_with("\\git")
+                || first.ends_with("/git.exe")
+                || first.ends_with("\\git.exe")
         };
         let git_dominant = cmd
             .split([';', '\n', '|', '&'])
@@ -344,7 +481,14 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 })
         });
         if git_dominant || git_in_subshell {
-            log_deviation("bash-git-bypass", &format!("verb={} cmd={}", verb, cmd.chars().take(80).collect::<String>()));
+            log_deviation(
+                "bash-git-bypass",
+                &format!(
+                    "verb={} cmd={}",
+                    verb,
+                    cmd.chars().take(80).collect::<String>()
+                ),
+            );
             return GateVerdict::deny(format!(
                 "bash-git-bypass: a `{}` verb invoking `git` is denied - git is a first-class spool surface, not a shell command. Use the git verb instead: \
                  git_status (porcelain), git_log, git_diff, git_show, git_branch (inspect); git_add, git_commit, git_finalize (stage/commit/push in one), git_push (push w/ rebase-retry); git_checkout (switch a ref, or restore only the given paths), git_fetch, git_rm, git_revert, git_reset (mutate); git_stash, git_stash_pop, git_stash_drop, git_stash_list (shelve); git_init (turn a non-repo directory into a repo). \
@@ -355,33 +499,73 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     }
 
     let claim_ms = now_ms();
-    let submitted_at_ms = dispatch_submitted_at_ms().map(|ms| ms.min(claim_ms)).unwrap_or(claim_ms);
+    let submitted_at_ms = dispatch_submitted_at_ms()
+        .map(|ms| ms.min(claim_ms))
+        .unwrap_or(claim_ms);
 
     let serves_no_phase_prose = dispatch_serves_no_phase_prose(verb, body);
-    let prev_dispatch_ms: u64 = if !is_longgap_activity_exempt(verb, &policy) && !serves_no_phase_prose {
-        let p = host_read(&crate::pkfs::anchor(".gm/last-dispatch-ts")).unwrap_or_default().trim().parse().unwrap_or(0);
-        let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-dispatch-ts"), &claim_ms.to_string());
-        p
-    } else { 0 };
+    let prev_dispatch_ms: u64 =
+        if !is_longgap_activity_exempt(verb, &policy) && !serves_no_phase_prose {
+            let p = host_read(&crate::pkfs::anchor(".gm/last-dispatch-ts"))
+                .unwrap_or_default()
+                .trim()
+                .parse()
+                .unwrap_or(0);
+            let _ = crate::wasm_dispatch::host_write(
+                &crate::pkfs::anchor(".gm/last-dispatch-ts"),
+                &claim_ms.to_string(),
+            );
+            p
+        } else {
+            0
+        };
 
     if is_longgap_refresh(verb, &policy) && !serves_no_phase_prose {
-        let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/last-instruction-ts"), &claim_ms.to_string());
-        let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/long-gap-retry-state"), "");
+        let _ = crate::wasm_dispatch::host_write(
+            &crate::pkfs::anchor(".gm/last-instruction-ts"),
+            &claim_ms.to_string(),
+        );
+        let _ =
+            crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/long-gap-retry-state"), "");
     } else if !is_longgap_denial_exempt(verb, &policy) && !serves_no_phase_prose {
         let last = host_read(&crate::pkfs::anchor(".gm/last-instruction-ts")).unwrap_or_default();
         let last_ms: u64 = last.trim().parse().unwrap_or(0);
         let longgap_threshold_ms = policy.longgap_threshold_ms;
-        if long_gap_should_fire(last_ms, prev_dispatch_ms, submitted_at_ms, longgap_threshold_ms) && long_gap_chain_belongs_to_this_session(&policy) {
+        if long_gap_should_fire(
+            last_ms,
+            prev_dispatch_ms,
+            submitted_at_ms,
+            longgap_threshold_ms,
+        ) && long_gap_chain_belongs_to_this_session(&policy)
+        {
             let gap_ms = submitted_at_ms.saturating_sub(last_ms);
-            let retry_state = host_read(&crate::pkfs::anchor(".gm/long-gap-retry-state")).unwrap_or_default();
+            let retry_state =
+                host_read(&crate::pkfs::anchor(".gm/long-gap-retry-state")).unwrap_or_default();
             let (last_verb, count, last_denial_ts) = parse_retry_state_v2(&retry_state);
             let since_last_denial = submitted_at_ms.saturating_sub(last_denial_ts);
-            let same_burst = last_denial_ts > 0 && since_last_denial <= policy.long_gap_same_burst_ms;
-            let new_count = if last_verb == verb && since_last_denial > policy.long_gap_same_burst_ms { count + 1 } else if last_verb == verb { count } else { 1u32 };
-            let _ = crate::wasm_dispatch::host_write(&crate::pkfs::anchor(".gm/long-gap-retry-state"), &format!("{}|{}|{}", verb, new_count, claim_ms));
+            let same_burst =
+                last_denial_ts > 0 && since_last_denial <= policy.long_gap_same_burst_ms;
+            let new_count =
+                if last_verb == verb && since_last_denial > policy.long_gap_same_burst_ms {
+                    count + 1
+                } else if last_verb == verb {
+                    count
+                } else {
+                    1u32
+                };
+            let _ = crate::wasm_dispatch::host_write(
+                &crate::pkfs::anchor(".gm/long-gap-retry-state"),
+                &format!("{}|{}|{}", verb, new_count, claim_ms),
+            );
             if new_count >= policy.long_gap_retry_escalate_after {
                 if !same_burst {
-                    log_deviation("long-gap-retry-without-instruction", &format!("verb={} consecutive_retries={} gap_ms={}", verb, new_count, gap_ms));
+                    log_deviation(
+                        "long-gap-retry-without-instruction",
+                        &format!(
+                            "verb={} consecutive_retries={} gap_ms={}",
+                            verb, new_count, gap_ms
+                        ),
+                    );
                 }
                 return GateVerdict::deny(format!(
                     "long-gap-retry-without-instruction: verb=`{}` denied {}x in a row by long-gap-no-instruction gate, yet the agent retried instead of dispatching `instruction`. The gate's `next_dispatch` field names the recovery verb - when it says `instruction`, the next verb IS `instruction`, not the same verb again. Dispatch `instruction` now; the chain cannot recover by re-attempting the denied verb.",
@@ -389,36 +573,35 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 ));
             }
             if !same_burst {
-                log_deviation("long-gap-no-instruction", &format!("verb={} gap_ms={}", verb, gap_ms));
+                log_deviation(
+                    "long-gap-no-instruction",
+                    &format!("verb={} gap_ms={}", verb, gap_ms),
+                );
             }
-            return GateVerdict::deny(
-                crate::prose::fill_placeholders(
+            return GateVerdict::deny(crate::prose::fill_placeholders(
+                "gates/long-gap-no-instruction",
+                &crate::prose::resolve_and_mark(
                     "gates/long-gap-no-instruction",
-                    &crate::prose::resolve_and_mark(
-                        "gates/long-gap-no-instruction",
-                        GATE_LONG_GAP_NO_INSTRUCTION_DEFAULT,
-                    ),
-                    &[
-                        ("gap_ms", gap_ms.to_string()),
-                        ("threshold_ms", longgap_threshold_ms.to_string()),
-                    ],
+                    GATE_LONG_GAP_NO_INSTRUCTION_DEFAULT,
                 ),
-            );
+                &[
+                    ("gap_ms", gap_ms.to_string()),
+                    ("threshold_ms", longgap_threshold_ms.to_string()),
+                ],
+            ));
         }
     }
 
     let is_complete_transition = is_transition_to_complete(verb, body);
 
     let requested_to_phase = if verb == "transition" {
-        body.get("to")
-            .and_then(|v| v.as_str())
-            .map(|s| {
-                if s.eq_ignore_ascii_case("stop") {
-                    policy.terminal_phase.clone()
-                } else {
-                    s.to_ascii_uppercase()
-                }
-            })
+        body.get("to").and_then(|v| v.as_str()).map(|s| {
+            if s.eq_ignore_ascii_case("stop") {
+                policy.terminal_phase.clone()
+            } else {
+                s.to_ascii_uppercase()
+            }
+        })
     } else {
         None
     };
@@ -426,10 +609,14 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     if let Some(to) = requested_to_phase {
         let from = current_phase_key();
         let to = to.as_str();
-        let (residuals, next_recovery) = crate::orchestrator::transitions::gate_residuals(&from, to);
+        let (residuals, next_recovery) =
+            crate::orchestrator::transitions::gate_residuals(&from, to);
         if !residuals.is_empty() {
             let gate_key = to.to_ascii_lowercase();
-            log_deviation("gate-deny", &format!("{}-gate residuals={}", gate_key, residuals.len()));
+            log_deviation(
+                "gate-deny",
+                &format!("{}-gate residuals={}", gate_key, residuals.len()),
+            );
             let repeat_count = record_gate_repeat(&gate_key, "gate-deny");
             let label = if to == policy.terminal_phase {
                 "stop-gate".to_string()
@@ -438,9 +625,16 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             };
             let mut reason = format!("{} residuals: {}", label, residuals.join("; "));
             if repeat_count >= policy.gate_repeat_escalate_threshold {
-                log_deviation("stuck-loop-escalation", &format!("gate={} repeat_count={}", gate_key, repeat_count));
-                log_deviation("self-reconfig-candidate", &format!("gate={} repeat_count={}", gate_key, repeat_count));
-                let friction_query = format!("gate {} stuck loop {}", gate_key, residuals.join(" "));
+                log_deviation(
+                    "stuck-loop-escalation",
+                    &format!("gate={} repeat_count={}", gate_key, repeat_count),
+                );
+                log_deviation(
+                    "self-reconfig-candidate",
+                    &format!("gate={} repeat_count={}", gate_key, repeat_count),
+                );
+                let friction_query =
+                    format!("gate {} stuck loop {}", gate_key, residuals.join(" "));
                 let historical_hits = crate::orchestrator::recall::recall_hits(&friction_query, 5);
                 let n_historical = historical_hits.as_array().map(|a| a.len()).unwrap_or(0);
                 reason = format!(
@@ -488,12 +682,27 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             if let Ok(v) = serde_json::from_str::<Value>(&body_s) {
                 if let Some(items) = v.get("items").and_then(|v| v.as_array()) {
                     for it in items {
-                        let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                        if crate::orchestrator::prd::status_is_open(status) { continue; }
-                        let witness = it.get("witness_evidence").or_else(|| it.get("witness")).and_then(|v| v.as_str()).unwrap_or("");
+                        let status = it
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("pending");
+                        if crate::orchestrator::prd::status_is_open(status) {
+                            continue;
+                        }
+                        let witness = it
+                            .get("witness_evidence")
+                            .or_else(|| it.get("witness"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         if witness.trim().is_empty() {
                             let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                            log_deviation("prd-anti-shape", &format!("id={} status={} no witness_evidence on closing transition", id, status));
+                            log_deviation(
+                                "prd-anti-shape",
+                                &format!(
+                                    "id={} status={} no witness_evidence on closing transition",
+                                    id, status
+                                ),
+                            );
                             anti_shape.push(id.to_string());
                         }
                     }

@@ -5,11 +5,15 @@ use super::gm_dir;
 use crate::pkfs;
 
 fn manifest_path(namespace: &str) -> std::path::PathBuf {
-    gm_dir().join("memories-manifest").join(format!("{namespace}.json"))
+    gm_dir()
+        .join("memories-manifest")
+        .join(format!("{namespace}.json"))
 }
 
 fn fiber_state_path(namespace: &str) -> std::path::PathBuf {
-    gm_dir().join("memories-manifest").join(format!("{namespace}.fiber-state.json"))
+    gm_dir()
+        .join("memories-manifest")
+        .join(format!("{namespace}.fiber-state.json"))
 }
 
 fn declared_depends_on(namespace: &str) -> Vec<String> {
@@ -18,7 +22,11 @@ fn declared_depends_on(namespace: &str) -> Vec<String> {
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|v| v.get("depends_on").cloned())
         .and_then(|v| v.as_array().cloned())
-        .map(|arr| arr.into_iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .map(|arr| {
+            arr.into_iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -59,10 +67,16 @@ pub fn active_namespace_set(known: &[String]) -> ActiveFiberSet {
 
 fn known_namespaces() -> Vec<String> {
     let mut out = vec!["default".to_string()];
-    let base = gm_dir().join("memories-manifest").to_string_lossy().to_string();
+    let base = gm_dir()
+        .join("memories-manifest")
+        .to_string_lossy()
+        .to_string();
     if let Some(serde_json::Value::Array(entries)) = pkfs::readdir(&base) {
         for entry in entries {
-            let name = entry.get("name").and_then(|n| n.as_str()).or_else(|| entry.as_str());
+            let name = entry
+                .get("name")
+                .and_then(|n| n.as_str())
+                .or_else(|| entry.as_str());
             if let Some(name) = name {
                 if let Some(ns) = name.strip_suffix(".json") {
                     if !ns.ends_with(".fiber-state") && !out.iter().any(|n| n == ns) {

@@ -12,7 +12,8 @@ struct ResolvedEntry {
     config: RagConfig,
 }
 
-static RESOLVED_CACHE: Mutex<Option<std::collections::HashMap<String, ResolvedEntry>>> = Mutex::new(None);
+static RESOLVED_CACHE: Mutex<Option<std::collections::HashMap<String, ResolvedEntry>>> =
+    Mutex::new(None);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VecTableNames {
@@ -22,11 +23,17 @@ pub struct VecTableNames {
 
 impl VecTableNames {
     pub fn new(table: &str, index: &str) -> Self {
-        VecTableNames { table: table.to_string(), index: index.to_string() }
+        VecTableNames {
+            table: table.to_string(),
+            index: index.to_string(),
+        }
     }
 
     pub fn with_conventional_vec_index(table: &str) -> Self {
-        VecTableNames { table: table.to_string(), index: format!("{}_vec", table) }
+        VecTableNames {
+            table: table.to_string(),
+            index: format!("{}_vec", table),
+        }
     }
 }
 
@@ -69,13 +76,20 @@ pub struct QueryBudgetConfig {
 
 impl Default for QueryBudgetConfig {
     fn default() -> Self {
-        QueryBudgetConfig { pool_multiplier: 5, pool_floor: 20, default_limit: 8, default_k: 10 }
+        QueryBudgetConfig {
+            pool_multiplier: 5,
+            pool_floor: 20,
+            default_limit: 8,
+            default_k: 10,
+        }
     }
 }
 
 impl QueryBudgetConfig {
     pub fn pool(&self, limit: usize) -> usize {
-        limit.saturating_mul(self.pool_multiplier).max(self.pool_floor)
+        limit
+            .saturating_mul(self.pool_multiplier)
+            .max(self.pool_floor)
     }
 }
 
@@ -124,7 +138,10 @@ pub struct EmbedDimConfig {
 
 impl Default for EmbedDimConfig {
     fn default() -> Self {
-        EmbedDimConfig { dim: 384, keep_mismatched_table_intact_instead_of_dropping: false }
+        EmbedDimConfig {
+            dim: 384,
+            keep_mismatched_table_intact_instead_of_dropping: false,
+        }
     }
 }
 
@@ -134,12 +151,15 @@ impl EmbedDimConfig {
             return false;
         }
         let will_drop = !self.keep_mismatched_table_intact_instead_of_dropping;
-        crate::wasm_dispatch::emit_event("embed_dim_mismatch", json!({
-            "table": table,
-            "old_dim": found_dim,
-            "new_dim": self.dim,
-            "will_drop": will_drop,
-        }));
+        crate::wasm_dispatch::emit_event(
+            "embed_dim_mismatch",
+            json!({
+                "table": table,
+                "old_dim": found_dim,
+                "new_dim": self.dim,
+                "will_drop": will_drop,
+            }),
+        );
         will_drop
     }
 }
@@ -192,12 +212,16 @@ impl IndexConfig {
 
     pub fn skips_dir_segment(&self, seg: &str, builtins: &[&str]) -> bool {
         builtins.iter().any(|d| seg == *d)
-            || self.extra_skip_dirs_appended_to_builtins_never_replacing.iter().any(|d| seg == d.as_str())
+            || self
+                .extra_skip_dirs_appended_to_builtins_never_replacing
+                .iter()
+                .any(|d| seg == d.as_str())
     }
 
     pub fn skips_filename(&self, name: &str, builtins: &[&str]) -> bool {
         builtins.iter().any(|suf| name.ends_with(suf))
-            || self.extra_skip_file_suffixes_appended_to_builtins_never_replacing
+            || self
+                .extra_skip_file_suffixes_appended_to_builtins_never_replacing
                 .iter()
                 .any(|suf| !suf.is_empty() && name.ends_with(suf.as_str()))
     }
@@ -211,7 +235,10 @@ pub struct DbPathConfig {
 
 impl Default for DbPathConfig {
     fn default() -> Self {
-        DbPathConfig { state_root_dir: ".gm".to_string(), db_filename: "gm.db".to_string() }
+        DbPathConfig {
+            state_root_dir: ".gm".to_string(),
+            db_filename: "gm.db".to_string(),
+        }
     }
 }
 
@@ -353,14 +380,34 @@ pub struct BrowserWitnessConfig {
 impl Default for BrowserWitnessConfig {
     fn default() -> Self {
         BrowserWitnessConfig {
-            always_browser_extensions_regardless_of_directory: [".html", ".htm", ".tsx", ".jsx", ".vue", ".svelte"]
-                .iter().map(|s| s.to_string()).collect(),
-            conditional_extensions_only_under_browser_dir_prefixes: [".mjs", ".cjs", ".js", ".ts", ".css", ".scss", ".sass"]
-                .iter().map(|s| s.to_string()).collect(),
+            always_browser_extensions_regardless_of_directory: [
+                ".html", ".htm", ".tsx", ".jsx", ".vue", ".svelte",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            conditional_extensions_only_under_browser_dir_prefixes: [
+                ".mjs", ".cjs", ".js", ".ts", ".css", ".scss", ".sass",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             browser_dir_prefixes_normalized_slash_lowercase: [
-                "public/", "site/", "app/", "pages/", "components/", "client/", "web/",
-                "src/frontend/", "packages/web-app/", "frontend/", "webapp/",
-            ].iter().map(|s| s.to_string()).collect(),
+                "public/",
+                "site/",
+                "app/",
+                "pages/",
+                "components/",
+                "client/",
+                "web/",
+                "src/frontend/",
+                "packages/web-app/",
+                "frontend/",
+                "webapp/",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         }
     }
 }
@@ -390,12 +437,16 @@ impl Default for InstructionPayloadConfig {
             max_marker_age_ms: 6 * 60 * 60 * 1000,
             orient_noun_limit: 5,
             orient_stopwords_compared_lowercase: [
-                "the","a","an","to","of","in","on","for","and","or","is","are","was","were",
-                "be","been","being","do","does","did","have","has","had","i","you","we","they",
-                "it","this","that","these","those","with","from","as","at","by","but","if",
-                "then","so","can","could","would","should","will","shall","may","might",
-                "please","me","my","our","your","their","his","her",
-            ].iter().map(|s| s.to_string()).collect(),
+                "the", "a", "an", "to", "of", "in", "on", "for", "and", "or", "is", "are", "was",
+                "were", "be", "been", "being", "do", "does", "did", "have", "has", "had", "i",
+                "you", "we", "they", "it", "this", "that", "these", "those", "with", "from", "as",
+                "at", "by", "but", "if", "then", "so", "can", "could", "would", "should", "will",
+                "shall", "may", "might", "please", "me", "my", "our", "your", "their", "his",
+                "her",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         }
     }
 }
@@ -438,11 +489,20 @@ pub struct ClaimAuditConfig {
 impl Default for ClaimAuditConfig {
     fn default() -> Self {
         ClaimAuditConfig {
-            shipped_claim_markers_matched_case_insensitive_substring: ["shipped", "validated", "confirmed live", "landed in", "fixed in", "live-witnessed"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            scan_paths_relative_to_project_root_missing_is_skip_not_error: vec!["AGENTS.md".to_string()],
+            shipped_claim_markers_matched_case_insensitive_substring: [
+                "shipped",
+                "validated",
+                "confirmed live",
+                "landed in",
+                "fixed in",
+                "live-witnessed",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            scan_paths_relative_to_project_root_missing_is_skip_not_error: vec![
+                "AGENTS.md".to_string()
+            ],
         }
     }
 }
@@ -451,28 +511,53 @@ fn apply_project_local_index_overlay(project_root: &str, index: &mut IndexConfig
     let path = if project_root.is_empty() {
         ".gm/index-config.json".to_string()
     } else {
-        format!("{}/.gm/index-config.json", project_root.trim_end_matches('/').trim_end_matches('\\'))
+        format!(
+            "{}/.gm/index-config.json",
+            project_root.trim_end_matches('/').trim_end_matches('\\')
+        )
     };
-    let Some(raw) = crate::pkfs::read_to_string(&path) else { return };
-    if raw.trim().is_empty() { return }
+    let Some(raw) = crate::pkfs::read_to_string(&path) else {
+        return;
+    };
+    if raw.trim().is_empty() {
+        return;
+    }
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        crate::wasm_dispatch::emit_event("index_config_overlay_unparseable", serde_json::json!({
-            "path": path,
-            "effect": "the overlay is being ignored entirely; the resolved tier's index settings stand unchanged",
-        }));
-        return
+        crate::wasm_dispatch::emit_event(
+            "index_config_overlay_unparseable",
+            serde_json::json!({
+                "path": path,
+                "effect": "the overlay is being ignored entirely; the resolved tier's index settings stand unchanged",
+            }),
+        );
+        return;
     };
     let append = |key: &str, into: &mut Vec<String>| {
-        let Some(arr) = v.get(key).and_then(|x| x.as_array()) else { return };
-        for s in arr.iter().filter_map(|x| x.as_str()).filter(|s| !s.is_empty()) {
+        let Some(arr) = v.get(key).and_then(|x| x.as_array()) else {
+            return;
+        };
+        for s in arr
+            .iter()
+            .filter_map(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+        {
             if !into.iter().any(|existing| existing == s) {
                 into.push(s.to_string());
             }
         }
     };
-    append("force_include_path_substrings", &mut index.force_include_path_substrings_overriding_every_skip);
-    append("extra_skip_dirs", &mut index.extra_skip_dirs_appended_to_builtins_never_replacing);
-    append("extra_skip_file_suffixes", &mut index.extra_skip_file_suffixes_appended_to_builtins_never_replacing);
+    append(
+        "force_include_path_substrings",
+        &mut index.force_include_path_substrings_overriding_every_skip,
+    );
+    append(
+        "extra_skip_dirs",
+        &mut index.extra_skip_dirs_appended_to_builtins_never_replacing,
+    );
+    append(
+        "extra_skip_file_suffixes",
+        &mut index.extra_skip_file_suffixes_appended_to_builtins_never_replacing,
+    );
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -510,7 +595,9 @@ impl Default for RagConfig {
             rssearch: VecTableNames::with_conventional_vec_index("rssearch_vectors"),
             git_commits: VecTableNames::with_conventional_vec_index("git_commit_vectors"),
             code_chunks: VecTableNames::with_conventional_vec_index("code_chunks"),
-            legacy_memories_alongside_code_chunks: VecTableNames::with_conventional_vec_index("memories"),
+            legacy_memories_alongside_code_chunks: VecTableNames::with_conventional_vec_index(
+                "memories",
+            ),
             claim_audit: ClaimAuditConfig::default(),
             pipeline: PipelineConfig::default(),
             instruction_payload: InstructionPayloadConfig::default(),
@@ -554,180 +641,636 @@ impl RagConfig {
         let mut cfg = RagConfig::default();
         let mut problems: Vec<String> = Vec::new();
 
-        let overwrite_present_usize_or_record_problem = |parent: &str, key: &str, out: &mut usize, problems: &mut Vec<String>| {
-            if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
-                match found.as_u64() {
-                    Some(n) => *out = n as usize,
-                    None => problems.push(format!("{parent}.{key} must be a non-negative integer, got {found}")),
+        let overwrite_present_usize_or_record_problem =
+            |parent: &str, key: &str, out: &mut usize, problems: &mut Vec<String>| {
+                if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
+                    match found.as_u64() {
+                        Some(n) => *out = n as usize,
+                        None => problems.push(format!(
+                            "{parent}.{key} must be a non-negative integer, got {found}"
+                        )),
+                    }
                 }
-            }
-        };
-        let overwrite_present_u64_or_record_problem = |parent: &str, key: &str, out: &mut u64, problems: &mut Vec<String>| {
-            if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
-                match found.as_u64() {
-                    Some(n) => *out = n,
-                    None => problems.push(format!("{parent}.{key} must be a non-negative integer, got {found}")),
-                }
-            }
-        };
-
-        let overwrite_present_f64_or_record_problem = |parent: &str, key: &str, out: &mut f64, problems: &mut Vec<String>| {
-            if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
-                match found.as_f64() {
-                    Some(n) => *out = n,
-                    None => problems.push(format!("{parent}.{key} must be a number, got {found}")),
-                }
-            }
-        };
-        let overwrite_present_bool_or_record_problem = |parent: &str, key: &str, out: &mut bool, problems: &mut Vec<String>| {
-            if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
-                match found.as_bool() {
-                    Some(b) => *out = b,
-                    None => problems.push(format!("{parent}.{key} must be a boolean, got {found}")),
-                }
-            }
-        };
-        let overwrite_present_i64_or_record_problem = |parent: &str, key: &str, out: &mut i64, problems: &mut Vec<String>| {
-            if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
-                match found.as_i64() {
-                    Some(n) => *out = n,
-                    None => problems.push(format!("{parent}.{key} must be an integer, got {found}")),
-                }
-            }
-        };
-        let overwrite_present_string_or_record_problem = |parent: &str, key: &str, out: &mut String, problems: &mut Vec<String>| {
-            if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
-                match found.as_str() {
-                    Some(s) => *out = s.to_string(),
-                    None => problems.push(format!("{parent}.{key} must be a string, got {found}")),
-                }
-            }
-        };
-        let append_present_strings_or_record_problem = |parent: &str, key: &str, out: &mut Vec<String>, problems: &mut Vec<String>| {
-            let found = match v.get(parent).and_then(|p| p.get(key)) {
-                Some(f) => f,
-                None => return,
             };
-            match found.as_array() {
-                Some(items) => {
-                    for item in items {
-                        match item.as_str() {
-                            Some(s) => out.push(s.to_string()),
-                            None => problems.push(format!("{parent}.{key} entries must be strings, got {item}")),
+        let overwrite_present_u64_or_record_problem =
+            |parent: &str, key: &str, out: &mut u64, problems: &mut Vec<String>| {
+                if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
+                    match found.as_u64() {
+                        Some(n) => *out = n,
+                        None => problems.push(format!(
+                            "{parent}.{key} must be a non-negative integer, got {found}"
+                        )),
+                    }
+                }
+            };
+
+        let overwrite_present_f64_or_record_problem =
+            |parent: &str, key: &str, out: &mut f64, problems: &mut Vec<String>| {
+                if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
+                    match found.as_f64() {
+                        Some(n) => *out = n,
+                        None => {
+                            problems.push(format!("{parent}.{key} must be a number, got {found}"))
                         }
                     }
                 }
-                None => problems.push(format!("{parent}.{key} must be an array of strings, got {found}")),
-            }
-        };
+            };
+        let overwrite_present_bool_or_record_problem =
+            |parent: &str, key: &str, out: &mut bool, problems: &mut Vec<String>| {
+                if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
+                    match found.as_bool() {
+                        Some(b) => *out = b,
+                        None => {
+                            problems.push(format!("{parent}.{key} must be a boolean, got {found}"))
+                        }
+                    }
+                }
+            };
+        let overwrite_present_i64_or_record_problem =
+            |parent: &str, key: &str, out: &mut i64, problems: &mut Vec<String>| {
+                if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
+                    match found.as_i64() {
+                        Some(n) => *out = n,
+                        None => {
+                            problems.push(format!("{parent}.{key} must be an integer, got {found}"))
+                        }
+                    }
+                }
+            };
+        let overwrite_present_string_or_record_problem =
+            |parent: &str, key: &str, out: &mut String, problems: &mut Vec<String>| {
+                if let Some(found) = v.get(parent).and_then(|p| p.get(key)) {
+                    match found.as_str() {
+                        Some(s) => *out = s.to_string(),
+                        None => {
+                            problems.push(format!("{parent}.{key} must be a string, got {found}"))
+                        }
+                    }
+                }
+            };
+        let append_present_strings_or_record_problem =
+            |parent: &str, key: &str, out: &mut Vec<String>, problems: &mut Vec<String>| {
+                let found = match v.get(parent).and_then(|p| p.get(key)) {
+                    Some(f) => f,
+                    None => return,
+                };
+                match found.as_array() {
+                    Some(items) => {
+                        for item in items {
+                            match item.as_str() {
+                                Some(s) => out.push(s.to_string()),
+                                None => problems.push(format!(
+                                    "{parent}.{key} entries must be strings, got {item}"
+                                )),
+                            }
+                        }
+                    }
+                    None => problems.push(format!(
+                        "{parent}.{key} must be an array of strings, got {found}"
+                    )),
+                }
+            };
 
-        overwrite_present_u64_or_record_problem("index", "wall_budget_ms", &mut cfg.index.wall_budget_ms, &mut problems);
-        overwrite_present_u64_or_record_problem("index", "incremental_topup_wall_budget_ms", &mut cfg.index.incremental_topup_wall_budget_ms, &mut problems);
-        overwrite_present_usize_or_record_problem("index", "max_file_bytes", &mut cfg.index.max_file_bytes, &mut problems);
-        overwrite_present_usize_or_record_problem("index", "max_chunks_per_file_per_pass", &mut cfg.index.max_chunks_embedded_per_file_per_pass_count_bound_only, &mut problems);
-        overwrite_present_u64_or_record_problem("index", "pessimistic_ms_per_chunk", &mut cfg.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound, &mut problems);
-        overwrite_present_usize_or_record_problem("index", "oversized_chunk_split_threshold", &mut cfg.index.split_chunk_above_bytes, &mut problems);
-        append_present_strings_or_record_problem("index", "extra_skip_dirs", &mut cfg.index.extra_skip_dirs_appended_to_builtins_never_replacing, &mut problems);
-        append_present_strings_or_record_problem("index", "extra_skip_file_suffixes", &mut cfg.index.extra_skip_file_suffixes_appended_to_builtins_never_replacing, &mut problems);
-        append_present_strings_or_record_problem("index", "force_include_path_substrings", &mut cfg.index.force_include_path_substrings_overriding_every_skip, &mut problems);
-        overwrite_present_usize_or_record_problem("index", "prune_enumeration_cap", &mut cfg.index.prune_enumeration_file_cap, &mut problems);
-        overwrite_present_usize_or_record_problem("index", "digest_max_files", &mut cfg.index.digest_max_files, &mut problems);
-        overwrite_present_usize_or_record_problem("index", "prune_pass_file_limit_floor", &mut cfg.index.prune_pass_file_limit_floor, &mut problems);
-        overwrite_present_usize_or_record_problem("index", "prune_pass_file_limit_ceiling", &mut cfg.index.prune_pass_file_limit_ceiling, &mut problems);
-        overwrite_present_bool_or_record_problem("index", "likely_orphaned_symbol_scan_enabled", &mut cfg.index.likely_orphaned_symbol_scan_enabled, &mut problems);
-        overwrite_present_bool_or_record_problem("retention", "auto_vacuum_enabled", &mut cfg.retention.auto_vacuum_enabled, &mut problems);
-        overwrite_present_f64_or_record_problem("retention", "tombstone_ratio_threshold", &mut cfg.retention.tombstone_ratio_threshold, &mut problems);
-        overwrite_present_u64_or_record_problem("retention", "tombstone_count_threshold", &mut cfg.retention.tombstone_count_threshold, &mut problems);
-        overwrite_present_u64_or_record_problem("memory_sync", "embed_budget_ms", &mut cfg.memory_sync.embed_budget_ms, &mut problems);
-        overwrite_present_u64_or_record_problem("memory_sync", "total_budget_ms", &mut cfg.memory_sync.total_budget_ms, &mut problems);
-        overwrite_present_u64_or_record_problem("memory_sync", "rekey_rows_deadline_ms", &mut cfg.memory_sync.rekey_rows_deadline_ms, &mut problems);
-        overwrite_present_usize_or_record_problem("memory_sync", "rekey_batch_max", &mut cfg.memory_sync.rekey_batch_max, &mut problems);
-        overwrite_present_usize_or_record_problem("memory_sync", "rename_batch_chunk", &mut cfg.memory_sync.rename_batch_chunk, &mut problems);
-        overwrite_present_usize_or_record_problem("embed", "query_cache_cap_entries", &mut cfg.embed_cache.query_cache_capacity, &mut problems);
-        overwrite_present_i64_or_record_problem("embed", "query_cache_ttl_ms", &mut cfg.embed_cache.query_cache_ttl_ms, &mut problems);
-        overwrite_present_usize_or_record_problem("embed", "plain_cache_max_text", &mut cfg.embed_cache.plain_cache_max_text_bytes, &mut problems);
-        overwrite_present_u64_or_record_problem("rssearch", "migrate_budget_ms", &mut cfg.bulk_embed.flat_json_migration_budget_ms, &mut problems);
-        overwrite_present_usize_or_record_problem("rssearch", "migrate_reported_failures", &mut cfg.bulk_embed.rssearch_migrate_reported_failures, &mut problems);
-        overwrite_present_u64_or_record_problem("git_commits", "embed_budget_ms", &mut cfg.bulk_embed.git_commit_embed_budget_ms, &mut problems);
-        overwrite_present_usize_or_record_problem("git_commits", "min_embeds_per_pass", &mut cfg.bulk_embed.git_commit_min_embeds_per_pass, &mut problems);
-        overwrite_present_usize_or_record_problem("git_commits", "diff_char_cap", &mut cfg.bulk_embed.git_commit_diff_char_cap, &mut problems);
-        overwrite_present_usize_or_record_problem("git_commits", "log_window", &mut cfg.bulk_embed.git_commit_log_window, &mut problems);
-        overwrite_present_usize_or_record_problem("git_commits", "max_consecutive_embed_failures", &mut cfg.bulk_embed.git_commit_max_consecutive_embed_failures, &mut problems);
-        overwrite_present_u64_or_record_problem("git_commits", "sync_hard_ceiling_ms", &mut cfg.bulk_embed.git_commit_sync_hard_ceiling_ms, &mut problems);
-        overwrite_present_usize_or_record_problem("git_commits", "full_diff_max_changed_lines", &mut cfg.bulk_embed.git_commit_full_diff_max_changed_lines, &mut problems);
-        overwrite_present_usize_or_record_problem("git_commits", "full_diff_max_files", &mut cfg.bulk_embed.git_commit_full_diff_max_files, &mut problems);
-        overwrite_present_usize_or_record_problem("embed", "max_subbatch_items", &mut cfg.bulk_embed.max_subbatch_items, &mut problems);
-        overwrite_present_string_or_record_problem("memory_md_tables", "meta", &mut cfg.memory_md_tables.meta, &mut problems);
-        overwrite_present_string_or_record_problem("memory_md_tables", "files", &mut cfg.memory_md_tables.files, &mut problems);
-        overwrite_present_string_or_record_problem("db_path", "state_root_dir", &mut cfg.db_path.state_root_dir, &mut problems);
-        overwrite_present_string_or_record_problem("db_path", "db_filename", &mut cfg.db_path.db_filename, &mut problems);
-        overwrite_present_f64_or_record_problem("scoring", "bm25_k1", &mut cfg.scoring.bm25_k1_term_frequency_saturation, &mut problems);
-        overwrite_present_f64_or_record_problem("scoring", "bm25_b", &mut cfg.scoring.bm25_b_document_length_normalization, &mut problems);
-        overwrite_present_f64_or_record_problem("scoring", "fusion_rrf_k", &mut cfg.scoring.fusion_rrf_k, &mut problems);
-        overwrite_present_f64_or_record_problem("scoring", "fusion_identifier_boost", &mut cfg.scoring.fusion_identifier_boost, &mut problems);
-        overwrite_present_f64_or_record_problem("scoring", "fusion_vector_list_weight", &mut cfg.scoring.fusion_vector_list_weight, &mut problems);
-        overwrite_present_f64_or_record_problem("scoring", "recency_floor", &mut cfg.scoring.recency_floor, &mut problems);
-        overwrite_present_f64_or_record_problem("scoring", "cos_floor", &mut cfg.scoring.cos_floor_applied_before_recency_rescue, &mut problems);
-        overwrite_present_f64_or_record_problem("scoring", "dedup_jaccard_threshold", &mut cfg.scoring.dedup_jaccard_near_duplicate_threshold, &mut problems);
-        overwrite_present_f64_or_record_problem("scoring", "half_life_ms", &mut cfg.scoring.half_life_ms, &mut problems);
-        overwrite_present_usize_or_record_problem("memory", "embed_dim", &mut cfg.embed.dim, &mut problems);
-        overwrite_present_usize_or_record_problem("memory", "recall_limit", &mut cfg.budget.default_limit, &mut problems);
-        overwrite_present_usize_or_record_problem("memory", "pool_multiplier", &mut cfg.budget.pool_multiplier, &mut problems);
-        overwrite_present_usize_or_record_problem("memory", "pool_floor", &mut cfg.budget.pool_floor, &mut problems);
-        overwrite_present_usize_or_record_problem("memory", "default_k", &mut cfg.budget.default_k, &mut problems);
-        overwrite_present_u64_or_record_problem("pipeline", "ttl_ms", &mut cfg.pipeline.ttl_ms, &mut problems);
-        overwrite_present_usize_or_record_problem("pipeline", "summarize_threshold", &mut cfg.pipeline.summarize_threshold, &mut problems);
-        overwrite_present_usize_or_record_problem("pipeline", "max_result_bytes", &mut cfg.pipeline.max_result_bytes_advertised_and_enforced_by_one_field, &mut problems);
-        overwrite_present_string_or_record_problem("pipeline", "summarize_prompt_template", &mut cfg.pipeline.summarize_prompt_template, &mut problems);
-        overwrite_present_usize_or_record_problem("pipeline", "summarize_target_chars", &mut cfg.pipeline.summarize_target_chars, &mut problems);
-        overwrite_present_usize_or_record_problem("pipeline", "summarize_max_summary_chars", &mut cfg.pipeline.summarize_max_summary_chars, &mut problems);
-        overwrite_present_usize_or_record_problem("pipeline", "summarize_input_char_cap", &mut cfg.pipeline.summarize_input_char_cap, &mut problems);
-        overwrite_present_u64_or_record_problem("pipeline", "max_attempts", &mut cfg.pipeline.max_attempts, &mut problems);
+        overwrite_present_u64_or_record_problem(
+            "index",
+            "wall_budget_ms",
+            &mut cfg.index.wall_budget_ms,
+            &mut problems,
+        );
+        overwrite_present_u64_or_record_problem(
+            "index",
+            "incremental_topup_wall_budget_ms",
+            &mut cfg.index.incremental_topup_wall_budget_ms,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "index",
+            "max_file_bytes",
+            &mut cfg.index.max_file_bytes,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "index",
+            "max_chunks_per_file_per_pass",
+            &mut cfg
+                .index
+                .max_chunks_embedded_per_file_per_pass_count_bound_only,
+            &mut problems,
+        );
+        overwrite_present_u64_or_record_problem(
+            "index",
+            "pessimistic_ms_per_chunk",
+            &mut cfg
+                .index
+                .pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "index",
+            "oversized_chunk_split_threshold",
+            &mut cfg.index.split_chunk_above_bytes,
+            &mut problems,
+        );
+        append_present_strings_or_record_problem(
+            "index",
+            "extra_skip_dirs",
+            &mut cfg
+                .index
+                .extra_skip_dirs_appended_to_builtins_never_replacing,
+            &mut problems,
+        );
+        append_present_strings_or_record_problem(
+            "index",
+            "extra_skip_file_suffixes",
+            &mut cfg
+                .index
+                .extra_skip_file_suffixes_appended_to_builtins_never_replacing,
+            &mut problems,
+        );
+        append_present_strings_or_record_problem(
+            "index",
+            "force_include_path_substrings",
+            &mut cfg
+                .index
+                .force_include_path_substrings_overriding_every_skip,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "index",
+            "prune_enumeration_cap",
+            &mut cfg.index.prune_enumeration_file_cap,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "index",
+            "digest_max_files",
+            &mut cfg.index.digest_max_files,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "index",
+            "prune_pass_file_limit_floor",
+            &mut cfg.index.prune_pass_file_limit_floor,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "index",
+            "prune_pass_file_limit_ceiling",
+            &mut cfg.index.prune_pass_file_limit_ceiling,
+            &mut problems,
+        );
+        overwrite_present_bool_or_record_problem(
+            "index",
+            "likely_orphaned_symbol_scan_enabled",
+            &mut cfg.index.likely_orphaned_symbol_scan_enabled,
+            &mut problems,
+        );
+        overwrite_present_bool_or_record_problem(
+            "retention",
+            "auto_vacuum_enabled",
+            &mut cfg.retention.auto_vacuum_enabled,
+            &mut problems,
+        );
+        overwrite_present_f64_or_record_problem(
+            "retention",
+            "tombstone_ratio_threshold",
+            &mut cfg.retention.tombstone_ratio_threshold,
+            &mut problems,
+        );
+        overwrite_present_u64_or_record_problem(
+            "retention",
+            "tombstone_count_threshold",
+            &mut cfg.retention.tombstone_count_threshold,
+            &mut problems,
+        );
+        overwrite_present_u64_or_record_problem(
+            "memory_sync",
+            "embed_budget_ms",
+            &mut cfg.memory_sync.embed_budget_ms,
+            &mut problems,
+        );
+        overwrite_present_u64_or_record_problem(
+            "memory_sync",
+            "total_budget_ms",
+            &mut cfg.memory_sync.total_budget_ms,
+            &mut problems,
+        );
+        overwrite_present_u64_or_record_problem(
+            "memory_sync",
+            "rekey_rows_deadline_ms",
+            &mut cfg.memory_sync.rekey_rows_deadline_ms,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "memory_sync",
+            "rekey_batch_max",
+            &mut cfg.memory_sync.rekey_batch_max,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "memory_sync",
+            "rename_batch_chunk",
+            &mut cfg.memory_sync.rename_batch_chunk,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "embed",
+            "query_cache_cap_entries",
+            &mut cfg.embed_cache.query_cache_capacity,
+            &mut problems,
+        );
+        overwrite_present_i64_or_record_problem(
+            "embed",
+            "query_cache_ttl_ms",
+            &mut cfg.embed_cache.query_cache_ttl_ms,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "embed",
+            "plain_cache_max_text",
+            &mut cfg.embed_cache.plain_cache_max_text_bytes,
+            &mut problems,
+        );
+        overwrite_present_u64_or_record_problem(
+            "rssearch",
+            "migrate_budget_ms",
+            &mut cfg.bulk_embed.flat_json_migration_budget_ms,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "rssearch",
+            "migrate_reported_failures",
+            &mut cfg.bulk_embed.rssearch_migrate_reported_failures,
+            &mut problems,
+        );
+        overwrite_present_u64_or_record_problem(
+            "git_commits",
+            "embed_budget_ms",
+            &mut cfg.bulk_embed.git_commit_embed_budget_ms,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "git_commits",
+            "min_embeds_per_pass",
+            &mut cfg.bulk_embed.git_commit_min_embeds_per_pass,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "git_commits",
+            "diff_char_cap",
+            &mut cfg.bulk_embed.git_commit_diff_char_cap,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "git_commits",
+            "log_window",
+            &mut cfg.bulk_embed.git_commit_log_window,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "git_commits",
+            "max_consecutive_embed_failures",
+            &mut cfg.bulk_embed.git_commit_max_consecutive_embed_failures,
+            &mut problems,
+        );
+        overwrite_present_u64_or_record_problem(
+            "git_commits",
+            "sync_hard_ceiling_ms",
+            &mut cfg.bulk_embed.git_commit_sync_hard_ceiling_ms,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "git_commits",
+            "full_diff_max_changed_lines",
+            &mut cfg.bulk_embed.git_commit_full_diff_max_changed_lines,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "git_commits",
+            "full_diff_max_files",
+            &mut cfg.bulk_embed.git_commit_full_diff_max_files,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "embed",
+            "max_subbatch_items",
+            &mut cfg.bulk_embed.max_subbatch_items,
+            &mut problems,
+        );
+        overwrite_present_string_or_record_problem(
+            "memory_md_tables",
+            "meta",
+            &mut cfg.memory_md_tables.meta,
+            &mut problems,
+        );
+        overwrite_present_string_or_record_problem(
+            "memory_md_tables",
+            "files",
+            &mut cfg.memory_md_tables.files,
+            &mut problems,
+        );
+        overwrite_present_string_or_record_problem(
+            "db_path",
+            "state_root_dir",
+            &mut cfg.db_path.state_root_dir,
+            &mut problems,
+        );
+        overwrite_present_string_or_record_problem(
+            "db_path",
+            "db_filename",
+            &mut cfg.db_path.db_filename,
+            &mut problems,
+        );
+        overwrite_present_f64_or_record_problem(
+            "scoring",
+            "bm25_k1",
+            &mut cfg.scoring.bm25_k1_term_frequency_saturation,
+            &mut problems,
+        );
+        overwrite_present_f64_or_record_problem(
+            "scoring",
+            "bm25_b",
+            &mut cfg.scoring.bm25_b_document_length_normalization,
+            &mut problems,
+        );
+        overwrite_present_f64_or_record_problem(
+            "scoring",
+            "fusion_rrf_k",
+            &mut cfg.scoring.fusion_rrf_k,
+            &mut problems,
+        );
+        overwrite_present_f64_or_record_problem(
+            "scoring",
+            "fusion_identifier_boost",
+            &mut cfg.scoring.fusion_identifier_boost,
+            &mut problems,
+        );
+        overwrite_present_f64_or_record_problem(
+            "scoring",
+            "fusion_vector_list_weight",
+            &mut cfg.scoring.fusion_vector_list_weight,
+            &mut problems,
+        );
+        overwrite_present_f64_or_record_problem(
+            "scoring",
+            "recency_floor",
+            &mut cfg.scoring.recency_floor,
+            &mut problems,
+        );
+        overwrite_present_f64_or_record_problem(
+            "scoring",
+            "cos_floor",
+            &mut cfg.scoring.cos_floor_applied_before_recency_rescue,
+            &mut problems,
+        );
+        overwrite_present_f64_or_record_problem(
+            "scoring",
+            "dedup_jaccard_threshold",
+            &mut cfg.scoring.dedup_jaccard_near_duplicate_threshold,
+            &mut problems,
+        );
+        overwrite_present_f64_or_record_problem(
+            "scoring",
+            "half_life_ms",
+            &mut cfg.scoring.half_life_ms,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "memory",
+            "embed_dim",
+            &mut cfg.embed.dim,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "memory",
+            "recall_limit",
+            &mut cfg.budget.default_limit,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "memory",
+            "pool_multiplier",
+            &mut cfg.budget.pool_multiplier,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "memory",
+            "pool_floor",
+            &mut cfg.budget.pool_floor,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "memory",
+            "default_k",
+            &mut cfg.budget.default_k,
+            &mut problems,
+        );
+        overwrite_present_u64_or_record_problem(
+            "pipeline",
+            "ttl_ms",
+            &mut cfg.pipeline.ttl_ms,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "pipeline",
+            "summarize_threshold",
+            &mut cfg.pipeline.summarize_threshold,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "pipeline",
+            "max_result_bytes",
+            &mut cfg
+                .pipeline
+                .max_result_bytes_advertised_and_enforced_by_one_field,
+            &mut problems,
+        );
+        overwrite_present_string_or_record_problem(
+            "pipeline",
+            "summarize_prompt_template",
+            &mut cfg.pipeline.summarize_prompt_template,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "pipeline",
+            "summarize_target_chars",
+            &mut cfg.pipeline.summarize_target_chars,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "pipeline",
+            "summarize_max_summary_chars",
+            &mut cfg.pipeline.summarize_max_summary_chars,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "pipeline",
+            "summarize_input_char_cap",
+            &mut cfg.pipeline.summarize_input_char_cap,
+            &mut problems,
+        );
+        overwrite_present_u64_or_record_problem(
+            "pipeline",
+            "max_attempts",
+            &mut cfg.pipeline.max_attempts,
+            &mut problems,
+        );
 
-        overwrite_present_usize_or_record_problem("instruction_payload", "ready_wave_limit", &mut cfg.instruction_payload.ready_wave_limit, &mut problems);
-        overwrite_present_usize_or_record_problem("instruction_payload", "mutables_pending_rows_inlined_limit", &mut cfg.instruction_payload.mutables_pending_rows_inlined_limit, &mut problems);
-        overwrite_present_usize_or_record_problem("instruction_payload", "prd_items_rows_inlined_limit", &mut cfg.instruction_payload.prd_items_rows_inlined_limit, &mut problems);
-        if let Some(found) = v.get("instruction_payload").and_then(|p| p.get("instruction_recall_hits")) {
+        overwrite_present_usize_or_record_problem(
+            "instruction_payload",
+            "ready_wave_limit",
+            &mut cfg.instruction_payload.ready_wave_limit,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "instruction_payload",
+            "mutables_pending_rows_inlined_limit",
+            &mut cfg.instruction_payload.mutables_pending_rows_inlined_limit,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "instruction_payload",
+            "prd_items_rows_inlined_limit",
+            &mut cfg.instruction_payload.prd_items_rows_inlined_limit,
+            &mut problems,
+        );
+        if let Some(found) = v
+            .get("instruction_payload")
+            .and_then(|p| p.get("instruction_recall_hits"))
+        {
             match found.as_u64() {
                 Some(n) => cfg.instruction_payload.instruction_recall_hits = n as u32,
                 None => problems.push(format!("instruction_payload.instruction_recall_hits must be a non-negative integer, got {found}")),
             }
         }
-        if let Some(found) = v.get("instruction_payload").and_then(|p| p.get("transition_recall_hits")) {
+        if let Some(found) = v
+            .get("instruction_payload")
+            .and_then(|p| p.get("transition_recall_hits"))
+        {
             match found.as_u64() {
                 Some(n) => cfg.instruction_payload.transition_recall_hits = n as u32,
                 None => problems.push(format!("instruction_payload.transition_recall_hits must be a non-negative integer, got {found}")),
             }
         }
-        overwrite_present_usize_or_record_problem("instruction_payload", "prompt_excerpt_chars", &mut cfg.instruction_payload.prompt_excerpt_chars, &mut problems);
-        overwrite_present_i64_or_record_problem("instruction_payload", "max_marker_age_ms", &mut cfg.instruction_payload.max_marker_age_ms, &mut problems);
-        overwrite_present_usize_or_record_problem("instruction_payload", "orient_noun_limit", &mut cfg.instruction_payload.orient_noun_limit, &mut problems);
-        append_present_strings_or_record_problem("instruction_payload", "extra_orient_stopwords", &mut cfg.instruction_payload.orient_stopwords_compared_lowercase, &mut problems);
+        overwrite_present_usize_or_record_problem(
+            "instruction_payload",
+            "prompt_excerpt_chars",
+            &mut cfg.instruction_payload.prompt_excerpt_chars,
+            &mut problems,
+        );
+        overwrite_present_i64_or_record_problem(
+            "instruction_payload",
+            "max_marker_age_ms",
+            &mut cfg.instruction_payload.max_marker_age_ms,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "instruction_payload",
+            "orient_noun_limit",
+            &mut cfg.instruction_payload.orient_noun_limit,
+            &mut problems,
+        );
+        append_present_strings_or_record_problem(
+            "instruction_payload",
+            "extra_orient_stopwords",
+            &mut cfg.instruction_payload.orient_stopwords_compared_lowercase,
+            &mut problems,
+        );
 
-        append_present_strings_or_record_problem("browser_witness", "extra_always_browser_extensions", &mut cfg.browser_witness.always_browser_extensions_regardless_of_directory, &mut problems);
-        append_present_strings_or_record_problem("browser_witness", "extra_conditional_extensions", &mut cfg.browser_witness.conditional_extensions_only_under_browser_dir_prefixes, &mut problems);
-        append_present_strings_or_record_problem("browser_witness", "extra_dir_prefixes", &mut cfg.browser_witness.browser_dir_prefixes_normalized_slash_lowercase, &mut problems);
+        append_present_strings_or_record_problem(
+            "browser_witness",
+            "extra_always_browser_extensions",
+            &mut cfg
+                .browser_witness
+                .always_browser_extensions_regardless_of_directory,
+            &mut problems,
+        );
+        append_present_strings_or_record_problem(
+            "browser_witness",
+            "extra_conditional_extensions",
+            &mut cfg
+                .browser_witness
+                .conditional_extensions_only_under_browser_dir_prefixes,
+            &mut problems,
+        );
+        append_present_strings_or_record_problem(
+            "browser_witness",
+            "extra_dir_prefixes",
+            &mut cfg
+                .browser_witness
+                .browser_dir_prefixes_normalized_slash_lowercase,
+            &mut problems,
+        );
 
-        overwrite_present_usize_or_record_problem("discipline_note", "max_name_len", &mut cfg.discipline_note.max_name_len_hard_refuse_not_truncate, &mut problems);
-        overwrite_present_usize_or_record_problem("discipline_note", "max_text_len", &mut cfg.discipline_note.max_text_len_hard_refuse_not_truncate, &mut problems);
-        overwrite_present_usize_or_record_problem("discipline_note", "active_policies_instruction_limit", &mut cfg.discipline_note.active_policies_surfaced_in_instruction_payload_limit, &mut problems);
+        overwrite_present_usize_or_record_problem(
+            "discipline_note",
+            "max_name_len",
+            &mut cfg.discipline_note.max_name_len_hard_refuse_not_truncate,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "discipline_note",
+            "max_text_len",
+            &mut cfg.discipline_note.max_text_len_hard_refuse_not_truncate,
+            &mut problems,
+        );
+        overwrite_present_usize_or_record_problem(
+            "discipline_note",
+            "active_policies_instruction_limit",
+            &mut cfg
+                .discipline_note
+                .active_policies_surfaced_in_instruction_payload_limit,
+            &mut problems,
+        );
 
-        append_present_strings_or_record_problem("claim_audit", "extra_shipped_claim_markers", &mut cfg.claim_audit.shipped_claim_markers_matched_case_insensitive_substring, &mut problems);
-        append_present_strings_or_record_problem("claim_audit", "extra_scan_paths", &mut cfg.claim_audit.scan_paths_relative_to_project_root_missing_is_skip_not_error, &mut problems);
+        append_present_strings_or_record_problem(
+            "claim_audit",
+            "extra_shipped_claim_markers",
+            &mut cfg
+                .claim_audit
+                .shipped_claim_markers_matched_case_insensitive_substring,
+            &mut problems,
+        );
+        append_present_strings_or_record_problem(
+            "claim_audit",
+            "extra_scan_paths",
+            &mut cfg
+                .claim_audit
+                .scan_paths_relative_to_project_root_missing_is_skip_not_error,
+            &mut problems,
+        );
 
         for (parent, names) in [
             ("rssearch", &mut cfg.rssearch),
             ("git_commits", &mut cfg.git_commits),
             ("code_chunks", &mut cfg.code_chunks),
         ] {
-            overwrite_present_string_or_record_problem(parent, "table", &mut names.table, &mut problems);
-            overwrite_present_string_or_record_problem(parent, "index", &mut names.index, &mut problems);
+            overwrite_present_string_or_record_problem(
+                parent,
+                "table",
+                &mut names.table,
+                &mut problems,
+            );
+            overwrite_present_string_or_record_problem(
+                parent,
+                "index",
+                &mut names.index,
+                &mut problems,
+            );
         }
 
-        if let Some(ns) = v.get("memory").and_then(|m| m.get("namespace")).and_then(|n| n.as_str()) {
+        if let Some(ns) = v
+            .get("memory")
+            .and_then(|m| m.get("namespace"))
+            .and_then(|n| n.as_str())
+        {
             cfg.namespaces.default = ns.to_string();
         }
-        if let Some(d) = v.get("memory").and_then(|m| m.get("discipline_namespaces")).and_then(|x| x.as_array()) {
+        if let Some(d) = v
+            .get("memory")
+            .and_then(|m| m.get("discipline_namespaces"))
+            .and_then(|x| x.as_array())
+        {
             cfg.namespaces.discipline_fanout = d
                 .iter()
                 .filter_map(|e| e.as_str())
@@ -735,7 +1278,11 @@ impl RagConfig {
                 .map(|e| e.trim().to_string())
                 .collect();
         }
-        if let Some(extra) = v.get("memory").and_then(|m| m.get("kv_put_extra_namespaces")).and_then(|x| x.as_array()) {
+        if let Some(extra) = v
+            .get("memory")
+            .and_then(|m| m.get("kv_put_extra_namespaces"))
+            .and_then(|x| x.as_array())
+        {
             cfg.namespaces.kv_put_extra = extra
                 .iter()
                 .filter_map(|e| e.as_str())
@@ -762,21 +1309,37 @@ impl RagConfig {
             }
         }
         let tiered_config_value = crate::config::resolve().config.value;
-        let resolved_config_or_defaults_on_validation_failure = match RagConfig::from_value(&tiered_config_value) {
+        let resolved_config_or_defaults_on_validation_failure = match RagConfig::from_value(
+            &tiered_config_value,
+        ) {
             Ok(cfg) => cfg,
             Err(reason) => {
-                crate::wasm_dispatch::emit_event("ragconfig_validation_failed", serde_json::json!({
-                    "reason": reason,
-                    "effect": "the ENTIRE resolved config is being ignored and compiled defaults are in use -- not just the offending key",
-                }));
+                crate::wasm_dispatch::emit_event(
+                    "ragconfig_validation_failed",
+                    serde_json::json!({
+                        "reason": reason,
+                        "effect": "the ENTIRE resolved config is being ignored and compiled defaults are in use -- not just the offending key",
+                    }),
+                );
                 RagConfig::default()
             }
         };
-        let mut resolved_config_or_defaults_on_validation_failure = resolved_config_or_defaults_on_validation_failure;
-        apply_project_local_index_overlay(&project_root, &mut resolved_config_or_defaults_on_validation_failure.index);
+        let mut resolved_config_or_defaults_on_validation_failure =
+            resolved_config_or_defaults_on_validation_failure;
+        apply_project_local_index_overlay(
+            &project_root,
+            &mut resolved_config_or_defaults_on_validation_failure.index,
+        );
         if let Ok(mut cache) = RESOLVED_CACHE.lock() {
-            cache.get_or_insert_with(std::collections::HashMap::new)
-                .insert(project_root, ResolvedEntry { ts_ms: now_ms, config: resolved_config_or_defaults_on_validation_failure.clone() });
+            cache
+                .get_or_insert_with(std::collections::HashMap::new)
+                .insert(
+                    project_root,
+                    ResolvedEntry {
+                        ts_ms: now_ms,
+                        config: resolved_config_or_defaults_on_validation_failure.clone(),
+                    },
+                );
         }
         resolved_config_or_defaults_on_validation_failure
     }
@@ -809,12 +1372,22 @@ impl RagConfig {
             ));
         }
         if self.scoring.half_life_ms <= 0.0 {
-            return Err("ragconfig: scoring.half_life_ms must be positive (it divides an age)".to_string());
+            return Err(
+                "ragconfig: scoring.half_life_ms must be positive (it divides an age)".to_string(),
+            );
         }
-        if self.index.pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound == 0 {
+        if self
+            .index
+            .pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound
+            == 0
+        {
             return Err("ragconfig: index.pessimistic_ms_per_chunk must be non-zero; it divides the remaining wall budget to derive a per-file chunk allowance".to_string());
         }
-        if self.index.max_chunks_embedded_per_file_per_pass_count_bound_only == 0 {
+        if self
+            .index
+            .max_chunks_embedded_per_file_per_pass_count_bound_only
+            == 0
+        {
             return Err("ragconfig: index.max_chunks_per_file_per_pass must be non-zero; a zero cap truncates every file to no chunks and the index never populates".to_string());
         }
         if !(self.scoring.bm25_k1_term_frequency_saturation >= 0.0) {
@@ -848,14 +1421,24 @@ impl RagConfig {
             ));
         }
         if self.budget.pool_multiplier == 0 {
-            return Err("ragconfig: budget.pool_multiplier must be non-zero; a zero pool retrieves nothing".to_string());
+            return Err(
+                "ragconfig: budget.pool_multiplier must be non-zero; a zero pool retrieves nothing"
+                    .to_string(),
+            );
         }
-        for names in [&self.rssearch, &self.git_commits, &self.code_chunks, &self.legacy_memories_alongside_code_chunks] {
+        for names in [
+            &self.rssearch,
+            &self.git_commits,
+            &self.code_chunks,
+            &self.legacy_memories_alongside_code_chunks,
+        ] {
             reject_unless_ascii_alnum_underscore_sql_ident(&names.table)?;
             reject_unless_ascii_alnum_underscore_sql_ident(&names.index)?;
         }
         if self.namespaces.code.is_empty() || self.namespaces.default.is_empty() {
-            return Err("ragconfig: namespaces.code and namespaces.default must be non-empty".to_string());
+            return Err(
+                "ragconfig: namespaces.code and namespaces.default must be non-empty".to_string(),
+            );
         }
         Ok(())
     }

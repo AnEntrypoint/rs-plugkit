@@ -32,7 +32,9 @@ impl Default for TencentBackendConfig {
 
 pub fn resolved_config() -> TencentBackendConfig {
     let tiered = crate::config::resolve().config.value;
-    let block = tiered.get("memory").and_then(|m| m.get("tencentdb_backend"));
+    let block = tiered
+        .get("memory")
+        .and_then(|m| m.get("tencentdb_backend"));
     let mut cfg = TencentBackendConfig::default();
     if let Some(b) = block {
         if let Some(v) = b.get("enabled").and_then(Value::as_bool) {
@@ -59,7 +61,11 @@ pub fn routed_namespaces() -> Vec<String> {
         .and_then(|m| m.get("tencentdb_backend"))
         .and_then(|b| b.get("namespaces"))
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -91,11 +97,28 @@ fn content_key(namespace: &str, text: &str) -> String {
     format!("tdai-{:016x}-{}", hash, text.len())
 }
 
-fn file_path_for_kind_grouped_memory(data_dir: &str, namespace: &str, kind: &str, key: &str) -> String {
-    format!("{}/{}/{}/{}.md", data_dir.trim_end_matches('/'), namespace, kind, key)
+fn file_path_for_kind_grouped_memory(
+    data_dir: &str,
+    namespace: &str,
+    kind: &str,
+    key: &str,
+) -> String {
+    format!(
+        "{}/{}/{}/{}.md",
+        data_dir.trim_end_matches('/'),
+        namespace,
+        kind,
+        key
+    )
 }
 
-pub fn write(namespace: &str, kind: &str, text: &str, embedding: &Value, now_ms: i64) -> Result<Value, String> {
+pub fn write(
+    namespace: &str,
+    kind: &str,
+    text: &str,
+    embedding: &Value,
+    now_ms: i64,
+) -> Result<Value, String> {
     let cfg = resolved_config();
     write_cfg(namespace, kind, text, embedding, now_ms, &cfg)
 }
@@ -110,7 +133,10 @@ pub fn write_cfg(
 ) -> Result<Value, String> {
     let vec = crate::vecns::json_to_f32_vec(embedding)
         .filter(|v| !v.is_empty())
-        .ok_or_else(|| "tencentdb_memory: empty or non-array embedding; refusing NULL-embedding row".to_string())?;
+        .ok_or_else(|| {
+            "tencentdb_memory: empty or non-array embedding; refusing NULL-embedding row"
+                .to_string()
+        })?;
     if vec.len() != cfg.dim {
         return Err(format!(
             "tencentdb_memory: embedding dim {} does not match configured dim {} (memory.tencentdb_backend.vectors_db_dims); refusing to write a row the index column cannot hold",
@@ -122,7 +148,10 @@ pub fn write_cfg(
     let rel_path = file_path_for_kind_grouped_memory(&cfg.data_dir, namespace, kind, &key);
 
     if !crate::pkfs::write(&rel_path, text) {
-        return Err(format!("tencentdb_memory: failed to write content file {}", rel_path));
+        return Err(format!(
+            "tencentdb_memory: failed to write content file {}",
+            rel_path
+        ));
     }
 
     ensure_schema(cfg)?;
@@ -133,9 +162,19 @@ pub fn write_cfg(
         cfg.table, embedding_sql
     );
     let path = shared_db_path();
-    let spec = crate::vecns::VecTableSpec { db_name: &path, table: &cfg.table, index: &cfg.index };
+    let spec = crate::vecns::VecTableSpec {
+        db_name: &path,
+        table: &cfg.table,
+        index: &cfg.index,
+    };
     let now_s = now_ms.to_string();
-    let insert_params = [namespace, kind, key.as_str(), rel_path.as_str(), now_s.as_str()];
+    let insert_params = [
+        namespace,
+        kind,
+        key.as_str(),
+        rel_path.as_str(),
+        now_s.as_str(),
+    ];
     crate::vecns::delete_then_insert_with_recovery(
         &spec,
         |s| s.exec_params(&delete_sql, &[namespace, key.as_str()]),
@@ -156,7 +195,12 @@ pub fn recall(query_embedding: &Value, namespace: &str, limit: usize) -> Result<
     recall_cfg(query_embedding, namespace, limit, &cfg)
 }
 
-pub fn recall_cfg(query_embedding: &Value, namespace: &str, limit: usize, cfg: &TencentBackendConfig) -> Result<Value, String> {
+pub fn recall_cfg(
+    query_embedding: &Value,
+    namespace: &str,
+    limit: usize,
+    cfg: &TencentBackendConfig,
+) -> Result<Value, String> {
     let qvec = crate::vecns::json_to_f32_vec(query_embedding)
         .ok_or_else(|| "tencentdb_memory recall: invalid query embedding".to_string())?;
     if qvec.len() != cfg.dim {
@@ -177,7 +221,11 @@ pub fn recall_cfg(query_embedding: &Value, namespace: &str, limit: usize, cfg: &
     let arr = rows.as_array().cloned().unwrap_or_default();
     let mut hits = Vec::with_capacity(arr.len().min(limit));
     for row in arr.into_iter().take(limit) {
-        let file_path = row.get("file_path").and_then(Value::as_str).unwrap_or_default().to_string();
+        let file_path = row
+            .get("file_path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let text = crate::pkfs::read_to_string(&file_path);
         let distance = row.get("distance").and_then(Value::as_f64).unwrap_or(2.0);
         let mut obj = row.as_object().cloned().unwrap_or_default();
@@ -195,7 +243,10 @@ pub fn delete_index_first_then_file(namespace: &str, key: &str) -> Result<bool, 
 
 pub fn delete_cfg(namespace: &str, key: &str, cfg: &TencentBackendConfig) -> Result<bool, String> {
     ensure_schema(cfg)?;
-    let select_sql = format!("SELECT file_path FROM {} WHERE namespace=?1 AND key=?2 AND deleted=0", cfg.table);
+    let select_sql = format!(
+        "SELECT file_path FROM {} WHERE namespace=?1 AND key=?2 AND deleted=0",
+        cfg.table
+    );
     let file_path = shared_query_params(&select_sql, &[namespace, key])?
         .as_array()
         .and_then(|a| a.first())
@@ -204,11 +255,15 @@ pub fn delete_cfg(namespace: &str, key: &str, cfg: &TencentBackendConfig) -> Res
         .map(str::to_string);
     let existed = file_path.is_some();
     if existed {
-        let mark_sql = format!("UPDATE {} SET deleted=1 WHERE namespace=?1 AND key=?2", cfg.table);
+        let mark_sql = format!(
+            "UPDATE {} SET deleted=1 WHERE namespace=?1 AND key=?2",
+            cfg.table
+        );
         shared_exec_params(&mark_sql, &[namespace, key])?;
     }
     if let Some(p) = file_path {
-        let _ = crate::pkfs::exists(&p) && crate::wasm_dispatch::host_remove_file_never_directory(&p);
+        let _ =
+            crate::pkfs::exists(&p) && crate::wasm_dispatch::host_remove_file_never_directory(&p);
     }
     Ok(existed)
 }

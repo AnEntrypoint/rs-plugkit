@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use crate::ragconfig::RagConfig;
-use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
+use crate::shared_db::{
+    shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB,
+};
 use crate::vecns::{self, QueryBudget, RecencyParams, VecTableSpec};
 
 fn default_cfg() -> RagConfig {
@@ -21,12 +23,21 @@ fn spec<'a>(path: &'a str, cfg: &'a RagConfig) -> VecTableSpec<'a> {
 }
 
 fn has_deleted_column(path: &str, cfg: &RagConfig) -> bool {
-    let sql = format!("SELECT name FROM pragma_table_info('{}') WHERE name = 'deleted'", cfg.rssearch.table);
-    let resp = crate::wasm_dispatch::plugin_call("libsql", "query", &json!({ "db": SHARED_DB, "path": path, "sql": sql }));
+    let sql = format!(
+        "SELECT name FROM pragma_table_info('{}') WHERE name = 'deleted'",
+        cfg.rssearch.table
+    );
+    let resp = crate::wasm_dispatch::plugin_call(
+        "libsql",
+        "query",
+        &json!({ "db": SHARED_DB, "path": path, "sql": sql }),
+    );
     if resp.get("ok").and_then(Value::as_bool) != Some(true) {
         return false;
     }
-    resp.get("rows").and_then(|rows| rows.as_array().map(|a| !a.is_empty())).unwrap_or(false)
+    resp.get("rows")
+        .and_then(|rows| rows.as_array().map(|a| !a.is_empty()))
+        .unwrap_or(false)
 }
 
 pub fn ensure_schema() -> Result<(), String> {
@@ -36,7 +47,11 @@ pub fn ensure_schema() -> Result<(), String> {
 static SCHEMA_ENSURED: Mutex<Option<HashSet<(String, usize)>>> = Mutex::new(None);
 
 pub fn forget_ensured_schema() {
-    if let Some(seen) = SCHEMA_ENSURED.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+    if let Some(seen) = SCHEMA_ENSURED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
         seen.clear();
     }
 }
@@ -76,14 +91,32 @@ fn json_to_f32_vec(v: &Value) -> Option<Vec<f32>> {
     vecns::json_to_f32_vec(v)
 }
 
-pub fn write(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: i64) -> Result<(), String> {
+pub fn write(
+    namespace: &str,
+    key: &str,
+    text: &str,
+    embedding: &Value,
+    now_ms: i64,
+) -> Result<(), String> {
     write_cfg(namespace, key, text, embedding, now_ms, &default_cfg())
 }
 
-pub fn write_cfg(namespace: &str, key: &str, text: &str, embedding: &Value, now_ms: i64, cfg: &RagConfig) -> Result<(), String> {
+pub fn write_cfg(
+    namespace: &str,
+    key: &str,
+    text: &str,
+    embedding: &Value,
+    now_ms: i64,
+    cfg: &RagConfig,
+) -> Result<(), String> {
     let vec = match json_to_f32_vec(embedding) {
         Some(v) if !v.is_empty() => v,
-        _ => return Err("rssearch_vectors: empty or non-array embedding; refusing NULL-embedding row".to_string()),
+        _ => {
+            return Err(
+                "rssearch_vectors: empty or non-array embedding; refusing NULL-embedding row"
+                    .to_string(),
+            )
+        }
     };
     if vec.len() != cfg.dim() {
         return Err(format!(
@@ -94,7 +127,10 @@ pub fn write_cfg(namespace: &str, key: &str, text: &str, embedding: &Value, now_
     if let Err(e) = ensure_schema_cfg(cfg) {
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
     }
-    let delete_sql = format!("DELETE FROM {} WHERE namespace=?1 AND key=?2", cfg.rssearch.table);
+    let delete_sql = format!(
+        "DELETE FROM {} WHERE namespace=?1 AND key=?2",
+        cfg.rssearch.table
+    );
     let embedding_sql = format!("vector('{}')", vecns::qlit(&vec));
     let sql = format!(
         "INSERT INTO {}(namespace, key, text, embedding, updated_at, deleted) VALUES(?1,?2,?3,{},?4,0)",
@@ -105,11 +141,15 @@ pub fn write_cfg(namespace: &str, key: &str, text: &str, embedding: &Value, now_
     vecns::delete_then_insert_with_recovery(
         &spec(&path, cfg),
         |s| s.exec_params(&delete_sql, &[namespace, key]),
-        &sql, &[namespace, key, text, &now_s],
+        &sql,
+        &[namespace, key, text, &now_s],
         |e| {
-            crate::wasm_dispatch::emit_event("rssearch_vectors_shadow_row_recovery", json!({
-                "namespace": namespace, "key": key, "error": e,
-            }));
+            crate::wasm_dispatch::emit_event(
+                "rssearch_vectors_shadow_row_recovery",
+                json!({
+                    "namespace": namespace, "key": key, "error": e,
+                }),
+            );
         },
     )
 }
@@ -122,7 +162,11 @@ pub fn mark_deleted_cfg(namespace: &str, key: &str, cfg: &RagConfig) -> Result<(
     mark_deleted_reporting_match_cfg(namespace, key, cfg).map(|_| ())
 }
 
-pub fn mark_deleted_reporting_match_cfg(namespace: &str, key: &str, cfg: &RagConfig) -> Result<bool, String> {
+pub fn mark_deleted_reporting_match_cfg(
+    namespace: &str,
+    key: &str,
+    cfg: &RagConfig,
+) -> Result<bool, String> {
     if let Err(e) = ensure_schema_cfg(cfg) {
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
     }
@@ -137,7 +181,10 @@ pub fn mark_deleted_reporting_match_cfg(namespace: &str, key: &str, cfg: &RagCon
     .and_then(|rows| rows.as_array()?.first()?.get("n")?.as_i64())
     .unwrap_or(0)
         > 0;
-    let sql = format!("UPDATE {} SET deleted=1 WHERE namespace=?1 AND key=?2", cfg.rssearch.table);
+    let sql = format!(
+        "UPDATE {} SET deleted=1 WHERE namespace=?1 AND key=?2",
+        cfg.rssearch.table
+    );
     shared_exec_params(&sql, &[namespace, key])?;
     Ok(existed)
 }
@@ -156,7 +203,10 @@ pub fn live_keys_cfg(namespace: &str, cfg: &RagConfig) -> Vec<String> {
         return out;
     }
     let Ok(rows) = shared_query_params(
-        &format!("SELECT key FROM {} WHERE namespace=?1 AND deleted=0", cfg.rssearch.table),
+        &format!(
+            "SELECT key FROM {} WHERE namespace=?1 AND deleted=0",
+            cfg.rssearch.table
+        ),
         &[namespace],
     ) else {
         return out;
@@ -197,14 +247,20 @@ pub fn vacuum_tombstones_cfg(namespace: Option<&str>, cfg: &RagConfig) -> Result
         return Ok(0);
     }
     let delete_sql = match namespace {
-        Some(_) => format!("DELETE FROM {} WHERE deleted=1 AND namespace=?1", cfg.rssearch.table),
+        Some(_) => format!(
+            "DELETE FROM {} WHERE deleted=1 AND namespace=?1",
+            cfg.rssearch.table
+        ),
         None => format!("DELETE FROM {} WHERE deleted=1", cfg.rssearch.table),
     };
     shared_exec_params(&delete_sql, &params)?;
-    crate::wasm_dispatch::emit_event("rssearch_vectors_vacuumed", json!({
-        "namespace": namespace,
-        "rows_reclaimed": reclaimable,
-    }));
+    crate::wasm_dispatch::emit_event(
+        "rssearch_vectors_vacuumed",
+        json!({
+            "namespace": namespace,
+            "rows_reclaimed": reclaimable,
+        }),
+    );
     Ok(reclaimable)
 }
 
@@ -220,7 +276,11 @@ impl TombstoneCensus {
 
     pub fn tombstone_ratio(&self) -> f64 {
         let total = self.total();
-        if total == 0 { 0.0 } else { self.tombstoned as f64 / total as f64 }
+        if total == 0 {
+            0.0
+        } else {
+            self.tombstoned as f64 / total as f64
+        }
     }
 }
 
@@ -243,7 +303,10 @@ fn scoped_count(deleted_flag: u8, namespace: Option<&str>, cfg: &RagConfig) -> u
         .max(0) as u64
 }
 
-pub fn tombstone_census_cfg(namespace: Option<&str>, cfg: &RagConfig) -> Result<TombstoneCensus, String> {
+pub fn tombstone_census_cfg(
+    namespace: Option<&str>,
+    cfg: &RagConfig,
+) -> Result<TombstoneCensus, String> {
     ensure_schema_cfg(cfg)?;
     Ok(TombstoneCensus {
         live: scoped_count(0, namespace, cfg),
@@ -265,12 +328,20 @@ pub fn vacuum_tombstones(namespace: Option<&str>) -> Result<u64, String> {
     vacuum_tombstones_cfg(namespace, &default_cfg())
 }
 
-pub fn undelete_cfg(namespace: &str, key: &str, updated_at_ms: i64, cfg: &RagConfig) -> Result<(), String> {
+pub fn undelete_cfg(
+    namespace: &str,
+    key: &str,
+    updated_at_ms: i64,
+    cfg: &RagConfig,
+) -> Result<(), String> {
     if let Err(e) = ensure_schema_cfg(cfg) {
         return Err(format!("rssearch_vectors ensure_schema failed: {}", e));
     }
     let upd = updated_at_ms.to_string();
-    let sql = format!("UPDATE {} SET deleted=0, updated_at=?1 WHERE namespace=?2 AND key=?3", cfg.rssearch.table);
+    let sql = format!(
+        "UPDATE {} SET deleted=0, updated_at=?1 WHERE namespace=?2 AND key=?3",
+        cfg.rssearch.table
+    );
     shared_exec_params(&sql, &[&upd, namespace, key])
 }
 
@@ -307,7 +378,14 @@ where
 const FIRST_NAMESPACE_PLACEHOLDER_AFTER_QUERY_VECTOR_PAIR: usize = 3;
 
 fn ann_query_sql(namespaces: &[String], pool: usize, cfg: &RagConfig) -> String {
-    let ns_placeholders: Vec<String> = (0..namespaces.len()).map(|i| format!("?{}", i + FIRST_NAMESPACE_PLACEHOLDER_AFTER_QUERY_VECTOR_PAIR)).collect();
+    let ns_placeholders: Vec<String> = (0..namespaces.len())
+        .map(|i| {
+            format!(
+                "?{}",
+                i + FIRST_NAMESPACE_PLACEHOLDER_AFTER_QUERY_VECTOR_PAIR
+            )
+        })
+        .collect();
     let ns_filter = if namespaces.is_empty() {
         String::new()
     } else {
@@ -321,13 +399,25 @@ fn ann_query_sql(namespaces: &[String], pool: usize, cfg: &RagConfig) -> String 
     )
 }
 
-pub fn search_with_recency(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64) -> Result<Value, String> {
+pub fn search_with_recency(
+    query_embedding: &Value,
+    namespaces: &[String],
+    limit: usize,
+    now_ms: i64,
+) -> Result<Value, String> {
     search_with_recency_cfg(query_embedding, namespaces, limit, now_ms, &default_cfg())
 }
 
-pub fn search_with_recency_cfg(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64, cfg: &RagConfig) -> Result<Value, String> {
-    let qvec = json_to_f32_vec(query_embedding)
-        .ok_or_else(|| "rssearch_vectors search_with_recency: invalid query embedding".to_string())?;
+pub fn search_with_recency_cfg(
+    query_embedding: &Value,
+    namespaces: &[String],
+    limit: usize,
+    now_ms: i64,
+    cfg: &RagConfig,
+) -> Result<Value, String> {
+    let qvec = json_to_f32_vec(query_embedding).ok_or_else(|| {
+        "rssearch_vectors search_with_recency: invalid query embedding".to_string()
+    })?;
     ensure_schema_cfg(cfg)?;
     let recency_params = RecencyParams::from_scoring(&cfg.scoring);
     let budget = QueryBudget::from_config(&cfg.budget);
@@ -335,7 +425,9 @@ pub fn search_with_recency_cfg(query_embedding: &Value, namespaces: &[String], l
     let pool = budget.pool(limit);
     let sql = ann_query_sql(namespaces, pool, cfg);
     let mut params: Vec<&str> = vec![&qlit, &qlit];
-    for n in namespaces { params.push(n.as_str()); }
+    for n in namespaces {
+        params.push(n.as_str());
+    }
     let rows = recover_and_retry(|| shared_query_params(&sql, &params))?;
     let arr = rows.as_array().cloned().unwrap_or_default();
     let mut scored: Vec<(f64, Value)> = Vec::with_capacity(arr.len());
@@ -345,7 +437,10 @@ pub fn search_with_recency_cfg(query_embedding: &Value, namespaces: &[String], l
         if cos < cfg.scoring.cos_floor_applied_before_recency_rescue {
             continue;
         }
-        let updated_at = row.get("updated_at").and_then(|u| u.as_i64()).unwrap_or(now_ms);
+        let updated_at = row
+            .get("updated_at")
+            .and_then(|u| u.as_i64())
+            .unwrap_or(now_ms);
         let (recency, score) = vecns::recency_score(cos, updated_at, now_ms, &recency_params);
         let mut obj = row.as_object().cloned().unwrap_or_default();
         obj.insert("cos".to_string(), json!(cos));
@@ -375,9 +470,16 @@ fn jaccard_overlap(a: &str, b: &str) -> f64 {
     inter / (ta.len() as f64 + tb.len() as f64 - inter)
 }
 
-pub fn search_memory_hits_cfg(query_embedding: &Value, namespaces: &[String], limit: usize, now_ms: i64, cfg: &RagConfig) -> Result<Value, String> {
-    let qvec = json_to_f32_vec(query_embedding)
-        .ok_or_else(|| "rssearch_vectors search_memory_hits: invalid query embedding".to_string())?;
+pub fn search_memory_hits_cfg(
+    query_embedding: &Value,
+    namespaces: &[String],
+    limit: usize,
+    now_ms: i64,
+    cfg: &RagConfig,
+) -> Result<Value, String> {
+    let qvec = json_to_f32_vec(query_embedding).ok_or_else(|| {
+        "rssearch_vectors search_memory_hits: invalid query embedding".to_string()
+    })?;
     ensure_schema_cfg(cfg)?;
     let recency_params = RecencyParams::from_scoring(&cfg.scoring);
     let budget = QueryBudget::from_config(&cfg.budget);
@@ -385,7 +487,9 @@ pub fn search_memory_hits_cfg(query_embedding: &Value, namespaces: &[String], li
     let pool = budget.pool(limit);
     let sql = ann_query_sql(namespaces, pool, cfg);
     let mut params: Vec<&str> = vec![&qlit, &qlit];
-    for n in namespaces { params.push(n.as_str()); }
+    for n in namespaces {
+        params.push(n.as_str());
+    }
     let rows = recover_and_retry(|| shared_query_params(&sql, &params))?;
     let arr = rows.as_array().cloned().unwrap_or_default();
     let mut scored: Vec<(f64, Value)> = Vec::with_capacity(arr.len());
@@ -395,7 +499,10 @@ pub fn search_memory_hits_cfg(query_embedding: &Value, namespaces: &[String], li
         if cos < cfg.scoring.cos_floor_applied_before_recency_rescue {
             continue;
         }
-        let updated_at = row.get("updated_at").and_then(|u| u.as_i64()).unwrap_or(now_ms);
+        let updated_at = row
+            .get("updated_at")
+            .and_then(|u| u.as_i64())
+            .unwrap_or(now_ms);
         let (recency, score) = vecns::recency_score(cos, updated_at, now_ms, &recency_params);
         let hit = json!({
             "key": row.get("key").cloned().unwrap_or(Value::Null),
@@ -412,7 +519,10 @@ pub fn search_memory_hits_cfg(query_embedding: &Value, namespaces: &[String], li
     for (_, hit) in scored {
         let text = hit.get("text").and_then(|t| t.as_str()).unwrap_or("");
         let dup = out.iter().any(|kept| {
-            jaccard_overlap(text, kept.get("text").and_then(|t| t.as_str()).unwrap_or("")) >= cfg.scoring.dedup_jaccard_near_duplicate_threshold
+            jaccard_overlap(
+                text,
+                kept.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+            ) >= cfg.scoring.dedup_jaccard_near_duplicate_threshold
         });
         if !dup {
             out.push(hit);
@@ -425,12 +535,23 @@ pub fn search_memory_hits_cfg(query_embedding: &Value, namespaces: &[String], li
 }
 
 fn extract_embedding_value(v: &Value) -> Option<Value> {
-    if v.is_array() { return Some(v.clone()); }
-    if let Some(arr) = v.get("embedding") {
-        if arr.is_array() { return Some(arr.clone()); }
+    if v.is_array() {
+        return Some(v.clone());
     }
-    if let Some(emb) = v.get("data").and_then(|d| d.as_array()).and_then(|a| a.first()).and_then(|e| e.get("embedding")) {
-        if emb.is_array() { return Some(emb.clone()); }
+    if let Some(arr) = v.get("embedding") {
+        if arr.is_array() {
+            return Some(arr.clone());
+        }
+    }
+    if let Some(emb) = v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|a| a.first())
+        .and_then(|e| e.get("embedding"))
+    {
+        if emb.is_array() {
+            return Some(emb.clone());
+        }
     }
     None
 }
@@ -438,19 +559,24 @@ fn extract_embedding_value(v: &Value) -> Option<Value> {
 fn host_kv_query_raw(namespace: &str, query: &str) -> Value {
     let packed = unsafe {
         crate::wasm_dispatch::host_kv_query(
-            namespace.as_ptr(), namespace.len() as u32,
-            query.as_ptr(), query.len() as u32,
+            namespace.as_ptr(),
+            namespace.len() as u32,
+            query.as_ptr(),
+            query.len() as u32,
         )
     };
     crate::wasm_dispatch::unpack_to_value_pub(packed)
 }
 
-
 static MIGRATION_COMPLETE: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
     std::sync::Mutex::new(None);
 
 pub fn forget_migration_complete() {
-    if let Some(seen) = MIGRATION_COMPLETE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+    if let Some(seen) = MIGRATION_COMPLETE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
         seen.clear();
     }
 }
@@ -459,14 +585,24 @@ pub fn migrate_namespace_from_flat_json(namespace: &str, now_ms: i64) -> Result<
     migrate_namespace_from_flat_json_cfg(namespace, now_ms, &default_cfg())
 }
 
-pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &RagConfig) -> Result<Value, String> {
+pub fn migrate_namespace_from_flat_json_cfg(
+    namespace: &str,
+    now_ms: i64,
+    cfg: &RagConfig,
+) -> Result<Value, String> {
     if namespace.is_empty() {
         return Err("migrate_namespace_from_flat_json: namespace required".to_string());
     }
     {
         let guard = MIGRATION_COMPLETE.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.as_ref().map(|s| s.contains(namespace)).unwrap_or(false) {
-            return Ok(json!({ "migrated": false, "reason": "already-populated-memoized", "namespace": namespace }));
+        if guard
+            .as_ref()
+            .map(|s| s.contains(namespace))
+            .unwrap_or(false)
+        {
+            return Ok(
+                json!({ "migrated": false, "reason": "already-populated-memoized", "namespace": namespace }),
+            );
         }
     }
     ensure_schema_cfg(cfg)?;
@@ -474,9 +610,21 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
     let vec_entries = host_kv_query_raw(&vec_ns, "");
     let entries = match vec_entries.as_array() {
         Some(a) if !a.is_empty() => a.clone(),
-        _ => return Ok(json!({ "migrated": false, "reason": "no-flat-json-entries", "namespace": namespace })),
+        _ => {
+            return Ok(
+                json!({ "migrated": false, "reason": "no-flat-json-entries", "namespace": namespace }),
+            )
+        }
     };
-    let flat_total = entries.iter().filter(|e| e.get("key").and_then(|k| k.as_str()).map(|k| k != "__digest__").unwrap_or(false)).count() as i64;
+    let flat_total = entries
+        .iter()
+        .filter(|e| {
+            e.get("key")
+                .and_then(|k| k.as_str())
+                .map(|k| k != "__digest__")
+                .unwrap_or(false)
+        })
+        .count() as i64;
     let existing = row_count_cfg(namespace, cfg).unwrap_or(0);
     if existing >= flat_total {
         MIGRATION_COMPLETE
@@ -484,7 +632,9 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
             .unwrap_or_else(|e| e.into_inner())
             .get_or_insert_with(std::collections::HashSet::new)
             .insert(namespace.to_string());
-        return Ok(json!({ "migrated": false, "reason": "already-populated", "existing_rows": existing }));
+        return Ok(
+            json!({ "migrated": false, "reason": "already-populated", "existing_rows": existing }),
+        );
     }
     let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(rows) = shared_query_params(
@@ -500,58 +650,102 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
         }
     }
     let text_entries = host_kv_query_raw(namespace, "");
-    let mut text_by_key: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut text_by_key: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     if let Some(arr) = text_entries.as_array() {
         for e in arr {
-            if let (Some(k), Some(v)) = (e.get("key").and_then(|x| x.as_str()), e.get("value").and_then(|x| x.as_str())) {
+            if let (Some(k), Some(v)) = (
+                e.get("key").and_then(|x| x.as_str()),
+                e.get("value").and_then(|x| x.as_str()),
+            ) {
                 text_by_key.insert(k.to_string(), v.to_string());
             }
         }
     }
     let is_code_ns = cfg.namespaces.is_code(namespace);
-    let mut corpus = if is_code_ns { Some(crate::code_index::FusionCorpus::load()) } else { None };
+    let mut corpus = if is_code_ns {
+        Some(crate::code_index::FusionCorpus::load())
+    } else {
+        None
+    };
     let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut migrated = 0u32;
     let mut skipped = 0u32;
     let mut write_failures = 0u32;
     let mut deferred = 0u32;
     for entry in &entries {
-        let key = match entry.get("key").and_then(|k| k.as_str()) { Some(k) => k, None => { skipped += 1; continue; } };
-        if key == "__digest__" { continue; }
-        if present.contains(key) { continue; }
+        let key = match entry.get("key").and_then(|k| k.as_str()) {
+            Some(k) => k,
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+        if key == "__digest__" {
+            continue;
+        }
+        if present.contains(key) {
+            continue;
+        }
         let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
         if elapsed > cfg.bulk_embed.flat_json_migration_budget_ms {
             deferred += 1;
             continue;
         }
-        let raw_value = match entry.get("value").and_then(|v| v.as_str()) { Some(v) => v, None => { skipped += 1; continue; } };
-        let parsed: Value = match serde_json::from_str(raw_value) { Ok(v) => v, Err(_) => { skipped += 1; continue; } };
-        let embedding = match extract_embedding_value(&parsed) { Some(e) => e, None => { skipped += 1; continue; } };
-        let text = text_by_key.get(key).cloned()
+        let raw_value = match entry.get("value").and_then(|v| v.as_str()) {
+            Some(v) => v,
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let parsed: Value = match serde_json::from_str(raw_value) {
+            Ok(v) => v,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let embedding = match extract_embedding_value(&parsed) {
+            Some(e) => e,
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let text = text_by_key
+            .get(key)
+            .cloned()
             .or_else(|| corpus.as_mut().and_then(|c| c.text_for_key(key)))
             .unwrap_or_default();
         match write_cfg(namespace, key, &text, &embedding, now_ms, cfg) {
             Ok(()) => migrated += 1,
             Err(e) => {
                 if (write_failures as usize) < cfg.bulk_embed.rssearch_migrate_reported_failures {
-                    crate::wasm_dispatch::emit_event("rssearch_vectors_migrate_row_failed", json!({
-                        "namespace": namespace,
-                        "key": key,
-                        "error": e,
-                    }));
+                    crate::wasm_dispatch::emit_event(
+                        "rssearch_vectors_migrate_row_failed",
+                        json!({
+                            "namespace": namespace,
+                            "key": key,
+                            "error": e,
+                        }),
+                    );
                 }
                 write_failures += 1;
                 skipped += 1;
             }
         }
     }
-    crate::wasm_dispatch::emit_event("rssearch_vectors_migrated", json!({
-        "namespace": namespace,
-        "migrated_count": migrated,
-        "skipped_count": skipped,
-        "write_failure_count": write_failures,
-        "deferred_count": deferred,
-    }));
+    crate::wasm_dispatch::emit_event(
+        "rssearch_vectors_migrated",
+        json!({
+            "namespace": namespace,
+            "migrated_count": migrated,
+            "skipped_count": skipped,
+            "write_failure_count": write_failures,
+            "deferred_count": deferred,
+        }),
+    );
     if deferred == 0 {
         MIGRATION_COMPLETE
             .lock()
@@ -559,5 +753,7 @@ pub fn migrate_namespace_from_flat_json_cfg(namespace: &str, now_ms: i64, cfg: &
             .get_or_insert_with(std::collections::HashSet::new)
             .insert(namespace.to_string());
     }
-    Ok(json!({ "migrated": true, "namespace": namespace, "migrated_count": migrated, "skipped_count": skipped, "deferred_count": deferred }))
+    Ok(
+        json!({ "migrated": true, "namespace": namespace, "migrated_count": migrated, "skipped_count": skipped, "deferred_count": deferred }),
+    )
 }

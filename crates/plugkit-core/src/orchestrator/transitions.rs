@@ -1,8 +1,8 @@
 use super::fsm::{self, GateDef, HookMode};
-use super::state::{Phase, read_state_with_graph, set_phase_with_session_with_graph};
+use super::mutables;
 use super::prd;
 use super::recall;
-use super::mutables;
+use super::state::{read_state_with_graph, set_phase_with_session_with_graph, Phase};
 
 pub fn next_skill(current: &Phase, g: &fsm::Graph) -> String {
     g.state(current.as_str())
@@ -18,7 +18,10 @@ pub fn next_phase(current: &Phase, g: &fsm::Graph) -> Phase {
 }
 
 pub fn known_predicates() -> Vec<(&'static str, &'static str)> {
-    predicate_table().iter().map(|(name, desc, _)| (*name, *desc)).collect()
+    predicate_table()
+        .iter()
+        .map(|(name, desc, _)| (*name, *desc))
+        .collect()
 }
 
 pub fn handle_predicates_md(_content: &str) -> (String, String, i32) {
@@ -68,35 +71,67 @@ fn predicate_table() -> Vec<(&'static str, &'static str, PredicateFn)> {
         .collect()
 }
 
-fn pred_remote_hook_refused() -> bool { false }
+fn pred_remote_hook_refused() -> bool {
+    false
+}
 
-fn pred_prd_all_closed() -> bool { !prd_has_open_items() }
-fn pred_mutables_all_resolved() -> bool { mutables::pending_detailed().is_empty() }
-fn pred_mutables_all_typed() -> bool { mutables::all_typed() }
-fn pred_state_obligations_ready() -> bool { mutables::state_obligations_ready() }
-fn pred_conc_obligations_ready() -> bool { mutables::conc_obligations_ready() }
-fn pred_sec_obligations_ready() -> bool { mutables::sec_obligations_ready() }
-fn pred_res_obligations_ready() -> bool { mutables::res_obligations_ready() }
-fn pred_worktree_clean() -> bool { !worktree_dirty() }
-fn pred_browser_witness_coverage() -> bool { check_browser_witness_coverage_for_cwd("").is_empty() }
+fn pred_prd_all_closed() -> bool {
+    !prd_has_open_items()
+}
+fn pred_mutables_all_resolved() -> bool {
+    mutables::pending_detailed().is_empty()
+}
+fn pred_mutables_all_typed() -> bool {
+    mutables::all_typed()
+}
+fn pred_state_obligations_ready() -> bool {
+    mutables::state_obligations_ready()
+}
+fn pred_conc_obligations_ready() -> bool {
+    mutables::conc_obligations_ready()
+}
+fn pred_sec_obligations_ready() -> bool {
+    mutables::sec_obligations_ready()
+}
+fn pred_res_obligations_ready() -> bool {
+    mutables::res_obligations_ready()
+}
+fn pred_worktree_clean() -> bool {
+    !worktree_dirty()
+}
+fn pred_browser_witness_coverage() -> bool {
+    check_browser_witness_coverage_for_cwd("").is_empty()
+}
 #[cfg(target_arch = "wasm32")]
-fn pred_app_loads_witnessed() -> bool { crate::browser_witness::app_loads_witnessed_this_stop_window("") }
-#[cfg(not(target_arch = "wasm32"))]
-fn pred_app_loads_witnessed() -> bool { true }
-#[cfg(target_arch = "wasm32")]
-fn pred_claim_audit_clean() -> bool {
-    crate::wasm_dispatch::host_abi::git_repository_absent() || super::claim_audit::claim_audit_clean()
+fn pred_app_loads_witnessed() -> bool {
+    crate::browser_witness::app_loads_witnessed_this_stop_window("")
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_claim_audit_clean() -> bool { true }
-fn pred_submodules_clean() -> bool { super::submodule_drift::submodules_clean() }
+fn pred_app_loads_witnessed() -> bool {
+    true
+}
+#[cfg(target_arch = "wasm32")]
+fn pred_claim_audit_clean() -> bool {
+    crate::wasm_dispatch::host_abi::git_repository_absent()
+        || super::claim_audit::claim_audit_clean()
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn pred_claim_audit_clean() -> bool {
+    true
+}
+fn pred_submodules_clean() -> bool {
+    super::submodule_drift::submodules_clean()
+}
 
 #[cfg(target_arch = "wasm32")]
 fn emit_unknown_predicate(other: &str) {
-    crate::wasm_dispatch::emit_event("fsm_unknown_predicate", serde_json::json!({
-        "predicate": other,
-        "reason": "not in transitions::known_predicates(); this gate can never be satisfied. Fix the name in .gm/instructions/fsm/graph.json (see fsm/predicates.md for the valid set) or use a jit hook for a condition that has no compiled predicate.",
-    }));
+    crate::wasm_dispatch::emit_event(
+        "fsm_unknown_predicate",
+        serde_json::json!({
+            "predicate": other,
+            "reason": "not in transitions::known_predicates(); this gate can never be satisfied. Fix the name in .gm/instructions/fsm/graph.json (see fsm/predicates.md for the valid set) or use a jit hook for a condition that has no compiled predicate.",
+        }),
+    );
 }
 #[cfg(not(target_arch = "wasm32"))]
 fn emit_unknown_predicate(_other: &str) {}
@@ -136,19 +171,34 @@ fn residual_scan_fired() -> bool {
         Some(ms) => ms,
         None => return false,
     };
-    residual_scan_marker_matches_current_session_or_is_within_longgap_threshold(fired_sid, fired_at_ms)
+    residual_scan_marker_matches_current_session_or_is_within_longgap_threshold(
+        fired_sid,
+        fired_at_ms,
+    )
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn residual_scan_fired() -> bool { false }
+fn residual_scan_fired() -> bool {
+    false
+}
 
 fn prd_has_open_items() -> bool {
     let (body, _err, code) = prd::handle_list("");
-    if code != 0 { return false; }
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return false };
-    let Some(items) = v.get("items").and_then(|v| v.as_array()) else { return false };
+    if code != 0 {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return false;
+    };
+    let Some(items) = v.get("items").and_then(|v| v.as_array()) else {
+        return false;
+    };
     items.iter().any(|it| {
-        let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-        let blocked_external = it.get("blockedBy")
+        let status = it
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pending");
+        let blocked_external = it
+            .get("blockedBy")
             .and_then(|v| v.as_array())
             .map(|seq| seq.iter().any(|x| x.as_str() == Some("external")))
             .unwrap_or(false);
@@ -187,7 +237,9 @@ fn synthetic_test_files_added_in_working_diff() -> Vec<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn synthetic_test_files_added_in_working_diff() -> Vec<String> { vec![] }
+fn synthetic_test_files_added_in_working_diff() -> Vec<String> {
+    vec![]
+}
 
 #[cfg(target_arch = "wasm32")]
 fn pred_no_synthetic_test_files() -> bool {
@@ -195,17 +247,24 @@ fn pred_no_synthetic_test_files() -> bool {
     if found.is_empty() {
         return true;
     }
-    crate::wasm_dispatch::emit_event("deviation.synthetic-test-file", serde_json::json!({
-        "files": found,
-        "reason": "VERIFY doctrine forbids standing test files: delete them and replace their assertions with a live exec_js/browser witness, then re-verify",
-    }));
+    crate::wasm_dispatch::emit_event(
+        "deviation.synthetic-test-file",
+        serde_json::json!({
+            "files": found,
+            "reason": "VERIFY doctrine forbids standing test files: delete them and replace their assertions with a live exec_js/browser witness, then re-verify",
+        }),
+    );
     false
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_no_synthetic_test_files() -> bool { true }
+fn pred_no_synthetic_test_files() -> bool {
+    true
+}
 #[cfg(not(target_arch = "wasm32"))]
-fn worktree_dirty() -> bool { false }
+fn worktree_dirty() -> bool {
+    false
+}
 
 #[cfg(target_arch = "wasm32")]
 fn added_lines_in_diff() -> Vec<(String, usize, String)> {
@@ -221,7 +280,10 @@ fn added_lines_in_diff() -> Vec<(String, usize, String)> {
         }
         if let Some(hunk) = line.strip_prefix("@@ ") {
             if let Some(plus) = hunk.split("+").nth(1) {
-                let num_part = plus.split(|c: char| c == ',' || c == ' ').next().unwrap_or("0");
+                let num_part = plus
+                    .split(|c: char| c == ',' || c == ' ')
+                    .next()
+                    .unwrap_or("0");
                 current_line = num_part.parse().unwrap_or(0);
             }
             continue;
@@ -237,15 +299,23 @@ fn added_lines_in_diff() -> Vec<(String, usize, String)> {
     out
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn added_lines_in_diff() -> Vec<(String, usize, String)> { vec![] }
+fn added_lines_in_diff() -> Vec<(String, usize, String)> {
+    vec![]
+}
 
 fn is_test_scoped_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    lower.contains(".test.") || lower.contains(".spec.") || lower.contains("/test/") || lower.contains("/tests/") || lower.contains("/__tests__/")
+    lower.contains(".test.")
+        || lower.contains(".spec.")
+        || lower.contains("/test/")
+        || lower.contains("/tests/")
+        || lower.contains("/__tests__/")
 }
 
 fn needle_first_occurrence_sits_inside_quoted_string_literal(text: &str, needle: &str) -> bool {
-    let Some(idx) = text.find(needle) else { return false };
+    let Some(idx) = text.find(needle) else {
+        return false;
+    };
     let before = &text[..idx];
     let d = before.matches('"').count();
     let s = before.matches('\'').count();
@@ -255,72 +325,126 @@ fn needle_first_occurrence_sits_inside_quoted_string_literal(text: &str, needle:
 
 #[cfg(target_arch = "wasm32")]
 fn pred_no_admit_deferral_markers() -> bool {
-    const COLON_MARKERS: &[&str] = &["TODO:", "FIXME:", "XXX:", "HACK:", "todo!(", "unimplemented!("];
+    const COLON_MARKERS: &[&str] = &[
+        "TODO:",
+        "FIXME:",
+        "XXX:",
+        "HACK:",
+        "todo!(",
+        "unimplemented!(",
+    ];
     const PHRASES: &[&str] = &["not implemented", "not yet implemented"];
-    const SOURCE_EXTS: &[&str] = &[".rs", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".py", ".go", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".sh", ".ps1", ".vue", ".svelte"];
+    const SOURCE_EXTS: &[&str] = &[
+        ".rs", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".py", ".go", ".java", ".c", ".cc",
+        ".cpp", ".h", ".hpp", ".sh", ".ps1", ".vue", ".svelte",
+    ];
     let mut found = Vec::new();
     for (path, line_no, text) in added_lines_in_diff() {
-        if !SOURCE_EXTS.iter().any(|e| path.ends_with(e)) { continue; }
+        if !SOURCE_EXTS.iter().any(|e| path.ends_with(e)) {
+            continue;
+        }
         let upper = text.to_ascii_uppercase();
         let colon_hit = COLON_MARKERS.iter().any(|m| {
             let mu = m.to_ascii_uppercase();
-            upper.contains(&mu) && !needle_first_occurrence_sits_inside_quoted_string_literal(&upper, &mu)
+            upper.contains(&mu)
+                && !needle_first_occurrence_sits_inside_quoted_string_literal(&upper, &mu)
         });
         let lower = text.to_ascii_lowercase();
-        let phrase_hit = PHRASES.iter().any(|p| lower.contains(p) && !needle_first_occurrence_sits_inside_quoted_string_literal(&lower, p));
+        let phrase_hit = PHRASES.iter().any(|p| {
+            lower.contains(p)
+                && !needle_first_occurrence_sits_inside_quoted_string_literal(&lower, p)
+        });
         if colon_hit || phrase_hit {
             found.push(format!("{path}:{line_no}: {}", text.trim()));
         }
     }
-    if found.is_empty() { return true; }
-    crate::wasm_dispatch::emit_event("deviation.admit-deferral-marker", serde_json::json!({
-        "lines": found,
-        "reason": "an admit/deferral marker in a source file stands in for a complete proof -- finish the work or remove the marker, then re-attempt",
-    }));
+    if found.is_empty() {
+        return true;
+    }
+    crate::wasm_dispatch::emit_event(
+        "deviation.admit-deferral-marker",
+        serde_json::json!({
+            "lines": found,
+            "reason": "an admit/deferral marker in a source file stands in for a complete proof -- finish the work or remove the marker, then re-attempt",
+        }),
+    );
     false
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_no_admit_deferral_markers() -> bool { true }
+fn pred_no_admit_deferral_markers() -> bool {
+    true
+}
 
 #[cfg(target_arch = "wasm32")]
 fn pred_no_secrets_in_diff() -> bool {
     let mut found = Vec::new();
     for (path, line_no, text) in added_lines_in_diff() {
-        let looks_like_aws_key = text.contains("AKIA") && text.matches(|c: char| c.is_ascii_alphanumeric()).count() >= 20;
+        let looks_like_aws_key = text.contains("AKIA")
+            && text.matches(|c: char| c.is_ascii_alphanumeric()).count() >= 20;
         let looks_like_private_key = text.contains("-----BEGIN") && text.contains("PRIVATE KEY");
         let looks_like_db_url_with_password = (text.contains("://") && text.contains('@'))
-            && (text.contains("postgres") || text.contains("mysql") || text.contains("mongodb") || text.contains("redis"))
-            && text.contains(':') && !text.contains("<") && !text.contains("${") && !text.contains("%s");
+            && (text.contains("postgres")
+                || text.contains("mysql")
+                || text.contains("mongodb")
+                || text.contains("redis"))
+            && text.contains(':')
+            && !text.contains("<")
+            && !text.contains("${")
+            && !text.contains("%s");
         let lower = text.to_ascii_lowercase();
-        let looks_like_bearer_literal = (lower.contains("api_key") || lower.contains("apikey") || lower.contains("bearer ") || lower.contains("secret_key"))
-            && text.contains('"') && text.matches(|c: char| c.is_ascii_alphanumeric()).count() >= 24
-            && !lower.contains("process.env") && !lower.contains("env::var") && !lower.contains("getenv");
-        if looks_like_aws_key || looks_like_private_key || looks_like_db_url_with_password || looks_like_bearer_literal {
+        let looks_like_bearer_literal = (lower.contains("api_key")
+            || lower.contains("apikey")
+            || lower.contains("bearer ")
+            || lower.contains("secret_key"))
+            && text.contains('"')
+            && text.matches(|c: char| c.is_ascii_alphanumeric()).count() >= 24
+            && !lower.contains("process.env")
+            && !lower.contains("env::var")
+            && !lower.contains("getenv");
+        if looks_like_aws_key
+            || looks_like_private_key
+            || looks_like_db_url_with_password
+            || looks_like_bearer_literal
+        {
             let redacted: String = text.chars().take(20).collect();
             found.push(format!("{path}:{line_no}: {redacted}... (redacted)"));
         }
     }
-    if found.is_empty() { return true; }
-    crate::wasm_dispatch::emit_event("deviation.secret-in-diff", serde_json::json!({
-        "lines": found,
-        "reason": "a line in the working diff matches a high-confidence secret shape -- remove the literal, route it through an env var or secret store, then re-attempt",
-    }));
+    if found.is_empty() {
+        return true;
+    }
+    crate::wasm_dispatch::emit_event(
+        "deviation.secret-in-diff",
+        serde_json::json!({
+            "lines": found,
+            "reason": "a line in the working diff matches a high-confidence secret shape -- remove the literal, route it through an env var or secret store, then re-attempt",
+        }),
+    );
     false
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_no_secrets_in_diff() -> bool { true }
+fn pred_no_secrets_in_diff() -> bool {
+    true
+}
 
 #[cfg(target_arch = "wasm32")]
 fn pred_no_unchecked_panics_in_diff() -> bool {
     let mut found = Vec::new();
     for (path, line_no, text) in added_lines_in_diff() {
-        if is_test_scoped_path(&path) { continue; }
+        if is_test_scoped_path(&path) {
+            continue;
+        }
         let trimmed = text.trim();
         if trimmed.starts_with('#') || trimmed.starts_with("//") {
             continue;
         }
         let is_rust = path.ends_with(".rs");
-        let is_js_like = path.ends_with(".js") || path.ends_with(".ts") || path.ends_with(".jsx") || path.ends_with(".tsx") || path.ends_with(".mjs") || path.ends_with(".cjs");
+        let is_js_like = path.ends_with(".js")
+            || path.ends_with(".ts")
+            || path.ends_with(".jsx")
+            || path.ends_with(".tsx")
+            || path.ends_with(".mjs")
+            || path.ends_with(".cjs");
         if is_rust {
             let has_unwrap = text.contains(".unwrap()") && !text.contains("unwrap_or");
             let has_expect = text.contains(".expect(");
@@ -334,42 +458,70 @@ fn pred_no_unchecked_panics_in_diff() -> bool {
             }
         }
     }
-    if found.is_empty() { return true; }
-    crate::wasm_dispatch::emit_event("deviation.unchecked-panic", serde_json::json!({
-        "lines": found,
-        "reason": "a new line panics/throws/unwraps outside a test path with no visible handling -- propagate the error explicitly (Result/catch) or justify the panic as a real precondition violation, then re-attempt",
-    }));
+    if found.is_empty() {
+        return true;
+    }
+    crate::wasm_dispatch::emit_event(
+        "deviation.unchecked-panic",
+        serde_json::json!({
+            "lines": found,
+            "reason": "a new line panics/throws/unwraps outside a test path with no visible handling -- propagate the error explicitly (Result/catch) or justify the panic as a real precondition violation, then re-attempt",
+        }),
+    );
     false
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_no_unchecked_panics_in_diff() -> bool { true }
+fn pred_no_unchecked_panics_in_diff() -> bool {
+    true
+}
 
 #[cfg(target_arch = "wasm32")]
 fn pred_no_hedge_language_in_diff() -> bool {
-    const HEDGES: &[&str] = &["todo later", "in a future session", "for now we", "as a stopgap", "good enough for now", "left as an exercise", "out of scope for this", "not yet implemented", "we'll come back to"];
+    const HEDGES: &[&str] = &[
+        "todo later",
+        "in a future session",
+        "for now we",
+        "as a stopgap",
+        "good enough for now",
+        "left as an exercise",
+        "out of scope for this",
+        "not yet implemented",
+        "we'll come back to",
+    ];
     let mut found = Vec::new();
     for (path, line_no, text) in added_lines_in_diff() {
-        if !path.ends_with(".md") { continue; }
+        if !path.ends_with(".md") {
+            continue;
+        }
         let lower = text.to_ascii_lowercase();
         if HEDGES.iter().any(|h| lower.contains(h)) {
             found.push(format!("{path}:{line_no}: {}", text.trim()));
         }
     }
-    if found.is_empty() { return true; }
-    crate::wasm_dispatch::emit_event("deviation.hedge-language", serde_json::json!({
-        "lines": found,
-        "reason": "a hedge/deferral phrase in touched prose stands in for a decision -- commit to the real answer or remove the hedge, then re-attempt",
-    }));
+    if found.is_empty() {
+        return true;
+    }
+    crate::wasm_dispatch::emit_event(
+        "deviation.hedge-language",
+        serde_json::json!({
+            "lines": found,
+            "reason": "a hedge/deferral phrase in touched prose stands in for a decision -- commit to the real answer or remove the hedge, then re-attempt",
+        }),
+    );
     false
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_no_hedge_language_in_diff() -> bool { true }
+fn pred_no_hedge_language_in_diff() -> bool {
+    true
+}
 
 #[cfg(target_arch = "wasm32")]
 fn graphical_symbol_lines_in_diff() -> Vec<String> {
     let mut found = Vec::new();
     for (path, line_no, text) in added_lines_in_diff() {
-        if path.ends_with("CHANGELOG.md") { continue; }
+        if path.ends_with("CHANGELOG.md") {
+            continue;
+        }
         let has_glyph = text.chars().any(|c| {
             let cp = c as u32;
             matches!(cp, 0x2190..=0x21FF | 0x2500..=0x257F | 0x2600..=0x27BF | 0x1F300..=0x1FAFF | 0x2B00..=0x2BFF)
@@ -384,45 +536,81 @@ fn graphical_symbol_lines_in_diff() -> Vec<String> {
 #[cfg(target_arch = "wasm32")]
 fn pred_no_graphical_symbols_in_diff() -> bool {
     let found = graphical_symbol_lines_in_diff();
-    if found.is_empty() { return true; }
-    crate::wasm_dispatch::emit_event("deviation.graphical-symbol", serde_json::json!({
-        "lines": found,
-        "reason": "a decorative non-ASCII glyph landed in tracked source/prose -- convert to its plain-ASCII equivalent (->, -/*, [x]/[ ], done/todo/pass/fail), then re-attempt",
-    }));
+    if found.is_empty() {
+        return true;
+    }
+    crate::wasm_dispatch::emit_event(
+        "deviation.graphical-symbol",
+        serde_json::json!({
+            "lines": found,
+            "reason": "a decorative non-ASCII glyph landed in tracked source/prose -- convert to its plain-ASCII equivalent (->, -/*, [x]/[ ], done/todo/pass/fail), then re-attempt",
+        }),
+    );
     false
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_no_graphical_symbols_in_diff() -> bool { true }
+fn pred_no_graphical_symbols_in_diff() -> bool {
+    true
+}
 
 #[cfg(target_arch = "wasm32")]
 fn pred_idempotent_dispatch_replay_safe() -> bool {
     let raw = crate::pkfs::read_to_string(".gm/exec-spool/.audit-tuples.json").unwrap_or_default();
-    if raw.trim().is_empty() { return true; }
-    let Ok(serde_json::Value::Array(tuples)) = serde_json::from_str::<serde_json::Value>(&raw) else { return true };
-    let mut seen: std::collections::HashMap<(String, String), String> = std::collections::HashMap::new();
+    if raw.trim().is_empty() {
+        return true;
+    }
+    let Ok(serde_json::Value::Array(tuples)) = serde_json::from_str::<serde_json::Value>(&raw)
+    else {
+        return true;
+    };
+    let mut seen: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
     let mut conflicts = Vec::new();
     for t in &tuples {
-        let id = t.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let hash = t.get("hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let outcome = t.get("outcome").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        if id.is_empty() || hash.is_empty() { continue; }
+        let id = t
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let hash = t
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let outcome = t
+            .get("outcome")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if id.is_empty() || hash.is_empty() {
+            continue;
+        }
         let key = (id.clone(), hash.clone());
         match seen.get(&key) {
             Some(prior) if *prior != outcome => {
                 conflicts.push(format!("{id}@{hash}: {prior} then {outcome}"));
             }
-            _ => { seen.insert(key, outcome); }
+            _ => {
+                seen.insert(key, outcome);
+            }
         }
     }
-    if conflicts.is_empty() { return true; }
-    crate::wasm_dispatch::emit_event("deviation.non-idempotent-replay", serde_json::json!({
-        "conflicts": conflicts,
-        "reason": "the same (id, hash) audit tuple was recorded with two different outcomes this stop window -- a replayed dispatch must reach the same result, never a second different mutation",
-    }));
+    if conflicts.is_empty() {
+        return true;
+    }
+    crate::wasm_dispatch::emit_event(
+        "deviation.non-idempotent-replay",
+        serde_json::json!({
+            "conflicts": conflicts,
+            "reason": "the same (id, hash) audit tuple was recorded with two different outcomes this stop window -- a replayed dispatch must reach the same result, never a second different mutation",
+        }),
+    );
     false
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_idempotent_dispatch_replay_safe() -> bool { true }
+fn pred_idempotent_dispatch_replay_safe() -> bool {
+    true
+}
 
 #[cfg(target_arch = "wasm32")]
 fn ci_validation_fresh() -> bool {
@@ -431,10 +619,18 @@ fn ci_validation_fresh() -> bool {
     }
     let raw = crate::pkfs::read_to_string(".gm/exec-spool/.ci-validated").unwrap_or_default();
     let trimmed = raw.trim();
-    if trimmed.is_empty() { return false; }
+    if trimmed.is_empty() {
+        return false;
+    }
     let current_head = crate::wasm_dispatch::git_call("rev-parse HEAD", None)
-        .get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-    if current_head.is_empty() { return false; }
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if current_head.is_empty() {
+        return false;
+    }
     match serde_json::from_str::<serde_json::Value>(trimmed) {
         Ok(v) => {
             let marker_sha = v.get("head_sha").and_then(|s| s.as_str()).unwrap_or("");
@@ -444,7 +640,9 @@ fn ci_validation_fresh() -> bool {
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn ci_validation_fresh() -> bool { true }
+fn ci_validation_fresh() -> bool {
+    true
+}
 
 #[cfg(target_arch = "wasm32")]
 fn working_diff_touched_file_count() -> usize {
@@ -452,25 +650,42 @@ fn working_diff_touched_file_count() -> usize {
         let raw = crate::wasm_dispatch::git_porcelain();
         raw.lines().filter(|l| !l.trim().is_empty()).count()
     };
-    if porcelain_count > 0 { return porcelain_count; }
+    if porcelain_count > 0 {
+        return porcelain_count;
+    }
     let raw = crate::wasm_dispatch::git_call("show --name-only --format=", None);
-    raw.get("stdout").and_then(|s| s.as_str()).unwrap_or("")
+    raw.get("stdout")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
         .lines()
         .filter(|l| !l.trim().is_empty())
         .count()
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn working_diff_touched_file_count() -> usize { 0 }
+fn working_diff_touched_file_count() -> usize {
+    0
+}
 
 #[cfg(target_arch = "wasm32")]
 fn split_context_swept() -> bool {
-    if working_diff_touched_file_count() <= 1 { return true; }
-    let raw = crate::pkfs::read_to_string(".gm/exec-spool/.split-context-swept").unwrap_or_default();
+    if working_diff_touched_file_count() <= 1 {
+        return true;
+    }
+    let raw =
+        crate::pkfs::read_to_string(".gm/exec-spool/.split-context-swept").unwrap_or_default();
     let trimmed = raw.trim();
-    if trimmed.is_empty() { return false; }
+    if trimmed.is_empty() {
+        return false;
+    }
     let current_head = crate::wasm_dispatch::git_call("rev-parse HEAD", None)
-        .get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-    if current_head.is_empty() { return false; }
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if current_head.is_empty() {
+        return false;
+    }
     match serde_json::from_str::<serde_json::Value>(trimmed) {
         Ok(v) => {
             let marker_sha = v.get("head_sha").and_then(|s| s.as_str()).unwrap_or("");
@@ -480,77 +695,113 @@ fn split_context_swept() -> bool {
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn split_context_swept() -> bool { true }
+fn split_context_swept() -> bool {
+    true
+}
 
 #[cfg(target_arch = "wasm32")]
 fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
     let edits_path = if cwd.is_empty() {
         ".gm/exec-spool/.turn-browser-edits.json".to_string()
     } else {
-        format!("{}/.gm/exec-spool/.turn-browser-edits.json", cwd.trim_end_matches('/').trim_end_matches('\\'))
+        format!(
+            "{}/.gm/exec-spool/.turn-browser-edits.json",
+            cwd.trim_end_matches('/').trim_end_matches('\\')
+        )
     };
     let edits_raw = crate::pkfs::read_to_string(&edits_path).unwrap_or_default();
-    if edits_raw.trim().is_empty() { return vec![]; }
-    let edits: Vec<serde_json::Value> = match serde_json::from_str::<serde_json::Value>(&edits_raw) {
+    if edits_raw.trim().is_empty() {
+        return vec![];
+    }
+    let edits: Vec<serde_json::Value> = match serde_json::from_str::<serde_json::Value>(&edits_raw)
+    {
         Ok(serde_json::Value::Array(arr)) => arr,
         _ => return vec![],
     };
-    if edits.is_empty() { return vec![]; }
+    if edits.is_empty() {
+        return vec![];
+    }
     let witness_path = if cwd.is_empty() {
         ".gm/exec-spool/.turn-browser-witnessed".to_string()
     } else {
-        format!("{}/.gm/exec-spool/.turn-browser-witnessed", cwd.trim_end_matches('/').trim_end_matches('\\'))
+        format!(
+            "{}/.gm/exec-spool/.turn-browser-witnessed",
+            cwd.trim_end_matches('/').trim_end_matches('\\')
+        )
     };
     let witness_raw = crate::pkfs::read_to_string(&witness_path).unwrap_or_default();
-    let witnessed_hashes: serde_json::Map<String, serde_json::Value> = match serde_json::from_str::<serde_json::Value>(&witness_raw) {
-        Ok(serde_json::Value::Object(m)) => {
-            let mut merged = serde_json::Map::new();
-            if let Some(serde_json::Value::Object(legacy)) = m.get("witnessed_hashes") {
-                for (k, v) in legacy { if v.is_string() { merged.insert(k.clone(), v.clone()); } }
+    let witnessed_hashes: serde_json::Map<String, serde_json::Value> =
+        match serde_json::from_str::<serde_json::Value>(&witness_raw) {
+            Ok(serde_json::Value::Object(m)) => {
+                let mut merged = serde_json::Map::new();
+                if let Some(serde_json::Value::Object(legacy)) = m.get("witnessed_hashes") {
+                    for (k, v) in legacy {
+                        if v.is_string() {
+                            merged.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                for (k, v) in &m {
+                    if k != "witnessed_hashes" && v.is_string() {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                }
+                merged
             }
-            for (k, v) in &m { if k != "witnessed_hashes" && v.is_string() { merged.insert(k.clone(), v.clone()); } }
-            merged
-        }
-        _ => serde_json::Map::new(),
-    };
+            _ => serde_json::Map::new(),
+        };
     let mut unwitnessed: Vec<String> = vec![];
     for entry in edits.iter() {
         let file = match entry.get("file").and_then(|v| v.as_str()) {
             Some(f) if !f.is_empty() => f,
             _ => continue,
         };
-        if !crate::browser_witness::is_browser_running_file(file) { continue; }
+        if !crate::browser_witness::is_browser_running_file(file) {
+            continue;
+        }
         let edit_hash = entry.get("hash").and_then(|v| v.as_str()).unwrap_or("");
         let current_hash = crate::browser_witness::hash_file_short(file);
-        if current_hash.is_empty() { continue; }
-        let witness_hash = witnessed_hashes.get(file).and_then(|v| v.as_str()).unwrap_or("");
-        let matches = !witness_hash.is_empty() && (current_hash.starts_with(witness_hash) || witness_hash.starts_with(current_hash.as_str()));
+        if current_hash.is_empty() {
+            continue;
+        }
+        let witness_hash = witnessed_hashes
+            .get(file)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let matches = !witness_hash.is_empty()
+            && (current_hash.starts_with(witness_hash)
+                || witness_hash.starts_with(current_hash.as_str()));
         if !matches {
             let kind = if witness_hash.is_empty() {
                 "browser-witness-missing"
             } else {
                 "browser-witness-hash-mismatch"
             };
-            crate::wasm_dispatch::emit_event(&format!("deviation.{kind}"), serde_json::json!({
-                "file": file,
-                "kind": kind,
-                "severity": super::deviations::effective_severity(kind).as_str(),
-                "edit_hash": edit_hash,
-                "current_hash": current_hash,
-                "witness_hash": witness_hash,
-                "reason": if witness_hash.is_empty() {
-                    "this file was edited but never witnessed in a browser dispatch"
-                } else {
-                    "this file was witnessed, then edited again -- the witness is stale"
-                },
-            }));
+            crate::wasm_dispatch::emit_event(
+                &format!("deviation.{kind}"),
+                serde_json::json!({
+                    "file": file,
+                    "kind": kind,
+                    "severity": super::deviations::effective_severity(kind).as_str(),
+                    "edit_hash": edit_hash,
+                    "current_hash": current_hash,
+                    "witness_hash": witness_hash,
+                    "reason": if witness_hash.is_empty() {
+                        "this file was edited but never witnessed in a browser dispatch"
+                    } else {
+                        "this file was witnessed, then edited again -- the witness is stale"
+                    },
+                }),
+            );
             unwitnessed.push(file.to_string());
         }
     }
     unwitnessed
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn check_browser_witness_coverage_for_cwd(_cwd: &str) -> Vec<String> { vec![] }
+fn check_browser_witness_coverage_for_cwd(_cwd: &str) -> Vec<String> {
+    vec![]
+}
 
 pub enum HookOutcome {
     Passed,
@@ -586,17 +837,26 @@ impl HookOutcome {
 
 #[cfg(target_arch = "wasm32")]
 fn hook_outcome(hook_path: &str) -> HookOutcome {
-    let Some(full) = fsm::resolve_hook_path(hook_path) else { return HookOutcome::Missing };
-    let Some(script) = crate::pkfs::read_to_string(&full) else { return HookOutcome::Missing };
-    crate::wasm_dispatch::emit_event("fsm_hook_executing", serde_json::json!({
-        "hook_path": hook_path,
-        "resolved_path": full,
-    }));
+    let Some(full) = fsm::resolve_hook_path(hook_path) else {
+        return HookOutcome::Missing;
+    };
+    let Some(script) = crate::pkfs::read_to_string(&full) else {
+        return HookOutcome::Missing;
+    };
+    crate::wasm_dispatch::emit_event(
+        "fsm_hook_executing",
+        serde_json::json!({
+            "hook_path": hook_path,
+            "resolved_path": full,
+        }),
+    );
     let opts = serde_json::json!({ "timeoutMs": fsm::graph().policy.hook_timeout_ms }).to_string();
     let packed = unsafe {
         crate::wasm_dispatch::host_exec_js(
-            script.as_ptr(), script.len() as u32,
-            opts.as_ptr(), opts.len() as u32,
+            script.as_ptr(),
+            script.len() as u32,
+            opts.as_ptr(),
+            opts.len() as u32,
         )
     };
     let v = crate::wasm_dispatch::unpack_to_value_pub(packed);
@@ -610,7 +870,9 @@ fn hook_outcome(hook_path: &str) -> HookOutcome {
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn hook_outcome(_hook_path: &str) -> HookOutcome { HookOutcome::Unsupported }
+fn hook_outcome(_hook_path: &str) -> HookOutcome {
+    HookOutcome::Unsupported
+}
 
 fn hook_result(hook_path: &str) -> bool {
     hook_outcome(hook_path).passed()
@@ -639,7 +901,9 @@ fn predicate_detail(predicate_name: Option<&str>) -> Option<String> {
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn predicate_detail(_predicate_name: Option<&str>) -> Option<String> { None }
+fn predicate_detail(_predicate_name: Option<&str>) -> Option<String> {
+    None
+}
 
 fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, String, i32)> {
     let Some(edge) = graph.edge_between(from, to) else {
@@ -653,7 +917,9 @@ fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, S
         ));
     };
     for gate_name in &edge.gates {
-        let Some(g) = graph.gate(gate_name) else { continue };
+        let Some(g) = graph.gate(gate_name) else {
+            continue;
+        };
         if !evaluate_gate(g) {
             let detail = hook_denial_detail_or_none_if_predicate_caused_it(g)
                 .or_else(|| predicate_detail(g.predicate.as_deref()));
@@ -703,33 +969,38 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
     let mut residuals = Vec::new();
     let mut next_dispatch: Option<String> = None;
     for gate_name in &edge.gates {
-        let Some(g) = graph.gate(gate_name) else { continue };
+        let Some(g) = graph.gate(gate_name) else {
+            continue;
+        };
         if !evaluate_gate(g) {
             residuals.push(match hook_denial_detail_or_none_if_predicate_caused_it(g) {
                 Some(d) => format!("{} -- {}", g.message, d),
                 None => g.message.clone(),
             });
             if next_dispatch.is_none() {
-                next_dispatch = Some(match g.next_dispatch.as_deref() {
-                    Some(v) if !v.is_empty() => v,
-                    _ => match gate_name.as_str() {
-                    "residual-scan-fired" => "residual-scan",
-                    "prd-all-closed" => "prd-resolve",
-                    "mutables-all-resolved" => "mutable-resolve",
-                    "mutables-all-typed" => "mutable-add",
-                    "state-obligations-ready" => "mutable-add",
-                    "conc-obligations-ready" => "mutable-add",
-                    "sec-obligations-ready" => "mutable-add",
-                    "res-obligations-ready" => "mutable-add",
-                    "worktree-clean" => "git_finalize",
-                    "ci-validated-fresh" => "ci-status",
-                    "browser-witness-coverage" => "browser",
-                    "app-loads-witnessed" => "browser",
-                    "claim-audit-clean" => "claim-audit",
-                    "submodules-clean" => "git_add",
-                        _ => "instruction",
-                    },
-                }.to_string());
+                next_dispatch = Some(
+                    match g.next_dispatch.as_deref() {
+                        Some(v) if !v.is_empty() => v,
+                        _ => match gate_name.as_str() {
+                            "residual-scan-fired" => "residual-scan",
+                            "prd-all-closed" => "prd-resolve",
+                            "mutables-all-resolved" => "mutable-resolve",
+                            "mutables-all-typed" => "mutable-add",
+                            "state-obligations-ready" => "mutable-add",
+                            "conc-obligations-ready" => "mutable-add",
+                            "sec-obligations-ready" => "mutable-add",
+                            "res-obligations-ready" => "mutable-add",
+                            "worktree-clean" => "git_finalize",
+                            "ci-validated-fresh" => "ci-status",
+                            "browser-witness-coverage" => "browser",
+                            "app-loads-witnessed" => "browser",
+                            "claim-audit-clean" => "claim-audit",
+                            "submodules-clean" => "git_add",
+                            _ => "instruction",
+                        },
+                    }
+                    .to_string(),
+                );
             }
         }
     }
@@ -738,7 +1009,11 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn handle(_content: &str) -> (String, String, i32) {
-    ("{\"ok\":false,\"error\":\"transition requires wasm32\"}".to_string(), String::new(), 1)
+    (
+        "{\"ok\":false,\"error\":\"transition requires wasm32\"}".to_string(),
+        String::new(),
+        1,
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -754,7 +1029,9 @@ pub fn handle(content: &str) -> (String, String, i32) {
         if let Some(sid) = crate::validation::session_id_from_body(&v) {
             session_id = Some(sid);
         }
-        let to_str = v.get("to").and_then(|s| s.as_str())
+        let to_str = v
+            .get("to")
+            .and_then(|s| s.as_str())
             .or_else(|| v.get("phase").and_then(|s| s.as_str()))
             .or_else(|| v.as_str());
         match to_str {
@@ -788,12 +1065,19 @@ pub fn handle(content: &str) -> (String, String, i32) {
     }
 
     let skill = next_skill(&target, &graph);
-    match set_phase_with_session_with_graph(target.clone(), Some(skill.clone()), session_id, &graph) {
+    match set_phase_with_session_with_graph(target.clone(), Some(skill.clone()), session_id, &graph)
+    {
         Ok(s) => {
             #[cfg(target_arch = "wasm32")]
-            crate::wasm_dispatch::emit_event("phase.transitioned", serde_json::json!({ "from": cur_phase.as_str(), "phase": s.phase.as_str() }));
+            crate::wasm_dispatch::emit_event(
+                "phase.transitioned",
+                serde_json::json!({ "from": cur_phase.as_str(), "phase": s.phase.as_str() }),
+            );
             #[cfg(target_arch = "wasm32")]
-            if s.phase.as_str().eq_ignore_ascii_case(fsm::graph().policy.terminal_phase.as_str()) {
+            if s.phase
+                .as_str()
+                .eq_ignore_ascii_case(fsm::graph().policy.terminal_phase.as_str())
+            {
                 let receipt = crate::evidence_receipt::write();
                 crate::wasm_dispatch::emit_event("evidence.receipt", receipt);
             }
@@ -805,17 +1089,35 @@ pub fn handle(content: &str) -> (String, String, i32) {
                         .and_then(|v| v.get("items").cloned())
                         .and_then(|v| v.as_array().cloned())
                         .and_then(|arr| {
-                            arr.iter().find(|it| {
-                                let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-                                prd::status_is_open(status)
-                            }).cloned()
+                            arr.iter()
+                                .find(|it| {
+                                    let status = it
+                                        .get("status")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("pending");
+                                    prd::status_is_open(status)
+                                })
+                                .cloned()
                         })
-                        .and_then(|it| it.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                        .and_then(|it| {
+                            it.get("subject")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
                         .unwrap_or_default()
-                } else { String::new() }
+                } else {
+                    String::new()
+                }
             };
-            let combined = if query.is_empty() { s.phase.as_str().to_string() } else { format!("{} {}", s.phase.as_str(), query) };
-            let hits = recall::recall_hits(&combined, crate::ragconfig::InstructionPayloadConfig::default().transition_recall_hits);
+            let combined = if query.is_empty() {
+                s.phase.as_str().to_string()
+            } else {
+                format!("{} {}", s.phase.as_str(), query)
+            };
+            let hits = recall::recall_hits(
+                &combined,
+                crate::ragconfig::InstructionPayloadConfig::default().transition_recall_hits,
+            );
             let payload = serde_json::json!({
                 "phase": s.phase.as_str(),
                 "phase_label": skill,

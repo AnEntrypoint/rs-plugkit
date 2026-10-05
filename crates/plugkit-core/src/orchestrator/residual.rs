@@ -1,7 +1,8 @@
 use super::gm_dir;
 use crate::pkfs;
 
-pub const RESIDUAL_PRD_OPEN_DEFAULT: &str = "PRD still has items; complete or remove them before residual scan.";
+pub const RESIDUAL_PRD_OPEN_DEFAULT: &str =
+    "PRD still has items; complete or remove them before residual scan.";
 pub const RESIDUAL_BROWSER_OPEN_DEFAULT: &str = "browser sessions still open -- dispatch `browser` with `session close-all` body (closes every Chrome your gm session owns; `session close <id>` for a shared id), then `session list` to confirm none remain, before retrying residual-scan";
 pub const RESIDUAL_TASKS_RUNNING_DEFAULT: &str = "background tasks still running -- wait for completion or kill them via the host_exec_js interface before retrying residual-scan";
 pub const RESIDUAL_DIRTY_TREE_DEFAULT: &str = "worktree dirty -- modified={modified} untracked={untracked} -- commit or revert before residual scan; a push from a dirty tree orphans the unstaged delta";
@@ -26,7 +27,9 @@ fn count_modified_untracked(porcelain: &str) -> (usize, usize) {
     let mut modified = 0usize;
     let mut untracked = 0usize;
     for line in porcelain.lines() {
-        if line.len() < 2 { continue; }
+        if line.len() < 2 {
+            continue;
+        }
         if line.starts_with("??") {
             untracked += 1;
         } else {
@@ -56,7 +59,8 @@ fn prd_empty_or_missing() -> bool {
                 return true;
             }
             if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(trimmed) {
-                let items_opt = yaml.as_sequence()
+                let items_opt = yaml
+                    .as_sequence()
                     .or_else(|| yaml.get("items").and_then(|v| v.as_sequence()));
                 if let Some(items) = items_opt {
                     if items.is_empty() {
@@ -64,7 +68,8 @@ fn prd_empty_or_missing() -> bool {
                     }
                     let any_open = items.iter().any(|item| {
                         let status = item.get("status").and_then(|v| v.as_str());
-                        let blocked_external = item.get("blockedBy")
+                        let blocked_external = item
+                            .get("blockedBy")
                             .and_then(|v| v.as_sequence())
                             .map(|seq| seq.iter().any(|x| x.as_str() == Some("external")))
                             .unwrap_or(false);
@@ -87,10 +92,16 @@ fn browser_sessions_open() -> bool {
     ];
     for marker in &candidates {
         let ps = marker.to_string_lossy().to_string();
-        if !pkfs::exists(&ps) { continue; }
-        let Some(s) = pkfs::read_to_string(&ps) else { continue; };
+        if !pkfs::exists(&ps) {
+            continue;
+        }
+        let Some(s) = pkfs::read_to_string(&ps) else {
+            continue;
+        };
         let t = s.trim();
-        if t.is_empty() || t == "{}" || t == "[]" { continue; }
+        if t.is_empty() || t == "{}" || t == "[]" {
+            continue;
+        }
         let Ok(val) = serde_json::from_str::<serde_json::Value>(t) else {
             return true;
         };
@@ -102,7 +113,9 @@ fn browser_sessions_open() -> bool {
                         serde_json::Value::Null => false,
                         _ => true,
                     };
-                    if open { return true; }
+                    if open {
+                        return true;
+                    }
                 }
             }
             _ => return true,
@@ -128,14 +141,21 @@ fn deviation_scan_result(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn handle_scan(_content: &str) -> (String, String, i32) {
-    ("{\"ok\":false,\"error\":\"residual-scan requires wasm32\"}".to_string(), String::new(), 1)
+    (
+        "{\"ok\":false,\"error\":\"residual-scan requires wasm32\"}".to_string(),
+        String::new(),
+        1,
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn handle_scan(_content: &str) -> (String, String, i32) {
     let marker = gm_dir().join("residual-check-fired");
 
-    let enabled = crate::orchestrator::fsm::graph().policy.residual_checks.clone();
+    let enabled = crate::orchestrator::fsm::graph()
+        .policy
+        .residual_checks
+        .clone();
     let on = |k: &str| enabled.iter().any(|c| c == k);
 
     if on("prd-open") && !prd_empty_or_missing() {
@@ -200,7 +220,8 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
     let fired_at_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let _ = pkfs::write(&marker_s, &format!("{}:{}", fired_sid, fired_at_ms));
 
-    let message = crate::prose::resolve_and_mark("residual/imperative", RESIDUAL_IMPERATIVE_DEFAULT);
+    let message =
+        crate::prose::resolve_and_mark("residual/imperative", RESIDUAL_IMPERATIVE_DEFAULT);
     let mut payload = serde_json::json!({
         "scan": "fired",
         "marker": marker.display().to_string(),
@@ -217,12 +238,16 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
 
 #[cfg(target_arch = "wasm32")]
 fn liqology_stale_memory_finding() -> Option<serde_json::Value> {
-    let resp = crate::wasm_dispatch::plugin_call("liqology", "prune_report", &serde_json::json!({}));
+    let resp =
+        crate::wasm_dispatch::plugin_call("liqology", "prune_report", &serde_json::json!({}));
     if !crate::wasm_dispatch::plugin_ok(&resp) {
         return None;
     }
     let would_evict = resp.get("would_evict_ids").and_then(|v| v.as_array())?;
-    let retained = resp.get("retained_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let retained = resp
+        .get("retained_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     if would_evict.is_empty() || retained == 0 {
         return None;
     }

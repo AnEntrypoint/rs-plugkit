@@ -19,32 +19,213 @@ const DEFAULT_LIMIT: usize = 25;
 const MAX_LIMIT: usize = 200;
 const DEFAULT_IMPACT_DEPTH: usize = 3;
 const TEST_CALLER_DEPTH: usize = 6;
-const CONTAINER_KINDS_SQL: &str = "('impl_item','trait_item','class_declaration','class_definition','struct_item','enum_item')";
+const CONTAINER_KINDS_SQL: &str =
+    "('impl_item','trait_item','class_declaration','class_definition','struct_item','enum_item')";
 const ACTIONS: &[&str] = &[
-    "overview", "status", "sync", "outline", "find", "callers", "callees", "impact", "hotspots", "orphans",
-    "imports", "importers", "cycles", "coupling", "complexity", "duplicates", "tests",
+    "overview",
+    "status",
+    "sync",
+    "outline",
+    "find",
+    "callers",
+    "callees",
+    "impact",
+    "hotspots",
+    "orphans",
+    "imports",
+    "importers",
+    "cycles",
+    "coupling",
+    "complexity",
+    "duplicates",
+    "tests",
 ];
 const RISK_CANDIDATE_POOL: usize = 100;
 const COMMON_STD_NAMES: &[&str] = &[
-    "path", "parent", "as_path", "to_path_buf", "file_stem", "components", "metadata", "store", "load", "set", "update", "run", "call", "apply", "size", "name", "id",
-    "read_to_string", "exists", "trim_start_matches", "trim_end_matches", "trim_start", "trim_end", "strip_prefix", "strip_suffix", "split_once", "rsplit",
-    "to_lowercase", "to_uppercase", "to_ascii_lowercase", "is_file", "is_dir", "create_dir_all", "canonicalize", "file_name", "extension", "display", "borrow",
-    "borrow_mut", "unwrap_err", "ok_or", "ok_or_else", "position", "retain", "truncate", "clear", "resize", "reserve", "with_capacity", "from_utf8_lossy", "to_vec",
-    "as_slice", "get_or_insert_with", "sleep", "spawn", "send", "recv", "wait", "kill", "flush", "char_indices", "is_char_boundary", "is_alphanumeric",
-    "new", "get", "get_mut", "len", "is_empty", "is_some", "is_none", "is_ok", "is_err", "as_str", "as_ref", "as_mut", "as_bytes", "as_array", "as_u64", "as_i64",
-    "as_f64", "as_bool", "ok", "err", "map", "map_err", "and_then", "or_else", "unwrap", "unwrap_or", "unwrap_or_else", "unwrap_or_default", "expect", "filter",
-    "filter_map", "flat_map", "join", "insert", "remove", "push", "pop", "contains", "contains_key", "iter", "iter_mut", "into_iter", "collect", "cloned", "copied",
-    "clone", "to_string", "to_owned", "into", "from", "try_from", "from_str", "default", "fmt", "eq", "cmp", "partial_cmp", "next", "take", "skip", "rev", "min",
-    "max", "sort", "sort_by", "sort_by_key", "dedup", "extend", "entry", "or_insert", "or_insert_with", "or_default", "first", "last", "trim", "split", "lines",
-    "chars", "bytes", "starts_with", "ends_with", "find", "replace", "lock", "drop", "read", "write", "open", "close", "push_str", "format", "then", "any", "all",
-    "count", "sum", "zip", "enumerate", "chain", "flatten", "abs", "saturating_sub", "saturating_add", "min_by_key", "max_by_key", "parse", "keys", "values",
+    "path",
+    "parent",
+    "as_path",
+    "to_path_buf",
+    "file_stem",
+    "components",
+    "metadata",
+    "store",
+    "load",
+    "set",
+    "update",
+    "run",
+    "call",
+    "apply",
+    "size",
+    "name",
+    "id",
+    "read_to_string",
+    "exists",
+    "trim_start_matches",
+    "trim_end_matches",
+    "trim_start",
+    "trim_end",
+    "strip_prefix",
+    "strip_suffix",
+    "split_once",
+    "rsplit",
+    "to_lowercase",
+    "to_uppercase",
+    "to_ascii_lowercase",
+    "is_file",
+    "is_dir",
+    "create_dir_all",
+    "canonicalize",
+    "file_name",
+    "extension",
+    "display",
+    "borrow",
+    "borrow_mut",
+    "unwrap_err",
+    "ok_or",
+    "ok_or_else",
+    "position",
+    "retain",
+    "truncate",
+    "clear",
+    "resize",
+    "reserve",
+    "with_capacity",
+    "from_utf8_lossy",
+    "to_vec",
+    "as_slice",
+    "get_or_insert_with",
+    "sleep",
+    "spawn",
+    "send",
+    "recv",
+    "wait",
+    "kill",
+    "flush",
+    "char_indices",
+    "is_char_boundary",
+    "is_alphanumeric",
+    "new",
+    "get",
+    "get_mut",
+    "len",
+    "is_empty",
+    "is_some",
+    "is_none",
+    "is_ok",
+    "is_err",
+    "as_str",
+    "as_ref",
+    "as_mut",
+    "as_bytes",
+    "as_array",
+    "as_u64",
+    "as_i64",
+    "as_f64",
+    "as_bool",
+    "ok",
+    "err",
+    "map",
+    "map_err",
+    "and_then",
+    "or_else",
+    "unwrap",
+    "unwrap_or",
+    "unwrap_or_else",
+    "unwrap_or_default",
+    "expect",
+    "filter",
+    "filter_map",
+    "flat_map",
+    "join",
+    "insert",
+    "remove",
+    "push",
+    "pop",
+    "contains",
+    "contains_key",
+    "iter",
+    "iter_mut",
+    "into_iter",
+    "collect",
+    "cloned",
+    "copied",
+    "clone",
+    "to_string",
+    "to_owned",
+    "into",
+    "from",
+    "try_from",
+    "from_str",
+    "default",
+    "fmt",
+    "eq",
+    "cmp",
+    "partial_cmp",
+    "next",
+    "take",
+    "skip",
+    "rev",
+    "min",
+    "max",
+    "sort",
+    "sort_by",
+    "sort_by_key",
+    "dedup",
+    "extend",
+    "entry",
+    "or_insert",
+    "or_insert_with",
+    "or_default",
+    "first",
+    "last",
+    "trim",
+    "split",
+    "lines",
+    "chars",
+    "bytes",
+    "starts_with",
+    "ends_with",
+    "find",
+    "replace",
+    "lock",
+    "drop",
+    "read",
+    "write",
+    "open",
+    "close",
+    "push_str",
+    "format",
+    "then",
+    "any",
+    "all",
+    "count",
+    "sum",
+    "zip",
+    "enumerate",
+    "chain",
+    "flatten",
+    "abs",
+    "saturating_sub",
+    "saturating_add",
+    "min_by_key",
+    "max_by_key",
+    "parse",
+    "keys",
+    "values",
 ];
 
 fn uniquely_defined_names(db: &str) -> HashSet<String> {
-    rows(db, &format!("SELECT name FROM {SYMBOLS_TABLE} WHERE name != '' GROUP BY name HAVING COUNT(*) = 1"), &[])
-        .iter()
-        .map(|r| string(r, "name"))
-        .collect()
+    rows(
+        db,
+        &format!(
+            "SELECT name FROM {SYMBOLS_TABLE} WHERE name != '' GROUP BY name HAVING COUNT(*) = 1"
+        ),
+        &[],
+    )
+    .iter()
+    .map(|r| string(r, "name"))
+    .collect()
 }
 
 fn is_common_std_name(name: &str) -> bool {
@@ -52,7 +233,10 @@ fn is_common_std_name(name: &str) -> bool {
 }
 
 fn is_identifier_like(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
 }
 
 fn host_now_ms() -> u64 {
@@ -72,12 +256,19 @@ fn legacy_edges_namespace() -> String {
 }
 
 fn number(v: Option<&Value>) -> u64 {
-    v.and_then(|x| x.as_u64().or_else(|| x.as_f64().map(|f| f as u64)).or_else(|| x.as_str().and_then(|s| s.parse().ok())))
-        .unwrap_or(0)
+    v.and_then(|x| {
+        x.as_u64()
+            .or_else(|| x.as_f64().map(|f| f as u64))
+            .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+    })
+    .unwrap_or(0)
 }
 
 fn string(row: &Value, key: &str) -> String {
-    row.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    row.get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn rows(db: &str, sql: &str, params: &[&str]) -> Vec<Value> {
@@ -88,7 +279,10 @@ fn rows(db: &str, sql: &str, params: &[&str]) -> Vec<Value> {
 }
 
 fn single_count(db: &str, sql: &str) -> u64 {
-    rows(db, sql, &[]).first().map(|r| number(r.get("c"))).unwrap_or(0)
+    rows(db, sql, &[])
+        .first()
+        .map(|r| number(r.get("c")))
+        .unwrap_or(0)
 }
 
 const ADDED_SYMBOL_COLUMNS: &[(&str, &str)] = &[
@@ -111,20 +305,46 @@ fn ensure_schema(db: &str) -> Result<(), String> {
         "CREATE TABLE IF NOT EXISTS {SYMBOLS_TABLE} (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, signature TEXT, cx INTEGER, nesting INTEGER, params INTEGER, sloc INTEGER, node_count INTEGER, shape_hash TEXT, is_test INTEGER, exported INTEGER)"
     ))?;
     libsql_wasm::exec(db, &format!("CREATE TABLE IF NOT EXISTS {IMPORTS_TABLE} (path TEXT NOT NULL, line INTEGER, spec TEXT)"))?;
-    let _ = libsql_wasm::exec(db, &format!("ALTER TABLE {FILES_TABLE} ADD COLUMN schema INTEGER"));
-    let _ = libsql_wasm::exec(db, &format!("ALTER TABLE {FILES_TABLE} ADD COLUMN is_test INTEGER"));
+    let _ = libsql_wasm::exec(
+        db,
+        &format!("ALTER TABLE {FILES_TABLE} ADD COLUMN schema INTEGER"),
+    );
+    let _ = libsql_wasm::exec(
+        db,
+        &format!("ALTER TABLE {FILES_TABLE} ADD COLUMN is_test INTEGER"),
+    );
     for (column, kind) in ADDED_SYMBOL_COLUMNS {
-        let _ = libsql_wasm::exec(db, &format!("ALTER TABLE {SYMBOLS_TABLE} ADD COLUMN {column} {kind}"));
+        let _ = libsql_wasm::exec(
+            db,
+            &format!("ALTER TABLE {SYMBOLS_TABLE} ADD COLUMN {column} {kind}"),
+        );
     }
-    libsql_wasm::exec(db, &format!("CREATE INDEX IF NOT EXISTS {SYMBOLS_TABLE}_name ON {SYMBOLS_TABLE}(name)"))?;
-    libsql_wasm::exec(db, &format!("CREATE INDEX IF NOT EXISTS {SYMBOLS_TABLE}_path ON {SYMBOLS_TABLE}(path)"))?;
-    libsql_wasm::exec(db, &format!("CREATE INDEX IF NOT EXISTS {IMPORTS_TABLE}_path ON {IMPORTS_TABLE}(path)"))?;
+    libsql_wasm::exec(
+        db,
+        &format!("CREATE INDEX IF NOT EXISTS {SYMBOLS_TABLE}_name ON {SYMBOLS_TABLE}(name)"),
+    )?;
+    libsql_wasm::exec(
+        db,
+        &format!("CREATE INDEX IF NOT EXISTS {SYMBOLS_TABLE}_path ON {SYMBOLS_TABLE}(path)"),
+    )?;
+    libsql_wasm::exec(
+        db,
+        &format!("CREATE INDEX IF NOT EXISTS {IMPORTS_TABLE}_path ON {IMPORTS_TABLE}(path)"),
+    )?;
     Ok(())
 }
 
 fn signature_of(name: &str, body: &str) -> String {
-    let first_line = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-    let signature = if first_line.is_empty() { name } else { first_line };
+    let first_line = body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let signature = if first_line.is_empty() {
+        name
+    } else {
+        first_line
+    };
     signature.chars().take(SIGNATURE_MAX_CHARS).collect()
 }
 
@@ -138,7 +358,9 @@ fn display_name(name: &str, signature: &str) -> String {
 fn is_test_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let file = lower.rsplit('/').next().unwrap_or("");
-    lower.split('/').any(|seg| matches!(seg, "test" | "tests" | "__tests__" | "spec" | "specs"))
+    lower
+        .split('/')
+        .any(|seg| matches!(seg, "test" | "tests" | "__tests__" | "spec" | "specs"))
         || file.contains(".test.")
         || file.contains(".spec.")
         || file.ends_with("_test.go")
@@ -150,11 +372,17 @@ fn is_test_path(path: &str) -> bool {
 }
 
 fn is_test_symbol(name: &str, file_is_test: bool) -> bool {
-    file_is_test || name.starts_with("test_") || name.starts_with("Test") || name.starts_with("Benchmark")
+    file_is_test
+        || name.starts_with("test_")
+        || name.starts_with("Test")
+        || name.starts_with("Benchmark")
 }
 
 fn is_exported_signature(signature: &str) -> bool {
-    signature.starts_with("pub ") || signature.starts_with("pub(") || signature.starts_with("export ") || signature.starts_with("public ")
+    signature.starts_with("pub ")
+        || signature.starts_with("pub(")
+        || signature.starts_with("export ")
+        || signature.starts_with("public ")
 }
 
 struct SymbolRow {
@@ -185,10 +413,17 @@ fn sql_text(value: &str) -> String {
 }
 
 fn sql_optional_number(value: Option<u64>) -> String {
-    value.map(|v| v.to_string()).unwrap_or_else(|| "NULL".to_string())
+    value
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "NULL".to_string())
 }
 
-fn store_file(db: &str, fp: &str, file: &FileSymbols, project_path: Option<&str>) -> Result<(), String> {
+fn store_file(
+    db: &str,
+    fp: &str,
+    file: &FileSymbols,
+    project_path: Option<&str>,
+) -> Result<(), String> {
     let path = sql_text(fp);
     let mut script = format!("BEGIN; DELETE FROM {SYMBOLS_TABLE} WHERE path={path}; DELETE FROM {IMPORTS_TABLE} WHERE path={path};");
     if !file.symbols.is_empty() {
@@ -197,7 +432,10 @@ fn store_file(db: &str, fp: &str, file: &FileSymbols, project_path: Option<&str>
             .iter()
             .map(|s| {
                 let m = s.metrics.as_ref();
-                let shape = m.filter(|x| x.shape_hash != 0).map(|x| sql_text(&format!("{:016x}", x.shape_hash))).unwrap_or_else(|| "NULL".to_string());
+                let shape = m
+                    .filter(|x| x.shape_hash != 0)
+                    .map(|x| sql_text(&format!("{:016x}", x.shape_hash)))
+                    .unwrap_or_else(|| "NULL".to_string());
                 format!(
                     "({path},{},{},{},{},{},{},{},{},{},{},{shape},{},{})",
                     sql_text(&s.kind),
@@ -221,8 +459,15 @@ fn store_file(db: &str, fp: &str, file: &FileSymbols, project_path: Option<&str>
         ));
     }
     if !file.imports.is_empty() {
-        let values: Vec<String> = file.imports.iter().map(|i| format!("({path},{},{})", i.line, sql_text(&i.spec))).collect();
-        script.push_str(&format!(" INSERT INTO {IMPORTS_TABLE}(path,line,spec) VALUES {};", values.join(",")));
+        let values: Vec<String> = file
+            .imports
+            .iter()
+            .map(|i| format!("({path},{},{})", i.line, sql_text(&i.spec)))
+            .collect();
+        script.push_str(&format!(
+            " INSERT INTO {IMPORTS_TABLE}(path,line,spec) VALUES {};",
+            values.join(",")
+        ));
     }
     script.push_str(&format!(
         " INSERT OR REPLACE INTO {FILES_TABLE}(path,lang,size,mtime_ms,loc,symbols,edges,parse_failed,schema,is_test) VALUES ({path},{},{},{},{},{},{},{},{SCHEMA_VERSION},{}); COMMIT;",
@@ -250,13 +495,22 @@ fn write_edges(fp: &str, edges: &[CallEdge], project_path: Option<&str>) {
         code_index::fv_delete(&ns, &edges_key(fp));
         return;
     }
-    let packed: Vec<Value> = edges.iter().map(|e| json!([e.caller_symbol, e.callee_symbol, e.line])).collect();
-    code_index::fv_put(&ns, &edges_key(fp), &json!({ "path": fp, "edges": packed }).to_string());
+    let packed: Vec<Value> = edges
+        .iter()
+        .map(|e| json!([e.caller_symbol, e.callee_symbol, e.line]))
+        .collect();
+    code_index::fv_put(
+        &ns,
+        &edges_key(fp),
+        &json!({ "path": fp, "edges": packed }).to_string(),
+    );
 }
 
 fn purge_legacy_edges(started_ms: u64, budget_ms: u64) {
     let ns = legacy_edges_namespace();
-    let Some(legacy) = code_index::fv_query(&ns, "").as_array().cloned() else { return };
+    let Some(legacy) = code_index::fv_query(&ns, "").as_array().cloned() else {
+        return;
+    };
     for row in legacy {
         if host_now_ms().saturating_sub(started_ms) > budget_ms {
             return;
@@ -267,7 +521,13 @@ fn purge_legacy_edges(started_ms: u64, budget_ms: u64) {
     }
 }
 
-fn extract_file(fp: &str, lang: &str, content: &str, size: u64, mtime_ms: u64) -> (FileSymbols, u32) {
+fn extract_file(
+    fp: &str,
+    lang: &str,
+    content: &str,
+    size: u64,
+    mtime_ms: u64,
+) -> (FileSymbols, u32) {
     let analysis = code_index::analyze_source(content, lang);
     let file_is_test = is_test_path(fp);
     let mut metrics = analysis.metrics.into_iter();
@@ -317,16 +577,44 @@ pub(crate) fn sync_files(
         return json!({ "ok": false, "error": e });
     }
     purge_legacy_edges(started_ms, budget_ms);
-    let known: HashMap<String, (u64, u64, u64)> = rows(&db, &format!("SELECT path, size, mtime_ms, schema FROM {FILES_TABLE}"), &[])
-        .iter()
-        .map(|r| (string(r, "path"), (number(r.get("size")), number(r.get("mtime_ms")), number(r.get("schema")))))
-        .collect();
+    let known: HashMap<String, (u64, u64, u64)> = rows(
+        &db,
+        &format!("SELECT path, size, mtime_ms, schema FROM {FILES_TABLE}"),
+        &[],
+    )
+    .iter()
+    .map(|r| {
+        (
+            string(r, "path"),
+            (
+                number(r.get("size")),
+                number(r.get("mtime_ms")),
+                number(r.get("schema")),
+            ),
+        )
+    })
+    .collect();
     let size_cap = max_file_bytes.saturating_mul(SOURCE_SIZE_CAP_MULTIPLIER);
-    let (mut synced, mut unchanged, mut deferred, mut symbols_written, mut edges_written, mut parse_failures) = (0u32, 0u32, 0u32, 0usize, 0usize, 0u32);
+    let (
+        mut synced,
+        mut unchanged,
+        mut deferred,
+        mut symbols_written,
+        mut edges_written,
+        mut parse_failures,
+    ) = (0u32, 0u32, 0u32, 0usize, 0usize, 0u32);
     let mut seen: HashSet<String> = HashSet::new();
     for raw in files {
-        let fp = raw.trim_start_matches("./").trim_start_matches('/').to_string();
-        let Some(lang) = fp.rfind('.').and_then(|dot| code_index::lang_for_ext(&fp[dot..])) else { continue };
+        let fp = raw
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .to_string();
+        let Some(lang) = fp
+            .rfind('.')
+            .and_then(|dot| code_index::lang_for_ext(&fp[dot..]))
+        else {
+            continue;
+        };
         seen.insert(fp.clone());
         if host_now_ms().saturating_sub(started_ms) > budget_ms {
             deferred += 1;
@@ -334,16 +622,30 @@ pub(crate) fn sync_files(
         }
         let stat = host_stat(&fp).or_else(|| host_stat(raw));
         let size = stat.as_ref().map(|s| number(s.get("size"))).unwrap_or(0);
-        let mtime_ms = stat.as_ref().map(|s| number(s.get("mtime_ms"))).unwrap_or(0);
+        let mtime_ms = stat
+            .as_ref()
+            .map(|s| number(s.get("mtime_ms")))
+            .unwrap_or(0);
         if known.get(&fp) == Some(&(size, mtime_ms, SCHEMA_VERSION)) && mtime_ms > 0 {
             unchanged += 1;
             continue;
         }
-        let Some(content) = host_read(&fp).or_else(|| host_read(raw)).or_else(|| host_read(&format!("/{fp}"))) else { continue };
+        let Some(content) = host_read(&fp)
+            .or_else(|| host_read(raw))
+            .or_else(|| host_read(&format!("/{fp}")))
+        else {
+            continue;
+        };
         if content.len() > size_cap {
             continue;
         }
-        let (file, failed) = extract_file(&fp, lang, &content, size.max(content.len() as u64), mtime_ms);
+        let (file, failed) = extract_file(
+            &fp,
+            lang,
+            &content,
+            size.max(content.len() as u64),
+            mtime_ms,
+        );
         parse_failures += failed;
         if store_file(&db, &fp, &file, project_path).is_ok() {
             synced += 1;
@@ -356,7 +658,11 @@ pub(crate) fn sync_files(
         let gone: Vec<&String> = known.keys().filter(|p| !seen.contains(*p)).collect();
         removed = gone.len() as u32;
         for batch in gone.chunks(200) {
-            let list = batch.iter().map(|p| sql_text(p)).collect::<Vec<_>>().join(",");
+            let list = batch
+                .iter()
+                .map(|p| sql_text(p))
+                .collect::<Vec<_>>()
+                .join(",");
             let script = format!("BEGIN; DELETE FROM {SYMBOLS_TABLE} WHERE path IN ({list}); DELETE FROM {IMPORTS_TABLE} WHERE path IN ({list}); DELETE FROM {FILES_TABLE} WHERE path IN ({list}); COMMIT;");
             let _ = libsql_wasm::exec(&db, &script);
             for path in batch {
@@ -386,7 +692,14 @@ pub(crate) fn sync_tree(cfg: &crate::ragconfig::RagConfig, project_path: Option<
     let started = host_now_ms();
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
     let files = code_index::collect_files(root, cfg.index.digest_max_files, &cfg.index);
-    sync_files(&files, project_path, started, cfg.index.wall_budget_ms, cfg.index.max_file_bytes, true)
+    sync_files(
+        &files,
+        project_path,
+        started,
+        cfg.index.wall_budget_ms,
+        cfg.index.max_file_bytes,
+        true,
+    )
 }
 
 pub(crate) fn clear(project_path: Option<&str>) {
@@ -415,12 +728,34 @@ fn load_edges(project_path: Option<&str>) -> Vec<Edge> {
     let stored = code_index::fv_query(&edges_namespace(project_path), "");
     let mut out = Vec::new();
     for row in stored.as_array().map(Vec::as_slice).unwrap_or(&[]) {
-        let Some(parsed) = row.get("value").and_then(|v| v.as_str()).and_then(|s| serde_json::from_str::<Value>(s).ok()) else { continue };
+        let Some(parsed) = row
+            .get("value")
+            .and_then(|v| v.as_str())
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        else {
+            continue;
+        };
         let path = string(&parsed, "path");
-        for e in parsed.get("edges").and_then(|v| v.as_array()).map(Vec::as_slice).unwrap_or(&[]) {
+        for e in parsed
+            .get("edges")
+            .and_then(|v| v.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+        {
             let Some(triple) = e.as_array() else { continue };
-            let text = |i: usize| triple.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            out.push(Edge { path: path.clone(), caller: text(0), callee: text(1), line: number(triple.get(2)) });
+            let text = |i: usize| {
+                triple
+                    .get(i)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            out.push(Edge {
+                path: path.clone(),
+                caller: text(0),
+                callee: text(1),
+                line: number(triple.get(2)),
+            });
         }
     }
     out
@@ -431,7 +766,11 @@ fn path_dir(path: &str) -> &str {
 }
 
 fn path_join(base: &str, rest: &str) -> String {
-    let mut segments: Vec<&str> = if base.is_empty() { Vec::new() } else { base.split('/').collect() };
+    let mut segments: Vec<&str> = if base.is_empty() {
+        Vec::new()
+    } else {
+        base.split('/').collect()
+    };
     for part in rest.split('/') {
         match part {
             "" | "." => {}
@@ -444,7 +783,10 @@ fn path_join(base: &str, rest: &str) -> String {
     segments.join("/")
 }
 
-fn first_existing(files: &HashSet<String>, candidates: impl IntoIterator<Item = String>) -> Option<String> {
+fn first_existing(
+    files: &HashSet<String>,
+    candidates: impl IntoIterator<Item = String>,
+) -> Option<String> {
     candidates.into_iter().find(|c| files.contains(c))
 }
 
@@ -460,7 +802,9 @@ fn rust_module_dir(from: &str) -> String {
 fn rust_source_root(from: &str, files: &HashSet<String>) -> Option<String> {
     let mut dir = path_dir(from).to_string();
     loop {
-        let has_crate_root = ["lib.rs", "main.rs"].iter().any(|root| files.contains(&path_join(&dir, root)));
+        let has_crate_root = ["lib.rs", "main.rs"]
+            .iter()
+            .any(|root| files.contains(&path_join(&dir, root)));
         if has_crate_root || dir == "src" || dir.ends_with("/src") {
             return Some(dir);
         }
@@ -510,7 +854,10 @@ fn resolve_javascript(from: &str, spec: &str, files: &HashSet<String>) -> Option
     for ext in ["js", "ts", "tsx", "jsx", "mjs"] {
         candidates.push(format!("{base}/index.{ext}"));
     }
-    if let Some(stem) = ["js", "mjs", "cjs", "jsx"].iter().find_map(|e| base.strip_suffix(&format!(".{e}"))) {
+    if let Some(stem) = ["js", "mjs", "cjs", "jsx"]
+        .iter()
+        .find_map(|e| base.strip_suffix(&format!(".{e}")))
+    {
         candidates.push(format!("{stem}.ts"));
         candidates.push(format!("{stem}.tsx"));
     }
@@ -526,17 +873,36 @@ fn resolve_python(from: &str, spec: &str, files: &HashSet<String>) -> Option<Str
             base = path_dir(&base).to_string();
         }
         let joined = path_join(&base, &module);
-        let init = if module.is_empty() { format!("{base}/__init__.py") } else { format!("{joined}/__init__.py") };
+        let init = if module.is_empty() {
+            format!("{base}/__init__.py")
+        } else {
+            format!("{joined}/__init__.py")
+        };
         return first_existing(files, [format!("{joined}.py"), init]);
     }
     let wanted = [format!("{module}.py"), format!("{module}/__init__.py")];
-    files.iter().filter(|f| wanted.iter().any(|w| f.as_str() == w || f.ends_with(&format!("/{w}")))).min().cloned()
+    files
+        .iter()
+        .filter(|f| {
+            wanted
+                .iter()
+                .any(|w| f.as_str() == w || f.ends_with(&format!("/{w}")))
+        })
+        .min()
+        .cloned()
 }
 
 fn resolve_by_suffix(spec_path: &str, files: &HashSet<String>) -> Option<String> {
     let suffix = format!("/{spec_path}");
-    let matches: Vec<&String> = files.iter().filter(|f| f.as_str() == spec_path || f.ends_with(&suffix)).collect();
-    if matches.len() == 1 { matches.first().map(|m| (*m).clone()) } else { None }
+    let matches: Vec<&String> = files
+        .iter()
+        .filter(|f| f.as_str() == spec_path || f.ends_with(&suffix))
+        .collect();
+    if matches.len() == 1 {
+        matches.first().map(|m| (*m).clone())
+    } else {
+        None
+    }
 }
 
 fn resolve_import(from: &str, lang: &str, spec: &str, files: &HashSet<String>) -> Option<String> {
@@ -544,8 +910,16 @@ fn resolve_import(from: &str, lang: &str, spec: &str, files: &HashSet<String>) -
         "rust" => resolve_rust(from, spec, files),
         "javascript" | "typescript" | "tsx" => resolve_javascript(from, spec, files),
         "python" => resolve_python(from, spec, files),
-        "java" | "kotlin" => resolve_by_suffix(&format!("{}.{}", spec.replace('.', "/"), if lang == "java" { "java" } else { "kt" }), files),
-        "c" | "cpp" => first_existing(files, [path_join(path_dir(from), spec)]).or_else(|| resolve_by_suffix(spec, files)),
+        "java" | "kotlin" => resolve_by_suffix(
+            &format!(
+                "{}.{}",
+                spec.replace('.', "/"),
+                if lang == "java" { "java" } else { "kt" }
+            ),
+            files,
+        ),
+        "c" | "cpp" => first_existing(files, [path_join(path_dir(from), spec)])
+            .or_else(|| resolve_by_suffix(spec, files)),
         _ => None,
     }
 }
@@ -559,12 +933,19 @@ struct ImportGraph {
 }
 
 fn load_import_graph(db: &str) -> ImportGraph {
-    let langs: HashMap<String, String> = rows(db, &format!("SELECT path, lang FROM {FILES_TABLE}"), &[])
-        .iter()
-        .map(|r| (string(r, "path"), string(r, "lang")))
-        .collect();
+    let langs: HashMap<String, String> =
+        rows(db, &format!("SELECT path, lang FROM {FILES_TABLE}"), &[])
+            .iter()
+            .map(|r| (string(r, "path"), string(r, "lang")))
+            .collect();
     let files: HashSet<String> = langs.keys().cloned().collect();
-    let mut graph = ImportGraph { forward: BTreeMap::new(), reverse: BTreeMap::new(), external: BTreeMap::new(), total_imports: 0, resolved_imports: 0 };
+    let mut graph = ImportGraph {
+        forward: BTreeMap::new(),
+        reverse: BTreeMap::new(),
+        external: BTreeMap::new(),
+        total_imports: 0,
+        resolved_imports: 0,
+    };
     for r in rows(db, &format!("SELECT path, spec FROM {IMPORTS_TABLE}"), &[]) {
         let (path, spec) = (string(&r, "path"), string(&r, "spec"));
         graph.total_imports += 1;
@@ -572,7 +953,11 @@ fn load_import_graph(db: &str) -> ImportGraph {
         match resolve_import(&path, lang, &spec, &files) {
             Some(target) if target != path => {
                 graph.resolved_imports += 1;
-                graph.reverse.entry(target.clone()).or_default().insert(path.clone());
+                graph
+                    .reverse
+                    .entry(target.clone())
+                    .or_default()
+                    .insert(path.clone());
                 graph.forward.entry(path).or_default().insert(target);
             }
             Some(_) => graph.resolved_imports += 1,
@@ -594,11 +979,21 @@ fn strongly_connected_components(forward: &BTreeMap<String, BTreeSet<String>>) -
     let index_of: HashMap<&str, usize> = names.iter().enumerate().map(|(i, n)| (*n, i)).collect();
     let adjacency: Vec<Vec<usize>> = names
         .iter()
-        .map(|n| forward.get(*n).map(|t| t.iter().filter_map(|x| index_of.get(x.as_str()).copied()).collect()).unwrap_or_default())
+        .map(|n| {
+            forward
+                .get(*n)
+                .map(|t| {
+                    t.iter()
+                        .filter_map(|x| index_of.get(x.as_str()).copied())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
         .collect();
     let count = names.len();
     let (mut index, mut lowlink) = (vec![usize::MAX; count], vec![0usize; count]);
-    let (mut on_stack, mut stack, mut next_index) = (vec![false; count], Vec::<usize>::new(), 0usize);
+    let (mut on_stack, mut stack, mut next_index) =
+        (vec![false; count], Vec::<usize>::new(), 0usize);
     let mut components = Vec::new();
     for root in 0..count {
         if index[root] != usize::MAX {
@@ -659,20 +1054,34 @@ fn definitions(db: &str, name: &str, limit: usize) -> Vec<Value> {
 }
 
 fn location(row: &Value) -> String {
-    format!("{}:{}-{}", string(row, "path"), number(row.get("line_start")), number(row.get("line_end")))
+    format!(
+        "{}:{}-{}",
+        string(row, "path"),
+        number(row.get("line_start")),
+        number(row.get("line_end"))
+    )
 }
 
 fn definition_locations(db: &str, name: &str) -> Vec<String> {
-    definitions(db, name, 6).iter().map(|d| format!("{} {}", location(d), string(d, "kind"))).collect()
+    definitions(db, name, 6)
+        .iter()
+        .map(|d| format!("{} {}", location(d), string(d, "kind")))
+        .collect()
 }
 
 fn unique_definition(db: &str, name: &str) -> Option<String> {
     let defs = definitions(db, name, 2);
-    if defs.len() == 1 { defs.first().map(location) } else { None }
+    if defs.len() == 1 {
+        defs.first().map(location)
+    } else {
+        None
+    }
 }
 
 fn is_test_name(db: &str, name: &str) -> bool {
-    definitions(db, name, 4).iter().any(|d| number(d.get("is_test")) == 1)
+    definitions(db, name, 4)
+        .iter()
+        .any(|d| number(d.get("is_test")) == 1)
 }
 
 fn container_of(db: &str, path: &str, line_start: u64, line_end: u64) -> Option<String> {
@@ -702,22 +1111,42 @@ fn coverage(db: &str) -> Value {
 
 pub(crate) fn lean_overview(stored_digest: Option<String>) -> Value {
     let db = db_path(None);
-    let files = match libsql_wasm::query_params(&db, &format!("SELECT COUNT(*) AS c FROM {FILES_TABLE}"), &[]) {
-        Ok(r) => r.as_array().and_then(|a| a.first()).map(|r| number(r.get("c"))).unwrap_or(0),
+    let files = match libsql_wasm::query_params(
+        &db,
+        &format!("SELECT COUNT(*) AS c FROM {FILES_TABLE}"),
+        &[],
+    ) {
+        Ok(r) => r
+            .as_array()
+            .and_then(|a| a.first())
+            .map(|r| number(r.get("c")))
+            .unwrap_or(0),
         Err(e) => {
             if stored_digest.is_none() {
                 return Value::Null;
             }
             let lower = e.to_ascii_lowercase();
-            let reason = if lower.contains("unknown plugin") || lower.contains("unknown_plugin") { "libsql_plugin_unavailable" } else if lower.contains("no such table") { "symbols_not_indexed_yet" } else { "libsql_query_failed" };
+            let reason = if lower.contains("unknown plugin") || lower.contains("unknown_plugin") {
+                "libsql_plugin_unavailable"
+            } else if lower.contains("no such table") {
+                "symbols_not_indexed_yet"
+            } else {
+                "libsql_query_failed"
+            };
             return json!({ "codeinsight_available": false, "codeinsight_unavailable_reason": reason, "digest": stored_digest });
         }
     };
     if files == 0 && stored_digest.is_none() {
         return Value::Null;
     }
-    let symbol_count = single_count(&db, &format!("SELECT COUNT(*) AS c FROM {SYMBOLS_TABLE} WHERE kind NOT IN {DOC_KINDS_SQL}"));
-    let doc_sections = single_count(&db, &format!("SELECT COUNT(*) AS c FROM {SYMBOLS_TABLE} WHERE kind IN {DOC_KINDS_SQL}"));
+    let symbol_count = single_count(
+        &db,
+        &format!("SELECT COUNT(*) AS c FROM {SYMBOLS_TABLE} WHERE kind NOT IN {DOC_KINDS_SQL}"),
+    );
+    let doc_sections = single_count(
+        &db,
+        &format!("SELECT COUNT(*) AS c FROM {SYMBOLS_TABLE} WHERE kind IN {DOC_KINDS_SQL}"),
+    );
     json!({
         "codeinsight_available": true,
         "file_count": files,
@@ -742,10 +1171,20 @@ fn by_language(db: &str, limit: usize) -> Vec<Value> {
 
 fn by_area(db: &str, limit: usize) -> Vec<Value> {
     let mut areas: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
-    for r in rows(db, &format!("SELECT path, loc, symbols FROM {FILES_TABLE}"), &[]) {
+    for r in rows(
+        db,
+        &format!("SELECT path, loc, symbols FROM {FILES_TABLE}"),
+        &[],
+    ) {
         let path = string(&r, "path");
         let segments: Vec<&str> = path.split('/').collect();
-        let area = if segments.len() > 2 { segments[..2].join("/") } else if segments.len() == 2 { segments[0].to_string() } else { ".".to_string() };
+        let area = if segments.len() > 2 {
+            segments[..2].join("/")
+        } else if segments.len() == 2 {
+            segments[0].to_string()
+        } else {
+            ".".to_string()
+        };
         let entry = areas.entry(area).or_default();
         entry.0 += 1;
         entry.1 += number(r.get("loc"));
@@ -767,7 +1206,10 @@ fn callee_fan_in(edges: &[Edge]) -> Vec<(String, usize, usize)> {
         entry.0 += 1;
         entry.1.insert((e.path.as_str(), e.caller.as_str()));
     }
-    let mut out: Vec<(String, usize, usize)> = callers_by_callee.into_iter().map(|(name, (calls, distinct))| (name.to_string(), calls, distinct.len())).collect();
+    let mut out: Vec<(String, usize, usize)> = callers_by_callee
+        .into_iter()
+        .map(|(name, (calls, distinct))| (name.to_string(), calls, distinct.len()))
+        .collect();
     out.sort_by(|a, b| b.2.cmp(&a.2).then(b.1.cmp(&a.1)).then(a.0.cmp(&b.0)));
     out
 }
@@ -787,11 +1229,20 @@ fn fan_in_rows(db: &str, edges: &[Edge], limit: usize) -> Vec<Value> {
 fn fan_out_rows(edges: &[Edge], limit: usize) -> Vec<Value> {
     let mut callees_by_caller: HashMap<(&str, &str), HashSet<&str>> = HashMap::new();
     for e in edges {
-        callees_by_caller.entry((e.path.as_str(), e.caller.as_str())).or_default().insert(e.callee.as_str());
+        callees_by_caller
+            .entry((e.path.as_str(), e.caller.as_str()))
+            .or_default()
+            .insert(e.callee.as_str());
     }
-    let mut out: Vec<((&str, &str), usize)> = callees_by_caller.into_iter().map(|(k, v)| (k, v.len())).collect();
+    let mut out: Vec<((&str, &str), usize)> = callees_by_caller
+        .into_iter()
+        .map(|(k, v)| (k, v.len()))
+        .collect();
     out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    out.into_iter().take(limit).map(|((path, caller), n)| json!({ "symbol": caller, "path": path, "distinct_callees": n })).collect()
+    out.into_iter()
+        .take(limit)
+        .map(|((path, caller), n)| json!({ "symbol": caller, "path": path, "distinct_callees": n }))
+        .collect()
 }
 
 fn function_symbol_rows(db: &str, lang: &str, path_prefix: &str) -> Vec<Value> {
@@ -807,7 +1258,13 @@ fn function_symbol_rows(db: &str, lang: &str, path_prefix: &str) -> Vec<Value> {
     .collect()
 }
 
-fn no_direct_callers(db: &str, edges: &[Edge], limit: usize, lang: &str, path_prefix: &str) -> (usize, Vec<String>) {
+fn no_direct_callers(
+    db: &str,
+    edges: &[Edge],
+    limit: usize,
+    lang: &str,
+    path_prefix: &str,
+) -> (usize, Vec<String>) {
     let called: HashSet<&str> = edges.iter().map(|e| e.callee.as_str()).collect();
     let mut orphans: Vec<Value> = function_symbol_rows(db, lang, path_prefix)
         .into_iter()
@@ -821,7 +1278,11 @@ fn no_direct_callers(db: &str, edges: &[Edge], limit: usize, lang: &str, path_pr
         .iter()
         .take(limit)
         .map(|r| {
-            let api = if number(r.get("exported")) == 1 { " (exported)" } else { "" };
+            let api = if number(r.get("exported")) == 1 {
+                " (exported)"
+            } else {
+                ""
+            };
             format!("{} {}{api}", location(r), string(r, "name"))
         })
         .collect();
@@ -829,7 +1290,13 @@ fn no_direct_callers(db: &str, edges: &[Edge], limit: usize, lang: &str, path_pr
 }
 
 fn symbol_span_line(r: &Value) -> String {
-    format!("{} lines {} {} {}", number(r.get("span")), location(r), string(r, "kind"), string(r, "name"))
+    format!(
+        "{} lines {} {} {}",
+        number(r.get("span")),
+        location(r),
+        string(r, "kind"),
+        string(r, "name")
+    )
 }
 
 fn biggest_symbols(db: &str, limit: usize) -> Vec<String> {
@@ -858,7 +1325,13 @@ fn complexity_line(r: &Value) -> String {
     )
 }
 
-fn most_complex(db: &str, sort: &str, limit: usize, include_tests: bool, path_prefix: &str) -> Vec<String> {
+fn most_complex(
+    db: &str,
+    sort: &str,
+    limit: usize,
+    include_tests: bool,
+    path_prefix: &str,
+) -> Vec<String> {
     let order = match sort {
         "nesting" => "nesting",
         "params" => "params",
@@ -880,7 +1353,10 @@ fn most_complex(db: &str, sort: &str, limit: usize, include_tests: bool, path_pr
 
 fn complexity(db: &str, project_path: Option<&str>, body: &Value, limit: usize) -> Value {
     let sort = text_field(body, &["sort"]).unwrap_or("cx");
-    let include_tests = body.get("include_tests").and_then(|v| v.as_bool()).unwrap_or(false);
+    let include_tests = body
+        .get("include_tests")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let path_prefix = normalized_path(text_field(body, &["path", "path_prefix"]).unwrap_or(""));
     let thresholds = json!({ "cx_over": 15, "nesting_over": 5, "params_over": 5, "sloc_over": 80 });
     let flagged = single_count(
@@ -913,7 +1389,14 @@ fn complexity(db: &str, project_path: Option<&str>, body: &Value, limit: usize) 
         .map(|r| {
             let callers = fan_in.get(&string(r, "name")).copied().unwrap_or(0) as u64;
             let score = number(r.get("cx")) * (1 + callers);
-            (score, format!("risk {score} (cx x {} callers) {}", 1 + callers, complexity_line(r)))
+            (
+                score,
+                format!(
+                    "risk {score} (cx x {} callers) {}",
+                    1 + callers,
+                    complexity_line(r)
+                ),
+            )
         })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));
@@ -965,28 +1448,47 @@ fn duplicates(db: &str, limit: usize) -> Value {
 }
 
 fn import_lines(db: &str, path: &str) -> Vec<String> {
-    let langs = rows(db, &format!("SELECT lang FROM {FILES_TABLE} WHERE path=?1"), &[path]);
+    let langs = rows(
+        db,
+        &format!("SELECT lang FROM {FILES_TABLE} WHERE path=?1"),
+        &[path],
+    );
     let lang = langs.first().map(|r| string(r, "lang")).unwrap_or_default();
-    let files: HashSet<String> = rows(db, &format!("SELECT path FROM {FILES_TABLE}"), &[]).iter().map(|r| string(r, "path")).collect();
-    rows(db, &format!("SELECT line, spec FROM {IMPORTS_TABLE} WHERE path=?1 ORDER BY line"), &[path])
+    let files: HashSet<String> = rows(db, &format!("SELECT path FROM {FILES_TABLE}"), &[])
         .iter()
-        .map(|r| {
-            let spec = string(r, "spec");
-            match resolve_import(path, &lang, &spec, &files) {
-                Some(target) => format!("{} {spec} -> {target}", number(r.get("line"))),
-                None => format!("{} {spec} (external or unresolved)", number(r.get("line"))),
-            }
-        })
-        .collect()
+        .map(|r| string(r, "path"))
+        .collect();
+    rows(
+        db,
+        &format!("SELECT line, spec FROM {IMPORTS_TABLE} WHERE path=?1 ORDER BY line"),
+        &[path],
+    )
+    .iter()
+    .map(|r| {
+        let spec = string(r, "spec");
+        match resolve_import(path, &lang, &spec, &files) {
+            Some(target) => format!("{} {spec} -> {target}", number(r.get("line"))),
+            None => format!("{} {spec} (external or unresolved)", number(r.get("line"))),
+        }
+    })
+    .collect()
 }
 
 fn normalized_path(path: &str) -> String {
-    path.trim_start_matches("./").trim_start_matches('/').to_string()
+    path.trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_string()
 }
 
 fn imports(db: &str, path: &str) -> Result<Value, String> {
     let path = normalized_path(path);
-    let known = single_count(db, &format!("SELECT COUNT(*) AS c FROM {FILES_TABLE} WHERE path='{}'", path.replace('\'', "''")));
+    let known = single_count(
+        db,
+        &format!(
+            "SELECT COUNT(*) AS c FROM {FILES_TABLE} WHERE path='{}'",
+            path.replace('\'', "''")
+        ),
+    );
     if known == 0 {
         return Err(format!("path not indexed: {path}"));
     }
@@ -996,7 +1498,11 @@ fn imports(db: &str, path: &str) -> Result<Value, String> {
 fn importers(db: &str, path: &str, limit: usize) -> Value {
     let path = normalized_path(path);
     let graph = load_import_graph(db);
-    let found: Vec<&String> = graph.reverse.get(&path).map(|s| s.iter().collect()).unwrap_or_default();
+    let found: Vec<&String> = graph
+        .reverse
+        .get(&path)
+        .map(|s| s.iter().collect())
+        .unwrap_or_default();
     json!({
         "path": path,
         "total": found.len(),
@@ -1008,9 +1514,18 @@ fn importers(db: &str, path: &str, limit: usize) -> Value {
 const CYCLE_MEMBERS_SHOWN: usize = 12;
 
 fn cycle_summary(component: &[String]) -> String {
-    let shown = component.iter().take(CYCLE_MEMBERS_SHOWN).cloned().collect::<Vec<_>>().join(" <-> ");
+    let shown = component
+        .iter()
+        .take(CYCLE_MEMBERS_SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" <-> ");
     let more = component.len().saturating_sub(CYCLE_MEMBERS_SHOWN);
-    if more == 0 { format!("{} files: {shown}", component.len()) } else { format!("{} files: {shown} (+{more} more)", component.len()) }
+    if more == 0 {
+        format!("{} files: {shown}", component.len())
+    } else {
+        format!("{} files: {shown} (+{more} more)", component.len())
+    }
 }
 
 fn cycles(db: &str, limit: usize) -> Value {
@@ -1039,16 +1554,25 @@ fn coupling_rows(graph: &ImportGraph, db: &str) -> Vec<(String, usize, usize, bo
 
 fn coupling(db: &str, limit: usize, path_prefix: &str) -> Value {
     let graph = load_import_graph(db);
-    let all: Vec<(String, usize, usize, bool)> = coupling_rows(&graph, db).into_iter().filter(|r| r.0.starts_with(path_prefix)).collect();
+    let all: Vec<(String, usize, usize, bool)> = coupling_rows(&graph, db)
+        .into_iter()
+        .filter(|r| r.0.starts_with(path_prefix))
+        .collect();
     let line = |(path, fan_in, fan_out, _): &(String, usize, usize, bool)| {
-        let instability = if fan_in + fan_out == 0 { 0.0 } else { (*fan_out as f64 / (*fan_in + *fan_out) as f64 * 100.0).round() / 100.0 };
+        let instability = if fan_in + fan_out == 0 {
+            0.0
+        } else {
+            (*fan_out as f64 / (*fan_in + *fan_out) as f64 * 100.0).round() / 100.0
+        };
         format!("in {fan_in} out {fan_out} instability {instability} {path}")
     };
     let mut by_total: Vec<&(String, usize, usize, bool)> = all.iter().filter(|r| !r.3).collect();
     by_total.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)).then(a.0.cmp(&b.0)));
-    let mut hubs: Vec<&(String, usize, usize, bool)> = all.iter().filter(|r| !r.3 && r.1 > 0).collect();
+    let mut hubs: Vec<&(String, usize, usize, bool)> =
+        all.iter().filter(|r| !r.3 && r.1 > 0).collect();
     hubs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    let mut entry_files: Vec<&(String, usize, usize, bool)> = all.iter().filter(|r| !r.3 && r.1 == 0 && r.2 > 0).collect();
+    let mut entry_files: Vec<&(String, usize, usize, bool)> =
+        all.iter().filter(|r| !r.3 && r.1 == 0 && r.2 > 0).collect();
     entry_files.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
     json!({
         "meaning": "in = files importing this file, out = indexed files it imports, instability = out/(in+out); only imports resolved to indexed files count",
@@ -1071,20 +1595,44 @@ fn overview(project_path: Option<&str>, limit: usize) -> Value {
     if let Some(map) = out.as_object_mut() {
         map.insert("by_language".into(), json!(by_language(&db, 12)));
         map.insert("by_area".into(), json!(by_area(&db, limit.min(15))));
-        map.insert("biggest_symbols".into(), json!(biggest_symbols(&db, limit.min(10))));
-        map.insert("most_complex".into(), json!(most_complex(&db, "cx", limit.min(8), false, "")));
-        map.insert("most_called".into(), json!(fan_in_rows(&db, &edges, limit.min(10))));
-        map.insert("widest_callers".into(), json!(fan_out_rows(&edges, limit.min(10))));
+        map.insert(
+            "biggest_symbols".into(),
+            json!(biggest_symbols(&db, limit.min(10))),
+        );
+        map.insert(
+            "most_complex".into(),
+            json!(most_complex(&db, "cx", limit.min(8), false, "")),
+        );
+        map.insert(
+            "most_called".into(),
+            json!(fan_in_rows(&db, &edges, limit.min(10))),
+        );
+        map.insert(
+            "widest_callers".into(),
+            json!(fan_out_rows(&edges, limit.min(10))),
+        );
         map.insert("call_edges".into(), json!(edges.len()));
-        map.insert("functions_without_direct_callers".into(), json!({ "total": orphan_total, "sample": orphan_sample }));
-        map.insert("test_files".into(), json!(single_count(&db, &format!("SELECT COUNT(*) AS c FROM {FILES_TABLE} WHERE is_test=1"))));
+        map.insert(
+            "functions_without_direct_callers".into(),
+            json!({ "total": orphan_total, "sample": orphan_sample }),
+        );
+        map.insert(
+            "test_files".into(),
+            json!(single_count(
+                &db,
+                &format!("SELECT COUNT(*) AS c FROM {FILES_TABLE} WHERE is_test=1")
+            )),
+        );
         map.insert("imports".into(), json!({
             "specs": graph.total_imports,
             "resolved_to_indexed_files": graph.resolved_imports,
             "cycles": cycle_sets.len(),
             "largest_cycle": cycle_sets.first().map(|c| format!("{} files: {}", c.len(), c.iter().take(6).cloned().collect::<Vec<_>>().join(", "))),
         }));
-        map.insert("duplicate_function_groups".into(), json!({ "total": duplicate_total, "top": duplicate_sample }));
+        map.insert(
+            "duplicate_function_groups".into(),
+            json!({ "total": duplicate_total, "top": duplicate_sample }),
+        );
     }
     out
 }
@@ -1105,11 +1653,25 @@ fn status(project_path: Option<&str>) -> Value {
 
 fn outline(db: &str, path: &str) -> Result<Value, String> {
     let normalized = normalized_path(path);
-    let file = rows(db, &format!("SELECT lang, loc, symbols FROM {FILES_TABLE} WHERE path=?1"), &[&normalized]);
+    let file = rows(
+        db,
+        &format!("SELECT lang, loc, symbols FROM {FILES_TABLE} WHERE path=?1"),
+        &[&normalized],
+    );
     let Some(file) = file.first() else {
         let like = format!("%{normalized}%");
-        let near: Vec<String> = rows(db, &format!("SELECT path FROM {FILES_TABLE} WHERE path LIKE ?1 ORDER BY path LIMIT 8"), &[&like]).iter().map(|r| string(r, "path")).collect();
-        return Err(format!("path not indexed: {normalized}; near matches: {}", near.join(", ")));
+        let near: Vec<String> = rows(
+            db,
+            &format!("SELECT path FROM {FILES_TABLE} WHERE path LIKE ?1 ORDER BY path LIMIT 8"),
+            &[&like],
+        )
+        .iter()
+        .map(|r| string(r, "path"))
+        .collect();
+        return Err(format!(
+            "path not indexed: {normalized}; near matches: {}",
+            near.join(", ")
+        ));
     };
     let symbols = rows(db, &format!("SELECT kind, name, line_start, line_end, signature, cx FROM {SYMBOLS_TABLE} WHERE path=?1 ORDER BY line_start, line_end DESC"), &[&normalized]);
     let mut stack: Vec<u64> = Vec::new();
@@ -1123,21 +1685,42 @@ fn outline(db: &str, path: &str) -> Result<Value, String> {
             let indent = "  ".repeat(stack.len());
             stack.push(le);
             let cx = string(s, "cx");
-            let cx_tag = if cx.is_empty() { String::new() } else { format!(" [cx {cx}]") };
-            format!("{indent}{ls}-{le} {} {}{cx_tag}", string(s, "kind"), string(s, "signature"))
+            let cx_tag = if cx.is_empty() {
+                String::new()
+            } else {
+                format!(" [cx {cx}]")
+            };
+            format!(
+                "{indent}{ls}-{le} {} {}{cx_tag}",
+                string(s, "kind"),
+                string(s, "signature")
+            )
         })
         .collect();
-    Ok(json!({ "path": normalized, "lang": string(file, "lang"), "loc": number(file.get("loc")), "symbol_count": symbols.len(), "outline": lines }))
+    Ok(
+        json!({ "path": normalized, "lang": string(file, "lang"), "loc": number(file.get("loc")), "symbol_count": symbols.len(), "outline": lines }),
+    )
 }
 
 fn like_escaped(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    text.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
-fn find(db: &str, name: &str, kind: Option<&str>, path_prefix: Option<&str>, limit: usize) -> Value {
+fn find(
+    db: &str,
+    name: &str,
+    kind: Option<&str>,
+    path_prefix: Option<&str>,
+    limit: usize,
+) -> Value {
     let escaped_name = like_escaped(name);
     let like = format!("%{escaped_name}%");
-    let prefix_like = format!("{}%", like_escaped(path_prefix.unwrap_or("").trim_start_matches("./")));
+    let prefix_like = format!(
+        "{}%",
+        like_escaped(path_prefix.unwrap_or("").trim_start_matches("./"))
+    );
     let limit_s = (limit + 1).to_string();
     let kind_filter = kind.unwrap_or("");
     let found = rows(
@@ -1152,9 +1735,20 @@ fn find(db: &str, name: &str, kind: Option<&str>, path_prefix: Option<&str>, lim
         .iter()
         .take(limit)
         .map(|r| {
-            let container = container_of(db, &string(r, "path"), number(r.get("line_start")), number(r.get("line_end")));
+            let container = container_of(
+                db,
+                &string(r, "path"),
+                number(r.get("line_start")),
+                number(r.get("line_end")),
+            );
             let inside = container.map(|c| format!(" in {c}")).unwrap_or_default();
-            format!("{} {}{} :: {}", location(r), string(r, "kind"), inside, string(r, "signature"))
+            format!(
+                "{} {}{} :: {}",
+                location(r),
+                string(r, "kind"),
+                inside,
+                string(r, "signature")
+            )
         })
         .collect();
     json!({ "query": name, "matches": matches, "truncated": truncated })
@@ -1164,9 +1758,24 @@ fn edge_line(e: &Edge) -> String {
     format!("{}:{} {} -> {}", e.path, e.line, e.caller, e.callee)
 }
 
-fn callers_or_callees(db: &str, project_path: Option<&str>, symbol: &str, want_callers: bool, limit: usize) -> Value {
+fn callers_or_callees(
+    db: &str,
+    project_path: Option<&str>,
+    symbol: &str,
+    want_callers: bool,
+    limit: usize,
+) -> Value {
     let edges = load_edges(project_path);
-    let matched: Vec<&Edge> = edges.iter().filter(|e| if want_callers { e.callee == symbol } else { e.caller == symbol }).collect();
+    let matched: Vec<&Edge> = edges
+        .iter()
+        .filter(|e| {
+            if want_callers {
+                e.callee == symbol
+            } else {
+                e.caller == symbol
+            }
+        })
+        .collect();
     let total = matched.len();
     let mut out = json!({
         "symbol": symbol,
@@ -1175,9 +1784,16 @@ fn callers_or_callees(db: &str, project_path: Option<&str>, symbol: &str, want_c
         "truncated": total > limit,
     });
     if want_callers {
-        let distinct: HashSet<(&str, &str)> = matched.iter().map(|e| (e.path.as_str(), e.caller.as_str())).collect();
+        let distinct: HashSet<(&str, &str)> = matched
+            .iter()
+            .map(|e| (e.path.as_str(), e.caller.as_str()))
+            .collect();
         out["distinct_callers"] = json!(distinct.len());
-        out["edges"] = json!(matched.iter().take(limit).map(|e| edge_line(e)).collect::<Vec<_>>());
+        out["edges"] = json!(matched
+            .iter()
+            .take(limit)
+            .map(|e| edge_line(e))
+            .collect::<Vec<_>>());
     } else {
         let mut by_callee: BTreeMap<&str, usize> = BTreeMap::new();
         for e in &matched {
@@ -1206,16 +1822,29 @@ fn callers_or_callees(db: &str, project_path: Option<&str>, symbol: &str, want_c
     out
 }
 
-fn reach(db: &str, edges: &[Edge], symbol: &str, max_depth: usize, upstream: bool, through_ambiguous: bool) -> Vec<(String, usize)> {
+fn reach(
+    db: &str,
+    edges: &[Edge],
+    symbol: &str,
+    max_depth: usize,
+    upstream: bool,
+    through_ambiguous: bool,
+) -> Vec<(String, usize)> {
     let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
     for e in edges {
-        let (from, to) = if upstream { (e.callee.as_str(), e.caller.as_str()) } else { (e.caller.as_str(), e.callee.as_str()) };
+        let (from, to) = if upstream {
+            (e.callee.as_str(), e.caller.as_str())
+        } else {
+            (e.caller.as_str(), e.callee.as_str())
+        };
         adjacency.entry(from).or_default().push(to);
     }
     let mut visited: HashMap<&str, usize> = HashMap::from([(symbol, 0)]);
     let mut ambiguity: HashMap<String, bool> = HashMap::new();
     let mut is_ambiguous = |name: &str| -> bool {
-        *ambiguity.entry(name.to_string()).or_insert_with(|| is_common_std_name(name) || definitions(db, name, 2).len() > 1)
+        *ambiguity
+            .entry(name.to_string())
+            .or_insert_with(|| is_common_std_name(name) || definitions(db, name, 2).len() > 1)
     };
     let mut frontier = vec![symbol];
     for depth in 1..=max_depth {
@@ -1236,17 +1865,32 @@ fn reach(db: &str, edges: &[Edge], symbol: &str, max_depth: usize, upstream: boo
         }
         frontier = next;
     }
-    let mut reached: Vec<(String, usize)> = visited.into_iter().filter(|(name, _)| *name != symbol).map(|(n, d)| (n.to_string(), d)).collect();
+    let mut reached: Vec<(String, usize)> = visited
+        .into_iter()
+        .filter(|(name, _)| *name != symbol)
+        .map(|(n, d)| (n.to_string(), d))
+        .collect();
     reached.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
     reached
 }
 
-fn impact(db: &str, project_path: Option<&str>, symbol: &str, max_depth: usize, upstream: bool, limit: usize, through_ambiguous: bool) -> Value {
+fn impact(
+    db: &str,
+    project_path: Option<&str>,
+    symbol: &str,
+    max_depth: usize,
+    upstream: bool,
+    limit: usize,
+    through_ambiguous: bool,
+) -> Value {
     let depth_cap = max_depth.clamp(1, 10);
     let edges = load_edges(project_path);
     let reached = reach(db, &edges, symbol, depth_cap, upstream, through_ambiguous);
     let total = reached.len();
-    let tests_reached = reached.iter().filter(|(name, _)| is_test_name(db, name)).count();
+    let tests_reached = reached
+        .iter()
+        .filter(|(name, _)| is_test_name(db, name))
+        .count();
     let lines: Vec<String> = reached
         .iter()
         .take(limit)
@@ -1256,7 +1900,9 @@ fn impact(db: &str, project_path: Option<&str>, symbol: &str, max_depth: usize, 
             }
             match unique_definition(db, name) {
                 Some(at) => format!("d{depth} {name} ({at})"),
-                None if definitions(db, name, 2).len() > 1 => format!("d{depth} {name} (ambiguous: several definitions, not expanded)"),
+                None if definitions(db, name, 2).len() > 1 => {
+                    format!("d{depth} {name} (ambiguous: several definitions, not expanded)")
+                }
                 None => format!("d{depth} {name}"),
             }
         })
@@ -1278,7 +1924,10 @@ fn tests_for(db: &str, project_path: Option<&str>, symbol: &str, limit: usize) -
     let reached = reach(db, &edges, symbol, TEST_CALLER_DEPTH, true, false);
     let mut found: Vec<String> = Vec::new();
     for (name, depth) in &reached {
-        for d in definitions(db, name, 6).iter().filter(|d| number(d.get("is_test")) == 1) {
+        for d in definitions(db, name, 6)
+            .iter()
+            .filter(|d| number(d.get("is_test")) == 1)
+        {
             found.push(format!("d{depth} {} {name}", location(d)));
         }
     }
@@ -1322,7 +1971,13 @@ fn hotspots(db: &str, project_path: Option<&str>, limit: usize) -> Value {
     })
 }
 
-fn orphans(db: &str, project_path: Option<&str>, limit: usize, lang: &str, path_prefix: &str) -> Value {
+fn orphans(
+    db: &str,
+    project_path: Option<&str>,
+    limit: usize,
+    lang: &str,
+    path_prefix: &str,
+) -> Value {
     let edges = load_edges(project_path);
     let (total, sample) = no_direct_callers(db, &edges, limit, lang, path_prefix);
     json!({
@@ -1334,40 +1989,99 @@ fn orphans(db: &str, project_path: Option<&str>, limit: usize, lang: &str, path_
 }
 
 fn text_field<'a>(body: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter().find_map(|k| body.get(*k).and_then(|v| v.as_str())).filter(|s| !s.is_empty())
+    keys.iter()
+        .find_map(|k| body.get(*k).and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
 }
 
 pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     let action = text_field(body, &["action", "mode"]).unwrap_or("overview");
     let project_path = text_field(body, &["root", "projectPath"]);
-    let limit = body.get("limit").or_else(|| body.get("k")).and_then(|v| v.as_u64()).map(|n| (n as usize).clamp(1, MAX_LIMIT)).unwrap_or(DEFAULT_LIMIT);
+    let limit = body
+        .get("limit")
+        .or_else(|| body.get("k"))
+        .and_then(|v| v.as_u64())
+        .map(|n| (n as usize).clamp(1, MAX_LIMIT))
+        .unwrap_or(DEFAULT_LIMIT);
     let db = db_path(project_path);
     let symbol = text_field(body, &["symbol", "name"]);
     let need_symbol = || symbol.ok_or_else(|| format!("{action} requires `symbol`"));
-    let need_path = || text_field(body, &["path", "file"]).ok_or_else(|| format!("{action} requires `path`"));
+    let need_path =
+        || text_field(body, &["path", "file"]).ok_or_else(|| format!("{action} requires `path`"));
     match action {
         "overview" => Ok(overview(project_path, limit)),
         "status" => Ok(status(project_path)),
-        "sync" => Ok(sync_tree(&crate::ragconfig::RagConfig::resolved(), project_path)),
+        "sync" => Ok(sync_tree(
+            &crate::ragconfig::RagConfig::resolved(),
+            project_path,
+        )),
         "outline" => outline(&db, need_path()?),
-        "find" => Ok(find(&db, need_symbol()?, text_field(body, &["kind"]), text_field(body, &["path", "path_prefix"]), limit)),
-        "callers" => Ok(callers_or_callees(&db, project_path, need_symbol()?, true, limit)),
-        "callees" => Ok(callers_or_callees(&db, project_path, need_symbol()?, false, limit)),
+        "find" => Ok(find(
+            &db,
+            need_symbol()?,
+            text_field(body, &["kind"]),
+            text_field(body, &["path", "path_prefix"]),
+            limit,
+        )),
+        "callers" => Ok(callers_or_callees(
+            &db,
+            project_path,
+            need_symbol()?,
+            true,
+            limit,
+        )),
+        "callees" => Ok(callers_or_callees(
+            &db,
+            project_path,
+            need_symbol()?,
+            false,
+            limit,
+        )),
         "impact" => {
-            let depth = body.get("max_depth").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(DEFAULT_IMPACT_DEPTH);
-            let upstream = text_field(body, &["direction"]).map(|d| d != "callees" && d != "downstream").unwrap_or(true);
-            let through_ambiguous = body.get("through_ambiguous").and_then(|v| v.as_bool()).unwrap_or(false);
-            Ok(impact(&db, project_path, need_symbol()?, depth, upstream, limit, through_ambiguous))
+            let depth = body
+                .get("max_depth")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+                .unwrap_or(DEFAULT_IMPACT_DEPTH);
+            let upstream = text_field(body, &["direction"])
+                .map(|d| d != "callees" && d != "downstream")
+                .unwrap_or(true);
+            let through_ambiguous = body
+                .get("through_ambiguous")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Ok(impact(
+                &db,
+                project_path,
+                need_symbol()?,
+                depth,
+                upstream,
+                limit,
+                through_ambiguous,
+            ))
         }
         "hotspots" => Ok(hotspots(&db, project_path, limit)),
-        "orphans" => Ok(orphans(&db, project_path, limit, text_field(body, &["language", "lang"]).unwrap_or(""), &normalized_path(text_field(body, &["path", "path_prefix"]).unwrap_or("")))),
+        "orphans" => Ok(orphans(
+            &db,
+            project_path,
+            limit,
+            text_field(body, &["language", "lang"]).unwrap_or(""),
+            &normalized_path(text_field(body, &["path", "path_prefix"]).unwrap_or("")),
+        )),
         "imports" => imports(&db, need_path()?),
         "importers" => Ok(importers(&db, need_path()?, limit)),
         "cycles" => Ok(cycles(&db, limit)),
-        "coupling" => Ok(coupling(&db, limit, &normalized_path(text_field(body, &["path", "path_prefix"]).unwrap_or("")))),
+        "coupling" => Ok(coupling(
+            &db,
+            limit,
+            &normalized_path(text_field(body, &["path", "path_prefix"]).unwrap_or("")),
+        )),
         "complexity" => Ok(complexity(&db, project_path, body, limit)),
         "duplicates" => Ok(duplicates(&db, limit)),
         "tests" => Ok(tests_for(&db, project_path, need_symbol()?, limit)),
-        other => Err(format!("unknown action `{other}`; accepted: {}", ACTIONS.join(", "))),
+        other => Err(format!(
+            "unknown action `{other}`; accepted: {}",
+            ACTIONS.join(", ")
+        )),
     }
 }

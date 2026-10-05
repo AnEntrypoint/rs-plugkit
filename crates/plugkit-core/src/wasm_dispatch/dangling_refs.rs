@@ -1,7 +1,7 @@
-use serde_json::{json, Value};
-use std::collections::HashSet;
 use super::host_abi::{git_call_argv, host_exists, host_read};
 use super::verbs::{ERR_CODE_DANGLING_REFERENCE, ERR_CODE_DANGLING_SCAN_UNREADABLE};
+use serde_json::{json, Value};
+use std::collections::HashSet;
 
 const MAX_SCAN_BYTES: usize = 512 * 1024;
 const MAX_SCAN_FILES: usize = 400;
@@ -9,11 +9,29 @@ const MAX_CANDIDATES: usize = 400;
 const MAX_REFERENCES_PER_FILE: usize = 200;
 const CONTEXT_TAIL_CHARS: usize = 64;
 
-const SKIP_DIRECTORIES: &[&str] = &["node_modules", "dist", "vendor", "build", "coverage", ".git", ".gm", ".agentplug-kv"];
-const SCANNABLE_EXTENSIONS: &[&str] = &["js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts", "json"];
+const SKIP_DIRECTORIES: &[&str] = &[
+    "node_modules",
+    "dist",
+    "vendor",
+    "build",
+    "coverage",
+    ".git",
+    ".gm",
+    ".agentplug-kv",
+];
+const SCANNABLE_EXTENSIONS: &[&str] =
+    &["js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts", "json"];
 const PROBE_EXTENSIONS: &[&str] = &["", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".json"];
-const PROBE_INDEX_SUFFIXES: &[&str] = &["/index.js", "/index.mjs", "/index.cjs", "/index.ts", "/index.json"];
-const EXTERNAL_SCHEMES: &[&str] = &["node:", "npm:", "data:", "http://", "https://", "file:", "bun:", "jsr:", "deno:", "#"];
+const PROBE_INDEX_SUFFIXES: &[&str] = &[
+    "/index.js",
+    "/index.mjs",
+    "/index.cjs",
+    "/index.ts",
+    "/index.json",
+];
+const EXTERNAL_SCHEMES: &[&str] = &[
+    "node:", "npm:", "data:", "http://", "https://", "file:", "bun:", "jsr:", "deno:", "#",
+];
 const PROTECTED_EXCLUDE_PATHSPEC: &str = ":(top,exclude).agentplug*";
 const WORKSPACE_PACKAGE_PARENT: &str = "packages";
 const CONDITION_KEYS: &[&str] = &["import", "default", "require", "node", "browser"];
@@ -26,7 +44,12 @@ pub struct DanglingScan {
     pub scannable_files: usize,
 }
 
-pub fn scan_commit(cwd: Option<&str>, paths: &[String], add_all: bool, body: &Value) -> DanglingScan {
+pub fn scan_commit(
+    cwd: Option<&str>,
+    paths: &[String],
+    add_all: bool,
+    body: &Value,
+) -> DanglingScan {
     let waivers = waivers_from_body(body);
     let root = repo_root(cwd);
     let ordered = commit_path_set(cwd, paths, add_all);
@@ -36,20 +59,41 @@ pub fn scan_commit(cwd: Option<&str>, paths: &[String], add_all: bool, body: &Va
     let mut scannable_files = 0usize;
 
     for path in ordered.iter() {
-        if scanned_files >= MAX_SCAN_FILES || candidates.len() >= MAX_CANDIDATES { break; }
-        if !is_scannable(path) { continue; }
+        if scanned_files >= MAX_SCAN_FILES || candidates.len() >= MAX_CANDIDATES {
+            break;
+        }
+        if !is_scannable(path) {
+            continue;
+        }
         scannable_files += 1;
-        let Some(source) = read_text(&root, path) else { continue; };
-        if source.len() > MAX_SCAN_BYTES { continue; }
+        let Some(source) = read_text(&root, path) else {
+            continue;
+        };
+        if source.len() > MAX_SCAN_BYTES {
+            continue;
+        }
         scanned_files += 1;
         let is_json = extension_of(path) == "json";
         for reference in extract_references(&source, is_json) {
-            if candidates.len() >= MAX_CANDIDATES { break; }
+            if candidates.len() >= MAX_CANDIDATES {
+                break;
+            }
             for target in resolve(&reference.specifier, &directory_of(path), &root) {
-                if target == *path { continue; }
-                if committed.contains(&target) { break; }
-                if !file_present(&root, &target) { continue; }
-                candidates.push((path.clone(), reference.specifier.clone(), reference.line, target));
+                if target == *path {
+                    continue;
+                }
+                if committed.contains(&target) {
+                    break;
+                }
+                if !file_present(&root, &target) {
+                    continue;
+                }
+                candidates.push((
+                    path.clone(),
+                    reference.specifier.clone(),
+                    reference.line,
+                    target,
+                ));
                 break;
             }
         }
@@ -61,7 +105,9 @@ pub fn scan_commit(cwd: Option<&str>, paths: &[String], add_all: bool, body: &Va
     let mut offenders = Vec::new();
     let mut waived = Vec::new();
     for (from, specifier, line, target) in candidates {
-        if tracked.contains(&target) || ignored.contains(&target) { continue; }
+        if tracked.contains(&target) || ignored.contains(&target) {
+            continue;
+        }
         if waivers.waive_all || waivers.named.contains(&target) {
             waived.push(target.clone());
             continue;
@@ -73,10 +119,26 @@ pub fn scan_commit(cwd: Option<&str>, paths: &[String], add_all: bool, body: &Va
             "target": target,
         }));
     }
-    offenders.sort_by(|a, b| a["from"].as_str().unwrap_or("").cmp(b["from"].as_str().unwrap_or(""))
-        .then(a["line"].as_u64().unwrap_or(0).cmp(&b["line"].as_u64().unwrap_or(0))));
+    offenders.sort_by(|a, b| {
+        a["from"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["from"].as_str().unwrap_or(""))
+            .then(
+                a["line"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .cmp(&b["line"].as_u64().unwrap_or(0)),
+            )
+    });
     let readable_files = scanned_files;
-    DanglingScan { offenders, waived, scanned_files, readable_files, scannable_files }
+    DanglingScan {
+        offenders,
+        waived,
+        scanned_files,
+        readable_files,
+        scannable_files,
+    }
 }
 
 pub fn scan_unreadable(scan: &DanglingScan) -> bool {
@@ -96,7 +158,10 @@ pub fn refusal_detail(verb: &str, scan: &DanglingScan) -> Value {
     let mut fixes: Vec<String> = Vec::new();
     for offender in &scan.offenders {
         let target = offender["target"].as_str().unwrap_or("");
-        fixes.push(format!("add {} to this commit's paths, or commit it first", target));
+        fixes.push(format!(
+            "add {} to this commit's paths, or commit it first",
+            target
+        ));
     }
     fixes.dedup();
     json!({
@@ -118,39 +183,66 @@ struct Waivers {
 
 fn waivers_from_body(body: &Value) -> Waivers {
     match body.get("allow_dangling") {
-        Some(Value::Bool(true)) => Waivers { waive_all: true, named: Vec::new() },
+        Some(Value::Bool(true)) => Waivers {
+            waive_all: true,
+            named: Vec::new(),
+        },
         Some(Value::Array(items)) => Waivers {
             waive_all: false,
-            named: items.iter().filter_map(|v| v.as_str()).map(normalize).collect(),
+            named: items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(normalize)
+                .collect(),
         },
-        _ => Waivers { waive_all: false, named: Vec::new() },
+        _ => Waivers {
+            waive_all: false,
+            named: Vec::new(),
+        },
     }
 }
 
 fn repo_root(cwd: Option<&str>) -> String {
-    exec_git(&["rev-parse", "--show-toplevel"], cwd).trim().replace('\\', "/")
+    exec_git(&["rev-parse", "--show-toplevel"], cwd)
+        .trim()
+        .replace('\\', "/")
 }
 
 fn exec_git(argv: &[&str], cwd: Option<&str>) -> String {
-    git_call_argv(argv, cwd).get("stdout").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    git_call_argv(argv, cwd)
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn read_text(root: &str, relative: &str) -> Option<String> {
     let direct = host_read(relative).filter(|text| !text.is_empty());
-    if direct.is_some() || root.is_empty() { return direct; }
+    if direct.is_some() || root.is_empty() {
+        return direct;
+    }
     host_read(&format!("{root}/{relative}")).filter(|text| !text.is_empty())
 }
 
 fn file_present(root: &str, relative: &str) -> bool {
-    if host_exists(relative) { return true; }
+    if host_exists(relative) {
+        return true;
+    }
     !root.is_empty() && host_exists(&format!("{root}/{relative}"))
 }
 
 fn commit_path_set(cwd: Option<&str>, paths: &[String], add_all: bool) -> Vec<String> {
-    let mut set: Vec<String> = split_nul(&exec_git(&["diff", "--cached", "--name-only", "-z"], cwd));
-    if !add_all && paths.is_empty() { return set; }
+    let mut set: Vec<String> =
+        split_nul(&exec_git(&["diff", "--cached", "--name-only", "-z"], cwd));
+    if !add_all && paths.is_empty() {
+        return set;
+    }
     let mut argv: Vec<String> = vec![
-        "status".to_string(), "--porcelain".to_string(), "-z".to_string(), "-uall".to_string(), "--".to_string(),
+        "status".to_string(),
+        "--porcelain".to_string(),
+        "-z".to_string(),
+        "-uall".to_string(),
+        "--".to_string(),
     ];
     if add_all {
         argv.push(":/".to_string());
@@ -166,7 +258,9 @@ fn commit_path_set(cwd: Option<&str>, paths: &[String], add_all: bool) -> Vec<St
 }
 
 fn tracked_paths(cwd: Option<&str>, candidates: &[String]) -> HashSet<String> {
-    if candidates.is_empty() { return HashSet::new(); }
+    if candidates.is_empty() {
+        return HashSet::new();
+    }
     let mut argv: Vec<String> = vec!["ls-files".to_string(), "-z".to_string(), "--".to_string()];
     argv.extend(candidates.iter().cloned());
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -174,7 +268,9 @@ fn tracked_paths(cwd: Option<&str>, candidates: &[String]) -> HashSet<String> {
 }
 
 fn ignored_paths(cwd: Option<&str>, candidates: &[String]) -> HashSet<String> {
-    if candidates.is_empty() { return HashSet::new(); }
+    if candidates.is_empty() {
+        return HashSet::new();
+    }
     let mut argv: Vec<String> = vec!["check-ignore".to_string(), "--".to_string()];
     argv.extend(candidates.iter().cloned());
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -182,21 +278,32 @@ fn ignored_paths(cwd: Option<&str>, candidates: &[String]) -> HashSet<String> {
 }
 
 fn porcelain_paths(output: &str) -> Vec<String> {
-    output.split('\0')
+    output
+        .split('\0')
         .filter(|record| !record.is_empty())
         .map(|record| {
-            let path = if record.len() >= 4 && record.as_bytes()[2] == b' ' { &record[3..] } else { record };
+            let path = if record.len() >= 4 && record.as_bytes()[2] == b' ' {
+                &record[3..]
+            } else {
+                record
+            };
             normalize(path)
         })
         .collect()
 }
 
 fn split_nul(output: &str) -> Vec<String> {
-    output.split('\0').filter(|entry| !entry.is_empty()).map(normalize).collect()
+    output
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(normalize)
+        .collect()
 }
 
 fn push_unique(set: &mut Vec<String>, path: String) {
-    if !path.is_empty() && !set.contains(&path) { set.push(path); }
+    if !path.is_empty() && !set.contains(&path) {
+        set.push(path);
+    }
 }
 
 fn normalize(path: &str) -> String {
@@ -205,7 +312,9 @@ fn normalize(path: &str) -> String {
     for segment in unified.split('/') {
         match segment {
             "" | "." => {}
-            ".." => { segments.pop(); }
+            ".." => {
+                segments.pop();
+            }
             other => segments.push(other),
         }
     }
@@ -229,12 +338,19 @@ fn extension_of(path: &str) -> &str {
 
 fn is_scannable(path: &str) -> bool {
     let unified = path.replace('\\', "/");
-    if unified.split('/').any(|segment| SKIP_DIRECTORIES.contains(&segment)) { return false; }
+    if unified
+        .split('/')
+        .any(|segment| SKIP_DIRECTORIES.contains(&segment))
+    {
+        return false;
+    }
     SCANNABLE_EXTENSIONS.contains(&extension_of(&unified))
 }
 
 fn has_code_extension(specifier: &str) -> bool {
-    SCANNABLE_EXTENSIONS.iter().any(|extension| specifier.ends_with(&format!(".{extension}")))
+    SCANNABLE_EXTENSIONS
+        .iter()
+        .any(|extension| specifier.ends_with(&format!(".{extension}")))
 }
 
 struct Reference {
@@ -257,13 +373,19 @@ fn extract_references(source: &str, is_json: bool) -> Vec<Reference> {
 
     for character in source.chars() {
         if in_line_comment {
-            if character == '\n' { line += 1; in_line_comment = false; }
+            if character == '\n' {
+                line += 1;
+                in_line_comment = false;
+            }
             previous = character;
             continue;
         }
         if in_block_comment {
-            if character == '\n' { line += 1; }
-            else if previous == '*' && character == '/' { in_block_comment = false; }
+            if character == '\n' {
+                line += 1;
+            } else if previous == '*' && character == '/' {
+                in_block_comment = false;
+            }
             previous = character;
             continue;
         }
@@ -281,9 +403,16 @@ fn extract_references(source: &str, is_json: bool) -> Vec<Reference> {
             }
             if character == closing {
                 quote = None;
-                if let Some(specifier) = specifier_in_literal(&literal, &context, &preceding_literal, is_json) {
-                    found.push(Reference { line: literal_line, specifier });
-                    if found.len() >= MAX_REFERENCES_PER_FILE { return found; }
+                if let Some(specifier) =
+                    specifier_in_literal(&literal, &context, &preceding_literal, is_json)
+                {
+                    found.push(Reference {
+                        line: literal_line,
+                        specifier,
+                    });
+                    if found.len() >= MAX_REFERENCES_PER_FILE {
+                        return found;
+                    }
                 }
                 preceding_literal.clear();
                 preceding_literal.push_str(&literal);
@@ -291,13 +420,25 @@ fn extract_references(source: &str, is_json: bool) -> Vec<Reference> {
                 previous = character;
                 continue;
             }
-            if character == '\n' { line += 1; }
+            if character == '\n' {
+                line += 1;
+            }
             literal.push(character);
             previous = character;
             continue;
         }
-        if previous == '/' && character == '/' { in_line_comment = true; context.pop(); previous = character; continue; }
-        if previous == '/' && character == '*' { in_block_comment = true; context.pop(); previous = character; continue; }
+        if previous == '/' && character == '/' {
+            in_line_comment = true;
+            context.pop();
+            previous = character;
+            continue;
+        }
+        if previous == '/' && character == '*' {
+            in_block_comment = true;
+            context.pop();
+            previous = character;
+            continue;
+        }
         if character == '\'' || character == '"' || character == '`' {
             quote = Some(character);
             literal_line = line;
@@ -325,22 +466,45 @@ fn push_context(context: &mut Vec<char>, character: char) {
     }
 }
 
-fn specifier_in_literal(literal: &str, context: &[char], preceding_literal: &str, is_json: bool) -> Option<String> {
+fn specifier_in_literal(
+    literal: &str,
+    context: &[char],
+    preceding_literal: &str,
+    is_json: bool,
+) -> Option<String> {
     let specifier = literal.trim();
-    if specifier.is_empty() { return None; }
-    if EXTERNAL_SCHEMES.iter().any(|scheme| specifier.starts_with(scheme)) { return None; }
+    if specifier.is_empty() {
+        return None;
+    }
+    if EXTERNAL_SCHEMES
+        .iter()
+        .any(|scheme| specifier.starts_with(scheme))
+    {
+        return None;
+    }
     let tail: String = context.iter().collect();
     let trimmed = tail.trim_end();
     let keyword = trailing_word(trimmed);
-    let keyword = if keyword.is_empty() { preceding_literal.trim() } else { keyword };
+    let keyword = if keyword.is_empty() {
+        preceding_literal.trim()
+    } else {
+        keyword
+    };
     if is_json {
-        let path_valued = (specifier.starts_with("./") || specifier.starts_with("../")) && has_code_extension(specifier);
-        if keyword != "$ref" && !path_valued { return None; }
+        let path_valued = (specifier.starts_with("./") || specifier.starts_with("../"))
+            && has_code_extension(specifier);
+        if keyword != "$ref" && !path_valued {
+            return None;
+        }
         return Some(specifier.to_string());
     }
     match keyword {
         "from" | "import" | "require" => {
-            if declares_type_only(trimmed) { None } else { Some(specifier.to_string()) }
+            if declares_type_only(trimmed) {
+                None
+            } else {
+                Some(specifier.to_string())
+            }
         }
         _ => None,
     }
@@ -375,7 +539,11 @@ fn resolve(specifier: &str, from_directory: &str, root: &str) -> Vec<String> {
 }
 
 fn probe(base: &str) -> Vec<String> {
-    if base.is_empty() || base.split('/').any(|segment| SKIP_DIRECTORIES.contains(&segment)) {
+    if base.is_empty()
+        || base
+            .split('/')
+            .any(|segment| SKIP_DIRECTORIES.contains(&segment))
+    {
         return Vec::new();
     }
     let mut candidates = Vec::new();
@@ -396,8 +564,12 @@ fn bare_package_candidates(specifier: &str, from_directory: &str, root: &str) ->
     let mut candidates = Vec::new();
     for directory in ancestor_directories(from_directory) {
         let manifest_path = join_path(&directory, "package.json");
-        let Some(text) = read_text(root, &manifest_path) else { continue };
-        let Ok(manifest) = serde_json::from_str::<Value>(&text) else { continue };
+        let Some(text) = read_text(root, &manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
         if package_name_matches(&manifest, &directory, package) {
             for target in export_targets(&manifest, subpath) {
                 candidates.push(normalize(&join_path(&directory, &target)));
@@ -405,7 +577,8 @@ fn bare_package_candidates(specifier: &str, from_directory: &str, root: &str) ->
             candidates.extend(direct_subpath_candidates(&directory, subpath));
         }
         if declares_workspace_packages(&manifest) {
-            let package_directory = join_path(&join_path(&directory, WORKSPACE_PACKAGE_PARENT), package);
+            let package_directory =
+                join_path(&join_path(&directory, WORKSPACE_PACKAGE_PARENT), package);
             let manifest_path = join_path(&package_directory, "package.json");
             if let Some(text) = read_text(root, &manifest_path) {
                 if let Ok(manifest) = serde_json::from_str::<Value>(&text) {
@@ -421,7 +594,11 @@ fn bare_package_candidates(specifier: &str, from_directory: &str, root: &str) ->
 }
 
 fn join_path(directory: &str, suffix: &str) -> String {
-    if directory.is_empty() { suffix.to_string() } else { format!("{directory}/{suffix}") }
+    if directory.is_empty() {
+        suffix.to_string()
+    } else {
+        format!("{directory}/{suffix}")
+    }
 }
 
 fn ancestor_directories(directory: &str) -> Vec<String> {
@@ -438,14 +615,17 @@ fn ancestor_directories(directory: &str) -> Vec<String> {
 }
 
 fn package_name_matches(manifest: &Value, directory: &str, package: &str) -> bool {
-    if manifest.get("name").and_then(|v| v.as_str()) == Some(package) { return true; }
+    if manifest.get("name").and_then(|v| v.as_str()) == Some(package) {
+        return true;
+    }
     directory.rsplit('/').next().unwrap_or("") == package
 }
 
 fn declares_workspace_packages(manifest: &Value) -> bool {
     let patterns: Vec<&str> = match manifest.get("workspaces") {
         Some(Value::Array(items)) => items.iter().filter_map(|v| v.as_str()).collect(),
-        Some(Value::Object(map)) => map.get("packages")
+        Some(Value::Object(map)) => map
+            .get("packages")
             .and_then(|v| v.as_array())
             .map(|items| items.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default(),
@@ -463,12 +643,17 @@ fn direct_subpath_candidates(directory: &str, subpath: Option<&str>) -> Vec<Stri
             normalize(&join_path(directory, subpath)),
             normalize(&join_path(&join_path(directory, "src"), subpath)),
         ],
-        None => PROBE_INDEX_SUFFIXES.iter().map(|suffix| normalize(&format!("{directory}{suffix}"))).collect(),
+        None => PROBE_INDEX_SUFFIXES
+            .iter()
+            .map(|suffix| normalize(&format!("{directory}{suffix}")))
+            .collect(),
     }
 }
 
 fn export_targets(manifest: &Value, subpath: Option<&str>) -> Vec<String> {
-    let Some(exports) = manifest.get("exports") else { return Vec::new() };
+    let Some(exports) = manifest.get("exports") else {
+        return Vec::new();
+    };
     let key = match subpath {
         Some(subpath) => format!("./{subpath}"),
         None => ".".to_string(),
@@ -481,8 +666,12 @@ fn export_targets(manifest: &Value, subpath: Option<&str>) -> Vec<String> {
                 collect_export_targets(value, &mut targets, None);
             }
             for (pattern, value) in map {
-                let Some(prefix) = pattern.strip_suffix("/*") else { continue };
-                let Some(rest) = key.strip_prefix(&format!("{prefix}/")) else { continue };
+                let Some(prefix) = pattern.strip_suffix("/*") else {
+                    continue;
+                };
+                let Some(rest) = key.strip_prefix(&format!("{prefix}/")) else {
+                    continue;
+                };
                 collect_export_targets(value, &mut targets, Some(rest));
             }
         }

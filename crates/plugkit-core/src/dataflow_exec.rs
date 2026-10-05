@@ -9,7 +9,10 @@ pub struct RunState {
 
 impl RunState {
     pub fn new(request: Value) -> Self {
-        RunState { outputs: std::collections::BTreeMap::new(), request }
+        RunState {
+            outputs: std::collections::BTreeMap::new(),
+            request,
+        }
     }
 
     fn resolve_ref(&self, ref_str: &str) -> Value {
@@ -23,13 +26,21 @@ impl RunState {
         let base = match root {
             "request" => &self.request,
             "steps" => {
-                let Some((step_id, rest)) = path.split_once('.') else { return Value::Null };
-                let Some(v) = self.outputs.get(step_id) else { return Value::Null };
+                let Some((step_id, rest)) = path.split_once('.') else {
+                    return Value::Null;
+                };
+                let Some(v) = self.outputs.get(step_id) else {
+                    return Value::Null;
+                };
                 return dig(v, rest);
             }
             _ => return Value::Null,
         };
-        if path.is_empty() { base.clone() } else { dig(base, path) }
+        if path.is_empty() {
+            base.clone()
+        } else {
+            dig(base, path)
+        }
     }
 
     fn build_body(&self, mapping: &InputMapping) -> Value {
@@ -78,7 +89,11 @@ fn dispatch_gm_internal(verb: &str, body: &Value) -> Value {
             json!({ "embedding": crate::wasm_dispatch::embed_query(query) })
         }
         "vector_search" => {
-            let embedding = body.get("embedding").and_then(|e| e.get("embedding")).cloned().unwrap_or(Value::Null);
+            let embedding = body
+                .get("embedding")
+                .and_then(|e| e.get("embedding"))
+                .cloned()
+                .unwrap_or(Value::Null);
             let ns = body.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
             let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(8) as u32;
             crate::wasm_dispatch::vec_search_local(&embedding, ns, k)
@@ -90,7 +105,10 @@ fn dispatch_gm_internal(verb: &str, body: &Value) -> Value {
             let mut corpus = crate::code_index::FusionCorpus::load();
             let ranked = corpus.bm25_rank_cfg(query, k, &cfg.scoring);
             let ids: Vec<&str> = ranked.iter().map(|(key, _)| key.as_str()).collect();
-            let scored: Vec<Value> = ranked.iter().map(|(key, score)| json!({ "key": key, "score": score })).collect();
+            let scored: Vec<Value> = ranked
+                .iter()
+                .map(|(key, score)| json!({ "key": key, "score": score }))
+                .collect();
             json!({ "ids": ids, "scored": scored })
         }
         "git_commit_rank" => {
@@ -102,22 +120,34 @@ fn dispatch_gm_internal(verb: &str, body: &Value) -> Value {
             json!({ "commits": hashes, "commit_details": commits })
         }
         "search_with_recency" => {
-            let embedding = body.get("embedding").and_then(|e| e.get("embedding")).cloned().unwrap_or(Value::Null);
+            let embedding = body
+                .get("embedding")
+                .and_then(|e| e.get("embedding"))
+                .cloned()
+                .unwrap_or(Value::Null);
             let namespaces: Vec<String> = body
                 .get("namespaces")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
             let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
-            crate::rssearch_vectors::search_with_recency(&embedding, &namespaces, limit, now_ms).unwrap_or(Value::Null)
+            crate::rssearch_vectors::search_with_recency(&embedding, &namespaces, limit, now_ms)
+                .unwrap_or(Value::Null)
         }
         "extract_chunks" => {
             let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let source = body.get("source").and_then(|v| v.as_str()).unwrap_or("");
             let lang = body.get("lang").and_then(|v| v.as_str()).unwrap_or("");
             let chunks = crate::code_index::extract_chunks(path, source, lang);
-            let bodies: Vec<Value> = chunks.iter().map(|(_, _, _, _, body)| json!(body)).collect();
+            let bodies: Vec<Value> = chunks
+                .iter()
+                .map(|(_, _, _, _, body)| json!(body))
+                .collect();
             let structured: Vec<Value> = chunks
                 .iter()
                 .map(|(kind, name, line_start, line_end, body)| {
@@ -126,7 +156,9 @@ fn dispatch_gm_internal(verb: &str, body: &Value) -> Value {
                 .collect();
             json!({ "bodies": bodies, "chunks": structured })
         }
-        other => json!({ "ok": false, "error": format!("unknown gm-internal dataflow verb: {other}") }),
+        other => {
+            json!({ "ok": false, "error": format!("unknown gm-internal dataflow verb: {other}") })
+        }
     }
 }
 
@@ -134,7 +166,9 @@ pub fn run(pipeline: &Pipeline, request: Value) -> Value {
     let mut state = RunState::new(request);
     for step in &pipeline.steps {
         if let Some(cond_name) = &step.when {
-            let Some(cond) = pipeline.conditions.iter().find(|c| &c.name == cond_name) else { continue };
+            let Some(cond) = pipeline.conditions.iter().find(|c| &c.name == cond_name) else {
+                continue;
+            };
             if !state.eval_condition(cond) {
                 continue;
             }
@@ -147,7 +181,11 @@ pub fn run(pipeline: &Pipeline, request: Value) -> Value {
         let out = run_fuse(fuse, &state);
         state.outputs.insert(fuse.id.clone(), out);
     }
-    state.outputs.get(&pipeline.output).cloned().unwrap_or(Value::Null)
+    state
+        .outputs
+        .get(&pipeline.output)
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 fn run_fuse(fuse: &FuseNode, state: &RunState) -> Value {
@@ -163,7 +201,11 @@ fn run_fuse(fuse: &FuseNode, state: &RunState) -> Value {
                         .get(src)
                         .and_then(|v| v.get("ids").or_else(|| v.get("hits")))
                         .and_then(|v| v.as_array())
-                        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default()
                 })
                 .collect();
@@ -171,10 +213,21 @@ fn run_fuse(fuse: &FuseNode, state: &RunState) -> Value {
                 .sources
                 .iter()
                 .enumerate()
-                .map(|(i, _)| if i == 0 { cfg.scoring.fusion_vector_list_weight } else { cfg.scoring.fusion_identifier_boost })
+                .map(|(i, _)| {
+                    if i == 0 {
+                        cfg.scoring.fusion_vector_list_weight
+                    } else {
+                        cfg.scoring.fusion_identifier_boost
+                    }
+                })
                 .collect();
-            let query = state.request.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let fused = rs_search::fusion::fuse_n_cfg(&lists, &weights, query, cfg.scoring.fusion_rrf_k);
+            let query = state
+                .request
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let fused =
+                rs_search::fusion::fuse_n_cfg(&lists, &weights, query, cfg.scoring.fusion_rrf_k);
             json!({
                 "ids": fused.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
                 "scored": fused.into_iter().map(|(id, score)| json!({"id": id, "score": score})).collect::<Vec<_>>(),

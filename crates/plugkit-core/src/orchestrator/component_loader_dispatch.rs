@@ -1,21 +1,28 @@
 #![cfg(target_arch = "wasm32")]
 
-use std::collections::{BTreeMap, BTreeSet};
-use super::component_loader::{
-    self, ComponentEntry, FiberSwap,
-};
+use super::component_loader::{self, ComponentEntry, FiberSwap};
 use crate::pkfs;
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn parse_entries(v: &Value) -> Vec<ComponentEntry> {
     v.as_array()
-        .map(|arr| arr.iter().filter_map(|e| serde_json::from_value::<ComponentEntry>(e.clone()).ok()).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| serde_json::from_value::<ComponentEntry>(e.clone()).ok())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 pub fn handle_reconcile(content: &str) -> (String, String, i32) {
     let parsed: Value = serde_json::from_str(content).unwrap_or(Value::Null);
-    let previous = parse_entries(&parsed.get("previous").cloned().unwrap_or(Value::Array(vec![])));
+    let previous = parse_entries(
+        &parsed
+            .get("previous")
+            .cloned()
+            .unwrap_or(Value::Array(vec![])),
+    );
     let next = parse_entries(&parsed.get("next").cloned().unwrap_or(Value::Array(vec![])));
 
     if next.is_empty() && parsed.get("next").is_none() {
@@ -39,9 +46,14 @@ pub fn handle_reconcile(content: &str) -> (String, String, i32) {
             if decision.op != component_loader::ReconcileOp::ReassignRealms {
                 continue;
             }
-            let Some(entry) = next.iter().find(|e| e.id == decision.id) else { continue };
-            let Some(prev_entry) = previous.iter().find(|e| e.id == decision.id) else { continue };
-            let reassignment = component_loader::patch_isolation(&mut state, prev_entry, &entry.isolate, &next);
+            let Some(entry) = next.iter().find(|e| e.id == decision.id) else {
+                continue;
+            };
+            let Some(prev_entry) = previous.iter().find(|e| e.id == decision.id) else {
+                continue;
+            };
+            let reassignment =
+                component_loader::patch_isolation(&mut state, prev_entry, &entry.isolate, &next);
             reassignments.push(reassignment);
         }
 
@@ -84,11 +96,18 @@ impl FiberSwap for RecordingSwap {
         self.disposed.push(entry_id.to_string());
     }
 
-    fn instantiate(&mut self, entry_id: &str, url: &str, source: &str, _config: &Value) -> Result<String, String> {
+    fn instantiate(
+        &mut self,
+        entry_id: &str,
+        url: &str,
+        source: &str,
+        _config: &Value,
+    ) -> Result<String, String> {
         if self.fail_urls.contains(url) {
             return Err(format!("simulated import failure for {url}"));
         }
-        self.instantiated.push((entry_id.to_string(), url.to_string()));
+        self.instantiated
+            .push((entry_id.to_string(), url.to_string()));
         Ok(source.to_string())
     }
 }
@@ -99,12 +118,20 @@ pub fn handle_hmr(content: &str) -> (String, String, i32) {
     let stashed: BTreeSet<String> = parsed
         .get("stashed")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let externals: BTreeSet<String> = parsed
         .get("externals")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     if stashed.is_empty() {
@@ -115,7 +142,12 @@ pub fn handle_hmr(content: &str) -> (String, String, i32) {
         );
     }
 
-    let entries = parse_entries(&parsed.get("entries").cloned().unwrap_or(Value::Array(vec![])));
+    let entries = parse_entries(
+        &parsed
+            .get("entries")
+            .cloned()
+            .unwrap_or(Value::Array(vec![])),
+    );
 
     let graph: component_loader::ImportGraph = parsed
         .get("graph")
@@ -123,7 +155,14 @@ pub fn handle_hmr(content: &str) -> (String, String, i32) {
         .map(|obj| {
             obj.iter()
                 .map(|(k, v)| {
-                    let imports = v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+                    let imports = v
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     (k.clone(), imports)
                 })
                 .collect()
@@ -133,24 +172,47 @@ pub fn handle_hmr(content: &str) -> (String, String, i32) {
     let current_sources: BTreeMap<String, String> = parsed
         .get("current_sources")
         .and_then(|v| v.as_object())
-        .map(|obj| obj.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
         .unwrap_or_default();
     let next_sources: BTreeMap<String, String> = parsed
         .get("next_sources")
         .and_then(|v| v.as_object())
-        .map(|obj| obj.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
         .unwrap_or_else(|| current_sources.clone());
 
     let fail_urls: BTreeSet<String> = parsed
         .get("fail_urls")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
-    let mut swap = RecordingSwap { disposed: Vec::new(), instantiated: Vec::new(), fail_urls };
+    let mut swap = RecordingSwap {
+        disposed: Vec::new(),
+        instantiated: Vec::new(),
+        fail_urls,
+    };
 
-    let (stale_ids, accepted, outcome) =
-        component_loader::hmr_cycle(&stashed, &externals, &entries, &graph, &current_sources, &next_sources, &mut swap);
+    let (stale_ids, accepted, outcome) = component_loader::hmr_cycle(
+        &stashed,
+        &externals,
+        &entries,
+        &graph,
+        &current_sources,
+        &next_sources,
+        &mut swap,
+    );
 
     let payload = serde_json::json!({
         "ok": true,

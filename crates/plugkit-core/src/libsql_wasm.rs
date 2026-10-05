@@ -22,7 +22,9 @@ const SQLITE_NOTADB: i64 = 26;
 fn parse_code(err: &str, field: &str) -> Option<i64> {
     let at = err.find(field)? + field.len();
     let rest = &err[at..];
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 
@@ -80,27 +82,49 @@ fn plugin_ok_err(resp: &Value) -> Result<(), String> {
     if ok {
         Ok(())
     } else {
-        Err(resp.get("error").and_then(|v| v.as_str()).unwrap_or("libsql plugin call failed").to_string())
+        Err(resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("libsql plugin call failed")
+            .to_string())
     }
 }
 
 fn plugin_ok_rows(resp: &Value) -> Result<Value, String> {
     let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if ok {
-        Ok(resp.get("rows").cloned().unwrap_or(Value::Array(Vec::new())))
+        Ok(resp
+            .get("rows")
+            .cloned()
+            .unwrap_or(Value::Array(Vec::new())))
     } else {
-        Err(resp.get("error").and_then(|v| v.as_str()).unwrap_or("libsql plugin call failed").to_string())
+        Err(resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("libsql plugin call failed")
+            .to_string())
     }
 }
 
 pub fn absolute_db_path(filename: &str) -> String {
-    if filename.is_empty() || filename == ":memory:" || filename.starts_with('/') || (filename.len() > 1 && filename.as_bytes()[1] == b':') {
+    if filename.is_empty()
+        || filename == ":memory:"
+        || filename.starts_with('/')
+        || (filename.len() > 1 && filename.as_bytes()[1] == b':')
+    {
         return filename.to_string();
     }
     match host_cwd_string() {
         Some(cwd) if !cwd.is_empty() => {
             let cwd = cwd.trim_end_matches(['/', '\\']);
-            format!("{}/{}/{}", cwd, crate::ragconfig::RagConfig::resolved().db_path.state_root_dir, filename)
+            format!(
+                "{}/{}/{}",
+                cwd,
+                crate::ragconfig::RagConfig::resolved()
+                    .db_path
+                    .state_root_dir,
+                filename
+            )
         }
         _ => filename.to_string(),
     }
@@ -127,12 +151,20 @@ pub fn query(path: &str, sql: &str) -> Result<Value, String> {
 }
 
 pub fn exec_params(path: &str, sql: &str, params: &[&str]) -> Result<(), String> {
-    let resp = plugin_call("libsql", "exec_params", &json!({ "path": path, "sql": sql, "params": params }));
+    let resp = plugin_call(
+        "libsql",
+        "exec_params",
+        &json!({ "path": path, "sql": sql, "params": params }),
+    );
     plugin_ok_err(&resp)
 }
 
 pub fn query_params(path: &str, sql: &str, params: &[&str]) -> Result<Value, String> {
-    let resp = plugin_call("libsql", "query_params", &json!({ "path": path, "sql": sql, "params": params }));
+    let resp = plugin_call(
+        "libsql",
+        "query_params",
+        &json!({ "path": path, "sql": sql, "params": params }),
+    );
     plugin_ok_rows(&resp)
 }
 
@@ -150,7 +182,11 @@ pub fn rollback(path: &str) -> Result<(), String> {
 }
 
 pub fn prepare_execute(path: &str, sql: &str, params: &[&str]) -> Result<(), String> {
-    let resp = plugin_call("libsql", "prepare_execute", &json!({ "path": path, "sql": sql, "params": params }));
+    let resp = plugin_call(
+        "libsql",
+        "prepare_execute",
+        &json!({ "path": path, "sql": sql, "params": params }),
+    );
     plugin_ok_err(&resp)
 }
 
@@ -158,16 +194,26 @@ pub fn serialize(path: &str) -> Result<Vec<u8>, String> {
     let resp = plugin_call("libsql", "serialize", &json!({ "path": path }));
     let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if !ok {
-        return Err(resp.get("error").and_then(|v| v.as_str()).unwrap_or("serialize failed").to_string());
+        return Err(resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("serialize failed")
+            .to_string());
     }
-    let b64 = resp.get("data").and_then(|v| v.as_str())
+    let b64 = resp
+        .get("data")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| "serialize: missing data in plugin response".to_string())?;
     base64_decode(b64)
 }
 
 pub fn deserialize(path: &str, bytes: &[u8]) -> Result<(), String> {
     let b64 = base64_encode(bytes);
-    let resp = plugin_call("libsql", "deserialize", &json!({ "path": path, "data": b64 }));
+    let resp = plugin_call(
+        "libsql",
+        "deserialize",
+        &json!({ "path": path, "data": b64 }),
+    );
     plugin_ok_err(&resp)
 }
 
@@ -182,4 +228,3 @@ pub fn smoke() -> Value {
     let _ = close(p);
     json!({ "ok": true, "smoke": log, "libsql_version": "delegated" })
 }
-

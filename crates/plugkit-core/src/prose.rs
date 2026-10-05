@@ -28,7 +28,10 @@ impl Outcome {
     }
 
     pub fn is_degraded(&self) -> bool {
-        matches!(self, Outcome::Degraded { .. } | Outcome::ConfigRepoUnreachable { .. })
+        matches!(
+            self,
+            Outcome::Degraded { .. } | Outcome::ConfigRepoUnreachable { .. }
+        )
     }
 }
 
@@ -58,9 +61,7 @@ fn remaining_placeholders(text: &str) -> Vec<String> {
         if bytes[i] == b'{' {
             if let Some(end) = text[i + 1..].find('}') {
                 let inner = &text[i + 1..i + 1 + end];
-                if !inner.is_empty()
-                    && inner.chars().all(|c| c.is_ascii_lowercase() || c == '_')
-                {
+                if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
                     found.push(inner.to_string());
                 }
                 i += end + 2;
@@ -136,7 +137,11 @@ pub fn resolve_detailed(key: &str, default: &str) -> (String, Outcome) {
     }
 
     let mut pending_degraded: Option<Outcome> = None;
-    for tier in [tier1_project_vendored, tier2_in_project_repo, tier3_user_wide_repo] {
+    for tier in [
+        tier1_project_vendored,
+        tier2_in_project_repo,
+        tier3_user_wide_repo,
+    ] {
         match tier(key) {
             TierResult::Answered(text, outcome) => return (text, outcome),
             TierResult::Terminal(outcome) => return (default.to_string(), outcome),
@@ -221,7 +226,11 @@ pub fn resolve_and_mark(key: &str, default: &str) -> String {
 fn read_clean(path: &str) -> Option<String> {
     let raw = pkfs::read_to_string(path)?;
     let text = raw.trim_start_matches('\u{feff}').replace("\r\n", "\n");
-    if text.trim().is_empty() { None } else { Some(text) }
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 enum SourceRead {
@@ -258,7 +267,8 @@ fn read_from_config_repo(_key: &str) -> SourceRead {
     )
 }
 
-const MESSAGE_NAMESPACES: &[(&str, &str)] = &[("gates/", "gates_dir"), ("residual/", "residual_dir")];
+const MESSAGE_NAMESPACES: &[(&str, &str)] =
+    &[("gates/", "gates_dir"), ("residual/", "residual_dir")];
 
 struct CacheLocation {
     dir: String,
@@ -299,12 +309,19 @@ fn message_location(config: Option<&serde_json::Value>, key: &str) -> Option<Cac
 }
 
 fn read_from_cache_root(cache: &str, key: &str) -> SourceRead {
-    let config = pkfs::read_to_string(&format!("{cache}/gm.config.json"))
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')).ok());
-    let CacheLocation { dir, stem, declaring_field } = message_location(config.as_ref(), key)
+    let config = pkfs::read_to_string(&format!("{cache}/gm.config.json")).and_then(|raw| {
+        serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')).ok()
+    });
+    let CacheLocation {
+        dir,
+        stem,
+        declaring_field,
+    } = message_location(config.as_ref(), key)
         .unwrap_or_else(|| instructions_location(config.as_ref(), key));
     if validate_source_path(&dir).is_err() {
-        return SourceRead::Broken(format!("{cache}/gm.config.json: {declaring_field} is not a safe relative path"));
+        return SourceRead::Broken(format!(
+            "{cache}/gm.config.json: {declaring_field} is not a safe relative path"
+        ));
     }
     let trimmed = dir.trim().trim_matches('/');
     let full = if trimmed.is_empty() {
@@ -330,7 +347,8 @@ fn read_from_source_repo(key: &str) -> SourceRead {
     if cfg_raw.trim_start_matches('\u{feff}').trim().is_empty() {
         return SourceRead::NotConfigured;
     }
-    let cfg: serde_json::Value = match serde_json::from_str(cfg_raw.trim_start_matches('\u{feff}')) {
+    let cfg: serde_json::Value = match serde_json::from_str(cfg_raw.trim_start_matches('\u{feff}'))
+    {
         Ok(v) => v,
         Err(e) => {
             return SourceRead::Broken(format!("{SOURCE_SPEC_PATH}: not valid JSON: {e}"));
@@ -341,7 +359,11 @@ fn read_from_source_repo(key: &str) -> SourceRead {
             "{SOURCE_SPEC_PATH}: top level must be a JSON object"
         ));
     }
-    let has_repo_field = cfg.get("repo").and_then(|v| v.as_str()).map(|s| !s.trim().is_empty()).unwrap_or(false);
+    let has_repo_field = cfg
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
     if has_repo_field {
         return read_from_repo_spec_schema(key, &cfg_raw);
     }
