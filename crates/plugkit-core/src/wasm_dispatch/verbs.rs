@@ -1710,6 +1710,8 @@ fn apply_scope_echo(reply: &mut Value, scope: &PathScope, channels: &[&Vec<Value
     }
 }
 
+const CHANGED_FILES_REPORT_CAP: usize = 25;
+
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
     if !crate::wasm_dispatch::host_allow_root(root) {
         return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
@@ -1724,17 +1726,30 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
     };
     let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
     if !already_indexed {
-        let stored = crate::code_index::stored_digest_at(Some(root));
-        let current = crate::code_index::current_digest_at(root);
-        let stale = match &stored { Some(s) => s != &current, None => true };
-        if stale {
-            let cold_start = stored.is_none();
-            let reason = if cold_start { "digest-absent" } else { "digest-mismatch" };
-            emit_event("codeinsight_rebuild", json!({ "reason": reason, "root": root, "stored_then_current": current }));
+        let diff = crate::code_index::index_diff_at(Some(root));
+        if !diff.is_empty() {
+            let cold_start = diff.cold_start;
+            let reason = if cold_start { "manifest-absent" } else { "files-changed" };
+            let priority = diff.priority_paths();
+            emit_event("codeinsight_rebuild", json!({
+                "reason": reason,
+                "root": root,
+                "changed_total": diff.count(),
+                "changed_count": diff.changed.len(),
+                "added_count": diff.added.len(),
+                "removed_count": diff.removed.len(),
+                "changed_files": &diff.changed[..diff.changed.len().min(CHANGED_FILES_REPORT_CAP)],
+                "added_files": &diff.added[..diff.added.len().min(CHANGED_FILES_REPORT_CAP)],
+                "removed_files": &diff.removed[..diff.removed.len().min(CHANGED_FILES_REPORT_CAP)],
+                "changed_files_truncated": diff.changed.len() > CHANGED_FILES_REPORT_CAP
+                    || diff.added.len() > CHANGED_FILES_REPORT_CAP
+                    || diff.removed.len() > CHANGED_FILES_REPORT_CAP,
+                "digest": crate::code_index::current_digest_at(root),
+            }));
             if cold_start {
                 let _ = crate::code_index::index_at(root, 500, root);
             } else {
-                let _ = crate::code_index::index_at_topup(root, 500, root, cfg.index.incremental_topup_wall_budget_ms);
+                let _ = crate::code_index::index_at_topup_for(root, 500, root, cfg.index.incremental_topup_wall_budget_ms, &priority);
             }
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
@@ -2136,17 +2151,29 @@ fn codesearch_dispatch(body: &Value) -> u64 {
     }
     let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
     if !already_indexed {
-        let stored = crate::code_index::stored_digest();
-        let current = crate::code_index::current_digest();
-        let stale = match &stored { Some(s) => s != &current, None => true };
-        if stale {
-            let cold_start = stored.is_none();
-            let reason = if cold_start { "digest-absent" } else { "digest-mismatch" };
-            emit_event("codeinsight_rebuild", json!({ "reason": reason, "stored_then_current": current }));
+        let diff = crate::code_index::index_diff_at(None);
+        if !diff.is_empty() {
+            let cold_start = diff.cold_start;
+            let reason = if cold_start { "manifest-absent" } else { "files-changed" };
+            let priority = diff.priority_paths();
+            emit_event("codeinsight_rebuild", json!({
+                "reason": reason,
+                "changed_total": diff.count(),
+                "changed_count": diff.changed.len(),
+                "added_count": diff.added.len(),
+                "removed_count": diff.removed.len(),
+                "changed_files": &diff.changed[..diff.changed.len().min(CHANGED_FILES_REPORT_CAP)],
+                "added_files": &diff.added[..diff.added.len().min(CHANGED_FILES_REPORT_CAP)],
+                "removed_files": &diff.removed[..diff.removed.len().min(CHANGED_FILES_REPORT_CAP)],
+                "changed_files_truncated": diff.changed.len() > CHANGED_FILES_REPORT_CAP
+                    || diff.added.len() > CHANGED_FILES_REPORT_CAP
+                    || diff.removed.len() > CHANGED_FILES_REPORT_CAP,
+                "digest": crate::code_index::current_digest(),
+            }));
             if cold_start {
                 let _ = crate::code_index::index(".", 500);
             } else {
-                let _ = crate::code_index::index_topup(".", 500, cfg.index.incremental_topup_wall_budget_ms);
+                let _ = crate::code_index::index_topup_for(".", 500, cfg.index.incremental_topup_wall_budget_ms, &priority);
             }
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
@@ -3736,11 +3763,107 @@ fn bundle_prd_commit_comments(cwd: Option<&str>, message: &str) -> String {
     out
 }
 
+const GIT_MESSAGE_FILE_REF_PREFIX: char = '@';
+
+fn git_message_file_refusal(verb: &str, raw: &str, reason: &str) -> Value {
+    json!({
+        "error": format!("refusing to use {raw:?} as the {verb} message: {reason}"),
+        "error_code": "git_message_file_ref_unresolved",
+        "message_field": raw,
+        "reason": reason,
+        "hint": "a message starting with '@' names a file to read the message from, resolved against the dispatch cwd; inline the text or point at a file that exists and is not empty",
+        "next_dispatch": "instruction",
+    })
+}
+
+fn git_message_file_path(reference: &str, cwd: Option<&str>) -> String {
+    if crate::pkfs::is_absolute(reference) {
+        return reference.to_string();
+    }
+    let relative = reference.trim_start_matches("./");
+    match cwd {
+        Some(base) if !base.trim().is_empty() => {
+            format!("{}/{}", base.trim_end_matches(['/', '\\']), relative)
+        }
+        _ => relative.to_string(),
+    }
+}
+
+fn expand_git_message_field(verb: &str, raw: &str, cwd: Option<&str>) -> Result<String, Value> {
+    let trimmed = raw.trim();
+    let reference = match trimmed.strip_prefix(GIT_MESSAGE_FILE_REF_PREFIX) {
+        Some(reference) => reference.trim(),
+        None => return Ok(trimmed.to_string()),
+    };
+    if reference.is_empty() {
+        return Err(git_message_file_refusal(verb, raw, "it is '@' with no path after it"));
+    }
+    let path = git_message_file_path(reference, cwd);
+    if !crate::pkfs::exists(&path) {
+        return Err(git_message_file_refusal(
+            verb,
+            raw,
+            &format!("the file it names does not exist: {path}"),
+        ));
+    }
+    match crate::pkfs::read_to_string(&path) {
+        Some(contents) if !contents.trim().is_empty() => Ok(contents.trim().to_string()),
+        Some(_) => Err(git_message_file_refusal(
+            verb,
+            raw,
+            &format!("the file it names is empty: {path}"),
+        )),
+        None => Err(git_message_file_refusal(
+            verb,
+            raw,
+            &format!("the file it names could not be read: {path}"),
+        )),
+    }
+}
+
+const GIT_COMMIT_AUTHOR: &str = "lanmower <657315+lanmower@users.noreply.github.com>";
+const AI_TRAILER_MARKERS: [&str; 6] = ["claude", "anthropic", "copilot", "chatgpt", "openai", "codex"];
+
+fn git_ai_trailer_refusal(verb: &str, trailer: &str) -> Value {
+    json!({
+        "error": format!("refusing to {verb} a message carrying an AI attribution trailer ({trailer}): this project attributes work to lanmower only"),
+        "error_code": "git_message_ai_attribution_trailer",
+        "trailer": trailer,
+        "reason": "AI attribution trailer in commit message",
+        "hint": "drop the Co-Authored-By line naming an assistant; the git verbs pass --author=lanmower <657315+lanmower@users.noreply.github.com> themselves",
+        "next_dispatch": "instruction",
+    })
+}
+
+fn ai_attribution_trailer(message: &str) -> Option<String> {
+    message.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key.trim().to_ascii_lowercase() != "co-authored-by" {
+            return None;
+        }
+        let value = value.to_ascii_lowercase();
+        AI_TRAILER_MARKERS
+            .iter()
+            .find(|marker| value.contains(*marker))
+            .map(|_| line.trim().to_string())
+    })
+}
+
 fn git_commit(body: &Value) -> u64 {
     git_async_entry("git_commit", body, |body, plan| {
         let repo = body.get("repo").and_then(|v| v.as_str());
         let cwd = body.get("cwd").and_then(|v| v.as_str()).or(repo);
-        let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let message = match expand_git_message_field(
+            "git_commit",
+            body.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+            cwd,
+        ) {
+            Ok(message) => message,
+            Err(refusal) => return Ok(err_json("git_commit", refusal)),
+        };
+        if let Some(trailer) = ai_attribution_trailer(&message) {
+            return Ok(err_json("git_commit", git_ai_trailer_refusal("git_commit", &trailer)));
+        }
         if message.is_empty() {
             return Ok(err("git_commit", "message required"));
         }
@@ -3763,7 +3886,7 @@ fn git_commit(body: &Value) -> u64 {
             stdout.split('\0').filter(|entry| !entry.is_empty()).map(String::from).collect()
         };
         let head_before_probe = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-        let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message, &paths, add_all);
+        let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message.as_str(), &paths, add_all);
         if let Some(prior) = git_commit_dedup_lookup(&dedup_key, cwd) {
             let sha = prior.get("sha").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let summary = prior.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -3821,8 +3944,8 @@ fn git_commit(body: &Value) -> u64 {
                 })));
             }
         }
-        let bundled_message = bundle_prd_commit_comments(cwd, message);
-        let mut argv: Vec<String> = vec!["commit".to_string(), "-m".to_string(), bundled_message];
+        let bundled_message = bundle_prd_commit_comments(cwd, message.as_str());
+        let mut argv: Vec<String> = vec!["commit".to_string(), format!("--author={GIT_COMMIT_AUTHOR}"), "-m".to_string(), bundled_message];
         if allow_empty { argv.push("--allow-empty".to_string()); }
         if !scoped_paths.is_empty() {
             argv.push("--".to_string());
@@ -3948,7 +4071,17 @@ fn git_finalize(body: &Value) -> u64 {
             "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
         }));
     }
-    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let message = match expand_git_message_field(
+        "git_finalize",
+        body.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+        cwd_ref,
+    ) {
+        Ok(message) => message,
+        Err(refusal) => return err_json("git_finalize", refusal),
+    };
+    if let Some(trailer) = ai_attribution_trailer(&message) {
+        return err_json("git_finalize", git_ai_trailer_refusal("git_finalize", &trailer));
+    }
     let paths: Vec<String> = body.get("paths").or_else(|| body.get("files"))
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
@@ -3993,7 +4126,7 @@ fn git_finalize(body: &Value) -> u64 {
             }));
         }
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
-        let mut commit_argv: Vec<String> = vec!["commit".to_string(), "-m".to_string(), bundled_message];
+        let mut commit_argv: Vec<String> = vec!["commit".to_string(), format!("--author={GIT_COMMIT_AUTHOR}"), "-m".to_string(), bundled_message];
         if scoped {
             commit_argv.push("--".to_string());
             commit_argv.extend(paths.iter().cloned());
@@ -4025,7 +4158,15 @@ fn git_finalize(body: &Value) -> u64 {
             let flush_message = if message.is_empty() { "chore: flush resolved PRD notes".to_string() } else { message.clone() };
             let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
             let _ = git_call_argv(&as_argv(&git_stage_argv(&[], cwd_ref)), cwd_ref);
-            let cr = git_call_argv(&["commit", "--allow-empty", "-m", bundled_message.as_str()], cwd_ref);
+            let flush_argv: Vec<String> = vec![
+                "commit".to_string(),
+                "--allow-empty".to_string(),
+                format!("--author={GIT_COMMIT_AUTHOR}"),
+                "-m".to_string(),
+                bundled_message.clone(),
+            ];
+            let flush_argv: Vec<&str> = flush_argv.iter().map(String::as_str).collect();
+            let cr = git_call_argv(&flush_argv, cwd_ref);
             let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
             let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
             if ccode == 0 && !head_after.is_empty() && head_after != head_before_any_commit {
@@ -4698,10 +4839,17 @@ fn git_merge(body: &Value) -> u64 {
     if refspec.is_empty() { return err("git_merge", "ref required"); }
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
     let ff_only = body.get("ff_only").and_then(|v| v.as_bool()).unwrap_or(false);
-    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let message = match expand_git_message_field(
+        "git_merge",
+        body.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+        cwd,
+    ) {
+        Ok(message) => message,
+        Err(refusal) => return err_json("git_merge", refusal),
+    };
     let mut argv: Vec<&str> = vec!["merge", "--no-edit"];
     if ff_only { argv.push("--ff-only"); }
-    if !message.is_empty() { argv.push("-m"); argv.push(message); }
+    if !message.is_empty() { argv.push("-m"); argv.push(message.as_str()); }
     argv.push(refspec);
     let r = git_call_argv(&argv, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -4776,7 +4924,14 @@ fn git_stash(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields("git_stash", body, &["include_untracked", "message", "path", "paths", "files"]) { return refusal; }
     let cwd = body_cwd(body);
     let include_untracked = body.get("include_untracked").and_then(|v| v.as_bool()).unwrap_or(true);
-    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("gm shelf").trim();
+    let message = match expand_git_message_field(
+        "git_stash",
+        body.get("message").and_then(|v| v.as_str()).unwrap_or("gm shelf"),
+        cwd,
+    ) {
+        Ok(message) => message,
+        Err(refusal) => return err_json("git_stash", refusal),
+    };
     let paths = body_pathspecs(body);
     let mut scope: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
     scope.extend(GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
@@ -4793,7 +4948,7 @@ fn git_stash(body: &Value) -> u64 {
             }));
         }
     }
-    let mut argv = vec!["stash", "push", "--message", message];
+    let mut argv = vec!["stash", "push", "--message", message.as_str()];
     if include_untracked { argv.push("--include-untracked"); }
     argv.push("--");
     argv.extend(scope.iter().copied());
