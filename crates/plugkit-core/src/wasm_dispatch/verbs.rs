@@ -5289,17 +5289,18 @@ fn git_add(body: &Value) -> u64 {
                 protected_pathspec_refusal("git_add", &blocked_paths),
             ));
         }
-        let argv_owned = git_stage_argv(&paths, cwd);
-        let argv = as_argv(&argv_owned);
-        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
-        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-        if code != 0 {
-            return Ok(err(
-                "git_add",
-                r.get("stderr")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("git add failed"),
-            ));
+        for argv_owned in git_add_stage_argvs(&paths, cwd) {
+            let argv = as_argv(&argv_owned);
+            let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+            let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+            if code != 0 {
+                return Ok(err(
+                    "git_add",
+                    r.get("stderr")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("git add failed"),
+                ));
+            }
         }
         let mut staged: Vec<String> = if paths.is_empty() {
             let out = git_step_replayed_by_call_order(
@@ -8063,6 +8064,55 @@ fn git_stage_argv(paths: &[String], cwd: Option<&str>) -> Vec<String> {
         argv.extend(paths.iter().cloned());
     }
     argv
+}
+
+fn gitlink_paths(cwd: Option<&str>) -> Vec<String> {
+    git_call_argv(&["ls-files", "--stage", "-z"], cwd)
+        .get("stdout")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .split('\0')
+        .filter_map(|entry| {
+            let (metadata, path) = entry.split_once('\t')?;
+            metadata.starts_with("160000 ").then(|| path.to_string())
+        })
+        .collect()
+}
+
+fn changed_gitlink_paths(cwd: Option<&str>) -> Vec<String> {
+    let gitlinks = gitlink_paths(cwd);
+    let changed = git_call_argv(&["diff", "--name-only", "-z"], cwd);
+    changed
+        .get("stdout")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .split('\0')
+        .filter(|path| gitlinks.iter().any(|gitlink| gitlink == path))
+        .map(String::from)
+        .collect()
+}
+
+fn git_add_stage_argvs(paths: &[String], cwd: Option<&str>) -> Vec<Vec<String>> {
+    if !paths.is_empty() {
+        return vec![git_stage_argv(paths, cwd)];
+    }
+    let gitlinks = gitlink_paths(cwd);
+    if gitlinks.is_empty() {
+        return vec![git_stage_argv(paths, cwd)];
+    }
+    let mut source_scope = git_pathspec_scope(paths, cwd);
+    for gitlink in &gitlinks {
+        source_scope.push(format!(":(top,exclude,literal){}", gitlink));
+    }
+    let mut source_argv = vec!["add".to_string(), "--".to_string()];
+    source_argv.extend(source_scope);
+    let changed_gitlinks = changed_gitlink_paths(cwd);
+    if changed_gitlinks.is_empty() {
+        return vec![source_argv];
+    }
+    let mut gitlink_argv = vec!["add".to_string(), "--".to_string()];
+    gitlink_argv.extend(changed_gitlinks);
+    vec![gitlink_argv, source_argv]
 }
 
 fn git_porcelain_argv(paths: &[String], cwd: Option<&str>) -> Vec<String> {
