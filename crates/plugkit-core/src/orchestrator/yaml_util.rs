@@ -5,8 +5,12 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
     let bv: Vec<char> = b.chars().collect();
     let m = av.len();
     let n = bv.len();
-    if m == 0 { return n; }
-    if n == 0 { return m; }
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
     let mut prev: Vec<usize> = (0..=n).collect();
     let mut cur: Vec<usize> = vec![0; n + 1];
     for i in 1..=m {
@@ -31,8 +35,16 @@ pub fn base64_encode(bytes: &[u8]) -> String {
         let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
         out.push(B64_CHARS[((n >> 18) & 0x3f) as usize] as char);
         out.push(B64_CHARS[((n >> 12) & 0x3f) as usize] as char);
-        out.push(if chunk.len() > 1 { B64_CHARS[((n >> 6) & 0x3f) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { B64_CHARS[(n & 0x3f) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            B64_CHARS[((n >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64_CHARS[(n & 0x3f) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -49,7 +61,10 @@ fn base64_char_value(c: u8) -> Option<u32> {
 }
 
 pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
-    let clean: Vec<u8> = s.bytes().filter(|&c| c != b'=' && !c.is_ascii_whitespace()).collect();
+    let clean: Vec<u8> = s
+        .bytes()
+        .filter(|&c| c != b'=' && !c.is_ascii_whitespace())
+        .collect();
     let mut out = Vec::with_capacity(clean.len() / 4 * 3 + 3);
     for chunk in clean.chunks(4) {
         let mut n: u32 = 0;
@@ -70,29 +85,71 @@ pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 pub fn defer_marker_in_text(text: &str) -> Option<&'static str> {
     let lower = text.to_lowercase();
     const HARD_MARKERS: &[&str] = &[
-        "defer to later", "deferred to later", "deferred for later",
-        "address it next", "address this next", "leave for next",
-        "documented for next", "documented for future",
-        "below criticality", "skip for now", "punt for now",
-        "do later", "fix later", "later pass", "future work",
+        "defer to later",
+        "deferred to later",
+        "deferred for later",
+        "address it next",
+        "address this next",
+        "leave for next",
+        "documented for next",
+        "documented for future",
+        "below criticality",
+        "skip for now",
+        "punt for now",
+        "do later",
+        "fix later",
+        "later pass",
+        "future work",
     ];
     for m in HARD_MARKERS {
-        if lower.contains(m) { return Some(m); }
+        if lower.contains(m) {
+            return Some(m);
+        }
     }
     const SOFT_MARKERS: &[&str] = &[
-        "next pass", "next session", "next turn",
-        "future pass", "future session", "future turn",
+        "next pass",
+        "next session",
+        "next turn",
+        "future pass",
+        "future session",
+        "future turn",
     ];
     let has_soft = SOFT_MARKERS.iter().find(|m| lower.contains(**m)).copied();
     if let Some(m) = has_soft {
-        const DEFER_CUE: &[&str] = &["defer", "punt", "leave", "save it", "save this",
-            "push to", "kick to", "hold for", "wait for", "do it in", "handle in", "finish in"];
-        const RETRO_CUE: &[&str] = &["quoted", "described", "the phrase", "rejected for",
-            "flagged", "caused by", "deviation", "false-positive", "false positive",
-            "was mine", "self-caught", "tripped", "substring"];
+        const DEFER_CUE: &[&str] = &[
+            "defer",
+            "punt",
+            "leave",
+            "save it",
+            "save this",
+            "push to",
+            "kick to",
+            "hold for",
+            "wait for",
+            "do it in",
+            "handle in",
+            "finish in",
+        ];
+        const RETRO_CUE: &[&str] = &[
+            "quoted",
+            "described",
+            "the phrase",
+            "rejected for",
+            "flagged",
+            "caused by",
+            "deviation",
+            "false-positive",
+            "false positive",
+            "was mine",
+            "self-caught",
+            "tripped",
+            "substring",
+        ];
         let retro = RETRO_CUE.iter().any(|c| lower.contains(c));
         let defer = DEFER_CUE.iter().any(|c| lower.contains(c));
-        if defer && !retro { return Some(m); }
+        if defer && !retro {
+            return Some(m);
+        }
     }
     None
 }

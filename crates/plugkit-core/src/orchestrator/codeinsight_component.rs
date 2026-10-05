@@ -4,12 +4,18 @@ use super::fiber_lifecycle::{self, ActiveFiberSet, FiberLifecycle};
 use super::gm_dir;
 
 fn fiber_state_path(role: &str) -> std::path::PathBuf {
-    gm_dir().join("codeinsight-fiber-state").join(format!("{role}.json"))
+    gm_dir()
+        .join("codeinsight-fiber-state")
+        .join(format!("{role}.json"))
 }
 
 fn known_roles() -> Vec<String> {
     let cfg = crate::ragconfig::RagConfig::resolved().namespaces;
-    vec![cfg.code.clone(), cfg.vec_namespace(&cfg.code), cfg.manifest_namespace()]
+    vec![
+        cfg.code.clone(),
+        cfg.vec_namespace(&cfg.code),
+        cfg.manifest_namespace(),
+    ]
 }
 
 pub fn advance_all_roles() -> Vec<String> {

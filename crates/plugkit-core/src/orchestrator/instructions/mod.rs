@@ -1,22 +1,22 @@
+pub mod browser;
+pub mod conc;
+pub mod decide;
+pub mod emit;
 pub mod entry;
 pub mod entry_extended;
-pub mod emit;
-pub mod update_docs;
-pub mod browser;
-pub mod specify;
 pub mod prove;
-pub mod state;
-pub mod conc;
-pub mod sec;
 pub mod res;
-pub mod decide;
+pub mod sec;
+pub mod specify;
+pub mod state;
+pub mod update_docs;
 
-use serde_json::json;
-use super::state::{read_state, Phase};
 use super::mutables;
 use super::prd;
 use super::recall;
+use super::state::{read_state, Phase};
 use crate::pkfs;
+use serde_json::json;
 
 #[cfg(target_arch = "wasm32")]
 fn payload_cfg() -> crate::ragconfig::InstructionPayloadConfig {
@@ -32,7 +32,9 @@ fn expire_stale_marker(v: serde_json::Value) -> serde_json::Value {
         serde_json::Value::String(s) => iso8601_to_ms(s),
         _ => None,
     };
-    let Some(written_ms) = written_ms else { return v };
+    let Some(written_ms) = written_ms else {
+        return v;
+    };
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
     if now_ms.saturating_sub(written_ms) > max_marker_age_ms {
         return serde_json::Value::Null;
@@ -43,11 +45,17 @@ fn expire_stale_marker(v: serde_json::Value) -> serde_json::Value {
 #[cfg(target_arch = "wasm32")]
 fn iso8601_to_ms(s: &str) -> Option<i64> {
     let b = s.as_bytes();
-    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' { return None; }
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' {
+        return None;
+    }
     let num = |a: usize, z: usize| -> Option<i64> { s.get(a..z)?.parse::<i64>().ok() };
     let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
     let (h, mi, sec) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
-    let ms = if b.len() >= 23 && b[19] == b'.' { num(20, 23).unwrap_or(0) } else { 0 };
+    let ms = if b.len() >= 23 && b[19] == b'.' {
+        num(20, 23).unwrap_or(0)
+    } else {
+        0
+    };
     let y_adj = if mo <= 2 { y - 1 } else { y };
     let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
     let yoe = y_adj - era * 400;
@@ -63,10 +71,18 @@ const SUPPLY_CHAIN_SCAN_DEBOUNCE_MS: i64 = 300_000;
 
 #[cfg(target_arch = "wasm32")]
 fn automatic_supply_chain_scan() -> serde_json::Value {
-    let ts_path = super::gm_dir().join(".last-scan-deps-ts").to_string_lossy().to_string();
-    let result_path = super::gm_dir().join(".last-scan-deps-result.json").to_string_lossy().to_string();
+    let ts_path = super::gm_dir()
+        .join(".last-scan-deps-ts")
+        .to_string_lossy()
+        .to_string();
+    let result_path = super::gm_dir()
+        .join(".last-scan-deps-result.json")
+        .to_string_lossy()
+        .to_string();
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
-    let last_ts = pkfs::read_to_string(&ts_path).and_then(|s| s.trim().parse::<i64>().ok()).filter(|n| *n > 0);
+    let last_ts = pkfs::read_to_string(&ts_path)
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|n| *n > 0);
     if let Some(last) = last_ts {
         if now_ms.saturating_sub(last) < SUPPLY_CHAIN_SCAN_DEBOUNCE_MS {
             return pkfs::read_to_string(&result_path)
@@ -91,7 +107,10 @@ fn write_turn_summary(
 ) {
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
     let last_instruction_ts = pkfs::read_to_string(
-        &super::gm_dir().join("last-instruction-ts").to_string_lossy().to_string(),
+        &super::gm_dir()
+            .join("last-instruction-ts")
+            .to_string_lossy()
+            .to_string(),
     )
     .and_then(|s| s.trim().parse::<i64>().ok())
     .filter(|n| *n > 0);
@@ -107,7 +126,9 @@ fn write_turn_summary(
         "update_available": update_available.clone(),
         "config_changed_count": config_changed_count,
     });
-    let path = super::gm_dir().join("exec-spool").join(".turn-summary.json");
+    let path = super::gm_dir()
+        .join("exec-spool")
+        .join(".turn-summary.json");
     let _ = pkfs::write(&path.to_string_lossy().to_string(), &summary.to_string());
 }
 
@@ -119,7 +140,9 @@ fn read_spool_json(name: &str) -> serde_json::Value {
         return serde_json::Value::Null;
     }
     match pkfs::read_to_string(&ps) {
-        Some(content) => serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::Value::Null),
+        Some(content) => {
+            serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::Value::Null)
+        }
         None => serde_json::Value::Null,
     }
 }
@@ -128,12 +151,16 @@ fn read_spool_json(name: &str) -> serde_json::Value {
 fn residual_check_fired_recently() -> bool {
     let marker = super::gm_dir().join("residual-check-fired");
     let ms = marker.to_string_lossy().to_string();
-    pkfs::read_to_string(&ms).map(|s| !s.trim().is_empty()).unwrap_or(false)
+    pkfs::read_to_string(&ms)
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
 }
 
 #[cfg(target_arch = "wasm32")]
 fn should_residual_scan(prd_pending: usize, running_tasks_count: usize) -> bool {
-    if residual_check_fired_recently() { return false; }
+    if residual_check_fired_recently() {
+        return false;
+    }
     prd_pending == 0 && running_tasks_count == 0
 }
 
@@ -157,8 +184,18 @@ pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
 pub fn has_compiled_default_for_prose_key(key: &str) -> bool {
     matches!(
         key,
-        "emit" | "update_docs" | "browser" | "entry" | "entry-extended"
-            | "specify" | "prove" | "state" | "conc" | "sec" | "res" | "decide"
+        "emit"
+            | "update_docs"
+            | "browser"
+            | "entry"
+            | "entry-extended"
+            | "specify"
+            | "prove"
+            | "state"
+            | "conc"
+            | "sec"
+            | "res"
+            | "decide"
     )
 }
 
@@ -174,7 +211,12 @@ pub fn fnv1a64(text: &str) -> u64 {
 pub fn get_instruction(phase: &str) -> String {
     let upper = phase.trim().to_ascii_uppercase();
     let g = super::fsm::graph();
-    let pseudo = g.policy.pseudo_phases.iter().find(|(name, _)| name == &upper).map(|(_, key)| key.clone());
+    let pseudo = g
+        .policy
+        .pseudo_phases
+        .iter()
+        .find(|(name, _)| name == &upper)
+        .map(|(_, key)| key.clone());
     let key = match pseudo {
         Some(k) => k,
         None if upper.is_empty() => "entry".to_string(),
@@ -196,7 +238,11 @@ pub fn get_instruction(phase: &str) -> String {
 fn next_phase_hint(phase: &str) -> Option<String> {
     let upper = phase.trim().to_ascii_uppercase();
     let g = super::fsm::graph();
-    let is_entry_pseudo = g.policy.pseudo_phases.iter().any(|(name, key)| name == &upper && key == "entry");
+    let is_entry_pseudo = g
+        .policy
+        .pseudo_phases
+        .iter()
+        .any(|(name, key)| name == &upper && key == "entry");
     if upper.is_empty() || is_entry_pseudo {
         return Some(g.policy.initial_phase.clone());
     }
@@ -234,10 +280,17 @@ fn prd_pending_count(items: &[serde_json::Value]) -> usize {
 
 #[cfg(target_arch = "wasm32")]
 fn item_is_open(it: &serde_json::Value) -> bool {
-    let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
-    let blocked_external = it.get("blockedBy")
+    let status = it
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pending");
+    let blocked_external = it
+        .get("blockedBy")
         .and_then(|v| v.as_array())
-        .map(|seq| seq.iter().any(|x| matches!(x.as_str(), Some("external") | Some("out-of-reach"))))
+        .map(|seq| {
+            seq.iter()
+                .any(|x| matches!(x.as_str(), Some("external") | Some("out-of-reach")))
+        })
         .unwrap_or(false);
     prd::status_is_open(status) && !blocked_external
 }
@@ -247,7 +300,11 @@ fn dedup_rows_by_id_keeping_last(rows: Vec<serde_json::Value>) -> Vec<serde_json
     let mut slot_of_id: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut kept: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
     for row in rows {
-        let Some(id) = row.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+        let Some(id) = row
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        else {
             kept.push(row);
             continue;
         };
@@ -290,21 +347,25 @@ fn rows_truncation_note(
 
 #[cfg(target_arch = "wasm32")]
 fn ready_wave(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    let completed_ids: std::collections::HashSet<String> = items.iter()
+    let completed_ids: std::collections::HashSet<String> = items
+        .iter()
         .filter(|it| !item_is_open(it))
         .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .collect();
-    let unblocked: Vec<serde_json::Value> = items.iter()
+    let unblocked: Vec<serde_json::Value> = items
+        .iter()
         .filter(|it| item_is_open(it))
         .filter(|it| {
             it.get("blockedBy")
                 .or_else(|| it.get("dependencies"))
                 .and_then(|v| v.as_array())
-                .map(|deps| deps.iter().all(|d| {
-                    d.as_str()
-                        .map(|s| s == "external" || completed_ids.contains(s))
-                        .unwrap_or(false)
-                }))
+                .map(|deps| {
+                    deps.iter().all(|d| {
+                        d.as_str()
+                            .map(|s| s == "external" || completed_ids.contains(s))
+                            .unwrap_or(false)
+                    })
+                })
                 .unwrap_or(true)
         })
         .cloned()
@@ -322,7 +383,9 @@ fn orient_nouns(prompt: &str) -> Vec<String> {
         .filter(|w| w.len() > 2)
         .filter(|w| {
             let lower = w.to_lowercase();
-            !cfg.orient_stopwords_compared_lowercase.iter().any(|sw| sw.to_lowercase() == lower)
+            !cfg.orient_stopwords_compared_lowercase
+                .iter()
+                .any(|sw| sw.to_lowercase() == lower)
         })
         .map(|s| s.to_string())
         .collect();
@@ -363,7 +426,9 @@ fn pending_step_block(st: &super::state::TurnState) -> Option<serde_json::Value>
 #[cfg(target_arch = "wasm32")]
 fn ilog(msg: &str) {
     #[link(wasm_import_module = "env")]
-    extern "C" { fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32; }
+    extern "C" {
+        fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
+    }
     let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -372,7 +437,9 @@ fn ilog(_msg: &str) {}
 #[cfg(target_arch = "wasm32")]
 fn idev(event: &str, detail: &str) {
     #[link(wasm_import_module = "env")]
-    extern "C" { fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32; }
+    extern "C" {
+        fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
+    }
     let evt = json!({
         "event": format!("deviation.{}", event),
         "sub": "hook",
@@ -389,8 +456,13 @@ fn idev(event: &str, detail: &str) {
 #[cfg(not(target_arch = "wasm32"))]
 fn idev(_event: &str, _detail: &str) {}
 
-const INVESTIGATE_READONLY_MODES: &[&str] =
-    &["investigate_readonly", "readonly", "read_only", "investigate", "readonly_investigate"];
+const INVESTIGATE_READONLY_MODES: &[&str] = &[
+    "investigate_readonly",
+    "readonly",
+    "read_only",
+    "investigate",
+    "readonly_investigate",
+];
 
 fn is_investigate_readonly_mode(mode: &str) -> bool {
     INVESTIGATE_READONLY_MODES.contains(&mode)
@@ -428,7 +500,10 @@ once findings are reported.\n"
 
 #[cfg(target_arch = "wasm32")]
 pub fn handle_instruction(content: &str) -> (String, String, i32) {
-    ilog(&format!("instruction::handle start body_len={}", content.len()));
+    ilog(&format!(
+        "instruction::handle start body_len={}",
+        content.len()
+    ));
     let graph = super::fsm::graph();
     let trimmed = content.trim();
     let mut session_id_opt: Option<String> = None;
@@ -501,7 +576,10 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
                 "note": "lightweight read-only dispatch: no phase/PRD/mutables state was read or written for this call; this bypasses the SPECIFY->...->COMPLETE trajectory entirely and is not resumable via instruction_hash/phase machinery -- dispatch `instruction` again with no `mode` (or a fresh prompt) to re-enter the normal phase-managed flow",
             });
             let s = payload.to_string();
-            ilog(&format!("instruction::handle investigate_readonly done out_len={}", s.len()));
+            ilog(&format!(
+                "instruction::handle investigate_readonly done out_len={}",
+                s.len()
+            ));
             return (s, String::new(), 0);
         }
     }
@@ -513,14 +591,23 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
 
     let is_valid_phase = |upper: &str| -> bool {
-        graph.policy.pseudo_phases.iter().any(|(name, _)| name == upper) || graph.has_state(upper)
+        graph
+            .policy
+            .pseudo_phases
+            .iter()
+            .any(|(name, _)| name == upper)
+            || graph.has_state(upper)
     };
     let phase = match raw_phase_opt.as_deref() {
         None => read_state().phase.as_str().to_string(),
         Some(p) => {
             let upper = p.trim().to_ascii_uppercase();
             if upper.is_empty() || is_valid_phase(&upper) {
-                if upper.is_empty() { read_state().phase.as_str().to_string() } else { upper }
+                if upper.is_empty() {
+                    read_state().phase.as_str().to_string()
+                } else {
+                    upper
+                }
             } else {
                 let known: Vec<String> = graph.states.iter().map(|s| s.key.clone()).collect();
                 ilog(&format!(
@@ -552,16 +639,20 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         }
     }
 
-    let raw_phase_override = raw_phase_opt.as_deref().map(|p| {
-        !p.trim().is_empty() && is_valid_phase(&p.trim().to_ascii_uppercase())
-    }).unwrap_or(false);
+    let raw_phase_override = raw_phase_opt
+        .as_deref()
+        .map(|p| !p.trim().is_empty() && is_valid_phase(&p.trim().to_ascii_uppercase()))
+        .unwrap_or(false);
 
     let policy = graph.policy.clone();
     let initial_phase = policy.initial_phase.clone();
     let terminal_phase = policy.terminal_phase.clone();
 
     if policy.fresh_prompt_resets_phase
-        && fresh_prompt && !raw_phase_override && phase != initial_phase && phase != terminal_phase
+        && fresh_prompt
+        && !raw_phase_override
+        && phase != initial_phase
+        && phase != terminal_phase
         && prd_pending_count(&prd_items_json()) == 0
         && !session_mismatch
     {
@@ -582,7 +673,10 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
                 .or_else(|| graph.states.first().and_then(|s| Phase::parse(&s.key)))
                 .unwrap_or_else(Phase::plan);
             let _ = super::state::write_state(&st);
-            ilog(&format!("instruction::handle fresh prompt on {} chain -> reset phase to {}", terminal_phase, initial_phase));
+            ilog(&format!(
+                "instruction::handle fresh prompt on {} chain -> reset phase to {}",
+                terminal_phase, initial_phase
+            ));
         } else if prd_pending_count(&prd_items_json()) == 0 && session_id_opt.is_some() {
             idev(
                 "complete-chain-poll",
@@ -619,9 +713,12 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
 
     let instruction_hash = format!("{:016x}", fnv1a64(&instruction));
-    let prior_instruction_hash = notify_session
-        .as_deref()
-        .and_then(|sid| read_spool_json(&format!(".last-instruction-hash-{sid}.json")).get("hash").and_then(|h| h.as_str()).map(|s| s.to_string()));
+    let prior_instruction_hash = notify_session.as_deref().and_then(|sid| {
+        read_spool_json(&format!(".last-instruction-hash-{sid}.json"))
+            .get("hash")
+            .and_then(|h| h.as_str())
+            .map(|s| s.to_string())
+    });
     let instruction_unchanged = !requests_entry_extended
         && asserted_instruction_hash.as_deref() == Some(instruction_hash.as_str());
     let instruction_suppressible_but_unasserted = !requests_entry_extended
@@ -630,7 +727,11 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     if let Some(sid) = notify_session.as_deref() {
         let marker = json!({ "hash": instruction_hash, "ts": super::state::now_ms() });
         let _ = pkfs::write(
-            &super::gm_dir().join("exec-spool").join(format!(".last-instruction-hash-{sid}.json")).to_string_lossy().to_string(),
+            &super::gm_dir()
+                .join("exec-spool")
+                .join(format!(".last-instruction-hash-{sid}.json"))
+                .to_string_lossy()
+                .to_string(),
             &marker.to_string(),
         );
     }
@@ -643,8 +744,12 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let early_next_step_path = super::gm_dir().join("next-step.md");
     let early_next_step_path_s = early_next_step_path.to_string_lossy().to_string();
     let existing_next_step = pkfs::read_to_string(&early_next_step_path_s).unwrap_or_default();
-    let existing_body = existing_next_step.splitn(2, "\n\n---\n\n").nth(1).unwrap_or("");
-    if existing_body != instruction || !existing_next_step.contains(&format!("Phase: {}\n", phase)) {
+    let existing_body = existing_next_step
+        .splitn(2, "\n\n---\n\n")
+        .nth(1)
+        .unwrap_or("");
+    if existing_body != instruction || !existing_next_step.contains(&format!("Phase: {}\n", phase))
+    {
         let early_next_step = format!(
             "# Next step\n\nPhase: {}\nUpdated: {}\n\n---\n\n{}",
             phase,
@@ -658,20 +763,41 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let prd_items = prd_items_json();
     let prd_pending = prd_pending_count(&prd_items);
     let prd_items_open = dedup_rows_by_id_keeping_last(
-        prd_items.iter().filter(|it| item_is_open(it)).cloned().collect(),
+        prd_items
+            .iter()
+            .filter(|it| item_is_open(it))
+            .cloned()
+            .collect(),
     );
     let next = next_phase_hint(&phase);
 
     let prompt_query = {
         let p = read_last_prompt();
-        if p.is_empty() { String::new() } else { p.chars().take(payload_cfg().prompt_excerpt_chars).collect() }
+        if p.is_empty() {
+            String::new()
+        } else {
+            p.chars().take(payload_cfg().prompt_excerpt_chars).collect()
+        }
     };
-    let prd_subject_query = prd_items.iter()
+    let prd_subject_query = prd_items
+        .iter()
         .find(|it| item_is_open(it))
-        .and_then(|it| it.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .and_then(|it| {
+            it.get("subject")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_default();
-    let query = if !prompt_query.is_empty() { prompt_query } else { prd_subject_query };
-    ilog(&format!("instruction::handle pre-recall query_len={} prd_pending={}", query.len(), prd_pending));
+    let query = if !prompt_query.is_empty() {
+        prompt_query
+    } else {
+        prd_subject_query
+    };
+    ilog(&format!(
+        "instruction::handle pre-recall query_len={} prd_pending={}",
+        query.len(),
+        prd_pending
+    ));
     let (recall_hits, recall_embed_failed) = if query.is_empty() {
         (serde_json::Value::Array(Vec::new()), false)
     } else {
@@ -689,7 +815,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let stuck_spool = super::task::stuck_spool();
     let unsupervised_watcher = expire_stale_marker(read_spool_json(".pre-supervised-watcher.json"));
     let gm_plugkit_stale = expire_stale_marker(read_spool_json(".gm-plugkit-stale.json"));
-    let wrapper_stale_in_memory = expire_stale_marker(read_spool_json(".wrapper-stale-in-memory.json"));
+    let wrapper_stale_in_memory =
+        expire_stale_marker(read_spool_json(".wrapper-stale-in-memory.json"));
     let config_repo_unreachable =
         expire_stale_marker(read_spool_json(".config-repo-unreachable.json"));
     let running_tasks_count = match &running_tasks {
@@ -704,7 +831,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let mutables_pending_count = mutables_pending.len();
 
     let payload_limits = payload_cfg();
-    let mutables_rows_inlined = mutables_pending_count.min(payload_limits.mutables_pending_rows_inlined_limit);
+    let mutables_rows_inlined =
+        mutables_pending_count.min(payload_limits.mutables_pending_rows_inlined_limit);
     let mutables_pending_inlined: Vec<serde_json::Value> =
         mutables_pending[mutables_pending_count - mutables_rows_inlined..].to_vec();
     let mutables_pending_truncated = if mutables_rows_inlined < mutables_pending_count {
@@ -724,7 +852,10 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let prd_items_inlined: Vec<serde_json::Value> = if prd_full_detail {
         prd_items_open[..prd_rows_inlined].to_vec()
     } else {
-        prd_items_open[..prd_rows_inlined].iter().map(summarize_prd_row).collect()
+        prd_items_open[..prd_rows_inlined]
+            .iter()
+            .map(summarize_prd_row)
+            .collect()
     };
     let prd_items_truncated = if prd_rows_inlined < prd_items_open_count || !prd_full_detail {
         let mut note = rows_truncation_note(
@@ -764,7 +895,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
 
     let discipline_policies = super::discipline_note::active_policies();
     let discipline_policies_hash = format!("{:016x}", fnv1a64(&discipline_policies.to_string()));
-    let discipline_policies_unchanged = asserted_policy_hash.as_deref() == Some(discipline_policies_hash.as_str());
+    let discipline_policies_unchanged =
+        asserted_policy_hash.as_deref() == Some(discipline_policies_hash.as_str());
 
     write_turn_summary(
         &phase,
@@ -829,25 +961,44 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         }
     }
     if let Some(sid) = notify_session.as_deref() {
-        let delta_allowed = instruction_unchanged && !full_reply_requested && !session_mismatch && session_id_opt.is_some();
-        payload = elide_fields_the_caller_already_holds(payload, sid, asserted_reply_hash.as_deref(), delta_allowed);
+        let delta_allowed = instruction_unchanged
+            && !full_reply_requested
+            && !session_mismatch
+            && session_id_opt.is_some();
+        payload = elide_fields_the_caller_already_holds(
+            payload,
+            sid,
+            asserted_reply_hash.as_deref(),
+            delta_allowed,
+        );
     }
     let s = payload.to_string();
     ilog(&format!("instruction::handle done out_len={}", s.len()));
     #[cfg(target_arch = "wasm32")]
-    crate::wasm_dispatch::emit_event("instruction.served", serde_json::json!({
-        "phase": phase,
-        "prd_pending_count": prd_pending,
-        "mutables_pending_count": mutables_pending_count,
-    }));
+    crate::wasm_dispatch::emit_event(
+        "instruction.served",
+        serde_json::json!({
+            "phase": phase,
+            "prd_pending_count": prd_pending,
+            "mutables_pending_count": mutables_pending_count,
+        }),
+    );
     (s, String::new(), 0)
 }
 
 #[cfg(target_arch = "wasm32")]
 const FIELDS_ALWAYS_RESTATED_IN_A_DELTA_REPLY: &[&str] = &[
-    "phase", "session_id", "instruction_hash", "instruction_unchanged", "policy_hash",
-    "prd_pending_count", "mutables_pending_count", "next_phase_hint",
-    "sub_phase", "await_result", "prd_items",
+    "phase",
+    "session_id",
+    "instruction_hash",
+    "instruction_unchanged",
+    "policy_hash",
+    "prd_pending_count",
+    "mutables_pending_count",
+    "next_phase_hint",
+    "sub_phase",
+    "await_result",
+    "prd_items",
 ];
 
 #[cfg(target_arch = "wasm32")]
@@ -855,7 +1006,11 @@ const FIELDS_PRESENT_ONLY_WHEN_THEIR_OWN_HASH_IS_UNASSERTED: &[&str] = &["discip
 
 #[cfg(target_arch = "wasm32")]
 fn last_reply_path(sid: &str) -> String {
-    super::gm_dir().join("exec-spool").join(format!(".last-instruction-reply-{sid}.json")).to_string_lossy().to_string()
+    super::gm_dir()
+        .join("exec-spool")
+        .join(format!(".last-instruction-reply-{sid}.json"))
+        .to_string_lossy()
+        .to_string()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -885,11 +1040,14 @@ fn elide_fields_the_caller_already_holds(
     if !caller_holds_previous {
         return payload;
     }
-    let (Some(current), Some(prior)) = (payload.as_object(), previous.as_object()) else { return payload };
+    let (Some(current), Some(prior)) = (payload.as_object(), previous.as_object()) else {
+        return payload;
+    };
     let mut delta = serde_json::Map::new();
     let mut unchanged: Vec<String> = Vec::new();
     for (key, value) in current {
-        let restated = FIELDS_ALWAYS_RESTATED_IN_A_DELTA_REPLY.contains(&key.as_str()) || key == "reply_hash";
+        let restated =
+            FIELDS_ALWAYS_RESTATED_IN_A_DELTA_REPLY.contains(&key.as_str()) || key == "reply_hash";
         if !restated && prior.get(key) == Some(value) {
             unchanged.push(key.clone());
         } else {

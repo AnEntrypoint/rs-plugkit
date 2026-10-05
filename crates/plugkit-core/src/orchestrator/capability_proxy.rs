@@ -5,8 +5,15 @@ use super::fiber_lifecycle::FiberLifecycle;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
-    InactiveAccess { accessor: String, key: String, provider: String },
-    UndeclaredAccess { accessor: String, key: String },
+    InactiveAccess {
+        accessor: String,
+        key: String,
+        provider: String,
+    },
+    UndeclaredAccess {
+        accessor: String,
+        key: String,
+    },
 }
 
 impl ResolveError {
@@ -45,7 +52,8 @@ pub fn resolve(accessor: &str, key: &str) -> Result<String, ResolveError> {
 
     let enabled = discipline_note::enabled_names();
     let realm_table = discipline_note::build_realm_table(&enabled);
-    let dep_realm = discipline_note::resolve_key_realm(&realm_table, &accessor_component.realm, key);
+    let dep_realm =
+        discipline_note::resolve_key_realm(&realm_table, &accessor_component.realm, key);
     let provider = enabled
         .iter()
         .filter(|n| n.as_str() != accessor)
@@ -72,7 +80,11 @@ pub fn resolve(accessor: &str, key: &str) -> Result<String, ResolveError> {
     }
 }
 
-fn all_known_providers_of(key: &str, dep_realm: &str, realm_table: &super::coeffect_realm::RealmTable) -> Vec<String> {
+fn all_known_providers_of(
+    key: &str,
+    dep_realm: &str,
+    realm_table: &super::coeffect_realm::RealmTable,
+) -> Vec<String> {
     discipline_note::all_known_discipline_dirs_pub()
         .into_iter()
         .filter(|n| {
@@ -84,8 +96,12 @@ fn all_known_providers_of(key: &str, dep_realm: &str, realm_table: &super::coeff
 }
 
 pub fn handle(content: &str) -> (String, String, i32) {
-    let parsed: serde_json::Value = serde_json::from_str(content).unwrap_or(serde_json::Value::Null);
-    let accessor = parsed.get("accessor").and_then(|v| v.as_str()).unwrap_or("");
+    let parsed: serde_json::Value =
+        serde_json::from_str(content).unwrap_or(serde_json::Value::Null);
+    let accessor = parsed
+        .get("accessor")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let key = parsed.get("key").and_then(|v| v.as_str()).unwrap_or("");
     if accessor.is_empty() || key.is_empty() {
         return (
