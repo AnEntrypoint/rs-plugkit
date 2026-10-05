@@ -5561,10 +5561,8 @@ fn git_commit(body: &Value) -> u64 {
         if allow_empty {
             argv.push("--allow-empty".to_string());
         }
-        if !scoped_paths.is_empty() {
-            argv.push("--".to_string());
-            argv.extend(scoped_paths.iter().cloned());
-        }
+        argv.push("--".to_string());
+        argv.extend(git_pathspec_scope(scoped_paths, cwd));
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -5809,10 +5807,8 @@ fn git_finalize(body: &Value) -> u64 {
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
         let mut commit_argv: Vec<String> =
             vec!["commit".to_string(), "-m".to_string(), bundled_message];
-        if scoped {
-            commit_argv.push("--".to_string());
-            commit_argv.extend(paths.iter().cloned());
-        }
+        commit_argv.push("--".to_string());
+        commit_argv.extend(git_pathspec_scope(&paths, cwd_ref));
         let commit_argv: Vec<&str> = commit_argv.iter().map(String::as_str).collect();
         let cr = git_call_argv(&commit_argv, cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -5853,10 +5849,16 @@ fn git_finalize(body: &Value) -> u64 {
             };
             let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
             let _ = git_call_argv(&as_argv(&git_stage_argv(&[], cwd_ref)), cwd_ref);
-            let cr = git_call_argv(
-                &["commit", "--allow-empty", "-m", bundled_message.as_str()],
-                cwd_ref,
-            );
+            let mut commit_argv = vec![
+                "commit".to_string(),
+                "--allow-empty".to_string(),
+                "-m".to_string(),
+                bundled_message,
+                "--".to_string(),
+            ];
+            commit_argv.extend(git_pathspec_scope(&[], cwd_ref));
+            let commit_argv: Vec<&str> = commit_argv.iter().map(String::as_str).collect();
+            let cr = git_call_argv(&commit_argv, cwd_ref);
             let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
             let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
             if ccode == 0 && !head_after.is_empty() && head_after != head_before_any_commit {
@@ -5967,10 +5969,8 @@ fn git_finalize(body: &Value) -> u64 {
                 "--amend".to_string(),
                 "--no-edit".to_string(),
             ];
-            if scoped {
-                amend.push("--".to_string());
-                amend.extend(paths.iter().cloned());
-            }
+            amend.push("--".to_string());
+            amend.extend(git_pathspec_scope(&paths, cwd_ref));
             let amend_argv: Vec<&str> = amend.iter().map(String::as_str).collect();
             let amend = git_call_argv(&amend_argv, cwd_ref);
             if amend.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0 {
@@ -8133,9 +8133,17 @@ fn with_exclusion_report(mut data: Value, cwd: Option<&str>, paths: &[String]) -
         .map(|(status, path)| format!("{} {}", status, path))
         .collect();
     let active = excluded_pathspecs(paths, cwd);
+    let active_count = active.len();
+    let active: Vec<String> = active.into_iter().take(50).collect();
     if let Some(map) = data.as_object_mut() {
         map.insert("excluded".to_string(), json!(active));
-        map.insert("excluded_count".to_string(), json!(active.len()));
+        map.insert("excluded_count".to_string(), json!(active_count));
+        if active_count > 50 {
+            map.insert(
+                "excluded_truncated_count".to_string(),
+                json!(active_count - 50),
+            );
+        }
         if !paths.is_empty() {
             map.insert("requested_paths".to_string(), json!(paths));
         }
