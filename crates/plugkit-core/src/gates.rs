@@ -104,8 +104,9 @@ fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
 }
 
 const LONGGAP_EXEMPT_READ_ONLY_VERBS: &[&str] = &[
-    "codesearch", "recall", "memorize-fire", "git_status", "git_log", "git_diff", "git_show",
-        "git_remote", "branch_status", "ci-status", "fs_read", "fs_stat", "fs_readdir", "status",
+    "codesearch", "search", "code_search", "recall", "memorize-fire", "git_status", "git_log", "git_diff", "git_show",
+    "git_remote",
+    "branch_status", "ci-status", "fs_read", "fs_stat", "fs_readdir", "status",
 ];
 
 const LONGGAP_EXEMPT_WORK_VERBS: &[&str] = &[
