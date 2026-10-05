@@ -1,15 +1,19 @@
-use serde_json::{json, Value};
-use crate::pkfs;
 use super::gm_dir;
+use crate::pkfs;
+use serde_json::{json, Value};
 
 const DEFAULT_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const HARD_FLOOR_MS: u64 = 1000;
 const STUCK_SPOOL_AGE_MS: u64 = 90_000;
 
 fn override_max_timeout_ms() -> Option<u64> {
-    let p = gm_dir().join("exec-spool").join(".task-timeout-override.json");
+    let p = gm_dir()
+        .join("exec-spool")
+        .join(".task-timeout-override.json");
     let ps = p.to_string_lossy().to_string();
-    if !pkfs::exists(&ps) { return None; }
+    if !pkfs::exists(&ps) {
+        return None;
+    }
     let content = pkfs::read_to_string(&ps)?;
     let v: Value = serde_json::from_str(&content).ok()?;
     v.get("maxTimeoutMs").and_then(|x| x.as_u64())
@@ -73,13 +77,23 @@ pub fn handle_spawn(content: &str) -> (String, String, i32) {
         Err(e) => return err_resp("task-spawn", &format!("invalid JSON: {}", e)),
     };
     let lang = body.get("lang").and_then(|v| v.as_str()).unwrap_or("");
-    let code = body.get("code").and_then(|v| v.as_str())
+    let code = body
+        .get("code")
+        .and_then(|v| v.as_str())
         .or_else(|| body.get("body").and_then(|v| v.as_str()))
         .unwrap_or("");
-    if lang.is_empty() { return err_resp("task-spawn", "lang required"); }
-    if code.is_empty() { return err_resp("task-spawn", "code required"); }
+    if lang.is_empty() {
+        return err_resp("task-spawn", "lang required");
+    }
+    if code.is_empty() {
+        return err_resp("task-spawn", "code required");
+    }
     let codeinsight_start = ensure_current_insight();
-    if !codeinsight_start.get("ready").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !codeinsight_start
+        .get("ready")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return err_resp("task-spawn", &format!(
             "code insight is required before starting a job but did not reach a current complete index: {}",
             codeinsight_start
@@ -95,7 +109,11 @@ pub fn handle_spawn(content: &str) -> (String, String, i32) {
     });
     let result = host_task("spawn", &params);
     if !result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        let msg = result.get("error").and_then(|v| v.as_str()).unwrap_or("spawn failed").to_string();
+        let msg = result
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("spawn failed")
+            .to_string();
         return err_resp("task-spawn", &msg);
     }
     let mut data = result;
@@ -112,13 +130,17 @@ pub fn handle_spawn(content: &str) -> (String, String, i32) {
 
 pub fn handle_list(_content: &str) -> (String, String, i32) {
     let result = host_task("list", &json!({}));
-    let tasks = result.get("tasks").cloned().unwrap_or(Value::Array(Vec::new()));
+    let tasks = result
+        .get("tasks")
+        .cloned()
+        .unwrap_or(Value::Array(Vec::new()));
     ok_resp("task-list", json!({ "tasks": tasks }))
 }
 
 pub fn handle_stop(content: &str) -> (String, String, i32) {
     let id = if let Ok(v) = serde_json::from_str::<Value>(content) {
-        v.get("id").and_then(|x| x.as_str())
+        v.get("id")
+            .and_then(|x| x.as_str())
             .or_else(|| v.get("task_id").and_then(|x| x.as_str()))
             .map(|s| s.to_string())
             .or_else(|| v.as_str().map(|s| s.to_string()))
@@ -133,34 +155,55 @@ pub fn handle_stop(content: &str) -> (String, String, i32) {
     if result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
         ok_resp("task-stop", result)
     } else {
-        let msg = result.get("error").and_then(|v| v.as_str()).unwrap_or("stop failed").to_string();
+        let msg = result
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("stop failed")
+            .to_string();
         err_resp("task-stop", &msg)
     }
 }
 
 pub fn handle_output(content: &str) -> (String, String, i32) {
     let body: Value = serde_json::from_str(content).unwrap_or(Value::Null);
-    let id = body.get("id").and_then(|v| v.as_str())
+    let id = body
+        .get("id")
+        .and_then(|v| v.as_str())
         .or_else(|| body.get("task_id").and_then(|v| v.as_str()))
         .or_else(|| body.as_str())
         .unwrap_or("");
-    if id.is_empty() { return err_resp("task-output", "task id required"); }
-    let max_bytes = body.get("max_bytes").and_then(|v| v.as_u64()).unwrap_or(65536);
+    if id.is_empty() {
+        return err_resp("task-output", "task id required");
+    }
+    let max_bytes = body
+        .get("max_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(65536);
     let result = host_task("output", &json!({ "id": id, "max_bytes": max_bytes }));
     ok_resp("task-output", result)
 }
 
 pub fn live_running_tasks() -> Value {
     let result = host_task("list", &json!({}));
-    let tasks = result.get("tasks").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let tasks = result
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let now_ms = host_now_ms();
     let mut running: Vec<Value> = Vec::new();
     for t in tasks {
         if t.get("status").and_then(|v| v.as_str()) == Some("running") {
             let pid = t.get("pid").and_then(|v| v.as_u64());
             let id = t.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let lang = t.get("lang").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let started = t.get("started_ms").and_then(|v| v.as_u64()).unwrap_or(now_ms);
+            let lang = t
+                .get("lang")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let started = t
+                .get("started_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(now_ms);
             let deadline = t.get("deadline_ms").and_then(|v| v.as_u64()).unwrap_or(0);
             running.push(json!({
                 "id": id,
@@ -185,7 +228,9 @@ pub fn any_running() -> bool {
 pub fn open_browser_sessions() -> Value {
     let p = gm_dir().join("exec-spool").join("browser-sessions.json");
     let ps = p.to_string_lossy().to_string();
-    if !pkfs::exists(&ps) { return Value::Array(Vec::new()); }
+    if !pkfs::exists(&ps) {
+        return Value::Array(Vec::new());
+    }
     let content = match pkfs::read_to_string(&ps) {
         Some(s) => s,
         None => return Value::Array(Vec::new()),
@@ -207,7 +252,9 @@ pub fn open_browser_sessions() -> Value {
     let current_sid = super::state::read_state().session_id;
     for (sid, sessions) in obj {
         if let Some(cur) = &current_sid {
-            if sid != cur { continue; }
+            if sid != cur {
+                continue;
+            }
         }
         let port_info = ports.get(sid).cloned().unwrap_or(Value::Null);
         out.push(json!({
@@ -233,8 +280,13 @@ pub fn stuck_spool() -> Value {
     };
     let verb_list = verbs.as_array().cloned().unwrap_or_default();
     for verb_entry in verb_list {
-        let is_dir = verb_entry.get("is_dir").and_then(|v| v.as_bool()).unwrap_or(false);
-        if !is_dir { continue; }
+        let is_dir = verb_entry
+            .get("is_dir")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !is_dir {
+            continue;
+        }
         let verb_name = match verb_entry.get("name").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
             None => continue,
@@ -245,7 +297,9 @@ pub fn stuck_spool() -> Value {
             None => continue,
         };
         for f in files {
-            if !f.get("is_file").and_then(|v| v.as_bool()).unwrap_or(false) { continue; }
+            if !f.get("is_file").and_then(|v| v.as_bool()).unwrap_or(false) {
+                continue;
+            }
             let fname = match f.get("name").and_then(|v| v.as_str()) {
                 Some(s) => s.to_string(),
                 None => continue,
@@ -257,11 +311,15 @@ pub fn stuck_spool() -> Value {
             };
             let mtime = stat.get("mtime_ms").and_then(|v| v.as_f64()).unwrap_or(0.0) as u64;
             let age = now_ms.saturating_sub(mtime);
-            if age < STUCK_SPOOL_AGE_MS { continue; }
+            if age < STUCK_SPOOL_AGE_MS {
+                continue;
+            }
             let base = fname.trim_end_matches(".txt").to_string();
             let out_name = format!("{}-{}.json", verb_name, base);
             let out_path = format!("{}/{}", out_ps, out_name);
-            if pkfs::exists(&out_path) { continue; }
+            if pkfs::exists(&out_path) {
+                continue;
+            }
             stuck.push(json!({
                 "verb": verb_name,
                 "task_base": base,

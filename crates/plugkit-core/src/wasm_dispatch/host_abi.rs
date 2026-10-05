@@ -43,9 +43,12 @@ pub fn plugin_call(plugin: &str, verb: &str, body: &Value) -> Value {
     let body_s = body.to_string();
     let packed = unsafe {
         host_plugin_call(
-            plugin.as_ptr(), plugin.len() as u32,
-            verb.as_ptr(), verb.len() as u32,
-            body_s.as_ptr(), body_s.len() as u32,
+            plugin.as_ptr(),
+            plugin.len() as u32,
+            verb.as_ptr(),
+            verb.len() as u32,
+            body_s.as_ptr(),
+            body_s.len() as u32,
         )
     };
     unpack_to_value(packed)
@@ -53,7 +56,14 @@ pub fn plugin_call(plugin: &str, verb: &str, body: &Value) -> Value {
 
 pub fn host_task(action: &str, params: &Value) -> Value {
     let params_s = params.to_string();
-    let packed = unsafe { host_task_proc(action.as_ptr(), action.len() as u32, params_s.as_ptr(), params_s.len() as u32) };
+    let packed = unsafe {
+        host_task_proc(
+            action.as_ptr(),
+            action.len() as u32,
+            params_s.as_ptr(),
+            params_s.len() as u32,
+        )
+    };
     unpack_to_value(packed)
 }
 
@@ -76,11 +86,17 @@ const DUBIOUS_OWNERSHIP_MARKER: &str = "detected dubious ownership in repository
 fn dubious_ownership_repository(stderr: &str) -> Option<String> {
     let rest = stderr.split_once(DUBIOUS_OWNERSHIP_MARKER)?.1;
     let repository = rest.split('\'').next()?.trim();
-    if repository.is_empty() { None } else { Some(repository.to_string()) }
+    if repository.is_empty() {
+        None
+    } else {
+        Some(repository.to_string())
+    }
 }
 
 fn comparable_path(path: &str) -> String {
-    path.replace('\\', "/").trim_end_matches('/').to_ascii_lowercase()
+    path.replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
 }
 
 fn is_absolute_path(path: &str) -> bool {
@@ -101,31 +117,56 @@ fn repository_contains_git_cwd(repository: &str, cwd: Option<&str>) -> bool {
 
 fn argv_trusting_repository(args: &str, repository: &str) -> String {
     let trimmed = args.trim();
-    let split_on_whitespace = || trimmed.split_whitespace().map(String::from).collect::<Vec<String>>();
+    let split_on_whitespace = || {
+        trimmed
+            .split_whitespace()
+            .map(String::from)
+            .collect::<Vec<String>>()
+    };
     let mut argv: Vec<String> = if trimmed.starts_with('[') {
         serde_json::from_str(trimmed).unwrap_or_else(|_| split_on_whitespace())
     } else {
         split_on_whitespace()
     };
-    argv.splice(0..0, ["-c".to_string(), format!("safe.directory={repository}")]);
+    argv.splice(
+        0..0,
+        ["-c".to_string(), format!("safe.directory={repository}")],
+    );
     serde_json::to_string(&argv).unwrap_or_default()
 }
 
 fn git_call_host(args: &str, cwd: Option<&str>) -> Value {
     let cwd_s = cwd.unwrap_or("");
-    let packed = unsafe { host_git(args.as_ptr(), args.len() as u32, cwd_s.as_ptr(), cwd_s.len() as u32) };
+    let packed = unsafe {
+        host_git(
+            args.as_ptr(),
+            args.len() as u32,
+            cwd_s.as_ptr(),
+            cwd_s.len() as u32,
+        )
+    };
     unpack_to_value(packed)
 }
 
 pub fn git_call_async(args: &str, cwd: Option<&str>) -> Value {
     let first = git_call_host(args, cwd);
-    let Some(repository) = first.get("stderr").and_then(|s| s.as_str()).and_then(dubious_ownership_repository) else { return first };
-    if !repository_contains_git_cwd(&repository, cwd) { return first; }
+    let Some(repository) = first
+        .get("stderr")
+        .and_then(|s| s.as_str())
+        .and_then(dubious_ownership_repository)
+    else {
+        return first;
+    };
+    if !repository_contains_git_cwd(&repository, cwd) {
+        return first;
+    }
     git_call_host(&argv_trusting_repository(args, &repository), cwd)
 }
 
 pub fn git_pending_token(v: &Value) -> Option<String> {
-    if !v.get("pending").and_then(|x| x.as_bool()).unwrap_or(false) { return None; }
+    if !v.get("pending").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return None;
+    }
     v.get("token").and_then(|x| x.as_str()).map(String::from)
 }
 
@@ -139,7 +180,8 @@ pub(crate) fn git_response_is_not_repository(v: &Value) -> bool {
     if !failed {
         return false;
     }
-    let output = format!("{}{}",
+    let output = format!(
+        "{}{}",
         v.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
         v.get("stderr").and_then(|x| x.as_str()).unwrap_or(""),
     );
@@ -157,7 +199,11 @@ pub(crate) fn porcelain_or_dirty(v: Value) -> String {
         if git_response_is_not_repository(&v) {
             return String::new();
         }
-        let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
+        let stderr = v
+            .get("stderr")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim();
         let detail = if stderr.is_empty() {
             format!("exit_code={exit_code}")
         } else {
@@ -165,7 +211,10 @@ pub(crate) fn porcelain_or_dirty(v: Value) -> String {
         };
         return format!("?? git-status-failed ({detail})");
     }
-    v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string()
+    v.get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 pub fn git_call_argv(argv: &[&str], cwd: Option<&str>) -> Value {
@@ -209,7 +258,9 @@ pub(crate) fn pack_ptr_len(ptr: usize, len: usize) -> u64 {
 }
 
 pub(crate) fn read_str(ptr: *const u8, len: u32) -> String {
-    if ptr.is_null() || len == 0 { return String::new(); }
+    if ptr.is_null() || len == 0 {
+        return String::new();
+    }
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -217,7 +268,9 @@ pub(crate) fn read_str(ptr: *const u8, len: u32) -> String {
 pub(crate) fn unpack_to_string(packed: u64) -> Option<String> {
     let p = (packed & 0xffff_ffff) as u32;
     let l = (packed >> 32) as u32;
-    if p == 0 || l == 0 { return None; }
+    if p == 0 || l == 0 {
+        return None;
+    }
     let bytes = unsafe { Vec::from_raw_parts(p as *mut u8, l as usize, l as usize) };
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -229,11 +282,17 @@ pub(crate) fn unpack_to_value(packed: u64) -> Value {
     }
 }
 
-pub fn unpack_to_value_pub(packed: u64) -> Value { unpack_to_value(packed) }
+pub fn unpack_to_value_pub(packed: u64) -> Value {
+    unpack_to_value(packed)
+}
 
-pub fn unpack_to_string_pub(packed: u64) -> Option<String> { unpack_to_string(packed) }
+pub fn unpack_to_string_pub(packed: u64) -> Option<String> {
+    unpack_to_string(packed)
+}
 
-pub fn pack_ptr_len_pub(ptr: usize, len: usize) -> u64 { pack_ptr_len(ptr, len) }
+pub fn pack_ptr_len_pub(ptr: usize, len: usize) -> u64 {
+    pack_ptr_len(ptr, len)
+}
 
 pub fn host_cwd_string() -> Option<String> {
     let packed = unsafe { host_cwd() };
@@ -251,16 +310,26 @@ pub fn host_read(path: &str) -> Option<String> {
 }
 
 pub fn host_write(path: &str, data: &str) -> bool {
-    let rc = unsafe { host_fs_write(path.as_ptr(), path.len() as u32, data.as_ptr(), data.len() as u32) };
+    let rc = unsafe {
+        host_fs_write(
+            path.as_ptr(),
+            path.len() as u32,
+            data.as_ptr(),
+            data.len() as u32,
+        )
+    };
     rc != 0
 }
 
 pub fn host_cas_write(path: &str, expected: &str, data: &str) -> u32 {
     unsafe {
         host_fs_cas_write(
-            path.as_ptr(), path.len() as u32,
-            expected.as_ptr(), expected.len() as u32,
-            data.as_ptr(), data.len() as u32,
+            path.as_ptr(),
+            path.len() as u32,
+            expected.as_ptr(),
+            expected.len() as u32,
+            data.as_ptr(),
+            data.len() as u32,
         )
     }
 }
@@ -280,7 +349,16 @@ pub fn host_remove_file_never_directory(path: &str) -> bool {
 }
 
 pub fn host_kv_read(namespace: &str, key: &str) -> Option<String> {
-    if key.is_empty() { return None; }
-    let packed = unsafe { host_kv_get(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
+    if key.is_empty() {
+        return None;
+    }
+    let packed = unsafe {
+        host_kv_get(
+            namespace.as_ptr(),
+            namespace.len() as u32,
+            key.as_ptr(),
+            key.len() as u32,
+        )
+    };
     unpack_to_string(packed)
 }

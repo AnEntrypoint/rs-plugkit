@@ -52,8 +52,18 @@ pub struct AbiError {
 }
 
 impl AbiError {
-    pub fn new(kind: AbiErrorKind, plugin: &str, verb: &str, message: impl Into<String>) -> AbiError {
-        AbiError { kind, message: message.into(), plugin: plugin.to_string(), verb: verb.to_string() }
+    pub fn new(
+        kind: AbiErrorKind,
+        plugin: &str,
+        verb: &str,
+        message: impl Into<String>,
+    ) -> AbiError {
+        AbiError {
+            kind,
+            message: message.into(),
+            plugin: plugin.to_string(),
+            verb: verb.to_string(),
+        }
     }
 
     pub fn to_response(&self) -> Value {
@@ -70,7 +80,14 @@ impl AbiError {
 
 impl std::fmt::Display for AbiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}: [{}] {}", self.plugin, self.verb, self.kind.as_str(), self.message)
+        write!(
+            f,
+            "{}/{}: [{}] {}",
+            self.plugin,
+            self.verb,
+            self.kind.as_str(),
+            self.message
+        )
     }
 }
 
@@ -193,10 +210,21 @@ pub fn capabilities(plugin: &str) -> Result<Option<Capability>, AbiError> {
             let verbs = data
                 .get("verbs")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let abi = data.get("abi").and_then(|v| v.as_u64()).unwrap_or(ABI_VERSION);
-            Ok(Some(Capability { plugin: plugin.to_string(), abi, verbs }))
+            let abi = data
+                .get("abi")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(ABI_VERSION);
+            Ok(Some(Capability {
+                plugin: plugin.to_string(),
+                abi,
+                verbs,
+            }))
         }
         Err(e) if e.kind == AbiErrorKind::VerbNotSupported => Ok(None),
         Err(e) => Err(e),

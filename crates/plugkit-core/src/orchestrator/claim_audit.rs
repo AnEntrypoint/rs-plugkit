@@ -8,7 +8,11 @@ fn looks_like_commit_hash(token: &str) -> bool {
 
 fn extract_commit_hash_tokens(line: &str) -> Vec<String> {
     line.split_whitespace()
-        .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric()).to_string())
+        .map(|token| {
+            token
+                .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+                .to_string()
+        })
         .filter(|token| looks_like_commit_hash(token))
         .collect()
 }
@@ -48,32 +52,63 @@ pub struct HashClaimFinding {
 #[cfg(target_arch = "wasm32")]
 fn commit_hash_exists_in_repo_history(hash: &str, submodule: Option<&str>) -> bool {
     let result = crate::wasm_dispatch::git_call_argv(&["cat-file", "-e", hash], submodule);
-    result.get("exit_code").and_then(|code| code.as_i64()).unwrap_or(1) == 0
+    result
+        .get("exit_code")
+        .and_then(|code| code.as_i64())
+        .unwrap_or(1)
+        == 0
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn commit_hash_exists_in_repo_history(_hash: &str, _submodule: Option<&str>) -> bool { true }
+fn commit_hash_exists_in_repo_history(_hash: &str, _submodule: Option<&str>) -> bool {
+    true
+}
 
 #[cfg(target_arch = "wasm32")]
-fn scan_text_for_hash_claims(text: &str, source_label: &str, findings: &mut Vec<HashClaimFinding>, scanned_line_count: &mut usize, cfg: &crate::ragconfig::ClaimAuditConfig) {
+fn scan_text_for_hash_claims(
+    text: &str,
+    source_label: &str,
+    findings: &mut Vec<HashClaimFinding>,
+    scanned_line_count: &mut usize,
+    cfg: &crate::ragconfig::ClaimAuditConfig,
+) {
     for line in text.lines() {
         *scanned_line_count += 1;
-        if !line_asserts_shipped_claim_cfg(line, cfg) { continue; }
+        if !line_asserts_shipped_claim_cfg(line, cfg) {
+            continue;
+        }
         let hashes = extract_commit_hash_tokens(line);
-        if hashes.is_empty() { continue; }
+        if hashes.is_empty() {
+            continue;
+        }
         let submodule = named_submodule_in_line(line);
         for hash in hashes {
-            let hash_resolved_in_repo_history = commit_hash_exists_in_repo_history(&hash, submodule.as_deref());
-            let line_excerpt: String = format!("[{}] {}", source_label, line.trim()).chars().take(180).collect();
-            let checked_in_repo = submodule.clone().unwrap_or_else(|| "gm (this repo)".to_string());
-            findings.push(HashClaimFinding { line_excerpt, hash, hash_resolved_in_repo_history, checked_in_repo });
+            let hash_resolved_in_repo_history =
+                commit_hash_exists_in_repo_history(&hash, submodule.as_deref());
+            let line_excerpt: String = format!("[{}] {}", source_label, line.trim())
+                .chars()
+                .take(180)
+                .collect();
+            let checked_in_repo = submodule
+                .clone()
+                .unwrap_or_else(|| "gm (this repo)".to_string());
+            findings.push(HashClaimFinding {
+                line_excerpt,
+                hash,
+                hash_resolved_in_repo_history,
+                checked_in_repo,
+            });
         }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn handle_audit(_content: &str) -> (String, String, i32) {
-    ("{\"ok\":false,\"error\":\"claim-audit requires wasm32\"}".to_string(), String::new(), 1)
+    (
+        "{\"ok\":false,\"error\":\"claim-audit requires wasm32\"}".to_string(),
+        String::new(),
+        1,
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -84,20 +119,45 @@ pub fn handle_audit(_content: &str) -> (String, String, i32) {
     let audit_cfg = claim_audit_config();
 
     for scan_path in &audit_cfg.scan_paths_relative_to_project_root_missing_is_skip_not_error {
-        let full = std::path::Path::new(".").join(scan_path).to_string_lossy().to_string();
+        let full = std::path::Path::new(".")
+            .join(scan_path)
+            .to_string_lossy()
+            .to_string();
         if let Some(text) = pkfs::read_to_string(&full) {
-            scan_text_for_hash_claims(&text, scan_path, &mut findings, &mut scanned_line_count, &audit_cfg);
+            scan_text_for_hash_claims(
+                &text,
+                scan_path,
+                &mut findings,
+                &mut scanned_line_count,
+                &audit_cfg,
+            );
         }
     }
 
     #[cfg(target_arch = "wasm32")]
     for (memory_key, memory_text) in crate::memory_md::flat_kv_entries("default") {
-        scan_text_for_hash_claims(&memory_text, &memory_key, &mut findings, &mut scanned_line_count, &audit_cfg);
+        scan_text_for_hash_claims(
+            &memory_text,
+            &memory_key,
+            &mut findings,
+            &mut scanned_line_count,
+            &audit_cfg,
+        );
     }
 
-    let stale_claim_count = findings.iter().filter(|finding| !finding.hash_resolved_in_repo_history).count();
-    let marker_path = gm_dir().join("claim-audit-fired").to_string_lossy().to_string();
-    let marker_body = if stale_claim_count > 0 { "stale" } else { "clean" };
+    let stale_claim_count = findings
+        .iter()
+        .filter(|finding| !finding.hash_resolved_in_repo_history)
+        .count();
+    let marker_path = gm_dir()
+        .join("claim-audit-fired")
+        .to_string_lossy()
+        .to_string();
+    let marker_body = if stale_claim_count > 0 {
+        "stale"
+    } else {
+        "clean"
+    };
     let _ = pkfs::write(&marker_path, marker_body);
 
     let claims_found = findings.len();
@@ -117,12 +177,18 @@ pub fn handle_audit(_content: &str) -> (String, String, i32) {
 }
 
 pub fn claim_audit_fired() -> bool {
-    let marker_path = gm_dir().join("claim-audit-fired").to_string_lossy().to_string();
+    let marker_path = gm_dir()
+        .join("claim-audit-fired")
+        .to_string_lossy()
+        .to_string();
     pkfs::exists(&marker_path)
 }
 
 pub fn claim_audit_clean() -> bool {
-    let marker_path = gm_dir().join("claim-audit-fired").to_string_lossy().to_string();
+    let marker_path = gm_dir()
+        .join("claim-audit-fired")
+        .to_string_lossy()
+        .to_string();
     match pkfs::read_to_string(&marker_path) {
         Some(marker_body) => marker_body.trim() == "clean",
         None => false,

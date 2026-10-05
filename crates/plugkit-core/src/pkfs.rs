@@ -29,7 +29,9 @@ fn project_root() -> Option<String> {
         None => cwd.clone(),
     };
     if let Ok(mut cache) = ROOT_CACHE.lock() {
-        cache.get_or_insert_with(std::collections::HashMap::new).insert(cwd, root.clone());
+        cache
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(cwd, root.clone());
     }
     Some(root)
 }
@@ -39,7 +41,11 @@ fn git_toplevel() -> Option<String> {
     let v = crate::wasm_dispatch::git_call("rev-parse --show-toplevel", None);
     let out = v.get("stdout").and_then(|x| x.as_str())?;
     let top = out.lines().next()?.trim().trim_end_matches(['/', '\\']);
-    if top.is_empty() { None } else { Some(top.to_string()) }
+    if top.is_empty() {
+        None
+    } else {
+        Some(top.to_string())
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -84,11 +90,14 @@ pub fn exists(path: &str) -> bool {
 #[cfg(target_arch = "wasm32")]
 pub fn readdir(path: &str) -> Option<serde_json::Value> {
     let anchored = anchor(path);
-    let packed = unsafe {
-        crate::wasm_dispatch::host_fs_readdir(anchored.as_ptr(), anchored.len() as u32)
-    };
+    let packed =
+        unsafe { crate::wasm_dispatch::host_fs_readdir(anchored.as_ptr(), anchored.len() as u32) };
     let v = crate::wasm_dispatch::unpack_to_value_pub(packed);
-    if v.is_null() { None } else { Some(v) }
+    if v.is_null() {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -97,14 +106,26 @@ pub fn stat(path: &str) -> Option<serde_json::Value> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn read_to_string(_path: &str) -> Option<String> { None }
+pub fn read_to_string(_path: &str) -> Option<String> {
+    None
+}
 #[cfg(not(target_arch = "wasm32"))]
-pub fn write(_path: &str, _data: &str) -> bool { false }
+pub fn write(_path: &str, _data: &str) -> bool {
+    false
+}
 #[cfg(not(target_arch = "wasm32"))]
-pub fn cas_write(_path: &str, _expected: &str, _data: &str) -> CasWriteOutcome { CasWriteOutcome::IoError }
+pub fn cas_write(_path: &str, _expected: &str, _data: &str) -> CasWriteOutcome {
+    CasWriteOutcome::IoError
+}
 #[cfg(not(target_arch = "wasm32"))]
-pub fn exists(_path: &str) -> bool { false }
+pub fn exists(_path: &str) -> bool {
+    false
+}
 #[cfg(not(target_arch = "wasm32"))]
-pub fn readdir(_path: &str) -> Option<serde_json::Value> { None }
+pub fn readdir(_path: &str) -> Option<serde_json::Value> {
+    None
+}
 #[cfg(not(target_arch = "wasm32"))]
-pub fn stat(_path: &str) -> Option<serde_json::Value> { None }
+pub fn stat(_path: &str) -> Option<serde_json::Value> {
+    None
+}
