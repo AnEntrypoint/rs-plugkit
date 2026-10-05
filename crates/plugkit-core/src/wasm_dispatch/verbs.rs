@@ -5876,6 +5876,7 @@ fn git_finalize(body: &Value) -> u64 {
                 message.clone()
             };
             let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
+            let bundled_summary = bundled_message.lines().next().unwrap_or("").to_string();
             let _ = git_call_argv(&as_argv(&git_stage_argv(&[], cwd_ref)), cwd_ref);
             let mut commit_argv = vec![
                 "commit".to_string(),
@@ -5892,7 +5893,7 @@ fn git_finalize(body: &Value) -> u64 {
             if ccode == 0 && !head_after.is_empty() && head_after != head_before_any_commit {
                 committed = true;
                 sha = head_after[..head_after.len().min(10)].to_string();
-                summary = bundled_message.lines().next().unwrap_or("").to_string();
+                summary = bundled_summary;
                 emit_event(
                     "git.commit",
                     json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary, "repo": repo, "flushed_pending_prd_notes": true }),

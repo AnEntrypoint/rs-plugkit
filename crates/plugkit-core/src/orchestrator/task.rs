@@ -102,11 +102,14 @@ pub fn handle_spawn(content: &str) -> (String, String, i32) {
     let requested = body.get("timeoutMs").and_then(|v| v.as_u64());
     let timeout = clamp_timeout(requested);
     let was_clamped = requested.map(|r| r != timeout).unwrap_or(false);
-    let params = json!({
+    let mut params = json!({
         "lang": lang,
         "code": code,
         "timeoutMs": timeout,
     });
+    if let Some(cwd) = body.get("cwd") {
+        params["cwd"] = cwd.clone();
+    }
     let result = host_task("spawn", &params);
     if !result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
         let msg = result
