@@ -268,7 +268,7 @@ fn purge_legacy_edges(started_ms: u64, budget_ms: u64) {
 }
 
 fn extract_file(fp: &str, lang: &str, content: &str, size: u64, mtime_ms: u64) -> (FileSymbols, u32) {
-    let analysis = code_index::analyze_source(content, lang);
+    let analysis = code_index::analyze_source(&fp, content, lang);
     let file_is_test = is_test_path(fp);
     let mut metrics = analysis.metrics.into_iter();
     let symbols = analysis
@@ -386,7 +386,9 @@ pub(crate) fn sync_tree(cfg: &crate::ragconfig::RagConfig, project_path: Option<
     let started = host_now_ms();
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
     let files = code_index::collect_files(root, cfg.index.digest_max_files, &cfg.index);
-    sync_files(&files, project_path, started, cfg.index.wall_budget_ms, cfg.index.max_file_bytes, true)
+    let out = sync_files(&files, project_path, started, cfg.index.wall_budget_ms, cfg.index.max_file_bytes, true);
+    code_index::report_treesitter_outage();
+    out
 }
 
 pub(crate) fn clear(project_path: Option<&str>) {

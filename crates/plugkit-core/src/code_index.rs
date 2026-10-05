@@ -460,18 +460,125 @@ fn walk_posix(root: &str, max_files: usize, files: &mut Vec<String>, gi: &Option
     }
 }
 
-pub fn extract_chunks(_path: &str, source: &str, lang_name: &str) -> Vec<(String, String, usize, usize, String)> {
-    extract_chunks_reporting_plugin_failure(_path, source, lang_name).0
+pub fn extract_chunks(path: &str, source: &str, lang_name: &str) -> Vec<(String, String, usize, usize, String)> {
+    extract_chunks_reporting_plugin_failure(path, source, lang_name).0
 }
 
 type ChunkTuple = (String, String, usize, usize, String);
 
-fn parse_nodes(source: &str, lang_name: &str) -> Option<Vec<Value>> {
+const TREESITTER_REPROBE_MS: u64 = 60_000;
+const TREESITTER_AVAILABLE_REPROBE_MS: u64 = 600_000;
+
+const TREESITTER_OUTAGE_SAMPLE_CAP: usize = 10;
+
+const FALLBACK_CHUNK_LINES: usize = 160;
+
+const FALLBACK_CHUNK_MAX_PER_FILE: usize = 6;
+
+const FALLBACK_CHUNK_KIND: &str = "fallback_block";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TreesitterState {
+    Available,
+    Unavailable(&'static str),
+}
+
+struct TreesitterProbe {
+    state: TreesitterState,
+    checked_ms: u64,
+}
+
+static TREESITTER_PROBE: std::sync::Mutex<Option<TreesitterProbe>> = std::sync::Mutex::new(None);
+
+struct TreesitterOutage {
+    cause: &'static str,
+    files: u32,
+    first_path: String,
+    langs: Vec<String>,
+    sample_paths: Vec<String>,
+}
+
+static TREESITTER_OUTAGE: std::sync::Mutex<Option<TreesitterOutage>> = std::sync::Mutex::new(None);
+
+fn treesitter_state(now_ms: u64) -> TreesitterState {
+    if let Ok(guard) = TREESITTER_PROBE.lock() {
+        if let Some(probe) = guard.as_ref() {
+            let within_ttl = match probe.state {
+                TreesitterState::Available => TREESITTER_AVAILABLE_REPROBE_MS,
+                TreesitterState::Unavailable(_) => TREESITTER_REPROBE_MS,
+            };
+            let clock_ran_backwards = now_ms < probe.checked_ms;
+            if !clock_ran_backwards && now_ms.saturating_sub(probe.checked_ms) < within_ttl {
+                return probe.state;
+            }
+        }
+    }
+    let resp = plugin_call("treesitter", "parse", &json!({ "lang": "markdown", "source": "probe\n" }));
+    let plugin_is_resident = plugin_ok(&resp)
+        && resp.get("lang").and_then(|v| v.as_str()).is_some()
+        && resp.get("nodes").and_then(|v| v.as_array()).is_some();
+    let state = if plugin_is_resident {
+        TreesitterState::Available
+    } else {
+        let cause = plugin_failure_code(&resp);
+        match cause {
+            crate::wasm_dispatch::PLUGIN_FAIL_UNKNOWN_PLUGIN | crate::wasm_dispatch::PLUGIN_FAIL_NOT_LOADED => {
+                TreesitterState::Unavailable(cause)
+            }
+            _ => TreesitterState::Available,
+        }
+    };
+    if let Ok(mut guard) = TREESITTER_PROBE.lock() {
+        *guard = Some(TreesitterProbe { state, checked_ms: now_ms });
+    }
+    state
+}
+
+fn mark_treesitter_unavailable(cause: &'static str, now_ms: u64) {
+    if let Ok(mut guard) = TREESITTER_PROBE.lock() {
+        *guard = Some(TreesitterProbe { state: TreesitterState::Unavailable(cause), checked_ms: now_ms });
+    }
+}
+
+fn note_treesitter_outage(cause: &'static str, path: &str, lang_name: &str) {
+    if let Ok(mut guard) = TREESITTER_OUTAGE.lock() {
+        let outage = guard.get_or_insert_with(|| TreesitterOutage {
+            cause,
+            files: 0,
+            first_path: path.to_string(),
+            langs: Vec::new(),
+            sample_paths: Vec::new(),
+        });
+        outage.files += 1;
+        if !outage.langs.iter().any(|l| l == lang_name) { outage.langs.push(lang_name.to_string()); }
+        if outage.sample_paths.len() < TREESITTER_OUTAGE_SAMPLE_CAP { outage.sample_paths.push(path.to_string()); }
+    }
+}
+
+fn take_treesitter_outage() -> Option<TreesitterOutage> {
+    TREESITTER_OUTAGE.lock().ok().and_then(|mut guard| guard.take())
+}
+
+fn parse_nodes(source: &str, lang_name: &str, path: &str) -> Option<Vec<Value>> {
+    let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    if let TreesitterState::Unavailable(cause) = treesitter_state(now_ms) {
+        note_treesitter_outage(cause, path, lang_name);
+        return None;
+    }
     let resp = plugin_call("treesitter", "parse", &json!({ "lang": lang_name, "source": source }));
     if !plugin_ok(&resp) {
+        let cause = plugin_failure_code(&resp);
+        if cause == crate::wasm_dispatch::PLUGIN_FAIL_UNKNOWN_PLUGIN
+            || cause == crate::wasm_dispatch::PLUGIN_FAIL_NOT_LOADED
+        {
+            mark_treesitter_unavailable(cause, now_ms);
+            note_treesitter_outage(cause, path, lang_name);
+            return None;
+        }
         crate::wasm_dispatch::emit_event("code_index_treesitter_failed", json!({
+            "path": path,
             "lang": lang_name,
-            "plugin_failure": plugin_failure_code(&resp),
+            "plugin_failure": cause,
             "source_len": source.len(),
         }));
         return None;
@@ -480,6 +587,7 @@ fn parse_nodes(source: &str, lang_name: &str) -> Option<Vec<Value>> {
         Some(n) => Some(n.clone()),
         None => {
             crate::wasm_dispatch::emit_event("code_index_treesitter_failed", json!({
+                "path": path,
                 "lang": lang_name,
                 "plugin_failure": crate::wasm_dispatch::PLUGIN_FAIL_MALFORMED,
                 "source_len": source.len(),
@@ -487,6 +595,32 @@ fn parse_nodes(source: &str, lang_name: &str) -> Option<Vec<Value>> {
             None
         }
     }
+}
+
+pub(crate) fn report_treesitter_outage() {
+    if let Some(outage) = take_treesitter_outage() {
+        crate::wasm_dispatch::emit_event("code_index_treesitter_unavailable", json!({
+            "plugin_failure": outage.cause,
+            "files_affected": outage.files,
+            "first_path": outage.first_path,
+            "langs": outage.langs,
+            "sample_paths": outage.sample_paths,
+            "reprobe_after_ms": TREESITTER_REPROBE_MS,
+        }));
+    }
+}
+
+fn fallback_chunks(source: &str) -> Vec<ChunkTuple> {
+    let line_count = source.lines().count();
+    if line_count == 0 { return Vec::new(); }
+    let window_count = ((line_count + FALLBACK_CHUNK_LINES - 1) / FALLBACK_CHUNK_LINES).min(FALLBACK_CHUNK_MAX_PER_FILE);
+    (0..window_count)
+        .map(|w| {
+            let start = w * FALLBACK_CHUNK_LINES;
+            let end = (start + FALLBACK_CHUNK_LINES).min(line_count);
+            (FALLBACK_CHUNK_KIND.to_string(), String::new(), start + 1, end, slice_lines(source, start + 1, end))
+        })
+        .collect()
 }
 
 fn chunk_spans(source: &str, nodes: &[Value]) -> Vec<(ChunkTuple, (usize, usize))> {
@@ -511,10 +645,10 @@ fn chunks_from_nodes(source: &str, nodes: &[Value]) -> Vec<ChunkTuple> {
     chunk_spans(source, nodes).into_iter().map(|(chunk, _)| chunk).collect()
 }
 
-pub fn extract_chunks_reporting_plugin_failure(_path: &str, source: &str, lang_name: &str) -> (Vec<ChunkTuple>, bool) {
-    match parse_nodes(source, lang_name) {
+pub fn extract_chunks_reporting_plugin_failure(path: &str, source: &str, lang_name: &str) -> (Vec<ChunkTuple>, bool) {
+    match parse_nodes(source, lang_name, path) {
         Some(nodes) => (chunks_from_nodes(source, &nodes), false),
-        None => (Vec::new(), true),
+        None => (fallback_chunks(source), true),
     }
 }
 
@@ -704,8 +838,8 @@ fn imports_from_nodes(source: &str, lang_name: &str, sorted_nodes: &[RawNode]) -
     out
 }
 
-pub(crate) fn analyze_source(source: &str, lang_name: &str) -> SourceAnalysis {
-    let Some(nodes) = parse_nodes(source, lang_name) else {
+pub(crate) fn analyze_source(path: &str, source: &str, lang_name: &str) -> SourceAnalysis {
+    let Some(nodes) = parse_nodes(source, lang_name, path) else {
         return SourceAnalysis { chunks: Vec::new(), metrics: Vec::new(), edges: Vec::new(), imports: Vec::new(), parse_failed: true };
     };
     let spans = chunk_spans(source, &nodes);
@@ -1217,17 +1351,17 @@ pub fn index(root: &str, max_files: usize) -> Value {
 }
 
 pub fn index_at(root: &str, max_files: usize, project_path: &str) -> Value {
-    index_cfg_impl(root, max_files, &crate::ragconfig::RagConfig::resolved(), false, 20, Some(project_path))
+    index_cfg_impl(root, max_files, &crate::ragconfig::RagConfig::resolved(), false, 20, Some(project_path), &[])
 }
 
-pub fn index_at_topup(root: &str, max_files: usize, project_path: &str, cap_ms: u64) -> Value {
+pub fn index_at_topup_for(root: &str, max_files: usize, project_path: &str, cap_ms: u64, priority: &[String]) -> Value {
     let mut cfg = crate::ragconfig::RagConfig::resolved();
     cfg.index.wall_budget_ms = cap_ms.min(cfg.index.wall_budget_ms);
-    index_cfg_impl(root, max_files, &cfg, false, 20, Some(project_path))
+    index_cfg_impl(root, max_files, &cfg, false, 20, Some(project_path), priority)
 }
 
 pub fn index_with_dead_code(root: &str, max_files: usize, limit: usize) -> Value {
-    let mut out = index_cfg_impl(root, max_files, &crate::ragconfig::RagConfig::resolved(), true, limit, None);
+    let mut out = index_cfg_impl(root, max_files, &crate::ragconfig::RagConfig::resolved(), true, limit, None, &[]);
     if let Some(obj) = out.as_object_mut() {
         obj.insert("dead_code_scan_forced".to_string(), json!(true));
     }
@@ -1235,16 +1369,28 @@ pub fn index_with_dead_code(root: &str, max_files: usize, limit: usize) -> Value
 }
 
 pub fn index_cfg(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig) -> Value {
-    index_cfg_impl(root, max_files, cfg, cfg.index.likely_orphaned_symbol_scan_enabled, 20, None)
+    index_cfg_impl(root, max_files, cfg, cfg.index.likely_orphaned_symbol_scan_enabled, 20, None, &[])
 }
 
-pub fn index_topup(root: &str, max_files: usize, cap_ms: u64) -> Value {
+pub fn index_topup_for(root: &str, max_files: usize, cap_ms: u64, priority: &[String]) -> Value {
     let mut cfg = crate::ragconfig::RagConfig::resolved();
     cfg.index.wall_budget_ms = cap_ms.min(cfg.index.wall_budget_ms);
-    index_cfg(root, max_files, &cfg)
+    index_cfg_impl(root, max_files, &cfg, cfg.index.likely_orphaned_symbol_scan_enabled, 20, None, priority)
 }
 
-fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig, include_dead_code: bool, orphan_scan_limit: usize, project_path: Option<&str>) -> Value {
+fn prioritize_paths(files: Vec<String>, priority: &[String]) -> Vec<String> {
+    if priority.is_empty() { return files; }
+    let wanted: std::collections::HashSet<&str> = priority.iter().map(|p| p.as_str()).collect();
+    let mut head = Vec::with_capacity(files.len());
+    let mut tail = Vec::with_capacity(files.len());
+    for f in files {
+        if wanted.contains(canonical_index_path(&f)) { head.push(f) } else { tail.push(f) }
+    }
+    head.extend(tail);
+    head
+}
+
+fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfig, include_dead_code: bool, orphan_scan_limit: usize, project_path: Option<&str>, priority: &[String]) -> Value {
     let db_path = project_db_path(project_path);
     let libsql_err = ensure_schema_at(&db_path).err().map(|e| e.to_string());
     let libsql_ok = libsql_err.is_none();
@@ -1276,7 +1422,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     let mut full_files = collect_files(r, limit.max(prune_enumeration_cap), &cfg.index);
     full_files.sort_by(|a, b| canonical_index_path(a).cmp(canonical_index_path(b)));
     let resume_cursor = stored_index_cursor_at(project_path);
-    let files = rotated_from_cursor(&full_files, resume_cursor.as_deref());
+    let files = prioritize_paths(rotated_from_cursor(&full_files, resume_cursor.as_deref()), priority);
     let mut first_deferred: Option<String> = None;
     let mut fresh_files_this_pass = 0usize;
     {
@@ -1327,7 +1473,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     let mut treesitter_failures = 0u32;
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut digest_entries: Vec<(String, u32)> = Vec::with_capacity(files.len());
+    let mut digest_entries: Vec<(String, u64)> = Vec::with_capacity(files.len());
 
     for raw_fp in &files {
         let canon = canonical_index_path(raw_fp).to_string();
@@ -1349,25 +1495,42 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                 let stat_mtime = stat.get("mtime_ms").and_then(|v| v.as_f64());
                 let stat_size = stat.get("size").and_then(|v| v.as_u64());
                 let size_matches = m.size.is_none() || stat_size == m.size;
-                if let (Some(mtime), Some(dh)) = (stat_mtime, m.digest_hash) {
-                    if mtime == m.mtime_ms && size_matches && m.holds_every_chunk() && libsql_ok && chunk_rows(fp) == m.chunks.len() {
-                        seen.insert(fp.clone());
-                        indexed += 1;
-                        *langs.entry(lang_name.to_string()).or_insert(0) += 1;
-                        chunked += m.chunks.len() as i32;
-                        reused += m.chunks.len() as i32;
-                        reused_files += 1;
-                        digest_entries.push((fp.clone(), dh));
-                        continue;
+                if let Some(mtime) = stat_mtime {
+                    if m.digest_hash.is_some()
+                        && mtime == m.mtime_ms && size_matches && m.holds_every_chunk() && libsql_ok
+                        && chunk_rows(fp) == m.chunks.len()
+                        && !m.chunks.iter().any(|c| c.kind == FALLBACK_CHUNK_KIND)
+                    {
+                        let content = match read_indexable(fp, raw_fp) {
+                            Some(c) if c.len() <= cfg.index.max_file_bytes => c,
+                            Some(_) => continue,
+                            None => {
+                                digest_entries.push((fp.clone(), UNREADABLE_CONTENT_HASH));
+                                continue;
+                            }
+                        };
+                        if !m.chunks.is_empty() || content.trim().is_empty() {
+                            seen.insert(fp.clone());
+                            indexed += 1;
+                            *langs.entry(lang_name.to_string()).or_insert(0) += 1;
+                            chunked += m.chunks.len() as i32;
+                            reused += m.chunks.len() as i32;
+                            reused_files += 1;
+                            digest_entries.push((fp.clone(), crate::hash::fnv1a64(content.as_bytes())));
+                            continue;
+                        }
                     }
                 }
             }
         }
 
-        let content = match host_read(fp)
-            .or_else(|| host_read(raw_fp))
-            .or_else(|| host_read(&format!("/{}", fp)))
-        { Some(c) => c, None => continue };
+        let content = match read_indexable(fp, raw_fp) {
+            Some(c) => c,
+            None => {
+                digest_entries.push((fp.clone(), UNREADABLE_CONTENT_HASH));
+                continue;
+            }
+        };
         if content.len() > cfg.index.max_file_bytes { continue; }
         let file_size = content.len() as u64;
         let file_mtime = crate::wasm_dispatch::host_stat(fp)
@@ -1379,11 +1542,10 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         *langs.entry(lang_name.to_string()).or_insert(0) += 1;
         let file_hash = crc32(&content);
         let path_hash = crc32(fp);
-        let file_digest_hash = crate::hash::fnv1a64(content.as_bytes()) as u32;
-        digest_entries.push((fp.clone(), file_digest_hash));
+        let file_digest_hash = crate::hash::fnv1a64(content.as_bytes());
 
         if let Some(m) = prior.get(fp) {
-            if m.hash == file_hash && m.holds_every_chunk() {
+            if m.hash == file_hash && m.holds_every_chunk() && !m.chunks.is_empty() && !m.chunks.iter().any(|c| c.kind == FALLBACK_CHUNK_KIND) {
                 let mut all_persisted = true;
                 if !(libsql_ok && chunk_rows(fp) == m.chunks.len()) {
                     if libsql_ok {
@@ -1398,7 +1560,8 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
                 reused += m.chunks.len() as i32;
                 reused_files += 1;
                 if all_persisted {
-                    fv_put(&manifest_ns_for(project_path), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, file_size, &m.commit_overview, &m.chunks, m.skipped_no_embed));
+                    fv_put(&manifest_ns_for(project_path), fp, &manifest_to_json(fp, file_hash, file_digest_hash as u32, file_mtime, file_size, &m.commit_overview, &m.chunks, m.skipped_no_embed));
+                    digest_entries.push((fp.clone(), file_digest_hash));
                 } else {
                     fv_delete(&manifest_ns_for(project_path), fp);
                 }
@@ -1578,9 +1741,12 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             } else {
                 compute_commit_overview(fp)
             };
-            fv_put(&manifest_ns_for(project_path), fp, &manifest_to_json(fp, file_hash, file_digest_hash, file_mtime, file_size, &commit_overview, &records, file_skipped_no_embed));
+            fv_put(&manifest_ns_for(project_path), fp, &manifest_to_json(fp, file_hash, file_digest_hash as u32, file_mtime, file_size, &commit_overview, &records, file_skipped_no_embed));
         } else {
             fv_delete(&manifest_ns_for(project_path), fp);
+        }
+        if file_fully_persisted && deferred_in_file == 0 {
+            digest_entries.push((fp.clone(), file_digest_hash));
         }
         fusion_corpus_cache_invalidate(project_path);
     }
@@ -1613,15 +1779,23 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     }
     let pass_complete = deferred_files == 0 && deferred_chunks == 0 && skipped_no_embed == 0;
     store_index_cursor_at(first_deferred.as_deref(), project_path);
+    let (mut content_manifest, _stored_present) = load_content_manifest(project_path);
+    if enumeration_was_complete {
+        let live_paths: std::collections::HashSet<String> = full_files.iter().map(|f| canonical_index_path(f).to_string()).collect();
+        content_manifest.retain(|path, _| live_paths.contains(path));
+    }
+    for (path, hash) in &digest_entries {
+        content_manifest.insert(path.clone(), *hash);
+    }
+    store_content_manifest(project_path, &content_manifest);
+    report_treesitter_outage();
     if pass_complete {
-        let digest = digest_from_entries(digest_entries);
+        let digest = digest_from_manifest(&content_manifest);
         store_digest_at(&digest, project_path);
         let msg = format!("code_index: done files_indexed={} chunks={} embedded={} reused={} reused_files={} removed_files={} skipped_no_embed={} digest={}", indexed, chunked, embedded, reused, reused_files, removed_files, skipped_no_embed, digest);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     } else {
-        let partial_digest = format!("{}:partial={}", digest_from_entries(digest_entries), deferred_files + deferred_chunks + skipped_no_embed);
-        store_digest_at(&partial_digest, project_path);
-        let msg = format!("code_index: partial pass files_indexed={} deferred_files={} deferred_chunks={} embedded={} reused={} removed_files={} resume_at={:?} -- partial digest stored, next call resumes there", indexed, deferred_files, deferred_chunks, embedded, reused, removed_files, first_deferred);
+        let msg = format!("code_index: partial pass files_indexed={} deferred_files={} deferred_chunks={} embedded={} reused={} removed_files={} resume_at={:?} -- content manifest updated for the files reached, next call resumes there", indexed, deferred_files, deferred_chunks, embedded, reused, removed_files, first_deferred);
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
         crate::wasm_dispatch::emit_event("codeinsight_index_partial", json!({
             "files_indexed": indexed,
@@ -1631,7 +1805,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             "embedded": embedded,
         }));
     }
-    let silently_empty_due_to_plugin_failure = indexed > 0 && chunked == 0 && treesitter_failures >= indexed as u32;
+    let silently_empty_due_to_plugin_failure = indexed > 0 && treesitter_failures >= indexed as u32;
     json!({
         "ok": !silently_empty_due_to_plugin_failure,
         "files_scanned": files.len(),
@@ -1712,26 +1886,25 @@ fn store_index_cursor_at(cursor: Option<&str>, project_path: Option<&str>) {
 
 pub fn ensure_current_insight() -> Value {
     let cfg = crate::ragconfig::RagConfig::resolved();
-    let stored = stored_digest();
     let current = current_digest_cfg(&cfg);
-    let stale = stored.as_deref() != Some(current.as_str());
-    let prior_partial = stored.as_deref().is_some_and(|digest| digest.contains(":partial="));
-    let cold_start = stored.is_none();
-    let index = if stale && !prior_partial {
+    let diff = index_diff_at(None);
+    let stale = !diff.is_empty();
+    let prior_partial = stored_index_cursor_at(None).is_some();
+    let cold_start = diff.cold_start;
+    let index = if stale {
         if cold_start {
             index_cfg(".", cfg.index.prune_pass_file_limit_ceiling, &cfg)
         } else {
-            index_topup(".", cfg.index.prune_pass_file_limit_ceiling, cfg.index.incremental_topup_wall_budget_ms)
+            index_topup_for(".", cfg.index.prune_pass_file_limit_ceiling, cfg.index.incremental_topup_wall_budget_ms, &diff.priority_paths())
         }
     } else {
-        let symbols = if stale { crate::code_symbols::sync_tree(&cfg, None) } else { Value::Null };
         json!({
             "ok": true,
             "reused": true,
-            "digest": stored,
+            "digest": current,
             "complete": !prior_partial,
             "partial": prior_partial,
-            "symbols": symbols,
+            "symbols": Value::Null,
         })
     };
     let refreshed = index.get("digest").and_then(|v| v.as_str()).map(str::to_owned);
@@ -1774,17 +1947,102 @@ fn embed_texts_batch(inputs: &[String]) -> Vec<Option<Vec<f32>>> {
 
 const DIGEST_PATH: &str = ".gm/exec-spool/.codeinsight-digest";
 
-fn digest_from_entries(mut entries: Vec<(String, u32)>) -> String {
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries.dedup_by(|a, b| a.0 == b.0);
+const CONTENT_MANIFEST_PATH: &str = ".gm/exec-spool/.codeinsight-content-manifest.json";
+
+type ContentManifest = std::collections::BTreeMap<String, u64>;
+
+const UNREADABLE_CONTENT_HASH: u64 = 0;
+
+fn digest_acc(entries: &[(String, u64)]) -> String {
     let mut acc = String::with_capacity(entries.len() * 32);
-    for (path, hash) in &entries {
+    for (path, hash) in entries {
         acc.push_str(path);
         acc.push('|');
-        acc.push_str(&format!("{:08x}", hash));
+        acc.push_str(&format!("{:016x}", hash));
         acc.push('\n');
     }
     format!("v3:{:016x}:files={}", crate::hash::fnv1a64(acc.as_bytes()), entries.len())
+}
+
+fn digest_from_manifest(manifest: &ContentManifest) -> String {
+    let entries: Vec<(String, u64)> = manifest.iter().map(|(path, hash)| (path.clone(), *hash)).collect();
+    digest_acc(&entries)
+}
+
+fn read_indexable(canon: &str, raw_fp: &str) -> Option<String> {
+    host_read(canon)
+        .or_else(|| host_read(raw_fp))
+        .or_else(|| host_read(&format!("/{}", canon)))
+}
+
+fn content_manifest_path_for(project_path: Option<&str>) -> String {
+    match project_path {
+        Some(p) if !p.is_empty() => format!("{}/{}", p.trim_end_matches(['/', '\\']), CONTENT_MANIFEST_PATH),
+        _ => CONTENT_MANIFEST_PATH.to_string(),
+    }
+}
+
+fn load_content_manifest(project_path: Option<&str>) -> (ContentManifest, bool) {
+    let path = content_manifest_path_for(project_path);
+    let raw = match crate::wasm_dispatch::host_read(&path) {
+        Some(raw) => raw,
+        None => return (ContentManifest::new(), false),
+    };
+    match serde_json::from_str::<ContentManifest>(&raw) {
+        Ok(manifest) => (manifest, true),
+        Err(e) => {
+            crate::wasm_dispatch::emit_event("code_index_content_manifest_corrupt", json!({
+                "path": path,
+                "reason": e.to_string(),
+                "bytes": raw.len(),
+            }));
+            (ContentManifest::new(), true)
+        }
+    }
+}
+
+fn store_content_manifest(project_path: Option<&str>, manifest: &ContentManifest) {
+    let path = content_manifest_path_for(project_path);
+    match serde_json::to_string(manifest) {
+        Ok(raw) => {
+            if !crate::wasm_dispatch::host_write(&path, &raw) {
+                crate::wasm_dispatch::emit_event("code_index_content_manifest_write_failed", json!({
+                    "path": path,
+                    "reason": "host_write returned false",
+                    "files": manifest.len(),
+                }));
+            }
+        }
+        Err(e) => {
+            crate::wasm_dispatch::emit_event("code_index_content_manifest_write_failed", json!({
+                "path": path,
+                "reason": e.to_string(),
+            }));
+        }
+    }
+}
+
+fn current_content_manifest_at(
+    cfg: &crate::ragconfig::RagConfig,
+    project_path: Option<&str>,
+) -> (ContentManifest, bool) {
+    let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
+    let enumeration_cap = cfg.index.prune_enumeration_file_cap;
+    let files = collect_files(root, enumeration_cap, &cfg.index);
+    let truncated = files.len() >= enumeration_cap;
+    let mut manifest = ContentManifest::new();
+    for raw_fp in &files {
+        let canon = canonical_index_path(raw_fp).to_string();
+        let ext = match canon.rfind('.') { Some(i) => &canon[i..], None => "" };
+        if lang_for_ext(ext).is_none() { continue; }
+        let hash = match read_indexable(&canon, raw_fp) {
+            Some(content) if content.len() <= cfg.index.max_file_bytes => crate::hash::fnv1a64(content.as_bytes()),
+            Some(_) => continue,
+            None => UNREADABLE_CONTENT_HASH,
+        };
+        manifest.insert(canon, hash);
+    }
+    (manifest, truncated)
 }
 
 pub fn current_digest() -> String {
@@ -1826,24 +2084,7 @@ pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Op
             }
         }
     }
-    let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
-    let files = collect_files(root, cfg.index.digest_max_files, &cfg.index);
-    let mut entries: Vec<(String, u32)> = Vec::new();
-    for raw_fp in &files {
-        let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();
-        let ext = match canon.rfind('.') { Some(i) => &canon[i..], None => "" };
-        if lang_for_ext(ext).is_none() { continue; }
-        let stat = match crate::wasm_dispatch::host_stat(&canon)
-            .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
-        { Some(s) => s, None => continue };
-        if stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0) > cfg.index.max_file_bytes as u64 { continue; }
-        let content = match host_read(&canon)
-            .or_else(|| host_read(raw_fp))
-        { Some(c) => c, None => continue };
-        let content_hash = crate::hash::fnv1a64(content.as_bytes()) as u32;
-        entries.push((canon, content_hash));
-    }
-    let digest = digest_from_entries(entries);
+    let digest = digest_from_manifest(&current_content_manifest_at(cfg, project_path).0);
     if let Ok(mut cache) = DIGEST_CACHE.lock() {
         cache.get_or_insert_with(std::collections::HashMap::new)
             .insert(cache_key, DigestCacheEntry { ts_ms: now_ms, digest: digest.clone() });
@@ -1875,6 +2116,52 @@ pub fn store_digest(digest: &str) {
 pub fn store_digest_at(digest: &str, project_path: Option<&str>) {
     let _ = crate::wasm_dispatch::host_write(&digest_path_for(project_path), digest);
     fv_delete(&code_ns_for(project_path), "__digest__");
+}
+
+pub struct IndexDiff {
+    pub changed: Vec<String>,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub cold_start: bool,
+}
+
+impl IndexDiff {
+    pub fn is_empty(&self) -> bool {
+        self.changed.is_empty() && self.added.is_empty() && self.removed.is_empty()
+    }
+
+    pub fn count(&self) -> usize {
+        self.changed.len() + self.added.len() + self.removed.len()
+    }
+
+    pub fn priority_paths(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.changed.iter().chain(self.added.iter()).cloned().collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
+pub fn index_diff_at(project_path: Option<&str>) -> IndexDiff {
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    let (stored, stored_present) = load_content_manifest(project_path);
+    let (current, enumeration_truncated) = current_content_manifest_at(&cfg, project_path);
+    let mut changed = Vec::new();
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    for (path, hash) in &current {
+        match stored.get(path) {
+            Some(prev) if *prev == *hash => {}
+            Some(_) => changed.push(path.clone()),
+            None => added.push(path.clone()),
+        }
+    }
+    if !enumeration_truncated {
+        for path in stored.keys() {
+            if !current.contains_key(path) { removed.push(path.clone()); }
+        }
+    }
+    IndexDiff { changed, added, removed, cold_start: !stored_present }
 }
 
 pub fn overview() -> Value {
