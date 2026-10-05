@@ -425,13 +425,32 @@ pub fn user_cache_root() -> Option<String> {
 fn home_dir() -> Option<String> {
     for key in ["HOME", "USERPROFILE"] {
         if let Some(s) = env_var(key) {
-            let t = s.trim().trim_end_matches(['/', '\\']);
-            if !t.is_empty() {
-                return Some(t.to_string());
+            let raw = s.trim();
+            if !is_absolute_home_dir(raw) {
+                continue;
             }
+            let t = raw.trim_end_matches(['/', '\\']);
+            if t.is_empty() {
+                return Some("/".to_string());
+            }
+            if t.len() == 2 && t.as_bytes()[1] == b':' {
+                return Some(raw.to_string());
+            }
+            return Some(t.to_string());
         }
     }
     None
+}
+
+fn is_absolute_home_dir(path: &str) -> bool {
+    if path.starts_with('/') || path.starts_with("\\\\") {
+        return true;
+    }
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
 }
 
 const PUBLISH_SWAP_READ_ATTEMPTS: u32 = 5;
