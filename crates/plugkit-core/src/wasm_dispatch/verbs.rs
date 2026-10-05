@@ -431,6 +431,23 @@ fn path_within_project(path: &str) -> bool {
         && !normalized.contains(':')
 }
 
+fn path_outside_project_message(path: &str) -> String {
+    let Some(root) = super::host_abi::host_cwd_string() else {
+        return "path must be relative and within the project".to_string();
+    };
+    let slashed = |s: &str| s.replace('\\', "/");
+    let root_slashed = slashed(&root);
+    let root_trimmed = root_slashed.trim_end_matches('/');
+    let path_slashed = slashed(path);
+    let suggestion = path_slashed
+        .strip_prefix(root_trimmed)
+        .map(|rest| rest.trim_start_matches('/'))
+        .filter(|rest| !rest.is_empty() && path_within_project(rest))
+        .map(|rest| format!("; the relative form of that path is \"{rest}\""))
+        .unwrap_or_default();
+    format!("path must be relative and within the project; the project root is {root}, so pass a path relative to it (for example \"src/main.rs\", not an absolute path or one containing \"..\"){suggestion}")
+}
+
 fn paged_lines(content: &str, offset: usize, limit: usize) -> (String, usize, usize, usize) {
     let lines: Vec<&str> = content.split('\n').collect();
     let total = lines.len();
@@ -449,7 +466,7 @@ fn fs_read(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() { return err("fs_read", "path required -- pass {\"path\":\"<relative path>\"}; add \"offset\"/\"limit\" to read a line range and \"max_bytes\" to cap one chunk"); }
     if !path_within_project(path) {
-        return err("fs_read", "path must be relative and within the project");
+        return err("fs_read", &path_outside_project_message(path));
     }
     let offset = match body.get("offset").and_then(|v| v.as_u64()) {
         Some(n) => n as usize,
@@ -500,7 +517,7 @@ fn fs_write(body: &Value) -> u64 {
         .unwrap_or("");
     if path.is_empty() { return err("fs_write", "path required"); }
     if !path_within_project(path) {
-        return err("fs_write", "path must be relative and within the project");
+        return err("fs_write", &path_outside_project_message(path));
     }
     if super::host_abi::host_write(path, data) { ok("fs_write", json!({ "bytes": data.len() })) } else { err("fs_write", "write failed") }
 }
@@ -508,7 +525,7 @@ fn fs_write(body: &Value) -> u64 {
 fn fs_readdir(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     if !path_within_project(path) {
-        return err("fs_readdir", "path must be relative and within the project");
+        return err("fs_readdir", &path_outside_project_message(path));
     }
     let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
     let v = unpack_to_value(packed);
@@ -520,7 +537,7 @@ fn fs_stat(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() { return err("fs_stat", "path required"); }
     if !path_within_project(path) {
-        return err("fs_stat", "path must be relative and within the project");
+        return err("fs_stat", &path_outside_project_message(path));
     }
     match super::host_abi::host_stat(path) {
         Some(v) if !v.is_null() => ok("fs_stat", v),
