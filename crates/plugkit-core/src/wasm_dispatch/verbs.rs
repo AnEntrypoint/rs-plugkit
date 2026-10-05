@@ -1812,11 +1812,13 @@ fn merge_stage_ms(prior: Value, now: Value) -> Value {
     Value::Object(out)
 }
 
-const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
+const REGEX_SCAN_DEFAULT_BUDGET_MS: u64 = 20_000;
+
+const CODESEARCH_MODES: &[&str] =&["dual", "literal", "regex", "filename"];
 
 const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "query", "mode", "path", "glob", "path_glob", "exclude_glob", "exclude_globs", "case_insensitive", "whole_word", "comments_only",
-    "k", "max_results", "maxResults", "limit", "head_limit", "max_matches", "max_files", "output", "max_chars", "verbose", "docs",
+    "k", "max_results", "maxResults", "limit", "head_limit", "max_matches", "max_files", "output", "max_chars", "verbose", "docs", "timeout_ms",
     // `resolve_scan_target` reads these, and "root" is the escape hatch the out-of-root error tells
     // the caller to use, so refusing it here would leave that advice unusable. "cwd" is the
     // spelling an MCP client already has in hand for the same thing.
@@ -1982,6 +1984,13 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
     if body.get("docs").and_then(|v| v.as_bool()) == Some(false) {
         exclude_globs.extend(crate::codesearch_rank::DOC_EXCLUDE_GLOBS.iter().map(|g| g.to_string()));
     }
+    let budget_ms = match body.get("timeout_ms") {
+        None | Some(Value::Null) => regex.then_some(REGEX_SCAN_DEFAULT_BUDGET_MS),
+        Some(value) => match value.as_u64() {
+            Some(n) if n > 0 => Some(n.min(cfg.index.wall_budget_ms)),
+            _ => return err("codesearch", "timeout_ms must be a positive integer number of milliseconds"),
+        },
+    };
     let spill_name = format!("codesearch-{}.txt", dispatch_task_id().unwrap_or_else(|| unsafe { host_now_ms() }.to_string()));
     let scan = crate::code_index::LiteralScan {
         pattern: query,
@@ -1997,7 +2006,7 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
         term_combination: combine,
-        budget_ms: None,
+        budget_ms,
         max_matches_per_file: None,
         context: 0,
         refresh: scan_refresh_requested(body),
