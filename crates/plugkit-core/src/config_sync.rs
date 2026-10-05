@@ -142,42 +142,78 @@ fn exec_js_stdout(code: &str, timeout_ms: u32) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn try_lock(src: &RepoSource) -> bool {
+struct RefreshLock {
+    path: String,
+    token: String,
+}
+
+fn try_lock(src: &RepoSource) -> Option<RefreshLock> {
     let path = lock_path(src);
     let Ok(p) = serde_json::to_string(&path) else {
-        return false;
+        return None;
     };
     let Ok(parent_p) = serde_json::to_string(&cache_root(src)) else {
-        return false;
+        return None;
     };
     let code = format!(
         "const fs=require('fs');const p={p};const staleMs={LOCK_STALE_MS};\
-         const parentDir=require('path').dirname({parent_p});\
-         try{{fs.mkdirSync(parentDir,{{recursive:true}});}}catch(e0){{}}\
-         process.stdout.write((function(){{\
-         try{{fs.mkdirSync(p);return 'acquired';}}catch(e){{}}\
-         let st=null;try{{st=fs.statSync(p);}}catch(e2){{return 'busy';}}\
-         if(Date.now()-st.mtimeMs<=staleMs){{return 'busy';}}\
-         const aside=p+'.stale-'+process.pid+'-'+Date.now();\
-         try{{fs.renameSync(p,aside);}}catch(e3){{return 'busy';}}\
-         try{{fs.rmSync(aside,{{recursive:true,force:true}});}}catch(e4){{}}\
-         try{{fs.mkdirSync(p);return 'acquired';}}catch(e5){{return 'busy';}}\
-         }})());"
+             const parentDir=require('path').dirname({parent_p});\
+             try{{fs.mkdirSync(parentDir,{{recursive:true}});}}catch(e0){{}}\
+             process.stdout.write((function(){{\
+             function acquire(){{\
+               const token=process.pid+'-'+Date.now()+'-'+Math.random().toString(36).slice(2);\
+               try{{fs.mkdirSync(p);}}catch(e){{return 'busy';}}\
+               try{{fs.writeFileSync(p+'/owner',token,{{flag:'wx'}});return 'acquired:'+token;}}\
+               catch(e){{try{{fs.rmSync(p,{{recursive:true,force:true}});}}catch(e2){{}}return 'busy';}}\
+             }}\
+             let first=acquire();if(first!=='busy'){{return first;}}\
+             let st=null;try{{st=fs.statSync(p);}}catch(e2){{return 'busy';}}\
+             if(Date.now()-st.mtimeMs<=staleMs){{return 'busy';}}\
+             const aside=p+'.stale-'+process.pid+'-'+Date.now();\
+             try{{fs.renameSync(p,aside);}}catch(e3){{return 'busy';}}\
+             try{{fs.rmSync(aside,{{recursive:true,force:true}});}}catch(e4){{}}\
+             return acquire();\
+             }})());"
+    );
+    let token = exec_js_stdout(&code, 15000)?
+        .trim()
+        .strip_prefix("acquired:")?
+        .to_string();
+    if token.is_empty() {
+        None
+    } else {
+        Some(RefreshLock { path, token })
+    }
+}
+
+fn owns_lock(lock: &RefreshLock) -> bool {
+    let (Ok(p), Ok(token)) = (
+        serde_json::to_string(&lock.path),
+        serde_json::to_string(&lock.token),
+    ) else {
+        return false;
+    };
+    let code = format!(
+        "const fs=require('fs');try{{process.stdout.write(fs.readFileSync({p}+'/owner','utf8')==={token}?'owned':'lost');}}catch(e){{process.stdout.write('lost');}}"
     );
     exec_js_stdout(&code, 15000)
-        .map(|s| s.contains("acquired"))
+        .map(|s| s.trim() == "owned")
         .unwrap_or(false)
 }
 
-fn unlock(src: &RepoSource) {
-    let path = lock_path(src);
-    let Ok(p) = serde_json::to_string(&path) else {
-        return;
+fn unlock(lock: &RefreshLock) -> bool {
+    let (Ok(p), Ok(token)) = (
+        serde_json::to_string(&lock.path),
+        serde_json::to_string(&lock.token),
+    ) else {
+        return false;
     };
     let code = format!(
-        "const fs=require('fs');try{{fs.rmSync({p},{{recursive:true,force:true}});}}catch(e){{}}process.stdout.write('done');"
+        "const fs=require('fs');try{{if(fs.readFileSync({p}+'/owner','utf8')!=={token}){{process.stdout.write('lost');}}else{{fs.rmSync({p},{{recursive:true,force:true}});process.stdout.write('released');}}}}catch(e){{process.stdout.write('lost');}}"
     );
-    let _ = exec_js_stdout(&code, 15000);
+    exec_js_stdout(&code, 15000)
+        .map(|s| s.trim() == "released")
+        .unwrap_or(false)
 }
 
 fn git(argv: &[&str], cwd: Option<&str>) -> Result<String, String> {
@@ -236,7 +272,16 @@ fn is_sha_like(s: &str) -> bool {
     s.len() >= 7 && s.len() <= 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn staging_dir(src: &RepoSource) -> String {
+fn staging_dir(src: &RepoSource, lock: &RefreshLock) -> String {
+    format!(
+        "{}.{}.staging-{}",
+        cache_root(src),
+        source_key(src),
+        lock.token
+    )
+}
+
+fn legacy_staging_dir(src: &RepoSource) -> String {
     format!("{}.{}.staging", cache_root(src), source_key(src))
 }
 
@@ -265,14 +310,16 @@ fn recover_stranded(src: &RepoSource) {
             rename(&retired, &src.cache_dir);
         }
     }
-    let staging = staging_dir(src);
+    let staging = legacy_staging_dir(src);
     if crate::pkfs::exists(&staging) {
         remove_tree(&staging);
     }
 }
 
-fn publish_staged(src: &RepoSource) -> Result<(), String> {
-    let staging = staging_dir(src);
+fn publish_staged(src: &RepoSource, staging: &str, lock: &RefreshLock) -> Result<(), String> {
+    if !owns_lock(lock) {
+        return Err("config refresh lock ownership was lost before publish".to_string());
+    }
     let retired = retired_dir(src);
     remove_tree(&retired);
 
@@ -298,8 +345,8 @@ fn publish_staged(src: &RepoSource) -> Result<(), String> {
     Ok(())
 }
 
-fn materialize(src: &RepoSource, reference: &str) -> Result<(), String> {
-    let staging = staging_dir(src);
+fn materialize(src: &RepoSource, reference: &str, lock: &RefreshLock) -> Result<(), String> {
+    let staging = staging_dir(src, lock);
     remove_tree(&staging);
 
     let mut argv: Vec<&str> = vec!["clone", "--depth", "1"];
@@ -326,15 +373,15 @@ fn materialize(src: &RepoSource, reference: &str) -> Result<(), String> {
         }
     }
 
-    publish_staged(src)
+    publish_staged(src, &staging, lock)
 }
 
-fn fetch_to(src: &RepoSource, target_sha: &str) -> Result<(), String> {
+fn fetch_to(src: &RepoSource, target_sha: &str, lock: &RefreshLock) -> Result<(), String> {
     let reference = src.reference.as_deref().unwrap_or("");
     if !reference.is_empty() && !is_sha_like(reference) {
-        return materialize(src, reference);
+        return materialize(src, reference, lock);
     }
-    materialize(src, target_sha)
+    materialize(src, target_sha, lock)
 }
 
 fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcome {
@@ -381,7 +428,7 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
         }
     }
 
-    if !try_lock(src) {
+    let Some(lock) = try_lock(src) else {
         return match have_local {
             Some(sha) => Ok(SyncOutcome {
                 sha: Some(sha),
@@ -394,11 +441,12 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
                 src.repo
             )),
         };
-    }
+    };
 
-    let result = refresh_locked(src, &mut st, now, have_local.clone());
-    unlock(src);
-    write_state(src, &st);
+    let result = refresh_locked(src, &mut st, now, have_local.clone(), &lock);
+    if unlock(&lock) {
+        write_state(src, &st);
+    }
     result
 }
 
@@ -407,7 +455,11 @@ fn refresh_locked(
     st: &mut SyncState,
     now: u64,
     have_local: Option<String>,
+    lock: &RefreshLock,
 ) -> Result<SyncOutcome, String> {
+    if !owns_lock(lock) {
+        return Err("config refresh lock ownership was lost before refresh".to_string());
+    }
     recover_stranded(src);
     let have_local = local_sha(src).or(have_local);
 
@@ -442,7 +494,7 @@ fn refresh_locked(
 
     let pre_fetch_config_text = crate::pkfs::read_to_string(&src.config_path());
 
-    let outcome = fetch_to(src, &remote);
+    let outcome = fetch_to(src, &remote, lock);
 
     if let Err(e) = outcome {
         st.consecutive_failures = st.consecutive_failures.saturating_add(1);
