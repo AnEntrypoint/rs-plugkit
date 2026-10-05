@@ -66,8 +66,7 @@ const GM_CONFIG_EXAMPLE: &str = r#"{
 }
 "#;
 
-const EXAMPLE_HOOK: &str = r#"// Example FSM jit-hook (per fsm-framework-jit-hook-concreting). A hook
-const fs = require('fs');
+const EXAMPLE_HOOK: &str = r#"const fs = require('fs');
 return fs.existsSync('.gm/ship-approved');
 "#;
 
