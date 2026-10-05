@@ -2901,7 +2901,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             }
         }
         } else {
-            out.insert("matches".to_string(), Value::Array(matches));
+                out.insert("matches".to_string(), Value::Array(matches.clone()));
         }
         let budget = req.max_chars.saturating_sub(REPLY_METADATA_RESERVE_CHARS).max(1_000);
     let mut spilled: Vec<String> = Vec::new();
