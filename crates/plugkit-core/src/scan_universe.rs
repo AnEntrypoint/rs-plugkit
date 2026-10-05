@@ -459,7 +459,11 @@ pub fn list_scan_universe(
                 let mut excluded = Vec::new();
                 for path in files {
                     match runtime_artifact_rule(&path) {
-                            Some(rule) => excluded.push(RuleExclusion { path, rule, files: None }),
+                        Some(rule) => excluded.push(RuleExclusion {
+                            path,
+                            rule,
+                            files: None,
+                        }),
                         None => kept.push(path),
                     }
                 }
