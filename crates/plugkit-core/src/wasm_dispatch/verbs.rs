@@ -4835,6 +4835,8 @@ fn git_cherry_pick(body: &Value) -> u64 {
         "head_after": head_after,
         "output": output
     }))
+    }
+
 const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &["SESSION_ID", "session_id", "sessionId", "cwd", "repo", "root", "projectPath", "git_root_override", "_plan"];
 const GIT_PROTECTED_PATHSPECS: &[(&str, &str)] = &[(".gm", ":(top,exclude).gm"), (".agentplug*", ":(top,exclude).agentplug*")];
 const GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD: usize = 2000;
