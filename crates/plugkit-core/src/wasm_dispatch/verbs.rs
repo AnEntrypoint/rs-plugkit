@@ -413,14 +413,57 @@ fn path_within_project(path: &str) -> bool {
         && !normalized.contains(':')
 }
 
+fn paged_lines(content: &str, offset: usize, limit: usize) -> (String, usize, usize, usize) {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let total = lines.len();
+    let start = offset.min(total);
+    let end = match limit { 0 => total, n => (start + n).min(total) };
+    let selected = &lines[start..end];
+    let mut out = String::new();
+    for (i, line) in selected.iter().enumerate() {
+        if i > 0 { out.push('\n'); }
+        out.push_str(line);
+    }
+    (out, total, start, end.saturating_sub(start))
+}
+
 fn fs_read(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    if path.is_empty() { return err("fs_read", "path required"); }
+    if path.is_empty() { return err("fs_read", "path required -- pass {\"path\":\"<relative path>\"}; add \"offset\"/\"limit\" to read a line range and \"max_bytes\" to cap one chunk"); }
     if !path_within_project(path) {
         return err("fs_read", "path must be relative and within the project");
     }
+    let offset = body.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let max_bytes = match body.get("max_bytes").and_then(|v| v.as_u64()) {
+        Some(n) if n > 0 => Some(n as usize),
+        _ => None,
+    };
     match host_read(path) {
-        Some(s) => ok("fs_read", Value::String(s)),
+        Some(content) => {
+            if offset == 0 && limit == 0 && max_bytes.is_none() {
+                return ok("fs_read", Value::String(content));
+            }
+            let (mut text, total_lines, from_line, returned_lines) = paged_lines(&content, offset, limit);
+            let mut truncated_at_bytes = false;
+            if let Some(cap) = max_bytes {
+                if text.len() > cap {
+                    let mut end = cap;
+                    while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+                    text = text[..end].to_string();
+                    truncated_at_bytes = true;
+                }
+            }
+            ok("fs_read", json!({
+                "path": path,
+                "content": text,
+                "total_lines": total_lines,
+                "offset": from_line,
+                "returned_lines": returned_lines,
+                "has_more_lines": from_line + returned_lines < total_lines,
+                "truncated_at_bytes": truncated_at_bytes,
+            }))
+        }
         None => err("fs_read", "not found or empty"),
     }
 }
