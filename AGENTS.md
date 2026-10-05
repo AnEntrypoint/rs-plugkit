@@ -271,6 +271,13 @@ changes.
   cross-namespace access, they are not a security boundary.
 - `codesearch_at_root` skips the cwd-bound fusion/BM25/dataflow machinery on
   purpose; it is tied to the current project's db and would mix roots.
+- `codesearch_at_root`'s `dual` mode reads a path scope (`paths`/`path`/
+  `path_glob`/`glob`/`include`, via `PathScope::from_body`) and filters the
+  vector and BM25 channels after retrieval (`retain_hits_in_scope`), over-
+  fetching first (`scoped_candidate_k`) since filtering happens after ranking.
+  A scoped reply echoes `path_glob`/`files_matching_glob`/`glob_matched_no_files`.
+  Before this, a `root`-scoped `dual` query answered from the whole indexed
+  tree regardless of `paths`, silently ignoring the filter.
 - `codesearch_exhaustive` (literal/regex) is dispatched before the root branch
   and every digest/index/embedding step, none of which it reads; routed later,
   a literal query on a large workspace took minutes.
