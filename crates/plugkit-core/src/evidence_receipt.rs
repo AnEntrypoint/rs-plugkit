@@ -1,7 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
+use crate::wasm_dispatch::{host_now_ms, host_read, host_write};
 use serde_json::{json, Value};
-use crate::wasm_dispatch::{host_read, host_write, host_now_ms};
 
 const RECEIPT_PATH: &str = ".gm/exec-spool/.evidence-receipt.json";
 const LEDGER_PATH: &str = ".gm/exec-spool/.dispatch-ledger.json";
@@ -12,13 +12,22 @@ fn now_ms() -> u64 {
 
 fn completed_prd_ids() -> Vec<String> {
     let (body, _err, code) = crate::orchestrator::prd::handle_list("");
-    if code != 0 { return vec![]; }
-    let Ok(v) = serde_json::from_str::<Value>(&body) else { return vec![] };
-    let Some(items) = v.get("items").and_then(|v| v.as_array()) else { return vec![] };
+    if code != 0 {
+        return vec![];
+    }
+    let Ok(v) = serde_json::from_str::<Value>(&body) else {
+        return vec![];
+    };
+    let Some(items) = v.get("items").and_then(|v| v.as_array()) else {
+        return vec![];
+    };
     items
         .iter()
         .filter(|it| {
-            let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+            let status = it
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("pending");
             !crate::orchestrator::prd::status_is_open(status)
         })
         .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
@@ -44,7 +53,11 @@ pub fn write() -> Value {
     let last_dispatch_id = serde_json::from_str::<Value>(&ledger_raw)
         .ok()
         .and_then(|v| v.as_array().and_then(|a| a.last().cloned()))
-        .and_then(|e| e.get("dispatch_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .and_then(|e| {
+            e.get("dispatch_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_default();
     let receipt = json!({
         "completed_prd_ids": completed_prd_ids(),
