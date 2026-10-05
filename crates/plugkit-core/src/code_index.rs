@@ -3535,6 +3535,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     }
     if budget_exhausted {
         out.insert("budget_exhausted".to_string(), json!(true));
+        out.insert("timed_out".to_string(), json!(true));
         out.insert("budget_ms".to_string(), json!(budget_ms));
     }
     if files_skipped_too_large_count > 0 {
