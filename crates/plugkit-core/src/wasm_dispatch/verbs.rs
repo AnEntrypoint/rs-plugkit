@@ -413,14 +413,74 @@ fn path_within_project(path: &str) -> bool {
         && !normalized.contains(':')
 }
 
+fn path_outside_project_message(path: &str) -> String {
+    let Some(root) = super::host_abi::host_cwd_string() else {
+        return "path must be relative and within the project".to_string();
+    };
+    let slashed = |s: &str| s.replace('\\', "/");
+    let root_slashed = slashed(&root);
+    let root_trimmed = root_slashed.trim_end_matches('/');
+    let path_slashed = slashed(path);
+    let suggestion = path_slashed
+        .strip_prefix(root_trimmed)
+        .map(|rest| rest.trim_start_matches('/'))
+        .filter(|rest| !rest.is_empty() && path_within_project(rest))
+        .map(|rest| format!("; the relative form of that path is \"{rest}\""))
+        .unwrap_or_default();
+    format!("path must be relative and within the project; the project root is {root}, so pass a path relative to it (for example \"src/main.rs\", not an absolute path or one containing \"..\"){suggestion}")
+}
+
+fn paged_lines(content: &str, offset: usize, limit: usize) -> (String, usize, usize, usize) {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let total = lines.len();
+    let start = offset.min(total);
+    let end = match limit { 0 => total, n => (start + n).min(total) };
+    let selected = &lines[start..end];
+    let mut out = String::new();
+    for (i, line) in selected.iter().enumerate() {
+        if i > 0 { out.push('\n'); }
+        out.push_str(line);
+    }
+    (out, total, start, end.saturating_sub(start))
+}
+
 fn fs_read(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    if path.is_empty() { return err("fs_read", "path required"); }
+    if path.is_empty() { return err("fs_read", "path required -- pass {\"path\":\"<relative path>\"}; add \"offset\"/\"limit\" to read a line range and \"max_bytes\" to cap one chunk"); }
     if !path_within_project(path) {
-        return err("fs_read", "path must be relative and within the project");
+        return err("fs_read", &path_outside_project_message(path));
     }
+    let offset = body.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let max_bytes = match body.get("max_bytes").and_then(|v| v.as_u64()) {
+        Some(n) if n > 0 => Some(n as usize),
+        _ => None,
+    };
     match host_read(path) {
-        Some(s) => ok("fs_read", Value::String(s)),
+        Some(content) => {
+            if offset == 0 && limit == 0 && max_bytes.is_none() {
+                return ok("fs_read", Value::String(content));
+            }
+            let (mut text, total_lines, from_line, returned_lines) = paged_lines(&content, offset, limit);
+            let mut truncated_at_bytes = false;
+            if let Some(cap) = max_bytes {
+                if text.len() > cap {
+                    let mut end = cap;
+                    while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+                    text = text[..end].to_string();
+                    truncated_at_bytes = true;
+                }
+            }
+            ok("fs_read", json!({
+                "path": path,
+                "content": text,
+                "total_lines": total_lines,
+                "offset": from_line,
+                "returned_lines": returned_lines,
+                "has_more_lines": from_line + returned_lines < total_lines,
+                "truncated_at_bytes": truncated_at_bytes,
+            }))
+        }
         None => err("fs_read", "not found or empty"),
     }
 }
@@ -432,7 +492,7 @@ fn fs_write(body: &Value) -> u64 {
     let allow_empty = body.get("allow_empty").and_then(|v| v.as_bool()).unwrap_or(false);
     if path.is_empty() { return err("fs_write", "path required"); }
     if !path_within_project(path) {
-        return err("fs_write", "path must be relative and within the project");
+        return err("fs_write", &path_outside_project_message(path));
     }
     let received_keys: Vec<String> = body.as_object()
         .map(|map| map.keys().cloned().collect())
@@ -467,7 +527,7 @@ fn fs_write(body: &Value) -> u64 {
 fn fs_readdir(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     if !path_within_project(path) {
-        return err("fs_readdir", "path must be relative and within the project");
+        return err("fs_readdir", &path_outside_project_message(path));
     }
     let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
     let v = unpack_to_value(packed);
@@ -479,7 +539,7 @@ fn fs_stat(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() { return err("fs_stat", "path required"); }
     if !path_within_project(path) {
-        return err("fs_stat", "path must be relative and within the project");
+        return err("fs_stat", &path_outside_project_message(path));
     }
     match super::host_abi::host_stat(path) {
         Some(v) if !v.is_null() => ok("fs_stat", v),
@@ -1545,6 +1605,128 @@ fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) -> Value {
     if opts.verbose { raw } else { crate::codesearch_rank::compact_dual(query, &raw, &opts) }
 }
 
+const PATH_SCOPE_FIELDS: &[&str] = &["paths", "path", "path_glob", "glob", "include"];
+
+struct PathScope {
+    patterns: Vec<String>,
+    globs: Vec<crate::path_glob::PathGlob>,
+}
+
+impl PathScope {
+    fn from_body(body: &Value) -> Result<Option<PathScope>, String> {
+        let mut patterns: Vec<String> = Vec::new();
+        for field in PATH_SCOPE_FIELDS {
+            let Some(value) = body.get(*field) else { continue };
+            match value {
+                Value::String(text) => push_scope_pattern(&mut patterns, text, field)?,
+                Value::Array(entries) => {
+                    if entries.is_empty() {
+                        return Err(format!(
+                            "{field} is an empty array -- a blank scope is dropped before the scan runs and silently searches everything; omit the field to search unscoped"
+                        ));
+                    }
+                    for entry in entries {
+                        match entry.as_str() {
+                            Some(text) => push_scope_pattern(&mut patterns, text, field)?,
+                            None => return Err(format!(
+                                "{field} entries must all be non-empty path strings; got {entry}"
+                            )),
+                        }
+                    }
+                }
+                Value::Null => continue,
+                other => return Err(format!(
+                    "{field} must be a string or an array of strings; got {other}"
+                )),
+            }
+        }
+        if patterns.is_empty() { return Ok(None) }
+        let mut globs = Vec::with_capacity(patterns.len());
+        for pattern in &patterns {
+            match crate::path_glob::PathGlob::parse(pattern) {
+                Ok(glob) => globs.push(glob),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Some(PathScope { patterns, globs }))
+    }
+
+    fn admits(&self, root: &str, path: &str) -> bool {
+        self.globs.iter().any(|glob| glob.admits(root, None, path))
+    }
+
+    fn applied(&self) -> String {
+        if self.patterns.len() == 1 { return self.patterns[0].clone() }
+        self.patterns.join(" ")
+    }
+}
+
+fn push_scope_pattern(out: &mut Vec<String>, raw: &str, field: &str) -> Result<(), String> {
+    let normalized = raw.trim().replace('\\', "/");
+    let normalized = normalized.trim_start_matches("./").trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        return Err(format!(
+            "{field} carries an empty path -- a blank scope is dropped before the scan runs and silently searches everything; omit the field to search unscoped"
+        ));
+    }
+    if normalized.starts_with('!') {
+        return Err(format!(
+            "{field} carries the negated pattern \"{normalized}\" -- there is no exclude filter in this build; scope positively and send one dispatch per subtree"
+        ));
+    }
+    if crate::path_glob::looks_like_glob(&normalized) {
+        if !out.contains(&normalized) { out.push(normalized) }
+        return Ok(());
+    }
+    let below = format!("{normalized}/**");
+    if !out.contains(&normalized) { out.push(normalized) }
+    if !out.contains(&below) { out.push(below) }
+    Ok(())
+}
+
+const SCOPED_CANDIDATE_MULTIPLIER: usize = 8;
+
+const SCOPED_CANDIDATE_FLOOR: usize = 50;
+
+fn scoped_candidate_k(k: u32, scope: Option<&PathScope>) -> usize {
+    match scope {
+        Some(_) => (k as usize).saturating_mul(SCOPED_CANDIDATE_MULTIPLIER).max(SCOPED_CANDIDATE_FLOOR),
+        None => k as usize,
+    }
+}
+
+fn hit_scope_path(hit: &Value) -> Option<String> {
+    hit.get("path").and_then(|v| v.as_str())
+        .or_else(|| hit.get("symbol").and_then(|s| s.get("path")).and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+}
+
+fn retain_hits_in_scope(hits: &mut Vec<Value>, root: &str, scope: Option<&PathScope>) {
+    let Some(scope) = scope else { return };
+    hits.retain(|hit| match hit_scope_path(hit) {
+        Some(path) => scope.admits(root, &path),
+        None => false,
+    });
+}
+
+fn apply_scope_echo(reply: &mut Value, scope: &PathScope, channels: &[&Vec<Value>]) {
+    let mut files: Vec<String> = Vec::new();
+    for channel in channels {
+        for hit in *channel {
+            if let Some(path) = hit_scope_path(hit) {
+                if !files.contains(&path) { files.push(path) }
+            }
+        }
+    }
+    let Value::Object(map) = reply else { return };
+    map.insert("path_glob".to_string(), json!(scope.applied()));
+    map.insert("files_matching_glob".to_string(), json!(files.len()));
+    if files.is_empty() {
+        map.insert("glob_matched_no_files".to_string(), json!(true));
+    }
+}
+
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
     if !crate::wasm_dispatch::host_allow_root(root) {
         return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
@@ -1553,6 +1735,10 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         let out = crate::code_index::search_filenames_at(query, k as usize, cfg, Some(root));
         return ok("codesearch", out);
     }
+    let scope = match PathScope::from_body(body) {
+        Ok(scope) => scope,
+        Err(e) => return err("codesearch", &e),
+    };
     let already_indexed = body.get("auto_indexed").and_then(|v| v.as_bool()).unwrap_or(false);
     if !already_indexed {
         let stored = crate::code_index::stored_digest_at(Some(root));
@@ -1576,10 +1762,11 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
     }
     let embedding = embed_query(query);
     let shown_k = dual_channel_depth(body, k);
-    let vres = crate::code_index::search_at(query, shown_k, Some(&embedding), Some(root));
-    let vector_hits = vres.get("rows").cloned().unwrap_or_else(|| json!([]));
+    let scan_k = scoped_candidate_k(shown_k as u32, scope.as_ref());
+    let vres = crate::code_index::search_at(query, scan_k, Some(&embedding), Some(root));
+    let mut vector_hits: Vec<Value> = vres.get("rows").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let mut corpus = crate::code_index::FusionCorpus::load_at(Some(root));
-    let bm25_hits: Vec<Value> = corpus.bm25_rank_cfg(query, shown_k, &cfg.scoring)
+    let mut bm25_hits: Vec<Value> = corpus.bm25_rank_cfg(query, scan_k, &cfg.scoring)
         .into_iter()
         .map(|(key, score)| {
             let text = corpus.text_for_key(&key).unwrap_or_default();
@@ -1594,7 +1781,11 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         })
         .collect();
     let commits = crate::code_index::git_commit_rank_at(root, query, 10);
-    let raw = json!({
+    retain_hits_in_scope(&mut vector_hits, root, scope.as_ref());
+    retain_hits_in_scope(&mut bm25_hits, root, scope.as_ref());
+    vector_hits.truncate(shown_k);
+    bm25_hits.truncate(shown_k);
+    let mut raw = json!({
         "mode": "dual",
         "root": root,
         "vector_hits": vector_hits,
@@ -1607,6 +1798,9 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         },
         "degraded": vres.get("degraded").cloned().unwrap_or(json!(false)),
     });
+    if let Some(scope) = scope.as_ref() {
+        apply_scope_echo(&mut raw, scope, &[&vector_hits, &bm25_hits]);
+    }
     ok("codesearch", compact_dual_reply(body, query, k, raw))
 }
 
