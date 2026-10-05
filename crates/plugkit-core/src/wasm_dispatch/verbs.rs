@@ -6851,7 +6851,8 @@ fn git_checkout_pathspec(raw: &str, top: &str, prefix: &str) -> Result<String, &
     if GIT_PROTECTED_PATHSPECS.iter().any(|(name, _)| {
         top_segment == name.trim_end_matches('*')
             || (name.ends_with('*') && top_segment.starts_with(name.trim_end_matches('*')))
-    }) {
+    }) && !is_restorable_transient_generated_path(&from_top)
+    {
         return Err("the project's own .gm/ and .agentplug* are never restored");
     }
     Ok(for_git)
@@ -7772,6 +7773,16 @@ fn exec_git_in(repo: Option<&str>, args: &str) -> String {
 
 fn git_porcelain_in(repo: Option<&str>) -> String {
     git_porcelain_scoped(repo, &[])
+}
+
+fn is_restorable_transient_generated_path(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    matches!(
+        path,
+        ".gm/.last-scan-deps-ts"
+            | ".gm/.last-scan-deps-result.json"
+            | ".agentplug-kv/codeinsight-edges"
+    ) || path.starts_with(".agentplug-kv/codeinsight-edges/")
 }
 
 fn git_push_porcelain_in(repo: Option<&str>) -> String {

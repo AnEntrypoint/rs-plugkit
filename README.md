@@ -267,7 +267,7 @@ finishes.
 
 `git_add`, `git_commit`, `git_finalize`, `git_diff`, `git_stash` and
 `git_checkout` take an optional `paths` (alias `files`) pathspec list
-(`git_checkout {paths, ref?}` restores just those files in the working tree from `ref`, default the index; it refuses an empty list, a leading `-` or `:`, `..`, an absolute path outside the repo, and anything under `.gm/` or `.agentplug*`, and answers `{restored, source, output}`). With it, `git_commit` and
+(`git_checkout {paths, ref?}` restores just those files in the working tree from `ref`, default the index; it refuses an empty list, a leading `-` or `:`, `..`, an absolute path outside the repo, and anything under `.gm/` or `.agentplug*` except `.gm/.last-scan-deps-ts`, `.gm/.last-scan-deps-result.json`, and `.agentplug-kv/codeinsight-edges/`, and answers `{restored, source, output}`). With it, `git_commit` and
 `git_finalize` stage and commit exactly those pathspecs (`git commit -- <paths>`,
 so entries another writer staged stay staged and uncommitted), the
 post-commit porcelain gate considers only those paths, and when dirt remains
