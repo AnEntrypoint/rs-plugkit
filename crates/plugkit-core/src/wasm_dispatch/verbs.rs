@@ -8043,7 +8043,11 @@ fn paths_staged_nothing(cwd: Option<&str>, paths: &[String]) -> bool {
 
 fn git_stage_argv(paths: &[String], cwd: Option<&str>) -> Vec<String> {
     let mut argv: Vec<String> = vec!["add".to_string(), "--".to_string()];
-    argv.extend(git_pathspec_scope(paths, cwd));
+    if paths.is_empty() {
+        argv.extend(git_pathspec_scope(paths, cwd));
+    } else {
+        argv.extend(paths.iter().cloned());
+    }
     argv
 }
 
