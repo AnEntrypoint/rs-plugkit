@@ -34,14 +34,34 @@ on:
       build_command:
         required: true
         type: string
+      release_signing_environment:
+        required: true
+        type: string
+      release_signing_key_id:
+        required: true
+        type: string
+      release_signing_public_key:
+        required: true
+        type: string
     secrets:
       publisher_token:
         required: true
-      release_signing_key:
-        required: true
 
 jobs:
+  signing-preflight:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.release_signing_environment }}
+    steps:
+      - name: Require the protected release signing key
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_SIGNING_KEY"
+
   bump:
+    needs: signing-preflight
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.bump.outputs.version }}
@@ -80,8 +100,9 @@ jobs:
           fi
 
   release:
-    needs: bump
+    needs: [signing-preflight, bump]
     runs-on: ubuntu-latest
+    environment: ${{ inputs.release_signing_environment }}
     defaults:
       run:
         working-directory: ${{ inputs.crate_dir }}
@@ -128,20 +149,38 @@ jobs:
       - name: Sign release assets
         shell: bash
         env:
-          RELEASE_SIGNING_KEY: ${{ secrets.release_signing_key }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_KEY_ID: ${{ inputs.release_signing_key_id }}
+          RELEASE_SIGNING_PUBLIC_KEY: ${{ inputs.release_signing_public_key }}
+          RELEASE_VERSION: ${{ needs.bump.outputs.version }}
+          RELEASE_SEQUENCE: ${{ github.run_id }}
         run: |
-          set -e
-          if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
-            echo "::warning::release_signing_key secret is not configured -- publishing without a minisig sidecar. agentplug-runner verifies only the sha256 sidecar and never reads a minisig, so an unsigned release is fully consumable; refusing here froze every consumer on the last published release (plugkit-bin stayed at v0.1.1284 while six main pushes failed at this step, 2026-09-10..14)."
-            exit 0
-          fi
-          sudo apt-get update -y >/dev/null && sudo apt-get install -y minisign >/dev/null
-          umask 077
-          KEYFILE="$RUNNER_TEMP/release.key"
-          printf '%s' "$RELEASE_SIGNING_KEY" > "$KEYFILE"
+          set -euo pipefail
           cd release-assets
-          minisign -S -s "$KEYFILE" -m "${{ inputs.published_asset_basename }}.wasm.sha256" -x "${{ inputs.published_asset_basename }}.wasm.sha256.minisig" </dev/null
-          rm -f "$KEYFILE"
+          node <<'NODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const artifact = `${{ inputs.published_asset_basename }}.wasm`;
+          const seed = process.env.RELEASE_SIGNING_KEY;
+          const publicKey = process.env.RELEASE_SIGNING_PUBLIC_KEY;
+          const version = process.env.RELEASE_VERSION;
+          const sequence = process.env.RELEASE_SEQUENCE;
+          const keyId = process.env.RELEASE_SIGNING_KEY_ID;
+          if (!/^[0-9a-f]{64}$/i.test(seed) || !/^[0-9a-f]{64}$/i.test(publicKey) || !/^\d+$/.test(sequence) || !keyId || !version) process.exit(1);
+          const privateDer = Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(seed, 'hex')]);
+          const privateKey = crypto.createPrivateKey({ key: privateDer, format: 'der', type: 'pkcs8' });
+          const derived = crypto.createPublicKey(privateKey).export({ type: 'spki', format: 'der' }).subarray(-32).toString('hex');
+          if (derived !== publicKey.toLowerCase()) process.exit(1);
+          const sha256 = crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
+          const nl = String.fromCharCode(10);
+          const statement = ['agentplug-update-v1', `artifact:${artifact}`, `version:${version}`, `sequence:${sequence}`, `sha256:${sha256}`, ''].join(nl);
+          const sig = crypto.sign(null, Buffer.from(statement), privateKey).toString('hex');
+          const publicDer = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(publicKey, 'hex')]);
+          const verifier = crypto.createPublicKey({ key: publicDer, format: 'der', type: 'spki' });
+          if (!crypto.verify(null, Buffer.from(statement), verifier, Buffer.from(sig, 'hex'))) process.exit(1);
+          fs.writeFileSync(`${artifact}.sig`, `${JSON.stringify({ v: 1, artifact, version, sequence: Number(sequence), sha256, signatures: [{ key_id: keyId, sig }] })}\n`);
+          NODE
 
       - name: Publish release
         env:
