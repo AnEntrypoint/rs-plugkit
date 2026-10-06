@@ -3437,33 +3437,36 @@ fn glob_match_simple(pattern: &str, text: &str) -> bool {
     pi == p.len()
 }
 
-pub fn search_filenames(pattern: &str, k: usize, cfg: &crate::ragconfig::RagConfig) -> Value {
-    search_filenames_at(pattern, k, cfg, None)
-}
-
-pub fn search_filenames_at(
-    pattern: &str,
-    k: usize,
-    cfg: &crate::ragconfig::RagConfig,
-    project_path: Option<&str>,
-) -> Value {
-    let needle = pattern.to_lowercase();
+pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
+    let needle = if req.case_insensitive {
+        req.pattern.to_lowercase()
+    } else {
+        req.pattern.to_owned()
+    };
     let is_glob = needle.contains('*') || needle.contains('?');
-    let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
-    let origin = if project_path.filter(|p| !p.is_empty()).is_some() {
+    let root = req.root.filter(|p| !p.is_empty()).unwrap_or(".");
+    let scope = req.path.filter(|p| !p.is_empty());
+    let origin = if req.root.filter(|p| !p.is_empty()).is_some() {
         crate::scan_universe::TargetOrigin::CallerNamed
     } else {
         crate::scan_universe::TargetOrigin::ProjectDefault
     };
-    let file_cap = cfg
-        .index
-        .digest_max_files
-        .max(20000)
-        .min(LITERAL_SCAN_MAX_FILES)
-        .max(1);
+    let include_globs = match parse_globs(&req.include_globs) {
+        Ok(parsed) => parsed,
+        Err(error) => return json!({ "ok": false, "error": error, "mode": "filename" }),
+    };
+    let exclude_globs = match parse_globs(&req.exclude_globs) {
+        Ok(parsed) => parsed,
+        Err(error) => return json!({ "ok": false, "error": error, "mode": "filename" }),
+    };
+    let admitted = |path: &str| {
+        (include_globs.is_empty() || include_globs.iter().any(|glob| glob.admits(root, scope, path)))
+            && !exclude_globs.iter().any(|glob| glob.admits(root, scope, path))
+    };
+    let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let universe = match crate::scan_universe::list_scan_universe(
         root,
-        None,
+        scope,
         file_cap.saturating_add(1),
         &cfg.index,
         origin,
@@ -3478,10 +3481,11 @@ pub fn search_filenames_at(
     } else {
         &listed[..]
     };
-    let hits: Vec<Value> = full_files
+    let mut paths: Vec<String> = full_files
         .iter()
+        .filter(|path| admitted(path))
         .filter(|p| {
-            let lp = p.to_lowercase();
+            let lp = if req.case_insensitive { p.to_lowercase() } else { (*p).clone() };
             if is_glob {
                 glob_match_simple(&needle, &lp)
                     || glob_match_simple(&needle, lp.rsplit('/').next().unwrap_or(&lp))
@@ -3489,17 +3493,65 @@ pub fn search_filenames_at(
                 lp.contains(&needle)
             }
         })
-        .take(k)
-        .map(|p| json!({ "path": p }))
+        .cloned()
         .collect();
-    let exhaustive = !files_truncated && universe.listing_complete;
+    let match_count = paths.len();
+    let limit = req.list_limit.unwrap_or(req.max_matches);
+    let matches_truncated = req.output != ScanOutput::Count && match_count > limit;
+    if req.output != ScanOutput::Count {
+        paths.truncate(limit);
+    }
+    let returned_count = if req.output == ScanOutput::Count { 0 } else { paths.len() };
+    let budget = req.max_chars.saturating_sub(REPLY_METADATA_RESERVE_CHARS).max(1);
+    let (shown, spilled) = if req.output == ScanOutput::Count {
+        (Vec::new(), Vec::new())
+    } else {
+        split_lines_at_budget(paths, budget)
+    };
+    let exhaustive = !files_truncated && !matches_truncated && universe.listing_complete;
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), json!(true));
     out.insert("mode".to_string(), json!("filename"));
-    out.insert("hits".to_string(), json!(hits));
+    match req.output {
+        ScanOutput::Matches => {
+            out.insert("hits".to_string(), json!(shown.iter().map(|path| json!({ "path": path })).collect::<Vec<_>>()));
+        }
+        ScanOutput::Compact => {
+            out.insert("matches".to_string(), json!(shown));
+        }
+        ScanOutput::Files => {
+            out.insert("files".to_string(), json!(shown));
+        }
+        ScanOutput::Count => {
+            out.insert("count".to_string(), json!(match_count));
+        }
+    }
+    out.insert("match_count".to_string(), json!(match_count));
+    out.insert("returned_count".to_string(), json!(returned_count));
     out.insert("scanned".to_string(), json!(full_files.len()));
     out.insert("file_source".to_string(), json!(universe.source.label()));
     out.insert("exhaustive".to_string(), json!(exhaustive));
+    if matches_truncated {
+        out.insert("matches_truncated".to_string(), json!(true));
+        out.insert("matches_truncated_at".to_string(), json!(limit));
+    }
+    if !spilled.is_empty() {
+        out.insert("reply_truncated".to_string(), json!(true));
+        out.insert("spilled_count".to_string(), json!(spilled.len()));
+        if let Some(path) = spill_lines_to_out_file(&req.spill_name, &spilled) {
+            out.insert("spill_file".to_string(), json!(path));
+        } else {
+            out.insert("exhaustive".to_string(), json!(false));
+            out.insert("spill_write_failed".to_string(), json!(true));
+        }
+    }
+    if !include_globs.is_empty() || !exclude_globs.is_empty() {
+        let admitted_files = full_files.iter().filter(|path| admitted(path)).count();
+        out.insert("files_matching_glob".to_string(), json!(admitted_files));
+        if admitted_files == 0 {
+            out.insert("glob_matched_no_files".to_string(), json!(true));
+        }
+    }
     if !universe.listing_complete {
         out.insert("listing_incomplete".to_string(), json!(true));
         if let Some(reason) = &universe.walk_reason {
