@@ -1,8 +1,8 @@
 #![cfg(target_arch = "wasm32")]
 
+pub(crate) mod host_abi;
 mod dangling_refs;
 mod events;
-pub(crate) mod host_abi;
 mod verbs;
 
 pub(crate) use events::{current_dispatch_session_id, emit_event};
