@@ -535,6 +535,13 @@ changes.
   the on-disk file and the `mutable-list`/`prd-list` verb that still serve the
   whole list. Unbounded arrays are what blew one first-turn response to 375 KB
   raw / 146 KB MCP-cleaned against a 146-row mutables file.
+- `mutables::handle_add` refuses a body with no non-empty `id`, and refuses one
+  whose only remaining keys are the dispatch envelope, writing nothing either
+  way. Before this it generated `mut-<ms>` for a missing `id`, so a
+  `mutable-add` dispatched with no body at all -- which the MCP layer turns into
+  `{"session_id":...}`, never an empty string -- created an unaddressable
+  placeholder row that read as real pending state. `status` counts as payload,
+  so `{id, status}` still reopens an existing row.
 - `mutables::handle_add` upserts on `id` and collapses pre-existing duplicate
   ids, keeping a resolved row over an unresolved one so a witnessed obligation
   is never reopened by the collapse. Before this it pushed blindly, so one id

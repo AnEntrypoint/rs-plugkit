@@ -88,10 +88,28 @@ fn find_cycle(start_id: &str, deps: &std::collections::HashMap<String, Vec<Strin
     walk(start_id, deps, &mut path, &mut on_path)
 }
 
+const DISPATCH_ENVELOPE_FIELDS: &[&str] = &[
+    "SESSION_ID",
+    "session_id",
+    "sessionId",
+    "cwd",
+    "repo",
+    "root",
+    "projectPath",
+    "git_root_override",
+    "_plan",
+];
+
+const MUTABLE_ADD_SHAPE: &str = "mutable-add needs {\"id\":\"<kebab-case-slug>\",\"value\":\"<what is unknown>\",\"status\":\"unknown\"} -- `value`/`subject`/`description`/`notes` carry the unknown, `obligation_kind`/`depends_on`/`witness_evidence` type it as an obligation.";
+
 pub fn handle_add(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
-        return (String::new(), "missing body".to_string(), 1);
+        return (
+            String::new(),
+            format!("missing body: {}", MUTABLE_ADD_SHAPE),
+            1,
+        );
     }
     let new_item: Value = match serde_yaml::from_str::<Value>(trimmed) {
         Ok(v) => v,
@@ -106,10 +124,43 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         Some(m) => m.clone(),
         None => return (String::new(), "item must be a mapping".to_string(), 1),
     };
-    let id = map.get(&Value::String("id".to_string()))
+    let id = match map
+        .get(&Value::String("id".to_string()))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("mut-{}", crate::orchestrator::state::now_ms()));
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(id) => id.to_string(),
+        None => {
+            let only_envelope = map
+                .keys()
+                .filter_map(|k| k.as_str())
+                .all(|k| DISPATCH_ENVELOPE_FIELDS.contains(&k));
+            let cause = if only_envelope {
+                "the body carried only dispatch envelope fields, which is what a mutable-add dispatched with no body at all arrives as"
+            } else {
+                "the body carried no `id`"
+            };
+            let err = format!(
+                "mutable-add refused: {} -- nothing was written. `id` is mandatory and is never generated: a `mut-<ms>` placeholder cannot be named by mutable-resolve, mutable-defer or another row's depends_on, so it reads as real pending state and blocks every transition while staying unreachable. {}",
+                cause, MUTABLE_ADD_SHAPE
+            );
+            return (String::new(), err, 1);
+        }
+    };
+    let payload_keys: Vec<&str> = map
+        .keys()
+        .filter_map(|k| k.as_str())
+        .filter(|k| *k != "id" && !DISPATCH_ENVELOPE_FIELDS.contains(k))
+        .collect();
+    if payload_keys.is_empty() {
+        let err = format!(
+            "mutable-add refused: `id` \"{}\" arrived with no payload field -- nothing was written. Once `id` and the dispatch envelope ({}) are set aside the body is empty, so the row would name no unknown. Pass at least one payload field beside `id`: `value`, `subject`, `description`, `notes`, `obligation_kind`, `depends_on`, `witness_evidence`.",
+            id,
+            DISPATCH_ENVELOPE_FIELDS.join(", ")
+        );
+        return (String::new(), err, 1);
+    }
     let new_depends_on = extract_depends_on(&map);
     let path = mutables_path();
     let path_s = path.to_string_lossy().to_string();
