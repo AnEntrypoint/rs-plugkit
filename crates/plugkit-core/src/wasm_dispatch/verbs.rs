@@ -1840,6 +1840,9 @@ const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     // the caller to use, so refusing it here would leave that advice unusable. "cwd" is the
     // spelling an MCP client already has in hand for the same thing.
     "root", "projectPath", "cwd",
+    // `codesearch_exhaustive` reads these: the term-combination a query_note/hint tells the
+    // caller to pass back, so refusing them leaves that advice unusable.
+    "combine", "term_combination", "verbatim",
 ];
 
 const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit", "head_limit"];
