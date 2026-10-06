@@ -279,6 +279,13 @@ round trip. On a non-green or unresolvable result, the response's
 `next_dispatch` field names `ci-status` so the caller can re-check once CI
 finishes.
 
+`git_commit` consumes the whole index in a merge.
+The verb refuses `paths` or `files` or `add_all`.
+These requests do not stage files.
+Review the staged index before the commit.
+It does not add a pathspec to the commit.
+Unstaged and untracked files are not in the commit.
+
 `git_add`, `git_commit`, `git_finalize`, `git_diff`, `git_stash` and
 `git_checkout` take an optional `paths` (alias `files`) pathspec list
 (`git_checkout {paths, ref?}` restores just those files in the working tree from `ref`, default the index; it refuses an empty list, a leading `-` or `:`, `..`, an absolute path outside the repo, and anything under `.gm/` or `.agentplug*` except `.gm/.last-scan-deps-ts`, `.gm/.last-scan-deps-result.json`, and `.agentplug-kv/codeinsight-edges/`, and answers `{restored, source, output}`). With it, `git_commit` and
