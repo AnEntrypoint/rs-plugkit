@@ -67,11 +67,11 @@ jobs:
       run:
         working-directory: ${{ inputs.crate_dir }}
     steps:
-          - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-            with:
-              token: ${{ secrets.publisher_token }}
-              fetch-depth: 0
-              ref: main
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          token: ${{ secrets.publisher_token }}
+          fetch-depth: 0
+          ref: main
 
       - name: Auto-bump patch version BEFORE build
         id: bump
