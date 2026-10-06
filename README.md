@@ -253,6 +253,20 @@ When a shell verb returns a `task_id`, use `task-output` with JSON body
 `{"id":"task-…"}` to retrieve it. Use `task-stop` with the same body to stop
 it. These are GM verb dispatches, not shell commands.
 
+`codeinsight` reads current source and refreshes its structural index before answering,
+without generating embeddings. Content hashes invalidate cached symbols even when file
+size and modification time are unchanged. Successful replies include `codeinsight_index`
+coverage for index-eligible files. Failed listings or stats, capped or budget-limited work,
+unreadable or oversized files, failed parses, and failed stores reject the query instead of
+presenting cached graph evidence as current. Use `action: "sync"`
+for a longer refresh before retrying a budget-limited query.
+
+Call edges use unqualified names, not resolved definition bindings. `callers`, `callees`,
+`impact` and `tests` reject path, file, glob and line scope fields. Use path-scoped
+`outline`/`find` and `codesearch` to distinguish same-named definitions and exact call
+sites. Caller and impact replies label this resolution model and definition ambiguity;
+`through_ambiguous` remains an explicit impact traversal opt-in.
+
 Close a completed PRD row with `prd-resolve` and JSON body
 `{"id":"<prd-item-id>","witness_evidence":"<live evidence>"}`. An optional
 `commit_comment` attaches a one-line resolution note to the next GM commit.
