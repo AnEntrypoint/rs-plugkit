@@ -225,13 +225,11 @@ fn scan_file_list(
     scanned
 }
 
-const STAMP_PATH: &str = ".gm/scan-deps-stamp.json";
+const STAMP_PATH: &str = ".gm/exec-spool/.scan-deps-stamp.json";
+const LEGACY_STAMP_PATH: &str = ".gm/scan-deps-stamp.json";
 
-fn load_stamp() -> std::collections::HashMap<String, (f64, u64)> {
-    let Some(text) = crate::wasm_dispatch::host_read(STAMP_PATH) else {
-        return Default::default();
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+fn parse_stamp(text: &str) -> std::collections::HashMap<String, (f64, u64)> {
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
         return Default::default();
     };
     let Some(obj) = v.get("packages").and_then(|p| p.as_object()) else {
@@ -246,13 +244,24 @@ fn load_stamp() -> std::collections::HashMap<String, (f64, u64)> {
         .collect()
 }
 
+fn load_stamp() -> std::collections::HashMap<String, (f64, u64)> {
+    crate::wasm_dispatch::host_read(STAMP_PATH)
+        .or_else(|| crate::wasm_dispatch::host_read(LEGACY_STAMP_PATH))
+        .as_deref()
+        .map(parse_stamp)
+        .unwrap_or_default()
+}
+
 fn save_stamp(packages: &std::collections::HashMap<String, (f64, u64)>) {
     let obj: serde_json::Map<String, Value> = packages
         .iter()
         .map(|(k, (mtime, size))| (k.clone(), json!([mtime, size])))
         .collect();
-    let doc = json!({ "tool": "scan_deps", "version": 1, "packages": obj });
-    let _ = crate::wasm_dispatch::host_write(STAMP_PATH, &doc.to_string());
+    let doc = json!({ "tool": "scan_deps", "version": 1, "packages": obj }).to_string();
+    if crate::wasm_dispatch::host_read(STAMP_PATH).as_deref() == Some(doc.as_str()) {
+        return;
+    }
+    let _ = crate::wasm_dispatch::host_write(STAMP_PATH, &doc);
 }
 
 fn is_noise_dir_segment(seg: &str) -> bool {
@@ -565,6 +574,7 @@ pub fn scan_deps(body: &Value) -> Value {
 
     if force_full {
         let _ = crate::wasm_dispatch::host_remove_file_never_directory(STAMP_PATH);
+        let _ = crate::wasm_dispatch::host_remove_file_never_directory(LEGACY_STAMP_PATH);
     }
     let node_modules = scan_node_modules(root, MAX_NODE_MODULES_FILES);
     findings.extend(node_modules.findings);
