@@ -239,7 +239,7 @@ Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir`, `scan_deps`
 size/line-ratio disproportion + dense `\uXXXX`-escape-run detection across
 git-tracked source and a bounded `node_modules` walk), `kv`/`kv_get`/
 `kv_put`/`kv_delete`, `exec`/`exec_js`, `fetch`, `env_get`, `recall`,
-`codesearch`, `callers`/`callees`/`impact`, `memorize`/`memorize-prune`, `health`, `filter`, the full git
+`codesearch`, `codeinsight` (symbol, call, import, complexity and duplicate queries; `callers`/`callees`/`impact` are aliases), `memorize`/`memorize-prune`, `health`, `filter`, the full git
 verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`,
 `git_add`, `git_commit`, `git_finalize`, `git_push`, `git_checkout`,
 `git_fetch`, `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`, `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
@@ -279,6 +279,27 @@ reported rather than reconciled. `paths` together with `rev` on
 `commit_comment` notes are bundled only by a commit whose scope covers
 `.gm/prd.yml` (no `paths`, or `paths` naming it or `.gm`); a narrower scoped
 commit leaves them pending so the row removal and its note land together.
+
+An explicit `paths` outranks the protected-path exclusion list: an entry the
+caller named is never withheld, and a request whose every pathspec resolves
+under `.agentplug*` is refused rather than silently widening. A scoped
+`git_commit`/`git_finalize` whose paths stage nothing fails with
+`error_code: invalid_args` and `requested_paths` instead of reporting
+`nothing_to_commit`, so a pathspec that no-ops cannot fall through to
+committing the rest of the index.
+
+`git_commit` and `git_finalize` refuse before staging anything when the commit
+would reference a file that exists on disk, is untracked, is not gitignored
+and is not part of this commit (`error_code: dangling_reference`, one
+`dangling_references` entry per offender naming `from`, `line`, `specifier`
+and `target`, plus a `fixes` list). Specifiers are resolved the way the
+runtime would: relative first, then bare against the nearest `package.json`
+`exports` map (string, conditional object and `"./*"` wildcard) and npm
+workspaces under `packages/*`. `allow_dangling: ["<target>"]` waives named
+targets and `allow_dangling: true` waives all; either way the waived targets
+come back in `dangling_waived`. Scanning skips `node_modules/`, `dist/`,
+`vendor/`, `build/`, `coverage/`, `.git/`, `.gm/` and `.agentplug-kv/`, files
+above 512 KiB, non-JS/TS/JSON extensions, and stops after 400 files.
 
 Async git hosts use a pending-token protocol shaped like `host_fetch`'s. A
 host that cannot block the wasm call (a browser driving isomorphic-git on the
