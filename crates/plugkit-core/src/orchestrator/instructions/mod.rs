@@ -208,7 +208,7 @@ fn next_phase_hint(phase: &str) -> Option<String> {
 #[cfg(target_arch = "wasm32")]
 fn prd_items_json() -> Vec<serde_json::Value> {
     for attempt in 0..2 {
-        let (body, err, code) = prd::handle_list("");
+        let (body, err, code) = prd::handle_list_full();
         if code == 0 {
             if let Some(items) = serde_json::from_str::<serde_json::Value>(&body)
                 .ok()

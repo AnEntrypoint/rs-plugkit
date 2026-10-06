@@ -2081,6 +2081,8 @@ grep (alias \"rg\") is an exhaustive literal/regex scan of the tree. Every reply
                                                      and bypass the mtime-keyed content cache, so uncommitted
                                                      edits and untracked files are visible. \"file_source\":\"disk\"
                                                      and \"no_cache\":true are aliases.
+  {\"mode\":\"pattern\"}                               scan for \"pattern\" (the default; naming it explicitly is
+                                                     always accepted)
   {\"mode\":\"comments\"}                              find comment spans instead of a pattern (no \"pattern\" needed)
 
 mode:\"comments\" -- one pass for every comment in the tree, column-1 and inline alike:
@@ -2372,7 +2374,7 @@ fn grep(body: &Value) -> u64 {
     let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let comments_flag = body.get("comments").and_then(|v| v.as_bool()).unwrap_or(false);
     let want_comments = mode == "comments" || comments_flag;
-    if !mode.is_empty() && mode != "comments" && !comments_flag {
+    if !mode.is_empty() && !GREP_MODES.contains(&mode.as_str()) && !comments_flag {
         return err("grep", &format!(
             "mode \"{mode}\" is not a grep mode -- valid modes are {}. \
              \"pattern\" (the default) scans for a pattern; \"comments\" finds comment spans and \
