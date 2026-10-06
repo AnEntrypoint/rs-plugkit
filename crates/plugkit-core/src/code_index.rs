@@ -3658,6 +3658,7 @@ pub struct CommentScan<'a> {
     pub exclude_globs: Vec<String>,
     pub max_matches: usize,
     pub max_files: usize,
+    pub context: usize,
     pub refresh: bool,
 }
 
@@ -3875,7 +3876,7 @@ fn scan_content_for_comments(content: &str, syntax: CommentSyntax) -> (Vec<Comme
     (comments, directives)
 }
 
-fn comment_span_json(path: &str, syntax: CommentSyntax, span: &CommentSpan) -> Value {
+fn comment_span_json(path: &str, syntax: CommentSyntax, span: &CommentSpan, context: usize, file_lines: &[&str]) -> Value {
     let mut hit = serde_json::Map::new();
     hit.insert("path".to_string(), json!(path));
     hit.insert("line".to_string(), json!(span.line));
@@ -3885,7 +3886,99 @@ fn comment_span_json(path: &str, syntax: CommentSyntax, span: &CommentSpan) -> V
     hit.insert("inline".to_string(), json!(span.inline));
     hit.insert("text".to_string(), json!(span.text.trim_end()));
     if span.text_truncated { hit.insert("text_truncated".to_string(), json!(true)); }
+    if context > 0 {
+        let idx = span.line.saturating_sub(1);
+        if idx < file_lines.len() {
+            let first = idx.saturating_sub(context);
+            let last = (idx + 1 + context).min(file_lines.len());
+            hit.insert("before".to_string(), json!(file_lines[first..idx].iter().map(|line| line.trim_end()).collect::<Vec<_>>()));
+            hit.insert("after".to_string(), json!(file_lines[(idx + 1).min(last)..last].iter().map(|line| line.trim_end()).collect::<Vec<_>>()));
+        }
+    }
     Value::Object(hit)
+}
+
+pub fn grep_hit_line_text(hit: &Value, with_column: bool) -> String {
+    let path = hit.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let line = hit.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+    let text = hit.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    if with_column {
+        let column = hit.get("column").and_then(|v| v.as_u64()).unwrap_or(0);
+        format!("{path}:{line}:{column}: {text}")
+    } else {
+        format!("{path}:{line}: {text}")
+    }
+}
+
+pub fn grep_content_lines(hits: &[Value], context: usize, with_column: bool) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(hits.len());
+    if context == 0 {
+        for hit in hits {
+            out.push(grep_hit_line_text(hit, with_column));
+        }
+        return out;
+    }
+    let mut groups: Vec<(String, Vec<(usize, bool, u64, String)>)> = Vec::new();
+    for hit in hits {
+        let path = hit.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let line = hit.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        if line == 0 { continue; }
+        let slot = match groups.iter().position(|(known, _)| *known == path) {
+            Some(index) => index,
+            None => {
+                groups.push((path.clone(), Vec::new()));
+                groups.len() - 1
+            }
+        };
+        let column = hit.get("column").and_then(|v| v.as_u64()).unwrap_or(0);
+        let text = hit.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let before = hit.get("before").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let after = hit.get("after").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let entries = &mut groups[slot].1;
+        entries.push((line, true, column, text));
+        for (offset, value) in before.iter().enumerate() {
+            entries.push((line.saturating_sub(before.len()) + offset, false, 0, value.as_str().unwrap_or("").to_string()));
+        }
+        for (offset, value) in after.iter().enumerate() {
+            entries.push((line + 1 + offset, false, 0, value.as_str().unwrap_or("").to_string()));
+        }
+    }
+    let mut first_window = true;
+    for (path, entries) in &mut groups {
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+        entries.dedup_by_key(|entry| entry.0);
+        let mut windows: Vec<(usize, usize)> = Vec::new();
+        for (line, is_hit, _, _) in entries.iter() {
+            if !is_hit { continue; }
+            let start = line.saturating_sub(context).max(1);
+            let end = line.saturating_add(context);
+            match windows.last_mut() {
+                Some(open) if start <= open.1.saturating_add(1) => {
+                    if end > open.1 { open.1 = end; }
+                }
+                _ => windows.push((start, end)),
+            }
+        }
+        let mut cursor = 0usize;
+        for window in windows {
+            if !first_window { out.push("--".to_string()); }
+            first_window = false;
+            while cursor < entries.len() && entries[cursor].0 < window.0 { cursor += 1; }
+            let mut index = cursor;
+            while index < entries.len() && entries[index].0 <= window.1 {
+                let (line, is_hit, column, text) = &entries[index];
+                out.push(if *is_hit && *column > 0 && with_column {
+                    format!("{path}:{line}:{column}: {text}")
+                } else if *is_hit {
+                    format!("{path}:{line}: {text}")
+                } else {
+                    format!("{path}-{line}- {text}")
+                });
+                index += 1;
+            }
+        }
+    }
+    out
 }
 
 pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Value {
@@ -3981,15 +4074,16 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         if content.as_bytes().contains(&0u8) { files_skipped_binary += 1; continue; }
         files_scanned += 1;
         let (file_comments, file_directives) = scan_content_for_comments(&content, syntax);
+        let file_lines: Vec<&str> = if req.context > 0 { content.lines().collect() } else { Vec::new() };
         if file_comments.is_empty() && file_directives.is_empty() { continue; }
         files_with_comments += 1;
         for span in &file_comments {
             if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
-            comments.push(comment_span_json(path, syntax, span));
+            comments.push(comment_span_json(path, syntax, span, req.context, &file_lines));
         }
         for span in &file_directives {
             if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
-            directives.push(comment_span_json(path, syntax, span));
+            directives.push(comment_span_json(path, syntax, span, req.context, &file_lines));
         }
     }
     let cache_hits = cache.hits;
@@ -4002,6 +4096,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), json!(true));
     out.insert("mode".to_string(), json!("comments"));
+    out.insert("context".to_string(), json!(req.context));
     out.insert("root".to_string(), json!(root));
     if req.paths.len() > 1 { out.insert("paths".to_string(), json!(req.paths)); }
     else if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
@@ -4035,16 +4130,9 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         seen.into_iter().map(|p| json!(p)).collect()
     };
     out.insert("files".to_string(), Value::Array(comment_paths));
+    let ordered_hits: Vec<Value> = comments.iter().chain(directives.iter()).cloned().collect();
     out.insert("output".to_string(), Value::Array(
-        comments.iter().chain(directives.iter())
-            .map(|hit| json!(format!(
-                "{}:{}:{}: {}",
-                hit.get("path").and_then(|v| v.as_str()).unwrap_or(""),
-                hit.get("line").and_then(|v| v.as_u64()).unwrap_or(0),
-                hit.get("column").and_then(|v| v.as_u64()).unwrap_or(0),
-                hit.get("text").and_then(|v| v.as_str()).unwrap_or(""),
-            )))
-            .collect(),
+        grep_content_lines(&ordered_hits, req.context, true).into_iter().map(|line| json!(line)).collect(),
     ));
     if cache_hits + cache_misses > 0 {
         out.insert("scan_cache".to_string(), json!({
