@@ -26,6 +26,20 @@ State lives on disk under a project's `.gm/` directory: `prd.yml`,
 
 ## Spool dispatch ABI
 
+`dream-replay-cycle` accepts canonical `session_id`, optional opaque `cycle_id` and
+`after_dispatch_id`. The owner is a nonempty ASCII path component of at most 256
+bytes containing letters, digits, dots, underscores or hyphens, but not `.` or `..`.
+Supplied optional IDs must be nonempty strings, bounded to
+128 and 512 bytes respectively; malformed input fails. It summarizes up to eight
+recent recorded observations using
+same-owner completed dispatch-ledger evidence; it does not execute tools, evaluate
+sealed worlds, register policies or deploy strategies. A successful new summary
+returns `kind: "observations"`, `status: "replayed"`, `owner_session_id`, the echoed
+`cycle_id`, `last_dispatch_id` and `replay`. Missing verified evidence or an unchanged
+verified dispatch returns `status: "deferred"` with a reason and no acknowledgment
+ID. Ordinary pending-pipeline gates remain authoritative. This maintenance verb
+does not refresh agent phase-prose timestamps.
+
 Callers write request JSON to `.gm/exec-spool/in/<verb>/<N>.txt` (or
 `in/<lang>/<N>.<ext>` for language-execution stems); the watcher processes on
 read and writes `out/<N>.json` (metadata) alongside `out/<N>.out`/`.err` for

@@ -185,8 +185,9 @@ fn is_longgap_refresh(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> 
 }
 
 pub fn dispatch_serves_no_phase_prose(verb: &str, body: &Value) -> bool {
-    verb == "instruction"
-        && crate::orchestrator::instructions::body_requests_investigate_readonly(body)
+    verb == "dream-replay-cycle"
+        || (verb == "instruction"
+            && crate::orchestrator::instructions::body_requests_investigate_readonly(body))
 }
 
 fn dispatch_submitted_at_ms() -> Option<u64> {
