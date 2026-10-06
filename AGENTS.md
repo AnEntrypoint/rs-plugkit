@@ -182,6 +182,12 @@
 
 ## Dream-RSI replay
 
+- `dream-replay-cycle` is observation-only maintenance, separate from frozen-world
+  policy replay. It uses canonical actual-owner `session_id`, verifies recorded ledger
+  evidence through `automatic_replay`, and defers without an acknowledgment when no new
+  verified dispatch exists. It preserves pending-pipeline gates and never refreshes
+  agent phase clocks or records its own maintenance as a training observation.
+
 - Replay is frozen-world evidence, not execution or deployment authority. Observations, evaluator receipts, policies and discoveries remain bound to their actual completed dispatch and owner session; normal authorization/phase paths govern deployment.
 - Score each world as best attained quality minus `beta1 * summed cost` plus `beta2 * parallelism_bonus`; policy score is the mean over supplied worlds. Challenger selection requires a strict improvement over the incumbent on the same worlds. Betas are explicit finite nonnegative inputs, never arbitrary defaults.
 - One-shot replay's bonus is revealed node count divided by distinct recorded rounds. Omitted discovery rounds receive sequential positions for older records. Sealing constructs children from `parent_id`, not array adjacency.
