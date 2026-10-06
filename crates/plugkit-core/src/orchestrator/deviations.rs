@@ -37,7 +37,7 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
     ),
     (
         "long-gap-no-instruction",
-        "a verb was dispatched after more than `policy.longgap_threshold_ms` of idle with no intervening `instruction` -- idle mid-chain loses the recovery prose",
+        "a state-changing verb was dispatched after more than `policy.longgap_threshold_ms` of idle with no intervening `instruction` -- idle mid-chain loses the recovery prose; reads and the exec/shell verbs are exempt, so a lookup is never blocked by this gate",
         Severity::Deny,
     ),
     (

@@ -61,6 +61,22 @@ cargo check -p rs-plugkit --offline
 The first line is exactly what CI builds and publishes. The host `cargo check`
 is the only build that compiles `#[cfg(not(target_arch = "wasm32"))]` code.
 
+Omitting `--features slim` still builds, and produces a ~139MB module that
+embeds the model weights instead of fetching them -- never deploy that by
+hand.
+
+Deploying a local build: the live module is `~/.agentplug/plugins/gm.wasm`
+(`$AGENTPLUG_HOME/plugins/gm.wasm`), NOT `~/.gm-tools/plugkit.wasm` --
+`agentplug-runner` resolves `plugin_wasm_path("gm")` under the install dir,
+so overwriting the `.gm-tools` copy alone changes nothing a dispatch can
+observe. Copy the built `target/wasm32-wasip1/release/rs_plugkit.wasm` over
+`~/.agentplug/plugins/gm.wasm` (keep a `.pre-*` backup beside it, as the
+existing ones do). The daemon's `PluginModules::get_or_compile` compares the
+file's `(mtime, size)`, re-hashes it and recompiles on change, so no MCP or
+daemon restart is needed: the next dispatch picks the new module up, and the
+first one after a swap pays the recompile. Because `gm.version` there reads
+`local-dev-sideload-*`, the auto-updater never overwrites a sideload.
+
 There is no standalone way to "run" this crate outside a wasm host --
 verification means building, then dispatching real spool verbs against a
 project with `agentplug-runner` loaded (see gm's own `AGENTS.md` for the
@@ -151,6 +167,11 @@ changes.
 
 ### code_index.rs
 
+- One gm wasm instance serves every project the daemon knows (the gm pool is
+  process-wide), so any in-instance static cache must key on the dispatch's
+  project: `project_scoped_cache_key` folds `host_cwd` in when no explicit root
+  is given. A `""` key once served one project's BM25 corpus to another.
+
 - `SKIP_FILE_SUFFIXES`: `.rlib`/`.rmeta`/`.pdb` are the only exclusion for
   build output in dirs not named exactly `target` (e.g. `target-foo/`); they
   hold readable symbol names that pollute literal scans.
@@ -170,6 +191,28 @@ changes.
   resumes. It must still be written; a missing digest forces a full re-index
   that is itself partial. A tree that never fits re-runs every dispatch until
   `IndexConfig::wall_budget_ms` / `MemorySyncBudgetConfig` is raised.
+- `index_cfg_impl` walks the whole sorted listing every pass, starting at the
+  path in `.gm/exec-spool/.codeinsight-cursor` (the first file the previous pass
+  deferred) and wrapping. `max_files` bounds freshly extracted files per pass,
+  never the listing: slicing the first N paths of the DFS listing meant a tree
+  past N files (spoint: `packages/` after 500 `apps/`/`client/` paths) was never
+  indexed, and a budget that always ran out in the same prefix starved the rest.
+- The per-file chunk cap defers fresh embeds instead of truncating: every chunk
+  whose embedding is reusable is kept, at most `cap` new ones are embedded, the
+  rest count into the manifest's `skipped_no_embed` so the next pass re-extracts
+  and continues. Truncating stored a 1-of-28-chunk file as complete forever.
+  Embed failures also keep the pass partial, so they are retried next pass.
+- The fresh-file allowance and the one-file floor grace are charged only after
+  extraction shows the file needs a fresh embed; a reuse-only re-extraction (an
+  older manifest, a touched mtime) costs no allowance, and the hash-match branch
+  rewrites the manifest's mtime/size so the stat fast path hits next time.
+  Otherwise N touched files took N top-up passes and never reached complete.
+- Throughput bound, measured on spoint: bge-small in wasm embeds a 512-token
+  chunk in ~5-7 s (opt-level z ~7 s, opt-level 3 + simd128 ~5 s), and the
+  codesearch top-up budget is 4 s, so a cold 7000-chunk tree advances about one
+  file per codesearch call; `codeinsight_index` (wall budget) is the bulk path.
+  Manifests older than `FIRST_MANIFEST_VERSION_RECORDING_DEFERRED_CHUNKS` could
+  be silently truncated, so they are re-extracted once (embeddings reused).
 - `root_ns_suffix`: host KV rows are keyed by namespace string alone, not by
   libsql db path, so every per-root db also salts its KV namespaces; the
   no-root namespace stays unsalted.
@@ -203,6 +246,16 @@ changes.
   `get` (never a slice index, for the same reason), and it returns every match
   per line rather than the first, since two matches on one line are two real
   call sites for a call-graph trace.
+
+### code_symbols.rs
+
+- `sync_files` runs in a pass's spare time, after the chunk walk: its budget is the smaller of what the wall budget has left and `wall_budget_ms / SYMBOL_SYNC_BUDGET_DIVISOR`, and a walk that used the whole budget leaves symbols deferred to the next pass (`files_deferred`, `complete: false`). Syncing re-extracts every file, so it is never the pass's first claim. `ensure_current_insight` calls it through `sync_tree` when the digest is stale but a partial embed pass is pending, because that branch never re-indexes. It is gated by size, mtime and `SCHEMA_VERSION`: change the stored row shape, bump the version, and every file re-syncs once.
+- Symbols, metrics and imports live in plain libsql tables (`code_symbols`, `code_symbol_files`, `code_imports`), never in the `F32_BLOB` chunk table, so ordinary `COUNT(*)` works. Multi-row inserts stay under SQLite's 999-parameter limit (`columns x rows`).
+- Call edges are one KV row per file (`cef-<crc32(path)>` in `<code_ns>-edges-by-file`); the old per-edge namespace is purged by the first sync. Edge callee names are the last leaf of the callee expression (`a.b.c()` records `c`); `callee_name_for_call` finds that expression as the widest node that starts where the call starts, over nodes sorted by start and width.
+- Import specs are stored raw and resolved at query time against the indexed file set, so an edit to one file never stales another file's edges. Only specs that resolve to an indexed file count as edges.
+- `find` escapes `%`, `_` and `\` with `ESCAPE '\'`; stripping them made every snake_case query match nothing.
+- `impact` does not expand through a name with several definitions (name-keyed edges would merge unrelated functions); `through_ambiguous` opts in.
+- `cx` counts decision nodes inside the function byte range, nested closures included; boolean operators are not counted except Python's `boolean_operator`.
 
 ### ragconfig.rs
 
@@ -243,6 +296,16 @@ changes.
   nothing telling the caller its instruction was ignored; the limit function's
   bool return lets `codesearch_exhaustive` bound results only when the caller
   actually stated a limit.
+- `git_pathspec_scope` emits every exclude pathspec before the caller's own.
+  git 2.46 on Windows silently stages nothing for `git add -- <untracked> <exclude>`
+  (exit 0), so an exclude ordered last turns a scoped commit into a no-op
+  staging plus an unscoped `git commit -m`, which is how a commit came to hold
+  files nobody asked for. Excludes first is load-bearing, and
+  `caller_pathspec_names` keeps an explicit `paths` from being withheld.
+- A scoped `git_commit`/`git_finalize` passes `-- <paths>` to `git commit`
+  (and to the absorb-concurrent-write `--amend`) and refuses when the paths
+  stage nothing: the unscoped commit that used to follow an empty stage is
+  what made a narrowed request widen to the whole index.
 - `browser` and `cdp` share `host_browser_exec`; the engine travels in the opts
   JSON (`"engine"`), never inside the code body, so the host picks
   lightpanda/steel/chrome without re-escaping caller JS.
@@ -440,6 +503,23 @@ changes.
 - `instructions::handle` suppresses prose only when the caller asserts the hash
   it holds; `.last-instruction-hash-<sid>.json` records what was sent, not what
   arrived.
+- Every non-read-only reply carries `reply_hash` (fnv of the full payload),
+  stored in `.last-instruction-reply-<sid>.json`. A caller that asserts both the
+  current instruction hash and `known_reply_hash` equal to that stored hash gets
+  a delta: fields equal to the stored reply are elided and listed in
+  `unchanged_since_last_reply`, dropped ones in `removed_since_last_reply`,
+  `FIELDS_ALWAYS_RESTATED_IN_A_DELTA_REPLY` stay inline, `full_reply_at` names
+  the file. Keying on the caller's assertion, never on what the server last
+  wrote, is what keeps a fork sharing the sid, a lost response or a retry from
+  eliding live state the caller never received; gm-mcp asserts the hash of the
+  last reply it actually delivered. `{"full":true}` forces the whole envelope;
+  a request with no `session_id` never gets a delta. This keeps the long-gap
+  re-check cheap (an unchanged 12 KB reply measured ~1.4-2.5 KB).
+- `gates::dispatch_serves_no_phase_prose`: an `instruction` in
+  `investigate_readonly` mode serves no phase prose, so it neither refreshes
+  `last-instruction-ts` nor stamps `last-dispatch-ts`; otherwise a 2 KB
+  read-only call satisfied the long-gap gate mid-chain without delivering the
+  recovery prose the gate exists for.
 - `instructions::handle` inlines only `instruction_payload.mutables_pending_rows_inlined_limit`
   / `prd_items_rows_inlined_limit` rows; the counts (`mutables_pending_count`,
   `epistemic_gap`, `prd_open_count`) stay exact and a `*_truncated` block names
@@ -510,6 +590,93 @@ changes.
   the mean-score policy-evaluation rule, `seal()` tree topology, the
   `dream-replay-round` session-scoped windowed-replay protocol, and
   `max_online_rounds` admission-cap semantics.
+- `admit_dispatch` RANKS, IT NEVER REFUSES. It returns `Admission::Allow` or
+  `Admission::Advisory`, and the advisory is attached to a dispatch that ran
+  (`dream_rsi_advisory`). It used to return `Err` for
+  `codesearch|fetch|serp|browser|cdp|exec_js` once any gate-drift failure
+  (`gate_denied`/`unknown_verb`/`retired_verb`) armed
+  `replay-recorded-successes-first` for the session and that verb had no
+  success newer than its own last such failure -- and a refused dispatch was
+  never recorded as an observation, so the verb could never produce the
+  success that cleared the refusal: a livelock, not a preference. The safety
+  property the refusal was standing in for is already enforced one line
+  earlier, because `gates::check_dispatch` runs first and denies on its own
+  (long-gap, gate-repeat escalation), so the ranking layer only ever saw
+  dispatches the gates had admitted.
+- A successful `instruction` clears the ranking by stamping
+  `.gm/dream-rsi/<sid>/reorientation-ts` AND the project-wide
+  `.gm/dream-rsi/_any-session/reorientation-ts`
+  (`PROJECT_WIDE_MARKER_SESSION`). The project-wide one is what makes the
+  remedy reachable: the MCP `gm_instruction` tool dispatches under a
+  server-local session id (`mcp-instruction-<pid>-<ts>`, gm-mcp
+  `src/index.js`), while a `codesearch` body carries the caller's own
+  session id, so a per-session marker alone could never clear a veto armed
+  under the other id. `.gm/last-instruction-ts` is NOT a clearing path for
+  the ranking either -- `gates::dispatch_serves_no_phase_prose` deliberately
+  withholds it from `instruction` in `investigate_readonly` mode (a 2 KB
+  read-only reply would otherwise satisfy the long-gap gate without
+  delivering the prose that gate exists for); it is still read, because a
+  non-readonly `instruction` does stamp it. The ranking also lapses
+  `VETO_MAX_AGE_MS` (600 s) after the failure so a stale one cannot strand
+  the verb for a whole session. `veto_reason`/`newest_marker` hold the
+  decision with no host behind them so it can be tested: `cargo test -p
+  rs-plugkit --lib` runs those four tests natively (`wasm_dispatch` is
+  wasm-only, so a native test covers everything except the host reads and
+  the verbs themselves).
+
+### wasm_dispatch/dangling_refs.rs
+
+- The guard runs inside `git_commit` and `git_finalize` before anything is
+  staged, so a refusal leaves the index untouched.
+- Only files already staged plus whatever `paths`/`add_all` would stage are
+  scanned: the working tree is usually dirty with another writer's edits and a
+  commit is only answerable for its own contents -- a sibling agent's unrelated
+  dirt is never a reason to refuse.
+- A resolved target counts as an offender only when it exists on disk, is not
+  tracked, is not gitignored, and is not in this commit's own path set -- an
+  untracked file being committed in the same dispatch is the fix, not an error.
+- `git check-ignore` filters generated-but-ignored targets, so a build artifact
+  or a vendored blob, or a build output directory, never blocks a commit.
+- A file in the commit's own path set that exists on disk but cannot be read is
+  refused with `dangling_scan_unreadable` before any offender is judged: its
+  references were never extracted, so a clean scan of it would be a lie. A path
+  that is absent (a staged deletion) is not unreadable, and `allow_dangling:
+  true` waives the whole check, unreadable files included.
+
+
+### gates.rs
+
+- `LONGGAP_GATED_STATE_CHANGING_VERBS` is the entire long-gap gate surface:
+  `is_longgap_denial_exempt` exempts every verb NOT on it, so a verb added
+  later is ungated by default. The previous shape was an exempt read-only
+  allowlist, which inverted that default, and every read verb missing from it
+  was denied after `policy.longgap_threshold_ms` of idle -- `search`, an
+  alias of `codesearch`, among them. Denying a read verb guards nothing: it
+  neither loses state nor advances the phase, and the gate still fires on the
+  next state-changing verb.
+- `exec_js` and the shell stems stay ungated on purpose. One verb body carries
+  both `tar -tf` and `rm -rf`, and the friction that drove this was a
+  read-only `bash` denied with no way to tell the two apart; `deny_shell_git`
+  is the gate that governs shell verbs, runs before this one, and is
+  unaffected.
+- `LONGGAP_EXEMPT_WORK_VERBS` is exempted on top of that surface: the exec and
+  shell stems cannot be classified from the verb name alone, and
+  `git_add`/`git_commit`/`git_fetch`/`git_push`/`git_finalize` fired after
+  minutes of native work such as a build, when the gap is expected rather
+  than a sign the caller lost its instruction. They are still activity, so
+  they still restart the idle clock.
+- `long_gap_chain_belongs_to_this_session` keeps the gate inside the caller's
+  own in-flight chain: it does not fire when the phase is the terminal phase,
+  nor when the turn state's session is a different session than the caller's
+  (unknown on either side still fires). Project-wide phase state once let one
+  session's chain deny every other session in the same project.
+- `is_longgap_activity_exempt` is a different notion from denial exemption and
+  still means "does not count as activity": such a verb neither reads nor
+  rewrites `.gm/last-dispatch-ts`, so it never restarts the idle clock for
+  the verbs that follow it, and it leaves `prev_dispatch_ms == 0`, which
+  satisfies `idle_since_any` on its own. Adding a verb to
+  `policy.longgap_exempt_verbs` to silence a denial therefore makes the gate
+  fire more readily, not less.
 
 ### Other modules
 
