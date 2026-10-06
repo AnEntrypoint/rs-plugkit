@@ -1757,6 +1757,22 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
             }
             return codesearch_at_root(&retry, root, query, k, cfg);
         }
+        let backlog = diff.embed_backlog_paths();
+        if !backlog.is_empty() {
+            emit_event("codeinsight_embed_backlog", json!({
+                "reason": "embeddings-pending",
+                "root": root,
+                "file_count": backlog.len(),
+                "files": &backlog[..backlog.len().min(CHANGED_FILES_REPORT_CAP)],
+                "files_truncated": backlog.len() > CHANGED_FILES_REPORT_CAP,
+            }));
+            let _ = crate::code_index::index_at_topup_for(root, 500, root, cfg.index.incremental_topup_wall_budget_ms, &backlog);
+            let mut retry = body.clone();
+            if let Some(obj) = retry.as_object_mut() {
+                obj.insert("auto_indexed".to_string(), Value::Bool(true));
+            }
+            return codesearch_at_root(&retry, root, query, k, cfg);
+        }
     }
     let embedding = embed_query(query);
     let shown_k = dual_channel_depth(body, k);
