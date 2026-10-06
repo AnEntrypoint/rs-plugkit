@@ -610,28 +610,42 @@ fn ensure_schema_for(project_path: Option<&str>) -> Result<String, String> {
 }
 
 pub(crate) fn list_dir(path: &str) -> Vec<String> {
+    readdir_entries(path)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| readdir_child_name(&entry).map(str::to_string))
+        .collect()
+}
+
+fn readdir_entries(path: &str) -> Result<Vec<Value>, String> {
     let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
     let v = unpack_to_value_pub(packed);
     match v {
-        Value::Array(arr) => arr
-            .into_iter()
-            .filter_map(|x| {
-                let entry = if let Some(s) = x.as_str() {
-                    s
-                } else {
-                    x.get("name")
-                        .or_else(|| x.get("path"))
-                        .or_else(|| x.get("file"))
-                        .and_then(|n| n.as_str())?
-                };
-                if !is_safe_readdir_child_name(entry) {
-                    return None;
-                }
-                Some(entry.to_string())
-            })
-            .collect(),
-        _ => Vec::new(),
+        Value::Array(arr) => Ok(arr),
+        _ => Err(format!("directory listing failed for {path}: {v}")),
     }
+}
+
+fn readdir_child_name(entry: &Value) -> Option<&str> {
+    let name = entry.as_str().or_else(|| {
+        entry
+            .get("name")
+            .or_else(|| entry.get("path"))
+            .or_else(|| entry.get("file"))
+            .and_then(Value::as_str)
+    })?;
+    is_safe_readdir_child_name(name).then_some(name)
+}
+
+fn list_dir_checked(path: &str) -> Result<Vec<String>, String> {
+    readdir_entries(path)?
+        .iter()
+        .map(|entry| {
+            readdir_child_name(entry)
+                .map(str::to_string)
+                .ok_or_else(|| format!("invalid directory listing entry for {path}"))
+        })
+        .collect()
 }
 
 fn is_safe_readdir_child_name(entry: &str) -> bool {
@@ -717,14 +731,35 @@ pub(crate) fn collect_files(
     max_files: usize,
     cfg: &crate::ragconfig::IndexConfig,
 ) -> Vec<String> {
+    collect_files_impl(root, max_files, cfg, false).unwrap_or_default()
+}
+
+pub(crate) fn collect_files_checked(
+    root: &str,
+    max_files: usize,
+    cfg: &crate::ragconfig::IndexConfig,
+) -> Result<Vec<String>, String> {
+    collect_files_impl(root, max_files, cfg, true)
+}
+
+fn collect_files_impl(
+    root: &str,
+    max_files: usize,
+    cfg: &crate::ragconfig::IndexConfig,
+    checked: bool,
+) -> Result<Vec<String>, String> {
     let gi = load_repo_gitignore(root);
-    let entries = list_dir(root);
+    let entries = if checked {
+        list_dir_checked(root)?
+    } else {
+        list_dir(root)
+    };
     if entries.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let has_slashes = entries.iter().any(|e| e.contains('/'));
     if has_slashes {
-        return entries
+        return Ok(entries
             .into_iter()
             .filter(|p| {
                 if cfg.is_force_included(p) {
@@ -743,11 +778,11 @@ pub(crate) fn collect_files(
                 !gitignore_excludes(&gi, p, false)
             })
             .take(max_files)
-            .collect();
+            .collect());
     }
     let mut files = Vec::new();
-    walk_posix(root, max_files, &mut files, &gi, cfg);
-    files
+    walk_posix(root, max_files, &mut files, &gi, cfg, checked)?;
+    Ok(files)
 }
 
 fn walk_posix(
@@ -756,17 +791,23 @@ fn walk_posix(
     files: &mut Vec<String>,
     gi: &Option<ignore::gitignore::Gitignore>,
     cfg: &crate::ragconfig::IndexConfig,
-) {
+    checked: bool,
+) -> Result<(), String> {
     if files.len() >= max_files {
-        return;
+        return Ok(());
     }
     let root_force_included = cfg.is_force_included(root);
     if !root_force_included && root.split('/').any(|seg| is_skipped_dir_segment(seg, cfg)) {
-        return;
+        return Ok(());
     }
-    for entry in list_dir(root) {
+    let entries = if checked {
+        list_dir_checked(root)?
+    } else {
+        list_dir(root)
+    };
+    for entry in entries {
         if files.len() >= max_files {
-            return;
+            return Ok(());
         }
         let next = if root.ends_with('/') {
             format!("{}{}", root, entry)
@@ -782,18 +823,22 @@ fn walk_posix(
                 continue;
             }
         }
-        let is_dir_entry = host_stat(&next)
-            .and_then(|v| v.get("isDirectory").and_then(|b| b.as_bool()))
-            .unwrap_or_else(|| !entry.contains('.'));
+        let is_dir = host_stat(&next).and_then(|v| v.get("isDirectory").and_then(|b| b.as_bool()));
+        let is_dir_entry = match is_dir {
+            Some(value) => value,
+            None if checked => return Err(format!("file stat failed for {next}")),
+            None => !entry.contains('.'),
+        };
         if !force_included && gitignore_excludes(gi, &next, is_dir_entry) {
             continue;
         }
         if !is_dir_entry {
             files.push(next);
         } else {
-            walk_posix(&next, max_files, files, gi, cfg);
+            walk_posix(&next, max_files, files, gi, cfg, checked)?;
         }
     }
+    Ok(())
 }
 
 pub fn extract_chunks(
