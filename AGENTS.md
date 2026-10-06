@@ -270,6 +270,21 @@ changes.
   per line rather than the first, since two matches on one line are two real
   call sites for a call-graph trace.
 
+### scan_universe.rs
+
+- A scope the caller spelled out (`path`/`paths`/`root`) beats every exclusion
+  rule: `named_scope` short-circuits `exclusion_rule` and skips
+  `prune_own_state`. `.gm` is a gitignored dot-directory, so the default-walk
+  rules hid the one tree an agent is most often sent to read -- a `grep` naming
+  `.gm/mutables.yml` was refused outright. The rules stay in force for the
+  unscoped universe, where they are what keeps a project-wide scan inside its
+  budget, and a pruned `.gm` still reports as `gm_state_dir`.
+- `path` is a literal path or glob and is never compiled as a regex; only
+  `pattern` is. `grep`'s "the pattern was read as a regex because of its
+  <reason>" suffix is appended only when `scan_literal` failed with
+  `error_kind: "pattern"` -- attached to a scope error it read as "your path
+  was treated as a regex alternation".
+
 ### code_symbols.rs
 
 - `sync_files` runs in a pass's spare time, after the chunk walk: its budget is the smaller of what the wall budget has left and `wall_budget_ms / SYMBOL_SYNC_BUDGET_DIVISOR`, and a walk that used the whole budget leaves symbols deferred to the next pass (`files_deferred`, `complete: false`). Syncing re-extracts every file, so it is never the pass's first claim. `ensure_current_insight` calls it through `sync_tree` when the digest is stale but a partial embed pass is pending, because that branch never re-indexes. It is gated by size, mtime and `SCHEMA_VERSION`: change the stored row shape, bump the version, and every file re-syncs once.
