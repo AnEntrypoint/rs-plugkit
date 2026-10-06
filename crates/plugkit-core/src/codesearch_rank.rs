@@ -82,6 +82,13 @@ impl RankOptions {
     }
 }
 
+fn contains_verbatim(haystack: &str, needle: &str) -> bool {
+    !haystack.is_empty()
+        && haystack
+            .to_lowercase()
+            .contains(&needle.to_lowercase())
+}
+
 pub fn is_identifier(query: &str) -> bool {
     query.len() >= 3
         && query.len() <= 96
@@ -393,6 +400,7 @@ struct MergedHit {
     name: String,
     snippet: String,
     score: f64,
+    literal: bool,
 }
 
 fn hit_location(hit: &Value) -> Option<(String, u64, String, String)> {
@@ -448,13 +456,17 @@ pub fn compact_dual(query: &str, raw: &Value, opts: &RankOptions) -> Value {
                 }
                 continue;
             };
+            let literal = contains_verbatim(hit_text(hit), query);
             let relative = opts.relative(&path);
             if (kind == "section" || is_doc_path(relative)) && !opts.include_docs {
                 docs_hidden += 1;
                 continue;
             }
             match index_by_location.get(&(path.clone(), line)) {
-                Some(&at) => merged[at].score += contribution,
+                Some(&at) => {
+                    merged[at].score += contribution;
+                    merged[at].literal |= literal;
+                }
                 None => {
                     let exact = !name.is_empty() && name.eq_ignore_ascii_case(query);
                     index_by_location.insert((path.clone(), line), merged.len());
@@ -465,6 +477,7 @@ pub fn compact_dual(query: &str, raw: &Value, opts: &RankOptions) -> Value {
                         line,
                         kind,
                         name,
+                        literal,
                     });
                 }
             }
@@ -480,6 +493,7 @@ pub fn compact_dual(query: &str, raw: &Value, opts: &RankOptions) -> Value {
             })
     });
     let total = merged.len();
+    let literal_total = merged.iter().filter(|h| h.literal).count();
     let shown: Vec<Value> = merged
         .into_iter()
         .take(opts.limit.max(1))
@@ -488,6 +502,7 @@ pub fn compact_dual(query: &str, raw: &Value, opts: &RankOptions) -> Value {
                 "at": format!("{}:{}", h.path, h.line),
                 "sym": if h.name.is_empty() { h.kind } else { format!("{} {}", h.kind, h.name) },
                 "snip": h.snippet,
+                "lit": h.literal,
             })
         })
         .collect();
@@ -498,6 +513,16 @@ pub fn compact_dual(query: &str, raw: &Value, opts: &RankOptions) -> Value {
     );
     out.insert("hits".into(), json!(shown));
     out.insert("total_candidates".into(), json!(total));
+    out.insert("literal_matches".into(), json!(literal_total));
+    if literal_total == 0 && total > 0 {
+        out.insert("hits_are_nearest_neighbours".into(), json!(true));
+        out.insert(
+            "note".into(),
+            json!(format!(
+                "no retrieved row contains \"{query}\" verbatim -- the rows above are ranked nearest neighbours from BM25/vector retrieval, not occurrences of the term"
+            )),
+        );
+    }
     if !unlocated.is_empty() {
         out.insert("unlocated_hits".into(), json!(unlocated));
     }
