@@ -131,13 +131,38 @@ pub fn handle_spawn(content: &str) -> (String, String, i32) {
     ok_resp("task-spawn", data)
 }
 
-pub fn handle_list(_content: &str) -> (String, String, i32) {
-    let result = host_task("list", &json!({}));
+pub fn handle_list(content: &str) -> (String, String, i32) {
+    let body: Value = match serde_json::from_str(content) {
+        Ok(Value::Object(body)) => Value::Object(body),
+        Ok(_) => return err_resp("task-list", "body must be an object"),
+        Err(error) => return err_resp("task-list", &format!("invalid JSON: {error}")),
+    };
+    if body.as_object().is_some_and(|body| {
+        body.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "prepare_handoff" | "SESSION_ID" | "session_id" | "sessionId"
+            )
+        })
+    }) {
+        return err_resp("task-list", "unknown body field");
+    }
+    if body
+        .get("prepare_handoff")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return err_resp("task-list", "prepare_handoff must be a boolean");
+    }
+    let result = host_task("list", &body);
     let tasks = result
         .get("tasks")
         .cloned()
         .unwrap_or(Value::Array(Vec::new()));
-    ok_resp("task-list", json!({ "tasks": tasks }))
+    let mut data = json!({ "tasks": tasks });
+    if let Some(status) = result.get("handoff_status") {
+        data["handoff_status"] = status.clone();
+    }
+    ok_resp("task-list", data)
 }
 
 pub fn handle_stop(content: &str) -> (String, String, i32) {
