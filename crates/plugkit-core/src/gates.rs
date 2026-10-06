@@ -134,51 +134,21 @@ fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
     (verb, count, ts)
 }
 
-const LONGGAP_EXEMPT_READ_ONLY_VERBS: &[&str] = &[
-    "codesearch",
-    "search",
-    "code_search",
-    "recall",
-    "memorize-fire",
-    "git_status",
-    "git_log",
-    "git_diff",
-    "git_show",
-    "git_remote",
-    "branch_status",
-    "ci-status",
-    "fs_read",
-    "fs_stat",
-    "fs_readdir",
-    "status",
+const LONGGAP_GATED_STATE_CHANGING_VERBS: &[&str] = &[
+    "fs_write", "kv_put", "cache_put", "cache_invalidate",
+    "sql_open", "sql_close", "sql_exec", "sql_serialize", "sql_deserialize", "sql_smoke",
+    "memorize", "memorize-prune", "memorize_prune", "memorize-vacuum", "memorize_vacuum",
+    "memorize-retention", "memorize_retention", "forget", "codeinsight_index",
+    "tencentdb-memory-import", "config-sync-now", "discipline", "close",
+    "git_add", "git_commit", "git_finalize", "git_push", "git_fetch", "git_pull",
+    "git_checkout", "git_merge", "git_merge_abort", "git_branch_delete", "git_rm",
+    "git_revert", "git_reset", "git_stash", "git_stash_pop", "git_stash_drop",
 ];
 
 const LONGGAP_EXEMPT_WORK_VERBS: &[&str] = &[
-    "exec_js",
-    "nodejs",
-    "javascript",
-    "node",
-    "js",
-    "typescript",
-    "bash",
-    "sh",
-    "shell",
-    "zsh",
-    "python",
-    "py",
-    "powershell",
-    "ps1",
-    "go",
-    "rust",
-    "c",
-    "cpp",
-    "java",
-    "deno",
-    "git_add",
-    "git_commit",
-    "git_fetch",
-    "git_push",
-    "git_finalize",
+    "exec_js", "nodejs", "javascript", "node", "js", "typescript", "bash", "sh", "shell", "zsh",
+    "python", "py", "powershell", "ps1", "go", "rust", "c", "cpp", "java", "deno",
+    "git_add", "git_commit", "git_fetch", "git_push", "git_finalize",
 ];
 
 fn long_gap_chain_belongs_to_this_session(policy: &crate::orchestrator::fsm::Policy) -> bool {
@@ -200,9 +170,14 @@ fn is_longgap_activity_exempt(verb: &str, policy: &crate::orchestrator::fsm::Pol
 }
 
 fn is_longgap_denial_exempt(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
-    LONGGAP_EXEMPT_READ_ONLY_VERBS.contains(&verb)
-        || LONGGAP_EXEMPT_WORK_VERBS.contains(&verb)
-        || is_longgap_activity_exempt(verb, policy)
+    if is_longgap_activity_exempt(verb, policy) {
+        return true;
+    }
+    if LONGGAP_EXEMPT_WORK_VERBS.contains(&verb) {
+        return true;
+    }
+    !LONGGAP_GATED_STATE_CHANGING_VERBS.contains(&verb)
+        && !crate::orchestrator::is_orchestrator_verb(verb)
 }
 
 fn is_longgap_refresh(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> bool {
@@ -676,7 +651,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     }
 
     if is_complete_transition {
-        let (body_s, _err, code) = crate::orchestrator::prd::handle_list("");
+        let (body_s, _err, code) = crate::orchestrator::prd::handle_list_full();
         let mut anti_shape: Vec<String> = Vec::new();
         if code == 0 {
             if let Ok(v) = serde_json::from_str::<Value>(&body_s) {

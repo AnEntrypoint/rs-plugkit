@@ -144,7 +144,7 @@ jobs:
           cd release-assets
           sha256sum "${{ inputs.published_asset_basename }}.wasm" | sed 's/ \*/  /' > "${{ inputs.published_asset_basename }}.wasm.sha256"
 
-      - name: Sign release assets
+      - name: Attach offline signatures
         shell: bash
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.release_signing_key }}
