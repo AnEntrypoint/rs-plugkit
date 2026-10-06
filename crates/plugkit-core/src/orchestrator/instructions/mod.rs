@@ -142,9 +142,10 @@ fn read_spool_json(name: &str) -> serde_json::Value {
 
 #[cfg(target_arch = "wasm32")]
 fn residual_check_fired_recently() -> bool {
-    let marker = super::gm_dir().join("residual-check-fired");
-    let ms = marker.to_string_lossy().to_string();
-    pkfs::read_to_string(&ms).map(|s| !s.trim().is_empty()).unwrap_or(false)
+    matches!(
+        super::yaml_util::read_residual_marker(),
+        super::yaml_util::ResidualMarker::Live { .. }
+    )
 }
 
 #[cfg(target_arch = "wasm32")]

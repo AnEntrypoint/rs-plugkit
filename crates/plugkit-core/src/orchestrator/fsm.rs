@@ -568,7 +568,7 @@ fn default_graph() -> Graph {
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
                 next_dispatch: Some("residual-scan".into()),
-                message: "transition rejected: residual-scan not fired in this stop window -- dispatch `residual-scan` before DECIDE -> COMPLETE.".into(),
+                message: "transition rejected: residual-scan gate is false -- .gm/residual-check-fired does not currently read as a fired scan. The appended reason names which case this is (never fired / fired-then-invalidated / foreign session / unreadable). Dispatch `residual-scan` as the LAST verb before this transition: a later prd-add, mutable-add, prd-defer or mutable-defer invalidates the marker.".into(),
             },
             GateDef {
                 name: "prd-all-closed".into(),

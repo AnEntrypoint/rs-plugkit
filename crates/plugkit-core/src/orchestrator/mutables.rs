@@ -216,7 +216,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         Ok(v) => v,
         Err((out, err, rc)) => return (out, err, rc),
     };
-    invalidate_residual_marker();
+    invalidate_residual_marker("mutable-add");
     #[cfg(target_arch = "wasm32")]
     crate::wasm_dispatch::emit_event("mutable.added", serde_json::json!({ "id": id, "rescoped": replaced_existing_id }));
     let mut response = serde_json::Map::new();
@@ -618,7 +618,7 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
     });
     match outcome {
         Ok(()) => {
-            invalidate_residual_marker();
+            invalidate_residual_marker("mutable-defer");
             #[cfg(target_arch = "wasm32")]
             crate::wasm_dispatch::emit_event("mutable.deferred", serde_json::json!({ "id": id_target, "reason": reason }));
             (serde_json::json!({ "deferred": id_target, "blockedBy": ["external"] }).to_string(), String::new(), 0)

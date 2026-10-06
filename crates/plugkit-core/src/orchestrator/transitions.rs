@@ -123,21 +123,53 @@ fn residual_scan_marker_matches_current_session_or_is_within_longgap_threshold(
 
 #[cfg(target_arch = "wasm32")]
 fn residual_scan_fired() -> bool {
-    let residual_marker = super::gm_dir().join("residual-check-fired");
-    let raw = match crate::pkfs::read_to_string(&residual_marker.to_string_lossy().to_string()) {
-        Some(s) if !s.trim().is_empty() => s,
-        _ => return false,
-    };
-    let mut parts = raw.trim().splitn(2, ':');
-    let fired_sid = parts.next().unwrap_or("");
-    let fired_at_ms: u64 = match parts.next().and_then(|s| s.parse().ok()) {
-        Some(ms) => ms,
-        None => return false,
-    };
-    residual_scan_marker_matches_current_session_or_is_within_longgap_threshold(fired_sid, fired_at_ms)
+    match super::yaml_util::read_residual_marker() {
+        super::yaml_util::ResidualMarker::Live { session_id, fired_at_ms } =>
+            residual_scan_marker_matches_current_session_or_is_within_longgap_threshold(&session_id, fired_at_ms),
+        _ => false,
+    }
 }
 #[cfg(not(target_arch = "wasm32"))]
 fn residual_scan_fired() -> bool { false }
+
+#[cfg(target_arch = "wasm32")]
+fn residual_scan_denial_detail() -> String {
+    use super::yaml_util::ResidualMarker;
+    let marker_path = super::yaml_util::residual_marker_path();
+    match super::yaml_util::read_residual_marker() {
+        ResidualMarker::Absent => format!(
+            "`{}` does not exist or is empty: no `residual-scan` has ever reached the fired state in this project. A response of `scan: \"skipped\"` (PRD open, browser session open, task running, dirty tree) returns exit code 0 but does NOT write the marker -- clear that skip reason, then re-dispatch `residual-scan`.",
+            marker_path
+        ),
+        ResidualMarker::Live { session_id, fired_at_ms } => {
+            let current_sid = super::state::read_state().session_id.unwrap_or_default();
+            if !session_id.is_empty() && !current_sid.is_empty() && session_id != current_sid {
+                return format!(
+                    "`{}` records a fired scan from session `{}`, but this session is `{}` -- the marker is not reused across sessions. Re-dispatch `residual-scan` in this session.",
+                    marker_path, session_id, current_sid
+                );
+            }
+            let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+            let threshold_ms = super::fsm::graph().policy.longgap_threshold_ms;
+            format!(
+                "`{}` records a fired scan with no usable session id, stamped {}ms ago, past the {}ms longgap threshold. Re-dispatch `residual-scan`.",
+                marker_path,
+                now_ms.saturating_sub(fired_at_ms),
+                threshold_ms
+            )
+        }
+        ResidualMarker::Invalidated { reason } => format!(
+            "a `residual-scan` DID fire in this session, and then `{}` invalidated its marker afterwards -- `.gm/residual-check-fired` is deliberately invalidated by every PRD/mutable write, so the scan is stale rather than missing. Re-dispatch `residual-scan` as the LAST verb before `transition`, with no prd-add / mutable-add / prd-defer / mutable-defer in between.",
+            reason
+        ),
+        ResidualMarker::Malformed { raw } => format!(
+            "`{}` is present but does not read as `<session_id>:<fired_at_ms>` (contents: `{}`). Re-dispatch `residual-scan`.",
+            marker_path, raw
+        ),
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn residual_scan_denial_detail() -> String { String::new() }
 
 fn prd_has_open_items() -> bool {
     let (body, _err, code) = prd::handle_list_full();
@@ -630,6 +662,10 @@ fn predicate_detail(predicate_name: Option<&str>) -> Option<String> {
             let lines = graphical_symbol_lines_in_diff();
             (!lines.is_empty()).then(|| lines.join("; "))
         }
+        Some("residual-scan-fired") => {
+            let detail = residual_scan_denial_detail();
+            (!detail.is_empty()).then_some(detail)
+        }
         _ => None,
     }
 }
@@ -700,7 +736,9 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
     for gate_name in &edge.gates {
         let Some(g) = graph.gate(gate_name) else { continue };
         if !evaluate_gate(g) {
-            residuals.push(match hook_denial_detail_or_none_if_predicate_caused_it(g) {
+            residuals.push(match hook_denial_detail_or_none_if_predicate_caused_it(g)
+                .or_else(|| predicate_detail(g.predicate.as_deref()))
+            {
                 Some(d) => format!("{} -- {}", g.message, d),
                 None => g.message.clone(),
             });
