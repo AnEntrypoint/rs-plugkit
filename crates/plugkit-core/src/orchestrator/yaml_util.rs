@@ -97,11 +97,43 @@ pub fn defer_marker_in_text(text: &str) -> Option<&'static str> {
     None
 }
 
-pub fn invalidate_residual_marker() {
-    let marker = super::gm_dir().join("residual-check-fired");
-    let marker_s = marker.to_string_lossy().to_string();
+pub const RESIDUAL_MARKER_NAME: &str = "residual-check-fired";
+
+pub enum ResidualMarker {
+    Absent,
+    Live { session_id: String, fired_at_ms: u64 },
+    Invalidated { reason: String },
+    Malformed { raw: String },
+}
+
+pub fn residual_marker_path() -> String {
+    super::gm_dir().join(RESIDUAL_MARKER_NAME).to_string_lossy().to_string()
+}
+
+pub fn read_residual_marker() -> ResidualMarker {
+    let raw = match crate::pkfs::read_to_string(&residual_marker_path()) {
+        Some(s) => s,
+        None => return ResidualMarker::Absent,
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return ResidualMarker::Absent;
+    }
+    if let Some(reason) = trimmed.strip_prefix("invalidated:") {
+        return ResidualMarker::Invalidated { reason: reason.to_string() };
+    }
+    let mut parts = trimmed.splitn(2, ':');
+    let session_id = parts.next().unwrap_or("").to_string();
+    match parts.next().and_then(|s| s.parse().ok()) {
+        Some(fired_at_ms) => ResidualMarker::Live { session_id, fired_at_ms },
+        None => ResidualMarker::Malformed { raw: trimmed.to_string() },
+    }
+}
+
+pub fn invalidate_residual_marker(reason: &str) {
+    let marker_s = residual_marker_path();
     if crate::pkfs::exists(&marker_s) {
-        let _ = crate::pkfs::write(&marker_s, "");
+        let _ = crate::pkfs::write(&marker_s, &format!("invalidated:{}", reason));
     }
 }
 
