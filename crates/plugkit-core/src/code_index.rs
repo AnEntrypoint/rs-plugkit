@@ -3465,7 +3465,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     } else {
         candidates.into_iter().map(|(_, _, _, hit)| hit).collect()
     };
-    let unread_paths: &[String] = &files[entered_paths.min(files.len())..];
     let cache_hits = cache.hits;
     let cache_misses = cache.misses;
     let cache_entries = cache.entries.len();
@@ -3506,11 +3505,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     if req.verbose || file_source != "git" {
         out.insert("file_source".to_string(), json!(file_source));
         out.insert("file_source_detail".to_string(), json!(universe.source.detail()));
-    if !unread_paths.is_empty() {
-        out.insert("paths_not_read_count".to_string(), json!(unread_paths.len()));
-        out.insert("paths_not_read".to_string(), json!(unread_paths.iter().take(SKIPPED_SAMPLE_LEN).cloned().collect::<Vec<_>>()));
-        out.insert("paths_not_read_note".to_string(), json!("the hit cap was reached before these named paths were opened, so nothing in them can appear above: the paths list above is what you asked for, files_scanned is what was actually read -- raise max_results or scan these paths one per call"));
-    }
     }
     if req.refresh {
         out.insert("refreshed".to_string(), json!(true));
@@ -4194,6 +4188,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
             directives.push(comment_span_json(path, syntax, span, req.context, &file_lines));
         }
     }
+    let unread_paths: &[String] = &files[entered_paths.min(files.len())..];
     let cache_hits = cache.hits;
     let cache_misses = cache.misses;
     let cache_entries = cache.entries.len();
@@ -4214,6 +4209,11 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
     out.insert("file_source".to_string(), json!(universe.source.label()));
     out.insert("file_source_detail".to_string(), json!(universe.source.detail()));
+    if !unread_paths.is_empty() {
+        out.insert("paths_not_read_count".to_string(), json!(unread_paths.len()));
+        out.insert("paths_not_read".to_string(), json!(unread_paths.iter().take(SKIPPED_SAMPLE_LEN).cloned().collect::<Vec<_>>()));
+        out.insert("paths_not_read_note".to_string(), json!("the hit cap was reached before these named paths were opened, so nothing in them can appear above: the paths list above is what you asked for, files_scanned is what was actually read -- raise max_results or scan these paths one per call"));
+    }
     if req.refresh {
         out.insert("refreshed".to_string(), json!(true));
         out.insert("refreshed_note".to_string(), json!(
