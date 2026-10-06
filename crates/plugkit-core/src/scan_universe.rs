@@ -285,6 +285,7 @@ struct RuleRecordingWalk<'a> {
     cfg: &'a IndexConfig,
     gitignore: Option<ignore::gitignore::Gitignore>,
     noise: NoiseDirs,
+    named_scope: bool,
     max_files: usize,
     deadline_ms: u64,
     reached_deadline: bool,
@@ -314,6 +315,7 @@ impl RuleRecordingWalk<'_> {
     }
 
     fn exclusion_rule(&self, name: &str, path: &str, is_dir: bool) -> Option<&'static str> {
+        if self.named_scope { return None; }
         if gitignore_excludes(&self.gitignore, path, is_dir) { return Some("gitignore"); }
         if !is_dir { return None; }
         if is_hidden_segment(name) { return Some("hidden_dir"); }
@@ -355,15 +357,17 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         Some(s) => relative_scope(root, s)?,
         None => None,
     };
+    // A scope the caller spelled out wins over every exclusion rule below, gm's own state included:
+    // ".gm" is a dot-directory and is gitignored, so a default-walk rule that hides it would also
+    // hide the one tree an agent is most often sent to read. The rules stay in force for the
+    // unscoped universe, where they are what keeps a project-wide scan inside its budget.
+    let named_scope = rel.is_some();
     let target = rel.as_deref().map(|r| join_under(root, r)).unwrap_or_else(|| root.to_string());
     let universe = |files, source, listing_complete, excluded, walk_reason| ScanUniverse {
         files, source, listing_complete, excluded, walk_reason,
         target: target.clone(),
     };
-    if let Some(own_state) = rel.as_deref().and_then(|r| r.split('/').find(|s| is_own_state_name(s))) {
-        return Err(format!("path '{}' is inside {own_state}, gm's own state directory, which is never a search target", scope.unwrap_or("")));
-    }
-    if rel.is_some() {
+    if named_scope {
         match stat_is_directory(&target) {
             None => return Err(format!(
                 "path '{}' does not exist under search root '{}' -- paths resolve relative to that root, which is the dispatch project unless `root` names another directory; if the path lives in a different project, pass that project's directory as `root` (or dispatch with its cwd)",
@@ -380,7 +384,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         match directory_is_gitignored(&target) {
             Ok(false) => match git_worktree_files(&target, 0) {
                 Ok((files, complete)) => {
-                    let (files, pruned) = prune_own_state(root, files);
+                    let (files, pruned) = if named_scope { (files, Vec::new()) } else { prune_own_state(root, files) };
                     return Ok(universe(files, FileSource::Git, complete, pruned, None));
                 }
                 Err(e) => WalkCause::GitListingFailed(e),
@@ -394,6 +398,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         cfg,
         gitignore: if policy.honour_gitignore { load_repo_gitignore(root) } else { None },
         noise: policy.noise,
+        named_scope,
         max_files,
         deadline_ms: unsafe { host_now_ms() }.saturating_add(cfg.wall_budget_ms),
         reached_deadline: false,

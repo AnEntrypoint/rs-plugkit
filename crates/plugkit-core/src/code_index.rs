@@ -3150,6 +3150,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         Err(e) => return json!({
             "ok": false,
             "error": format!("mode \"{}\" got an {e}", if req.regex { "regex" } else { "literal" }),
+            "error_kind": "pattern",
             "pattern": req.pattern,
         }),
     };
