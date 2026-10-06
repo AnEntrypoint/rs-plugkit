@@ -47,7 +47,7 @@
 
 - Structural queries first run bounded refresh without embeddings and refuse incomplete graph evidence. `sync_files` also runs during indexing and stale-insight maintenance; schema 3 records a current-byte FNV64 `source_hash` so same-size/mtime edits invalidate reuse. Failed parses retry. Bump the schema when stored shape changes.
 - Symbols, metrics and raw import specs live in `code_symbols`, `code_symbol_files` and `code_imports`, not vector chunks. Multi-row inserts stay within SQLite's 999-parameter bound.
-- JSON has no structural symbol support: scoped queries reject it; source-only coverage excludes it explicitly and observed JSON clears prior cached symbols/imports/edges. Cleanup failures and minified-source deferrals make coverage incomplete.
+- JSON has no structural symbol support: scoped queries reject it; source-only coverage excludes it explicitly and observed JSON clears prior cached symbols/imports/edges. Cleanup failures make coverage incomplete; line length alone must not defer supported bounded source.
 - Resolved `index.max_file_bytes` has a 2 MiB minimum after typed configuration overlay; wall-time and indexed-chunk bounds still apply. The unnormalized default remains 256 KiB.
 - Public `index.max_chunks_per_file_per_pass` bounds vector work only; `0` disables chunk embeddings while keeping bounded BM25 text and full text manifests. Text-only indexing still reports deferred vectors explicitly.
 - Call edges use one `cef-<crc32(path)>` KV row in `<code_ns>-edges-by-file`; first sync purges the retired per-edge namespace. `callee_name_for_call` records the final callee-expression leaf, selecting the widest node starting at the call.
@@ -77,6 +77,7 @@
 
 ### rssearch_vectors.rs, libsql_wasm.rs and host_abi.rs
 
+- `host_read` recognizes the native `host_fs_read` packed empty-success marker `1` before pointer decoding. Only an actual successful empty read yields `Some("")`; `0` remains a read failure.
 - `ann_query_sql` uses `pool`, not final `limit`, for both `vector_top_k` and outer SQL LIMIT; recency rescoring and dedup require candidate headroom.
 - `SCHEMA_ENSURED`/`MIGRATION_COMPLETE` are process-lifetime memos. Destructive table recovery calls `forget_ensured_schema`/`forget_migration_complete`.
 - Parsed SQLite `ext=`/`rc=` codes are authoritative in `classify_error` and suppress text fallback; only `ShadowRow` is text-only. Corruption recovery deletes the shared database, so quoted words such as "malformed" must not trigger it.

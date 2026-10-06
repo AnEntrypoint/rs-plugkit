@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+const HOST_FS_READ_EMPTY_SUCCESS: u64 = 1;
+
 macro_rules! host_abi_extern_block_and_host_imports_list_from_one_declaration {
     ($(fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?;)+) => {
         #[link(wasm_import_module = "env")]
@@ -397,7 +399,11 @@ pub fn host_allow_root(root: &str) -> bool {
 
 pub fn host_read(path: &str) -> Option<String> {
     let packed = unsafe { host_fs_read(path.as_ptr(), path.len() as u32) };
-    unpack_to_string(packed)
+    if packed == HOST_FS_READ_EMPTY_SUCCESS {
+        Some(String::new())
+    } else {
+        unpack_to_string(packed)
+    }
 }
 
 pub fn host_write(path: &str, data: &str) -> bool {

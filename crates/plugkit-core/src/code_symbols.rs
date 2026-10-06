@@ -16,7 +16,6 @@ const DOC_KINDS_SQL: &str = "('section','document')";
 const SOURCE_SIZE_CAP_MULTIPLIER: usize = 4;
 const ROWS_PER_INSERT: usize = 120;
 const SLOW_EXTRACT_LOG_MS: u64 = 500;
-const MINIFIED_MAX_LINE_CHARS: usize = 4_000;
 const NO_SYMBOL_EXTS: [&str; 1] = [".json"];
 const SIGNATURE_MAX_CHARS: usize = 140;
 const DEFAULT_LIMIT: usize = 25;
@@ -630,13 +629,13 @@ pub(crate) fn sync_files(
                 .any(|ext| fp[dot..].eq_ignore_ascii_case(ext))
         }) {
             seen.insert(fp.clone());
-                unsupported += 1;
-                if known.contains_key(&fp) {
-                    if host_now_ms().saturating_sub(started_ms) > budget_ms {
-                        deferred += 1;
-                        continue;
-                    }
-                    if !write_edges(&fp, &[], project_path) {
+            unsupported += 1;
+            if known.contains_key(&fp) {
+                if host_now_ms().saturating_sub(started_ms) > budget_ms {
+                    deferred += 1;
+                    continue;
+                }
+                if !write_edges(&fp, &[], project_path) {
                     store_failures += 1;
                     continue;
                 }
@@ -679,13 +678,6 @@ pub(crate) fn sync_files(
         let source_hash = format!("{:016x}", crate::hash::fnv1a64(content.as_bytes()));
         if known.get(&fp) == Some(&(size, mtime_ms, SCHEMA_VERSION, 0, source_hash)) {
             unchanged += 1;
-            continue;
-        }
-        if content
-            .lines()
-            .any(|line| line.len() > MINIFIED_MAX_LINE_CHARS)
-        {
-            deferred += 1;
             continue;
         }
         let file_started = host_now_ms();
