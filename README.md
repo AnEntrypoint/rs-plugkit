@@ -285,6 +285,11 @@ unreadable or oversized files, failed parses, and failed stores reject the query
 presenting cached graph evidence as current. Use `action: "sync"`
 for a longer refresh before retrying a budget-limited query.
 
+Readable empty files and supported files with long lines remain eligible for structural indexing.
+The host file-read ABI returns `0` on failure, reserved packed value `1` for successful empty UTF-8
+reads without allocation, and a pointer/length for nonempty reads. Empty-read success requires
+both a supporting host and guest; older components continue reporting that coverage incomplete.
+
 Call edges use unqualified names, not resolved definition bindings. `callers`, `callees`,
 `impact` and `tests` reject path, file, glob and line scope fields. Use path-scoped
 `outline`/`find` and `codesearch` to distinguish same-named definitions and exact call
