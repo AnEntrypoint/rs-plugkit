@@ -11,7 +11,7 @@ use crate::wasm_dispatch::{host_read, host_stat};
 const FILES_TABLE: &str = "code_symbol_files";
 const SYMBOLS_TABLE: &str = "code_symbols";
 const IMPORTS_TABLE: &str = "code_imports";
-const SCHEMA_VERSION: u64 = 2;
+const SCHEMA_VERSION: u64 = 3;
 const DOC_KINDS_SQL: &str = "('section','document')";
 const SOURCE_SIZE_CAP_MULTIPLIER: usize = 4;
 const SIGNATURE_MAX_CHARS: usize = 140;
@@ -313,6 +313,10 @@ fn ensure_schema(db: &str) -> Result<(), String> {
         db,
         &format!("ALTER TABLE {FILES_TABLE} ADD COLUMN is_test INTEGER"),
     );
+    let _ = libsql_wasm::exec(
+        db,
+        &format!("ALTER TABLE {FILES_TABLE} ADD COLUMN source_hash TEXT"),
+    );
     for (column, kind) in ADDED_SYMBOL_COLUMNS {
         let _ = libsql_wasm::exec(
             db,
@@ -398,6 +402,7 @@ struct SymbolRow {
 
 struct FileSymbols {
     lang: String,
+    source_hash: String,
     size: u64,
     mtime_ms: u64,
     loc: usize,
@@ -470,7 +475,7 @@ fn store_file(
         ));
     }
     script.push_str(&format!(
-        " INSERT OR REPLACE INTO {FILES_TABLE}(path,lang,size,mtime_ms,loc,symbols,edges,parse_failed,schema,is_test) VALUES ({path},{},{},{},{},{},{},{},{SCHEMA_VERSION},{}); COMMIT;",
+        " INSERT OR REPLACE INTO {FILES_TABLE}(path,lang,size,mtime_ms,loc,symbols,edges,parse_failed,schema,is_test,source_hash) VALUES ({path},{},{},{},{},{},{},{},{SCHEMA_VERSION},{},{}); COMMIT;",
         sql_text(&file.lang),
         file.size,
         file.mtime_ms,
@@ -479,9 +484,12 @@ fn store_file(
         file.edges.len(),
         file.parse_failed as u8,
         file.is_test as u8,
+        sql_text(&file.source_hash),
     ));
+    if !write_edges(fp, &file.edges, project_path) {
+        return Err(format!("failed to store call edges for {fp}"));
+    }
     libsql_wasm::exec(db, &script)?;
-    write_edges(fp, &file.edges, project_path);
     Ok(())
 }
 
@@ -489,12 +497,8 @@ fn edges_key(fp: &str) -> String {
     format!("cef-{:x}", code_index::crc32(fp))
 }
 
-fn write_edges(fp: &str, edges: &[CallEdge], project_path: Option<&str>) {
+fn write_edges(fp: &str, edges: &[CallEdge], project_path: Option<&str>) -> bool {
     let ns = edges_namespace(project_path);
-    if edges.is_empty() {
-        code_index::fv_delete(&ns, &edges_key(fp));
-        return;
-    }
     let packed: Vec<Value> = edges
         .iter()
         .map(|e| json!([e.caller_symbol, e.callee_symbol, e.line]))
@@ -503,7 +507,7 @@ fn write_edges(fp: &str, edges: &[CallEdge], project_path: Option<&str>) {
         &ns,
         &edges_key(fp),
         &json!({ "path": fp, "edges": packed }).to_string(),
-    );
+    )
 }
 
 fn purge_legacy_edges(started_ms: u64, budget_ms: u64) {
@@ -552,6 +556,7 @@ fn extract_file(
     let failed = analysis.parse_failed as u32;
     let file = FileSymbols {
         lang: lang.to_string(),
+        source_hash: format!("{:016x}", crate::hash::fnv1a64(content.as_bytes())),
         size,
         mtime_ms,
         loc: content.lines().count(),
@@ -577,9 +582,11 @@ pub(crate) fn sync_files(
         return json!({ "ok": false, "error": e });
     }
     purge_legacy_edges(started_ms, budget_ms);
-    let known: HashMap<String, (u64, u64, u64)> = rows(
+    let known: HashMap<String, (u64, u64, u64, u64, String)> = rows(
         &db,
-        &format!("SELECT path, size, mtime_ms, schema FROM {FILES_TABLE}"),
+        &format!(
+            "SELECT path, size, mtime_ms, schema, parse_failed, source_hash FROM {FILES_TABLE}"
+        ),
         &[],
     )
     .iter()
@@ -590,6 +597,8 @@ pub(crate) fn sync_files(
                 number(r.get("size")),
                 number(r.get("mtime_ms")),
                 number(r.get("schema")),
+                number(r.get("parse_failed")),
+                string(r, "source_hash"),
             ),
         )
     })
@@ -604,6 +613,9 @@ pub(crate) fn sync_files(
         mut parse_failures,
     ) = (0u32, 0u32, 0u32, 0usize, 0usize, 0u32);
     let mut seen: HashSet<String> = HashSet::new();
+    let mut unreadable = 0u32;
+    let mut oversized = 0u32;
+    let mut store_failures = 0u32;
     for raw in files {
         let fp = raw
             .trim_start_matches("./")
@@ -626,17 +638,20 @@ pub(crate) fn sync_files(
             .as_ref()
             .map(|s| number(s.get("mtime_ms")))
             .unwrap_or(0);
-        if known.get(&fp) == Some(&(size, mtime_ms, SCHEMA_VERSION)) && mtime_ms > 0 {
-            unchanged += 1;
-            continue;
-        }
         let Some(content) = host_read(&fp)
             .or_else(|| host_read(raw))
             .or_else(|| host_read(&format!("/{fp}")))
         else {
+            unreadable += 1;
             continue;
         };
         if content.len() > size_cap {
+            oversized += 1;
+            continue;
+        }
+        let source_hash = format!("{:016x}", crate::hash::fnv1a64(content.as_bytes()));
+        if known.get(&fp) == Some(&(size, mtime_ms, SCHEMA_VERSION, 0, source_hash)) {
+            unchanged += 1;
             continue;
         }
         let (file, failed) = extract_file(
@@ -651,6 +666,8 @@ pub(crate) fn sync_files(
             synced += 1;
             symbols_written += file.symbols.len();
             edges_written += file.edges.len();
+        } else {
+            store_failures += 1;
         }
     }
     let mut removed = 0u32;
@@ -664,7 +681,10 @@ pub(crate) fn sync_files(
                 .collect::<Vec<_>>()
                 .join(",");
             let script = format!("BEGIN; DELETE FROM {SYMBOLS_TABLE} WHERE path IN ({list}); DELETE FROM {IMPORTS_TABLE} WHERE path IN ({list}); DELETE FROM {FILES_TABLE} WHERE path IN ({list}); COMMIT;");
-            let _ = libsql_wasm::exec(&db, &script);
+            if libsql_wasm::exec(&db, &script).is_err() {
+                store_failures += 1;
+                continue;
+            }
             for path in batch {
                 code_index::fv_delete(&edges_namespace(project_path), &edges_key(path));
             }
@@ -679,7 +699,10 @@ pub(crate) fn sync_files(
         "symbols_written": symbols_written,
         "edges_written": edges_written,
         "treesitter_failures": parse_failures,
-        "complete": deferred == 0,
+        "files_unreadable": unreadable,
+        "files_oversized": oversized,
+        "store_failures": store_failures,
+        "complete": deferred == 0 && parse_failures == 0 && unreadable == 0 && oversized == 0 && store_failures == 0,
         "elapsed_ms": host_now_ms().saturating_sub(started_ms),
     });
     if synced > 0 || removed > 0 || deferred > 0 {
@@ -689,17 +712,52 @@ pub(crate) fn sync_files(
 }
 
 pub(crate) fn sync_tree(cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> Value {
+    sync_tree_with_budget(cfg, project_path, cfg.index.wall_budget_ms)
+}
+
+fn sync_tree_with_budget(
+    cfg: &crate::ragconfig::RagConfig,
+    project_path: Option<&str>,
+    budget_ms: u64,
+) -> Value {
     let started = host_now_ms();
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
-    let files = code_index::collect_files(root, cfg.index.digest_max_files, &cfg.index);
-    sync_files(
+    let mut files = match code_index::collect_files_checked(
+        root,
+        cfg.index.digest_max_files.saturating_add(1),
+        &cfg.index,
+    ) {
+        Ok(files) => files,
+        Err(error) => {
+            return json!({ "ok": false, "complete": false, "listing_complete": false, "error": error })
+        }
+    };
+    let listing_complete = files.len() <= cfg.index.digest_max_files;
+    files.truncate(cfg.index.digest_max_files);
+    let mut report = sync_files(
         &files,
         project_path,
         started,
-        cfg.index.wall_budget_ms,
+        budget_ms,
         cfg.index.max_file_bytes,
-        true,
-    )
+        listing_complete,
+    );
+    let empty_listing_with_cached_files = files.is_empty()
+        && !rows(
+            &db_path(project_path),
+            &format!("SELECT path FROM {FILES_TABLE} LIMIT 1"),
+            &[],
+        )
+        .is_empty();
+    report["files_listed"] = json!(files.len());
+    report["listing_complete"] = json!(listing_complete);
+    report["empty_listing_with_cached_files"] = json!(empty_listing_with_cached_files);
+    report["complete"] = json!(
+        report.get("complete").and_then(Value::as_bool) == Some(true)
+            && listing_complete
+            && !empty_listing_with_cached_files
+    );
+    report
 }
 
 pub(crate) fn clear(project_path: Option<&str>) {
@@ -1779,6 +1837,8 @@ fn callers_or_callees(
     let total = matched.len();
     let mut out = json!({
         "symbol": symbol,
+        "edge_resolution": "unqualified-name",
+        "ambiguous_definitions": definitions(db, symbol, 2).len() > 1,
         "defined_at": definition_locations(db, symbol),
         "total": total,
         "truncated": total > limit,
@@ -1910,6 +1970,8 @@ fn impact(
     json!({
         "symbol": symbol,
         "direction": if upstream { "callers: what breaks if this changes" } else { "callees: what this depends on" },
+        "edge_resolution": "unqualified-name",
+        "ambiguous_definitions": definitions(db, symbol, 2).len() > 1,
         "defined_at": definition_locations(db, symbol),
         "max_depth": depth_cap,
         "total": total,
@@ -1997,6 +2059,37 @@ fn text_field<'a>(body: &'a Value, keys: &[&str]) -> Option<&'a str> {
 pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     let action = text_field(body, &["action", "mode"]).unwrap_or("overview");
     let project_path = text_field(body, &["root", "projectPath"]);
+    if matches!(action, "callers" | "callees" | "impact" | "tests") {
+        let unsupported: Vec<&str> = [
+            "path",
+            "file",
+            "path_prefix",
+            "paths",
+            "glob",
+            "path_glob",
+            "line",
+            "line_start",
+            "line_end",
+        ]
+        .into_iter()
+        .filter(|field| body.get(*field).is_some())
+        .collect();
+        if !unsupported.is_empty() {
+            return Err(format!("{action} does not support scope fields {}; call edges are keyed by unqualified names, not resolved definitions. Use outline/find for path-scoped definitions and codesearch for exact call sites", unsupported.join(", ")));
+        }
+    }
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    if action == "sync" {
+        return Ok(sync_tree(&cfg, project_path));
+    }
+    let refresh = sync_tree_with_budget(
+        &cfg,
+        project_path,
+        cfg.index.incremental_topup_wall_budget_ms,
+    );
+    if refresh.get("complete").and_then(Value::as_bool) != Some(true) {
+        return Err(format!("symbol index refresh is incomplete; cached graph is not current evidence. Run action=sync and retry. Refresh: {refresh}"));
+    }
     let limit = body
         .get("limit")
         .or_else(|| body.get("k"))
@@ -2008,13 +2101,9 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     let need_symbol = || symbol.ok_or_else(|| format!("{action} requires `symbol`"));
     let need_path =
         || text_field(body, &["path", "file"]).ok_or_else(|| format!("{action} requires `path`"));
-    match action {
+    let mut output = match action {
         "overview" => Ok(overview(project_path, limit)),
         "status" => Ok(status(project_path)),
-        "sync" => Ok(sync_tree(
-            &crate::ragconfig::RagConfig::resolved(),
-            project_path,
-        )),
         "outline" => outline(&db, need_path()?),
         "find" => Ok(find(
             &db,
@@ -2083,5 +2172,7 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
             "unknown action `{other}`; accepted: {}",
             ACTIONS.join(", ")
         )),
-    }
+    }?;
+    output["codeinsight_index"] = refresh;
+    Ok(output)
 }
