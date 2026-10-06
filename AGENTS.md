@@ -207,6 +207,29 @@ changes.
   older manifest, a touched mtime) costs no allowance, and the hash-match branch
   rewrites the manifest's mtime/size so the stat fast path hits next time.
   Otherwise N touched files took N top-up passes and never reached complete.
+- `current_digest_cfg_at` folds a content hash per file, so reading the tree
+  was unavoidable on every `ensure_current_insight` call and the in-instance
+  `DIGEST_CACHE` (5 s TTL) is lost whenever the daemon evicts and reinstates
+  the project -- which it does constantly across ~126 registry roots. Per-file
+  `(mtime_bits, size) -> hash` now persists to
+  `.gm/exec-spool/.codeinsight-file-digests.json`, so a repeat digest costs a
+  walk plus stats and no file reads. The pair is the same identity the manifest
+  stat fast path already trusts, and a miss only costs a re-read.
+- `chunk_rows_by_path` is a full aggregate over `code_chunks` (measured 12 s);
+  the pass's cleanup sweep reuses the map built before the walk instead of
+  recomputing it, since every chunk written during the pass belongs to a path
+  already in `files_set` and can never be an orphan.
+- `ensure_schema_at_cfg` creates `code_chunks` with no index on `path`, so the
+  `GROUP BY path` above scanned a 200 MB table and dragged every `body` and
+  `F32_BLOB` through the reader; `_path` is now created beside the table and
+  after `drop_if_dim_mismatch_cfg`, which drops the table and its indexes.
+- A top-up on a tree whose stored digest is `:partial=` used to run on every
+  `codesearch` dispatch, because `verbs.rs`' two auto-index sites tested
+  `stale` where `ensure_current_insight` tests `stale && !prior_partial`. An
+  over-budget digest never equals a fresh one, so the gate could not close and
+  the tree re-walked forever. `topup_allowed` now admits a partial tree at most
+  once per `PARTIAL_TOPUP_MIN_INTERVAL_MS` per project, so progress still
+  resumes but one dispatch no longer costs one walk.
 - Throughput bound, measured on spoint: bge-small in wasm embeds a 512-token
   chunk in ~5-7 s (opt-level z ~7 s, opt-level 3 + simd128 ~5 s), and the
   codesearch top-up budget is 4 s, so a cold 7000-chunk tree advances about one
@@ -281,7 +304,36 @@ changes.
 
 ### wasm_dispatch/verbs.rs
 
-- `confinement_violation`/`capability_access_violation` key off the caller's
+- `project_path_rejection` is the single path guard for `fs_read`/`fs_readdir`/
+  `fs_stat`/`fs_write`; the three read verbs pass `caller_opted_outside_root(body)`
+  and `fs_write` passes `false`. `READ_ONLY_OUTSIDE_ROOT_VERBS` is what makes the
+  opt-in unreachable from a write even if a caller later routes `fs_write` through
+  the same helper, so widening a read never silently widens a write.
+- `allowOutsideRoot` is admitted only as a literal boolean `true`
+  (`allow_outside_root`/`allowAbsolute` alias it) and only on the call that names
+  the path -- nothing infers it from the path shape, so a call without it fails
+  exactly as it did before. It widens WHICH root a read may address, never whether
+  a read may climb out of one: `path_has_parent_traversal` rejects any `..`
+  segment with or without the flag, and the refusal says so instead of naming the
+  flag again. The refusal a caller sees without the flag names the flag, which is
+  the whole discovery path for it.
+- The guest guard is only half of this gate: `agentplug-host`'s
+  `sandboxed_guest_path_with_extra_roots` independently refuses anything outside
+  the project root, the user gm root, and the granted extra roots, so an admitted
+  path still has to be granted before the host will serve it.
+  `outside_root_read_granted` asks for that grant through the same
+  `host_fs_allow_root` `scan_deps` already uses -- it adds no capability a caller
+  could not already reach by dispatching `scan_deps` at that root. It tries the
+  path itself then its parent, because `host_fs_allow_root` grants directories
+  only and `fs_read`/`fs_stat` are handed file paths. A directory with no project
+  marker is still refused, and the refusal says which roots the host will serve
+  rather than the "not found or empty" the host's silent `None` would otherwise
+  surface. Coverage of arbitrary non-project directories needs the host side
+  widened too, which is an `agentplug` rebuild and runner swap, not a gm change.
+- `scan_deps` keeps its own absolute-root rule (`host_allow_root`, a directory the
+  host grants) and is deliberately not part of this opt-in: it is a write-shaped
+  scan that already had a grant mechanism, and folding it in would have widened a
+  second surface for no caller need.
   self-declared `discipline` field. The spool ABI carries no unforgeable caller
   identity, so omitting `discipline` bypasses both: they catch accidental
   cross-namespace access, they are not a security boundary.
@@ -368,8 +420,20 @@ changes.
   libsql plugin's 8 s busy timeout; `BUSY_RETRY_ATTEMPTS` x 8 s must stay under
   the host's per-dispatch deadline.
 - `host_abi::git_call` turns an async `{pending, token}` envelope into
-  `ok:false` (`porcelain_or_dirty` would read a shapeless value as a clean
-  tree); only `git_step`/`git_poll` call `git_call_async`.
+  `ok:false` + `async_parked:true`; only `git_step`/`git_poll` call
+  `git_call_async`. `porcelain_or_dirty` keeps its synthetic `?? git-status-failed`
+  line for that parked case only, because it carries no status at all and reading
+  it as clean would push over an unexamined worktree.
+- `host_abi::porcelain_from` / `porcelain_or_dirty`: never launder a git failure
+  into a fake dirty entry. Every consumer reads non-empty porcelain as "the
+  worktree has work in it", so the old `?? git-status-failed` line made
+  `worktree_dirty()` true and hard-blocked `git_finalize` with "worktree still
+  dirty after commit (untriaged residual)". A real failure now returns the stdout
+  git did produce plus `partial`/`failed`/`skipped_paths`, and `git_status`
+  reports those as non-fatal fields. On Windows a path over MAX_PATH makes git
+  warn `could not open directory '<p>': Filename too long` and silently drop
+  entries while exiting 0 -- those are parsed into `skipped_paths`, so a
+  truncated listing is never mistaken for a clean tree.
 - `host_abi::git_call_async` retries once with `-c safe.directory=<repo>` when
   git refuses with "dubious ownership", and only when `<repo>` (the path git
   itself names) contains the git cwd. Windows worktrees created by an elevated
@@ -503,6 +567,15 @@ changes.
   `<session_id>:<fired_at_ms>`, which `transitions.rs` `residual_scan_fired`
   parses; mere existence must never pass the gate. Checks run in fixed order and
   the first failure ends the scan.
+- `yaml_util::invalidate_residual_marker(reason)` is the ONLY thing that clears
+  that marker, and it rewrites it to `invalidated:<reason>` rather than to empty
+  -- the tombstone keeps the gate false while letting the denial name which
+  verb (prd-add / mutable-add / prd-defer / mutable-defer) stale-dated the scan.
+  `yaml_util::read_residual_marker` is the one parser; `residual_scan_fired`,
+  `instructions::residual_check_fired_recently` and
+  `transitions::predicate_detail("residual-scan-fired")` all read through it.
+  A `prd-add` reporting `already_identical` must not invalidate: no PRD row
+  changed, so the scan is not stale.
 - `instructions::has_compiled_default_for_prose_key` must list exactly the keys
   `compiled_default_for_prose_key` matches, plus `entry`; unknown keys fall
   through to ENTRY prose.

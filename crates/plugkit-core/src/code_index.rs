@@ -282,6 +282,10 @@ pub fn ensure_schema_at_cfg(path: &str, cfg: &crate::ragconfig::RagConfig) -> Re
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, path TEXT NOT NULL, kind TEXT, name TEXT, line_start INTEGER, line_end INTEGER, body TEXT, embedding F32_BLOB({}))",
         cfg.code_chunks.table, cfg.dim()
     ))?;
+    let _ = libsql_wasm::exec(path, &format!(
+        "CREATE INDEX IF NOT EXISTS {}_path ON {}(path)",
+        cfg.code_chunks.table, cfg.code_chunks.table
+    ));
     libsql_wasm::exec(path, &format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, namespace TEXT, text TEXT, ts INTEGER, embedding F32_BLOB({}))",
         cfg.legacy_memories_alongside_code_chunks.table, cfg.dim()
@@ -1834,7 +1838,7 @@ fn index_cfg_impl(
         }
     }
     if libsql_ok {
-        let chunk_paths = chunk_rows_by_path(&db_path);
+        let chunk_paths = &chunk_counts;
         let mut orphan_chunk_files = 0u32;
         for path in chunk_paths.keys() {
             if !prior.contains_key(path) && !files_set.contains(path.as_str()) {
@@ -2068,6 +2072,52 @@ fn project_scoped_cache_key(project_path: Option<&str>) -> String {
     }
 }
 
+const FILE_DIGEST_CACHE_PATH: &str = ".gm/exec-spool/.codeinsight-file-digests.json";
+
+struct FileDigestEntry {
+    mtime_bits: u64,
+    size: u64,
+    hash: u32,
+}
+
+fn file_digest_cache_path_for(project_path: Option<&str>) -> String {
+    match project_path.filter(|p| !p.is_empty()) {
+        Some(p) => format!("{}/{}", p.trim_end_matches(['/', '\\']), FILE_DIGEST_CACHE_PATH),
+        None => FILE_DIGEST_CACHE_PATH.to_string(),
+    }
+}
+
+fn load_file_digest_cache(path: &str) -> std::collections::HashMap<String, FileDigestEntry> {
+    let mut out = std::collections::HashMap::new();
+    let raw = match crate::wasm_dispatch::host_read(path) { Some(r) => r, None => return out };
+    let parsed: Value = match serde_json::from_str(&raw) { Ok(p) => p, Err(_) => return out };
+    if let Some(obj) = parsed.as_object() {
+        for (k, v) in obj {
+            let arr = match v.as_array() { Some(a) => a, None => continue };
+            if arr.len() != 3 { continue; }
+            let (mtime_bits, size, hash) = match (
+                arr[0].as_u64(),
+                arr[1].as_u64(),
+                arr[2].as_u64(),
+            ) {
+                (Some(a), Some(b), Some(c)) => (a, b, c as u32),
+                _ => continue,
+            };
+            out.insert(k.clone(), FileDigestEntry { mtime_bits, size, hash });
+        }
+    }
+    out
+}
+
+fn save_file_digest_cache(path: &str, map: &std::collections::HashMap<String, FileDigestEntry>) {
+    let mut obj = serde_json::Map::new();
+    for (k, e) in map {
+        obj.insert(k.clone(), json!([e.mtime_bits, e.size, e.hash]));
+    }
+    let body = Value::Object(obj).to_string();
+    let _ = crate::wasm_dispatch::host_write(path, &body);
+}
+
 pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> String {
     let cache_key = project_scoped_cache_key(project_path);
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
@@ -2080,7 +2130,11 @@ pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Op
     }
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
     let files = collect_files(root, cfg.index.digest_max_files, &cfg.index);
+    let cache_path = file_digest_cache_path_for(project_path);
+    let mut file_digests = load_file_digest_cache(&cache_path);
+    let mut cache_dirty = false;
     let mut entries: Vec<(String, u32)> = Vec::new();
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     for raw_fp in &files {
         let canon = raw_fp.trim_start_matches("./").trim_start_matches('/').to_string();
         let ext = match canon.rfind('.') { Some(i) => &canon[i..], None => "" };
@@ -2088,12 +2142,30 @@ pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Op
         let stat = match crate::wasm_dispatch::host_stat(&canon)
             .or_else(|| crate::wasm_dispatch::host_stat(raw_fp))
         { Some(s) => s, None => continue };
-        if stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0) > cfg.index.max_file_bytes as u64 { continue; }
+        let size = stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+        if size > cfg.index.max_file_bytes as u64 { continue; }
+        let mtime_bits = stat.get("mtime_ms").and_then(|v| v.as_f64()).unwrap_or(0.0).to_bits();
+        seen_paths.insert(canon.clone());
+        if let Some(e) = file_digests.get(&canon) {
+            if e.mtime_bits == mtime_bits && e.size == size {
+                entries.push((canon, e.hash));
+                continue;
+            }
+        }
         let content = match host_read(&canon)
             .or_else(|| host_read(raw_fp))
         { Some(c) => c, None => continue };
         let content_hash = crate::hash::fnv1a64(content.as_bytes()) as u32;
+        file_digests.insert(canon.clone(), FileDigestEntry { mtime_bits, size, hash: content_hash });
+        cache_dirty = true;
         entries.push((canon, content_hash));
+    }
+    if file_digests.len() > seen_paths.len() + 4096 {
+        file_digests.retain(|k, _| seen_paths.contains(k));
+        cache_dirty = true;
+    }
+    if cache_dirty {
+        save_file_digest_cache(&cache_path, &file_digests);
     }
     let digest = digest_from_entries(entries);
     if let Ok(mut cache) = DIGEST_CACHE.lock() {
@@ -2108,6 +2180,34 @@ fn digest_path_for(project_path: Option<&str>) -> String {
         Some(p) if !p.is_empty() => format!("{}/{}", p.trim_end_matches(['/', '\\']), DIGEST_PATH),
         _ => DIGEST_PATH.to_string(),
     }
+}
+
+const PARTIAL_TOPUP_TS_PATH: &str = ".gm/exec-spool/.codeinsight-topup-ts";
+const PARTIAL_TOPUP_MIN_INTERVAL_MS: u64 = 300_000;
+
+fn partial_topup_ts_path_for(project_path: Option<&str>) -> String {
+    match project_path {
+        Some(p) if !p.is_empty() => format!("{}/{}", p.trim_end_matches(['/', '\\']), PARTIAL_TOPUP_TS_PATH),
+        _ => PARTIAL_TOPUP_TS_PATH.to_string(),
+    }
+}
+
+fn partial_topup_due_at(project_path: Option<&str>) -> bool {
+    let path = partial_topup_ts_path_for(project_path);
+    let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let last_ms = crate::wasm_dispatch::host_read(&path)
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if now_ms.saturating_sub(last_ms) < PARTIAL_TOPUP_MIN_INTERVAL_MS {
+        return false;
+    }
+    let _ = crate::wasm_dispatch::host_write(&path, &now_ms.to_string());
+    true
+}
+
+pub fn topup_allowed(stored: &Option<String>, project_path: Option<&str>) -> bool {
+    let prior_partial = stored.as_ref().is_some_and(|digest| digest.contains(":partial="));
+    !prior_partial || partial_topup_due_at(project_path)
 }
 
 pub fn stored_digest() -> Option<String> {
@@ -3365,6 +3465,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     } else {
         candidates.into_iter().map(|(_, _, _, hit)| hit).collect()
     };
+    let unread_paths: &[String] = &files[entered_paths.min(files.len())..];
     let cache_hits = cache.hits;
     let cache_misses = cache.misses;
     let cache_entries = cache.entries.len();
@@ -3405,6 +3506,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     if req.verbose || file_source != "git" {
         out.insert("file_source".to_string(), json!(file_source));
         out.insert("file_source_detail".to_string(), json!(universe.source.detail()));
+    if !unread_paths.is_empty() {
+        out.insert("paths_not_read_count".to_string(), json!(unread_paths.len()));
+        out.insert("paths_not_read".to_string(), json!(unread_paths.iter().take(SKIPPED_SAMPLE_LEN).cloned().collect::<Vec<_>>()));
+        out.insert("paths_not_read_note".to_string(), json!("the hit cap was reached before these named paths were opened, so nothing in them can appear above: the paths list above is what you asked for, files_scanned is what was actually read -- raise max_results or scan these paths one per call"));
+    }
     }
     if req.refresh {
         out.insert("refreshed".to_string(), json!(true));
@@ -4030,8 +4136,10 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     let mut files_skipped_too_large = 0usize;
     let mut files_skipped_no_syntax: Vec<String> = Vec::new();
     let mut matches_truncated = false;
+    let mut entered_paths = 0usize;
     for path in files {
         if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
+        entered_paths += 1;
         if let Some(g) = &glob {
             if !glob_scopes.iter().any(|s| g.admits(root, *s, path)) { continue; }
         }
