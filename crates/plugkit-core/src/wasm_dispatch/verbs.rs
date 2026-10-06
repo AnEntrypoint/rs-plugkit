@@ -2397,10 +2397,6 @@ fn codesearch_at_root(
             ),
         );
     }
-    if body.get("mode").and_then(|v| v.as_str()) == Some("filename") {
-        let out = crate::code_index::search_filenames_at(query, k as usize, cfg, Some(root));
-        return ok("codesearch", out);
-    }
     let scope = match PathScope::from_body(body) {
         Ok(scope) => scope,
         Err(e) => return err("codesearch", &e),
@@ -2589,6 +2585,14 @@ fn codesearch_exhaustive(
     cfg: &crate::ragconfig::RagConfig,
     explicit_limit: Option<u32>,
 ) -> u64 {
+    let filenames = body.get("mode").and_then(|v| v.as_str()) == Some("filename");
+    if filenames {
+        for field in ["whole_word", "comments_only"] {
+            if body.get(field).and_then(|value| value.as_bool()) == Some(true) {
+                return err("codesearch", &format!("{field} applies to source contents, not filename matching"));
+            }
+        }
+    }
     let mut root = body
         .get("root")
         .and_then(|v| v.as_str())
@@ -2714,10 +2718,10 @@ fn codesearch_exhaustive(
         root,
         path: path.as_deref(),
         regex,
-        case_insensitive: body
-            .get("case_insensitive")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+            case_insensitive: body
+                .get("case_insensitive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(filenames),
         whole_word: body
             .get("whole_word")
             .and_then(|v| v.as_bool())
@@ -2743,7 +2747,11 @@ fn codesearch_exhaustive(
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
     };
-    let out = crate::code_index::scan_literal(&scan, cfg);
+    let out = if filenames {
+        crate::code_index::scan_filenames(&scan, cfg)
+    } else {
+        crate::code_index::scan_literal(&scan, cfg)
+    };
     if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
         return err(
             "codesearch",
@@ -2970,7 +2978,7 @@ fn codesearch_dispatch(body: &Value) -> u64 {
         Ok(v) => v,
         Err(e) => return err("codesearch", &e),
     };
-    if mode == "literal" || mode == "regex" {
+    if mode == "literal" || mode == "regex" || mode == "filename" {
         if let Some(refusal) =
             refuse_unknown_fields("codesearch", body, CODESEARCH_EXHAUSTIVE_FIELDS)
         {
@@ -3005,10 +3013,6 @@ fn codesearch_dispatch(body: &Value) -> u64 {
     }
     if let Some(root) = root {
         return codesearch_at_root(body, root, query, k, &cfg);
-    }
-    if mode == "filename" {
-        let out = crate::code_index::search_filenames(query, k as usize, &cfg);
-        return ok("codesearch", out);
     }
     let (_dataflow_doc, dataflow_tier, dataflow_path) = crate::dataflow::document_detailed();
     if dataflow_tier != crate::dataflow::DataflowTier::CompiledDefault {
