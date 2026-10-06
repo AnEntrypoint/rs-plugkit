@@ -133,19 +133,67 @@ pub fn git_porcelain() -> String {
     porcelain_or_dirty(git_call("status --porcelain", None))
 }
 
-pub(crate) fn porcelain_or_dirty(v: Value) -> String {
+/// One `git status --porcelain` call, kept as data so a caller can tell a clean
+/// tree apart from one git could not fully read.
+///
+/// Windows MAX_PATH truncation makes git drop entries it cannot open: it warns on
+/// stderr and exits 0 (silent data loss), or exits non-zero. Neither may be
+/// reported as a dirty path -- every consumer of this string reads non-empty as
+/// "the worktree has work in it", so a fabricated `??` line is indistinguishable
+/// from a real untracked file and hard-blocks `git_finalize`.
+pub(crate) struct Porcelain {
+    pub porcelain: String,
+    pub partial: bool,
+    pub failed: bool,
+    pub parked: bool,
+    pub skipped_paths: Vec<String>,
+    pub stderr: String,
+    pub exit_code: i64,
+}
+
+const GIT_SKIPPED_DIR_MARKER: &str = "could not open directory";
+
+fn skipped_dir_from_stderr_line(line: &str) -> Option<String> {
+    let rest = line.split_once(GIT_SKIPPED_DIR_MARKER)?.1;
+    let start = rest.find('\'')? + 1;
+    let end = rest.rfind('\'')?;
+    if end <= start { return None; }
+    let path = rest[start..end].trim();
+    if path.is_empty() { None } else { Some(path.to_string()) }
+}
+
+pub(crate) fn porcelain_from(v: &Value) -> Porcelain {
     let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
     let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    if !ok || exit_code != 0 {
-        let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
-        let detail = if stderr.is_empty() {
-            format!("exit_code={exit_code}")
+    let porcelain = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let parked = v.get("async_parked").and_then(|x| x.as_bool()).unwrap_or(false);
+    let truncated = v.get("stdout_truncated").and_then(|x| x.as_bool()).unwrap_or(false);
+    let mut skipped_paths: Vec<String> = Vec::new();
+    for line in stderr.lines() {
+        let Some(path) = skipped_dir_from_stderr_line(line) else { continue };
+        if !skipped_paths.contains(&path) { skipped_paths.push(path); }
+    }
+    let failed = !ok || exit_code != 0;
+    let partial = failed || truncated || !skipped_paths.is_empty();
+    Porcelain { porcelain, partial, failed, parked, skipped_paths, stderr, exit_code }
+}
+
+pub(crate) fn porcelain_or_dirty(v: Value) -> String {
+    let st = porcelain_from(&v);
+    // An async-parked envelope carries no status at all, so reading it as a clean
+    // tree would push over a worktree nobody examined. A real git failure is the
+    // opposite case: it still lists what it could read, so return that and let
+    // git_status surface the failure as a non-fatal `partial` note.
+    if st.parked {
+        let detail = if st.stderr.trim().is_empty() {
+            format!("exit_code={}", st.exit_code)
         } else {
-            format!("exit_code={exit_code} stderr={stderr}")
+            format!("exit_code={} stderr={}", st.exit_code, st.stderr.trim())
         };
         return format!("?? git-status-failed ({detail})");
     }
-    v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string()
+    st.porcelain
 }
 
 pub fn git_call_argv(argv: &[&str], cwd: Option<&str>) -> Value {
