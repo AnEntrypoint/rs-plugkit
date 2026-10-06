@@ -5636,6 +5636,31 @@ fn git_commit(body: &Value) -> u64 {
             .get("add_all")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let merge_probe = git_step_replayed_by_call_order(
+            plan,
+            &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"],
+            cwd,
+        )?;
+        let merge_pending = match merge_probe.get("exit_code").and_then(Value::as_i64) {
+            Some(0) => true,
+            Some(1) => false,
+            _ => {
+                return Ok(err(
+                    "git_commit",
+                    "unable to inspect repository merge state",
+                ))
+            }
+        };
+        if merge_pending && (body.get("paths").is_some() || body.get("files").is_some() || add_all)
+        {
+            return Ok(err_json(
+                "git_commit",
+                json!({
+                    "error": "a merge commit consumes the complete prepared index; path-scoped or add_all requests are refused before staging. Resolve and review the staged merge, then call git_commit without paths or add_all",
+                    "error_code": "merge_requires_prepared_index",
+                }),
+            ));
+        }
         let blocked_paths = hard_excluded_pathspecs(&paths);
         if !blocked_paths.is_empty() {
             return Ok(err_json(
@@ -5780,8 +5805,10 @@ fn git_commit(body: &Value) -> u64 {
         if allow_empty {
             argv.push("--allow-empty".to_string());
         }
-        argv.push("--".to_string());
-        argv.extend(git_pathspec_scope(scoped_paths, cwd));
+        if !merge_pending {
+            argv.push("--".to_string());
+            argv.extend(git_pathspec_scope(scoped_paths, cwd));
+        }
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
