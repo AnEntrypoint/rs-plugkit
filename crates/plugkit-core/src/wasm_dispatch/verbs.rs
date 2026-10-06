@@ -1776,6 +1776,65 @@ fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) -> Value {
     if opts.verbose { raw } else { crate::codesearch_rank::compact_dual(query, &raw, &opts) }
 }
 
+thread_local! {
+    static DISPATCH_STARTED_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static CALLER_BUDGET_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn set_caller_budget(timeout_ms: Option<u64>) {
+    DISPATCH_STARTED_MS.with(|c| c.set(unsafe { host_now_ms() }));
+    CALLER_BUDGET_MS.with(|c| c.set(timeout_ms.unwrap_or(0)));
+}
+
+fn caller_remaining_ms() -> Option<u64> {
+    let budget = CALLER_BUDGET_MS.with(|c| c.get());
+    if budget == 0 { return None; }
+    let elapsed = unsafe { host_now_ms() }.saturating_sub(DISPATCH_STARTED_MS.with(|c| c.get()));
+    Some(budget.saturating_sub(elapsed))
+}
+
+const DUAL_SEARCH_RESERVE_MS: u64 = 30_000;
+
+const VECTOR_CHANNEL_RESERVE_MS: u64 = 15_000;
+
+const VECTOR_CHANNEL_COLD_RESERVE_MS: u64 = 60_000;
+
+fn index_progress_of(result: &Value) -> Value {
+    json!({
+        "files_indexed": result.get("files_indexed").and_then(|v| v.as_u64()).unwrap_or(0),
+        "files_deferred": result.get("deferred_files").and_then(|v| v.as_u64()).unwrap_or(0),
+        "chunks": result.get("chunks").and_then(|v| v.as_u64()).unwrap_or(0),
+        "complete": result.get("complete").and_then(|v| v.as_bool()).unwrap_or(false),
+        "pass_ms": result.get("pass_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
+}
+
+fn unindexed_channel(root: &str) -> Value {
+    json!({ "independent": true, "indexed_root": root, "ran": false })
+}
+
+fn cold_index_pending_reply(root: &str, retry: &Value) -> Value {
+    json!({
+        "mode": "dual",
+        "root": root,
+        "partial": true,
+        "partial_reason": "this project's index was stale, and the pass that rebuilds it used the budget this dispatch had left; re-dispatch the same query to search what is indexed now and to continue indexing",
+        "index_progress": retry.get("index_progress").cloned().unwrap_or_else(|| json!({})),
+        "stage_ms": retry.get("stage_ms").cloned().unwrap_or_else(|| json!({})),
+        "vector_hits": [],
+        "bm25_hits": [],
+        "phrase_hits": [],
+        "commits": [],
+        "channels": {
+            "vector": unindexed_channel(root),
+            "bm25": unindexed_channel(root),
+            "phrase": unindexed_channel(root),
+            "commits": unindexed_channel(root),
+        },
+        "degraded": true,
+    })
+}
+
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
     if !crate::wasm_dispatch::host_allow_root(root) {
         return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
@@ -1797,32 +1856,39 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
             let reason = if cold_start { "digest-absent" } else { "digest-mismatch" };
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "root": root, "stored_then_current": current }));
             let index_started = unsafe { crate::wasm_dispatch::host_now_ms() };
-            if cold_start {
-                let _ = crate::code_index::index_at_topup(root, cfg.index.prune_pass_file_limit_ceiling, root, COLD_INDEX_PASS_BUDGET_MS);
+            let cold_budget_ms = match caller_remaining_ms() {
+                Some(remaining) => COLD_INDEX_PASS_BUDGET_MS.min(remaining.saturating_sub(DUAL_SEARCH_RESERVE_MS)),
+                None => COLD_INDEX_PASS_BUDGET_MS,
+            };
+            let index_result = if cold_start {
+                crate::code_index::index_at_topup(root, cfg.index.prune_pass_file_limit_ceiling, root, cold_budget_ms)
             } else {
-                let _ = crate::code_index::index_at_topup(root, cfg.index.prune_pass_file_limit_ceiling, root, cfg.index.incremental_topup_wall_budget_ms);
-            }
+                crate::code_index::index_at_topup(root, cfg.index.prune_pass_file_limit_ceiling, root, cfg.index.incremental_topup_wall_budget_ms)
+            };
             let index_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(index_started);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
+                obj.insert("index_progress".to_string(), index_progress_of(&index_result));
                 obj.insert("stage_ms".to_string(), json!({
                     "digest": index_started.saturating_sub(digest_started),
                     "index_pass": index_ms,
                     "total": unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms),
                 }));
             }
+            if caller_remaining_ms().map(|left| left < DUAL_SEARCH_RESERVE_MS).unwrap_or(false) {
+                emit_event("codesearch_index_pending", json!({
+                    "root": root,
+                    "index_progress": retry.get("index_progress").cloned().unwrap_or_else(|| json!({})),
+                }));
+                return ok("codesearch", cold_index_pending_reply(root, &retry));
+            }
             return codesearch_at_root(&retry, root, query, k, cfg);
         }
     }
     let stage = |from: u64| unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(from);
     let mut at = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let embedding = embed_query(query);
-    let embed_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let shown_k = dual_channel_depth(body, k);
-    let vres = crate::code_index::search_at(query, shown_k, Some(&embedding), Some(root));
-    let vector_hits = vres.get("rows").cloned().unwrap_or_else(|| json!([]));
-    let vector_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut corpus = crate::code_index::FusionCorpus::load_at(Some(root));
     let corpus_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let bm25_ranked = corpus.bm25_rank_cfg(query, shown_k, &cfg.scoring);
@@ -1844,7 +1910,23 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
     let commits = crate::code_index::git_commit_rank_at(root, query, 10);
     let commits_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, Some(root), cfg);
-    let phrase_ms = stage(at);
+    let phrase_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let vector_reserve_ms = if prior_stage_ms.get("index_pass").is_some() {
+        VECTOR_CHANNEL_COLD_RESERVE_MS
+    } else {
+        VECTOR_CHANNEL_RESERVE_MS
+    };
+    let vector_channel_ran = caller_remaining_ms().map(|left| left >= vector_reserve_ms).unwrap_or(true);
+    let (vector_hits, embed_ms, vector_ms, degraded) = if vector_channel_ran {
+        let embedding = embed_query(query);
+        let embed_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
+        let vres = crate::code_index::search_at(query, shown_k, Some(&embedding), Some(root));
+        let rows = vres.get("rows").cloned().unwrap_or_else(|| json!([]));
+        let vector_ms = stage(at);
+        (rows, embed_ms, vector_ms, vres.get("degraded").cloned().unwrap_or(json!(false)))
+    } else {
+        (json!([]), 0u64, 0u64, json!(true))
+    };
     let stage_ms = json!({
         "embed_query": embed_ms,
         "vector_search": vector_ms,
@@ -1864,7 +1946,16 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
         "commits": commits,
         "channels": {
-            "vector": { "independent": true, "indexed_root": root },
+            "vector": if vector_channel_ran {
+                json!({ "independent": true, "indexed_root": root, "ran": true })
+            } else {
+                json!({
+                    "independent": true,
+                    "indexed_root": root,
+                    "ran": false,
+                    "skipped": "the embedding channel could not finish inside this dispatch's remaining budget, so bm25, phrase and commits answered instead; re-dispatch for the vector channel",
+                })
+            },
             "bm25": { "independent": true, "indexed_root": root },
             "phrase": {
                 "independent": true,
@@ -1876,7 +1967,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
             "commits": { "independent": true, "indexed_root": root },
         },
         "stage_ms": merge_stage_ms(prior_stage_ms, stage_ms),
-        "degraded": vres.get("degraded").cloned().unwrap_or(json!(false)),
+        "degraded": degraded,
     });
     ok("codesearch", compact_dual_reply(body, query, k, raw))
 }
@@ -2187,7 +2278,9 @@ grep (alias \"rg\") is an exhaustive literal/regex scan of the tree. Every reply
   {\"fixed_strings\":true}                            match the pattern literally, never as a regex
   {\"case_insensitive\":true}                         \"ignore_case\" is an alias
   {\"whole_word\":true}
-  {\"context\":2}                                     include N lines before and after each hit
+  {\"context\":2}                                     include N lines before and after each hit, in any mode including
+                                                     mode comments; context lines print as path-N- text, hit
+                                                     lines as path:line: text, gaps between windows as --
   {\"max_results\":200}                               hit cap (default 200); aliases: maxResults, limit, max_matches, k
   {\"max_files\":50000}                               file cap (default 50000)
   {\"refresh\":true}                                  re-read from disk: walk instead of `git ls-files --cached`,
@@ -2632,7 +2725,9 @@ fn grep(body: &Value) -> u64 {
                 out.insert("matches".to_string(), Value::Array(grep_shaped_matches(matches, want_columns)));
             } else {
                 out.remove("matches");
-                out.insert("output".to_string(), Value::Array(matches.iter().map(|m| json!(grep_output_line(m, "content"))).collect()));
+                out.insert("output".to_string(), Value::Array(
+                    crate::code_index::grep_content_lines(&matches, context, false).into_iter().map(|line| json!(line)).collect(),
+                ));
             }
         }
     }
@@ -2661,6 +2756,10 @@ fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
         Ok(globs) => globs,
         Err(e) => return err("grep", &e),
     };
+    let context = match body.get("context").and_then(|v| v.as_u64()) {
+        Some(n) => n as usize,
+        None => 0,
+    };
     let scan = crate::code_index::CommentScan {
         root,
         paths: &path_refs,
@@ -2672,6 +2771,7 @@ fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
         max_matches: max_matches as usize,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
+        context,
         refresh: scan_refresh_requested(body),
     };
     let scanned = crate::code_index::scan_comments(&scan, cfg);
@@ -6182,19 +6282,27 @@ fn strip_timeout_ms_prefix_directive(body_s: &str) -> (Option<u64>, &str) {
 
 fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
     let verb = read_str(verb_ptr as *const u8, verb_len);
-    let body_s = read_str(body_ptr as *const u8, body_len);
+    let raw_body_s = read_str(body_ptr as *const u8, body_len);
+    let body_is_json = verb_body_must_be_json(&verb);
+    let (caller_timeout_ms, body_s) = if body_is_json {
+        let (n, rest) = strip_timeout_ms_prefix_directive(&raw_body_s);
+        (n, rest.to_string())
+    } else {
+        (None, raw_body_s.clone())
+    };
     let fingerprint = request_fingerprint(&verb, &body_s);
-    let body_parse_failed = verb_body_must_be_json(&verb)
+    let body_parse_failed = body_is_json
         && !body_s.is_empty()
         && serde_json::from_str::<Value>(&body_s).is_err();
     let body: Value = if body_s.is_empty() { Value::Null } else {
         serde_json::from_str(&body_s).unwrap_or(Value::Null)
     };
+    set_caller_budget(caller_timeout_ms);
     let dispatch_session_id = body.get("sessionId").and_then(|v| v.as_str())
         .or_else(|| body.get("session_id").and_then(|v| v.as_str()))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .or_else(|| extract_session_id_from_plain_text_body(&body_s));
+        .or_else(|| extract_session_id_from_plain_text_body(&raw_body_s));
     super::events::set_dispatch_session_id(dispatch_session_id.clone());
     if let Some(root_override) = body.get("git_root_override").and_then(|v| v.as_str()) {
         crate::orchestrator::seed_project_root_override(root_override);
@@ -6205,6 +6313,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         Some(rejection) => rejection,
         None => dispatch_gated_verb(&verb, &body, &body_s),
     };
+    set_caller_budget(None);
     super::events::set_dispatch_session_id(None);
     let result_value = super::host_abi::unpack_to_value(result_packed);
     #[cfg(target_arch = "wasm32")]
