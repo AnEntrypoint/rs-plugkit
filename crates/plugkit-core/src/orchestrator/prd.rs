@@ -426,7 +426,9 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         Ok(u) => u,
         Err((out, err, rc)) => return (out, err, rc),
     };
-    invalidate_residual_marker();
+    if add_outcome != AddOutcome::AlreadyIdentical {
+        invalidate_residual_marker("prd-add");
+    }
     #[cfg(target_arch = "wasm32")]
     crate::wasm_dispatch::emit_event(
         "prd.added",
@@ -503,7 +505,7 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
     });
     match outcome {
         Ok(()) => {
-            invalidate_residual_marker();
+            invalidate_residual_marker("prd-defer");
             #[cfg(target_arch = "wasm32")]
             crate::wasm_dispatch::emit_event("prd.deferred", serde_json::json!({ "id": id_target, "reason": reason }));
             (serde_json::json!({ "deferred": id_target, "blockedBy": ["external"] }).to_string(), String::new(), 0)
