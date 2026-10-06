@@ -6563,6 +6563,31 @@ fn git_pull(body: &Value) -> u64 {
         .filter(|line| !line.is_empty())
         .collect();
     if code != 0 {
+        let lower_output = output.to_ascii_lowercase();
+        if lower_output.contains("committer identity unknown")
+            || lower_output.contains("author identity unknown")
+            || lower_output.contains("unable to auto-detect email address")
+            || lower_output.contains("empty ident name")
+        {
+            return err_json(
+                "git_pull",
+                json!({
+                    "error": output,
+                    "error_code": "git_identity_required",
+                    "remote": remote,
+                    "branch": if branch.is_empty() { Value::Null } else { json!(branch) },
+                    "ff_only": ff_only,
+                    "conflicted": !conflicts.is_empty(),
+                    "conflicts": conflicts,
+                    "head_before": head_before,
+                    "hint": "Git needs a commit identity for this merge. GitHub CLI authentication does not configure Git commit identity. Set this repository's user.name and user.email to your verified GitHub identity, then retry git_pull. No identity or global configuration was changed.",
+                    "repo_local_config_argv": [
+                        ["git", "config", "--local", "user.name", "<your GitHub name>"],
+                        ["git", "config", "--local", "user.email", "<your verified GitHub email>"],
+                    ],
+                }),
+            );
+        }
         if conflicts.is_empty() {
             let target_branch = if branch.is_empty() {
                 exec_git_in(cwd, "rev-parse --abbrev-ref HEAD")
