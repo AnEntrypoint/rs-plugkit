@@ -1474,6 +1474,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut digest_entries: Vec<(String, u64)> = Vec::with_capacity(files.len());
+    let mut embed_backlog = load_embed_backlog(project_path);
 
     for raw_fp in &files {
         let canon = canonical_index_path(raw_fp).to_string();
@@ -1615,6 +1616,7 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             if fresh_file_allowance_spent || (under_floor && floor_grace_used_this_pass) {
                 deferred_files += 1;
                 first_deferred.get_or_insert_with(|| fp.clone());
+                embed_backlog.insert(fp.clone());
                 continue;
             }
             if under_floor {
@@ -1745,8 +1747,15 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
         } else {
             fv_delete(&manifest_ns_for(project_path), fp);
         }
-        if file_fully_persisted && deferred_in_file == 0 {
+        if file_fully_persisted {
             digest_entries.push((fp.clone(), file_digest_hash));
+            if deferred_in_file > 0 || file_skipped_no_embed > 0 {
+                embed_backlog.insert(fp.clone());
+            } else {
+                embed_backlog.remove(fp);
+            }
+        } else {
+            embed_backlog.insert(fp.clone());
         }
         fusion_corpus_cache_invalidate(project_path);
     }
@@ -1777,6 +1786,8 @@ fn index_cfg_impl(root: &str, max_files: usize, cfg: &crate::ragconfig::RagConfi
             }));
         }
     }
+    embed_backlog.retain(|p| files_set.contains(p.as_str()));
+    store_embed_backlog(project_path, &embed_backlog);
     let pass_complete = deferred_files == 0 && deferred_chunks == 0 && skipped_no_embed == 0;
     store_index_cursor_at(first_deferred.as_deref(), project_path);
     let (mut content_manifest, _stored_present) = load_content_manifest(project_path);
@@ -1951,7 +1962,36 @@ const CONTENT_MANIFEST_PATH: &str = ".gm/exec-spool/.codeinsight-content-manifes
 
 type ContentManifest = std::collections::BTreeMap<String, u64>;
 
+const EMBED_BACKLOG_PATH: &str = ".gm/exec-spool/.codeinsight-embed-backlog.json";
+
 const UNREADABLE_CONTENT_HASH: u64 = 0;
+
+fn embed_backlog_path_for(project_path: Option<&str>) -> String {
+    match project_path {
+        Some(p) if !p.is_empty() => format!("{}/{}", p.trim_end_matches(['/', '\\']), EMBED_BACKLOG_PATH),
+        _ => EMBED_BACKLOG_PATH.to_string(),
+    }
+}
+
+fn load_embed_backlog(project_path: Option<&str>) -> std::collections::BTreeSet<String> {
+    let path = embed_backlog_path_for(project_path);
+    match crate::wasm_dispatch::host_read(&path) {
+        Some(raw) => serde_json::from_str::<Vec<String>>(&raw)
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+        None => std::collections::BTreeSet::new(),
+    }
+}
+
+fn store_embed_backlog(project_path: Option<&str>, pending: &std::collections::BTreeSet<String>) {
+    let path = embed_backlog_path_for(project_path);
+    let entries: Vec<&String> = pending.iter().collect();
+    match serde_json::to_string(&entries) {
+        Ok(raw) => { let _ = crate::wasm_dispatch::host_write(&path, &raw); }
+        Err(_) => {}
+    }
+}
 
 fn digest_acc(entries: &[(String, u64)]) -> String {
     let mut acc = String::with_capacity(entries.len() * 32);
@@ -2122,6 +2162,7 @@ pub struct IndexDiff {
     pub changed: Vec<String>,
     pub added: Vec<String>,
     pub removed: Vec<String>,
+    pub pending_embed_files: Vec<String>,
     pub cold_start: bool,
 }
 
@@ -2136,6 +2177,13 @@ impl IndexDiff {
 
     pub fn priority_paths(&self) -> Vec<String> {
         let mut out: Vec<String> = self.changed.iter().chain(self.added.iter()).cloned().collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    pub fn embed_backlog_paths(&self) -> Vec<String> {
+        let mut out = self.pending_embed_files.clone();
         out.sort();
         out.dedup();
         out
@@ -2161,7 +2209,13 @@ pub fn index_diff_at(project_path: Option<&str>) -> IndexDiff {
             if !current.contains_key(path) { removed.push(path.clone()); }
         }
     }
-    IndexDiff { changed, added, removed, cold_start: !stored_present }
+    let mut pending_embed_files: Vec<String> = load_embed_backlog(project_path)
+        .into_iter()
+        .filter(|p| current.contains_key(p))
+        .collect();
+    pending_embed_files.sort();
+    pending_embed_files.dedup();
+    IndexDiff { changed, added, removed, pending_embed_files, cold_start: !stored_present }
 }
 
 pub fn overview() -> Value {
