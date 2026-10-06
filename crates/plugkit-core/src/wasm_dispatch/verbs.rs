@@ -4713,6 +4713,35 @@ fn run_git_checked(
 
 const GIT_STATUS_SUMMARY_DEFAULT_PATHS: usize = 20;
 
+fn git_head_ref_line(
+    plan: &mut GitPendingTokenReplayPlan,
+    cwd: Option<&str>,
+) -> Result<String, u64> {
+    let r = git_step_replayed_by_call_order(plan, &["log", "-1", "--pretty=format:%H %D"], cwd)?;
+    Ok(r.get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string())
+}
+
+fn split_head_ref_line(line: &str) -> (String, String) {
+    let sha = line
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let branch = line
+        .split("HEAD -> ")
+        .nth(1)
+        .and_then(|rest| rest.split([',', ')'].as_ref()).next())
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "HEAD".to_string());
+    (sha, branch)
+}
+
 fn git_status(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_status",
@@ -4768,6 +4797,8 @@ fn git_status(body: &Value) -> u64 {
             }
         }
         let dirty = !porcelain.trim().is_empty();
+        let head_line = git_head_ref_line(plan, cwd)?;
+        let (head_sha, head_branch) = split_head_ref_line(&head_line);
         if summary {
             let first_n = limit.unwrap_or(GIT_STATUS_SUMMARY_DEFAULT_PATHS);
             let entries: Vec<&str> = porcelain.lines().filter(|l| l.len() >= 3).collect();
@@ -4792,11 +4823,17 @@ fn git_status(body: &Value) -> u64 {
                     "first_paths_note": "each entry is the two-column porcelain status, a space, then the path",
                     "truncated": entries.len() > first_n,
                     "scoped_to": paths,
+                    "head": head_sha.clone(),
+                    "head_sha": head_sha.clone(),
+                    "branch": head_branch.clone(),
                 }),
             ));
         }
         let mut lists = json!({
             "dirty": dirty,
+            "head": head_sha,
+            "head_sha": head_sha,
+            "branch": head_branch,
             "modified": modified,
             "untracked": untracked,
             "deleted": deleted,
@@ -5025,6 +5062,64 @@ fn verify_push_landed(
     }
     let already_current = remote_before.map(|b| b == local_head).unwrap_or(false);
     Ok((remote_after, already_current))
+}
+
+const PUSHED_COMMITS_LIST_LIMIT: usize = 50;
+
+fn pushed_commits_published(repo: Option<&str>, from: Option<&str>, to: &str) -> Value {
+    let range = match from {
+        Some(from) => format!("{}..{}", from, to),
+        None => to.to_string(),
+    };
+    let count = git_call_argv(&["rev-list", "--count", range.as_str()], repo)
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0")
+        .trim()
+        .parse::<u64>()
+        .unwrap_or(0);
+    let limit = format!("--max-count={}", PUSHED_COMMITS_LIST_LIMIT);
+    let log_out = git_call_argv(
+        &[
+            "log",
+            limit.as_str(),
+            "--pretty=format:%H%x1f%an%x1f%ae%x1f%s",
+            range.as_str(),
+        ],
+        repo,
+    )
+    .get("stdout")
+    .and_then(|v| v.as_str())
+    .unwrap_or("")
+    .to_string();
+    let mut commits: Vec<Value> = vec![];
+    let mut authors: Vec<String> = vec![];
+    for line in log_out.lines() {
+        let fields: Vec<&str> = line.split('\u{1f}').collect();
+        if fields.len() < 4 {
+            continue;
+        }
+        let author = format!("{} <{}>", fields[1], fields[2]);
+        if !authors.contains(&author) {
+            authors.push(author);
+        }
+        commits.push(json!({
+            "sha": fields[0],
+            "author": fields[1],
+            "author_email": fields[2],
+            "subject": fields[3],
+        }));
+    }
+    json!({
+        "range": range,
+        "from": from,
+        "to": to,
+        "count": count,
+        "listed": commits.len(),
+        "truncated": count > commits.len() as u64,
+        "authors": authors,
+        "commits": commits,
+    })
 }
 
 fn git_push(body: &Value) -> u64 {
@@ -5285,6 +5380,11 @@ fn git_push(body: &Value) -> u64 {
                 "source_ref": source_ref,
                 "source_sha": local_source_after,
                 "preserved_dirty_worktree": preserved_dirty_worktree,
+                "pushed_commits": pushed_commits_published(
+                    repo.as_deref(),
+                    remote_before.as_deref(),
+                    &local_source_after,
+                ),
                 "ssh_fallback": ssh_fallback.as_ref().map(|f| json!({
                     "used": true,
                     "reason": "origin is an SSH URL that refused authentication while an https route was reachable",
@@ -5745,6 +5845,7 @@ fn git_finalize(body: &Value) -> u64 {
                 "already_current": push_data.get("already_current").cloned().unwrap_or(Value::Null),
                 "remote_sha": push_data.get("remote_sha").cloned().unwrap_or(Value::Null),
                 "preserved_dirty_worktree": push_data.get("preserved_dirty_worktree").cloned().unwrap_or(Value::Null),
+                "pushed_commits": push_data.get("pushed_commits").cloned().unwrap_or(Value::Null),
                 "steps": [
                     {"step": "commit", "skipped": "explicit source_ref publishes an existing commit"},
                     {"step": "push", "branch": push_data.get("branch").cloned().unwrap_or(Value::Null)},
@@ -6085,6 +6186,7 @@ fn git_finalize(body: &Value) -> u64 {
         "remote_advanced": remote_advanced,
         "already_current": already_current,
         "remote_sha": remote_sha,
+        "pushed_commits": push_data.and_then(|d| d.get("pushed_commits")).cloned().unwrap_or(Value::Null),
         "steps": steps,
         "ssh_fallback": push_data.and_then(|d| d.get("ssh_fallback")).cloned().unwrap_or(Value::Null),
         "ci_validated_marker_written": ci_validated_written,
