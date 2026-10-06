@@ -1834,7 +1834,7 @@ const REGEX_SCAN_DEFAULT_BUDGET_MS: u64 = 20_000;
 const CODESEARCH_MODES: &[&str] =&["dual", "literal", "regex", "filename"];
 
 const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
-    "query", "mode", "path", "glob", "path_glob", "exclude_glob", "exclude_globs", "case_insensitive", "whole_word", "comments_only",
+    "query", "mode", "path", "glob", "path_glob", "exclude", "exclude_glob", "exclude_globs", "case_insensitive", "whole_word", "comments_only",
     "k", "max_results", "maxResults", "limit", "head_limit", "max_matches", "max_files", "output", "max_chars", "verbose", "docs", "timeout_ms",
     // `resolve_scan_target` reads these, and "root" is the escape hatch the out-of-root error tells
     // the caller to use, so refusing it here would leave that advice unusable. "cwd" is the
@@ -1989,7 +1989,7 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
             Err(e) => return err("codesearch", &format!("{key} {e}")),
         }
     }
-    for key in ["exclude_glob", "exclude_globs"] {
+    for key in ["exclude", "exclude_glob", "exclude_globs"] {
         match glob_patterns_from(body.get(key)) {
             Ok(patterns) => exclude_globs.extend(patterns.into_iter().map(|p| p.strip_prefix('!').map(str::to_string).unwrap_or(p))),
             Err(e) => return err("codesearch", &format!("{key} {e}")),
@@ -2049,14 +2049,27 @@ const GREP_OUTPUT_MODES: &[&str] = &["content", "files_with_matches", "count"];
 
 const GREP_MODES: &[&str] = &["pattern", "comments"];
 
+const GREP_EXCLUDE_FIELDS: &[&str] = &["exclude", "exclude_glob", "exclude_globs"];
+
 const GREP_HELP: &str = "\
 grep (alias \"rg\") is an exhaustive literal/regex scan of the tree. Every reply is bounded; read
 \"exhaustive\" in the response to know whether it saw everything.
 
   {\"pattern\":\"<text or regex>\"}                    required (unless mode:\"comments\"); \"query\" is accepted too
   {\"path\":\"<dir or file>\"}                         narrow the scan to one subtree or one file
-  {\"glob\":\"**/*.rs\"}                               narrow by path glob; \"include\"/\"path_glob\" are aliases
+  {\"glob\":\"**/*.rs\"}                               narrow by path glob; \"include\"/\"path_glob\" are aliases;
+                                                     a \"!\"-prefixed entry excludes instead: [\"**/*.rs\",\"!vendor/**\"]
+  {\"exclude\":[\"vendor/**\",\"test/hardware/**\"]}   drop paths from the scan: one glob or a list of globs, matched
+                                                     like \"glob\", so name a whole tree as \"vendor/**\". This is how a
+                                                     sweep skips vendored, generated or other-owned trees -- never
+                                                     hand-write an alternation for it. \"exclude_glob\"/\"exclude_globs\"
+                                                     are aliases. Exclusions never affect \"exhaustive\".
   {\"output_mode\":\"content\"}                        \"content\" (default): one hit per line; \"files_with_matches\"; \"count\"
+  {\"detail\":true}                                   \"content\" answers \"output\" (one \"path:line: text\" string per hit)
+                                                     plus \"counts\" ({path,count} per file) -- never both \"output\" and
+                                                     \"matches\". \"detail\":true returns structured \"matches\" objects
+                                                     instead of \"output\"; add \"columns\":true to keep each hit's column.
+                                                     \"occurrence_count\" is omitted whenever it is 1.
   {\"regex\":true}                                    force regex on/off; unset, the pattern is auto-read
   {\"fixed_strings\":true}                            match the pattern literally, never as a regex
   {\"case_insensitive\":true}                         \"ignore_case\" is an alias
@@ -2312,6 +2325,48 @@ fn grep_counted_files(matches: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// A `!`-prefixed entry in the include glob excludes instead, and every `exclude*` field is
+/// exclusion-only. Both feed the same `exclude_globs` the literal walker already honours, so an
+/// omitted exclude leaves the scan exactly as it was.
+fn grep_route_globs(body: &Value) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut include_globs: Vec<String> = Vec::new();
+    let mut exclude_globs: Vec<String> = Vec::new();
+    let include_field = ["glob", "include", "path_glob"]
+        .into_iter()
+        .find(|field| body.get(*field).is_some());
+    if let Some(field) = include_field {
+        for pattern in glob_patterns_from(body.get(field)).map_err(|e| format!("{field} {e}"))? {
+            match pattern.strip_prefix('!') {
+                Some(negated) => exclude_globs.push(negated.to_string()),
+                None => include_globs.push(pattern),
+            }
+        }
+    }
+    for field in GREP_EXCLUDE_FIELDS {
+        for pattern in glob_patterns_from(body.get(field)).map_err(|e| format!("{field} {e}"))? {
+            let pattern = pattern.strip_prefix('!').map(str::to_string).unwrap_or(pattern);
+            exclude_globs.push(pattern);
+        }
+    }
+    Ok((include_globs, exclude_globs))
+}
+
+fn grep_shaped_matches(matches: Vec<Value>, want_columns: bool) -> Vec<Value> {
+    matches
+        .into_iter()
+        .map(|hit| {
+            let Value::Object(mut map) = hit else { return hit };
+            if !want_columns {
+                map.remove("column");
+            }
+            if map.get("occurrence_count").and_then(|v| v.as_u64()) == Some(1) {
+                map.remove("occurrence_count");
+            }
+            Value::Object(map)
+        })
+        .collect()
+}
+
 fn grep(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
     let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -2371,11 +2426,9 @@ fn grep(body: &Value) -> u64 {
         Some(n) => n as usize,
         None => 0,
     };
-    let include_globs = match glob_patterns_from(
-        body.get("glob").or_else(|| body.get("include")).or_else(|| body.get("path_glob"))
-    ) {
-        Ok(patterns) => patterns,
-        Err(e) => return err("grep", &format!("glob {e}")),
+    let (include_globs, exclude_globs) = match grep_route_globs(body) {
+        Ok(globs) => globs,
+        Err(e) => return err("grep", &e),
     };
     let scan = crate::code_index::LiteralScan {
         pattern,
@@ -2388,7 +2441,7 @@ fn grep(body: &Value) -> u64 {
         whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
         comments_only: false,
         include_globs,
-        exclude_globs: Vec::new(),
+        exclude_globs,
         max_matches: scan_cap as usize,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
@@ -2440,8 +2493,14 @@ fn grep(body: &Value) -> u64 {
             out.insert("output".to_string(), Value::Array(counts.iter().map(|c| json!(grep_output_line(c, "count"))).collect()));
         }
         _ => {
-            out.insert("files".to_string(), Value::Array(counts.iter().map(|c| json!(grep_hit_path(c))).collect()));
-            out.insert("output".to_string(), Value::Array(matches.iter().map(|m| json!(grep_output_line(m, "content"))).collect()));
+            out.insert("counts".to_string(), Value::Array(counts));
+            if body.get("detail").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let want_columns = body.get("columns").and_then(|v| v.as_bool()).unwrap_or(false);
+                out.insert("matches".to_string(), Value::Array(grep_shaped_matches(matches, want_columns)));
+            } else {
+                out.remove("matches");
+                out.insert("output".to_string(), Value::Array(matches.iter().map(|m| json!(grep_output_line(m, "content"))).collect()));
+            }
         }
     }
     let partial = finish_scan_reply(&mut out, scan_cap);
@@ -2464,6 +2523,10 @@ fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
         Ok(limit) => limit,
         Err(e) => return err("grep", &e),
     };
+    let (_, exclude_globs) = match grep_route_globs(body) {
+        Ok(globs) => globs,
+        Err(e) => return err("grep", &e),
+    };
     let scan = crate::code_index::CommentScan {
         root,
         path: path.as_deref(),
@@ -2471,6 +2534,7 @@ fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
             .or_else(|| body.get("include").and_then(|v| v.as_str()))
             .or_else(|| body.get("path_glob").and_then(|v| v.as_str()))
             .filter(|g| !g.is_empty()),
+        exclude_globs,
         max_matches: max_matches as usize,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
@@ -2547,7 +2611,7 @@ fn identifier_route_globs(body: &Value, include_docs: bool) -> Result<(Vec<Strin
             }
         }
     }
-    for key in ["exclude_glob", "exclude_globs"] {
+    for key in ["exclude", "exclude_glob", "exclude_globs"] {
         let patterns = glob_patterns_from(body.get(key)).map_err(|e| format!("{key} {e}"))?;
         exclude_globs.extend(patterns.into_iter().map(|p| p.strip_prefix('!').map(str::to_string).unwrap_or(p)));
     }

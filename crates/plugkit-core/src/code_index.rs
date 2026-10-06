@@ -3633,6 +3633,7 @@ pub struct CommentScan<'a> {
     pub root: Option<&'a str>,
     pub path: Option<&'a str>,
     pub path_glob: Option<&'a str>,
+    pub exclude_globs: Vec<String>,
     pub max_matches: usize,
     pub max_files: usize,
     pub refresh: bool,
@@ -3880,6 +3881,13 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         },
         None => None,
     };
+    let mut exclude_globs: Vec<crate::path_glob::PathGlob> = Vec::new();
+    for pattern in &req.exclude_globs {
+        match crate::path_glob::PathGlob::parse(pattern) {
+            Ok(parsed) => exclude_globs.push(parsed),
+            Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
+        }
+    }
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let universe = match crate::scan_universe::list_scan_universe(root, scope, file_cap.saturating_add(1), &cfg.index, origin, req.refresh) {
@@ -3911,6 +3919,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         if let Some(g) = &glob {
             if !g.admits(root, scope, path) { continue; }
         }
+        if exclude_globs.iter().any(|g| g.admits(root, scope, path)) { continue; }
         if has_binary_extension(path) { files_skipped_binary_extension += 1; continue; }
         let Some(syntax) = comment_syntax_for_path(path) else {
             if files_skipped_no_syntax.len() < SKIPPED_SAMPLE_LEN { files_skipped_no_syntax.push(path.clone()); }
@@ -3973,6 +3982,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     out.insert("root".to_string(), json!(root));
     if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
     if let Some(g) = req.path_glob { out.insert("path_glob".to_string(), json!(g)); }
+    if !req.exclude_globs.is_empty() { out.insert("exclude_glob".to_string(), json!(req.exclude_globs.join(", "))); }
     if glob.is_some() { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
     out.insert("file_source".to_string(), json!(universe.source.label()));
