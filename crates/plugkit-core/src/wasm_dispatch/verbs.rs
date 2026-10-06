@@ -247,6 +247,15 @@ fn guard_surface_report() -> Value {
             "rejects": ["any .. segment", "absolute paths", "paths containing a drive colon"],
             "applied_to": verbs_with_capability(Capability::ProjectPath),
         },
+        "read_outside_root_opt_in": {
+            "accepts": ["an absolute path outside the project root with no \"..\" segment"],
+            "requires": ["the literal boolean body field \"allowOutsideRoot\": true on that same call",
+                         "\"allow_outside_root\" and \"allowAbsolute\" are aliases; a non-boolean value is not an opt-in"],
+            "applied_to": READ_ONLY_OUTSIDE_ROOT_VERBS,
+            "still_rejected": ["any \"..\" segment, with or without the opt-in",
+                               "every write verb: fs_write stays project-only and ignores the flag"],
+            "note": "The opt-in widens WHICH root a read may address, never whether a read may climb out of one. It is per call and never inferred from the path shape, so a call without it fails exactly as before.",
+        },
         "project_path_or_granted_root": {
             "accepts": ["a relative path within the project", "an absolute directory the host grants (an existing directory holding .git, .gm, package.json, Cargo.toml, go.mod or pyproject.toml)"],
             "applied_to": verbs_with_capability(Capability::ProjectPathOrGrantedRoot),
@@ -424,6 +433,35 @@ fn ok_partial(verb: &str, data: Value, partial_reason: &str) -> u64 {
     pack(json!({ "ok": true, "verb": verb, "partial": true, "partial_reason": partial_reason, "data": data }).to_string())
 }
 
+const READ_OUTSIDE_ROOT_OPT_IN_FIELDS: &[&str] = &["allowOutsideRoot", "allow_outside_root", "allowAbsolute"];
+const READ_ONLY_OUTSIDE_ROOT_VERBS: &[&str] = &["fs_read", "fs_readdir", "fs_stat"];
+
+fn caller_opted_outside_root(body: &Value) -> bool {
+    READ_OUTSIDE_ROOT_OPT_IN_FIELDS
+        .iter()
+        .any(|field| body.get(*field).and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
+fn path_has_parent_traversal(path: &str) -> bool {
+    path.replace('\\', "/").split('/').any(|seg| seg == "..")
+}
+
+fn outside_root_read_granted(path: &str) -> bool {
+    if crate::wasm_dispatch::host_allow_root(path) { return true; }
+    let slashed = path.replace('\\', "/");
+    match slashed.rfind('/') {
+        Some(i) if i > 0 => {
+            let parent = &slashed[..i];
+            !parent.is_empty() && crate::wasm_dispatch::host_allow_root(parent)
+        }
+        _ => false,
+    }
+}
+
+fn outside_root_not_granted_message(path: &str) -> String {
+    format!("allowOutsideRoot:true was accepted and the path has no \"..\" segment, but the host sandbox will not serve \"{path}\": outside the project root it reads only paths under the user gm root or under a directory carrying a project marker (.git, .gm, package.json, Cargo.toml, go.mod, pyproject.toml). Point the call at such a directory, or read this path with the host's own file-read tool.")
+}
+
 fn path_within_project(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     !normalized.split('/').any(|seg| seg == "..")
@@ -431,9 +469,13 @@ fn path_within_project(path: &str) -> bool {
         && !normalized.contains(':')
 }
 
-fn path_outside_project_message(path: &str) -> String {
+fn path_outside_project_message(path: &str, read_verb: bool) -> String {
     let Some(root) = super::host_abi::host_cwd_string() else {
-        return "path must be relative and within the project".to_string();
+        return if read_verb {
+            "path must be relative and within the project; pass allowOutsideRoot:true to read outside the root".to_string()
+        } else {
+            "path must be relative and within the project".to_string()
+        };
     };
     let slashed = |s: &str| s.replace('\\', "/");
     let root_slashed = slashed(&root);
@@ -445,7 +487,33 @@ fn path_outside_project_message(path: &str) -> String {
         .filter(|rest| !rest.is_empty() && path_within_project(rest))
         .map(|rest| format!("; the relative form of that path is \"{rest}\""))
         .unwrap_or_default();
-    format!("path must be relative and within the project; the project root is {root}, so pass a path relative to it (for example \"src/main.rs\", not an absolute path or one containing \"..\"){suggestion}")
+    let opt_in_hint = if read_verb {
+        "; pass allowOutsideRoot:true to read outside the root (read verbs only -- fs_write is never widened)"
+    } else {
+        ""
+    };
+    format!("path must be relative and within the project; the project root is {root}, so pass a path relative to it (for example \"src/main.rs\", not an absolute path or one containing \"..\"){suggestion}{opt_in_hint}")
+}
+
+fn path_traversal_message(path: &str) -> String {
+    format!("path must not contain a \"..\" segment, even with allowOutsideRoot:true -- the opt-in widens which root a read may address, never whether it may climb out of one; pass the final absolute path directly instead of \"{path}\"")
+}
+
+fn project_path_rejection(verb: &str, path: &str, allow_outside_root: bool) -> Option<u64> {
+    if path_within_project(path) { return None; }
+    let read_verb = READ_ONLY_OUTSIDE_ROOT_VERBS.contains(&verb);
+    if !read_verb || !allow_outside_root {
+        return Some(err(verb, &path_outside_project_message(path, read_verb)));
+    }
+    if path_has_parent_traversal(path) {
+        return Some(err(verb, &path_traversal_message(path)));
+    }
+    if outside_root_read_granted(path) { return None; }
+    Some(err(verb, &outside_root_not_granted_message(path)))
+}
+
+fn read_path_rejection(verb: &str, path: &str, body: &Value) -> Option<u64> {
+    project_path_rejection(verb, path, caller_opted_outside_root(body))
 }
 
 fn paged_lines(content: &str, offset: usize, limit: usize) -> (String, usize, usize, usize) {
@@ -465,9 +533,7 @@ fn paged_lines(content: &str, offset: usize, limit: usize) -> (String, usize, us
 fn fs_read(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() { return err("fs_read", "path required -- pass {\"path\":\"<relative path>\"}; add \"offset\"/\"limit\" to read a line range and \"max_bytes\" to cap one chunk"); }
-    if !path_within_project(path) {
-        return err("fs_read", &path_outside_project_message(path));
-    }
+    if let Some(rejection) = read_path_rejection("fs_read", path, body) { return rejection; }
     let offset = match body.get("offset").and_then(|v| v.as_u64()) {
         Some(n) => n as usize,
         None => 0,
@@ -517,16 +583,21 @@ fn fs_write(body: &Value) -> u64 {
         .unwrap_or("");
     if path.is_empty() { return err("fs_write", "path required"); }
     if !path_within_project(path) {
-        return err("fs_write", &path_outside_project_message(path));
+        let ignored_opt_in = if caller_opted_outside_root(body) {
+            " allowOutsideRoot is accepted by the read verbs only and is ignored here: a write outside the root stays refused."
+        } else {
+            ""
+        };
+        let mut message = path_outside_project_message(path, false);
+        message.push_str(ignored_opt_in);
+        return err("fs_write", &message);
     }
     if super::host_abi::host_write(path, data) { ok("fs_write", json!({ "bytes": data.len() })) } else { err("fs_write", "write failed") }
 }
 
 fn fs_readdir(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    if !path_within_project(path) {
-        return err("fs_readdir", &path_outside_project_message(path));
-    }
+    if let Some(rejection) = read_path_rejection("fs_readdir", path, body) { return rejection; }
     let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
     let v = unpack_to_value(packed);
     if v.is_null() { return err("fs_readdir", "empty"); }
@@ -536,9 +607,7 @@ fn fs_readdir(body: &Value) -> u64 {
 fn fs_stat(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() { return err("fs_stat", "path required"); }
-    if !path_within_project(path) {
-        return err("fs_stat", &path_outside_project_message(path));
-    }
+    if let Some(rejection) = read_path_rejection("fs_stat", path, body) { return rejection; }
     match super::host_abi::host_stat(path) {
         Some(v) if !v.is_null() => ok("fs_stat", v),
         _ => err("fs_stat", "not found"),
@@ -2132,19 +2201,35 @@ fs_read returns a file's contents.
                                   offset past the end returns \"\" with \"returned_lines\":0 instead of failing.
                                   Omit both for the whole file (the pre-existing behaviour).
   {\"max_bytes\":65536}            cap the returned chunk; \"truncated_at_bytes\" reports whether it fired.
+  {\"allowOutsideRoot\":true}      opt in to an absolute path outside the project root; required per call.
+                                  \"allow_outside_root\" is an alias. A path holding a \"..\" segment is still
+                                  refused, and the host sandbox still serves only paths under the user gm root
+                                  or a directory carrying a project marker (.git, .gm, package.json,
+                                  Cargo.toml, go.mod, pyproject.toml).
 Paged replies add \"total_lines\", \"offset\", \"returned_lines\" and \"has_more_lines\".";
 
 const FS_WRITE_HELP: &str = "\
 fs_write writes a file inside the project.
   {\"path\":\"<relative path>\"}     required, relative and within the project
   {\"content\":\"<text>\"}           required; \"data\" is an alias
-Returns {\"bytes\": <written>}.";
+Returns {\"bytes\": <written>}. A write outside the root is always refused, allowOutsideRoot included: that
+flag widens the read verbs only.";
 
 const FS_READDIR_HELP: &str = "\
-fs_readdir lists one directory inside the project. {\"path\":\"<relative dir>\"} (default \".\").";
+fs_readdir lists one directory inside the project. {\"path\":\"<relative dir>\"} (default \".\").
+  {\"allowOutsideRoot\":true}      opt in to an absolute path outside the project root; required per call.
+                                  \"allow_outside_root\" is an alias. A path holding a \"..\" segment is still
+                                  refused, and the host sandbox still serves only paths under the user gm root
+                                  or a directory carrying a project marker (.git, .gm, package.json,
+                                  Cargo.toml, go.mod, pyproject.toml).";
 
 const FS_STAT_HELP: &str = "\
-fs_stat stats one path inside the project. {\"path\":\"<relative path>\"}, required.";
+fs_stat stats one path inside the project. {\"path\":\"<relative path>\"}, required.
+  {\"allowOutsideRoot\":true}      opt in to an absolute path outside the project root; required per call.
+                                  \"allow_outside_root\" is an alias. A path holding a \"..\" segment is still
+                                  refused, and the host sandbox still serves only paths under the user gm root
+                                  or a directory carrying a project marker (.git, .gm, package.json,
+                                  Cargo.toml, go.mod, pyproject.toml).";
 
 fn help_requested(body: &Value) -> bool {
     match body.get("help") {
@@ -2913,7 +2998,14 @@ fn health_probe_codesearch() -> Value {
     json!({ "ok": ok, "error": if ok { Value::Null } else { v.get("error").cloned().unwrap_or(Value::Null) } })
 }
 
-fn health(_body: &Value) -> u64 {
+const HEALTH_PROBE_FIELDS: &[&str] = &["probes", "probe_subsystems"];
+const HEALTH_PROBE_SKIPPED_NOTE: &str = "not run: each probe is a real recall and a real codesearch, measured at 40-160s together on a large project, which no dispatch caller's timeout survives. Pass {\"probes\": true} to run them.";
+
+fn health_probe_skipped() -> Value {
+    json!({ "ok": Value::Null, "skipped": true, "note": HEALTH_PROBE_SKIPPED_NOTE })
+}
+
+fn health(body: &Value) -> u64 {
     let now = unsafe { host_now_ms() };
     let subsystems: Vec<Value> = crate::mediator::all_verbs_by_subsystem()
         .into_iter()
@@ -2937,10 +3029,21 @@ fn health(_body: &Value) -> u64 {
         }
     }
 
-    let recall_health = health_probe_recall();
-    let codesearch_health = health_probe_codesearch();
-    let subsystems_healthy = recall_health.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
-        && codesearch_health.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    let probes_requested = HEALTH_PROBE_FIELDS
+        .iter()
+        .any(|field| body.get(*field).and_then(|v| v.as_bool()).unwrap_or(false));
+    let (recall_health, codesearch_health) = if probes_requested {
+        (health_probe_recall(), health_probe_codesearch())
+    } else {
+        (health_probe_skipped(), health_probe_skipped())
+    };
+    let subsystems_healthy = match (
+        recall_health.get("ok").and_then(|b| b.as_bool()),
+        codesearch_health.get("ok").and_then(|b| b.as_bool()),
+    ) {
+        (Some(recall_ok), Some(codesearch_ok)) => recall_ok && codesearch_ok,
+        _ => true,
+    };
 
     ok("health", json!({
         "ok": subsystems_healthy,
@@ -2956,6 +3059,7 @@ fn health(_body: &Value) -> u64 {
         "plugin_response_envelope": plugin_response_envelope_contract(),
         "subsystems": subsystems,
         "subsystem_probes": { "recall": recall_health, "codesearch": codesearch_health },
+        "subsystem_probes_requested": probes_requested,
         "verb_aliases": aliases,
         "error_codes": [
             ERR_CODE_FAILED, ERR_CODE_RETIRED_VERB, ERR_CODE_UNSUPPORTED,
@@ -3904,6 +4008,8 @@ fn run_git_checked(argv: &[&str], cwd: Option<&str>, verb: &str, fallback: &str)
 
 const GIT_STATUS_SUMMARY_DEFAULT_PATHS: usize = 20;
 
+const GIT_STATUS_SKIPPED_PATHS_MAX: usize = 25;
+
 fn git_status(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields("git_status", body, &["path", "paths", "files", "summary", "limit"]) { return refusal; }
     git_async_entry("git_status", body, |body, plan| {
@@ -3917,7 +4023,8 @@ fn git_status(body: &Value) -> u64 {
             for p in &paths { argv.push(p.as_str()); }
         }
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
-        let porcelain = super::host_abi::porcelain_or_dirty(r);
+        let st = super::host_abi::porcelain_from(&r);
+        let porcelain = st.porcelain.clone();
         let mut modified: Vec<String> = vec![];
         let mut untracked: Vec<String> = vec![];
         let mut deleted: Vec<String> = vec![];
@@ -3934,11 +4041,11 @@ fn git_status(body: &Value) -> u64 {
             if y == 'D' || x == 'D' { deleted.push(path.clone()); }
         }
         let dirty = !porcelain.trim().is_empty();
-        if summary {
+        let mut lists = if summary {
             let first_n = limit.unwrap_or(GIT_STATUS_SUMMARY_DEFAULT_PATHS);
             let entries: Vec<&str> = porcelain.lines().filter(|l| l.len() >= 3).collect();
             let first_paths: Vec<String> = entries.iter().take(first_n).map(|l| format!("{} {}", &l[..2], l[3..].trim())).collect();
-            return Ok(ok("git_status", json!({
+            json!({
                 "dirty": dirty,
                 "summary": true,
                 "counts": {
@@ -3952,27 +4059,49 @@ fn git_status(body: &Value) -> u64 {
                 "first_paths_note": "each entry is the two-column porcelain status, a space, then the path",
                 "truncated": entries.len() > first_n,
                 "scoped_to": paths,
-            })));
-        }
-        let mut lists = json!({
-            "dirty": dirty,
-            "modified": modified,
-            "untracked": untracked,
-            "deleted": deleted,
-            "staged": staged,
-        });
-        if let Some(cap) = limit {
-            let mut truncated = serde_json::Map::new();
-            for key in ["modified", "untracked", "deleted", "staged"] {
-                let total = lists[key].as_array().map(|a| a.len()).unwrap_or(0);
-                if total > cap {
-                    lists[key] = Value::Array(lists[key].as_array().cloned().unwrap_or_default().into_iter().take(cap).collect());
-                    truncated.insert(key.to_string(), json!(total));
+            })
+        } else {
+            let mut l = json!({
+                "dirty": dirty,
+                "modified": modified,
+                "untracked": untracked,
+                "deleted": deleted,
+                "staged": staged,
+            });
+            if let Some(cap) = limit {
+                let mut truncated = serde_json::Map::new();
+                for key in ["modified", "untracked", "deleted", "staged"] {
+                    let total = l[key].as_array().map(|a| a.len()).unwrap_or(0);
+                    if total > cap {
+                        l[key] = Value::Array(l[key].as_array().cloned().unwrap_or_default().into_iter().take(cap).collect());
+                        truncated.insert(key.to_string(), json!(total));
+                    }
+                }
+                if !truncated.is_empty() { l["truncated_totals"] = Value::Object(truncated); }
+            }
+            if !paths.is_empty() { l["scoped_to"] = json!(paths); }
+            l
+        };
+        // A path git cannot open (Windows MAX_PATH, or permissions) must degrade
+        // this listing, never abort it: report what was read and name the rest.
+        if st.partial {
+            let skipped: Vec<String> = st.skipped_paths.iter().take(GIT_STATUS_SKIPPED_PATHS_MAX).cloned().collect();
+            let note = if st.failed {
+                format!("git status exited {} -- the paths listed are only what it could read. This is NOT a dirty-tree signal and git_finalize is not blocked by it.", st.exit_code)
+            } else {
+                "git skipped path(s) it could not open (Windows MAX_PATH or permission); entries under them are absent from this listing, not clean".to_string()
+            };
+            if let Some(map) = lists.as_object_mut() {
+                map.insert("partial".to_string(), json!(true));
+                map.insert("skipped_count".to_string(), json!(st.skipped_paths.len()));
+                map.insert("skipped_paths".to_string(), json!(skipped));
+                map.insert("status_note".to_string(), Value::String(note));
+                if st.failed {
+                    map.insert("git_error".to_string(), json!(st.stderr.trim()));
+                    map.insert("exit_code".to_string(), json!(st.exit_code));
                 }
             }
-            if !truncated.is_empty() { lists["truncated_totals"] = Value::Object(truncated); }
         }
-        if !paths.is_empty() { lists["scoped_to"] = json!(paths); }
         Ok(ok("git_status", lists))
     })
 }
@@ -4398,8 +4527,12 @@ fn git_commit(body: &Value) -> u64 {
             })));
         }
         let status_r = git_step_replayed_by_call_order(plan, &as_argv(&git_porcelain_argv(&[], cwd)), cwd)?;
-        let porcelain = super::host_abi::porcelain_or_dirty(status_r);
-        if porcelain.trim().is_empty() && !allow_empty {
+        let status = super::host_abi::porcelain_from(&status_r);
+        let porcelain = status.porcelain.clone();
+        // porcelain_or_dirty no longer fabricates a dirty entry when git fails, so
+        // an unreadable tree must not be answered "nothing to commit" either --
+        // fall through and let git itself decide.
+        if porcelain.trim().is_empty() && !allow_empty && !status.failed {
             return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true }), cwd, &paths)));
         }
         if !paths.is_empty() {
