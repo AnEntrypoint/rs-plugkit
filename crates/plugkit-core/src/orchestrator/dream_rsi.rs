@@ -207,7 +207,7 @@ pub fn observe_dispatch(session_id: &str, dispatch_id: &str, verb: &str, fingerp
     let path = format!(".gm/dream-rsi/{session_id}/observations.json");
     let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
     let mut observations = serde_json::from_str::<Value>(&raw).ok().and_then(|value| value.as_array().cloned()).unwrap_or_default();
-    let prd_open_count = crate::orchestrator::prd::handle_list("").0
+    let prd_open_count = crate::orchestrator::prd::handle_list_full().0
         .parse::<Value>().ok().and_then(|value| value.get("items").and_then(Value::as_array).cloned())
         .map(|items| items.iter().filter(|item| crate::orchestrator::prd::status_is_open(item.get("status").and_then(Value::as_str).unwrap_or("pending"))).count())
         .unwrap_or(0);

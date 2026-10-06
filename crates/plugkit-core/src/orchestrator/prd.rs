@@ -121,35 +121,196 @@ fn slug_from_subject(subject: &str) -> Option<String> {
     Some(out)
 }
 
-pub fn handle_list(_content: &str) -> (String, String, i32) {
+const PRD_BRIEF_TITLE_CHARS: usize = 140;
+
+const PRD_ROW_ID_FIELDS: &[&str] = &["id", "ids", "row_id"];
+
+const PRD_ROW_STATUS_FIELDS: &[&str] = &["status"];
+
+const PRD_FULL_BODY_FIELDS: &[&str] = &["full", "verbose", "bodies"];
+
+const PRD_BRIEF_BODY_FIELDS: &[&str] = &["brief", "compact"];
+
+const PRD_TITLE_FIELDS: &[&str] = &["title", "subject"];
+
+fn load_rows() -> Result<Vec<serde_json::Value>, (String, i32)> {
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
     if !pkfs::exists(&path_s) {
-        return (serde_json::json!({ "items": [], "count": 0 }).to_string(), String::new(), 0);
+        return Ok(Vec::new());
     }
     let raw = match pkfs::read_to_string(&path_s) {
         Some(s) => s,
-        None => return (String::new(), "read failed".to_string(), 1),
+        None => return Err(("read failed".to_string(), 1)),
     };
     let doc: Value = match serde_yaml::from_str(&raw) {
         Ok(v) => v,
-        Err(e) => return (String::new(), format!("parse failed: {}", e), 1),
+        Err(e) => return Err((format!("parse failed: {}", e), 1)),
     };
-    let seq = doc.as_sequence().cloned()
+    let seq = doc
+        .as_sequence()
+        .cloned()
         .or_else(|| doc.get("items").and_then(|v| v.as_sequence()).cloned())
         .unwrap_or_default();
-    let items: Vec<serde_json::Value> = seq.iter().filter_map(|item| {
-        let m = item.as_mapping()?;
-        let mut out = serde_json::Map::new();
-        for (k, v) in m {
-            if let Some(ks) = k.as_str() {
-                out.insert(ks.to_string(), yaml_to_json(v));
-            }
+    Ok(seq.iter().filter_map(row_to_json).collect())
+}
+
+fn row_to_json(item: &Value) -> Option<serde_json::Value> {
+    let m = item.as_mapping()?;
+    let mut out = serde_json::Map::new();
+    for (k, v) in m {
+        if let Some(ks) = k.as_str() {
+            out.insert(ks.to_string(), yaml_to_json(v));
         }
-        Some(serde_json::Value::Object(out))
-    }).collect();
-    let count = items.len();
-    (serde_json::json!({ "items": items, "count": count }).to_string(), String::new(), 0)
+    }
+    Some(serde_json::Value::Object(out))
+}
+
+fn row_text(row: &serde_json::Value, fields: &[&str]) -> String {
+    fields
+        .iter()
+        .filter_map(|key| row.get(*key).and_then(|v| v.as_str()))
+        .find(|s| !s.trim().is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn row_status(row: &serde_json::Value) -> String {
+    match row.get("status").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => "pending".to_string(),
+    }
+}
+
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clamp_chars(s: &str, max: usize) -> String {
+    let mut out: String = s.chars().take(max).collect();
+    if s.chars().count() > max {
+        out.push_str("...");
+    }
+    out
+}
+
+fn brief_row(row: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "id": row_text(row, &["id"]),
+        "status": row_status(row),
+        "title": clamp_chars(&one_line(&row_text(row, PRD_TITLE_FIELDS)), PRD_BRIEF_TITLE_CHARS),
+    })
+}
+
+fn request_object(content: &str) -> serde_json::Value {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return serde_json::Value::Object(serde_json::Map::new());
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(trimmed).ok().or_else(|| {
+        serde_yaml::from_str::<Value>(trimmed)
+            .ok()
+            .and_then(|v| serde_json::to_value(v).ok())
+    });
+    match parsed {
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        _ => serde_json::Value::Object(serde_json::Map::new()),
+    }
+}
+
+fn request_strings(request: &serde_json::Value, fields: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for field in fields {
+        match request.get(*field) {
+            Some(serde_json::Value::String(s)) => {
+                if !s.trim().is_empty() {
+                    out.push(s.trim().to_string());
+                }
+            }
+            Some(serde_json::Value::Array(items)) => {
+                for item in items {
+                    if let Some(s) = item.as_str() {
+                        if !s.trim().is_empty() {
+                            out.push(s.trim().to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn request_flag(request: &serde_json::Value, fields: &[&str]) -> Option<bool> {
+    fields
+        .iter()
+        .filter_map(|field| request.get(*field))
+        .find_map(|v| v.as_bool())
+}
+
+pub fn handle_list_full() -> (String, String, i32) {
+    let rows = match load_rows() {
+        Ok(rows) => rows,
+        Err((message, code)) => return (String::new(), message, code),
+    };
+    let count = rows.len();
+    (
+        serde_json::json!({ "items": rows, "count": count }).to_string(),
+        String::new(),
+        0,
+    )
+}
+
+pub fn handle_list(content: &str) -> (String, String, i32) {
+    let request = request_object(content);
+    let rows = match load_rows() {
+        Ok(rows) => rows,
+        Err((message, code)) => return (String::new(), message, code),
+    };
+    let total = rows.len();
+    let wanted_ids = request_strings(&request, PRD_ROW_ID_FIELDS);
+    let wanted_statuses = request_strings(&request, PRD_ROW_STATUS_FIELDS);
+    let selected: Vec<serde_json::Value> = rows
+        .into_iter()
+        .filter(|row| {
+            let id = row_text(row, &["id"]);
+            let status = row_status(row);
+            let id_ok = wanted_ids.is_empty() || wanted_ids.iter().any(|want| want == &id);
+            let status_ok =
+                wanted_statuses.is_empty() || wanted_statuses.iter().any(|want| want == &status);
+            id_ok && status_ok
+        })
+        .collect();
+    if !wanted_ids.is_empty() && selected.is_empty() {
+        return (
+            String::new(),
+            format!(
+                "no PRD row with id {} of the {} rows in .gm/prd.yml -- pass no id for the listing",
+                wanted_ids.join(", "),
+                total
+            ),
+            1,
+        );
+    }
+    let brief_flag = request_flag(&request, PRD_BRIEF_BODY_FIELDS);
+    let full_flag = request_flag(&request, PRD_FULL_BODY_FIELDS);
+    let want_full =
+        full_flag.unwrap_or_else(|| brief_flag.map(|b| !b).unwrap_or(!wanted_ids.is_empty()));
+    let items: Vec<serde_json::Value> = if want_full {
+        selected
+    } else {
+        selected.iter().map(brief_row).collect()
+    };
+    let reply = serde_json::json!({
+        "items": items,
+        "count": items.len(),
+        "total": total,
+        "brief": !want_full,
+        "full": want_full,
+        "hint": "pass {\"id\":\"<row id>\"} for one full row, {\"status\":\"pending\"} to filter, or {\"full\":true} for every full body",
+    });
+    (reply.to_string(), String::new(), 0)
 }
 
 

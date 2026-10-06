@@ -140,7 +140,7 @@ fn residual_scan_fired() -> bool {
 fn residual_scan_fired() -> bool { false }
 
 fn prd_has_open_items() -> bool {
-    let (body, _err, code) = prd::handle_list("");
+    let (body, _err, code) = prd::handle_list_full();
     if code != 0 { return false; }
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return false };
     let Some(items) = v.get("items").and_then(|v| v.as_array()) else { return false };
@@ -793,7 +793,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
                 crate::wasm_dispatch::emit_event("evidence.receipt", receipt);
             }
             let query = {
-                let (body, _err, code) = prd::handle_list("");
+                let (body, _err, code) = prd::handle_list_full();
                 if code == 0 {
                     serde_json::from_str::<serde_json::Value>(&body)
                         .ok()

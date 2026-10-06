@@ -494,7 +494,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     }
 
     if is_complete_transition {
-        let (body_s, _err, code) = crate::orchestrator::prd::handle_list("");
+        let (body_s, _err, code) = crate::orchestrator::prd::handle_list_full();
         let mut anti_shape: Vec<String> = Vec::new();
         if code == 0 {
             if let Ok(v) = serde_json::from_str::<Value>(&body_s) {
