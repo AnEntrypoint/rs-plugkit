@@ -1851,7 +1851,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         let stored = crate::code_index::stored_digest_at(Some(root));
         let current = crate::code_index::current_digest_at(root);
         let stale = match &stored { Some(s) => s != &current, None => true };
-        if stale {
+        if stale && crate::code_index::topup_allowed(&stored, Some(root)) {
             let cold_start = stored.is_none();
             let reason = if cold_start { "digest-absent" } else { "digest-mismatch" };
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "root": root, "stored_then_current": current }));
@@ -2985,7 +2985,7 @@ fn codesearch(body: &Value) -> u64 {
         let stored = crate::code_index::stored_digest();
         let current = crate::code_index::current_digest();
         let stale = match &stored { Some(s) => s != &current, None => true };
-        if stale {
+        if stale && crate::code_index::topup_allowed(&stored, None) {
             let cold_start = stored.is_none();
             let reason = if cold_start { "digest-absent" } else { "digest-mismatch" };
             emit_event("codeinsight_rebuild", json!({ "reason": reason, "stored_then_current": current }));
