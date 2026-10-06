@@ -11,16 +11,10 @@ fn now_ms() -> u64 {
 }
 
 fn completed_prd_ids() -> Vec<String> {
-    let (body, _err, code) = crate::orchestrator::prd::handle_list("");
-    if code != 0 {
-        return vec![];
-    }
-    let Ok(v) = serde_json::from_str::<Value>(&body) else {
-        return vec![];
-    };
-    let Some(items) = v.get("items").and_then(|v| v.as_array()) else {
-        return vec![];
-    };
+    let (body, _err, code) = crate::orchestrator::prd::handle_list_full();
+    if code != 0 { return vec![]; }
+    let Ok(v) = serde_json::from_str::<Value>(&body) else { return vec![] };
+    let Some(items) = v.get("items").and_then(|v| v.as_array()) else { return vec![] };
     items
         .iter()
         .filter(|it| {

@@ -299,6 +299,15 @@ fn guard_surface_report() -> Value {
             "rejects": ["any .. segment", "absolute paths", "paths containing a drive colon"],
             "applied_to": verbs_with_capability(Capability::ProjectPath),
         },
+        "read_outside_root_opt_in": {
+            "accepts": ["an absolute path outside the project root with no \"..\" segment"],
+            "requires": ["the literal boolean body field \"allowOutsideRoot\": true on that same call",
+                         "\"allow_outside_root\" and \"allowAbsolute\" are aliases; a non-boolean value is not an opt-in"],
+            "applied_to": READ_ONLY_OUTSIDE_ROOT_VERBS,
+            "still_rejected": ["any \"..\" segment, with or without the opt-in",
+                               "every write verb: fs_write stays project-only and ignores the flag"],
+            "note": "The opt-in widens WHICH root a read may address, never whether a read may climb out of one. It is per call and never inferred from the path shape, so a call without it fails exactly as before.",
+        },
         "project_path_or_granted_root": {
             "accepts": ["a relative path within the project", "an absolute directory the host grants (an existing directory holding .git, .gm, package.json, Cargo.toml, go.mod or pyproject.toml)"],
             "applied_to": verbs_with_capability(Capability::ProjectPathOrGrantedRoot),
@@ -461,8 +470,61 @@ fn err_json(verb: &str, detail: Value) -> u64 {
     pack(obj.to_string())
 }
 
+fn err_retry_same_verb(verb: &str, reason: &str) -> u64 {
+    pack(
+        json!({
+            "ok": false,
+            "verb": verb,
+            "error": reason,
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "next_dispatch_hint": verb,
+        })
+        .to_string(),
+    )
+}
+
 fn ok(verb: &str, data: Value) -> u64 {
-    pack(json!({ "ok": true, "verb": verb, "data": data, "next_dispatch_hint": next_dispatch_hint_for(verb) }).to_string())
+    pack(json!({ "ok": true, "verb": verb, "data": data }).to_string())
+}
+
+/// A scan that did not see every file still answers, so it stays `ok` -- a caller who read
+/// `ok: true` as "the whole tree was searched" would take a partial answer for a complete one.
+/// The bound that fired rides beside `ok` instead of inside `data`, where it used to sit behind
+/// a page of counters.
+fn ok_partial(verb: &str, data: Value, partial_reason: &str) -> u64 {
+    pack(json!({ "ok": true, "verb": verb, "partial": true, "partial_reason": partial_reason, "data": data }).to_string())
+}
+
+const READ_OUTSIDE_ROOT_OPT_IN_FIELDS: &[&str] =
+    &["allowOutsideRoot", "allow_outside_root", "allowAbsolute"];
+const READ_ONLY_OUTSIDE_ROOT_VERBS: &[&str] = &["fs_read", "fs_readdir", "fs_stat"];
+
+fn caller_opted_outside_root(body: &Value) -> bool {
+    READ_OUTSIDE_ROOT_OPT_IN_FIELDS
+        .iter()
+        .any(|field| body.get(*field).and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
+fn path_has_parent_traversal(path: &str) -> bool {
+    path.replace('\\', "/").split('/').any(|seg| seg == "..")
+}
+
+fn outside_root_read_granted(path: &str) -> bool {
+    if crate::wasm_dispatch::host_allow_root(path) {
+        return true;
+    }
+    let slashed = path.replace('\\', "/");
+    match slashed.rfind('/') {
+        Some(i) if i > 0 => {
+            let parent = &slashed[..i];
+            !parent.is_empty() && crate::wasm_dispatch::host_allow_root(parent)
+        }
+        _ => false,
+    }
+}
+
+fn outside_root_not_granted_message(path: &str) -> String {
+    format!("allowOutsideRoot:true was accepted and the path has no \"..\" segment, but the host sandbox will not serve \"{path}\": outside the project root it reads only paths under the user gm root or under a directory carrying a project marker (.git, .gm, package.json, Cargo.toml, go.mod, pyproject.toml). Point the call at such a directory, or read this path with the host's own file-read tool.")
 }
 
 fn path_within_project(path: &str) -> bool {
@@ -472,9 +534,13 @@ fn path_within_project(path: &str) -> bool {
         && !normalized.contains(':')
 }
 
-fn path_outside_project_message(path: &str) -> String {
+fn path_outside_project_message(path: &str, read_verb: bool) -> String {
     let Some(root) = super::host_abi::host_cwd_string() else {
-        return "path must be relative and within the project".to_string();
+        return if read_verb {
+            "path must be relative and within the project; pass allowOutsideRoot:true to read outside the root".to_string()
+        } else {
+            "path must be relative and within the project".to_string()
+        };
     };
     let slashed = |s: &str| s.replace('\\', "/");
     let root_slashed = slashed(&root);
@@ -486,7 +552,37 @@ fn path_outside_project_message(path: &str) -> String {
         .filter(|rest| !rest.is_empty() && path_within_project(rest))
         .map(|rest| format!("; the relative form of that path is \"{rest}\""))
         .unwrap_or_default();
-    format!("path must be relative and within the project; the project root is {root}, so pass a path relative to it (for example \"src/main.rs\", not an absolute path or one containing \"..\"){suggestion}")
+    let opt_in_hint = if read_verb {
+        "; pass allowOutsideRoot:true to read outside the root (read verbs only -- fs_write is never widened)"
+    } else {
+        ""
+    };
+    format!("path must be relative and within the project; the project root is {root}, so pass a path relative to it (for example \"src/main.rs\", not an absolute path or one containing \"..\"){suggestion}{opt_in_hint}")
+}
+
+fn path_traversal_message(path: &str) -> String {
+    format!("path must not contain a \"..\" segment, even with allowOutsideRoot:true -- the opt-in widens which root a read may address, never whether it may climb out of one; pass the final absolute path directly instead of \"{path}\"")
+}
+
+fn project_path_rejection(verb: &str, path: &str, allow_outside_root: bool) -> Option<u64> {
+    if path_within_project(path) {
+        return None;
+    }
+    let read_verb = READ_ONLY_OUTSIDE_ROOT_VERBS.contains(&verb);
+    if !read_verb || !allow_outside_root {
+        return Some(err(verb, &path_outside_project_message(path, read_verb)));
+    }
+    if path_has_parent_traversal(path) {
+        return Some(err(verb, &path_traversal_message(path)));
+    }
+    if outside_root_read_granted(path) {
+        return None;
+    }
+    Some(err(verb, &outside_root_not_granted_message(path)))
+}
+
+fn read_path_rejection(verb: &str, path: &str, body: &Value) -> Option<u64> {
+    project_path_rejection(verb, path, caller_opted_outside_root(body))
 }
 
 fn paged_lines(content: &str, offset: usize, limit: usize) -> (String, usize, usize, usize) {
@@ -513,11 +609,17 @@ fn fs_read(body: &Value) -> u64 {
     if path.is_empty() {
         return err("fs_read", "path required -- pass {\"path\":\"<relative path>\"}; add \"offset\"/\"limit\" to read a line range and \"max_bytes\" to cap one chunk");
     }
-    if !path_within_project(path) {
-        return err("fs_read", &path_outside_project_message(path));
+    if let Some(rejection) = read_path_rejection("fs_read", path, body) {
+        return rejection;
     }
-    let offset = body.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let offset = match body.get("offset").and_then(|v| v.as_u64()) {
+        Some(n) => n as usize,
+        None => 0,
+    };
+    let limit = match body.get("limit").and_then(|v| v.as_u64()) {
+        Some(n) => n as usize,
+        None => 0,
+    };
     let max_bytes = match body.get("max_bytes").and_then(|v| v.as_u64()) {
         Some(n) if n > 0 => Some(n as usize),
         _ => None,
@@ -570,7 +672,13 @@ fn fs_write(body: &Value) -> u64 {
         return err("fs_write", "path required");
     }
     if !path_within_project(path) {
-        return err("fs_write", &path_outside_project_message(path));
+        let mut message = path_outside_project_message(path, false);
+        if caller_opted_outside_root(body) {
+            message.push_str(
+                " allowOutsideRoot is accepted by read verbs only; writes stay project-only.",
+            );
+        }
+        return err("fs_write", &message);
     }
     let received_keys: Vec<String> = body
         .as_object()
@@ -611,8 +719,8 @@ fn fs_write(body: &Value) -> u64 {
 
 fn fs_readdir(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    if !path_within_project(path) {
-        return err("fs_readdir", &path_outside_project_message(path));
+    if let Some(rejection) = read_path_rejection("fs_readdir", path, body) {
+        return rejection;
     }
     let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
     let v = unpack_to_value(packed);
@@ -627,8 +735,8 @@ fn fs_stat(body: &Value) -> u64 {
     if path.is_empty() {
         return err("fs_stat", "path required");
     }
-    if !path_within_project(path) {
-        return err("fs_stat", &path_outside_project_message(path));
+    if let Some(rejection) = read_path_rejection("fs_stat", path, body) {
+        return rejection;
     }
     match super::host_abi::host_stat(path) {
         Some(v) if !v.is_null() => ok("fs_stat", v),
@@ -1213,6 +1321,8 @@ pub fn memory_recall_backend(
     .filter(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
 }
 
+const RECALL_QUERY_SHAPE: &str = "query required -- pass {\"query\":\"<the concept to recall>\"}: a plain STRING of prose, not an object, array or path; recall embeds that text and ranks stored memories by cosine times recency. Optional {\"limit\":8} row cap, {\"namespace\":\"default\"} for another namespace. There is no query-less listing mode, so a body without query is always a caller mistake";
+
 fn recall_reply(
     body: &Value,
     mode: &str,
@@ -1275,7 +1385,6 @@ fn recall_by_key(namespace: &str, key: &str) -> u64 {
 
 fn recall(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
-    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let limit = body
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -1291,8 +1400,21 @@ fn recall(body: &Value) -> u64 {
         Some(Value::String(key)) => return recall_by_key(namespace, key),
         Some(other) => return err("recall", &format!("key must be a memory key string such as \"mem-<hash>-<n>\", got {other}")),
     }
+    let Some(raw_query) = body.get("query") else {
+        return err_retry_same_verb("recall", RECALL_QUERY_SHAPE);
+    };
+    let Some(query) = raw_query.as_str() else {
+        let shown: String = raw_query.to_string().chars().take(80).collect();
+        return err_retry_same_verb(
+            "recall",
+            &format!(
+                "{}; got non-string JSON under \"query\": {}",
+                RECALL_QUERY_SHAPE, shown
+            ),
+        );
+    };
     if query.is_empty() {
-        return err("recall", "query required");
+        return err_retry_same_verb("recall", RECALL_QUERY_SHAPE);
     }
     if routed {
         let embedding = embed_query(query);
@@ -2083,6 +2205,126 @@ fn memorize_prune(body: &Value) -> u64 {
 
 const UNINDEXED_CANDIDATE_MAX: usize = 500;
 
+/// BM25 and the vector channel both lose the phrase: BM25 scores each query term independently
+/// and the embedder scores meaning, not wording. A verbatim match is therefore found by an
+/// exhaustive scan of the tree, run here within its own wall budget so a ranked query still
+/// answers in seconds. 6s covers a full scan of a tree the size of litebox-main (measured 2.1s).
+const DUAL_PHRASE_SCAN_BUDGET_MS: u64 = 6_000;
+const DUAL_PHRASE_SCAN_MAX_MATCHES: usize = 20;
+
+/// Matches the phrase scan may collect from one file before it moves on to the next. A scan that
+/// stops at its first `max_matches` hits answers with whatever the walk reached first, and the walk
+/// is ordered by path: on litebox-main a query for `cross_process_fork_slot` -- 43 matching lines --
+/// spent all 20 slots on `AGENTS.md`, `docs/*` and `litebox_shim_linux/src/lib.rs`, so
+/// `litebox_shim_linux/src/syscalls/process.rs`, which holds 19 of those 43 lines, answered with
+/// nothing at all and read to the caller as "this symbol does not exist". The phrase channel is the
+/// one channel that answers "which files contain this string verbatim", so a match-dense file must
+/// not be able to take another file's only slot.
+const DUAL_PHRASE_SCAN_PER_FILE_MATCHES: usize = 8;
+
+/// Room to collect the per-file quota from each of the first `DUAL_PHRASE_SCAN_MAX_MATCHES`
+/// matching files. Only a phrase common enough to fill the old cap before the walk ends pays for
+/// the wider collection, and even then the scan early-exits at this cap and is wall-bounded by
+/// `DUAL_PHRASE_SCAN_BUDGET_MS`; a full scan of a tree the size of litebox-main measures under a
+/// second. A phrase rarer than the cap costs exactly what it cost before.
+const DUAL_PHRASE_SCAN_COLLECT_MATCHES: usize =
+    DUAL_PHRASE_SCAN_MAX_MATCHES * DUAL_PHRASE_SCAN_PER_FILE_MATCHES;
+
+fn dual_phrase_hits(
+    query: &str,
+    root: Option<&str>,
+    cfg: &crate::ragconfig::RagConfig,
+) -> (Vec<Value>, u64, bool) {
+    if rs_search::tokenize::tokenize(query).len() < 2 {
+        return (Vec::new(), 0, false);
+    }
+    let scan = crate::code_index::LiteralScan {
+        pattern: query,
+        root,
+        path: None,
+        regex: false,
+        case_insensitive: true,
+        whole_word: false,
+        comments_only: false,
+        include_globs: Vec::new(),
+        exclude_globs: Vec::new(),
+        max_matches: DUAL_PHRASE_SCAN_COLLECT_MATCHES,
+        max_matches_per_file: Some(DUAL_PHRASE_SCAN_PER_FILE_MATCHES),
+        max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
+        context: 0,
+        term_combination: Some("phrase"),
+        budget_ms: Some(DUAL_PHRASE_SCAN_BUDGET_MS),
+        refresh: false,
+        output: crate::code_index::ScanOutput::Matches,
+        list_limit: None,
+        max_chars: usize::MAX,
+        spill_name: String::new(),
+        verbose: true,
+    };
+    let out = crate::code_index::scan_literal(&scan, cfg);
+    if out.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return (Vec::new(), 0, false);
+    }
+    // `phrase_match_count` is the lines the phrase itself matched, so it stays honest when the
+    // returned rows are capped: `match_count` is the length of the returned array and would report
+    // a capped scan as complete. `exhaustive` is the scan's own verdict and is false when the
+    // budget, a size ceiling or a match cap cut the walk short.
+    let total = out
+        .get("phrase_match_count")
+        .or_else(|| out.get("match_count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let exhaustive = out
+        .get("exhaustive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let hits = out
+        .get("matches")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    (
+        fair_share_phrase_hits(hits, DUAL_PHRASE_SCAN_MAX_MATCHES),
+        total,
+        exhaustive,
+    )
+}
+
+/// Take one hit from every path, then a second from every path that still has one, and so on until
+/// the cap is filled. Walk order still decides which paths are seen first but no longer decides
+/// which of them are represented: a file matching once is not crowded out by a file matching fifty
+/// times. The selection is re-sorted by path then line so the answer reads grouped per file.
+fn fair_share_phrase_hits(hits: Vec<Value>, cap: usize) -> Vec<Value> {
+    if hits.len() <= cap {
+        return hits;
+    }
+    let keep = crate::code_index::fair_share_indices(&hits, cap, |h| {
+        h.get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    });
+    let mut out: Vec<Value> = keep.into_iter().map(|i| hits[i].clone()).collect();
+    out.sort_by(|a, b| {
+        let (pa, pb) = (
+            a.get("path").and_then(|x| x.as_str()).unwrap_or(""),
+            b.get("path").and_then(|x| x.as_str()).unwrap_or(""),
+        );
+        let (la, lb) = (
+            a.get("line").and_then(|x| x.as_u64()).unwrap_or(0),
+            b.get("line").and_then(|x| x.as_u64()).unwrap_or(0),
+        );
+        pa.cmp(pb).then(la.cmp(&lb))
+    });
+    out
+}
+
+/// First dispatch on a tree with no digest at all. Bounded, not the full 110s index budget: a
+/// search that answers in half a minute with a full index beats one that times out at 120s. Measured
+/// on litebox-main (1834 files) a 30s pass indexes the whole tree, so every dispatch after it needs
+/// no index pass at all.
+const COLD_INDEX_PASS_BUDGET_MS: u64 = 30_000;
+
 fn unindexed_on_disk_candidates(namespace: &str) -> (Vec<Value>, usize) {
     let indexed = crate::rssearch_vectors::live_keys(namespace);
     let mut paths: Vec<(String, String)> = crate::memory_md::on_disk_memo_paths(namespace)
@@ -2168,6 +2410,11 @@ fn literal_fallback_scan(body: &Value, term: &str, k: usize) -> Option<Value> {
             "codesearch-fallback-{}.txt",
             dispatch_task_id().unwrap_or_else(|| unsafe { host_now_ms() }.to_string())
         ),
+        term_combination: Some("phrase"),
+        budget_ms: None,
+        max_matches_per_file: None,
+        context: 0,
+        refresh: false,
         verbose: false,
     };
     let out = crate::code_index::scan_literal(&scan, &cfg);
@@ -2405,7 +2652,10 @@ fn codesearch_at_root(
         .get("auto_indexed")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let prior_stage_ms = body.get("stage_ms").cloned().unwrap_or_else(|| json!({}));
     if !already_indexed {
+        let digest_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let stored = crate::code_index::stored_digest_at(Some(root));
         let current = crate::code_index::current_digest_at(root);
         let stale = match &stored {
@@ -2423,35 +2673,58 @@ fn codesearch_at_root(
                 "codeinsight_rebuild",
                 json!({ "reason": reason, "root": root, "stored_then_current": current }),
             );
+            let index_started = unsafe { crate::wasm_dispatch::host_now_ms() };
             if cold_start {
-                let _ = crate::code_index::index_at(root, 500, root);
+                let _ = crate::code_index::index_at_topup(
+                    root,
+                    cfg.index.prune_pass_file_limit_ceiling,
+                    root,
+                    COLD_INDEX_PASS_BUDGET_MS,
+                );
             } else {
                 let _ = crate::code_index::index_at_topup(
                     root,
-                    500,
+                    cfg.index.prune_pass_file_limit_ceiling,
                     root,
                     cfg.index.incremental_topup_wall_budget_ms,
                 );
             }
+            let index_ms =
+                unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(index_started);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
+                obj.insert("stage_ms".to_string(), json!({
+                    "digest": index_started.saturating_sub(digest_started),
+                    "index_pass": index_ms,
+                    "total": unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms),
+                }));
             }
             return codesearch_at_root(&retry, root, query, k, cfg);
         }
     }
+    let stage = |from: u64| unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(from);
+    let mut at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let embedding = embed_query(query);
+    let embed_ms = stage(at);
+    at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let shown_k = dual_channel_depth(body, k);
     let scan_k = scoped_candidate_k(shown_k as u32, scope.as_ref());
     let vres = crate::code_index::search_at(query, scan_k, Some(&embedding), Some(root));
     let mut vector_hits: Vec<Value> = vres
         .get("rows")
-        .and_then(|v| v.as_array())
+        .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let vector_ms = stage(at);
+    at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut corpus = crate::code_index::FusionCorpus::load_at(Some(root));
-    let mut bm25_hits: Vec<Value> = corpus
-        .bm25_rank_cfg(query, scan_k, &cfg.scoring)
+    let corpus_ms = stage(at);
+    at = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let bm25_ranked = corpus.bm25_rank_cfg(query, scan_k, &cfg.scoring);
+    let bm25_ms = stage(at);
+    at = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let mut bm25_hits: Vec<Value> = bm25_ranked
         .into_iter()
         .map(|(key, score)| {
             let text = corpus.text_for_key(&key).unwrap_or_default();
@@ -2468,21 +2741,50 @@ fn codesearch_at_root(
         })
         .collect();
     let commits = crate::code_index::git_commit_rank_at(root, query, 10);
+    let commits_ms = stage(at);
+    at = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let (mut phrase_hits, mut phrase_total, phrase_exhaustive) =
+        dual_phrase_hits(query, Some(root), cfg);
     retain_hits_in_scope(&mut vector_hits, root, scope.as_ref());
     retain_hits_in_scope(&mut bm25_hits, root, scope.as_ref());
     vector_hits.truncate(shown_k);
     bm25_hits.truncate(shown_k);
+    if scope.is_some() {
+        retain_hits_in_scope(&mut phrase_hits, root, scope.as_ref());
+        phrase_total = phrase_hits.len() as u64;
+    }
+    let phrase_ms = stage(at);
+    let stage_ms = json!({
+        "embed_query": embed_ms,
+        "vector_search": vector_ms,
+        "corpus_load": corpus_ms,
+        "bm25_rank": bm25_ms,
+        "commits": commits_ms,
+        "phrase_scan": phrase_ms,
+        "total": unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms),
+    });
     let mut raw = json!({
         "mode": "dual",
         "root": root,
         "vector_hits": vector_hits,
         "bm25_hits": bm25_hits,
+        "phrase_hits": phrase_hits,
+        "phrase_hits_total": phrase_total,
+        "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
         "commits": commits,
         "channels": {
             "vector": { "independent": true, "indexed_root": root },
             "bm25": { "independent": true, "indexed_root": root },
+            "phrase": {
+                "independent": true,
+                "budget_ms": DUAL_PHRASE_SCAN_BUDGET_MS,
+                "root": root,
+                "per_file_matches": DUAL_PHRASE_SCAN_PER_FILE_MATCHES,
+                "exhaustive": phrase_exhaustive && phrase_total <= phrase_hits.len() as u64,
+            },
             "commits": { "independent": true, "indexed_root": root },
         },
+        "stage_ms": merge_stage_ms(prior_stage_ms, stage_ms),
         "degraded": vres.get("degraded").cloned().unwrap_or(json!(false)),
     });
     if let Some(scope) = scope.as_ref() {
@@ -2490,6 +2792,24 @@ fn codesearch_at_root(
     }
     ok("codesearch", compact_dual_reply(body, query, k, raw))
 }
+
+/// An index pass runs in the dispatch that discovered the stale digest and then recurses, so the
+/// stages measured before and after it are summed into one report.
+fn merge_stage_ms(prior: Value, now: Value) -> Value {
+    let mut out = match prior {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    if let Value::Object(m) = now {
+        for (k, v) in m {
+            let sum = out.get(&k).and_then(|p| p.as_u64()).unwrap_or(0) + v.as_u64().unwrap_or(0);
+            out.insert(k, json!(sum));
+        }
+    }
+    Value::Object(out)
+}
+
+const REGEX_SCAN_DEFAULT_BUDGET_MS: u64 = 20_000;
 
 const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 
@@ -2499,6 +2819,7 @@ const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "path",
     "glob",
     "path_glob",
+    "exclude",
     "exclude_glob",
     "exclude_globs",
     "case_insensitive",
@@ -2515,16 +2836,23 @@ const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "max_chars",
     "verbose",
     "docs",
+    "timeout_ms",
+    "refresh",
+    "no_cache",
+    "force_disk",
+    "root",
+    "projectPath",
+    "cwd",
+    "combine",
+    "term_combination",
+    "verbatim",
 ];
 
 const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit", "head_limit"];
 
-fn codesearch_result_limit(
-    body: &Value,
-    cfg: &crate::ragconfig::RagConfig,
-) -> Result<(u32, bool), String> {
+fn scan_result_limit(body: &Value, fields: &[&str], default: u32) -> Result<(u32, bool), String> {
     let mut seen: Vec<(&str, u64)> = Vec::new();
-    for field in CODESEARCH_LIMIT_FIELDS {
+    for field in fields {
         if let Some(v) = body.get(*field) {
             match v.as_u64() {
                 Some(n) if n > 0 => seen.push((field, n)),
@@ -2537,7 +2865,7 @@ fn codesearch_result_limit(
         }
     }
     match seen.first() {
-        None => Ok((cfg.budget.default_k as u32, false)),
+        None => Ok((default, false)),
         Some((_, first)) => {
             if let Some((other, other_n)) = seen.iter().find(|(_, n)| n != first) {
                 let (winner, _) = seen[0];
@@ -2548,6 +2876,53 @@ fn codesearch_result_limit(
             Ok((*first as u32, true))
         }
     }
+}
+
+fn codesearch_result_limit(
+    body: &Value,
+    cfg: &crate::ragconfig::RagConfig,
+) -> Result<(u32, bool), String> {
+    scan_result_limit(body, CODESEARCH_LIMIT_FIELDS, cfg.budget.default_k as u32)
+}
+
+/// The directory a scan searches. `root` and its alias `projectPath` win; `cwd` is the spelling an
+/// MCP client already has in hand for the same thing, so it is read rather than silently ignored.
+fn scan_root(body: &Value) -> Option<&str> {
+    body.get("root")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
+        .or_else(|| body.get("cwd").and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty())
+}
+
+fn resolve_scan_target(body: &Value) -> Result<(Option<&str>, Option<String>), String> {
+    let mut root = scan_root(body);
+    let mut path = body
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned);
+    if let Some(candidate) = root {
+        if candidate == "." || candidate == "./" {
+            root = None;
+        } else if !crate::wasm_dispatch::host_allow_root(candidate) {
+            let scope = candidate.strip_prefix("./").unwrap_or(candidate);
+            let valid_relative_scope = !scope.starts_with('/')
+                && scope
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != "..");
+            if valid_relative_scope {
+                path = Some(match path {
+                    Some(path) => format!("{scope}/{path}"),
+                    None => scope.to_owned(),
+                });
+                root = None;
+            } else {
+                return Err(format!("root '{candidate}' is not a real, existing directory the host will grant access to"));
+            }
+        }
+    }
+    Ok((root, path))
 }
 
 fn glob_patterns_from(value: Option<&Value>) -> Result<Vec<String>, String> {
@@ -2589,40 +2964,17 @@ fn codesearch_exhaustive(
     if filenames {
         for field in ["whole_word", "comments_only"] {
             if body.get(field).and_then(|value| value.as_bool()) == Some(true) {
-                return err("codesearch", &format!("{field} applies to source contents, not filename matching"));
+                return err(
+                    "codesearch",
+                    &format!("{field} applies to source contents, not filename matching"),
+                );
             }
         }
     }
-    let mut root = body
-        .get("root")
-        .and_then(|v| v.as_str())
-        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
-        .filter(|p| !p.is_empty());
-    let mut path = body
-        .get("path")
-        .and_then(|v| v.as_str())
-        .filter(|p| !p.is_empty())
-        .map(str::to_owned);
-    if let Some(candidate) = root {
-        if candidate == "." || candidate == "./" {
-            root = None;
-        } else if !crate::wasm_dispatch::host_allow_root(candidate) {
-            let scope = candidate.strip_prefix("./").unwrap_or(candidate);
-            let valid_relative_scope = !scope.starts_with('/')
-                && scope
-                    .split('/')
-                    .all(|part| !part.is_empty() && part != "." && part != "..");
-            if valid_relative_scope {
-                path = Some(match path {
-                    Some(path) => format!("{scope}/{path}"),
-                    None => scope.to_owned(),
-                });
-                root = None;
-            } else {
-                return err("codesearch", &format!("root '{candidate}' is not a real, existing directory the host will grant access to"));
-            }
-        }
-    }
+    let (root, path) = match resolve_scan_target(body) {
+        Ok(target) => target,
+        Err(e) => return err("codesearch", &e),
+    };
     let max_matches = match body.get("max_matches") {
         Some(value) => match value.as_u64() {
             Some(limit) if limit > 0 => limit as usize,
@@ -2632,6 +2984,31 @@ fn codesearch_exhaustive(
             .map(|limit| limit as usize)
             .unwrap_or(usize::MAX),
     };
+    let explicit_combine = body
+        .get("combine")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("term_combination").and_then(|v| v.as_str()))
+        .filter(|c| !c.is_empty());
+    // `verbatim` is the caller-facing spelling of "match the query as one string": it is the
+    // default for a multi-word query, so it is only named here to keep the intent in the body.
+    let combine = match explicit_combine {
+        Some(c) => Some(c),
+        None if body
+            .get("verbatim")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false) =>
+        {
+            Some("phrase")
+        }
+        None => None,
+    };
+    if let Some(c) = combine {
+        if !["or", "and", "phrase"].contains(&c) {
+            return err("codesearch", &format!(
+                "combine \"{c}\" is not a term combination -- valid values are \"phrase\" (default: a multi-word query is matched verbatim as one string, spaces included), \"and\" (a line must carry every term) and \"or\" (a multi-word query is split into terms and a line needs any of them, ranked by how many it carries -- lines carrying fewer terms rank strictly below lines carrying all of them)"
+            ));
+        }
+    }
     let output = match body.get("output") {
         None | Some(Value::Null) => crate::code_index::ScanOutput::Matches,
         Some(raw) => match raw.as_str().and_then(crate::code_index::ScanOutput::parse) {
@@ -2689,7 +3066,7 @@ fn codesearch_exhaustive(
             Err(e) => return err("codesearch", &format!("{key} {e}")),
         }
     }
-    for key in ["exclude_glob", "exclude_globs"] {
+    for key in ["exclude", "exclude_glob", "exclude_globs"] {
         match glob_patterns_from(body.get(key)) {
             Ok(patterns) => exclude_globs.extend(
                 patterns
@@ -2709,6 +3086,18 @@ fn codesearch_exhaustive(
                 .map(|g| g.to_string()),
         );
     }
+    let budget_ms = match body.get("timeout_ms") {
+        None | Some(Value::Null) => regex.then_some(REGEX_SCAN_DEFAULT_BUDGET_MS),
+        Some(value) => match value.as_u64() {
+            Some(n) if n > 0 => Some(n.min(cfg.index.wall_budget_ms)),
+            _ => {
+                return err(
+                    "codesearch",
+                    "timeout_ms must be a positive integer number of milliseconds",
+                )
+            }
+        },
+    };
     let spill_name = format!(
         "codesearch-{}.txt",
         dispatch_task_id().unwrap_or_else(|| unsafe { host_now_ms() }.to_string())
@@ -2718,10 +3107,10 @@ fn codesearch_exhaustive(
         root,
         path: path.as_deref(),
         regex,
-            case_insensitive: body
-                .get("case_insensitive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(filenames),
+        case_insensitive: body
+            .get("case_insensitive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(filenames),
         whole_word: body
             .get("whole_word")
             .and_then(|v| v.as_bool())
@@ -2738,6 +3127,11 @@ fn codesearch_exhaustive(
             .and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64)
             as usize,
+        term_combination: combine,
+        budget_ms,
+        max_matches_per_file: None,
+        context: 0,
+        refresh: scan_refresh_requested(body),
         output,
         list_limit,
         max_chars,
@@ -2747,21 +3141,724 @@ fn codesearch_exhaustive(
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
     };
-    let out = if filenames {
+    let scanned = if filenames {
         crate::code_index::scan_filenames(&scan, cfg)
     } else {
         crate::code_index::scan_literal(&scan, cfg)
     };
-    if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+    if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
         return err(
             "codesearch",
-            out.get("error")
+            scanned
+                .get("error")
                 .and_then(|e| e.as_str())
                 .unwrap_or("exhaustive scan failed"),
         );
     }
-    ok("codesearch", out)
+    let mut out = match scanned {
+        Value::Object(map) => map,
+        other => return ok("codesearch", other),
+    };
+    let partial = finish_scan_reply(&mut out, max_matches.min(u32::MAX as usize) as u32);
+    answer_scan("codesearch", out, partial)
 }
+
+const GREP_OUTPUT_MODES: &[&str] = &["content", "files_with_matches", "count"];
+
+const GREP_MODES: &[&str] = &["pattern", "comments"];
+
+const GREP_EXCLUDE_FIELDS: &[&str] = &["exclude", "exclude_glob", "exclude_globs"];
+
+const GREP_HELP: &str = "\
+grep (alias \"rg\") is an exhaustive literal/regex scan of the tree. Every reply is bounded; read
+\"exhaustive\" in the response to know whether it saw everything.
+
+  {\"pattern\":\"<text or regex>\"}                    required (unless mode:\"comments\"); \"query\" is accepted too
+  {\"path\":\"<dir or file>\"}                         narrow the scan to one subtree or one file
+  {\"glob\":\"**/*.rs\"}                               narrow by path glob; \"include\"/\"path_glob\" are aliases;
+                                                     a \"!\"-prefixed entry excludes instead: [\"**/*.rs\",\"!vendor/**\"]
+  {\"exclude\":[\"vendor/**\",\"test/hardware/**\"]}   drop paths from the scan: one glob or a list of globs, matched
+                                                     like \"glob\", so name a whole tree as \"vendor/**\". This is how a
+                                                     sweep skips vendored, generated or other-owned trees -- never
+                                                     hand-write an alternation for it. \"exclude_glob\"/\"exclude_globs\"
+                                                     are aliases. Exclusions never affect \"exhaustive\".
+  {\"output_mode\":\"content\"}                        \"content\" (default): one hit per line; \"files_with_matches\"; \"count\"
+  {\"detail\":true}                                   \"content\" answers \"output\" (one \"path:line: text\" string per hit)
+                                                     plus \"counts\" ({path,count} per file) -- never both \"output\" and
+                                                     \"matches\". \"detail\":true returns structured \"matches\" objects
+                                                     instead of \"output\"; add \"columns\":true to keep each hit's column.
+                                                     \"occurrence_count\" is omitted whenever it is 1.
+  {\"regex\":true}                                    force regex on/off; unset, the pattern is auto-read
+  {\"fixed_strings\":true}                            match the pattern literally, never as a regex
+  {\"case_insensitive\":true}                         \"ignore_case\" is an alias
+  {\"whole_word\":true}
+  {\"context\":2}                                     include N lines before and after each hit
+  {\"max_results\":200}                               hit cap (default 200); aliases: maxResults, limit, max_matches, k
+  {\"max_files\":50000}                               file cap (default 50000)
+  {\"refresh\":true}                                  re-read from disk: walk instead of `git ls-files --cached`,
+                                                     and bypass the mtime-keyed content cache, so uncommitted
+                                                     edits and untracked files are visible. \"file_source\":\"disk\"
+                                                     and \"no_cache\":true are aliases.
+  {\"mode\":\"pattern\"}                               scan for \"pattern\" (the default; naming it explicitly is
+                                                     always accepted)
+  {\"mode\":\"comments\"}                              find comment spans instead of a pattern (no \"pattern\" needed)
+
+mode:\"comments\" -- one pass for every comment in the tree, column-1 and inline alike:
+  languages: C/C++/Java/Go/Rust/JS/TS/C#/PHP/Kotlin/Swift/Zig/Scala and Faust .dsp use // and /* */;
+             shell, YAML, TOML/INI/conf, Python, Ruby, Perl, PowerShell, Julia, Elixir, Dockerfile and
+             Makefile use #. String literals are respected, so \"http://x\" and '#' are not comments.
+  returns:   \"comments\":  [{path,line,column,kind:\"line\"|\"block\",syntax,inline,text}]
+             \"directives\": [{...same shape...}]  -- keepers, not prose to delete: #!/bin/sh shebangs,
+                            # syntax=docker/dockerfile:1 and # shellcheck disable=... land here, never in
+                            \"comments\". \"inline\":true marks a comment with code before it on the same line.
+             plus \"comment_count\", \"directive_count\", \"files\", \"output\" (path:line:column: text),
+             \"file_source\", \"file_source_detail\" and \"exhaustive\".
+
+Every scan reports \"file_source\" and \"file_source_detail\": \"git\" means `git ls-files --cached`
+(tracked files only), \"walk\" a filesystem walk and \"file\" a single file read straight from disk.
+When \"exhaustive\" is false the reply also carries \"partial\": true and a \"partial_reason\" naming the
+bound that fired, plus \"exhaustive_note\" on how to reach full coverage: scope with \"path\"/\"glob\" and
+repeat per subtree, or raise \"max_results\".";
+
+const CODESEARCH_HELP: &str = "\
+codesearch (aliases \"code_search\", \"search\") is the canonical search verb.
+  {\"query\":\"<text>\"}                 required
+  {\"mode\":\"dual\"}                    \"dual\" (default): ranked BM25+vector retrieval;
+                                       \"literal\"/\"regex\": exhaustive, every match with path:line, no ranking;
+                                       \"filename\": matches paths only
+  {\"k\":10}                            result cap for \"dual\"; aliases: max_results, maxResults, limit
+  {\"max_matches\":1000}                hit cap for the exhaustive modes
+  {\"max_files\":50000}                 file cap
+  {\"path\":\"<dir or file>\"}           narrow the scan; may be absolute when it is inside the search root
+  {\"root\":\"<project dir>\"}           search another project; \"path\" is then relative to it
+  {\"projectPath\":\"<project dir>\"}    alias of \"root\"
+  {\"cwd\":\"<project dir>\"}            alias of \"root\", lowest precedence of the three
+  {\"path_glob\":\"**/*.rs\"}            narrow by glob; \"glob\" is an alias
+  {\"combine\":\"phrase\"}               \"phrase\" (default for a multi-word query), \"and\" (every term on one line),
+                                       \"or\" (ranked union of any term)
+  {\"case_insensitive\":true, \"whole_word\":true}
+  {\"refresh\":true}                    re-read from disk for the exhaustive modes: walk instead of
+                                       `git ls-files --cached` and bypass the content cache";
+
+const FS_READ_HELP: &str = "\
+fs_read returns a file's contents.
+  {\"path\":\"<relative path>\"}     required, relative and within the project
+  {\"offset\":0, \"limit\":200}      read a line range; both clamp to the file's real line count, so an
+                                  offset past the end returns \"\" with \"returned_lines\":0 instead of failing.
+                                  Omit both for the whole file (the pre-existing behaviour).
+  {\"max_bytes\":65536}            cap the returned chunk; \"truncated_at_bytes\" reports whether it fired.
+  {\"allowOutsideRoot\":true}      opt in to an absolute path outside the project root; required per call.
+                                  \"allow_outside_root\" is an alias. A path holding a \"..\" segment is still
+                                  refused, and the host sandbox still serves only paths under the user gm root
+                                  or a directory carrying a project marker (.git, .gm, package.json,
+                                  Cargo.toml, go.mod, pyproject.toml).
+Paged replies add \"total_lines\", \"offset\", \"returned_lines\" and \"has_more_lines\".";
+
+const FS_WRITE_HELP: &str = "\
+fs_write writes a file inside the project.
+  {\"path\":\"<relative path>\"}     required, relative and within the project
+  {\"content\":\"<text>\"}           required; \"data\" is an alias
+Returns {\"bytes\": <written>}. A write outside the root is always refused, allowOutsideRoot included: that
+flag widens the read verbs only.";
+
+const FS_READDIR_HELP: &str = "\
+fs_readdir lists one directory inside the project. {\"path\":\"<relative dir>\"} (default \".\").
+  {\"allowOutsideRoot\":true}      opt in to an absolute path outside the project root; required per call.
+                                  \"allow_outside_root\" is an alias. A path holding a \"..\" segment is still
+                                  refused, and the host sandbox still serves only paths under the user gm root
+                                  or a directory carrying a project marker (.git, .gm, package.json,
+                                  Cargo.toml, go.mod, pyproject.toml).";
+
+const FS_STAT_HELP: &str = "\
+fs_stat stats one path inside the project. {\"path\":\"<relative path>\"}, required.
+  {\"allowOutsideRoot\":true}      opt in to an absolute path outside the project root; required per call.
+                                  \"allow_outside_root\" is an alias. A path holding a \"..\" segment is still
+                                  refused, and the host sandbox still serves only paths under the user gm root
+                                  or a directory carrying a project marker (.git, .gm, package.json,
+                                  Cargo.toml, go.mod, pyproject.toml).";
+
+fn help_requested(body: &Value) -> bool {
+    match body.get("help") {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => {
+            let s = s.trim().to_lowercase();
+            !s.is_empty() && s != "false" && s != "0" && s != "no" && s != "off"
+        }
+        Some(Value::Number(n)) => n.as_u64().unwrap_or(0) > 0,
+        _ => false,
+    }
+}
+
+fn verb_help_doc(verb: &str) -> Option<&'static str> {
+    match verb {
+        "grep" | "rg" => Some(GREP_HELP),
+        "codesearch" | "code_search" | "search" => Some(CODESEARCH_HELP),
+        "fs_read" => Some(FS_READ_HELP),
+        "fs_write" => Some(FS_WRITE_HELP),
+        "fs_readdir" => Some(FS_READDIR_HELP),
+        "fs_stat" => Some(FS_STAT_HELP),
+        _ => None,
+    }
+}
+
+fn scan_refresh_requested(body: &Value) -> bool {
+    if body
+        .get("refresh")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if body
+        .get("no_cache")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if body
+        .get("force_disk")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    body.get("file_source")
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("disk") || s.eq_ignore_ascii_case("walk"))
+        .unwrap_or(false)
+}
+
+fn scan_scope_hint(scan_cap: u32) -> String {
+    format!(
+        "to reach every match, scope the scan and repeat per subtree: pass \"path\":\"<dir-or-file>\" and/or \"glob\":\"**/*.rs\" -- a scoped scan's cap is per call, so union the per-scope results; or raise the cap with \"max_results\": <n> (this call used {scan_cap}); \"output_mode\":\"files_with_matches\" or \"count\" covers far more files per call than \"content\""
+    )
+}
+
+/// Counters that describe the scan to a human sitting in front of it and nothing else: the cache is
+/// internal, the phase split is profiling, and the listed/unreadable counts are already folded into
+/// `partial_reason` on the scans where they left the answer incomplete. `excluded_by_rule_summary`
+/// stays -- it names which rule hid which subtree, which is the one a caller can act on.
+const SCAN_TELEMETRY_DROPPED: &[&str] = &[
+    "scan_cache",
+    "phase_ms",
+    "files_listed",
+    "files_unreadable",
+    "files_with_nul_scanned",
+    "excluded_by_rule",
+    "excluded_by_rule_count",
+];
+
+/// A bounded scan still answers, so it stays `ok` -- and `ok: true` beside an empty `matches` reads
+/// as "there is nothing there" when it means "this did not look at everything". The bound that fired
+/// rides at the top of the envelope, where a caller meets it before the answer.
+fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Option<String> {
+    if out.get("exhaustive").and_then(|v| v.as_bool()) != Some(false) {
+        return None;
+    }
+    let num = |key: &str| out.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+    let mut bounds: Vec<String> = Vec::new();
+    if out.get("budget_exhausted").and_then(|v| v.as_bool()) == Some(true) {
+        bounds.push(format!(
+            "the {} ms wall budget ran out after {} of {} listed files",
+            num("budget_ms"),
+            num("files_scanned"),
+            num("files_listed")
+        ));
+    }
+    if out.get("matches_truncated").and_then(|v| v.as_bool()) == Some(true) {
+        bounds.push(format!(
+            "the hit cap cut at {} matches",
+            num("matches_truncated_at")
+        ));
+    }
+    if out.get("files_truncated").and_then(|v| v.as_bool()) == Some(true) {
+        bounds.push(format!(
+            "the file cap cut at {} files",
+            num("files_truncated_at")
+        ));
+    }
+    let unreadable = num("files_unreadable");
+    if unreadable > 0 {
+        bounds.push(format!("{unreadable} listed files could not be read"));
+    }
+    let too_large = num("files_skipped_too_large_count");
+    if too_large > 0 {
+        bounds.push(format!(
+            "{too_large} files were skipped as over the size ceiling"
+        ));
+    }
+    let untyped = num("files_skipped_untyped_oversize_count");
+    if untyped > 0 {
+        bounds.push(format!(
+            "{untyped} oversize files with no extension were skipped before reading"
+        ));
+    }
+    let reason = if bounds.is_empty() {
+        "the scan did not cover the whole scope".to_string()
+    } else {
+        bounds.join("; ")
+    };
+    Some(format!(
+        "{reason} -- the matches below are NOT every match in the scope"
+    ))
+}
+
+fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_cap: u32) -> Option<String> {
+    let partial = scan_partial_reason(out);
+    for key in SCAN_TELEMETRY_DROPPED {
+        out.remove(*key);
+    }
+    if out.contains_key("hint") {
+        out.remove("query_note");
+    }
+    if partial.is_some() {
+        out.insert(
+            "exhaustive_note".to_string(),
+            json!(scan_scope_hint(scan_cap)),
+        );
+    }
+    out.remove("scope_hint");
+    partial
+}
+
+const GREP_LIMIT_FIELDS: &[&str] = &["max_results", "maxResults", "limit", "max_matches", "k"];
+
+const GREP_DEFAULT_MAX_MATCHES: u32 = 200;
+
+const GREP_NON_CONTENT_SCAN_CAP: u32 = 50_000;
+
+const GREP_REGEX_CLASS_ESCAPES: &[u8] = &[b'b', b'B', b'd', b'D', b'w', b'W', b's', b'S'];
+
+/// A grep pattern is read as a regex when it carries a construct nobody means literally: an
+/// alternation bar, a class escape such as `\d`, a `[a-z]`-shaped range, or an anchor pinned to
+/// an edge. Anything else stays a substring, so a plain call keeps matching the text it names.
+/// A doubled `||` is left literal -- in source that is the logical-or operator, not a union with
+/// an empty branch. Callers who want the decision made for them pass `"regex": true` or
+/// `"regex": false` (or `"fixed_strings": true`) and skip this entirely.
+fn grep_regex_trigger(pattern: &str) -> Option<&'static str> {
+    let bytes = pattern.as_bytes();
+    let mut i = 0usize;
+    let mut alternation = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                if bytes
+                    .get(i + 1)
+                    .is_some_and(|c| GREP_REGEX_CLASS_ESCAPES.contains(c))
+                {
+                    return Some("class escape");
+                }
+                i += 2;
+            }
+            b'|' => {
+                let doubled = bytes.get(i + 1) == Some(&b'|') || (i > 0 && bytes[i - 1] == b'|');
+                if !doubled {
+                    alternation = true;
+                }
+                i += 1;
+            }
+            b'[' => {
+                let close = match bytes[i..].iter().position(|c| *c == b']') {
+                    Some(offset) => i + offset,
+                    None => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                let inner = &bytes[i + 1..close];
+                if inner.len() > 1 && inner.contains(&b'-') {
+                    return Some("character class range");
+                }
+                i = close + 1;
+            }
+            _ => i += 1,
+        }
+    }
+    if alternation {
+        return Some("alternation");
+    }
+    let trimmed = pattern.trim();
+    if trimmed.starts_with('^') || trimmed.ends_with('$') {
+        Some("anchor")
+    } else {
+        None
+    }
+}
+
+fn grep_hit_path(hit: &Value) -> String {
+    hit.get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn grep_hit_line(hit: &Value) -> String {
+    hit.get("line")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        .to_string()
+}
+
+fn grep_hit_text(hit: &Value) -> String {
+    hit.get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn grep_output_line(hit: &Value, output_mode: &str) -> String {
+    let path = grep_hit_path(hit);
+    match output_mode {
+        "files_with_matches" => path,
+        "count" => format!(
+            "{path}:{}",
+            hit.get("count").and_then(|v| v.as_u64()).unwrap_or(0)
+        ),
+        _ => format!("{path}:{}: {}", grep_hit_line(hit), grep_hit_text(hit)),
+    }
+}
+
+fn grep_counted_files(matches: &[Value]) -> Vec<Value> {
+    let mut order: Vec<String> = Vec::new();
+    let mut counts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for hit in matches {
+        let path = grep_hit_path(hit);
+        if !counts.contains_key(&path) {
+            order.push(path.clone());
+        }
+        let seen = counts.entry(path).or_insert(0);
+        *seen += 1;
+    }
+    order
+        .into_iter()
+        .map(|path| json!({ "path": path, "count": counts.get(&path).copied().unwrap_or(0) }))
+        .collect()
+}
+
+/// A `!`-prefixed entry in the include glob excludes instead, and every `exclude*` field is
+/// exclusion-only. Both feed the same `exclude_globs` the literal walker already honours, so an
+/// omitted exclude leaves the scan exactly as it was.
+fn grep_route_globs(body: &Value) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut include_globs: Vec<String> = Vec::new();
+    let mut exclude_globs: Vec<String> = Vec::new();
+    let include_field = ["glob", "include", "path_glob"]
+        .into_iter()
+        .find(|field| body.get(*field).is_some());
+    if let Some(field) = include_field {
+        for pattern in glob_patterns_from(body.get(field)).map_err(|e| format!("{field} {e}"))? {
+            match pattern.strip_prefix('!') {
+                Some(negated) => exclude_globs.push(negated.to_string()),
+                None => include_globs.push(pattern),
+            }
+        }
+    }
+    for field in GREP_EXCLUDE_FIELDS {
+        for pattern in glob_patterns_from(body.get(field)).map_err(|e| format!("{field} {e}"))? {
+            let pattern = pattern
+                .strip_prefix('!')
+                .map(str::to_string)
+                .unwrap_or(pattern);
+            exclude_globs.push(pattern);
+        }
+    }
+    Ok((include_globs, exclude_globs))
+}
+
+fn grep_shaped_matches(matches: Vec<Value>, want_columns: bool) -> Vec<Value> {
+    matches
+        .into_iter()
+        .map(|hit| {
+            let Value::Object(mut map) = hit else {
+                return hit;
+            };
+            if !want_columns {
+                map.remove("column");
+            }
+            if map.get("occurrence_count").and_then(|v| v.as_u64()) == Some(1) {
+                map.remove("occurrence_count");
+            }
+            Value::Object(map)
+        })
+        .collect()
+}
+
+fn grep(body: &Value) -> u64 {
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    let mode = body
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let comments_flag = body
+        .get("comments")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let want_comments = mode == "comments" || comments_flag;
+    if !mode.is_empty() && !GREP_MODES.contains(&mode.as_str()) && !comments_flag {
+        return err(
+            "grep",
+            &format!(
+                "mode \"{mode}\" is not a grep mode -- valid modes are {}. \
+             \"pattern\" (the default) scans for a pattern; \"comments\" finds comment spans and \
+             needs no \"pattern\". Pass {{\"help\": true}} for the full parameter list.",
+                GREP_MODES
+                    .iter()
+                    .map(|m| format!("\"{m}\""))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        );
+    }
+    if want_comments {
+        return grep_comments(&body, &cfg);
+    }
+    let pattern = body
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("query").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    if pattern.is_empty() {
+        return err("grep", "pattern required -- pass {\"pattern\":\"<text>\"}, optionally narrowed by \"path\" (a file or directory under the project root) and \"glob\"; pass {\"mode\":\"comments\"} to find comment spans instead, or {\"help\": true} for the full parameter list");
+    }
+    let output_mode = body
+        .get("output_mode")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("outputMode").and_then(|v| v.as_str()))
+        .unwrap_or("content");
+    if !GREP_OUTPUT_MODES.contains(&output_mode) {
+        return err(
+            "grep",
+            &format!(
+                "output_mode \"{output_mode}\" is not a grep output mode -- valid modes are {}. \
+             \"content\" returns every hit as path:line: text, \"files_with_matches\" returns each \
+             matching path once, \"count\" returns path:count.",
+                GREP_OUTPUT_MODES
+                    .iter()
+                    .map(|m| format!("\"{m}\""))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        );
+    }
+    let (root, path) = match resolve_scan_target(body) {
+        Ok(target) => target,
+        Err(e) => return err("grep", &e),
+    };
+    let (max_matches, limit_was_explicit) =
+        match scan_result_limit(body, GREP_LIMIT_FIELDS, GREP_DEFAULT_MAX_MATCHES) {
+            Ok(limit) => limit,
+            Err(e) => return err("grep", &e),
+        };
+    let scan_cap = match (limit_was_explicit, output_mode) {
+        (true, _) | (false, "content") => max_matches,
+        _ => GREP_NON_CONTENT_SCAN_CAP,
+    };
+    let fixed_strings = body
+        .get("fixed_strings")
+        .and_then(|v| v.as_bool())
+        .or_else(|| body.get("fixedStrings").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    let regex_asked = body.get("regex").and_then(|v| v.as_bool());
+    let auto_trigger = match (regex_asked, fixed_strings) {
+        (None, false) => grep_regex_trigger(pattern),
+        _ => None,
+    };
+    let use_regex = match regex_asked {
+        Some(want) => want && !fixed_strings,
+        None => auto_trigger.is_some(),
+    };
+    let context = match body.get("context").and_then(|v| v.as_u64()) {
+        Some(n) => n as usize,
+        None => 0,
+    };
+    let (include_globs, exclude_globs) = match grep_route_globs(body) {
+        Ok(globs) => globs,
+        Err(e) => return err("grep", &e),
+    };
+    let scan = crate::code_index::LiteralScan {
+        pattern,
+        root,
+        path: path.as_deref(),
+        regex: use_regex,
+        case_insensitive: body
+            .get("case_insensitive")
+            .and_then(|v| v.as_bool())
+            .or_else(|| body.get("ignore_case").and_then(|v| v.as_bool()))
+            .unwrap_or(false),
+        whole_word: body
+            .get("whole_word")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        comments_only: false,
+        include_globs,
+        exclude_globs,
+        max_matches: scan_cap as usize,
+        max_files: body
+            .get("max_files")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64)
+            as usize,
+        context,
+        term_combination: Some("phrase"),
+        budget_ms: None,
+        max_matches_per_file: None,
+        refresh: scan_refresh_requested(body),
+        output: crate::code_index::ScanOutput::Matches,
+        list_limit: None,
+        max_chars: usize::MAX,
+        spill_name: String::new(),
+        verbose: false,
+    };
+    let scanned = crate::code_index::scan_literal(&scan, &cfg);
+    if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+        let base = scanned
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("grep scan failed")
+            .to_string();
+        return match auto_trigger {
+            Some(reason) => err(
+                "grep",
+                &format!(
+                    "{base} -- the pattern was read as a regex because of its {reason}; \
+                 pass \"regex\": false (or \"fixed_strings\": true) to search for it literally"
+                ),
+            ),
+            None => err("grep", &base),
+        };
+    }
+    let mut out = match scanned {
+        Value::Object(map) => map,
+        other => return ok("grep", other),
+    };
+    let matches: Vec<Value> = out
+        .get("matches")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let counts = grep_counted_files(&matches);
+    out.insert("output_mode".to_string(), json!(output_mode));
+    out.insert("regex".to_string(), json!(use_regex));
+    if let Some(reason) = auto_trigger {
+        out.insert("regex_detected".to_string(), json!(reason));
+    }
+    out.insert("file_count".to_string(), json!(counts.len()));
+    out.insert("max_matches".to_string(), json!(scan_cap));
+    out.insert("context".to_string(), json!(context));
+    match output_mode {
+        "files_with_matches" => {
+            out.remove("matches");
+            out.insert("counts".to_string(), Value::Array(counts.clone()));
+            out.insert(
+                "output".to_string(),
+                Value::Array(counts.iter().map(|c| json!(grep_hit_path(c))).collect()),
+            );
+        }
+        "count" => {
+            out.remove("matches");
+            out.insert("counts".to_string(), Value::Array(counts.clone()));
+            out.insert(
+                "output".to_string(),
+                Value::Array(
+                    counts
+                        .iter()
+                        .map(|c| json!(grep_output_line(c, "count")))
+                        .collect(),
+                ),
+            );
+        }
+        _ => {
+            out.insert("counts".to_string(), Value::Array(counts));
+            if body
+                .get("detail")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                let want_columns = body
+                    .get("columns")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                out.insert(
+                    "matches".to_string(),
+                    Value::Array(grep_shaped_matches(matches, want_columns)),
+                );
+            } else {
+                out.remove("matches");
+                out.insert(
+                    "output".to_string(),
+                    Value::Array(
+                        matches
+                            .iter()
+                            .map(|m| json!(grep_output_line(m, "content")))
+                            .collect(),
+                    ),
+                );
+            }
+        }
+    }
+    let partial = finish_scan_reply(&mut out, scan_cap);
+    answer_scan("grep", out, partial)
+}
+
+fn answer_scan(verb: &str, out: serde_json::Map<String, Value>, partial: Option<String>) -> u64 {
+    match partial {
+        Some(reason) => ok_partial(verb, Value::Object(out), &reason),
+        None => ok(verb, Value::Object(out)),
+    }
+}
+
+fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
+    let (root, path) = match resolve_scan_target(body) {
+        Ok(target) => target,
+        Err(e) => return err("grep", &e),
+    };
+    let (max_matches, _) =
+        match scan_result_limit(body, GREP_LIMIT_FIELDS, GREP_DEFAULT_MAX_MATCHES) {
+            Ok(limit) => limit,
+            Err(e) => return err("grep", &e),
+        };
+    let (_, exclude_globs) = match grep_route_globs(body) {
+        Ok(globs) => globs,
+        Err(e) => return err("grep", &e),
+    };
+    let scan = crate::code_index::CommentScan {
+        root,
+        path: path.as_deref(),
+        path_glob: body
+            .get("glob")
+            .and_then(|v| v.as_str())
+            .or_else(|| body.get("include").and_then(|v| v.as_str()))
+            .or_else(|| body.get("path_glob").and_then(|v| v.as_str()))
+            .filter(|g| !g.is_empty()),
+        exclude_globs,
+        max_matches: max_matches as usize,
+        max_files: body
+            .get("max_files")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64)
+            as usize,
+        refresh: scan_refresh_requested(body),
+    };
+    let scanned = crate::code_index::scan_comments(&scan, cfg);
+    if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+        let base = scanned
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("comment scan failed")
+            .to_string();
+        return err("grep", &base);
+    }
+    let mut out = match scanned {
+        Value::Object(map) => map,
+        other => return ok("grep", other),
+    };
+    out.insert("verb_mode".to_string(), json!("comments"));
+    let partial = finish_scan_reply(&mut out, max_matches);
+    answer_scan("grep", out, partial)
+}
+
+const CODESEARCH_QUERY_SHAPE: &str = "query required -- pass {\"query\":\"<the text to search for>\"}: a plain STRING of text, never an object, array or path list; \"dual\" (the default) embeds it and ranks BM25+vector hits, \"literal\"/\"regex\" match it verbatim, \"filename\" matches it as a path substring or glob. Optional {\"mode\":\"dual\"|\"literal\"|\"regex\"|\"filename\"}, {\"k\":10} result cap for \"dual\", {\"max_matches\":1000} for the exhaustive modes, {\"path\":\"<dir or file>\"}, {\"path_glob\":\"**/*.rs\"}. There is no query-less listing mode, so a body without query is always a caller mistake";
 
 struct IdentifierScan<'a> {
     pattern: &'a str,
@@ -2792,6 +3889,11 @@ fn identifier_scan_lines(
         exclude_globs: exclude_globs.to_vec(),
         max_matches: crate::codesearch_rank::IDENTIFIER_SCAN_MAX_MATCHES,
         max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
+        term_combination: None,
+        budget_ms: None,
+        max_matches_per_file: None,
+        context: 0,
+        refresh: scan_refresh_requested(body),
         output: crate::code_index::ScanOutput::Compact,
         list_limit: None,
         max_chars: usize::MAX,
@@ -2844,7 +3946,7 @@ fn identifier_route_globs(
             }
         }
     }
-    for key in ["exclude_glob", "exclude_globs"] {
+    for key in ["exclude", "exclude_glob", "exclude_globs"] {
         let patterns = glob_patterns_from(body.get(key)).map_err(|e| format!("{key} {e}"))?;
         exclude_globs.extend(
             patterns
@@ -2958,9 +4060,21 @@ fn codesearch(body: &Value) -> u64 {
 
 fn codesearch_dispatch(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
-    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let Some(raw_query) = body.get("query") else {
+        return err_retry_same_verb("codesearch", CODESEARCH_QUERY_SHAPE);
+    };
+    let Some(query) = raw_query.as_str() else {
+        let shown: String = raw_query.to_string().chars().take(80).collect();
+        return err_retry_same_verb(
+            "codesearch",
+            &format!(
+                "{}; got non-string JSON under \"query\": {}",
+                CODESEARCH_QUERY_SHAPE, shown
+            ),
+        );
+    };
     if query.is_empty() {
-        return err("codesearch", "query required");
+        return err_retry_same_verb("codesearch", CODESEARCH_QUERY_SHAPE);
     }
     let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("dual");
     if !CODESEARCH_MODES.contains(&mode) {
@@ -2987,11 +4101,7 @@ fn codesearch_dispatch(body: &Value) -> u64 {
         let explicit = if limit_was_explicit { Some(k) } else { None };
         return codesearch_exhaustive(body, query, mode == "regex", &cfg, explicit);
     }
-    let root = body
-        .get("root")
-        .and_then(|v| v.as_str())
-        .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
-        .filter(|p| !p.is_empty());
+    let root = scan_root(body);
     let rank_opts = crate::codesearch_rank::RankOptions::from_body(body, k as usize, root);
     let identifier = query.trim();
     let flag = |name: &str| body.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -3048,7 +4158,11 @@ fn codesearch_dispatch(body: &Value) -> u64 {
             "codeinsight_rebuild",
             json!({ "reason": "explicit-rebuild", "keys_cleared": cleared }),
         );
-        let _ = crate::code_index::index(".", 500);
+        let _ = crate::code_index::index_topup(
+            ".",
+            cfg.index.prune_pass_file_limit_ceiling,
+            COLD_INDEX_PASS_BUDGET_MS,
+        );
         let mut retry = body.clone();
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -3079,11 +4193,15 @@ fn codesearch_dispatch(body: &Value) -> u64 {
                 json!({ "reason": reason, "stored_then_current": current }),
             );
             if cold_start {
-                let _ = crate::code_index::index(".", 500);
+                let _ = crate::code_index::index_topup(
+                    ".",
+                    cfg.index.prune_pass_file_limit_ceiling,
+                    COLD_INDEX_PASS_BUDGET_MS,
+                );
             } else {
                 let _ = crate::code_index::index_topup(
                     ".",
-                    500,
+                    cfg.index.prune_pass_file_limit_ceiling,
                     cfg.index.incremental_topup_wall_budget_ms,
                 );
             }
@@ -3131,6 +4249,7 @@ fn codesearch_dispatch(body: &Value) -> u64 {
         .iter()
         .map(|(hash, message, score)| json!({ "hash": hash, "message": message, "score": score }))
         .collect();
+    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, None, &cfg);
     let build_hit = |corpus: &mut crate::code_index::FusionCorpus,
                      key: &str,
                      score: Option<f64>,
@@ -3176,7 +4295,7 @@ fn codesearch_dispatch(body: &Value) -> u64 {
         .take(shown_k)
         .map(|(key, score)| build_hit(&mut corpus, key, Some(*score), None))
         .collect();
-    if !vec_ids.is_empty() || !bm25_ids.is_empty() {
+    if !vec_ids.is_empty() || !bm25_ids.is_empty() || !phrase_hits.is_empty() {
         return ok(
             "codesearch",
             compact_dual_reply(
@@ -3184,7 +4303,13 @@ fn codesearch_dispatch(body: &Value) -> u64 {
                 query,
                 k,
                 json!({
-                    "mode": "dual", "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response, "commits": commits,
+                    "mode": "dual",
+                    "vector_hits": vector_ranked,
+                    "bm25_hits": bm25_ranked_response,
+                    "phrase_hits": phrase_hits,
+                    "phrase_hits_total": phrase_total,
+                    "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
+                    "commits": commits,
                 }),
             ),
         );
@@ -3206,7 +4331,11 @@ fn codesearch_dispatch(body: &Value) -> u64 {
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     {
-        let _ = crate::code_index::index(".", 500);
+        let _ = crate::code_index::index_topup(
+            ".",
+            cfg.index.prune_pass_file_limit_ceiling,
+            COLD_INDEX_PASS_BUDGET_MS,
+        );
         let mut retry = body.clone();
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
@@ -3226,7 +4355,7 @@ fn codesearch_dispatch(body: &Value) -> u64 {
         );
     }
 
-    if vec_unavailable && kv_empty_now {
+    if vec_unavailable && kv_empty_now && phrase_hits.is_empty() {
         return err(
             "codesearch",
             "semantic retrieval unavailable (no vector hits and the embedder produced nothing) and the keyword fallback matched nothing -- this is NOT an empty-index result",
@@ -3242,6 +4371,9 @@ fn codesearch_dispatch(body: &Value) -> u64 {
             json!({
                 "mode": "fallback_kv", "degraded": vec_unavailable,
                 "hits": hits, "commits": commits, "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response,
+                "phrase_hits": phrase_hits,
+                "phrase_hits_total": phrase_total,
+                "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
             }),
         ),
     )
@@ -3291,7 +4423,14 @@ fn health_probe_codesearch() -> Value {
     json!({ "ok": ok, "error": if ok { Value::Null } else { v.get("error").cloned().unwrap_or(Value::Null) } })
 }
 
-fn health(_body: &Value) -> u64 {
+const HEALTH_PROBE_FIELDS: &[&str] = &["probes", "probe_subsystems"];
+const HEALTH_PROBE_SKIPPED_NOTE: &str = "not run: each probe is a real recall and a real codesearch, measured at 40-160s together on a large project, which no dispatch caller's timeout survives. Pass {\"probes\": true} to run them.";
+
+fn health_probe_skipped() -> Value {
+    json!({ "ok": Value::Null, "skipped": true, "note": HEALTH_PROBE_SKIPPED_NOTE })
+}
+
+fn health(body: &Value) -> u64 {
     let now = unsafe { host_now_ms() };
     let subsystems: Vec<Value> = crate::mediator::all_verbs_by_subsystem()
         .into_iter()
@@ -3319,16 +4458,21 @@ fn health(_body: &Value) -> u64 {
         }
     }
 
-    let recall_health = health_probe_recall();
-    let codesearch_health = health_probe_codesearch();
-    let subsystems_healthy = recall_health
-        .get("ok")
-        .and_then(|b| b.as_bool())
-        .unwrap_or(false)
-        && codesearch_health
-            .get("ok")
-            .and_then(|b| b.as_bool())
-            .unwrap_or(false);
+    let probes_requested = HEALTH_PROBE_FIELDS
+        .iter()
+        .any(|field| body.get(*field).and_then(|v| v.as_bool()).unwrap_or(false));
+    let (recall_health, codesearch_health) = if probes_requested {
+        (health_probe_recall(), health_probe_codesearch())
+    } else {
+        (health_probe_skipped(), health_probe_skipped())
+    };
+    let subsystems_healthy = match (
+        recall_health.get("ok").and_then(|b| b.as_bool()),
+        codesearch_health.get("ok").and_then(|b| b.as_bool()),
+    ) {
+        (Some(recall_ok), Some(codesearch_ok)) => recall_ok && codesearch_ok,
+        _ => true,
+    };
 
     ok(
         "health",
@@ -3346,6 +4490,7 @@ fn health(_body: &Value) -> u64 {
             "plugin_response_envelope": plugin_response_envelope_contract(),
             "subsystems": subsystems,
             "subsystem_probes": { "recall": recall_health, "codesearch": codesearch_health },
+            "subsystem_probes_requested": probes_requested,
             "verb_aliases": aliases,
             "error_codes": [
                 ERR_CODE_FAILED, ERR_CODE_RETIRED_VERB, ERR_CODE_UNSUPPORTED,
@@ -4826,6 +5971,7 @@ fn split_head_ref_line(line: &str) -> (String, String) {
         .unwrap_or_else(|| "HEAD".to_string());
     (sha, branch)
 }
+const GIT_STATUS_SKIPPED_PATHS_MAX: usize = 25;
 
 fn git_status(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
@@ -4854,13 +6000,8 @@ fn git_status(body: &Value) -> u64 {
             }
         }
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
-        let porcelain = super::host_abi::porcelain_or_dirty(r);
-        if let Some(detail) = super::host_abi::porcelain_failure_detail(&porcelain) {
-            return Err(err(
-                "git_status",
-                &format!("git status unavailable -- {detail}"),
-            ));
-        }
+        let st = super::host_abi::porcelain_from(&r);
+        let porcelain = st.porcelain.clone();
         let mut modified: Vec<String> = vec![];
         let mut untracked: Vec<String> = vec![];
         let mut deleted: Vec<String> = vec![];
@@ -4890,7 +6031,7 @@ fn git_status(body: &Value) -> u64 {
         let dirty = !porcelain.trim().is_empty();
         let head_line = git_head_ref_line(plan, cwd)?;
         let (head_sha, head_branch) = split_head_ref_line(&head_line);
-        if summary {
+        let mut lists = if summary {
             let first_n = limit.unwrap_or(GIT_STATUS_SUMMARY_DEFAULT_PATHS);
             let entries: Vec<&str> = porcelain.lines().filter(|l| l.len() >= 3).collect();
             let first_paths: Vec<String> = entries
@@ -4898,61 +6039,81 @@ fn git_status(body: &Value) -> u64 {
                 .take(first_n)
                 .map(|l| format!("{} {}", &l[..2], l[3..].trim()))
                 .collect();
-            return Ok(ok(
-                "git_status",
-                json!({
-                    "dirty": dirty,
-                    "summary": true,
-                    "counts": {
-                        "changed_paths": entries.len(),
-                        "modified": modified.len(),
-                        "staged": staged.len(),
-                        "deleted": deleted.len(),
-                        "untracked": untracked.len(),
-                    },
-                    "first_paths": first_paths,
-                    "first_paths_note": "each entry is the two-column porcelain status, a space, then the path",
-                    "truncated": entries.len() > first_n,
-                    "scoped_to": paths,
-                    "head": head_sha.clone(),
-                    "head_sha": head_sha.clone(),
-                    "branch": head_branch.clone(),
-                }),
-            ));
-        }
-        let mut lists = json!({
-            "dirty": dirty,
-            "head": head_sha,
-            "head_sha": head_sha,
-            "branch": head_branch,
-            "modified": modified,
-            "untracked": untracked,
-            "deleted": deleted,
-            "staged": staged,
-        });
-        if let Some(cap) = limit {
-            let mut truncated = serde_json::Map::new();
-            for key in ["modified", "untracked", "deleted", "staged"] {
-                let total = lists[key].as_array().map(|a| a.len()).unwrap_or(0);
-                if total > cap {
-                    lists[key] = Value::Array(
-                        lists[key]
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default()
-                            .into_iter()
-                            .take(cap)
-                            .collect(),
-                    );
-                    truncated.insert(key.to_string(), json!(total));
+            json!({
+                "dirty": dirty,
+                "head": head_sha.clone(), "head_sha": head_sha.clone(), "branch": head_branch.clone(),
+                "summary": true,
+                "counts": {
+                    "changed_paths": entries.len(),
+                    "modified": modified.len(),
+                    "staged": staged.len(),
+                    "deleted": deleted.len(),
+                    "untracked": untracked.len(),
+                },
+                "first_paths": first_paths,
+                "first_paths_note": "each entry is the two-column porcelain status, a space, then the path",
+                "truncated": entries.len() > first_n,
+                "scoped_to": paths,
+            })
+        } else {
+            let mut l = json!({
+                "dirty": dirty,
+                "head": head_sha.clone(), "head_sha": head_sha.clone(), "branch": head_branch.clone(),
+                "modified": modified,
+                "untracked": untracked,
+                "deleted": deleted,
+                "staged": staged,
+            });
+            if let Some(cap) = limit {
+                let mut truncated = serde_json::Map::new();
+                for key in ["modified", "untracked", "deleted", "staged"] {
+                    let total = l[key].as_array().map(|a| a.len()).unwrap_or(0);
+                    if total > cap {
+                        l[key] = Value::Array(
+                            l[key]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .take(cap)
+                                .collect(),
+                        );
+                        truncated.insert(key.to_string(), json!(total));
+                    }
+                }
+                if !truncated.is_empty() {
+                    l["truncated_totals"] = Value::Object(truncated);
                 }
             }
-            if !truncated.is_empty() {
-                lists["truncated_totals"] = Value::Object(truncated);
+            if !paths.is_empty() {
+                l["scoped_to"] = json!(paths);
             }
-        }
-        if !paths.is_empty() {
-            lists["scoped_to"] = json!(paths);
+            l
+        };
+        // A path git cannot open (Windows MAX_PATH, or permissions) must degrade
+        // this listing, never abort it: report what was read and name the rest.
+        if st.partial {
+            let skipped: Vec<String> = st
+                .skipped_paths
+                .iter()
+                .take(GIT_STATUS_SKIPPED_PATHS_MAX)
+                .cloned()
+                .collect();
+            let note = if st.failed {
+                format!("git status exited {} -- the paths listed are only what it could read. This is NOT a dirty-tree signal and git_finalize is not blocked by it.", st.exit_code)
+            } else {
+                "git skipped path(s) it could not open (Windows MAX_PATH or permission); entries under them are absent from this listing, not clean".to_string()
+            };
+            if let Some(map) = lists.as_object_mut() {
+                map.insert("partial".to_string(), json!(true));
+                map.insert("skipped_count".to_string(), json!(st.skipped_paths.len()));
+                map.insert("skipped_paths".to_string(), json!(skipped));
+                map.insert("status_note".to_string(), Value::String(note));
+                if st.failed {
+                    map.insert("git_error".to_string(), json!(st.stderr.trim()));
+                    map.insert("exit_code".to_string(), json!(st.exit_code));
+                }
+            }
         }
         Ok(ok("git_status", lists))
     })
@@ -5713,7 +6874,7 @@ fn git_commit(body: &Value) -> u64 {
         }
         let status_r =
             git_step_replayed_by_call_order(plan, &as_argv(&git_porcelain_argv(&[], cwd)), cwd)?;
-        let porcelain = super::host_abi::porcelain_or_dirty(status_r);
+        let porcelain = require_complete_git_porcelain("git_commit", &status_r)?;
         if porcelain.trim().is_empty() && !allow_empty {
             return Ok(ok(
                 "git_commit",
@@ -5726,7 +6887,7 @@ fn git_commit(body: &Value) -> u64 {
                 &as_argv(&git_porcelain_argv(&paths, cwd)),
                 cwd,
             )?;
-            let scoped_porcelain = super::host_abi::porcelain_or_dirty(scoped_r);
+            let scoped_porcelain = require_complete_git_porcelain("git_commit", &scoped_r)?;
             if scoped_porcelain.trim().is_empty() && !allow_empty {
                 let unmatched = pathspecs_matching_nothing(cwd, &paths);
                 if !unmatched.is_empty() && unmatched.len() == paths.len() {
@@ -5805,7 +6966,7 @@ fn git_commit(body: &Value) -> u64 {
         if allow_empty {
             argv.push("--allow-empty".to_string());
         }
-        if !merge_pending {
+        if !merge_pending && !scoped_paths.is_empty() {
             argv.push("--".to_string());
             argv.extend(git_pathspec_scope(scoped_paths, cwd));
         }
@@ -6017,7 +7178,10 @@ fn git_finalize(body: &Value) -> u64 {
             .map(String::from)
             .collect()
     };
-    let dirty = !git_porcelain_scoped(cwd_ref, &paths).trim().is_empty();
+    let dirty = match checked_git_porcelain_scoped("git_finalize", cwd_ref, &paths) {
+        Ok(porcelain) => !porcelain.trim().is_empty(),
+        Err(refusal) => return refusal,
+    };
     let mut dangling_waived: Vec<String> = Vec::new();
     if dirty {
         if message.is_empty() {
@@ -6027,16 +7191,16 @@ fn git_finalize(body: &Value) -> u64 {
             );
         }
         let scan = super::dangling_refs::scan_commit(cwd_ref, &paths, !scoped, body);
-        if !scan.offenders.is_empty() {
-            return err_json(
-                "git_finalize",
-                super::dangling_refs::refusal_detail("git_finalize", &scan),
-            );
-        }
         if super::dangling_refs::scan_unreadable(&scan) {
             return err_json(
                 "git_finalize",
                 super::dangling_refs::unreadable_detail("git_finalize", &scan),
+            );
+        }
+        if !scan.offenders.is_empty() {
+            return err_json(
+                "git_finalize",
+                super::dangling_refs::refusal_detail("git_finalize", &scan),
             );
         }
         dangling_waived = scan.waived;
@@ -6054,8 +7218,10 @@ fn git_finalize(body: &Value) -> u64 {
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
         let mut commit_argv: Vec<String> =
             vec!["commit".to_string(), "-m".to_string(), bundled_message];
-        commit_argv.push("--".to_string());
-        commit_argv.extend(git_pathspec_scope(&paths, cwd_ref));
+        if scoped {
+            commit_argv.push("--".to_string());
+            commit_argv.extend(git_pathspec_scope(&paths, cwd_ref));
+        }
         let commit_argv: Vec<&str> = commit_argv.iter().map(String::as_str).collect();
         let cr = git_call_argv(&commit_argv, cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -6202,12 +7368,18 @@ fn git_finalize(body: &Value) -> u64 {
         }));
     }
 
-    let mut leftover = git_porcelain_scoped(cwd_ref, &paths);
+    let mut leftover = match checked_git_porcelain_scoped("git_finalize", cwd_ref, &paths) {
+        Ok(porcelain) => porcelain,
+        Err(refusal) => return refusal,
+    };
     let dirty_only_from_concurrent_writer_on_just_committed_files = committed
         && !leftover.trim().is_empty()
         && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref));
     if dirty_only_from_concurrent_writer_on_just_committed_files {
-        leftover = git_porcelain_scoped(cwd_ref, &paths);
+        leftover = match checked_git_porcelain_scoped("git_finalize", cwd_ref, &paths) {
+            Ok(porcelain) => porcelain,
+            Err(refusal) => return refusal,
+        };
         if !leftover.trim().is_empty()
             && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref))
         {
@@ -6217,8 +7389,10 @@ fn git_finalize(body: &Value) -> u64 {
                 "--amend".to_string(),
                 "--no-edit".to_string(),
             ];
-            amend.push("--".to_string());
-            amend.extend(git_pathspec_scope(&paths, cwd_ref));
+            if scoped {
+                amend.push("--".to_string());
+                amend.extend(git_pathspec_scope(&paths, cwd_ref));
+            }
             let amend_argv: Vec<&str> = amend.iter().map(String::as_str).collect();
             let amend = git_call_argv(&amend_argv, cwd_ref);
             if amend.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0 {
@@ -6230,7 +7404,10 @@ fn git_finalize(body: &Value) -> u64 {
                     "note": "a file this dispatch committed was rewritten by a concurrent writer before the porcelain probe; amended rather than refusing the push",
                 }));
             }
-            leftover = git_porcelain_scoped(cwd_ref, &paths);
+            leftover = match checked_git_porcelain_scoped("git_finalize", cwd_ref, &paths) {
+                Ok(porcelain) => porcelain,
+                Err(refusal) => return refusal,
+            };
         }
     }
     if !leftover.trim().is_empty() {
@@ -8129,6 +9306,39 @@ fn is_transient_submodule_runtime_status(line: &str) -> bool {
         || path.starts_with(".agentplug-kv/")
 }
 
+fn require_complete_git_porcelain(verb: &str, response: &Value) -> Result<String, u64> {
+    let status = super::host_abi::porcelain_from(response);
+    if status.partial {
+        return Err(err_json(
+            verb,
+            json!({
+                "error": "git status is incomplete -- refusing mutation without complete worktree evidence",
+                "error_code": "git_status_incomplete",
+                "partial": true,
+                "failed": status.failed,
+                "parked": status.parked,
+                "exit_code": status.exit_code,
+                "stderr": status.stderr,
+                "skipped_paths": status.skipped_paths,
+                "observed_porcelain": status.porcelain,
+                "next_dispatch": "git_status",
+            }),
+        ));
+    }
+    Ok(status.porcelain)
+}
+
+fn checked_git_porcelain_scoped(
+    verb: &str,
+    repo: Option<&str>,
+    paths: &[String],
+) -> Result<String, u64> {
+    require_complete_git_porcelain(
+        verb,
+        &git_call_argv(&as_argv(&git_porcelain_argv(paths, repo)), repo),
+    )
+}
+
 fn git_porcelain_scoped(repo: Option<&str>, paths: &[String]) -> String {
     super::host_abi::porcelain_or_dirty(git_call_argv(
         &as_argv(&git_porcelain_argv(paths, repo)),
@@ -8655,11 +9865,9 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         } else {
             1
         };
-        let dream_rsi_vetoed = result_value
-            .get("dream_rsi_vetoed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if dream_rsi_vetoed || !root_resolved {
+        // A dispatch the strategy only advised against still ran, so it is still evidence: that is
+        // what lets a verb record the success that clears the ranking it was advised under.
+        if !root_resolved {
             None
         } else {
             let dispatch_id = crate::dispatch_ledger::record(
@@ -8754,16 +9962,49 @@ fn restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb: &str) {
     }
 }
 
+fn attach_dream_rsi_advisory(
+    packed: u64,
+    verb: &str,
+    reason: &str,
+    next_dispatch_hint: &str,
+) -> u64 {
+    let mut value = super::host_abi::unpack_to_value(packed);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "dream_rsi_advisory".to_string(),
+            json!({
+                "strategy": "replay-recorded-successes-first",
+                "verb": verb,
+                "next_dispatch_hint": next_dispatch_hint,
+                "admitted_anyway": true,
+                "reason": reason,
+            }),
+        );
+    }
+    pack(value.to_string())
+}
+
+/// The Dream-RSI ranking is advice attached to a dispatch that runs, never a refusal: it is
+/// consulted before the dispatch so it reads the state that produced it, and attached after so
+/// every arm of `dispatch_verb_unranked` carries it.
 fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
+    let admission = crate::orchestrator::dream_rsi::admit_dispatch(verb);
+    let packed = dispatch_verb_unranked(verb, body, body_s);
+    match admission {
+        crate::orchestrator::dream_rsi::Admission::Allow => packed,
+        crate::orchestrator::dream_rsi::Admission::Advisory {
+            reason,
+            next_dispatch_hint,
+        } => attach_dream_rsi_advisory(packed, verb, &reason, next_dispatch_hint),
+    }
+}
+
+fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
     #[cfg(target_arch = "wasm32")]
     let dispatch_start_ms = unsafe { host_now_ms() };
     let gate = crate::gates::check_dispatch(verb, body);
     if !gate.allowed {
         return pack(gate.to_denial_json(verb).to_string());
-    }
-    #[cfg(target_arch = "wasm32")]
-    if let Err(error) = crate::orchestrator::dream_rsi::admit_dispatch(verb) {
-        return err_json(verb, json!({ "error": error, "dream_rsi_vetoed": true }));
     }
     let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
     crate::browser_witness::record_from_body(cwd_for_witness, body);
@@ -8776,6 +10017,9 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
                 "dispatch.end",
                 serde_json::json!({ "verb": verb, "ms": ms }),
             );
+            if verb == "instruction" && code == 0 {
+                crate::orchestrator::dream_rsi::stamp_reorientation();
+            }
             if !crate::gates::dispatch_serves_no_phase_prose(verb, body) {
                 restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb);
                 crate::gates::restamp_last_dispatch_to_completion(verb);
@@ -8792,6 +10036,17 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
     }
     let body = body.clone();
     let body_s = body_s.to_string();
+    if help_requested(&body) {
+        if let Some(doc) = verb_help_doc(verb) {
+            return ok(
+                verb,
+                json!({ "help": true, "verb": verb, "parameters": doc }),
+            );
+        }
+        return err(verb, &format!(
+            "no parameter documentation is published for verb \"{verb}\" -- pass the verb's own body without \"help\" to see its error text, which names the fields it accepts"
+        ));
+    }
     let result = match verb {
         "fs_read" => fs_read(&body),
         "fs_write" => fs_write(&body),
@@ -8827,6 +10082,7 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
         "codeinsight_index" => codeinsight_index(&body),
         "codeinsight" => codeinsight(&body),
         "codesearch" | "code_search" | "search" => codesearch(&body),
+        "grep" | "rg" => grep(&body),
         "callers" => callers(&body),
         "callees" => callees(&body),
         "impact" => impact(&body),

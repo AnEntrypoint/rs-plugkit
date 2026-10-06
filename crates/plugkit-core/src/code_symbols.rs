@@ -14,6 +14,10 @@ const IMPORTS_TABLE: &str = "code_imports";
 const SCHEMA_VERSION: u64 = 3;
 const DOC_KINDS_SQL: &str = "('section','document')";
 const SOURCE_SIZE_CAP_MULTIPLIER: usize = 4;
+const ROWS_PER_INSERT: usize = 120;
+const SLOW_EXTRACT_LOG_MS: u64 = 500;
+const MINIFIED_MAX_LINE_CHARS: usize = 4_000;
+const NO_SYMBOL_EXTS: [&str; 1] = [".json"];
 const SIGNATURE_MAX_CHARS: usize = 140;
 const DEFAULT_LIMIT: usize = 25;
 const MAX_LIMIT: usize = 200;
@@ -431,9 +435,8 @@ fn store_file(
 ) -> Result<(), String> {
     let path = sql_text(fp);
     let mut script = format!("BEGIN; DELETE FROM {SYMBOLS_TABLE} WHERE path={path}; DELETE FROM {IMPORTS_TABLE} WHERE path={path};");
-    if !file.symbols.is_empty() {
-        let values: Vec<String> = file
-            .symbols
+    for batch in file.symbols.chunks(ROWS_PER_INSERT) {
+        let values: Vec<String> = batch
             .iter()
             .map(|s| {
                 let m = s.metrics.as_ref();
@@ -463,9 +466,8 @@ fn store_file(
             values.join(",")
         ));
     }
-    if !file.imports.is_empty() {
-        let values: Vec<String> = file
-            .imports
+    for batch in file.imports.chunks(ROWS_PER_INSERT) {
+        let values: Vec<String> = batch
             .iter()
             .map(|i| format!("({path},{},{})", i.line, sql_text(&i.spec)))
             .collect();
@@ -616,11 +618,36 @@ pub(crate) fn sync_files(
     let mut unreadable = 0u32;
     let mut oversized = 0u32;
     let mut store_failures = 0u32;
+    let mut unsupported = 0u32;
     for raw in files {
         let fp = raw
             .trim_start_matches("./")
             .trim_start_matches('/')
             .to_string();
+        if fp.rfind('.').is_some_and(|dot| {
+            NO_SYMBOL_EXTS
+                .iter()
+                .any(|ext| fp[dot..].eq_ignore_ascii_case(ext))
+        }) {
+            seen.insert(fp.clone());
+                unsupported += 1;
+                if known.contains_key(&fp) {
+                    if host_now_ms().saturating_sub(started_ms) > budget_ms {
+                        deferred += 1;
+                        continue;
+                    }
+                    if !write_edges(&fp, &[], project_path) {
+                    store_failures += 1;
+                    continue;
+                }
+                let path = sql_text(&fp);
+                let script = format!("BEGIN; DELETE FROM {SYMBOLS_TABLE} WHERE path={path}; DELETE FROM {IMPORTS_TABLE} WHERE path={path}; DELETE FROM {FILES_TABLE} WHERE path={path}; COMMIT;");
+                if libsql_wasm::exec(&db, &script).is_err() {
+                    store_failures += 1;
+                }
+            }
+            continue;
+        }
         let Some(lang) = fp
             .rfind('.')
             .and_then(|dot| code_index::lang_for_ext(&fp[dot..]))
@@ -654,6 +681,14 @@ pub(crate) fn sync_files(
             unchanged += 1;
             continue;
         }
+        if content
+            .lines()
+            .any(|line| line.len() > MINIFIED_MAX_LINE_CHARS)
+        {
+            deferred += 1;
+            continue;
+        }
+        let file_started = host_now_ms();
         let (file, failed) = extract_file(
             &fp,
             lang,
@@ -661,6 +696,16 @@ pub(crate) fn sync_files(
             size.max(content.len() as u64),
             mtime_ms,
         );
+        let file_ms = host_now_ms().saturating_sub(file_started);
+        if file_ms > SLOW_EXTRACT_LOG_MS {
+            let msg = format!(
+                "code_symbols: slow extract ms={} bytes={} fp={}",
+                file_ms,
+                content.len(),
+                fp
+            );
+            unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
+        }
         parse_failures += failed;
         if store_file(&db, &fp, &file, project_path).is_ok() {
             synced += 1;
@@ -702,6 +747,7 @@ pub(crate) fn sync_files(
         "files_unreadable": unreadable,
         "files_oversized": oversized,
         "store_failures": store_failures,
+        "files_without_symbol_support": unsupported,
         "complete": deferred == 0 && parse_failures == 0 && unreadable == 0 && oversized == 0 && store_failures == 0,
         "elapsed_ms": host_now_ms().saturating_sub(started_ms),
     });
@@ -2079,6 +2125,17 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
         }
     }
     let cfg = crate::ragconfig::RagConfig::resolved();
+    if let Some(path) = text_field(body, &["path", "file", "path_prefix"]) {
+        if path
+            .rsplit_once('.')
+            .map(|(_, extension)| extension.eq_ignore_ascii_case("json"))
+            == Some(true)
+        {
+            return Err(format!(
+                "JSON has no structural symbol support: {path}; use codesearch for its contents"
+            ));
+        }
+    }
     if action == "sync" {
         return Ok(sync_tree(&cfg, project_path));
     }

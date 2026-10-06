@@ -292,7 +292,9 @@ pub fn failure_is_gate_drift(result: &Value) -> bool {
     )
 }
 
-#[cfg(target_arch = "wasm32")]
+/// An observation counts toward the strategy only when the dispatch failed and the failure was
+/// gate drift; a plain failure (bad arguments, a real error from the verb) says nothing about
+/// whether the caller has lost the chain.
 fn observation_is_gate_drift_failure(observation: &Value) -> bool {
     observation.get("exit_code").and_then(Value::as_i64) != Some(0)
         && observation
@@ -333,27 +335,10 @@ pub fn observe_dispatch(
     }
     let path = format!(".gm/dream-rsi/{session_id}/observations.json");
     let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
-    let mut observations = serde_json::from_str::<Value>(&raw)
-        .ok()
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default();
-    let prd_open_count = crate::orchestrator::prd::handle_list("")
-        .0
-        .parse::<Value>()
-        .ok()
-        .and_then(|value| value.get("items").and_then(Value::as_array).cloned())
-        .map(|items| {
-            items
-                .iter()
-                .filter(|item| {
-                    crate::orchestrator::prd::status_is_open(
-                        item.get("status")
-                            .and_then(Value::as_str)
-                            .unwrap_or("pending"),
-                    )
-                })
-                .count()
-        })
+    let mut observations = serde_json::from_str::<Value>(&raw).ok().and_then(|value| value.as_array().cloned()).unwrap_or_default();
+    let prd_open_count = crate::orchestrator::prd::handle_list_full().0
+        .parse::<Value>().ok().and_then(|value| value.get("items").and_then(Value::as_array).cloned())
+        .map(|items| items.iter().filter(|item| crate::orchestrator::prd::status_is_open(item.get("status").and_then(Value::as_str).unwrap_or("pending"))).count())
         .unwrap_or(0);
     let mutable_open_count = crate::orchestrator::mutables::pending_detailed().len();
     let quality = if exit_code == 0 {
@@ -400,48 +385,186 @@ pub fn active_strategy(session_id: Option<&str>) -> Value {
         .unwrap_or(Value::Null)
 }
 
-#[cfg(target_arch = "wasm32")]
-pub fn admit_dispatch(verb: &str) -> Result<(), String> {
-    if !matches!(
-        verb,
-        "codesearch" | "fetch" | "serp" | "browser" | "cdp" | "exec_js"
-    ) {
-        return Ok(());
+/// A gate-drift failure older than this stops ranking above a fresh, valid dispatch, so a stale
+/// one cannot strand a verb for a whole session.
+const VETO_MAX_AGE_MS: i64 = 600_000;
+
+/// The per-session re-orientation marker cannot be the only one: the MCP `gm_instruction` tool
+/// dispatches under a server-local session id of its own, so the `instruction` a caller uses to
+/// clear a veto armed under its own session id stamps a directory nobody reads. This project-wide
+/// marker is what makes the documented remedy reachable; the per-session one stays so a session
+/// can still be judged on its own history.
+pub const PROJECT_WIDE_MARKER_SESSION: &str = "_any-session";
+
+fn reorientation_ts_path(session_id: &str) -> String {
+    format!(".gm/dream-rsi/{session_id}/reorientation-ts")
+}
+
+/// What `admit_dispatch` decides about a dispatch. The recorded strategy ranks and annotates; it
+/// never refuses.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Admission {
+    Allow,
+    /// `replay-recorded-successes-first` would rather see an `instruction` before this verb.
+    /// Refusing is what turned the ranking into a livelock: a refused dispatch was never recorded,
+    /// so the verb could never produce the success that clears the ranking.
+    Advisory { reason: String, next_dispatch_hint: &'static str },
+}
+
+impl Admission {
+    pub fn is_advisory(&self) -> bool {
+        matches!(self, Admission::Advisory { .. })
     }
-    let Some(session_id) = crate::orchestrator::state::dispatch_session_id() else {
-        return Ok(());
-    };
-    let strategy = active_strategy(Some(&session_id));
-    if strategy.get("selection").and_then(Value::as_str) != Some("replay-recorded-successes-first")
-    {
-        return Ok(());
-    }
-    let evidence = strategy
-        .get("evidence")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Dream-RSI strategy lacks evidence".to_string())?;
-    if evidence.iter().any(|entry| {
-        entry.get("verb").and_then(Value::as_str) == Some(verb)
-            && entry.get("exit_code").and_then(Value::as_i64) == Some(0)
-    }) {
-        return Ok(());
-    }
-    let Some(last_failure_ts) = evidence
-        .iter()
+}
+
+/// The ranking decision, split away from the file reads so it can be exercised without a host.
+/// `marker_ts` is the newest re-orientation stamp this dispatch can be judged against.
+fn veto_reason(verb: &str, strategy: &Value, now_ms: i64, marker_ts: i64) -> Option<String> {
+    if strategy.get("selection").and_then(Value::as_str) != Some("replay-recorded-successes-first") { return None; }
+    let evidence = strategy.get("evidence").and_then(Value::as_array)?;
+    if evidence.iter().any(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb) && entry.get("exit_code").and_then(Value::as_i64) == Some(0)) { return None; }
+    let last_failure_ts = evidence.iter()
         .filter(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb))
         .filter(|entry| observation_is_gate_drift_failure(entry))
         .filter_map(|entry| entry.get("ts").and_then(Value::as_i64))
-        .max()
-    else {
-        return Ok(());
-    };
-    let last_instruction_ts = crate::pkfs::read_to_string(".gm/last-instruction-ts")
-        .and_then(|raw| raw.trim().parse::<i64>().ok())
-        .unwrap_or(0);
-    if last_instruction_ts >= last_failure_ts {
-        return Ok(());
+        .max()?;
+    if now_ms.saturating_sub(last_failure_ts) > VETO_MAX_AGE_MS { return None; }
+    if marker_ts >= last_failure_ts { return None; }
+    Some(format!(
+        "Dream-RSI recorded a gate-drift failure for {verb} and no later `instruction` re-orientation, so replay-recorded-successes-first ranks `instruction` above it; this dispatch ran anyway because its inputs are valid -- refusing is what strands the verb, since a refused dispatch is never recorded and so can never be the success that clears the ranking"
+    ))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn stamp_reorientation() {
+    let now = super::state::now_ms().to_string();
+    if let Some(session_id) = crate::orchestrator::state::dispatch_session_id() {
+        if !session_id.trim().is_empty() {
+            let _ = crate::pkfs::write(&reorientation_ts_path(&session_id), &now);
+        }
     }
-    Err(format!("Dream-RSI selected replay-recorded-successes-first after observed failures; {verb} has no recorded successful replay in this session since the last `instruction` re-orientation -- dispatch `instruction` to clear this, then retry"))
+    let _ = crate::pkfs::write(&reorientation_ts_path(PROJECT_WIDE_MARKER_SESSION), &now);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn stamp_reorientation() {}
+
+#[cfg(target_arch = "wasm32")]
+fn read_ts(path: &str) -> i64 {
+    crate::pkfs::read_to_string(path).and_then(|raw| raw.trim().parse::<i64>().ok()).unwrap_or(0)
+}
+
+/// The stamp a dispatch is judged against: this session's own marker, the project-wide one any
+/// session's `instruction` stamps, and the long-gap `instruction` stamp.
+fn newest_marker(per_session_ts: i64, project_wide_ts: i64, long_gap_instruction_ts: i64) -> i64 {
+    per_session_ts.max(project_wide_ts).max(long_gap_instruction_ts)
+}
+
+/// Newest re-orientation marker this dispatch can be judged against. The long-gap
+/// `.gm/last-instruction-ts` is one of them, even though
+/// `gates::dispatch_serves_no_phase_prose` withholds it from `instruction` in
+/// `investigate_readonly` mode: any other `instruction` still stamps it.
+#[cfg(target_arch = "wasm32")]
+fn reorientation_ts(session_id: Option<&str>) -> i64 {
+    let per_session = match session_id.filter(|id| !id.trim().is_empty()) {
+        Some(id) => read_ts(&reorientation_ts_path(id)),
+        None => 0,
+    };
+    newest_marker(
+        per_session,
+        read_ts(&reorientation_ts_path(PROJECT_WIDE_MARKER_SESSION)),
+        read_ts(".gm/last-instruction-ts"),
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn admit_dispatch(verb: &str) -> Admission {
+    if !matches!(verb, "codesearch" | "fetch" | "serp" | "browser" | "cdp" | "exec_js") { return Admission::Allow; }
+    let Some(session_id) = crate::orchestrator::state::dispatch_session_id() else { return Admission::Allow; };
+    let strategy = active_strategy(Some(&session_id));
+    match veto_reason(verb, &strategy, super::state::now_ms() as i64, reorientation_ts(Some(&session_id))) {
+        Some(reason) => Admission::Advisory { reason, next_dispatch_hint: "instruction" },
+        None => Admission::Allow,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn admit_dispatch(_verb: &str) -> Admission { Admission::Allow }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strategy(selection: &str, evidence: Vec<Value>) -> Value {
+        json!({ "selection": selection, "evidence": evidence })
+    }
+
+    fn observation(verb: &str, exit_code: i64, gate_drift: bool, ts: i64) -> Value {
+        json!({ "dispatch_id": "d1", "verb": verb, "exit_code": exit_code, "gate_drift": gate_drift, "ts": ts })
+    }
+
+    fn gate_drift_failure(verb: &str, ts: i64) -> Value {
+        observation(verb, 1, true, ts)
+    }
+
+    /// The reported livelock: one gate-drift failure for `codesearch` armed the strategy, and the
+    /// documented remedy could not disarm it. Two properties hold it closed -- the armed strategy
+    /// produces advice instead of a refusal, and a re-orientation newer than the failure clears it.
+    #[test]
+    fn armed_strategy_advises_and_a_later_instruction_clears_it() {
+        let armed = strategy("replay-recorded-successes-first", vec![gate_drift_failure("codesearch", 1_000)]);
+
+        let before = veto_reason("codesearch", &armed, 2_000, 0).expect("an armed strategy still ranks the verb");
+        assert!(before.contains("ran anyway"), "the advice must say the dispatch ran: {before}");
+        assert!(Admission::Advisory { reason: before, next_dispatch_hint: "instruction" }.is_advisory());
+
+        assert_eq!(veto_reason("codesearch", &armed, 2_000, 1_500), None, "an instruction stamped after the failure clears the ranking");
+        assert_eq!(veto_reason("codesearch", &armed, 2_000, 1_000), None, "a stamp at the failure's own timestamp clears it");
+        assert!(veto_reason("codesearch", &armed, 2_000, 999).is_some(), "a stamp older than the failure leaves the ranking armed");
+
+        let after_success = strategy("replay-recorded-successes-first", vec![
+            gate_drift_failure("codesearch", 1_000),
+            observation("codesearch", 0, false, 1_500),
+        ]);
+        assert_eq!(veto_reason("codesearch", &after_success, 2_000, 0), None, "a recorded success for the verb clears the ranking on its own");
+    }
+
+    /// The livelock's root cause: the MCP `gm_instruction` tool dispatches under a server-local
+    /// session id of its own, so the per-session marker for the caller's session stays absent
+    /// while the project-wide one is stamped. Judging on the per-session marker alone made the
+    /// documented remedy unreachable.
+    #[test]
+    fn project_wide_marker_clears_a_ranking_stamped_under_another_session_id() {
+        let armed = strategy("replay-recorded-successes-first", vec![gate_drift_failure("codesearch", 1_000)]);
+        let stamped_by_another_session = newest_marker(0, 1_500, 0);
+        assert_eq!(newest_marker(0, 1_500, 0), 1_500);
+        assert_eq!(newest_marker(1_500, 0, 0), 1_500, "a session's own marker still counts");
+        assert_eq!(newest_marker(0, 0, 1_500), 1_500, "the long-gap instruction stamp still counts");
+        assert_eq!(
+            veto_reason("codesearch", &armed, 2_000, stamped_by_another_session),
+            None,
+            "an instruction dispatched under another session id must still clear the ranking"
+        );
+    }
+
+    #[test]
+    fn ranking_is_verb_scoped_and_lapses_on_its_own() {
+        let armed = strategy("replay-recorded-successes-first", vec![gate_drift_failure("codesearch", 1_000)]);
+        assert_eq!(veto_reason("fetch", &armed, 2_000, 0), None, "another verb's failure does not rank this one");
+        assert_eq!(veto_reason("codesearch", &armed, 1_000 + VETO_MAX_AGE_MS + 1, 0), None, "a failure past the max age stops ranking");
+
+        let unarmed = strategy("continue-current-exploration", vec![gate_drift_failure("codesearch", 1_000)]);
+        assert_eq!(veto_reason("codesearch", &unarmed, 2_000, 0), None, "an unarmed strategy ranks nothing");
+        assert_eq!(veto_reason("codesearch", &Value::Null, 2_000, 0), None, "no recorded strategy ranks nothing");
+    }
+
+    /// `admit_dispatch` returns `Admission`, never `Result`: a dispatch whose inputs are valid has
+    /// no refusal path left to strand it on.
+    #[test]
+    fn admission_has_no_refusal_variant() {
+        assert!(!Admission::Allow.is_advisory());
+        assert_eq!(admit_dispatch("codesearch"), Admission::Allow);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

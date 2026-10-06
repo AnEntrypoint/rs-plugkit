@@ -12,6 +12,7 @@ use crate::wasm_dispatch::{git_call_argv, host_now_ms, host_stat};
 const GIT_LISTING_SPLIT_DEPTH_LIMIT: usize = 16;
 
 const NESTED_REPO_DEPTH_LIMIT: usize = 8;
+const LISTING_WALK_ANSWERABLE_BUDGET_MS: u64 = 20_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileSource {
@@ -26,6 +27,14 @@ impl FileSource {
             FileSource::Git => "git",
             FileSource::Walk => "walk",
             FileSource::SingleFile => "file",
+        }
+    }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            FileSource::Git => "git ls-files --cached: tracked files only, so a file created since the last git add is not listed; pass \"refresh\": true to walk the disk instead",
+            FileSource::Walk => "filesystem walk under the target: every file on disk that no exclusion rule dropped",
+            FileSource::SingleFile => "one file named by \"path\", read straight from disk",
         }
     }
 }
@@ -129,13 +138,45 @@ fn stat_is_directory(path: &str) -> Option<bool> {
         .and_then(|v| v.get("isDirectory").and_then(|b| b.as_bool()))
 }
 
+/// A caller who spells out the whole location still means a place inside the search root, so an
+/// absolute `path` under that root is rewritten to the relative scope the rest of the scan works
+/// with. `None` means the location is not under the root at all.
+fn scope_inside_root(root: &str, scope: &str) -> Option<String> {
+    let abs_root = absolute_root_for_message(root).replace('\\', "/");
+    let abs_root = abs_root.trim_end_matches('/');
+    if abs_root.is_empty() {
+        return None;
+    }
+    // Both folds are byte-length preserving and `scope` already uses '/' separators, so the tail
+    // can be cut out of `scope` by length and keep the case the caller wrote.
+    let folded_root = abs_root.to_ascii_lowercase();
+    let folded_scope = scope.to_ascii_lowercase();
+    let rest = match folded_scope.strip_prefix(&folded_root) {
+        Some(rest) => rest,
+        None => return None,
+    };
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return None;
+    }
+    let tail = rest.trim_start_matches('/');
+    Some(scope[scope.len() - tail.len()..].to_string())
+}
+
 fn relative_scope(root: &str, scope: &str) -> Result<Option<String>, String> {
     let normalized = scope.replace('\\', "/");
     let bytes = normalized.as_bytes();
-    if normalized.starts_with('/') || (bytes.len() >= 2 && bytes[1] == b':') {
-        return Err(format!("path '{scope}' must be relative to the search root '{root}' -- pass another project as \"root\", and a location inside it as \"path\""));
-    }
-    let segments: Vec<&str> = normalized
+    let rooted = if normalized.starts_with('/') || (bytes.len() >= 2 && bytes[1] == b':') {
+        match scope_inside_root(root, &normalized) {
+            Some(rel) => rel,
+            None => return Err(format!(
+                "path '{scope}' is outside the search root '{}' -- the root actually searched is the dispatch project (the cwd this dispatch ran in) unless body \"root\" names another directory; to search another project pass its directory as \"root\" with a path relative to it, or dispatch with that project as cwd",
+                absolute_root_for_message(root),
+            )),
+        }
+    } else {
+        normalized
+    };
+    let segments: Vec<&str> = rooted
         .split('/')
         .filter(|s| !s.is_empty() && *s != ".")
         .collect();
@@ -304,6 +345,7 @@ enum WalkCause {
     TargetGitignored,
     OutsideWorktree(String),
     GitListingFailed(String),
+    CallerForcedDisk,
 }
 
 struct WalkPolicy {
@@ -322,6 +364,7 @@ fn walk_policy(cause: WalkCause, origin: TargetOrigin) -> WalkPolicy {
     };
     match (cause, origin) {
         (WalkCause::GitListingFailed(e), _) => project(format!("git could not list the worktree, so it was walked directly ({e})")),
+        (WalkCause::CallerForcedDisk, _) => project("the caller passed \"refresh\": true, so git ls-files was not consulted and the target was walked on disk".to_string()),
         (WalkCause::TargetGitignored, TargetOrigin::ProjectDefault) => project("the target is gitignored, so git lists nothing there and it was walked directly".to_string()),
         (WalkCause::OutsideWorktree(e), TargetOrigin::ProjectDefault) => project(format!("not inside a git worktree, so it was walked directly ({e})")),
         (WalkCause::TargetGitignored, TargetOrigin::CallerNamed) => WalkPolicy {
@@ -405,14 +448,15 @@ impl RuleRecordingWalk<'_> {
     }
 }
 
-fn absolute_root_for_message(root: &str) -> String {
+/// The root as a directory a caller can recognise: `root` defaults to `.`, which is the dispatch
+/// project, so a reply or an error that prints it verbatim tells the caller nothing about which
+/// project was searched.
+pub fn absolute_root_for_message(root: &str) -> String {
     if crate::pkfs::is_absolute(root) {
         return root.to_string();
     }
     crate::pkfs::anchor(root).trim_end_matches("/.").to_string()
 }
-
-const LISTING_WALK_ANSWERABLE_BUDGET_MS: u64 = 20_000;
 
 pub fn list_scan_universe(
     root: &str,
@@ -420,6 +464,7 @@ pub fn list_scan_universe(
     max_files: usize,
     cfg: &IndexConfig,
     origin: TargetOrigin,
+    force_disk: bool,
 ) -> Result<ScanUniverse, String> {
     let rel = match scope {
         Some(s) => relative_scope(root, s)?,
@@ -454,29 +499,31 @@ pub fn list_scan_universe(
             Some(true) => {}
         }
     }
-    let cause = match directory_is_gitignored(&target) {
-        Ok(false) => match git_worktree_files(&target, 0) {
-            Ok((files, complete)) => {
-                let mut kept = Vec::with_capacity(files.len());
-                let mut excluded = Vec::new();
-                for path in files {
-                    match runtime_artifact_rule(&path) {
-                        Some(rule) => excluded.push(RuleExclusion {
-                            path,
-                            rule,
-                            files: None,
-                        }),
-                        None => kept.push(path),
+    let cause = if force_disk {
+        WalkCause::CallerForcedDisk
+    } else {
+        match directory_is_gitignored(&target) {
+            Ok(false) => match git_worktree_files(&target, 0) {
+                Ok((files, complete)) => {
+                    let (files, mut pruned) = prune_own_state(root, files);
+                    let mut kept = Vec::with_capacity(files.len());
+                    for path in files {
+                        match runtime_artifact_rule(&path) {
+                            Some(rule) => pruned.push(RuleExclusion {
+                                path,
+                                rule,
+                                files: None,
+                            }),
+                            None => kept.push(path),
+                        }
                     }
+                    return Ok(universe(kept, FileSource::Git, complete, pruned, None));
                 }
-                return Ok(universe(kept, FileSource::Git, complete, excluded, None));
-                let (files, pruned) = prune_own_state(root, files);
-                return Ok(universe(files, FileSource::Git, complete, pruned, None));
-            }
-            Err(e) => WalkCause::GitListingFailed(e),
-        },
-        Ok(true) => WalkCause::TargetGitignored,
-        Err(e) => WalkCause::OutsideWorktree(e),
+                Err(e) => WalkCause::GitListingFailed(e),
+            },
+            Ok(true) => WalkCause::TargetGitignored,
+            Err(e) => WalkCause::OutsideWorktree(e),
+        }
     };
     let policy = walk_policy(cause, origin);
     let mut walk = RuleRecordingWalk {
@@ -518,7 +565,7 @@ pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> 
     } else {
         TargetOrigin::ProjectDefault
     };
-    match list_scan_universe(base, scope, max_files, cfg, origin) {
+    match list_scan_universe(base, scope, max_files, cfg, origin, false) {
         Ok(u) => u
             .files
             .into_iter()
