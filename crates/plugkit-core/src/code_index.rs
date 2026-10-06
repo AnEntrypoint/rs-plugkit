@@ -2608,7 +2608,7 @@ pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagC
         crate::scan_universe::TargetOrigin::ProjectDefault
     };
     let file_cap = cfg.index.digest_max_files.max(20000).min(LITERAL_SCAN_MAX_FILES).max(1);
-    let universe = match crate::scan_universe::list_scan_universe(root, None, file_cap.saturating_add(1), &cfg.index, origin, false) {
+    let universe = match crate::scan_universe::list_scan_universe(root, &[], file_cap.saturating_add(1), &cfg.index, origin, false) {
         Ok(e) => e,
         Err(e) => return json!({ "ok": false, "error": e, "mode": "filename" }),
     };
@@ -2712,7 +2712,7 @@ const DEPENDENCY_STORE_SEGMENTS: &[&str] = &["node_modules", ".pnpm", ".yarn", "
 pub struct LiteralScan<'a> {
     pub pattern: &'a str,
     pub root: Option<&'a str>,
-    pub path: Option<&'a str>,
+    pub paths: &'a [&'a str],
     pub regex: bool,
     pub case_insensitive: bool,
     pub whole_word: bool,
@@ -2753,6 +2753,10 @@ fn path_is_inside_dependency_store(path: &str) -> bool {
 
 fn parse_globs(patterns: &[String]) -> Result<Vec<crate::path_glob::PathGlob>, String> {
     patterns.iter().map(|g| crate::path_glob::PathGlob::parse(g)).collect()
+}
+
+fn glob_scopes_for<'a>(paths: &'a [&'a str]) -> Vec<Option<&'a str>> {
+    if paths.is_empty() { vec![None] } else { paths.iter().map(|p| Some(*p)).collect() }
 }
 
 fn spill_lines_to_out_file(spill_name: &str, lines: &[String]) -> Option<String> {
@@ -3051,7 +3055,8 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
 
     let root = req.root.filter(|p| !p.is_empty()).unwrap_or(".");
-    let scope = req.path.filter(|p| !p.is_empty());
+    let scope = req.paths.first().copied().filter(|p| !p.is_empty());
+    let glob_scopes: Vec<Option<&str>> = glob_scopes_for(req.paths);
     let origin = if req.root.filter(|p| !p.is_empty()).is_some() {
         crate::scan_universe::TargetOrigin::CallerNamed
     } else {
@@ -3067,12 +3072,12 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
     let has_glob_filter = !include_globs.is_empty() || !exclude_globs.is_empty();
     let admitted = |path: &str| -> bool {
-        (include_globs.is_empty() || include_globs.iter().any(|g| g.admits(root, scope, path)))
-            && !exclude_globs.iter().any(|g| g.admits(root, scope, path))
+        (include_globs.is_empty() || include_globs.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, path))))
+            && !exclude_globs.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, path)))
     };
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let listing_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let universe = match crate::scan_universe::list_scan_universe(root, scope, file_cap.saturating_add(1), &cfg.index, origin, req.refresh) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
     };
@@ -3382,6 +3387,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("pattern".to_string(), json!(req.pattern));
         out.insert("root".to_string(), json!(crate::scan_universe::absolute_root_for_message(root)));
         if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
+        if req.paths.len() > 1 { out.insert("paths".to_string(), json!(req.paths)); }
         out.insert("case_insensitive".to_string(), json!(req.case_insensitive));
         if !req.regex { out.insert("whole_word".to_string(), json!(req.whole_word)); }
         if !req.include_globs.is_empty() { out.insert("path_glob".to_string(), json!(req.include_globs.join(", "))); }
@@ -3647,7 +3653,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
 
 pub struct CommentScan<'a> {
     pub root: Option<&'a str>,
-    pub path: Option<&'a str>,
+    pub paths: &'a [&'a str],
     pub path_glob: Option<&'a str>,
     pub exclude_globs: Vec<String>,
     pub max_matches: usize,
@@ -3884,7 +3890,8 @@ fn comment_span_json(path: &str, syntax: CommentSyntax, span: &CommentSpan) -> V
 
 pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Value {
     let root = req.root.filter(|p| !p.is_empty()).unwrap_or(".");
-    let scope = req.path.filter(|p| !p.is_empty());
+    let scope = req.paths.first().copied().filter(|p| !p.is_empty());
+    let glob_scopes: Vec<Option<&str>> = glob_scopes_for(req.paths);
     let origin = if req.root.filter(|p| !p.is_empty()).is_some() {
         crate::scan_universe::TargetOrigin::CallerNamed
     } else {
@@ -3906,7 +3913,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     }
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let universe = match crate::scan_universe::list_scan_universe(root, scope, file_cap.saturating_add(1), &cfg.index, origin, req.refresh) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
     };
@@ -3914,7 +3921,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     let files_truncated = listed.len() > file_cap;
     let files: &[String] = if files_truncated { &listed[..file_cap] } else { &listed[..] };
     let files_matching_glob = match &glob {
-        Some(g) => files.iter().filter(|p| g.admits(root, scope, p)).count(),
+        Some(g) => files.iter().filter(|p| glob_scopes.iter().any(|s| g.admits(root, *s, p))).count(),
         None => files.len(),
     };
     let glob_matched_no_files = glob.is_some() && !files.is_empty() && files_matching_glob == 0;
@@ -3933,9 +3940,9 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     for path in files {
         if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
         if let Some(g) = &glob {
-            if !g.admits(root, scope, path) { continue; }
+            if !glob_scopes.iter().any(|s| g.admits(root, *s, path)) { continue; }
         }
-        if exclude_globs.iter().any(|g| g.admits(root, scope, path)) { continue; }
+        if exclude_globs.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, path))) { continue; }
         if has_binary_extension(path) { files_skipped_binary_extension += 1; continue; }
         let Some(syntax) = comment_syntax_for_path(path) else {
             if files_skipped_no_syntax.len() < SKIPPED_SAMPLE_LEN { files_skipped_no_syntax.push(path.clone()); }
@@ -3996,7 +4003,8 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     out.insert("ok".to_string(), json!(true));
     out.insert("mode".to_string(), json!("comments"));
     out.insert("root".to_string(), json!(root));
-    if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
+    if req.paths.len() > 1 { out.insert("paths".to_string(), json!(req.paths)); }
+    else if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
     if let Some(g) = req.path_glob { out.insert("path_glob".to_string(), json!(g)); }
     if !req.exclude_globs.is_empty() { out.insert("exclude_glob".to_string(), json!(req.exclude_globs.join(", "))); }
     if glob.is_some() { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
