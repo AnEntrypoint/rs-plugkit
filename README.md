@@ -253,6 +253,16 @@ When a shell verb returns a `task_id`, use `task-output` with JSON body
 `{"id":"task-…"}` to retrieve it. Use `task-stop` with the same body to stop
 it. These are GM verb dispatches, not shell commands.
 
+`task-list {}` reports status without persisting results. The explicit
+`{"prepare_handoff":true}` diagnostic runs the host's handoff preparation and
+returns `handoff_status`, but transfers no ownership. It may write completed
+result snapshots. Active execution, children or output drains defer preparation;
+invalid or full storage refuses it without closing execution admission.
+Preserved results last 30 minutes after child exit and retain at most 64 KiB
+per stream. `task-output` reports omitted-byte counts, including a tighter
+`max_bytes` request; `task-stop` removes the retained result. These guarantees
+require a host with durable task-result support.
+
 `codeinsight` reads current source and refreshes its structural index before answering,
 without generating embeddings. Content hashes invalidate cached symbols even when file
 size and modification time are unchanged. Successful replies include `codeinsight_index`
