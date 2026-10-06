@@ -61,6 +61,14 @@ pub fn write(path: &str, data: &str) -> bool {
     crate::wasm_dispatch::host_write(&anchor(path), data)
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn write_if_changed(path: &str, data: &str) -> bool {
+    if read_to_string(path).as_deref() == Some(data) {
+        return true;
+    }
+    write(path, data)
+}
+
 pub enum CasWriteOutcome {
     Swapped,
     Mismatch,
@@ -100,6 +108,8 @@ pub fn stat(path: &str) -> Option<serde_json::Value> {
 pub fn read_to_string(_path: &str) -> Option<String> { None }
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write(_path: &str, _data: &str) -> bool { false }
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_if_changed(_path: &str, _data: &str) -> bool { false }
 #[cfg(not(target_arch = "wasm32"))]
 pub fn cas_write(_path: &str, _expected: &str, _data: &str) -> CasWriteOutcome { CasWriteOutcome::IoError }
 #[cfg(not(target_arch = "wasm32"))]
