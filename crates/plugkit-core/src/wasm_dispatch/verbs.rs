@@ -2138,6 +2138,49 @@ fn dual_channel_depth(body: &Value, k: u32) -> usize {
     }
 }
 
+const LITERAL_FALLBACK_MIN_TERM_LEN: usize = 3;
+
+fn literal_fallback_scan(body: &Value, term: &str, k: usize) -> Option<Value> {
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    let scan = crate::code_index::LiteralScan {
+        pattern: term,
+        root: body
+            .get("root")
+            .and_then(|v| v.as_str())
+            .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
+            .filter(|p| !p.is_empty()),
+        path: body
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|p| !p.is_empty()),
+        regex: false,
+        case_insensitive: true,
+        whole_word: false,
+        comments_only: false,
+        include_globs: Vec::new(),
+        exclude_globs: Vec::new(),
+        max_matches: k.max(1),
+        max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
+        output: crate::code_index::ScanOutput::Matches,
+        list_limit: None,
+        max_chars: crate::code_index::DEFAULT_REPLY_MAX_CHARS,
+        spill_name: format!(
+            "codesearch-fallback-{}.txt",
+            dispatch_task_id().unwrap_or_else(|| unsafe { host_now_ms() }.to_string())
+        ),
+        verbose: false,
+    };
+    let out = crate::code_index::scan_literal(&scan, &cfg);
+    if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+        return None;
+    }
+    Some(out)
+}
+
+fn note_map(map: &mut serde_json::Map<String, Value>, note: String) {
+    map.insert("note".to_string(), json!(note));
+}
+
 fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) -> Value {
     let root = body
         .get("root")
@@ -2145,10 +2188,48 @@ fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) -> Value {
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()));
     let opts = crate::codesearch_rank::RankOptions::from_body(body, k as usize, root);
     if opts.verbose {
-        raw
-    } else {
-        crate::codesearch_rank::compact_dual(query, &raw, &opts)
+        return raw;
     }
+    let mut compact = crate::codesearch_rank::compact_dual(query, &raw, &opts);
+    if compact.get("literal_matches").and_then(|v| v.as_u64()) != Some(0) {
+        return compact;
+    }
+    let term = query.trim();
+    if term.len() < LITERAL_FALLBACK_MIN_TERM_LEN || term.contains(char::is_whitespace) {
+        return compact;
+    }
+    let Some(scan) = literal_fallback_scan(body, term, k as usize) else {
+        if let Some(map) = compact.as_object_mut() {
+            note_map(
+                map,
+                format!("the exhaustive literal check for \"{term}\" did not run -- the rows above are ranked nearest neighbours and are not verified to contain the term"),
+            );
+        }
+        return compact;
+    };
+    let found = scan
+        .get("match_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if found > 0 {
+        let mut out = scan;
+        if let Some(map) = out.as_object_mut() {
+            map.insert("literal_scan_escalated".to_string(), json!(true));
+            note_map(
+                map,
+                format!("dual retrieval returned no row containing \"{term}\" verbatim -- these are exhaustive literal matches"),
+            );
+        }
+        return out;
+    }
+    if let Some(map) = compact.as_object_mut() {
+        map.insert("literal_scan_matches".to_string(), json!(0));
+        note_map(
+            map,
+            format!("no file in the scanned corpus contains \"{term}\" verbatim -- the rows above are ranked nearest neighbours, not occurrences"),
+        );
+    }
+    compact
 }
 
 const PATH_SCOPE_FIELDS: &[&str] = &["paths", "path", "path_glob", "glob", "include"];
