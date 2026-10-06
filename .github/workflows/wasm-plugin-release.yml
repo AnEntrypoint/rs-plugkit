@@ -34,9 +34,6 @@ on:
       build_command:
         required: true
         type: string
-      release_signing_environment:
-        required: true
-        type: string
       release_signing_key_id:
         required: true
         type: string
@@ -46,15 +43,16 @@ on:
     secrets:
       publisher_token:
         required: true
+      release_signing_key:
+        required: true
 
 jobs:
   signing-preflight:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.release_signing_environment }}
     steps:
       - name: Require the protected release signing key
         env:
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_KEY: ${{ secrets.release_signing_key }}
         shell: bash
         run: |
           set -euo pipefail
@@ -102,7 +100,6 @@ jobs:
   release:
     needs: [signing-preflight, bump]
     runs-on: ubuntu-latest
-    environment: ${{ inputs.release_signing_environment }}
     defaults:
       run:
         working-directory: ${{ inputs.crate_dir }}
@@ -149,7 +146,7 @@ jobs:
       - name: Sign release assets
         shell: bash
         env:
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_KEY: ${{ secrets.release_signing_key }}
           RELEASE_SIGNING_KEY_ID: ${{ inputs.release_signing_key_id }}
           RELEASE_SIGNING_PUBLIC_KEY: ${{ inputs.release_signing_public_key }}
           RELEASE_VERSION: ${{ needs.bump.outputs.version }}
