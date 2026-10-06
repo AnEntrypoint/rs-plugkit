@@ -7545,7 +7545,7 @@ fn git_log(body: &Value) -> u64 {
                 json!({
                     "error": stderr,
                     "range": range,
-                    "hint": "git rejected the range; check both endpoints exist locally (a remote-tracking ref may need git_fetch first)"
+                    "hint": "Inspect the error for a Git failure or host execution limit; missing output is not an empty result."
                 }),
             ));
         }
@@ -7615,7 +7615,7 @@ fn git_diff(body: &Value) -> u64 {
                 json!({
                     "error": stderr,
                     "range": range,
-                    "hint": "git rejected the range; an empty diff must never be inferred from a rejected argument -- check both endpoints exist locally"
+                    "hint": "Inspect the error for a Git failure or host execution limit; missing output is not an empty result. Narrow paths/range or use stat:true."
                 }),
             ));
         }
