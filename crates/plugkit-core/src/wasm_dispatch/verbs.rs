@@ -2685,7 +2685,11 @@ fn grep(body: &Value) -> u64 {
     let scanned = crate::code_index::scan_literal(&scan, &cfg);
     if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
         let base = scanned.get("error").and_then(|e| e.as_str()).unwrap_or("grep scan failed").to_string();
-        return match auto_trigger {
+        // "error_kind":"pattern" is the matcher's own rejection. Anything else -- a scope that does
+        // not exist, a path outside the root -- says nothing about how the pattern was read, and
+        // appending the regex-detected note to it reads as "your path was compiled as a regex".
+        let pattern_rejected = scanned.get("error_kind").and_then(|k| k.as_str()) == Some("pattern");
+        return match auto_trigger.filter(|_| pattern_rejected) {
             Some(reason) => err("grep", &format!(
                 "{base} -- the pattern was read as a regex because of its {reason}; \
                  pass \"regex\": false (or \"fixed_strings\": true) to search for it literally"
