@@ -1662,7 +1662,7 @@ fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::Rag
     let scan = crate::code_index::LiteralScan {
         pattern: query,
         root,
-        path: None,
+        paths: &[],
         regex: false,
         case_insensitive: true,
         whole_word: false,
@@ -1955,11 +1955,30 @@ fn scan_root(body: &Value) -> Option<&str> {
         .filter(|p| !p.is_empty())
 }
 
-fn resolve_scan_target(body: &Value) -> Result<(Option<&str>, Option<String>), String> {
+fn scan_target_paths(body: &Value) -> Result<Vec<String>, String> {
+    let mut paths: Vec<String> = Vec::new();
+    for field in ["path", "paths", "files"] {
+        match body.get(field) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) => paths.push(s.clone()),
+            Some(Value::Array(items)) => for item in items {
+                match item.as_str() {
+                    Some(s) => paths.push(s.to_string()),
+                    None => return Err(format!("{field} entries must all be path strings, got {item}")),
+                }
+            },
+            Some(other) => return Err(format!("{field} must be a path string or an array of path strings, got {other}")),
+        }
+    }
+    paths.retain(|p| !p.trim().is_empty());
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    paths.retain(|p| seen.insert(p.clone()));
+    Ok(paths)
+}
+
+fn resolve_scan_target(body: &Value) -> Result<(Option<&str>, Vec<String>), String> {
     let mut root = scan_root(body);
-    let mut path = body.get("path").and_then(|v| v.as_str())
-        .filter(|p| !p.is_empty())
-        .map(str::to_owned);
+    let mut paths = scan_target_paths(body)?;
     if let Some(candidate) = root {
         if candidate == "." || candidate == "./" {
             root = None;
@@ -1968,17 +1987,22 @@ fn resolve_scan_target(body: &Value) -> Result<(Option<&str>, Option<String>), S
             let valid_relative_scope = !scope.starts_with('/')
                 && scope.split('/').all(|part| !part.is_empty() && part != "." && part != "..");
             if valid_relative_scope {
-                path = Some(match path {
-                    Some(path) => format!("{scope}/{path}"),
-                    None => scope.to_owned(),
-                });
+                if paths.is_empty() {
+                    paths.push(scope.to_owned());
+                } else {
+                    for path in &mut paths { *path = format!("{scope}/{path}"); }
+                }
                 root = None;
             } else {
                 return Err(format!("root '{candidate}' is not a real, existing directory the host will grant access to"));
             }
         }
     }
-    Ok((root, path))
+    Ok((root, paths))
+}
+
+fn scan_path_refs(paths: &[String]) -> Vec<&str> {
+    paths.iter().map(String::as_str).collect()
 }
 
 fn glob_patterns_from(value: Option<&Value>) -> Result<Vec<String>, String> {
@@ -2000,10 +2024,11 @@ fn dispatch_task_id() -> Option<String> {
 }
 
 fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ragconfig::RagConfig, explicit_limit: Option<u32>) -> u64 {
-    let (root, path) = match resolve_scan_target(body) {
+    let (root, paths) = match resolve_scan_target(body) {
         Ok(target) => target,
         Err(e) => return err("codesearch", &e),
     };
+    let path_refs = scan_path_refs(&paths);
     let max_matches = match body.get("max_matches") {
         Some(value) => match value.as_u64() {
             Some(limit) if limit > 0 => limit as usize,
@@ -2084,7 +2109,7 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
     let scan = crate::code_index::LiteralScan {
         pattern: query,
         root,
-        path: path.as_deref(),
+        paths: &path_refs,
         regex,
         case_insensitive: body.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false),
         whole_word: body.get("whole_word").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -2123,12 +2148,28 @@ const GREP_MODES: &[&str] = &["pattern", "comments"];
 
 const GREP_EXCLUDE_FIELDS: &[&str] = &["exclude", "exclude_glob", "exclude_globs"];
 
+const GREP_ACCEPTED_FIELDS: &[&str] = &[
+    "pattern", "query", "mode", "comments", "help",
+    "path", "paths", "files",
+    "glob", "include", "path_glob", "exclude", "exclude_glob", "exclude_globs",
+    "output_mode", "outputMode", "detail", "columns",
+    "regex", "fixed_strings", "fixedStrings", "case_insensitive", "ignore_case", "whole_word",
+    "context", "max_files",
+    "max_results", "maxResults", "limit", "max_matches", "k",
+    "refresh", "no_cache", "force_disk", "file_source",
+];
+
 const GREP_HELP: &str = "\
 grep (alias \"rg\") is an exhaustive literal/regex scan of the tree. Every reply is bounded; read
 \"exhaustive\" in the response to know whether it saw everything.
 
   {\"pattern\":\"<text or regex>\"}                    required (unless mode:\"comments\"); \"query\" is accepted too
   {\"path\":\"<dir or file>\"}                         narrow the scan to one subtree or one file
+  {\"paths\":[\"src/a.rs\",\"src/b/\"]}                  narrow it to exactly those files and directories;
+                                                     \"files\" is an alias. Paths resolve under the project
+                                                     root, or under \"root\"/\"projectPath\" when one is given.
+                                                     A field that is not one of the accepted names is
+                                                     refused, never ignored.
   {\"glob\":\"**/*.rs\"}                               narrow by path glob; \"include\"/\"path_glob\" are aliases;
                                                      a \"!\"-prefixed entry excludes instead: [\"**/*.rs\",\"!vendor/**\"]
   {\"exclude\":[\"vendor/**\",\"test/hardware/**\"]}   drop paths from the scan: one glob or a list of globs, matched
@@ -2171,7 +2212,7 @@ mode:\"comments\" -- one pass for every comment in the tree, column-1 and inline
 Every scan reports \"file_source\" and \"file_source_detail\": \"git\" means `git ls-files --cached`
 (tracked files only), \"walk\" a filesystem walk and \"file\" a single file read straight from disk.
 When \"exhaustive\" is false the reply also carries \"partial\": true and a \"partial_reason\" naming the
-bound that fired, plus \"exhaustive_note\" on how to reach full coverage: scope with \"path\"/\"glob\" and
+bound that fired, plus \"exhaustive_note\" on how to reach full coverage: scope with \"path\"/\"paths\"/\"glob\" and
 repeat per subtree, or raise \"max_results\".";
 
 const CODESEARCH_HELP: &str = "\
@@ -2266,7 +2307,7 @@ fn scan_refresh_requested(body: &Value) -> bool {
 
 fn scan_scope_hint(scan_cap: u32) -> String {
     format!(
-        "to reach every match, scope the scan and repeat per subtree: pass \"path\":\"<dir-or-file>\" and/or \"glob\":\"**/*.rs\" -- a scoped scan's cap is per call, so union the per-scope results; or raise the cap with \"max_results\": <n> (this call used {scan_cap}); \"output_mode\":\"files_with_matches\" or \"count\" covers far more files per call than \"content\""
+        "to reach every match, scope the scan and repeat per subtree: pass \"path\":\"<dir-or-file>\" or \"paths\":[\"<one>\",\"<two>\"] and/or \"glob\":\"**/*.rs\" -- a scoped scan's cap is per call, so union the per-scope results; or raise the cap with \"max_results\": <n> (this call used {scan_cap}); \"output_mode\":\"files_with_matches\" or \"count\" covers far more files per call than \"content\""
     )
 }
 
@@ -2462,6 +2503,7 @@ fn grep(body: &Value) -> u64 {
     let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let comments_flag = body.get("comments").and_then(|v| v.as_bool()).unwrap_or(false);
     let want_comments = mode == "comments" || comments_flag;
+    if let Some(refusal) = refuse_unknown_fields("grep", body, GREP_ACCEPTED_FIELDS) { return refusal; }
     if !mode.is_empty() && !GREP_MODES.contains(&mode.as_str()) && !comments_flag {
         return err("grep", &format!(
             "mode \"{mode}\" is not a grep mode -- valid modes are {}. \
@@ -2475,7 +2517,7 @@ fn grep(body: &Value) -> u64 {
         .or_else(|| body.get("query").and_then(|v| v.as_str()))
         .unwrap_or("");
     if pattern.is_empty() {
-        return err("grep", "pattern required -- pass {\"pattern\":\"<text>\"}, optionally narrowed by \"path\" (a file or directory under the project root) and \"glob\"; pass {\"mode\":\"comments\"} to find comment spans instead, or {\"help\": true} for the full parameter list");
+        return err("grep", "pattern required -- pass {\"pattern\":\"<text>\"}, optionally narrowed by \"path\" (one file or directory under the project root) or \"paths\"/\"files\" (a list of them) and \"glob\"; pass {\"mode\":\"comments\"} to find comment spans instead, or {\"help\": true} for the full parameter list");
     }
     let output_mode = body.get("output_mode").and_then(|v| v.as_str())
         .or_else(|| body.get("outputMode").and_then(|v| v.as_str()))
@@ -2488,10 +2530,11 @@ fn grep(body: &Value) -> u64 {
             GREP_OUTPUT_MODES.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(", "),
         ));
     }
-    let (root, path) = match resolve_scan_target(body) {
+    let (root, paths) = match resolve_scan_target(body) {
         Ok(target) => target,
         Err(e) => return err("grep", &e),
     };
+    let path_refs = scan_path_refs(&paths);
     let (max_matches, limit_was_explicit) = match scan_result_limit(body, GREP_LIMIT_FIELDS, GREP_DEFAULT_MAX_MATCHES) {
         Ok(limit) => limit,
         Err(e) => return err("grep", &e),
@@ -2523,7 +2566,7 @@ fn grep(body: &Value) -> u64 {
     let scan = crate::code_index::LiteralScan {
         pattern,
         root,
-        path: path.as_deref(),
+        paths: &path_refs,
         regex: use_regex,
         case_insensitive: body.get("case_insensitive").and_then(|v| v.as_bool())
             .or_else(|| body.get("ignore_case").and_then(|v| v.as_bool()))
@@ -2605,10 +2648,11 @@ fn answer_scan(verb: &str, out: serde_json::Map<String, Value>, partial: Option<
 }
 
 fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
-    let (root, path) = match resolve_scan_target(body) {
+    let (root, paths) = match resolve_scan_target(body) {
         Ok(target) => target,
         Err(e) => return err("grep", &e),
     };
+    let path_refs = scan_path_refs(&paths);
     let (max_matches, _) = match scan_result_limit(body, GREP_LIMIT_FIELDS, GREP_DEFAULT_MAX_MATCHES) {
         Ok(limit) => limit,
         Err(e) => return err("grep", &e),
@@ -2619,7 +2663,7 @@ fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
     };
     let scan = crate::code_index::CommentScan {
         root,
-        path: path.as_deref(),
+        paths: &path_refs,
         path_glob: body.get("glob").and_then(|v| v.as_str())
             .or_else(|| body.get("include").and_then(|v| v.as_str()))
             .or_else(|| body.get("path_glob").and_then(|v| v.as_str()))
@@ -2653,10 +2697,12 @@ struct IdentifierScan<'a> {
 }
 
 fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: Option<&str>, include_globs: &[String], exclude_globs: &[String], cfg: &crate::ragconfig::RagConfig) -> Result<(Vec<String>, bool), String> {
+    let named = scan_target_paths(body)?;
+    let path_refs = scan_path_refs(&named);
     let request = crate::code_index::LiteralScan {
         pattern: scan.pattern,
         root,
-        path: body.get("path").and_then(|v| v.as_str()).filter(|p| !p.is_empty()),
+        paths: &path_refs,
         regex: scan.regex,
         case_insensitive: false,
         whole_word: scan.whole_word,
