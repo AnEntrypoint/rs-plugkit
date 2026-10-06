@@ -65,13 +65,14 @@ pub fn scan_commit(
         if !is_scannable(path) {
             continue;
         }
-        scannable_files += 1;
         let Some(source) = read_text(&root, path) else {
+            scannable_files += 1;
             continue;
         };
         if source.len() > MAX_SCAN_BYTES {
             continue;
         }
+        scannable_files += 1;
         scanned_files += 1;
         let is_json = extension_of(path) == "json";
         for reference in extract_references(&source, is_json) {
