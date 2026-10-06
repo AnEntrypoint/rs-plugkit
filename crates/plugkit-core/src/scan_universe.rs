@@ -333,7 +333,24 @@ pub fn absolute_root_for_message(root: &str) -> String {
     crate::pkfs::anchor(root).trim_end_matches("/.").to_string()
 }
 
-pub fn list_scan_universe(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool) -> Result<ScanUniverse, String> {
+pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool) -> Result<ScanUniverse, String> {
+    let mut acc = list_scan_scope(root, scopes.first().copied(), max_files, cfg, origin, force_disk)?;
+    for scope in scopes.iter().skip(1) {
+        let next = list_scan_scope(root, Some(scope), max_files, cfg, origin, force_disk)?;
+        acc.files.extend(next.files);
+        acc.excluded.extend(next.excluded);
+        acc.listing_complete &= next.listing_complete;
+        if acc.walk_reason.is_none() { acc.walk_reason = next.walk_reason; }
+        if acc.source != next.source { acc.source = FileSource::Walk; }
+    }
+    if scopes.len() > 1 {
+        let mut seen: HashSet<String> = HashSet::with_capacity(acc.files.len());
+        acc.files.retain(|f| seen.insert(f.clone()));
+    }
+    Ok(acc)
+}
+
+fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool) -> Result<ScanUniverse, String> {
     let rel = match scope {
         Some(s) => relative_scope(root, s)?,
         None => None,
@@ -393,7 +410,7 @@ pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> 
     let (base, scope) = if root.is_empty() || root == "." || absolute { (if root.is_empty() { "." } else { root }, None) } else { (".", Some(root)) };
     let project_node_modules = join_under(base, "node_modules/");
     let origin = if absolute { TargetOrigin::CallerNamed } else { TargetOrigin::ProjectDefault };
-    match list_scan_universe(base, scope, max_files, cfg, origin, false) {
+    match list_scan_universe(base, &scope.into_iter().collect::<Vec<&str>>(), max_files, cfg, origin, false) {
         Ok(u) => u.files.into_iter().filter(|p| !p.starts_with(&project_node_modules)).take(max_files).collect(),
         Err(_) => Vec::new(),
     }
