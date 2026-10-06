@@ -111,10 +111,38 @@ fn argv_trusting_repository(args: &str, repository: &str) -> String {
     serde_json::to_string(&argv).unwrap_or_default()
 }
 
+fn git_response_is_not_repository(v: &Value) -> bool {
+    v.get("stderr")
+        .and_then(|x| x.as_str())
+        .map(|s| s.contains("not a git repository"))
+        .unwrap_or(false)
+}
+
+fn git_dispatch_cwd(cwd: Option<&str>) -> String {
+    match cwd {
+        Some(dir) if !dir.trim().is_empty() => dir.trim().to_string(),
+        _ => host_cwd_string().unwrap_or_default(),
+    }
+}
+
+fn annotate_repository_resolution(value: Value, resolved: &str) -> Value {
+    if !git_response_is_not_repository(&value) {
+        return value;
+    }
+    let stderr = value.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let remedy = format!("{resolved} is not inside a git work tree -- pass an absolute cwd at the MCP dispatch level, or cwd/repo/root/projectPath in the verb body");
+    let merged = if stderr.is_empty() { remedy } else { format!("{stderr}\n{remedy}") };
+    let mut annotated = value;
+    if let Some(fields) = annotated.as_object_mut() {
+        fields.insert("stderr".to_string(), Value::String(merged));
+    }
+    annotated
+}
+
 fn git_call_host(args: &str, cwd: Option<&str>) -> Value {
-    let cwd_s = cwd.unwrap_or("");
-    let packed = unsafe { host_git(args.as_ptr(), args.len() as u32, cwd_s.as_ptr(), cwd_s.len() as u32) };
-    unpack_to_value(packed)
+    let resolved = git_dispatch_cwd(cwd);
+    let packed = unsafe { host_git(args.as_ptr(), args.len() as u32, resolved.as_ptr(), resolved.len() as u32) };
+    annotate_repository_resolution(unpack_to_value(packed), &resolved)
 }
 
 pub fn git_call_async(args: &str, cwd: Option<&str>) -> Value {
@@ -133,6 +161,12 @@ pub fn git_porcelain() -> String {
     porcelain_or_dirty(git_call("status --porcelain", None))
 }
 
+pub(crate) const PORCELAIN_FAILED_MARKER: &str = "!!git-status-failed ";
+
+pub(crate) fn porcelain_failure_detail(porcelain: &str) -> Option<&str> {
+    porcelain.strip_prefix(PORCELAIN_FAILED_MARKER)
+}
+
 pub(crate) fn porcelain_or_dirty(v: Value) -> String {
     let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
     let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -143,7 +177,7 @@ pub(crate) fn porcelain_or_dirty(v: Value) -> String {
         } else {
             format!("exit_code={exit_code} stderr={stderr}")
         };
-        return format!("?? git-status-failed ({detail})");
+        return format!("{PORCELAIN_FAILED_MARKER}{detail}");
     }
     v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
