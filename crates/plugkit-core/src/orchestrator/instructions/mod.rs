@@ -70,29 +70,37 @@ fn iso8601_to_ms(s: &str) -> Option<i64> {
 const SUPPLY_CHAIN_SCAN_DEBOUNCE_MS: i64 = 300_000;
 
 #[cfg(target_arch = "wasm32")]
+fn scan_deps_cache_path(name: &str) -> String {
+    super::gm_dir().join("exec-spool").join(name).to_string_lossy().to_string()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn legacy_scan_deps_cache_path(name: &str) -> String {
+    super::gm_dir().join(name).to_string_lossy().to_string()
+}
+
+#[cfg(target_arch = "wasm32")]
 fn automatic_supply_chain_scan() -> serde_json::Value {
-    let ts_path = super::gm_dir()
-        .join(".last-scan-deps-ts")
-        .to_string_lossy()
-        .to_string();
-    let result_path = super::gm_dir()
-        .join(".last-scan-deps-result.json")
-        .to_string_lossy()
-        .to_string();
+    let ts_path = scan_deps_cache_path(".last-scan-deps-ts");
+    let result_path = scan_deps_cache_path(".last-scan-deps-result.json");
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
     let last_ts = pkfs::read_to_string(&ts_path)
+        .or_else(|| pkfs::read_to_string(&legacy_scan_deps_cache_path(".last-scan-deps-ts")))
         .and_then(|s| s.trim().parse::<i64>().ok())
         .filter(|n| *n > 0);
     if let Some(last) = last_ts {
         if now_ms.saturating_sub(last) < SUPPLY_CHAIN_SCAN_DEBOUNCE_MS {
             return pkfs::read_to_string(&result_path)
+                .or_else(|| {
+                    pkfs::read_to_string(&legacy_scan_deps_cache_path(".last-scan-deps-result.json"))
+                })
                 .and_then(|raw| serde_json::from_str(&raw).ok())
                 .unwrap_or(serde_json::Value::Null);
         }
     }
     let result = crate::scan_deps::scan_deps(&json!({}));
     let _ = pkfs::write(&ts_path, &now_ms.to_string());
-    let _ = pkfs::write(&result_path, &result.to_string());
+    let _ = pkfs::write_if_changed(&result_path, &result.to_string());
     result
 }
 
@@ -254,7 +262,7 @@ fn next_phase_hint(phase: &str) -> Option<String> {
 #[cfg(target_arch = "wasm32")]
 fn prd_items_json() -> Vec<serde_json::Value> {
     for attempt in 0..2 {
-        let (body, err, code) = prd::handle_list("");
+        let (body, err, code) = prd::handle_list_full();
         if code == 0 {
             if let Some(items) = serde_json::from_str::<serde_json::Value>(&body)
                 .ok()

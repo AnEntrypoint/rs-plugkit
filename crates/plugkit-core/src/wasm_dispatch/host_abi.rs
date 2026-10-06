@@ -226,30 +226,86 @@ pub fn git_repository_absent() -> bool {
 
 pub(crate) const PORCELAIN_FAILED_MARKER: &str = "!!git-status-failed ";
 
-pub(crate) fn porcelain_failure_detail(porcelain: &str) -> Option<&str> {
-    porcelain.strip_prefix(PORCELAIN_FAILED_MARKER)
+pub(crate) struct Porcelain {
+    pub porcelain: String,
+    pub partial: bool,
+    pub failed: bool,
+    pub parked: bool,
+    pub skipped_paths: Vec<String>,
+    pub stderr: String,
+    pub exit_code: i64,
+}
+
+const GIT_SKIPPED_DIR_MARKER: &str = "could not open directory";
+
+fn skipped_dir_from_stderr_line(line: &str) -> Option<String> {
+    let rest = line.split_once(GIT_SKIPPED_DIR_MARKER)?.1;
+    let start = rest.find('\'')? + 1;
+    let end = rest.rfind('\'')?;
+    if end <= start {
+        return None;
+    }
+    let path = rest[start..end].trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+pub(crate) fn porcelain_from(v: &Value) -> Porcelain {
+    let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
+    let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1);
+    let porcelain = v
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let stderr = v
+        .get("stderr")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let parked = v
+        .get("async_parked")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let truncated = ["stdout_truncated", "stderr_truncated"]
+        .iter()
+        .any(|field| v.get(*field).and_then(Value::as_bool) == Some(true));
+    let mut skipped_paths: Vec<String> = Vec::new();
+    for line in stderr.lines() {
+        let Some(path) = skipped_dir_from_stderr_line(line) else {
+            continue;
+        };
+        if !skipped_paths.contains(&path) {
+            skipped_paths.push(path);
+        }
+    }
+    let failed = !ok || exit_code != 0;
+    let partial = failed || parked || truncated || !skipped_paths.is_empty();
+    Porcelain {
+        porcelain,
+        partial,
+        failed,
+        parked,
+        skipped_paths,
+        stderr,
+        exit_code,
+    }
 }
 
 pub(crate) fn porcelain_or_dirty(v: Value) -> String {
-    let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
-    let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    if !ok || exit_code != 0 {
-        let stderr = v
-            .get("stderr")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .trim();
-        let detail = if stderr.is_empty() {
-            format!("exit_code={exit_code}")
+    let st = porcelain_from(&v);
+    if st.partial {
+        let detail = if st.stderr.trim().is_empty() {
+            format!("exit_code={}", st.exit_code)
         } else {
-            format!("exit_code={exit_code} stderr={stderr}")
+            format!("exit_code={} stderr={}", st.exit_code, st.stderr.trim())
         };
         return format!("{PORCELAIN_FAILED_MARKER}{detail}");
     }
-    v.get("stdout")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string()
+    st.porcelain
 }
 
 pub fn git_call_argv(argv: &[&str], cwd: Option<&str>) -> Value {

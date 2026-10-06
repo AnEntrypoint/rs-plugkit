@@ -222,22 +222,17 @@ fn nonrepo_fallback_root(cwd: &str) -> Option<PathBuf> {
 
 pub fn disclose_nonrepo_root(out: String) -> String {
     let cwd = current_cwd_string();
-    if !cwd_is_nonrepo_fallback(&cwd) {
-        return out;
-    }
-    let Ok(root) = try_resolve_project_root() else {
-        return out;
-    };
+    if !cwd_is_nonrepo_fallback(&cwd) { return out; }
+    let Ok(root) = try_resolve_project_root() else { return out };
+    let root_s = root.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
     let note = format!(
-        "cwd is not inside a git repository; using cwd itself as the project root ({}/.gm holds this dispatch's state). Pass git_root_override to pin a different root.",
-        root.to_string_lossy().trim_end_matches(['/', '\\'])
+        "cwd is not inside a git repository, so cwd itself is the project root: any state this dispatch wrote went to {}/.gm, not to the project you meant. Re-dispatch with cwd set to that project's root, or pass git_root_override in the body to re-pin .gm. Stateful verbs here are mutable-add, prd-add and transition.",
+        root_s
     );
     match serde_json::from_str::<serde_json::Value>(&out) {
         Ok(serde_json::Value::Object(mut map)) => {
-            map.insert(
-                "project_root_disclosure".to_string(),
-                serde_json::Value::String(note),
-            );
+            map.insert("project_root".to_string(), serde_json::Value::String(root_s));
+            map.insert("project_root_disclosure".to_string(), serde_json::Value::String(note));
             serde_json::Value::Object(map).to_string()
         }
         _ => out,

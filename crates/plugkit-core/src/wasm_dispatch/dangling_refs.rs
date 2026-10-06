@@ -39,62 +39,36 @@ const CONDITION_KEYS: &[&str] = &["import", "default", "require", "node", "brows
 pub struct DanglingScan {
     pub offenders: Vec<Value>,
     pub waived: Vec<String>,
+    pub unreadable: Vec<String>,
     pub scanned_files: usize,
-    pub readable_files: usize,
-    pub scannable_files: usize,
 }
 
-pub fn scan_commit(
-    cwd: Option<&str>,
-    paths: &[String],
-    add_all: bool,
-    body: &Value,
-) -> DanglingScan {
+pub fn scan_commit(cwd: Option<&str>, paths: &[String], add_all: bool, body: &Value) -> DanglingScan {
     let waivers = waivers_from_body(body);
     let root = repo_root(cwd);
     let ordered = commit_path_set(cwd, paths, add_all);
     let committed: HashSet<String> = ordered.iter().cloned().collect();
     let mut candidates: Vec<(String, String, usize, String)> = Vec::new();
     let mut scanned_files = 0usize;
-    let mut scannable_files = 0usize;
+    let mut unreadable: Vec<String> = Vec::new();
 
     for path in ordered.iter() {
-        if scanned_files >= MAX_SCAN_FILES || candidates.len() >= MAX_CANDIDATES {
-            break;
-        }
-        if !is_scannable(path) {
-            continue;
-        }
+        if scanned_files >= MAX_SCAN_FILES || candidates.len() >= MAX_CANDIDATES { break; }
+        if !is_scannable(path) { continue; }
         let Some(source) = read_text(&root, path) else {
-            scannable_files += 1;
+            if file_present(&root, path) && !waivers.waive_all { unreadable.push(path.clone()); }
             continue;
         };
-        if source.len() > MAX_SCAN_BYTES {
-            continue;
-        }
-        scannable_files += 1;
+        if source.len() > MAX_SCAN_BYTES { continue; }
         scanned_files += 1;
         let is_json = extension_of(path) == "json";
         for reference in extract_references(&source, is_json) {
-            if candidates.len() >= MAX_CANDIDATES {
-                break;
-            }
+            if candidates.len() >= MAX_CANDIDATES { break; }
             for target in resolve(&reference.specifier, &directory_of(path), &root) {
-                if target == *path {
-                    continue;
-                }
-                if committed.contains(&target) {
-                    break;
-                }
-                if !file_present(&root, &target) {
-                    continue;
-                }
-                candidates.push((
-                    path.clone(),
-                    reference.specifier.clone(),
-                    reference.line,
-                    target,
-                ));
+                if target == *path { continue; }
+                if committed.contains(&target) { break; }
+                if !file_present(&root, &target) { continue; }
+                candidates.push((path.clone(), reference.specifier.clone(), reference.line, target));
                 break;
             }
         }
@@ -120,37 +94,31 @@ pub fn scan_commit(
             "target": target,
         }));
     }
-    offenders.sort_by(|a, b| {
-        a["from"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(b["from"].as_str().unwrap_or(""))
-            .then(
-                a["line"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    .cmp(&b["line"].as_u64().unwrap_or(0)),
-            )
-    });
-    let readable_files = scanned_files;
-    DanglingScan {
-        offenders,
-        waived,
-        scanned_files,
-        readable_files,
-        scannable_files,
-    }
+    offenders.sort_by(|a, b| a["from"].as_str().unwrap_or("").cmp(b["from"].as_str().unwrap_or(""))
+        .then(a["line"].as_u64().unwrap_or(0).cmp(&b["line"].as_u64().unwrap_or(0))));
+    DanglingScan { offenders, waived, unreadable, scanned_files }
 }
 
+/// A file the scan could not read is not a clean scan: its references were never extracted, so a
+/// dangling one inside it would pass the check that exists to stop it.
 pub fn scan_unreadable(scan: &DanglingScan) -> bool {
-    scan.scannable_files > 0 && scan.readable_files == 0
+    !scan.unreadable.is_empty()
 }
 
 pub fn unreadable_detail(verb: &str, scan: &DanglingScan) -> Value {
+    let mut fixes: Vec<String> = Vec::new();
+    for path in &scan.unreadable {
+        fixes.push(format!("make {} readable and repeat this commit, or leave it out of the commit's paths", path));
+    }
+    fixes.dedup();
     json!({
-        "error": format!("dangling-reference scan could not read any of the {} scannable file(s) in this commit", scan.scannable_files),
+        "error": format!("commit includes {} file(s) that cannot be read, so their references were never checked", scan.unreadable.len()),
         "error_code": ERR_CODE_DANGLING_SCAN_UNREADABLE,
-        "scannable_files": scan.scannable_files,
+        "unreadable": scan.unreadable,
+        "fixes": fixes,
+        "scanned_files": scan.scanned_files,
+        "waived": scan.waived,
+        "allow_dangling_hint": "pass allow_dangling: true to waive the whole dangling-reference check for this commit",
         "next_dispatch": verb,
     })
 }
@@ -204,46 +172,28 @@ fn waivers_from_body(body: &Value) -> Waivers {
 }
 
 fn repo_root(cwd: Option<&str>) -> String {
-    exec_git(&["rev-parse", "--show-toplevel"], cwd)
-        .trim()
-        .replace('\\', "/")
+    exec_git(&["rev-parse", "--show-toplevel"], cwd).trim().replace('\\', "/")
 }
 
 fn exec_git(argv: &[&str], cwd: Option<&str>) -> String {
-    git_call_argv(argv, cwd)
-        .get("stdout")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
+    git_call_argv(argv, cwd).get("stdout").and_then(|v| v.as_str()).unwrap_or("").to_string()
 }
 
 fn read_text(root: &str, relative: &str) -> Option<String> {
-    let direct = host_read(relative).filter(|text| !text.is_empty());
-    if direct.is_some() || root.is_empty() {
-        return direct;
-    }
-    host_read(&format!("{root}/{relative}")).filter(|text| !text.is_empty())
+    if root.is_empty() { return host_read(relative); }
+    host_read(&format!("{root}/{relative}")).or_else(|| host_read(relative))
 }
 
 fn file_present(root: &str, relative: &str) -> bool {
-    if host_exists(relative) {
-        return true;
-    }
-    !root.is_empty() && host_exists(&format!("{root}/{relative}"))
+    if root.is_empty() { return host_exists(relative); }
+    host_exists(&format!("{root}/{relative}")) || host_exists(relative)
 }
 
 fn commit_path_set(cwd: Option<&str>, paths: &[String], add_all: bool) -> Vec<String> {
-    let mut set: Vec<String> =
-        split_nul(&exec_git(&["diff", "--cached", "--name-only", "-z"], cwd));
-    if !add_all && paths.is_empty() {
-        return set;
-    }
+    let mut set: Vec<String> = split_nul(&exec_git(&["diff", "--cached", "--name-only", "-z"], cwd));
+    if !add_all && paths.is_empty() { return set; }
     let mut argv: Vec<String> = vec![
-        "status".to_string(),
-        "--porcelain".to_string(),
-        "-z".to_string(),
-        "-uall".to_string(),
-        "--".to_string(),
+        "status".to_string(), "--porcelain".to_string(), "-z".to_string(), "-uall".to_string(), "--".to_string(),
     ];
     if add_all {
         argv.push(":/".to_string());

@@ -47,6 +47,9 @@
 
 - Structural queries first run bounded refresh without embeddings and refuse incomplete graph evidence. `sync_files` also runs during indexing and stale-insight maintenance; schema 3 records a current-byte FNV64 `source_hash` so same-size/mtime edits invalidate reuse. Failed parses retry. Bump the schema when stored shape changes.
 - Symbols, metrics and raw import specs live in `code_symbols`, `code_symbol_files` and `code_imports`, not vector chunks. Multi-row inserts stay within SQLite's 999-parameter bound.
+- JSON has no structural symbol support: scoped queries reject it; source-only coverage excludes it explicitly and observed JSON clears prior cached symbols/imports/edges. Cleanup failures and minified-source deferrals make coverage incomplete.
+- Resolved `index.max_file_bytes` has a 2 MiB minimum after typed configuration overlay; wall-time and indexed-chunk bounds still apply. The unnormalized default remains 256 KiB.
+- Public `index.max_chunks_per_file_per_pass` bounds vector work only; `0` disables chunk embeddings while keeping bounded BM25 text and full text manifests. Text-only indexing still reports deferred vectors explicitly.
 - Call edges use one `cef-<crc32(path)>` KV row in `<code_ns>-edges-by-file`; first sync purges the retired per-edge namespace. `callee_name_for_call` records the final callee-expression leaf, selecting the widest node starting at the call.
 - Raw import specs resolve at query time against indexed paths; only resolved indexed targets form edges. Changes in one file must not invalidate another file's stored import spelling.
 - `find` escapes `%`, `_` and `\` with SQL `ESCAPE '\'`; stripping them breaks snake-case queries. `cx` counts decisions within a function's byte range, nested closures included; Boolean operators count only for Python `boolean_operator`.
@@ -101,10 +104,15 @@
 - After a non-conflict pull failure, re-fetch and compare HEAD with the tracking ref before trusting timeout/hook/credential failure: the fast-forward may already have landed. Missing merge committer identity must name local `user.name`/`user.email` requirements; authentication is not commit identity, and tooling must not configure a global account silently.
 - Git verbs resolve the actual dispatch project and fail loudly outside a repository. `git_log` parses its formatted fields on `\u{1f}`, not spaces; subjects may contain spaces.
 
+- An active merge consumes the complete prepared index. `git_commit` refuses explicit paths and `add_all` before staging. Neither ordinary unscoped commits nor merge commits add commit pathspecs.
+- `git_status` preserves observed paths, partial/skipped-read diagnostics, head SHA and branch. Failed, parked, truncated or skipped status cannot establish clean: commit/finalize refuse before mutation and string-only guards carry a non-porcelain failure marker.
+
 ### wasm_dispatch/dangling_refs.rs
 
 - Validate before staging, so refusal leaves the index unchanged. Scan only already-staged files plus the proposed path/add-all scope, not sibling dirt.
 - A dangling target is an existing, untracked, non-ignored file outside this commit's path set. An untracked target included in the same commit is valid; `git check-ignore` excludes ignored generated output.
+
+- Every existing unreadable scoped source prevents a clean dangling-reference scan unless the caller explicitly waives the check. Empty readable files remain readable.
 
 ## Configuration, prose and notifications
 
@@ -158,7 +166,10 @@
 - Delta replies require the asserted current instruction hash and matching `known_reply_hash`. Equal fields are named as unchanged, removed fields are named separately, mandatory live fields stay inline, and `full_reply_at` names the full payload. No session means no delta; `full:true` forces full content. Never infer a client's knowledge from the last server write.
 - `investigate_readonly` serves no phase prose and cannot refresh phase-prose timestamps. Inline PRD/mutable row budgets bound payload arrays; exact counts and explicit full-list paths/verbs remain authoritative.
 - `mutables::handle_add` upserts IDs, collapses duplicates and prefers an already resolved row. `handle_list` remains the full-fidelity file view; deduplication must not reopen witnessed obligations.
-- `automatic_supply_chain_scan` runs on instruction, debounced by `.gm/.last-scan-deps-ts`/`SUPPLY_CHAIN_SCAN_DEBOUNCE_MS`. Structural scans supplement, never replace, exact IOC searches.
+
+- `mutable-add` requires a nonempty caller-supplied ID and at least one payload field beyond the dispatch envelope. It never invents a placeholder row; `status` is a payload field.
+- `prd-list` accepts ID/status filters and defaults to brief rows. Internal evidence, gates and instruction summaries use `handle_list_full`, not that abbreviated public view.
+- `automatic_supply_chain_scan` runs on instruction, debounced by `.gm/exec-spool/.last-scan-deps-ts`/`SUPPLY_CHAIN_SCAN_DEBOUNCE_MS`. The cached result lives beside that stamp. Legacy root `.gm` paths are read-only fallbacks. Structural scans supplement, never replace, exact IOC searches.
 
 ## Dependency scanning
 
@@ -166,6 +177,8 @@
 - Package signatures combine maximum mtime and summed bytes; directory mtime misses in-place writes. `walk_package` uses the actual dependency tree and containment/visited guards. `IndexConfig::is_force_included` is substring-based, including descendants.
 - Oversized files warn without a full scan. A failed read after positive-size stat is a blocked read, not empty content; failed or blocked packages must not become stamped clean.
 - `scan_node_modules` preserves earlier signatures for unchanged or budget-deferred packages. `full:true` clears the prior stamp before walking. Never silently report truncated scans as complete.
+
+- Package signatures use `.gm/exec-spool/.scan-deps-stamp.json`; the legacy `.gm/scan-deps-stamp.json` is a read-only fallback. `full:true` clears both. Deterministic serialization and `write_if_changed` preserve identical cached bytes.
 
 ## Dream-RSI replay
 

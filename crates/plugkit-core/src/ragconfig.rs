@@ -182,6 +182,8 @@ pub struct IndexConfig {
     pub likely_orphaned_symbol_scan_enabled: bool,
 }
 
+const MIN_INDEXED_FILE_BYTES: usize = 2 * 1024 * 1024;
+
 impl Default for IndexConfig {
     fn default() -> Self {
         IndexConfig {
@@ -749,6 +751,7 @@ impl RagConfig {
             &mut cfg.index.max_file_bytes,
             &mut problems,
         );
+        cfg.index.max_file_bytes = cfg.index.max_file_bytes.max(MIN_INDEXED_FILE_BYTES);
         overwrite_present_usize_or_record_problem(
             "index",
             "max_chunks_per_file_per_pass",
@@ -1382,13 +1385,6 @@ impl RagConfig {
             == 0
         {
             return Err("ragconfig: index.pessimistic_ms_per_chunk must be non-zero; it divides the remaining wall budget to derive a per-file chunk allowance".to_string());
-        }
-        if self
-            .index
-            .max_chunks_embedded_per_file_per_pass_count_bound_only
-            == 0
-        {
-            return Err("ragconfig: index.max_chunks_per_file_per_pass must be non-zero; a zero cap truncates every file to no chunks and the index never populates".to_string());
         }
         if !(self.scoring.bm25_k1_term_frequency_saturation >= 0.0) {
             return Err(format!(
