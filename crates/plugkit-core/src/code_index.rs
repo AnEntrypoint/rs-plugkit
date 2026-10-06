@@ -2871,8 +2871,12 @@ const TERM_TRIM_CHARS: &[char] = &['"', '\'', '`', ',', ';', ':', '<', '>', '(',
 /// Returns an empty vec when the query should stay one matcher: a single term, more than
 /// MAX_QUERY_TERMS terms, or a regex carrying a metacharacter (so `yama|ptrace_scope` keeps
 /// working as one alternation instead of being chopped into `yama|ptrace_scope` fragments).
+fn carries_regex_metacharacter(pattern: &str) -> bool {
+    pattern.chars().any(|c| TERM_SPLIT_METACHARACTERS.contains(&c))
+}
+
 fn query_terms(pattern: &str, regex: bool) -> Vec<String> {
-    if regex && pattern.chars().any(|c| TERM_SPLIT_METACHARACTERS.contains(&c)) {
+    if regex && carries_regex_metacharacter(pattern) {
         return Vec::new();
     }
     let mut out: Vec<String> = Vec::new();
@@ -3442,17 +3446,24 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("terms".to_string(), Value::Array(per_term));
         out.insert("lines_matching_all_terms".to_string(), json!(lines_all_terms));
         out.insert("phrase_match_count".to_string(), json!(lines_phrase_matched));
-        out.insert("query_note".to_string(), json!(if lines_all_terms == 0 {
-            format!(
+        out.insert("query_note".to_string(), json!(match combination {
+            TermCombination::And => format!(
+                "combine:\"and\": every line returned carries all {} terms; combine:\"or\" would add the lines carrying fewer, ranked strictly below them, and combine:\"phrase\" (the default for a multi-word query) would match the query verbatim",
+                term_matchers.len()
+            ),
+            _ if lines_all_terms == 0 => format!(
                 "no line carries all {} terms -- these hits are the ranked union (lines matching the most terms first); combine:\"phrase\" (the default for a multi-word query) matches the query verbatim instead, combine:\"and\" would return nothing here",
                 term_matchers.len()
-            )
-        } else {
-            format!(
+            ),
+            _ => format!(
                 "ranked union (combine:\"or\"): lines carrying all {} terms come first, every line carrying fewer ranks strictly below them; combine:\"and\" keeps only the all-terms lines, combine:\"phrase\" (the default) matches the query verbatim",
                 term_matchers.len()
-            )
+            ),
         }));
+    } else if req.regex && carries_regex_metacharacter(req.pattern) {
+        out.insert("query_note".to_string(), json!(
+            "the query was matched as ONE regular expression: mode \"regex\" honours every metacharacter as written, so a \"|\" alternates and a space inside the pattern belongs to the pattern -- the query was never split into terms and combine:\"or\"/\"and\" have no effect on it"
+        ));
     } else if req.pattern.split_whitespace().count() > 1 {
         out.insert("query_note".to_string(), json!(
             "the query was matched as ONE phrase: a line must contain it verbatim, spaces included -- pass combine:\"or\" to split it into terms and rank by how many a line carries, or combine:\"and\" to require all of them on one line"
@@ -3484,6 +3495,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                     term_matchers.len(), detail
                 ),
             }
+        } else if req.regex && carries_regex_metacharacter(req.pattern) {
+            format!(
+                "no line matched /{}/ as ONE regular expression: mode \"regex\" honoured every metacharacter as written, so a \"|\" alternated and the query was never split into terms",
+                req.pattern
+            )
         } else if req.pattern.split_whitespace().count() > 1 {
             format!(
                 "no line matched the query as ONE phrase: \"{}\" was matched verbatim, spaces included; split it into terms and pass combine:\"or\", or combine:\"and\" to require all of them on one line",
