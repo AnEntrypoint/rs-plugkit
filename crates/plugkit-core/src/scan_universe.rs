@@ -412,6 +412,8 @@ fn absolute_root_for_message(root: &str) -> String {
     crate::pkfs::anchor(root).trim_end_matches("/.").to_string()
 }
 
+const LISTING_WALK_ANSWERABLE_BUDGET_MS: u64 = 20_000;
+
 pub fn list_scan_universe(
     root: &str,
     scope: Option<&str>,
@@ -486,7 +488,8 @@ pub fn list_scan_universe(
         },
         noise: policy.noise,
         max_files,
-        deadline_ms: unsafe { host_now_ms() }.saturating_add(cfg.wall_budget_ms),
+        deadline_ms: unsafe { host_now_ms() }
+            .saturating_add(cfg.wall_budget_ms.min(LISTING_WALK_ANSWERABLE_BUDGET_MS)),
         reached_deadline: false,
         files: Vec::new(),
         excluded: Vec::new(),
