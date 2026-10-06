@@ -3913,6 +3913,9 @@ fn git_status(body: &Value) -> u64 {
         }
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let porcelain = super::host_abi::porcelain_or_dirty(r);
+        if let Some(detail) = super::host_abi::porcelain_failure_detail(&porcelain) {
+            return Err(err("git_status", &format!("git status unavailable -- {detail}")));
+        }
         let mut modified: Vec<String> = vec![];
         let mut untracked: Vec<String> = vec![];
         let mut deleted: Vec<String> = vec![];
