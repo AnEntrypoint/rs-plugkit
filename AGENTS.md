@@ -392,6 +392,15 @@ changes.
   `walk_package`'s mtime+size package signature, and `scan_one_file`'s
   blocked-read-vs-empty-file distinction.
 
+- The incremental package signature lives at
+  `.gm/exec-spool/.scan-deps-stamp.json`, not bare in `.gm/`, for the same
+  reason as the debounce stamp: a host that tracks `.gm/` in git was dirtied
+  by every `save_stamp` rewrite. `.gm/scan-deps-stamp.json` is read as a
+  fallback and never rewritten; `full:true` removes both. The stamp is
+  written only when its content changes -- serialising through
+  `serde_json::Map` keeps key order deterministic, so an unchanged
+  `node_modules` yields a byte-identical document.
+
 ### config.rs, config_sync.rs, prose.rs
 
 - `resolve_with`: a `ProjectVendored` win still runs the lower tiers'
@@ -569,9 +578,18 @@ changes.
 
 - `automatic_supply_chain_scan()` runs `scan_deps` on every `instruction`
   dispatch, surfaced as the response's `supply_chain_scan` field, debounced
-  by `.gm/.last-scan-deps-ts` at `SUPPLY_CHAIN_SCAN_DEBOUNCE_MS` (300000ms,
-  matching this project's existing `sync.debounce_ms` convention rather
-  than an invented number). Measured cost on this repo: 531ms for one full
+  by `.gm/exec-spool/.last-scan-deps-ts` at `SUPPLY_CHAIN_SCAN_DEBOUNCE_MS`
+  (300000ms, matching this project's existing `sync.debounce_ms` convention
+  rather than an invented number). The cache deliberately sits under
+  `exec-spool/` and not bare in `.gm/`: a host project that tracks `.gm/` in
+  git was left permanently dirty by every debounce tick, which blocked its
+  own DECIDE -> COMPLETE stop-gate until a junk commit absorbed the churn.
+  The debounce stamp must be rewritten on every scan, so no
+  write-only-when-content-changed rule can hold it still; only the path can.
+  The result JSON goes through `pkfs::write_if_changed` for the same reason.
+  `.gm/.last-scan-deps-ts` and `.gm/.last-scan-deps-result.json` are still
+  read as a fallback so an upgraded wasm reuses the previous scan instead of
+  paying for a full rescan; they are never rewritten. Measured cost on this repo: 531ms for one full
   scan (17 tracked files plus `node_modules`'s already-incremental,
   changed-since-stamp pass) -- cheap enough to run passively without being
   asked, which is the point: a HiddenSpawn-class payload smuggled into a
