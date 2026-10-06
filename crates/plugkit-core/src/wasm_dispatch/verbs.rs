@@ -655,7 +655,7 @@ fn fs_read(body: &Value) -> u64 {
                 }),
             )
         }
-        None => err("fs_read", "not found or empty"),
+        None => err("fs_read", "file read failed"),
     }
 }
 
