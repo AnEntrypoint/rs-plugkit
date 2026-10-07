@@ -7242,17 +7242,31 @@ fn git_commit(body: &Value) -> u64 {
         }
         let mut stage_stderr = String::new();
         let mut force_added_ignored_paths: Vec<String> = Vec::new();
+        let mut kept_staged_deletions: Vec<String> = Vec::new();
         if add_all || !paths.is_empty() {
             let staged_paths: &[String] = if add_all { &[] } else { &paths };
-            let ignored = ignored_requested_paths(plan, cwd, staged_paths)?;
-            let stage_argv = if ignored.is_empty() {
-                git_stage_argv(staged_paths, cwd)
+            let deletions = if add_all {
+                Vec::new()
             } else {
-                git_stage_argv_forced(staged_paths, cwd)
+                git_staged_deletion_paths(plan, cwd, staged_paths)?
             };
-            let stage = git_step_replayed_by_call_order(plan, &as_argv(&stage_argv), cwd)?;
-            stage_stderr = stage.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-            force_added_ignored_paths = ignored;
+            kept_staged_deletions = deletions.clone();
+            let to_stage: Vec<String> = staged_paths
+                .iter()
+                .filter(|p| !deletions.contains(p))
+                .cloned()
+                .collect();
+            if staged_paths.is_empty() || !to_stage.is_empty() {
+                let ignored = ignored_requested_paths(plan, cwd, &to_stage)?;
+                let stage_argv = if ignored.is_empty() {
+                    git_stage_argv(&to_stage, cwd)
+                } else {
+                    git_stage_argv_forced(&to_stage, cwd)
+                };
+                let stage = git_step_replayed_by_call_order(plan, &as_argv(&stage_argv), cwd)?;
+                stage_stderr = stage.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                force_added_ignored_paths = ignored;
+            }
         }
         let scoped_paths: &[String] = if add_all { &[] } else { &paths };
         if !scoped_paths.is_empty() {
@@ -7276,10 +7290,36 @@ fn git_commit(body: &Value) -> u64 {
                 })));
             }
         }
+        let mut index_commit_paths: Vec<String> = Vec::new();
+        let commit_paths: &[String] = if !scoped_paths.is_empty() && !kept_staged_deletions.is_empty()
+        {
+            let all_staged = git_staged_paths(plan, cwd)?;
+            let unrequested: Vec<String> = all_staged
+                .iter()
+                .filter(|p| !paths.contains(p))
+                .cloned()
+                .collect();
+            if !unrequested.is_empty() {
+                return Ok(err_json(
+                    "git_commit",
+                    json!({
+                        "error": format!("a path-scoped commit takes the worktree content of the named paths, so it cannot express the staged deletion(s) of {}; committing the index would also take {} path(s) staged outside the request: {}", kept_staged_deletions.join(", "), unrequested.len(), unrequested.join(", ")),
+                        "error_code": "would_sweep_unrequested_staged_paths",
+                        "requested_paths": paths,
+                        "staged_deletions": kept_staged_deletions,
+                        "unrequested_staged_paths": unrequested,
+                    }),
+                ));
+            }
+            index_commit_paths = all_staged;
+            &[]
+        } else {
+            scoped_paths
+        };
         let bundled_message = bundle_prd_commit_comments(cwd, message);
         let r = git_step_replayed_by_call_order(
             plan,
-            &as_argv(&git_commit_argv(&bundled_message, allow_empty, scoped_paths, None)),
+            &as_argv(&git_commit_argv(&bundled_message, allow_empty, commit_paths, None)),
             cwd,
         )?;
         if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
@@ -7301,7 +7341,7 @@ fn git_commit(body: &Value) -> u64 {
             };
             let retried = git_step_replayed_by_call_order(
                 plan,
-                &as_argv(&git_commit_argv(&bundled_message, allow_empty, scoped_paths, Some(&identity))),
+                &as_argv(&git_commit_argv(&bundled_message, allow_empty, commit_paths, Some(&identity))),
                 cwd,
             )?;
             if retried.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
@@ -7334,6 +7374,13 @@ fn git_commit(body: &Value) -> u64 {
         let mut payload = json!({ "committed": true, "sha": sha, "summary": summary });
         if !force_added_ignored_paths.is_empty() {
             payload["force_added_ignored_paths"] = json!(force_added_ignored_paths);
+        }
+        if !kept_staged_deletions.is_empty() {
+            payload["kept_staged_deletions"] = json!(kept_staged_deletions);
+        }
+        if commit_paths.is_empty() && !index_commit_paths.is_empty() {
+            payload["index_commit"] = json!(true);
+            payload["committed_paths"] = json!(index_commit_paths);
         }
         if !scan.waived.is_empty() {
             payload["dangling_waived"] = json!(scan.waived);
@@ -9645,18 +9692,110 @@ fn git_rm(body: &Value) -> u64 {
         .get("cached")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let mut argv: Vec<&str> = vec!["rm"];
+    let dry_run = body
+        .get("dry_run")
+        .or_else(|| body.get("dryRun"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut argv: Vec<String> = vec!["rm".to_string()];
     if cached {
-        argv.push("--cached");
+        argv.push("--cached".to_string());
     }
-    argv.push("-r");
+    argv.push("-r".to_string());
+    if dry_run {
+        argv.push("--dry-run".to_string());
+    }
+    argv.push("--".to_string());
     for p in &paths {
-        argv.push(p.as_str());
+        argv.push(p.clone());
     }
-    if let Err(e) = run_git_checked(&argv, cwd, "git_rm", "git rm failed") {
-        return e;
+    let r = git_call_argv(&as_argv(&argv), cwd);
+    let Some(code) = r.get("exit_code").and_then(|x| x.as_i64()) else {
+        return err(
+            "git_rm",
+            "git rm returned no exit code -- refusing to report removed for an unverified result",
+        );
+    };
+    if code != 0 {
+        return err(
+            "git_rm",
+            r.get("stderr")
+                .and_then(|x| x.as_str())
+                .unwrap_or("git rm failed"),
+        );
     }
-    ok("git_rm", json!({ "removed": paths, "cached": cached }))
+    let stdout = r
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let removed: Vec<String> = if dry_run {
+        git_rm_announced_paths(&stdout, &paths)
+    } else {
+        git_rm_paths_missing_from_index(&paths, cwd)
+    };
+    let kept: Vec<String> = paths
+        .iter()
+        .filter(|p| !removed.contains(p))
+        .cloned()
+        .collect();
+    if !kept.is_empty() {
+        return err_json(
+            "git_rm",
+            json!({
+                "error": format!("git rm exited 0 but {} of {} requested path(s) are still in the index: {}", kept.len(), paths.len(), kept.join(", ")),
+                "error_code": "paths_still_tracked",
+                "cached": cached,
+                "dry_run": dry_run,
+                "removed": removed,
+                "not_removed": kept,
+            }),
+        );
+    }
+    ok(
+        "git_rm",
+        json!({ "removed": removed, "cached": cached, "dry_run": dry_run, "applied": !dry_run }),
+    )
+}
+
+fn git_rm_path_covers(indexed: &str, requested: &str) -> bool {
+    indexed == requested || indexed.starts_with(&format!("{}/", requested))
+}
+
+fn git_rm_announced_paths(stdout: &str, paths: &[String]) -> Vec<String> {
+    let announced: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("rm ")?;
+            let p = rest.trim().trim_matches('\'');
+            (!p.is_empty()).then(|| p.to_string())
+        })
+        .collect();
+    paths
+        .iter()
+        .filter(|p| announced.iter().any(|a| git_rm_path_covers(a, p)))
+        .cloned()
+        .collect()
+}
+
+fn git_rm_paths_missing_from_index(paths: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut argv: Vec<String> = vec!["ls-files".to_string(), "-z".to_string(), "--".to_string()];
+    argv.extend(paths.iter().cloned());
+    let stdout = git_call_argv(&as_argv(&argv), cwd)
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let indexed: Vec<String> = stdout
+        .split('\0')
+        .filter(|e| !e.is_empty())
+        .map(String::from)
+        .collect();
+    paths
+        .iter()
+        .filter(|p| !indexed.iter().any(|e| git_rm_path_covers(e, p)))
+        .cloned()
+        .collect()
 }
 
 fn git_revert(body: &Value) -> u64 {
@@ -10224,6 +10363,51 @@ fn ignored_requested_paths(
     argv.extend(paths.iter().cloned());
     let r = git_step_replayed_by_call_order(plan, &as_argv(&argv), cwd)?;
     Ok(parse_ignore_list(r.get("stdout").and_then(|v| v.as_str()).unwrap_or("")))
+}
+
+fn git_staged_paths(
+    plan: &mut GitPendingTokenReplayPlan,
+    cwd: Option<&str>,
+) -> Result<Vec<String>, u64> {
+    let r = git_step_replayed_by_call_order(
+        plan,
+        &["diff", "--cached", "--name-only", "-z"],
+        cwd,
+    )?;
+    Ok(r.get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+fn git_staged_deletion_paths(
+    plan: &mut GitPendingTokenReplayPlan,
+    cwd: Option<&str>,
+    paths: &[String],
+) -> Result<Vec<String>, u64> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut argv: Vec<String> = vec![
+        "diff".to_string(),
+        "--cached".to_string(),
+        "--name-only".to_string(),
+        "-z".to_string(),
+        "--diff-filter=D".to_string(),
+        "--".to_string(),
+    ];
+    argv.extend(paths.iter().cloned());
+    let r = git_step_replayed_by_call_order(plan, &as_argv(&argv), cwd)?;
+    Ok(r.get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 fn ignored_requested_paths_now(cwd: Option<&str>, paths: &[String]) -> Vec<String> {
