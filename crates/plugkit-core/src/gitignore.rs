@@ -17,6 +17,10 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/long-gap-retry-state",
     ".gm/last-dispatch-ts",
     ".gm/last-instruction-ts",
+    ".gm/.last-scan-deps-ts",
+    ".gm/.last-scan-deps-result.json",
+    ".gm/.embed-generation.*",
+    ".gm/dream-rsi/",
     ".gm/fsm-graph-rejected.json",
     ".gm/bootstrap-status.json",
     ".gm/bootstrap-error.json",
@@ -45,6 +49,7 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/instructions-source-cache/",
     ".gm/config-source-cache/",
     ".gm/config-source-cache.*",
+    ".gm/config-source-cache-*",
     ".plugkit-browser-profile/",
     ".plugkit-browser-profile-*/",
 ];
