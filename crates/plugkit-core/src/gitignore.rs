@@ -28,10 +28,6 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/ingest-drafts/",
     ".gm/prd-state.json",
     ".gm/subagent-*.json",
-    ".gm/browser-profile/",
-    ".gm/browser-profile-*/",
-    ".gm/browser-profiles/",
-    ".gm/browser-chrome-profile-*/",
     ".gm/build-tool-ignores.md",
     ".gm/last-prompt.txt",
     ".gm/hooks/",
@@ -50,8 +46,6 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/config-source-cache/",
     ".gm/config-source-cache.*",
     ".gm/config-source-cache-*",
-    ".plugkit-browser-profile/",
-    ".plugkit-browser-profile-*/",
 ];
 
 pub const MUST_STAY_TRACKED: &[&str] = &[

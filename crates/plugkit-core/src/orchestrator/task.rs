@@ -253,48 +253,6 @@ pub fn any_running() -> bool {
     false
 }
 
-pub fn open_browser_sessions() -> Value {
-    let p = gm_dir().join("exec-spool").join("browser-sessions.json");
-    let ps = p.to_string_lossy().to_string();
-    if !pkfs::exists(&ps) {
-        return Value::Array(Vec::new());
-    }
-    let content = match pkfs::read_to_string(&ps) {
-        Some(s) => s,
-        None => return Value::Array(Vec::new()),
-    };
-    let v: Value = match serde_json::from_str(&content) {
-        Ok(x) => x,
-        Err(_) => return Value::Array(Vec::new()),
-    };
-    let obj = match v.as_object() {
-        Some(m) => m,
-        None => return Value::Array(Vec::new()),
-    };
-    let mut out: Vec<Value> = Vec::new();
-    let ports_p = gm_dir().join("exec-spool").join("browser-ports.json");
-    let ports_s = ports_p.to_string_lossy().to_string();
-    let ports: Value = pkfs::read_to_string(&ports_s)
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(Value::Null);
-    let current_sid = super::state::read_state().session_id;
-    for (sid, sessions) in obj {
-        if let Some(cur) = &current_sid {
-            if sid != cur {
-                continue;
-            }
-        }
-        let port_info = ports.get(sid).cloned().unwrap_or(Value::Null);
-        out.push(json!({
-            "session_id": sid,
-            "browser_sessions": sessions,
-            "port": port_info.get("port"),
-            "chrome_pid": port_info.get("pid"),
-        }));
-    }
-    Value::Array(out)
-}
-
 pub fn stuck_spool() -> Value {
     let in_dir = gm_dir().join("exec-spool").join("in");
     let out_dir = gm_dir().join("exec-spool").join("out");

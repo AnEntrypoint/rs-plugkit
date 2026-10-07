@@ -3,7 +3,6 @@ use crate::pkfs;
 
 pub const RESIDUAL_PRD_OPEN_DEFAULT: &str =
     "PRD still has items; complete or remove them before residual scan.";
-pub const RESIDUAL_BROWSER_OPEN_DEFAULT: &str = "browser sessions still open -- dispatch `browser` with `session close-all` body (closes every Chrome your gm session owns; `session close <id>` for a shared id), then `session list` to confirm none remain, before retrying residual-scan";
 pub const RESIDUAL_TASKS_RUNNING_DEFAULT: &str = "background tasks still running -- wait for completion or kill them via the host_exec_js interface before retrying residual-scan";
 pub const RESIDUAL_DIRTY_TREE_DEFAULT: &str = "worktree dirty -- modified={modified} untracked={untracked} -- commit or revert before residual scan; a push from a dirty tree orphans the unstaged delta";
 pub const RESIDUAL_IMPERATIVE_DEFAULT: &str = "Residual scan. Worktree clean, remote pushed, PRD empty, mutables witnessed -- the four checks. Anything reachable and in-spirit expands the PRD and runs. Out-of-reach is credentials, down service, product decision.";
@@ -84,46 +83,6 @@ fn prd_empty_or_missing() -> bool {
     }
 }
 
-fn browser_sessions_open() -> bool {
-    let current_sid = super::state::read_state().session_id;
-    let candidates = [
-        gm_dir().join("exec-spool").join("browser-sessions.json"),
-        gm_dir().join("browser-sessions.json"),
-    ];
-    for marker in &candidates {
-        let ps = marker.to_string_lossy().to_string();
-        if !pkfs::exists(&ps) {
-            continue;
-        }
-        let Some(s) = pkfs::read_to_string(&ps) else {
-            continue;
-        };
-        let t = s.trim();
-        if t.is_empty() || t == "{}" || t == "[]" {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(t) else {
-            return true;
-        };
-        match (&current_sid, val.as_object()) {
-            (Some(sid), Some(map)) => {
-                if let Some(entry) = map.get(sid) {
-                    let open = match entry {
-                        serde_json::Value::Array(a) => !a.is_empty(),
-                        serde_json::Value::Null => false,
-                        _ => true,
-                    };
-                    if open {
-                        return true;
-                    }
-                }
-            }
-            _ => return true,
-        }
-    }
-    false
-}
-
 fn running_tasks_exist() -> bool {
     super::task::any_running()
 }
@@ -170,16 +129,6 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
             "next_dispatch_hint": "prd-list"
         });
         return deviation_scan_result(payload, severity, &reason);
-    }
-
-    if on("browser-open") && browser_sessions_open() {
-        let payload = serde_json::json!({
-            "scan": "skipped",
-            "reason": crate::prose::resolve_and_mark("residual/browser-open", RESIDUAL_BROWSER_OPEN_DEFAULT),
-            "next_dispatch": "browser",
-            "next_dispatch_hint": "browser"
-        });
-        return (payload.to_string(), String::new(), 0);
     }
 
     if on("tasks-running") && running_tasks_exist() {

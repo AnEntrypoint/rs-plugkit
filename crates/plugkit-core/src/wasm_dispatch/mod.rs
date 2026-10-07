@@ -7,7 +7,7 @@ mod verbs;
 
 pub(crate) use events::{current_dispatch_session_id, emit_event};
 pub use host_abi::{
-    git_call, git_call_argv, git_porcelain, host_allow_root, host_browser_exec, host_cas_write,
+    git_call, git_call_argv, git_porcelain, host_allow_root, host_cas_write,
     host_cwd_string, host_env_get, host_exec_js, host_exists, host_fetch, host_fs_read,
     host_fs_readdir, host_fs_stat, host_fs_write, host_git, host_kv_delete, host_kv_get,
     host_kv_put, host_kv_query, host_kv_read, host_log, host_now_ms, host_plugin_call, host_read,

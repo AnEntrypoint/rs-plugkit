@@ -28,15 +28,15 @@ Route every mutation through PRD rows, mutables, KV memos; attach an audit tuple
 
 ## Witness
 
-You reason in code, not silent prose: an unrun thought is a guess. The hypothesis becomes `exec_js`/`codesearch`/`page.evaluate`; its output is the conclusion. Hypothesize, execute, witness -- the loop IS the reasoning, and it leaves an artifact the next agent can trust.
+You reason in code, not silent prose: an unrun thought is a guess. The hypothesis becomes `exec_js`/`codesearch`; its output is the conclusion. Hypothesize, execute, witness -- the loop IS the reasoning, and it leaves an artifact the next agent can trust.
 
 Witness IS the distance measurement: an observable artifact means `d(state, goal)` decreased. Prose-only composition, or success claimed without the run, sits at high distance regardless of structure -- unwitnessed prose; L3 rejects the next dispatch.
 
-**Process of elimination is the debugging paradigm on every surface; manual labour against real services is how you witness.** Each candidate cause is a hypothesis, tested by running it, never reasoned around. No guess-and-restart, no a/b-test, no shotgun variants: enumerate candidates as mutables, eliminate each by REAL-input witness -- `exec_js` on the real service, `codesearch`/`Read` on real source, `browser`'s `page.evaluate` on a live `window.*` global. Each elimination reveals the next mutable; iterate to single-cause-survives. One live-runtime read outweighs a hundred blind restarts.
+**Process of elimination is the debugging paradigm on every surface; manual labour against real services is how you witness.** Each candidate cause is a hypothesis, tested by running it, never reasoned around. No guess-and-restart, no a/b-test, no shotgun variants: enumerate candidates as mutables, eliminate each by REAL-input witness -- `exec_js` on the real service, `codesearch`/`Read` on real source. Each elimination reveals the next mutable; iterate to single-cause-survives. One live-runtime read outweighs a hundred blind restarts.
 
-**Before the first hypothesis, name the loop that will falsify it.** A hard bug gets a single named command -- an `exec_js`/`browser` dispatch, a CLI invocation, a curl against a live dev surface -- that is red-capable (drives the exact reported symptom, not a nearby one), deterministic (same verdict every run), and fast. Name and run that command once, unmodified, before reading code for a theory. Every mutable elimination pass afterward reuses the same loop.
+**Before the first hypothesis, name the loop that will falsify it.** A hard bug gets a single named command -- an `exec_js` dispatch, a CLI invocation, a curl against a live dev surface -- that is red-capable (drives the exact reported symptom, not a nearby one), deterministic (same verdict every run), and fast. Name and run that command once, unmodified, before reading code for a theory. Every mutable elimination pass afterward reuses the same loop.
 
-Profile the real surface, never intuit. `exec_js`: `duration_ms` free, own timing + `process.memoryUsage()` on stdout, thrown-`stack` on stderr -- read both channels. Slow-node-not-obvious: `exec_js opts.profile:true` / browser `profile\n<script>` prefix both return worst-N `file:line` self-time. Profile to LOCATE, then eliminate by live measurement.
+Profile the real surface, never intuit. `exec_js`: `duration_ms` free, own timing + `process.memoryUsage()` on stdout, thrown-`stack` on stderr -- read both channels. Slow-node-not-obvious: `exec_js opts.profile:true` returns worst-N `file:line` self-time. Profile to LOCATE, then eliminate by live measurement.
 
 ## Always-rearchitect-immediately (hard rule)
 

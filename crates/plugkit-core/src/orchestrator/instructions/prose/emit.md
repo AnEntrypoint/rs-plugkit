@@ -41,8 +41,6 @@ A build, a subprocess, a filesystem probe, a process-management check -- any she
 
 One write per artifact, then a disk Read against every touched path -- witness the change, never reason it succeeded. Verified disk state IS the witness, not the tool-call return. Discrepancy -> regress to root cause, never retry.
 
-**Client-side artifacts: write-then-browser-witness, same turn.** `.html .js .jsx .ts .tsx .vue .svelte .mjs .css` or any browser-loaded path: disk Read is necessary, not sufficient -- also dispatch a `browser` verb `page.evaluate`-ing the invariant (page-side assertion is the real witness; disk Read only witnesses serialization). Skip = shipping a green-checked stub. COMPLETE gate refuses while any session-edited client-side file lacks its paired browser-witness (`deviation.client-edit-no-witness`, gates.rs) -- the missing witness is the next dispatch.
-
 ## Artifact scope
 
 PRD names the writable artifacts; closure narrative goes to the commit message + `memorize-fire`, never the response body -- a file PRD does not name is response-body displacing dispatch. Write-then-check exposing an adjacent artifact (generated file the build needs, doc naming the new artifact, witness script) -> `prd-add` it this turn; unlanded observation evaporates with the turn. Uncertain writes -> re-dispatch `instruction`.

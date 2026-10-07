@@ -2,8 +2,8 @@
 
 use super::instructions::{compiled_default_for_prose_key, has_compiled_default_for_prose_key};
 use super::residual::{
-    RESIDUAL_BROWSER_OPEN_DEFAULT, RESIDUAL_DIRTY_TREE_DEFAULT, RESIDUAL_IMPERATIVE_DEFAULT,
-    RESIDUAL_PRD_OPEN_DEFAULT, RESIDUAL_TASKS_RUNNING_DEFAULT,
+    RESIDUAL_DIRTY_TREE_DEFAULT, RESIDUAL_IMPERATIVE_DEFAULT, RESIDUAL_PRD_OPEN_DEFAULT,
+    RESIDUAL_TASKS_RUNNING_DEFAULT,
 };
 use super::{fsm, transitions};
 use crate::pkfs;
@@ -16,21 +16,10 @@ const GATE_DEFAULTS: &[(&str, &str)] = &[(
 
 const RESIDUAL_DEFAULTS: &[(&str, &str)] = &[
     ("prd-open", RESIDUAL_PRD_OPEN_DEFAULT),
-    ("browser-open", RESIDUAL_BROWSER_OPEN_DEFAULT),
     ("tasks-running", RESIDUAL_TASKS_RUNNING_DEFAULT),
     ("dirty-tree", RESIDUAL_DIRTY_TREE_DEFAULT),
     ("imperative", RESIDUAL_IMPERATIVE_DEFAULT),
 ];
-
-const BROWSER_CONFIG_EXAMPLE: &str = r#"{
-  "cdp_poll_timeout_ms": 1000,
-  "cdp_poll_interval_ms": 250,
-  "chrome_ready_deadline_ms": 30000,
-  "eval_timeout_grace_ms": 6000,
-  "headless": false,
-  "session_idle_timeout_ms": 1800000
-}
-"#;
 
 const DAEMON_PROJECT_CONFIG_EXAMPLE: &str = r#"{
   "gm_concurrency_limit": 4
@@ -154,7 +143,6 @@ fn merge_policy_rows() -> Vec<PolicyRow> {
     let graph = fsm::graph();
     let mut prose_keys: Vec<String> = graph.states.iter().map(|s| s.prose_key.clone()).collect();
     prose_keys.push("entry".to_string());
-    prose_keys.push("browser".to_string());
     prose_keys.sort();
     prose_keys.dedup();
     for key in &prose_keys {
@@ -263,16 +251,6 @@ fn merge_policy_rows() -> Vec<PolicyRow> {
             note: None,
         });
     }
-
-    rows.push(PolicyRow {
-        path: ".gm/browser-config.json".to_string(),
-        class: "host JSON config",
-        policy: MergePolicy::PerFieldParseGated,
-        reader: "agentplug-host BrowserConfig::load -- a DIFFERENT crate, not this build",
-        placeholders: Vec::new(),
-        derived: "NOT derived from code: no reader for this path exists in plugkit, so the field list and per-field defaults below are transcribed from agentplug-host and can drift without this build noticing",
-        note: Some("The scaffolded example sets `headless: false`, matching the host's own compiled fallback `headless.unwrap_or(false)`. Removing the field reproduces the vendored example's behaviour.".to_string()),
-    });
 
     rows.push(PolicyRow {
         path: ".gm/daemon-project-config.json".to_string(),
@@ -402,7 +380,6 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
     let graph = fsm::graph();
     let mut prose_keys: Vec<String> = graph.states.iter().map(|s| s.prose_key.clone()).collect();
     prose_keys.push("entry".to_string());
-    prose_keys.push("browser".to_string());
     prose_keys.sort();
     prose_keys.dedup();
     for key in &prose_keys {
@@ -532,7 +509,7 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
             format!("- **Deviation severity** ({} kinds): `policy.deviation_severity`, keyed by kind, valued `deny` or `log`. See fsm/deviations.md.", crate::orchestrator::deviations::known_deviations().len()),
             "- **Instruction prose**: every `.gm/instructions/<prose_key>.md`, plus the gate and residual message files. Resolved per key, so overriding one leaves the rest on the compiled default.".to_string(),
             "- **Jit hooks**: `.gm/instructions/hooks/*.js`, referenced by a gate's `hook`. This is the escape hatch for a condition with no compiled predicate -- it runs real JS at gate evaluation and fails CLOSED.".to_string(),
-            "- **Browser and daemon knobs**: browser-config.json and daemon-project-config.json, per field.".to_string(),
+            "- **Daemon knobs**: daemon-project-config.json, per field.".to_string(),
             String::new(),
             "## Requires a Rust change".to_string(),
             String::new(),
@@ -578,11 +555,6 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
         let (ok, status) = write_if_absent_or_forced(&path, default_text, force);
         results.push(json!({ "path": path, "ok": ok, "status": status }));
     }
-
-    let browser_config_path = ".gm/browser-config.json";
-    let (ok, status) =
-        write_if_absent_or_forced(browser_config_path, BROWSER_CONFIG_EXAMPLE, force);
-    results.push(json!({ "path": browser_config_path, "ok": ok, "status": status }));
 
     let daemon_project_config_path = ".gm/daemon-project-config.json";
     let (ok, status) = write_if_absent_or_forced(
@@ -660,8 +632,8 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
             "derived_from": r.derived,
             "caveat": r.note,
         })).collect::<Vec<Value>>(),
-        "merge_policy_note": "Per-artifact precedence semantics, derived by walking the same registries the vendor pass writes from. There is deliberately no single global merge rule: `per-key-whole-file` prose falls back a FILE at a time with no merge inside it, the graph is `wholesale-replace`, and the two host JSON configs are `per-field-parse-gated` -- per-field while the file PARSES, whole-file-discarded the moment it does not. The same table is written to .gm/instructions/fsm/merge-policy.md. Rows whose `derived_from` begins NOT derived are transcribed from agentplug-host, which this build cannot see, and are the drift risk.",
-        "note": "instruction/transition now serve from these files wherever present (per-key fallback to the compiled default for any prose file, wholesale-replace for the graph). gates/<key>.md and residual/<key>.md override the matching gate-denial/residual-scan message text via the same prose::resolve chain, and some of those defaults carry {token} placeholders the caller substitutes AFTER resolution -- an override that drops a token silently renders without that value (see merge_policy[].placeholders). browser-config.json and daemon-project-config.json are example defaults for the fields BrowserConfig/ProjectDaemonConfig actually read -- removing a field falls back to that field's compiled default INDIVIDUALLY, but a file that fails to parse is discarded WHOLE and silently, reverting every field at once with no diagnostic. Note the example's `headless: false` matches the host's own fallback, so deleting that field preserves headful behaviour rather than inverting it. The machine-wide ~/.agentplug/daemon-config.json is out of this per-project verb's reach (gm.wasm's fs sandbox is rooted at the project cwd); agentplug-runner itself scaffolds that file with the same example-defaults shape on first daemon boot if absent. Edit .gm/instructions/fsm/graph.json to add a custom phase, rewire an edge, or change which gates guard which transition -- no rebuild needed. Re-run this verb with {\"force\":true} to reset any of these back to the compiled defaults.",
+        "merge_policy_note": "Per-artifact precedence semantics, derived by walking the same registries the vendor pass writes from. There is deliberately no single global merge rule: `per-key-whole-file` prose falls back a FILE at a time with no merge inside it, the graph is `wholesale-replace`, and the host JSON config is `per-field-parse-gated` -- per-field while the file PARSES, whole-file-discarded the moment it does not. The same table is written to .gm/instructions/fsm/merge-policy.md. Rows whose `derived_from` begins NOT derived are transcribed from agentplug-host, which this build cannot see, and are the drift risk.",
+        "note": "instruction/transition now serve from these files wherever present (per-key fallback to the compiled default for any prose file, wholesale-replace for the graph). gates/<key>.md and residual/<key>.md override the matching gate-denial/residual-scan message text via the same prose::resolve chain, and some of those defaults carry {token} placeholders the caller substitutes AFTER resolution -- an override that drops a token silently renders without that value (see merge_policy[].placeholders). daemon-project-config.json is an example default for the fields ProjectDaemonConfig actually reads -- removing a field falls back to that field's compiled default INDIVIDUALLY, but a file that fails to parse is discarded WHOLE and silently, reverting every field at once with no diagnostic. The machine-wide ~/.agentplug/daemon-config.json is out of this per-project verb's reach (gm.wasm's fs sandbox is rooted at the project cwd); agentplug-runner itself scaffolds that file with the same example-defaults shape on first daemon boot if absent. Edit .gm/instructions/fsm/graph.json to add a custom phase, rewire an edge, or change which gates guard which transition -- no rebuild needed. Re-run this verb with {\"force\":true} to reset any of these back to the compiled defaults.",
     });
     (payload.to_string(), String::new(), 0)
 }
