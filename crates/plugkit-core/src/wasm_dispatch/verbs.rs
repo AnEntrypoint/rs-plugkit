@@ -6365,6 +6365,95 @@ fn push_output_is_github_auth_failure(output: &str) -> bool {
         || output.contains("password authentication is not supported")
 }
 
+const GIT_PUSH_TRANSIENT_REMOTE_MAX_ATTEMPTS: u32 = 4;
+const GIT_PUSH_TRANSIENT_REMOTE_BACKOFF_MS: u64 = 500;
+
+fn push_output_is_diverged_remote(low: &str) -> bool {
+    low.contains("fetch first")
+        || low.contains("non-fast-forward")
+        || low.contains("non fast forward")
+        || low.contains("remote contains work that you do")
+}
+
+fn push_output_is_transient_remote_rejection(output: &str) -> bool {
+    let low = output.to_ascii_lowercase();
+    if push_output_is_diverged_remote(&low) || push_output_is_github_auth_failure(output) {
+        return false;
+    }
+    low.contains("internal server error")
+        || low.contains("service unavailable")
+        || low.contains("bad gateway")
+        || low.contains("gateway timeout")
+        || low.contains("request id")
+        || low.contains("remote end hung up")
+        || low.contains("temporarily unavailable")
+}
+
+fn push_output_remote_request_ids(output: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let low = line.to_ascii_lowercase();
+        let Some(at) = low.find("request id") else {
+            continue;
+        };
+        let tail = line[at + "request id".len()..]
+            .trim_start()
+            .trim_start_matches(':')
+            .trim_start();
+        let id = tail
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(|c: char| c == ',' || c == ';' || c == ')');
+        if !id.is_empty() && !ids.iter().any(|seen| seen == id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
+}
+
+fn pack_transient_remote_push_failure(
+    repo: &Option<String>,
+    branch: &str,
+    source_ref: &str,
+    source_sha: &str,
+    preserved_dirty_worktree: bool,
+    attempts: u32,
+    request_ids: &[String],
+    output: &str,
+) -> u64 {
+    log_deviation_push("push-transient-remote-rejection", branch);
+    let request_ids_display = if request_ids.is_empty() {
+        "(none reported)".to_string()
+    } else {
+        request_ids.join(", ")
+    };
+    let completed = attempts.saturating_sub(1) as u64;
+    let waited_ms = GIT_PUSH_TRANSIENT_REMOTE_BACKOFF_MS * completed * (completed + 1) / 2;
+    pack(
+        json!({
+            "ok": false,
+            "verb": "git_push",
+            "gate_denied": true,
+            "repo": repo,
+            "branch": branch,
+            "source_ref": source_ref,
+            "source_sha": source_sha,
+            "preserved_dirty_worktree": preserved_dirty_worktree,
+            "transient_remote_rejection": true,
+            "push_attempts": attempts,
+            "remote_request_ids": request_ids,
+            "reason": format!(
+                "push of explicit source ref '{}' to {} was rejected by the remote itself with a transient server-side error ({} attempts, {} ms of backoff) -- this is NOT a non-fast-forward: the local ref did not diverge, so git_pull reports 'Already up to date' and re-pulling cannot help. GitHub Request ID(s): {}. Last git output:\n{}",
+                source_ref, branch, attempts, waited_ms, request_ids_display, output
+            ),
+            "next_dispatch": "instruction",
+            "next_action_hint": "Re-dispatch the same git_push once the remote recovers; git_pull is unnecessary and will report Already up to date. A sustained failure is a GitHub-side outage, not a local divergence.",
+        })
+        .to_string(),
+    )
+}
+
 fn ssh_https_fallback_for_origin(repo: Option<&str>) -> Option<SshHttpsFallback> {
     let url = exec_git_in(repo, "remote get-url origin")
         .trim()
@@ -6620,6 +6709,26 @@ fn git_push(body: &Value) -> u64 {
             }
         }
     }
+    let mut transient_attempts = 1u32;
+    let mut remote_request_ids: Vec<String> = Vec::new();
+    if !push_succeeded && push_output_is_transient_remote_rejection(&push_out) {
+        remote_request_ids = push_output_remote_request_ids(&push_out);
+        while !push_succeeded && transient_attempts < GIT_PUSH_TRANSIENT_REMOTE_MAX_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(
+                GIT_PUSH_TRANSIENT_REMOTE_BACKOFF_MS * transient_attempts as u64,
+            ));
+            transient_attempts += 1;
+            let (out, ok_now) =
+                exec_git_push_in(repo.as_deref(), source_ref, &branch, ssh_fallback.as_ref());
+            for id in push_output_remote_request_ids(&out) {
+                if !remote_request_ids.contains(&id) {
+                    remote_request_ids.push(id);
+                }
+            }
+            push_out = out;
+            push_succeeded = ok_now;
+        }
+    }
     let mut attempts = 0u32;
     let mut rebased = false;
     if !push_succeeded && explicit_source_ref.is_some() {
@@ -6641,6 +6750,18 @@ fn git_push(body: &Value) -> u64 {
                 "next_action_hint": "Complete normal GitHub CLI sign-in, then re-dispatch the same git_push request; do not copy tokens or change git credential configuration.",
             }).to_string());
         }
+        if push_output_is_transient_remote_rejection(&push_out) {
+            return pack_transient_remote_push_failure(
+                &repo,
+                &branch,
+                source_ref,
+                &local_source_before,
+                preserved_dirty_worktree,
+                transient_attempts,
+                &remote_request_ids,
+                &push_out,
+            );
+        }
         log_deviation_push("push-explicit-ref-remote-moved", &branch);
         return pack(json!({
             "ok": false,
@@ -6659,7 +6780,10 @@ fn git_push(body: &Value) -> u64 {
             "next_action_hint": "git_pull {branch} then git_push {rev:\"HEAD\"}",
         }).to_string());
     }
-    while !push_succeeded && attempts < 3 {
+    while !push_succeeded
+        && attempts < 3
+        && !push_output_is_transient_remote_rejection(&push_out)
+    {
         attempts += 1;
         let rebase_argv = ["pull", "--rebase", "origin", branch.as_str()];
         let rebase_out = match ssh_fallback.as_ref() {
@@ -6693,6 +6817,18 @@ fn git_push(body: &Value) -> u64 {
         push_succeeded = ok_now;
     }
     if !push_succeeded {
+        if push_output_is_transient_remote_rejection(&push_out) {
+            return pack_transient_remote_push_failure(
+                &repo,
+                &branch,
+                source_ref,
+                &local_source_before,
+                preserved_dirty_worktree,
+                transient_attempts,
+                &remote_request_ids,
+                &push_out,
+            );
+        }
         log_deviation_push("push-remote-outpaces", &branch);
         return pack(json!({
             "ok": false,
