@@ -8622,7 +8622,7 @@ fn git_merge(body: &Value) -> u64 {
             "head_before": head_before,
             "head_after": head_after,
             "already_up_to_date": head_before == head_after,
-            "fast_forward": out.contains("Fast-forward"),
+            "fast_forward": out.lines().any(|line| line == "Fast-forward" || line.starts_with("Fast-forward (")),
             "output": out
         }),
     )
