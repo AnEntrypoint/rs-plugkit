@@ -1,7 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
-use serde::{Deserialize, Serialize};
 use crate::pkfs;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,7 +26,10 @@ pub fn read_fiber_state(path: &str) -> FiberLifecycle {
 }
 
 fn write_fiber_state(path: &str, state: FiberLifecycle) {
-    let body = FiberState { state, updated_at_ms: super::state::now_ms() };
+    let body = FiberState {
+        state,
+        updated_at_ms: super::state::now_ms(),
+    };
     if let Ok(text) = serde_json::to_string(&body) {
         let _ = pkfs::write(path, &text);
     }
@@ -65,10 +68,16 @@ pub struct PreservationViolation {
 
 impl ActiveFiberSet {
     pub fn new() -> ActiveFiberSet {
-        ActiveFiberSet { entries: Vec::new() }
+        ActiveFiberSet {
+            entries: Vec::new(),
+        }
     }
 
-    pub fn insert(&mut self, name: &str, capabilities: &[String]) -> Result<(), PreservationViolation> {
+    pub fn insert(
+        &mut self,
+        name: &str,
+        capabilities: &[String],
+    ) -> Result<(), PreservationViolation> {
         for (existing_name, existing_caps) in &self.entries {
             for cap in capabilities {
                 if existing_caps.contains(cap) {
@@ -101,14 +110,18 @@ pub fn verify_recovery_exactness(current: FiberLifecycle) -> bool {
     if current != FiberLifecycle::Unloading {
         return true;
     }
-    transition(current, true) == FiberLifecycle::Inactive && transition(current, false) == FiberLifecycle::Inactive
+    transition(current, true) == FiberLifecycle::Inactive
+        && transition(current, false) == FiberLifecycle::Inactive
 }
 
 pub struct SafeToWithdraw {
     pub name: String,
 }
 
-pub fn check_confluence(initial_states: &[(String, FiberLifecycle)], targets: &[(String, bool)]) -> bool {
+pub fn check_confluence(
+    initial_states: &[(String, FiberLifecycle)],
+    targets: &[(String, bool)],
+) -> bool {
     let run = |order: &[(String, bool)]| -> Vec<String> {
         let mut states: Vec<(String, FiberLifecycle)> = initial_states.to_vec();
         for (name, target) in order {
@@ -136,7 +149,9 @@ pub fn check_confluence(initial_states: &[(String, FiberLifecycle)], targets: &[
 impl SafeToWithdraw {
     pub fn check(name: &str, dependents: &[String]) -> Option<SafeToWithdraw> {
         if dependents.is_empty() {
-            Some(SafeToWithdraw { name: name.to_string() })
+            Some(SafeToWithdraw {
+                name: name.to_string(),
+            })
         } else {
             None
         }

@@ -1,10 +1,10 @@
 #![cfg(target_arch = "wasm32")]
 
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
 use super::coeffect_realm::RealmTable;
 use super::gm_dir;
 use crate::pkfs;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -62,8 +62,12 @@ pub struct ReconcileDecision {
     pub changed_fields: Vec<String>,
 }
 
-pub fn diff_entries(previous: &[ComponentEntry], next: &[ComponentEntry]) -> Vec<ReconcileDecision> {
-    let prev_by_id: BTreeMap<&str, &ComponentEntry> = previous.iter().map(|e| (e.id.as_str(), e)).collect();
+pub fn diff_entries(
+    previous: &[ComponentEntry],
+    next: &[ComponentEntry],
+) -> Vec<ReconcileDecision> {
+    let prev_by_id: BTreeMap<&str, &ComponentEntry> =
+        previous.iter().map(|e| (e.id.as_str(), e)).collect();
     let mut out = Vec::new();
 
     for entry in next {
@@ -76,7 +80,11 @@ pub fn diff_entries(previous: &[ComponentEntry], next: &[ComponentEntry]) -> Vec
             Some(prev) => {
                 let mut changed = Vec::new();
                 if prev.url != entry.url {
-                    out.push(ReconcileDecision { id: entry.id.clone(), op: ReconcileOp::Rebuild, changed_fields: vec!["url".to_string()] });
+                    out.push(ReconcileDecision {
+                        id: entry.id.clone(),
+                        op: ReconcileOp::Rebuild,
+                        changed_fields: vec!["url".to_string()],
+                    });
                     continue;
                 }
                 if prev.isolate != entry.isolate {
@@ -103,7 +111,11 @@ pub fn diff_entries(previous: &[ComponentEntry], next: &[ComponentEntry]) -> Vec
                 } else {
                     ReconcileOp::UpdateIntercept
                 };
-                out.push(ReconcileDecision { id: entry.id.clone(), op, changed_fields: changed });
+                out.push(ReconcileDecision {
+                    id: entry.id.clone(),
+                    op,
+                    changed_fields: changed,
+                });
             }
         }
     }
@@ -181,18 +193,30 @@ pub fn patch_isolation(
         let old_realm = rho.realm_of(key);
         let new_realm = rho_prime.realm_of(key);
         let entry_tag = next_tag(state);
-        state.entry_delta_tags.insert(entry_delta_key(&entry.id, key), entry_tag);
+        state
+            .entry_delta_tags
+            .insert(entry_delta_key(&entry.id, key), entry_tag);
 
-        let provider_id = state.provider_of.get(&provider_key(key, &old_realm)).cloned();
-        let provider_tag = provider_id
-            .as_ref()
-            .and_then(|pid| state.entry_delta_tags.get(&entry_delta_key(pid, key)).copied());
+        let provider_id = state
+            .provider_of
+            .get(&provider_key(key, &old_realm))
+            .cloned();
+        let provider_tag = provider_id.as_ref().and_then(|pid| {
+            state
+                .entry_delta_tags
+                .get(&entry_delta_key(pid, key))
+                .copied()
+        });
 
         let own_binding = provider_id.as_deref() == Some(entry.id.as_str())
-            && !state.provider_of.contains_key(&provider_key(key, &new_realm));
+            && !state
+                .provider_of
+                .contains_key(&provider_key(key, &new_realm));
         if own_binding {
             state.provider_of.remove(&provider_key(key, &old_realm));
-            state.provider_of.insert(provider_key(key, &new_realm), entry.id.clone());
+            state
+                .provider_of
+                .insert(provider_key(key, &new_realm), entry.id.clone());
             binding_moved.push(key.clone());
         }
 
@@ -204,7 +228,10 @@ pub fn patch_isolation(
             if dep_realm != old_realm && dep_realm != new_realm {
                 continue;
             }
-            let dep_tag = state.entry_delta_tags.get(&entry_delta_key(&dep.id, key)).copied();
+            let dep_tag = state
+                .entry_delta_tags
+                .get(&entry_delta_key(&dep.id, key))
+                .copied();
             let owned_old = dep_tag == Some(entry_tag);
             let owned_new = dep_tag == provider_tag && provider_tag.is_some();
             if owned_old != owned_new {
@@ -212,7 +239,13 @@ pub fn patch_isolation(
             }
         }
 
-        key_diffs.push(RealmKeyDiff { key: key.clone(), old_realm, new_realm, entry_tag, provider_tag });
+        key_diffs.push(RealmKeyDiff {
+            key: key.clone(),
+            old_realm,
+            new_realm,
+            entry_tag,
+            provider_tag,
+        });
     }
 
     RealmReassignment {
@@ -270,7 +303,11 @@ fn get_imports<'a>(graph: &'a ImportGraph, url: &str) -> &'a [String] {
     graph.get(url).map(|v| v.as_slice()).unwrap_or(&[])
 }
 
-pub fn classify(stashed: &BTreeSet<String>, externals: &BTreeSet<String>, graph: &ImportGraph) -> (BTreeSet<String>, BTreeSet<String>) {
+pub fn classify(
+    stashed: &BTreeSet<String>,
+    externals: &BTreeSet<String>,
+    graph: &ImportGraph,
+) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut accepted: BTreeSet<String> = stashed.clone();
     let mut declined: BTreeSet<String> = externals.clone();
     let mut pending: BTreeSet<String> = BTreeSet::new();
@@ -315,7 +352,11 @@ pub fn classify(stashed: &BTreeSet<String>, externals: &BTreeSet<String>, graph:
     (accepted, declined)
 }
 
-pub fn get_dependencies(root: &str, declined: &BTreeSet<String>, graph: &ImportGraph) -> BTreeSet<String> {
+pub fn get_dependencies(
+    root: &str,
+    declined: &BTreeSet<String>,
+    graph: &ImportGraph,
+) -> BTreeSet<String> {
     let mut deps: BTreeSet<String> = BTreeSet::new();
     let mut stack = vec![root.to_string()];
     while let Some(url) = stack.pop() {
@@ -332,7 +373,12 @@ pub fn get_dependencies(root: &str, declined: &BTreeSet<String>, graph: &ImportG
     deps
 }
 
-pub fn detect(entries: &[ComponentEntry], accepted: &BTreeSet<String>, declined: &BTreeSet<String>, graph: &ImportGraph) -> (Vec<String>, BTreeSet<String>) {
+pub fn detect(
+    entries: &[ComponentEntry],
+    accepted: &BTreeSet<String>,
+    declined: &BTreeSet<String>,
+    graph: &ImportGraph,
+) -> (Vec<String>, BTreeSet<String>) {
     let mut accepted = accepted.clone();
     let mut stale_entries = Vec::new();
     for entry in entries {
@@ -349,13 +395,24 @@ pub type ModuleBackup = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReloadOutcome {
-    Committed { reloaded: Vec<String> },
-    RolledBack { reloaded_from_backup: Vec<String>, error: String },
+    Committed {
+        reloaded: Vec<String>,
+    },
+    RolledBack {
+        reloaded_from_backup: Vec<String>,
+        error: String,
+    },
 }
 
 pub trait FiberSwap {
     fn dispose(&mut self, entry_id: &str);
-    fn instantiate(&mut self, entry_id: &str, url: &str, source: &str, config: &serde_json::Value) -> Result<String, String>;
+    fn instantiate(
+        &mut self,
+        entry_id: &str,
+        url: &str,
+        source: &str,
+        config: &serde_json::Value,
+    ) -> Result<String, String>;
 }
 
 pub fn reload(
@@ -381,7 +438,10 @@ pub fn reload(
                     let _ = swap.instantiate(&e.id, &e.url, &backup_source, &e.config);
                     restored.push(e.id.clone());
                 }
-                return ReloadOutcome::RolledBack { reloaded_from_backup: restored, error };
+                return ReloadOutcome::RolledBack {
+                    reloaded_from_backup: restored,
+                    error,
+                };
             }
         }
     }
@@ -406,7 +466,11 @@ pub fn hmr_cycle(
         .filter_map(|url| current_sources.get(url).map(|s| (url.clone(), s.clone())))
         .collect();
 
-    let stale_entries: Vec<ComponentEntry> = entries.iter().filter(|e| stale_ids.contains(&e.id)).cloned().collect();
+    let stale_entries: Vec<ComponentEntry> = entries
+        .iter()
+        .filter(|e| stale_ids.contains(&e.id))
+        .cloned()
+        .collect();
     let outcome = reload(&stale_entries, next_sources, &backup, swap);
 
     (stale_ids, accepted, outcome)

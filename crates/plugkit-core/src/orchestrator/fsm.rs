@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::pkfs;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateNode {
@@ -95,37 +95,100 @@ pub struct Policy {
 }
 
 fn default_toplevel_doc_allowlist() -> Vec<String> {
-    ["AGENTS.md", "CLAUDE.md", "README.md", "SKILLS.md", "CHANGELOG.md", "LICENSE", "LICENSE.md"]
-        .iter().map(|s| s.to_string()).collect()
+    [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "README.md",
+        "SKILLS.md",
+        "CHANGELOG.md",
+        "LICENSE",
+        "LICENSE.md",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 fn default_await_allowed_verbs() -> Vec<String> {
-    ["memorize-continue", "instruction", "phase-status", "health"].iter().map(|s| s.to_string()).collect()
+    ["memorize-continue", "instruction", "phase-status", "health"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 fn default_longgap_exempt_verbs() -> Vec<String> {
-    ["health", "auto-recall", "wait", "sleep"].iter().map(|s| s.to_string()).collect()
+    ["health", "auto-recall", "wait", "sleep"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 fn default_longgap_refresh_verbs() -> Vec<String> {
-    ["instruction", "transition", "phase-status", "prd-add", "prd-resolve", "prd-list", "prd-defer",
-     "mutable-add", "mutable-resolve", "mutable-list", "mutable-defer"]
-        .iter().map(|s| s.to_string()).collect()
+    [
+        "instruction",
+        "transition",
+        "phase-status",
+        "prd-add",
+        "prd-resolve",
+        "prd-list",
+        "prd-defer",
+        "mutable-add",
+        "mutable-resolve",
+        "mutable-list",
+        "mutable-defer",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 fn default_shell_verbs() -> Vec<String> {
-    ["bash", "sh", "shell", "zsh", "powershell", "ps1", "pwsh", "cmd"].iter().map(|s| s.to_string()).collect()
+    [
+        "bash",
+        "sh",
+        "shell",
+        "zsh",
+        "powershell",
+        "ps1",
+        "pwsh",
+        "cmd",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
-fn default_deny_shell_git() -> bool { true }
-fn default_gate_repeat_escalate_threshold() -> u64 { 3 }
-fn default_hook_timeout_ms() -> u64 { 15_000 }
-fn default_longgap_threshold_ms() -> u64 { 300_000 }
-fn default_require_witness_evidence() -> bool { true }
+fn default_deny_shell_git() -> bool {
+    true
+}
+fn default_gate_repeat_escalate_threshold() -> u64 {
+    3
+}
+fn default_hook_timeout_ms() -> u64 {
+    15_000
+}
+fn default_longgap_threshold_ms() -> u64 {
+    300_000
+}
+fn default_require_witness_evidence() -> bool {
+    true
+}
 fn default_prd_closed_statuses() -> Vec<String> {
-    ["done", "complete", "completed", "resolved"].iter().map(|s| s.to_string()).collect()
+    ["done", "complete", "completed", "resolved"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 fn default_mutables_resolved_statuses() -> Vec<String> {
-    ["witnessed", "resolved"].iter().map(|s| s.to_string()).collect()
+    ["witnessed", "resolved"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
-fn default_reject_duplicate_witness() -> bool { true }
-fn default_initial_phase() -> String { "PLAN".to_string() }
+fn default_reject_duplicate_witness() -> bool {
+    true
+}
+fn default_initial_phase() -> String {
+    "PLAN".to_string()
+}
 fn default_pseudo_phases() -> Vec<(String, String)> {
     vec![
         ("ENTRY".to_string(), "entry".to_string()),
@@ -135,16 +198,35 @@ fn default_pseudo_phases() -> Vec<(String, String)> {
 }
 
 fn default_residual_checks_ordered_by_priority() -> Vec<String> {
-    vec!["prd-open".to_string(), "browser-open".to_string(), "tasks-running".to_string(), "dirty-tree".to_string()]
+    vec![
+        "prd-open".to_string(),
+        "browser-open".to_string(),
+        "tasks-running".to_string(),
+        "dirty-tree".to_string(),
+    ]
 }
 
-fn default_long_gap_same_burst_ms() -> u64 { 5_000 }
-fn default_long_gap_retry_bursts_before_escalate() -> u32 { 2 }
-fn default_terminal_phase() -> String { "COMPLETE".to_string() }
-fn default_mutables_default_status() -> String { "unknown".to_string() }
-fn default_mutables_witness_status() -> String { "witnessed".to_string() }
-fn default_mutables_require_witness_evidence() -> bool { true }
-fn default_cas_max_attempts() -> u32 { 5 }
+fn default_long_gap_same_burst_ms() -> u64 {
+    5_000
+}
+fn default_long_gap_retry_bursts_before_escalate() -> u32 {
+    2
+}
+fn default_terminal_phase() -> String {
+    "COMPLETE".to_string()
+}
+fn default_mutables_default_status() -> String {
+    "unknown".to_string()
+}
+fn default_mutables_witness_status() -> String {
+    "witnessed".to_string()
+}
+fn default_mutables_require_witness_evidence() -> bool {
+    true
+}
+fn default_cas_max_attempts() -> u32 {
+    5
+}
 fn default_deviation_severity() -> std::collections::BTreeMap<String, String> {
     std::collections::BTreeMap::new()
 }
@@ -209,24 +291,45 @@ impl Graph {
     }
 
     pub fn default_edge_from(&self, from: &str) -> Option<&Edge> {
-        self.edges.iter().find(|e| e.from.eq_ignore_ascii_case(from))
+        self.edges
+            .iter()
+            .find(|e| e.from.eq_ignore_ascii_case(from))
     }
 
     pub fn edge_between(&self, from: &str, to: &str) -> Option<&Edge> {
-        self.edges.iter().find(|e| e.from.eq_ignore_ascii_case(from) && e.to.eq_ignore_ascii_case(to))
+        self.edges
+            .iter()
+            .find(|e| e.from.eq_ignore_ascii_case(from) && e.to.eq_ignore_ascii_case(to))
     }
 
     pub fn gate(&self, name: &str) -> Option<&GateDef> {
-        self.gates.iter().find(|g| g.name.eq_ignore_ascii_case(name))
+        self.gates
+            .iter()
+            .find(|g| g.name.eq_ignore_ascii_case(name))
     }
 
     pub const KNOWN_POLICY_KEYS: &'static [&'static str] = &[
-        "toplevel_doc_allowlist", "await_allowed_verbs", "longgap_exempt_verbs", "longgap_refresh_verbs", "fresh_prompt_resets_phase",
-        "shell_verbs", "deny_shell_git", "gate_repeat_escalate_threshold", "hook_timeout_ms",
-        "longgap_threshold_ms", "require_witness_evidence", "prd_closed_statuses",
-        "mutables_resolved_statuses", "reject_duplicate_witness", "initial_phase",
-        "terminal_phase", "mutables_default_status", "mutables_witness_status",
-        "mutables_require_witness_evidence", "cas_max_attempts", "deviation_severity",
+        "toplevel_doc_allowlist",
+        "await_allowed_verbs",
+        "longgap_exempt_verbs",
+        "longgap_refresh_verbs",
+        "fresh_prompt_resets_phase",
+        "shell_verbs",
+        "deny_shell_git",
+        "gate_repeat_escalate_threshold",
+        "hook_timeout_ms",
+        "longgap_threshold_ms",
+        "require_witness_evidence",
+        "prd_closed_statuses",
+        "mutables_resolved_statuses",
+        "reject_duplicate_witness",
+        "initial_phase",
+        "terminal_phase",
+        "mutables_default_status",
+        "mutables_witness_status",
+        "mutables_require_witness_evidence",
+        "cas_max_attempts",
+        "deviation_severity",
     ];
 
     pub fn min_plugkit_version_unmet(&self) -> Option<String> {
@@ -237,8 +340,15 @@ impl Graph {
         let running = env!("CARGO_PKG_VERSION");
         let parse = |s: &str| -> Option<Vec<u64>> {
             let core = s.split(['-', '+']).next().unwrap_or(s);
-            let parts: Vec<u64> = core.split('.').map(|p| p.trim().parse::<u64>().ok()).collect::<Option<Vec<u64>>>()?;
-            if parts.is_empty() { None } else { Some(parts) }
+            let parts: Vec<u64> = core
+                .split('.')
+                .map(|p| p.trim().parse::<u64>().ok())
+                .collect::<Option<Vec<u64>>>()?;
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts)
+            }
         };
         let (Some(want), Some(have)) = (parse(&declared), parse(running)) else {
             return Some(format!(
@@ -324,8 +434,12 @@ impl Graph {
     }
 
     pub fn unknown_policy_keys(raw: &str) -> Vec<String> {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { return Vec::new() };
-        let Some(policy) = v.get("policy").and_then(|p| p.as_object()) else { return Vec::new() };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return Vec::new();
+        };
+        let Some(policy) = v.get("policy").and_then(|p| p.as_object()) else {
+            return Vec::new();
+        };
         policy
             .keys()
             .filter(|k| !Self::KNOWN_POLICY_KEYS.contains(&k.as_str()))
@@ -335,7 +449,9 @@ impl Graph {
 
     pub fn deviation_severity_warnings(&self) -> Vec<String> {
         let mut warnings = Vec::new();
-        for unknown in super::deviations::unknown_severity_overrides(&self.policy.deviation_severity) {
+        for unknown in
+            super::deviations::unknown_severity_overrides(&self.policy.deviation_severity)
+        {
             warnings.push(format!(
                 "policy.deviation_severity names `{unknown}`, which is not a kind in the compiled deviation registry (see fsm/deviations.md for the valid set) -- this override configures nothing"
             ));
@@ -363,18 +479,30 @@ impl Graph {
         }
 
         if !self.has_state(&self.policy.initial_phase) {
-            problems.push(format!("policy.initial_phase `{}` is not a declared state", self.policy.initial_phase));
+            problems.push(format!(
+                "policy.initial_phase `{}` is not a declared state",
+                self.policy.initial_phase
+            ));
         }
         if !self.has_state(&self.policy.terminal_phase) {
-            problems.push(format!("policy.terminal_phase `{}` is not a declared state", self.policy.terminal_phase));
+            problems.push(format!(
+                "policy.terminal_phase `{}` is not a declared state",
+                self.policy.terminal_phase
+            ));
         }
 
         for e in &self.edges {
             if !self.has_state(&e.from) {
-                problems.push(format!("edge `{} -> {}` starts at undeclared state `{}`", e.from, e.to, e.from));
+                problems.push(format!(
+                    "edge `{} -> {}` starts at undeclared state `{}`",
+                    e.from, e.to, e.from
+                ));
             }
             if !self.has_state(&e.to) {
-                problems.push(format!("edge `{} -> {}` ends at undeclared state `{}`", e.from, e.to, e.to));
+                problems.push(format!(
+                    "edge `{} -> {}` ends at undeclared state `{}`",
+                    e.from, e.to, e.to
+                ));
             }
             for gate_name in &e.gates {
                 if self.gate(gate_name).is_none() {
@@ -740,11 +868,14 @@ fn source_repo_graph_path() -> Option<String> {
         return None;
     }
     if let Err(reason) = crate::config_path::validate_source_path(rel) {
-        crate::wasm_dispatch::emit_event("fsm_graph_source_path_rejected", serde_json::json!({
-            "path": rel,
-            "reason": reason,
-            "detail": "the resolved config's `fsm.graph` pointer is not a safe relative path, so the repo-supplied graph was not read. A pointer that escapes the cache directory is refused rather than normalised.",
-        }));
+        crate::wasm_dispatch::emit_event(
+            "fsm_graph_source_path_rejected",
+            serde_json::json!({
+                "path": rel,
+                "reason": reason,
+                "detail": "the resolved config's `fsm.graph` pointer is not a safe relative path, so the repo-supplied graph was not read. A pointer that escapes the cache directory is refused rather than normalised.",
+            }),
+        );
         return None;
     }
     let base = resolved.cache_dir?;
@@ -764,7 +895,11 @@ pub fn graph_detailed() -> (Graph, GraphTier, String) {
     if let Some(raw) = pkfs::read_to_string(GRAPH_OVERRIDE_PATH) {
         return match load_tier(&raw, GRAPH_OVERRIDE_PATH, GraphTier::LocalOverride) {
             Some(g) => (g, GraphTier::LocalOverride, GRAPH_OVERRIDE_PATH.to_string()),
-            None => (default_graph(), GraphTier::CompiledDefault, COMPILED_PATH.to_string()),
+            None => (
+                default_graph(),
+                GraphTier::CompiledDefault,
+                COMPILED_PATH.to_string(),
+            ),
         };
     }
 
@@ -772,13 +907,21 @@ pub fn graph_detailed() -> (Graph, GraphTier, String) {
         if let Some(raw) = pkfs::read_to_string(&path) {
             return match load_tier(&raw, &path, GraphTier::SourceRepo) {
                 Some(g) => (g, GraphTier::SourceRepo, path),
-                None => (default_graph(), GraphTier::CompiledDefault, COMPILED_PATH.to_string()),
+                None => (
+                    default_graph(),
+                    GraphTier::CompiledDefault,
+                    COMPILED_PATH.to_string(),
+                ),
             };
         }
     }
 
     clear_graph_rejection();
-    (default_graph(), GraphTier::CompiledDefault, COMPILED_PATH.to_string())
+    (
+        default_graph(),
+        GraphTier::CompiledDefault,
+        COMPILED_PATH.to_string(),
+    )
 }
 
 const COMPILED_PATH: &str = "<compiled default>";
@@ -789,34 +932,43 @@ fn load_tier(raw: &str, path: &str, tier: GraphTier) -> Option<Graph> {
             let unknown = Graph::unknown_policy_keys(raw);
             if !unknown.is_empty() {
                 #[cfg(target_arch = "wasm32")]
-                crate::wasm_dispatch::emit_event("fsm_graph_unknown_policy_keys", serde_json::json!({
-                    "path": path,
-                    "tier": tier.as_str(),
-                    "keys": unknown,
-                    "reason": "these policy keys are not recognised by this build and are being IGNORED -- a typo would look exactly like this. If they are from a newer build, this is expected and harmless.",
-                }));
+                crate::wasm_dispatch::emit_event(
+                    "fsm_graph_unknown_policy_keys",
+                    serde_json::json!({
+                        "path": path,
+                        "tier": tier.as_str(),
+                        "keys": unknown,
+                        "reason": "these policy keys are not recognised by this build and are being IGNORED -- a typo would look exactly like this. If they are from a newer build, this is expected and harmless.",
+                    }),
+                );
             }
 
             let severity_warnings = g.deviation_severity_warnings();
             if !severity_warnings.is_empty() {
                 #[cfg(target_arch = "wasm32")]
-                crate::wasm_dispatch::emit_event("fsm_graph_deviation_severity_warnings", serde_json::json!({
-                    "path": path,
-                    "tier": tier.as_str(),
-                    "warnings": severity_warnings,
-                    "reason": "these policy.deviation_severity entries name an unknown deviation kind or an invalid severity value, and are being IGNORED -- the registry default applies for each. Non-fatal by design: the rest of this graph, including its other severity overrides, is serving normally.",
-                }));
+                crate::wasm_dispatch::emit_event(
+                    "fsm_graph_deviation_severity_warnings",
+                    serde_json::json!({
+                        "path": path,
+                        "tier": tier.as_str(),
+                        "warnings": severity_warnings,
+                        "reason": "these policy.deviation_severity entries name an unknown deviation kind or an invalid severity value, and are being IGNORED -- the registry default applies for each. Non-fatal by design: the rest of this graph, including its other severity overrides, is serving normally.",
+                    }),
+                );
             }
 
             let refused = strip_untrusted_hooks(&mut g, tier);
             if !refused.is_empty() {
                 #[cfg(target_arch = "wasm32")]
-                crate::wasm_dispatch::emit_event("fsm_graph_remote_hook_refused", serde_json::json!({
-                    "path": path,
-                    "tier": tier.as_str(),
-                    "gates": refused,
-                    "reason": "a gate hook is arbitrary JS executed on this machine at every gate evaluation. This graph came from the compiled-default tier, which never carries hooks by construction -- if this event fires, something wrote a hook into a compiled default, which should not be possible. The gates keep their compiled predicates and are evaluated predicate-only.",
-                }));
+                crate::wasm_dispatch::emit_event(
+                    "fsm_graph_remote_hook_refused",
+                    serde_json::json!({
+                        "path": path,
+                        "tier": tier.as_str(),
+                        "gates": refused,
+                        "reason": "a gate hook is arbitrary JS executed on this machine at every gate evaluation. This graph came from the compiled-default tier, which never carries hooks by construction -- if this event fires, something wrote a hook into a compiled default, which should not be possible. The gates keep their compiled predicates and are evaluated predicate-only.",
+                    }),
+                );
                 record_graph_rejection_at(
                     path,
                     tier,
@@ -838,24 +990,30 @@ fn load_tier(raw: &str, path: &str, tier: GraphTier) -> Option<Graph> {
                 Some(g)
             } else {
                 #[cfg(target_arch = "wasm32")]
-                crate::wasm_dispatch::emit_event("fsm_graph_override_invalid", serde_json::json!({
-                    "path": path,
-                    "tier": tier.as_str(),
-                    "problems": problems,
-                    "reason": "graph parsed but failed referential-integrity validation; falling back to the built-in default this dispatch",
-                }));
+                crate::wasm_dispatch::emit_event(
+                    "fsm_graph_override_invalid",
+                    serde_json::json!({
+                        "path": path,
+                        "tier": tier.as_str(),
+                        "problems": problems,
+                        "reason": "graph parsed but failed referential-integrity validation; falling back to the built-in default this dispatch",
+                    }),
+                );
                 record_graph_rejection_at(path, tier, "invalid", &problems.join("; "));
                 None
             }
         }
         Err(e) => {
             #[cfg(target_arch = "wasm32")]
-            crate::wasm_dispatch::emit_event("fsm_graph_override_malformed", serde_json::json!({
-                "path": path,
-                "tier": tier.as_str(),
-                "error": e.to_string(),
-                "reason": "falling back to the built-in default graph this dispatch",
-            }));
+            crate::wasm_dispatch::emit_event(
+                "fsm_graph_override_malformed",
+                serde_json::json!({
+                    "path": path,
+                    "tier": tier.as_str(),
+                    "error": e.to_string(),
+                    "reason": "falling back to the built-in default graph this dispatch",
+                }),
+            );
             record_graph_rejection_at(path, tier, "malformed", &e.to_string());
             None
         }
@@ -917,7 +1075,9 @@ pub fn gates_missing_vs_default(active: &Graph) -> Vec<(String, String, Vec<Stri
     let default = default_graph();
     let mut out = Vec::new();
     for de in &default.edges {
-        let Some(ae) = active.edge_between(&de.from, &de.to) else { continue };
+        let Some(ae) = active.edge_between(&de.from, &de.to) else {
+            continue;
+        };
         let missing: Vec<String> = de
             .gates
             .iter()
@@ -1023,7 +1183,14 @@ pub fn staleness_report(active: &Graph, raw: Option<&str>) -> StalenessReport {
 
     let weakened_edges: Vec<String> = gates_missing_vs_default(active)
         .into_iter()
-        .map(|(from, to, missing)| format!("`{} -> {}` is missing gate(s) {}", from, to, missing.join(", ")))
+        .map(|(from, to, missing)| {
+            format!(
+                "`{} -> {}` is missing gate(s) {}",
+                from,
+                to,
+                missing.join(", ")
+            )
+        })
         .collect();
 
     let missing_policy_keys = match raw {
@@ -1053,9 +1220,14 @@ pub fn staleness_report(active: &Graph, raw: Option<&str>) -> StalenessReport {
 }
 
 fn absent_policy_keys(raw: &str) -> Vec<String> {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { return Vec::new() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
     let Some(policy) = v.get("policy").and_then(|p| p.as_object()) else {
-        return Graph::KNOWN_POLICY_KEYS.iter().map(|k| k.to_string()).collect();
+        return Graph::KNOWN_POLICY_KEYS
+            .iter()
+            .map(|k| k.to_string())
+            .collect();
     };
     Graph::KNOWN_POLICY_KEYS
         .iter()
@@ -1070,7 +1242,9 @@ pub fn vendored_graph_raw() -> Option<String> {
 
 pub fn graph_rejection() -> Option<serde_json::Value> {
     let raw = crate::pkfs::read_to_string(GRAPH_REJECTION_PATH)?;
-    if raw.trim().is_empty() { return None; }
+    if raw.trim().is_empty() {
+        return None;
+    }
     serde_json::from_str(&raw).ok()
 }
 

@@ -38,22 +38,36 @@ fn split_title(text: &str) -> (String, String) {
             let rest: Vec<&str> = lines.collect();
             (title, rest.join("\n"))
         }
-        Some(first) => (String::new(), format!("{first}\n{}", lines.collect::<Vec<_>>().join("\n"))),
+        Some(first) => (
+            String::new(),
+            format!("{first}\n{}", lines.collect::<Vec<_>>().join("\n")),
+        ),
         None => (String::new(), String::new()),
     }
 }
 
 pub fn compact_hits(hits: &Value, full: bool) -> Value {
-    let Some(list) = hits.as_array() else { return hits.clone() };
+    let Some(list) = hits.as_array() else {
+        return hits.clone();
+    };
     let mut kept: Vec<(HashSet<String>, Value)> = Vec::new();
     let mut deduped_keys: Vec<Value> = Vec::new();
     let mut seen_keys: HashSet<String> = HashSet::new();
     for hit in list {
-        let text = ["text", "value"].iter().find_map(|f| hit.get(*f).and_then(|v| v.as_str())).unwrap_or("");
+        let text = ["text", "value"]
+            .iter()
+            .find_map(|f| hit.get(*f).and_then(|v| v.as_str()))
+            .unwrap_or("");
         let tokens = token_set(text);
-        let repeated_key = hit.get("key").and_then(|v| v.as_str()).is_some_and(|k| !seen_keys.insert(k.to_string()));
-        let duplicate = repeated_key || (tokens.len() >= MIN_TOKENS_FOR_DEDUPE
-            && kept.iter().any(|(seen, _)| jaccard(seen, &tokens) >= NEAR_DUPLICATE_JACCARD));
+        let repeated_key = hit
+            .get("key")
+            .and_then(|v| v.as_str())
+            .is_some_and(|k| !seen_keys.insert(k.to_string()));
+        let duplicate = repeated_key
+            || (tokens.len() >= MIN_TOKENS_FOR_DEDUPE
+                && kept
+                    .iter()
+                    .any(|(seen, _)| jaccard(seen, &tokens) >= NEAR_DUPLICATE_JACCARD));
         if duplicate {
             deduped_keys.push(hit.get("key").cloned().unwrap_or(Value::Null));
             continue;
