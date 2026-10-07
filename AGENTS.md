@@ -263,6 +263,12 @@
   when the remote has since moved past that ref (e.g. a CI autobump), its
   rejection names the exact recovery (`git_pull` then `git_push
   {rev:"HEAD"}`) instead of leaving the caller to rediscover it.
+- A remote-side 5xx (`Internal Server Error` / `Service Unavailable` / a GitHub
+  `Request ID`) is classified as a transient remote rejection, not movement:
+  `git_push` retries it itself `GIT_PUSH_TRANSIENT_REMOTE_MAX_ATTEMPTS` times
+  with `GIT_PUSH_TRANSIENT_REMOTE_BACKOFF_MS` growth between attempts and only
+  then fails, reporting every `Request ID` seen. Telling that caller to
+  `git_pull` sends it in circles -- the local ref did not diverge.
 - `git_pull` on a nonzero exit with no conflicts re-fetches and compares HEAD
   against the remote-tracking ref before trusting the failure: a slow
   post-merge hook/auto-gc/credential prompt can make the host report a
@@ -337,7 +343,7 @@
 - Scoped `git_commit`/`git_finalize` stage and commit only caller pathspecs, including concurrent-write amend. Refuse paths that stage nothing; never follow an empty scoped add with an unscoped commit. Default commit uses already-staged content; blanket staging requires explicit `add_all` (unscoped finalize owns its documented default).
 - `git_pathspec_scope` emits excludes before inclusions; reversing them can make Windows git silently stage nothing. Preserve explicit caller paths. Always exclude `.agentplug*`; distinguish ignored/untracked generated `.gm` state from explicitly requested tracked state. Receipts disclose withheld runtime dirt rather than silently widening delivery.
 - `git_commit` deduplicates a logical request by cwd, pre-commit HEAD, message and paths within `GIT_COMMIT_DEDUP_TTL_MS`; replay the real SHA rather than execute another commit.
-- `git_finalize {paths}` scopes porcelain probes and pushes its new explicit ref, so unrelated writer dirt does not block it. `git_push {rev}` never rebases a dirty shared checkout; remote movement returns the recovery `git_pull` then `git_push {rev:"HEAD"}`.
+- `git_finalize {paths}` scopes porcelain probes and pushes its new explicit ref, so unrelated writer dirt does not block it. `git_push {rev}` never rebases a dirty shared checkout; remote movement returns the recovery `git_pull` then `git_push {rev:"HEAD"}`, while a remote 5xx is retried in-verb and reported with its `Request ID`s.
 - After a non-conflict pull failure, re-fetch and compare HEAD with the tracking ref before trusting timeout/hook/credential failure: the fast-forward may already have landed. Missing merge committer identity must name local `user.name`/`user.email` requirements; authentication is not commit identity, and tooling must not configure a global account silently.
 - Git verbs resolve the actual dispatch project and fail loudly outside a repository. `git_log` parses its formatted fields on `\u{1f}`, not spaces; subjects may contain spaces.
 
