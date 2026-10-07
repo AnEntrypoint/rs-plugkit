@@ -6477,6 +6477,38 @@ fn stamp_request_identity(mut value: Value, fingerprint: &str, body_parse_failed
     pack(value.to_string())
 }
 
+const BODY_PARSE_SNIPPET_LEAD_BYTES: usize = 32;
+const BODY_PARSE_SNIPPET_TRAIL_BYTES: usize = 48;
+
+fn body_parse_failure_response(verb: &str, body_s: &str, err: &serde_json::Error) -> u64 {
+    let bytes = body_s.as_bytes();
+    let offset = err.column().saturating_sub(1).min(bytes.len());
+    let lo = offset.saturating_sub(BODY_PARSE_SNIPPET_LEAD_BYTES);
+    let hi = offset.saturating_add(BODY_PARSE_SNIPPET_TRAIL_BYTES).min(bytes.len());
+    let snippet = if lo <= hi {
+        String::from_utf8_lossy(&bytes[lo..hi]).into_owned()
+    } else {
+        String::new()
+    };
+    pack(json!({
+        "verb": verb,
+        "ok": false,
+        "error_code": ERR_CODE_FAILED,
+        "error": format!(
+            "the {} byte(s) of dispatch body are not valid JSON, so verb \"{}\" never ran: {} at byte {} near {:?}. A backslash inside a JSON string must be doubled, so a Windows path reads \"C:\\\\dev\\\\spoint\" in the body text, or use forward slashes.",
+            bytes.len(), verb, err, offset, snippet
+        ),
+        "body_parse_error": true,
+        "body_parse_error_detail": err.to_string(),
+        "body_parse_error_offset": offset,
+        "body_parse_error_snippet": snippet,
+        "body_parse_error_bytes": bytes.len(),
+        "executed": false,
+        "re_dispatch_safe": true,
+        "next_dispatch_hint": "instruction",
+    }).to_string())
+}
+
 fn extract_session_id_from_plain_text_body(body_s: &str) -> Option<String> {
     let trimmed = body_s.trim_start();
     for prefix in ["sessionId=", "session_id="] {
@@ -6516,9 +6548,12 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         (None, raw_body_s.clone())
     };
     let fingerprint = request_fingerprint(&verb, &body_s);
-    let body_parse_failed = body_is_json
-        && !body_s.is_empty()
-        && serde_json::from_str::<Value>(&body_s).is_err();
+    let parse_failure: Option<serde_json::Error> = if body_is_json && !body_s.is_empty() {
+        serde_json::from_str::<Value>(&body_s).err()
+    } else {
+        None
+    };
+    let body_parse_failed = parse_failure.is_some();
     let body: Value = if body_s.is_empty() { Value::Null } else {
         serde_json::from_str(&body_s).unwrap_or(Value::Null)
     };
@@ -6536,7 +6571,10 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     let root_resolved = root_rejection.is_none();
     let result_packed = match root_rejection {
         Some(rejection) => rejection,
-        None => dispatch_gated_verb(&verb, &body, &body_s),
+        None => match parse_failure.as_ref() {
+            Some(err) => body_parse_failure_response(&verb, &body_s, err),
+            None => dispatch_gated_verb(&verb, &body, &body_s),
+        },
     };
     set_caller_budget(None);
     super::events::set_dispatch_session_id(None);
