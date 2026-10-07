@@ -1,8 +1,9 @@
 #![cfg(target_arch = "wasm32")]
 
-use crate::wasm_dispatch::{host_read, host_write, host_log};
+use crate::wasm_dispatch::{host_log, host_read, host_write};
 
 pub const MANAGED_ENTRIES: &[&str] = &[
+    ".agentplug-kv/",
     ".gm/exec-spool/",
     ".gm/gm-fired-*",
     ".gm/needs-gm",
@@ -11,6 +12,15 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/turn-state.json.corrupted-*",
     ".gm/residual-check-fired",
     ".gm/claim-audit-fired",
+    ".gm/continue.md",
+    ".gm/.gm-continue-count",
+    ".gm/long-gap-retry-state",
+    ".gm/last-dispatch-ts",
+    ".gm/last-instruction-ts",
+    ".gm/.last-scan-deps-ts",
+    ".gm/.last-scan-deps-result.json",
+    ".gm/.embed-generation.*",
+    ".gm/dream-rsi/",
     ".gm/fsm-graph-rejected.json",
     ".gm/bootstrap-status.json",
     ".gm/bootstrap-error.json",
@@ -34,10 +44,12 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/git-block-counter.json",
     ".gm/disciplines/codeinsight/",
     ".gm/disciplines/codeinsight-vec/",
+    ".gm/disciplines/codeinsight-manifest/",
     ".gm/disciplines/*/fiber-state.json",
     ".gm/instructions-source-cache/",
     ".gm/config-source-cache/",
     ".gm/config-source-cache.*",
+    ".gm/config-source-cache-*",
     ".plugkit-browser-profile/",
     ".plugkit-browser-profile-*/",
 ];
@@ -60,11 +72,15 @@ const LEGACY_START_GM: &str = "# >>> gm managed";
 const LEGACY_END_GM: &str = "# <<< gm managed";
 
 fn log_warn(msg: &str) {
-    unsafe { host_log(2, msg.as_ptr(), msg.len() as u32); }
+    unsafe {
+        host_log(2, msg.as_ptr(), msg.len() as u32);
+    }
 }
 
 fn log_info(msg: &str) {
-    unsafe { host_log(1, msg.as_ptr(), msg.len() as u32); }
+    unsafe {
+        host_log(1, msg.as_ptr(), msg.len() as u32);
+    }
 }
 
 fn strip_block(content: &str, start: &str, end: &str) -> String {
@@ -72,7 +88,10 @@ fn strip_block(content: &str, start: &str, end: &str) -> String {
     let mut rest = content;
     loop {
         match rest.find(start) {
-            None => { out.push_str(rest); return out; }
+            None => {
+                out.push_str(rest);
+                return out;
+            }
             Some(si) => {
                 out.push_str(&rest[..si]);
                 let after = &rest[si..];
@@ -83,10 +102,15 @@ fn strip_block(content: &str, start: &str, end: &str) -> String {
                     Some(ei) => {
                         let cut = ei + end.len();
                         let mut tail = &after[cut..];
-                        if tail.starts_with("\r\n") { tail = &tail[2..]; }
-                        else if tail.starts_with('\n') { tail = &tail[1..]; }
+                        if tail.starts_with("\r\n") {
+                            tail = &tail[2..];
+                        } else if tail.starts_with('\n') {
+                            tail = &tail[1..];
+                        }
                         rest = tail;
-                        while out.ends_with("\n\n") { out.pop(); }
+                        while out.ends_with("\n\n") {
+                            out.pop();
+                        }
                     }
                 }
             }
@@ -94,18 +118,25 @@ fn strip_block(content: &str, start: &str, end: &str) -> String {
     }
 }
 
-fn ensure_gm_dir_negations_into_nested_gitignore() {
-    let path = ".gm/.gitignore";
-    let original = match host_read(path) {
+fn ensure_gm_dir_negations_into_nested_gitignore(cwd: &str) -> Result<(), String> {
+    let path = format!(
+        "{}/.gm/.gitignore",
+        if cwd.is_empty() {
+            "."
+        } else {
+            cwd.trim_end_matches(['/', '\\'])
+        }
+    );
+    let original = match host_read(&path) {
         Some(s) => s,
-        None => return,
+        None => return Ok(()),
     };
     let has_blanket = original
         .lines()
         .map(|l| l.trim())
         .any(|l| l == "*" || l == "**" || l == "*.*");
     if !has_blanket {
-        return;
+        return Ok(());
     }
 
     let stripped = strip_block(&original, START_MARKER, END_MARKER);
@@ -126,6 +157,12 @@ fn ensure_gm_dir_negations_into_nested_gitignore() {
             block.push_str(&format!("!{}/**\n", bare));
         }
     }
+    for entry in MANAGED_ENTRIES {
+        if let Some(relative) = entry.strip_prefix(".gm/") {
+            block.push_str(relative);
+            block.push('\n');
+        }
+    }
     block.push_str(END_MARKER);
 
     let mut next = stripped.trim_end_matches(['\n', '\r']).to_string();
@@ -136,13 +173,14 @@ fn ensure_gm_dir_negations_into_nested_gitignore() {
         next.push_str(&block);
     }
     next.push('\n');
-    if next != original {
-        let _ = crate::wasm_dispatch::host_write(path, &next);
+    if next != original && !host_write(&path, &next) {
+        return Err(format!("host_fs_write failed for {}", path));
     }
+    Ok(())
 }
 
 pub fn ensure_managed_gitignore(cwd: &str) -> Result<bool, String> {
-    ensure_gm_dir_negations_into_nested_gitignore();
+    ensure_gm_dir_negations_into_nested_gitignore(cwd)?;
     let path = if cwd.is_empty() {
         ".gitignore".to_string()
     } else if cwd.ends_with('/') || cwd.ends_with('\\') {
@@ -181,7 +219,10 @@ pub fn ensure_managed_gitignore(cwd: &str) -> Result<bool, String> {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let mut cleaned = stripped_of_hostile.trim_end_matches('\n').trim_end_matches('\r').to_string();
+    let mut cleaned = stripped_of_hostile
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .to_string();
     if cleaned.is_empty() {
         cleaned = block;
     } else {
@@ -198,7 +239,11 @@ pub fn ensure_managed_gitignore(cwd: &str) -> Result<bool, String> {
         if !host_write(&path, &cleaned) {
             return Err(format!("host_fs_write failed for {}", path));
         }
-        log_info(&format!("plugkit gitignore: updated {} ({} entries)", path, MANAGED_ENTRIES.len()));
+        log_info(&format!(
+            "plugkit gitignore: updated {} ({} entries)",
+            path,
+            MANAGED_ENTRIES.len()
+        ));
     }
     Ok(changed)
 }

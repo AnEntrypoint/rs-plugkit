@@ -33,8 +33,15 @@ impl SyncState {
             Err(_) => return SyncState::default(),
         };
         SyncState {
-            last_checked_ms: v.get("last_checked_ms").and_then(|x| x.as_u64()).unwrap_or(0),
-            last_sha: v.get("last_sha").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            last_checked_ms: v
+                .get("last_checked_ms")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            last_sha: v
+                .get("last_sha")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             consecutive_failures: v
                 .get("consecutive_failures")
                 .and_then(|x| x.as_u64())
@@ -56,7 +63,9 @@ impl SyncState {
             return debounce_ms;
         }
         let exp = self.consecutive_failures.min(20);
-        let backoff = BACKOFF_BASE_MS.saturating_mul(1u64 << exp).min(BACKOFF_MAX_MS);
+        let backoff = BACKOFF_BASE_MS
+            .saturating_mul(1u64 << exp)
+            .min(BACKOFF_MAX_MS);
         backoff.max(debounce_ms)
     }
 }
@@ -81,7 +90,11 @@ fn remember_probe_ms(src: &RepoSource, now: u64) {
 }
 
 fn source_key(src: &RepoSource) -> String {
-    let ident = format!("{}\u{0}{}", src.repo, src.reference.as_deref().unwrap_or(""));
+    let ident = format!(
+        "{}\u{0}{}",
+        src.repo,
+        src.reference.as_deref().unwrap_or("")
+    );
     format!("{:016x}", crate::hash::fnv1a64(ident.as_bytes()))
 }
 
@@ -122,7 +135,9 @@ fn rename(from: &str, to: &str) -> bool {
     let code = format!(
         "const fs=require('fs');try{{fs.renameSync({f},{t});process.stdout.write('ok');}}catch(e){{process.stdout.write('fail');}}"
     );
-    exec_js_stdout(&code, 15000).map(|s| s.contains("ok")).unwrap_or(false)
+    exec_js_stdout(&code, 15000)
+        .map(|s| s.contains("ok"))
+        .unwrap_or(false)
 }
 
 fn exec_js_stdout(code: &str, timeout_ms: u32) -> Option<String> {
@@ -137,54 +152,107 @@ fn exec_js_stdout(code: &str, timeout_ms: u32) -> Option<String> {
     };
     let out = crate::wasm_dispatch::unpack_to_string_pub(packed)?;
     let parsed: Value = serde_json::from_str(&out).ok()?;
-    parsed.get("stdout").and_then(|v| v.as_str()).map(|s| s.to_string())
+    parsed
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
-fn try_lock(src: &RepoSource) -> bool {
+struct RefreshLock {
+    path: String,
+    token: String,
+}
+
+fn try_lock(src: &RepoSource) -> Option<RefreshLock> {
     let path = lock_path(src);
     let Ok(p) = serde_json::to_string(&path) else {
-        return false;
+        return None;
     };
     let Ok(parent_p) = serde_json::to_string(&cache_root(src)) else {
-        return false;
+        return None;
     };
     let code = format!(
         "const fs=require('fs');const p={p};const staleMs={LOCK_STALE_MS};\
-         const parentDir=require('path').dirname({parent_p});\
-         try{{fs.mkdirSync(parentDir,{{recursive:true}});}}catch(e0){{}}\
-         process.stdout.write((function(){{\
-         try{{fs.mkdirSync(p);return 'acquired';}}catch(e){{}}\
-         let st=null;try{{st=fs.statSync(p);}}catch(e2){{return 'busy';}}\
-         if(Date.now()-st.mtimeMs<=staleMs){{return 'busy';}}\
-         const aside=p+'.stale-'+process.pid+'-'+Date.now();\
-         try{{fs.renameSync(p,aside);}}catch(e3){{return 'busy';}}\
-         try{{fs.rmSync(aside,{{recursive:true,force:true}});}}catch(e4){{}}\
-         try{{fs.mkdirSync(p);return 'acquired';}}catch(e5){{return 'busy';}}\
-         }})());"
+             const parentDir=require('path').dirname({parent_p});\
+             try{{fs.mkdirSync(parentDir,{{recursive:true}});}}catch(e0){{}}\
+             process.stdout.write((function(){{\
+             function acquire(){{\
+               const token=process.pid+'-'+Date.now()+'-'+Math.random().toString(36).slice(2);\
+               try{{fs.mkdirSync(p);}}catch(e){{return 'busy';}}\
+               try{{fs.writeFileSync(p+'/owner',token,{{flag:'wx'}});return 'acquired:'+token;}}\
+               catch(e){{try{{fs.rmSync(p,{{recursive:true,force:true}});}}catch(e2){{}}return 'busy';}}\
+             }}\
+             let first=acquire();if(first!=='busy'){{return first;}}\
+             let st=null;try{{st=fs.statSync(p);}}catch(e2){{return 'busy';}}\
+             if(Date.now()-st.mtimeMs<=staleMs){{return 'busy';}}\
+             const aside=p+'.stale-'+process.pid+'-'+Date.now();\
+             try{{fs.renameSync(p,aside);}}catch(e3){{return 'busy';}}\
+             try{{fs.rmSync(aside,{{recursive:true,force:true}});}}catch(e4){{}}\
+             return acquire();\
+             }})());"
     );
-    exec_js_stdout(&code, 15000).map(|s| s.contains("acquired")).unwrap_or(false)
+    let token = exec_js_stdout(&code, 15000)?
+        .trim()
+        .strip_prefix("acquired:")?
+        .to_string();
+    if token.is_empty() {
+        None
+    } else {
+        Some(RefreshLock { path, token })
+    }
 }
 
-fn unlock(src: &RepoSource) {
-    let path = lock_path(src);
-    let Ok(p) = serde_json::to_string(&path) else {
-        return;
+fn owns_lock(lock: &RefreshLock) -> bool {
+    let (Ok(p), Ok(token)) = (
+        serde_json::to_string(&lock.path),
+        serde_json::to_string(&lock.token),
+    ) else {
+        return false;
     };
     let code = format!(
-        "const fs=require('fs');try{{fs.rmSync({p},{{recursive:true,force:true}});}}catch(e){{}}process.stdout.write('done');"
+        "const fs=require('fs');try{{process.stdout.write(fs.readFileSync({p}+'/owner','utf8')==={token}?'owned':'lost');}}catch(e){{process.stdout.write('lost');}}"
     );
-    let _ = exec_js_stdout(&code, 15000);
+    exec_js_stdout(&code, 15000)
+        .map(|s| s.trim() == "owned")
+        .unwrap_or(false)
+}
+
+fn unlock(lock: &RefreshLock) -> bool {
+    let (Ok(p), Ok(token)) = (
+        serde_json::to_string(&lock.path),
+        serde_json::to_string(&lock.token),
+    ) else {
+        return false;
+    };
+    let code = format!(
+        "const fs=require('fs');try{{if(fs.readFileSync({p}+'/owner','utf8')!=={token}){{process.stdout.write('lost');}}else{{fs.rmSync({p},{{recursive:true,force:true}});process.stdout.write('released');}}}}catch(e){{process.stdout.write('lost');}}"
+    );
+    exec_js_stdout(&code, 15000)
+        .map(|s| s.trim() == "released")
+        .unwrap_or(false)
 }
 
 fn git(argv: &[&str], cwd: Option<&str>) -> Result<String, String> {
     let v = crate::wasm_dispatch::git_call_argv(argv, cwd);
     let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
     let code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let stdout = v
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     if !ok || code != 0 {
         let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
-        let msg = if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() };
-        return Err(format!("git {} failed: {}", argv.first().copied().unwrap_or("?"), msg));
+        let msg = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        return Err(format!(
+            "git {} failed: {}",
+            argv.first().copied().unwrap_or("?"),
+            msg
+        ));
     }
     Ok(stdout)
 }
@@ -192,7 +260,11 @@ fn git(argv: &[&str], cwd: Option<&str>) -> Result<String, String> {
 fn local_sha(src: &RepoSource) -> Option<String> {
     let out = git(&["rev-parse", "HEAD"], Some(&cache_root(src))).ok()?;
     let s = out.trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 fn probe_remote_sha(src: &RepoSource) -> Result<String, String> {
@@ -206,14 +278,26 @@ fn probe_remote_sha(src: &RepoSource) -> Result<String, String> {
     if is_sha_like(reference) {
         return Ok(reference.to_string());
     }
-    Err(format!("remote {} advertises no ref matching {}", src.repo, reference))
+    Err(format!(
+        "remote {} advertises no ref matching {}",
+        src.repo, reference
+    ))
 }
 
 fn is_sha_like(s: &str) -> bool {
     s.len() >= 7 && s.len() <= 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn staging_dir(src: &RepoSource) -> String {
+fn staging_dir(src: &RepoSource, lock: &RefreshLock) -> String {
+    format!(
+        "{}.{}.staging-{}",
+        cache_root(src),
+        source_key(src),
+        lock.token
+    )
+}
+
+fn legacy_staging_dir(src: &RepoSource) -> String {
     format!("{}.{}.staging", cache_root(src), source_key(src))
 }
 
@@ -228,7 +312,9 @@ fn remove_tree(path: &str) -> bool {
     let code = format!(
         "const fs=require('fs');try{{fs.rmSync({p},{{recursive:true,force:true}});process.stdout.write('ok');}}catch(e){{process.stdout.write('fail');}}"
     );
-    exec_js_stdout(&code, 30000).map(|s| s.contains("ok")).unwrap_or(false)
+    exec_js_stdout(&code, 30000)
+        .map(|s| s.contains("ok"))
+        .unwrap_or(false)
 }
 
 fn recover_stranded(src: &RepoSource) {
@@ -240,35 +326,43 @@ fn recover_stranded(src: &RepoSource) {
             rename(&retired, &src.cache_dir);
         }
     }
-    let staging = staging_dir(src);
+    let staging = legacy_staging_dir(src);
     if crate::pkfs::exists(&staging) {
         remove_tree(&staging);
     }
 }
 
-fn publish_staged(src: &RepoSource) -> Result<(), String> {
-    let staging = staging_dir(src);
+fn publish_staged(src: &RepoSource, staging: &str, lock: &RefreshLock) -> Result<(), String> {
+    if !owns_lock(lock) {
+        return Err("config refresh lock ownership was lost before publish".to_string());
+    }
     let retired = retired_dir(src);
     remove_tree(&retired);
 
     let had_live = crate::pkfs::exists(&src.cache_dir);
     if had_live && !rename(&src.cache_dir, &retired) {
         remove_tree(&staging);
-        return Err(format!("could not move {} aside to publish a new checkout", src.cache_dir));
+        return Err(format!(
+            "could not move {} aside to publish a new checkout",
+            src.cache_dir
+        ));
     }
     if !rename(&staging, &src.cache_dir) {
         if had_live {
             rename(&retired, &src.cache_dir);
         }
         remove_tree(&staging);
-        return Err(format!("could not move staged checkout into {}", src.cache_dir));
+        return Err(format!(
+            "could not move staged checkout into {}",
+            src.cache_dir
+        ));
     }
     remove_tree(&retired);
     Ok(())
 }
 
-fn materialize(src: &RepoSource, reference: &str) -> Result<(), String> {
-    let staging = staging_dir(src);
+fn materialize(src: &RepoSource, reference: &str, lock: &RefreshLock) -> Result<(), String> {
+    let staging = staging_dir(src, lock);
     remove_tree(&staging);
 
     let mut argv: Vec<&str> = vec!["clone", "--depth", "1"];
@@ -295,15 +389,15 @@ fn materialize(src: &RepoSource, reference: &str) -> Result<(), String> {
         }
     }
 
-    publish_staged(src)
+    publish_staged(src, &staging, lock)
 }
 
-fn fetch_to(src: &RepoSource, target_sha: &str) -> Result<(), String> {
+fn fetch_to(src: &RepoSource, target_sha: &str, lock: &RefreshLock) -> Result<(), String> {
     let reference = src.reference.as_deref().unwrap_or("");
     if !reference.is_empty() && !is_sha_like(reference) {
-        return materialize(src, reference);
+        return materialize(src, reference, lock);
     }
-    materialize(src, target_sha)
+    materialize(src, target_sha, lock)
 }
 
 fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcome {
@@ -317,7 +411,12 @@ fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcom
             "detail": detail,
         }),
     );
-    SyncOutcome { sha, changed: false, degraded: true, detail }
+    SyncOutcome {
+        sha,
+        changed: false,
+        degraded: true,
+        detail,
+    }
 }
 
 pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome, String> {
@@ -346,7 +445,7 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
         }
     }
 
-    if !try_lock(src) {
+    let Some(lock) = try_lock(src) else {
         return match have_local {
             Some(sha) => Ok(SyncOutcome {
                 sha: Some(sha),
@@ -359,11 +458,12 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
                 src.repo
             )),
         };
-    }
+    };
 
-    let result = refresh_locked(src, &mut st, now, have_local.clone());
-    unlock(src);
-    write_state(src, &st);
+    let result = refresh_locked(src, &mut st, now, have_local.clone(), &lock);
+    if unlock(&lock) {
+        write_state(src, &st);
+    }
     result
 }
 
@@ -372,7 +472,11 @@ fn refresh_locked(
     st: &mut SyncState,
     now: u64,
     have_local: Option<String>,
+    lock: &RefreshLock,
 ) -> Result<SyncOutcome, String> {
+    if !owns_lock(lock) {
+        return Err("config refresh lock ownership was lost before refresh".to_string());
+    }
     recover_stranded(src);
     st.last_checked_ms = now;
     remember_probe_ms(src, now);
@@ -409,7 +513,7 @@ fn refresh_locked(
 
     let pre_fetch_config_text = crate::pkfs::read_to_string(&src.config_path());
 
-    let outcome = fetch_to(src, &remote);
+    let outcome = fetch_to(src, &remote, lock);
 
     if let Err(e) = outcome {
         st.consecutive_failures = st.consecutive_failures.saturating_add(1);
@@ -444,8 +548,12 @@ fn refresh_locked(
 
 fn changed_config_paths(src: &RepoSource, pre_fetch_text: Option<&str>) -> Vec<String> {
     let path = src.config_path();
-    let Some(pre_text) = pre_fetch_text else { return vec![path] };
-    let Some(post_text) = crate::pkfs::read_to_string(&path) else { return vec![path] };
+    let Some(pre_text) = pre_fetch_text else {
+        return vec![path];
+    };
+    let Some(post_text) = crate::pkfs::read_to_string(&path) else {
+        return vec![path];
+    };
     let (Ok(serde_json::Value::Object(pre)), Ok(serde_json::Value::Object(post))) = (
         serde_json::from_str::<serde_json::Value>(&pre_text),
         serde_json::from_str::<serde_json::Value>(&post_text),
@@ -465,7 +573,11 @@ fn changed_config_paths(src: &RepoSource, pre_fetch_text: Option<&str>) -> Vec<S
             keys.push(format!("{k} (removed)"));
         }
     }
-    if keys.is_empty() { vec![path] } else { keys }
+    if keys.is_empty() {
+        vec![path]
+    } else {
+        keys
+    }
 }
 
 pub struct GitRepoFetcher {
@@ -474,7 +586,9 @@ pub struct GitRepoFetcher {
 
 impl GitRepoFetcher {
     pub fn new() -> GitRepoFetcher {
-        GitRepoFetcher { debounce_ms: DEFAULT_DEBOUNCE_MS }
+        GitRepoFetcher {
+            debounce_ms: DEFAULT_DEBOUNCE_MS,
+        }
     }
 
     pub fn with_debounce_ms(debounce_ms: u64) -> GitRepoFetcher {

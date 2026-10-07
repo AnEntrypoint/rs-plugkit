@@ -34,12 +34,32 @@ on:
       build_command:
         required: true
         type: string
+      release_signing_key_id:
+        required: true
+        type: string
+      release_signing_public_key:
+        required: true
+        type: string
     secrets:
       publisher_token:
         required: true
+      release_signing_key:
+        required: true
 
 jobs:
+  signing-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the protected release signing key
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.release_signing_key }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_SIGNING_KEY"
+
   bump:
+    needs: signing-preflight
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.bump.outputs.version }}
@@ -51,6 +71,7 @@ jobs:
         with:
           token: ${{ secrets.publisher_token }}
           fetch-depth: 0
+          ref: main
 
       - name: Auto-bump patch version BEFORE build
         id: bump
@@ -78,7 +99,7 @@ jobs:
           fi
 
   release:
-    needs: bump
+    needs: [signing-preflight, bump]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -88,7 +109,7 @@ jobs:
         with:
           ref: main
 
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
         with:
           toolchain: stable
           targets: wasm32-wasip1
@@ -126,28 +147,38 @@ jobs:
       - name: Attach offline signatures
         shell: bash
         env:
-          SIGNATURE_MANIFEST: ${{ github.workspace }}/release-signatures/manifest.json
+          RELEASE_SIGNING_KEY: ${{ secrets.release_signing_key }}
+          RELEASE_SIGNING_KEY_ID: ${{ inputs.release_signing_key_id }}
+          RELEASE_SIGNING_PUBLIC_KEY: ${{ inputs.release_signing_public_key }}
+          RELEASE_VERSION: ${{ needs.bump.outputs.version }}
+          RELEASE_SEQUENCE: ${{ github.run_id }}
         run: |
-          set -e
-          for f in release-assets/*; do
-            name=$(basename "$f")
-            case "$name" in *.sha256|*.sig) continue ;; esac
-            if command -v sha256sum >/dev/null; then
-              sum=$(sha256sum "$f" | cut -d' ' -f1)
-            else
-              sum=$(shasum -a 256 "$f" | cut -d' ' -f1)
-            fi
-            entry=""
-            if [ -f "$SIGNATURE_MANIFEST" ]; then
-              entry=$(jq -c --arg n "$name" --arg h "$sum" '[.entries[]? | select(.artifact == $n and .sha256 == $h)] | first // empty' "$SIGNATURE_MANIFEST" 2>/dev/null || true)
-            fi
-            if [ -n "$entry" ]; then
-              printf '%s\n' "$entry" > "$f.sig"
-              echo "attached offline signature for $name"
-            else
-              echo "::notice::no offline signature for $name; publishing unsigned"
-            fi
-          done
+          set -euo pipefail
+          cd release-assets
+          node <<'NODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const artifact = `${{ inputs.published_asset_basename }}.wasm`;
+          const seed = process.env.RELEASE_SIGNING_KEY;
+          const publicKey = process.env.RELEASE_SIGNING_PUBLIC_KEY;
+          const version = process.env.RELEASE_VERSION;
+          const sequence = process.env.RELEASE_SEQUENCE;
+          const keyId = process.env.RELEASE_SIGNING_KEY_ID;
+          if (!/^[0-9a-f]{64}$/i.test(seed) || !/^[0-9a-f]{64}$/i.test(publicKey) || !/^\d+$/.test(sequence) || !keyId || !version) process.exit(1);
+          const privateDer = Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(seed, 'hex')]);
+          const privateKey = crypto.createPrivateKey({ key: privateDer, format: 'der', type: 'pkcs8' });
+          const derived = crypto.createPublicKey(privateKey).export({ type: 'spki', format: 'der' }).subarray(-32).toString('hex');
+          if (derived !== publicKey.toLowerCase()) process.exit(1);
+          const sha256 = crypto.createHash('sha256').update(fs.readFileSync(artifact)).digest('hex');
+          const nl = String.fromCharCode(10);
+          const statement = ['agentplug-update-v1', `artifact:${artifact}`, `version:${version}`, `sequence:${sequence}`, `sha256:${sha256}`, ''].join(nl);
+          const sig = crypto.sign(null, Buffer.from(statement), privateKey).toString('hex');
+          const publicDer = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(publicKey, 'hex')]);
+          const verifier = crypto.createPublicKey({ key: publicDer, format: 'der', type: 'spki' });
+          if (!crypto.verify(null, Buffer.from(statement), verifier, Buffer.from(sig, 'hex'))) process.exit(1);
+          fs.writeFileSync(`${artifact}.sig`, `${JSON.stringify({ v: 1, artifact, version, sequence: Number(sequence), sha256, signatures: [{ key_id: keyId, sig }] })}\n`);
+          NODE
 
       - name: Publish release
         env:

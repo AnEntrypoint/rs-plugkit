@@ -23,7 +23,9 @@ pub struct Registry {
 
 impl Registry {
     pub fn empty() -> Registry {
-        Registry { fibers: HashMap::new() }
+        Registry {
+            fibers: HashMap::new(),
+        }
     }
 
     pub fn coeffect_context(&self) -> BTreeSet<String> {
@@ -60,7 +62,12 @@ impl Registry {
         true
     }
 
-    pub fn insert(&self, name: &str, requires: BTreeSet<String>, provides: BTreeSet<String>) -> Option<Registry> {
+    pub fn insert(
+        &self,
+        name: &str,
+        requires: BTreeSet<String>,
+        provides: BTreeSet<String>,
+    ) -> Option<Registry> {
         if self.fibers.contains_key(name) {
             return None;
         }
@@ -72,7 +79,12 @@ impl Registry {
         let mut next = self.clone();
         next.fibers.insert(
             name.to_string(),
-            Fiber { requires, provides, state: LifecycleState::Inactive, retired: false },
+            Fiber {
+                requires,
+                provides,
+                state: LifecycleState::Inactive,
+                retired: false,
+            },
         );
         Some(next)
     }
@@ -120,7 +132,10 @@ impl Registry {
         Some(next)
     }
 
-    fn successors(&self, insert_candidates: &[(String, BTreeSet<String>, BTreeSet<String>)]) -> Vec<Registry> {
+    fn successors(
+        &self,
+        insert_candidates: &[(String, BTreeSet<String>, BTreeSet<String>)],
+    ) -> Vec<Registry> {
         let mut out = Vec::new();
         let names: Vec<String> = self.fibers.keys().cloned().collect();
         for name in &names {
@@ -166,7 +181,10 @@ pub fn verify_calculus(
         if !state.well_formed() {
             violations.push(CalculusViolation {
                 theorem: "preservation (Theorem 59)",
-                detail: format!("state with colliding provisions reached: {:?}", state.fibers.keys().collect::<Vec<_>>()),
+                detail: format!(
+                    "state with colliding provisions reached: {:?}",
+                    state.fibers.keys().collect::<Vec<_>>()
+                ),
             });
         }
 
@@ -179,7 +197,10 @@ pub fn verify_calculus(
         if !is_quiescent && successors.is_empty() {
             violations.push(CalculusViolation {
                 theorem: "progress (Theorem 66)",
-                detail: format!("non-quiescent state with no legal rule application: {:?}", state.fibers.keys().collect::<Vec<_>>()),
+                detail: format!(
+                    "non-quiescent state with no legal rule application: {:?}",
+                    state.fibers.keys().collect::<Vec<_>>()
+                ),
             });
         }
 
@@ -238,10 +259,20 @@ pub fn handle_model_check(_content: &str) -> (String, String, i32) {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExtendedLifecycle {
-    Inactive { outcome: Option<&'static str> },
-    Reloading { remaining_iterations: u32, committed: BTreeSet<String> },
-    Active { committed: BTreeSet<String> },
-    Unloading { committed: BTreeSet<String>, outcome: Option<&'static str> },
+    Inactive {
+        outcome: Option<&'static str>,
+    },
+    Reloading {
+        remaining_iterations: u32,
+        committed: BTreeSet<String>,
+    },
+    Active {
+        committed: BTreeSet<String>,
+    },
+    Unloading {
+        committed: BTreeSet<String>,
+        outcome: Option<&'static str>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,7 +289,9 @@ pub struct ExtendedRegistry {
 
 impl ExtendedRegistry {
     pub fn empty() -> ExtendedRegistry {
-        ExtendedRegistry { fibers: HashMap::new() }
+        ExtendedRegistry {
+            fibers: HashMap::new(),
+        }
     }
 
     pub fn coeffect_context(&self) -> BTreeSet<String> {
@@ -310,7 +343,12 @@ impl ExtendedRegistry {
         })
     }
 
-    fn would_create_precedence_cycle(&self, name: &str, requires: &BTreeSet<String>, provides: &BTreeSet<String>) -> bool {
+    fn would_create_precedence_cycle(
+        &self,
+        name: &str,
+        requires: &BTreeSet<String>,
+        provides: &BTreeSet<String>,
+    ) -> bool {
         let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
         for (n, fiber) in &self.fibers {
             for (m, other) in &self.fibers {
@@ -325,7 +363,12 @@ impl ExtendedRegistry {
                 edges.entry(name).or_default().push(n.as_str());
             }
         }
-        let all_names: Vec<&str> = self.fibers.keys().map(|s| s.as_str()).chain(std::iter::once(name)).collect();
+        let all_names: Vec<&str> = self
+            .fibers
+            .keys()
+            .map(|s| s.as_str())
+            .chain(std::iter::once(name))
+            .collect();
         let mut visiting: BTreeSet<&str> = BTreeSet::new();
         let mut done: BTreeSet<&str> = BTreeSet::new();
         fn has_cycle<'a>(
@@ -352,10 +395,17 @@ impl ExtendedRegistry {
             done.insert(node);
             false
         }
-        all_names.iter().any(|n| has_cycle(n, &edges, &mut visiting, &mut done))
+        all_names
+            .iter()
+            .any(|n| has_cycle(n, &edges, &mut visiting, &mut done))
     }
 
-    pub fn insert(&self, name: &str, requires: BTreeSet<String>, provides: BTreeSet<String>) -> Option<ExtendedRegistry> {
+    pub fn insert(
+        &self,
+        name: &str,
+        requires: BTreeSet<String>,
+        provides: BTreeSet<String>,
+    ) -> Option<ExtendedRegistry> {
         if self.fibers.contains_key(name) {
             return None;
         }
@@ -370,7 +420,11 @@ impl ExtendedRegistry {
         let mut next = self.clone();
         next.fibers.insert(
             name.to_string(),
-            ExtendedFiber { requires, provides, state: ExtendedLifecycle::Inactive { outcome: None } },
+            ExtendedFiber {
+                requires,
+                provides,
+                state: ExtendedLifecycle::Inactive { outcome: None },
+            },
         );
         Some(next)
     }
@@ -385,17 +439,20 @@ impl ExtendedRegistry {
         }
         let omega = fiber.requires.clone();
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state =
-            ExtendedLifecycle::Reloading { remaining_iterations, committed: omega };
+        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Reloading {
+            remaining_iterations,
+            committed: omega,
+        };
         Some(next)
     }
 
     pub fn iterate(&self, name: &str) -> Option<ExtendedRegistry> {
         let fiber = self.fibers.get(name)?;
         let (remaining, committed) = match &fiber.state {
-            ExtendedLifecycle::Reloading { remaining_iterations, committed } if *remaining_iterations > 0 => {
-                (*remaining_iterations, committed.clone())
-            }
+            ExtendedLifecycle::Reloading {
+                remaining_iterations,
+                committed,
+            } if *remaining_iterations > 0 => (*remaining_iterations, committed.clone()),
             _ => return None,
         };
         if self.target_defined(name) && self.fibers[name].requires != committed {
@@ -405,15 +462,20 @@ impl ExtendedRegistry {
             return None;
         }
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state =
-            ExtendedLifecycle::Reloading { remaining_iterations: remaining - 1, committed };
+        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Reloading {
+            remaining_iterations: remaining - 1,
+            committed,
+        };
         Some(next)
     }
 
     pub fn finish(&self, name: &str) -> Option<ExtendedRegistry> {
         let fiber = self.fibers.get(name)?;
         let committed = match &fiber.state {
-            ExtendedLifecycle::Reloading { remaining_iterations: 0, committed } => committed.clone(),
+            ExtendedLifecycle::Reloading {
+                remaining_iterations: 0,
+                committed,
+            } => committed.clone(),
             _ => return None,
         };
         if !self.target_defined(name) || self.fibers[name].requires != committed {
@@ -435,8 +497,10 @@ impl ExtendedRegistry {
             return None;
         }
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state =
-            ExtendedLifecycle::Unloading { committed, outcome: None };
+        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Unloading {
+            committed,
+            outcome: None,
+        };
         Some(next)
     }
 
@@ -447,8 +511,10 @@ impl ExtendedRegistry {
             _ => return None,
         };
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state =
-            ExtendedLifecycle::Unloading { committed, outcome: Some(error) };
+        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Unloading {
+            committed,
+            outcome: Some(error),
+        };
         Some(next)
     }
 
@@ -463,8 +529,10 @@ impl ExtendedRegistry {
             return None;
         }
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state =
-            ExtendedLifecycle::Unloading { committed, outcome: None };
+        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Unloading {
+            committed,
+            outcome: None,
+        };
         Some(next)
     }
 
@@ -580,7 +648,8 @@ pub fn demo_revert_arbitrary_order() -> CalculusViolation {
     if !fwd_commute {
         return CalculusViolation {
             theorem: "Definition 18/Lemma 18 (generator commutation)",
-            detail: "e1.fwd and e2.fwd do not commute at s0 -- effects are not independent".to_string(),
+            detail: "e1.fwd and e2.fwd do not commute at s0 -- effects are not independent"
+                .to_string(),
         };
     }
 
@@ -590,7 +659,10 @@ pub fn demo_revert_arbitrary_order() -> CalculusViolation {
     if lifo_result != s0 {
         return CalculusViolation {
             theorem: "Corollary 21 (LIFO reversion baseline)",
-            detail: format!("LIFO reversion did not recover s0: got {:?}, expected {:?}", lifo_result, s0),
+            detail: format!(
+                "LIFO reversion did not recover s0: got {:?}, expected {:?}",
+                lifo_result, s0
+            ),
         };
     }
     if nonlifo_result != s0 {
@@ -613,7 +685,8 @@ pub fn demo_revert_arbitrary_order() -> CalculusViolation {
 }
 
 pub fn obs_equiv(a: &[String], g1: &Registry, g2: &Registry) -> bool {
-    a.iter().all(|name| g1.satisfied(name) == g2.satisfied(name))
+    a.iter()
+        .all(|name| g1.satisfied(name) == g2.satisfied(name))
 }
 
 pub fn registry_equiv(g1: &Registry, g2: &Registry) -> bool {

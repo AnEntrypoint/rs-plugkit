@@ -91,18 +91,18 @@ pub mod cache;
 #[cfg(target_arch = "wasm32")]
 pub mod plugin_abi;
 
-pub mod pkfs;
-pub mod config_path;
-pub mod prose;
 pub mod config;
+pub mod config_path;
 #[cfg(target_arch = "wasm32")]
 pub mod config_sync;
-pub mod orchestrator;
-pub mod filter;
-pub mod validation;
 pub mod dataflow;
 #[cfg(target_arch = "wasm32")]
 pub mod dataflow_exec;
+pub mod filter;
+pub mod orchestrator;
+pub mod pkfs;
+pub mod prose;
+pub mod validation;
 
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]

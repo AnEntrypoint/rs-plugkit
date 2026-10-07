@@ -9,9 +9,12 @@ use crate::wasm_dispatch::unpack_to_value_pub;
 #[link(wasm_import_module = "env")]
 extern "C" {
     fn host_plugin_call(
-        plugin_ptr: *const u8, plugin_len: u32,
-        verb_ptr: *const u8, verb_len: u32,
-        body_ptr: *const u8, body_len: u32,
+        plugin_ptr: *const u8,
+        plugin_len: u32,
+        verb_ptr: *const u8,
+        verb_len: u32,
+        body_ptr: *const u8,
+        body_len: u32,
     ) -> u64;
 }
 
@@ -19,9 +22,12 @@ fn call_libsql_plugin(plugin: &str, verb: &str, body: &Value) -> Value {
     let body_s = body.to_string();
     let packed = unsafe {
         host_plugin_call(
-            plugin.as_ptr(), plugin.len() as u32,
-            verb.as_ptr(), verb.len() as u32,
-            body_s.as_ptr(), body_s.len() as u32,
+            plugin.as_ptr(),
+            plugin.len() as u32,
+            verb.as_ptr(),
+            verb.len() as u32,
+            body_s.as_ptr(),
+            body_s.len() as u32,
         )
     };
     unpack_to_value_pub(packed)
@@ -32,7 +38,11 @@ fn plugin_ok_err(resp: &Value) -> Result<(), String> {
     if ok {
         Ok(())
     } else {
-        Err(resp.get("error").and_then(|v| v.as_str()).unwrap_or("plugin call failed").to_string())
+        Err(resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("plugin call failed")
+            .to_string())
     }
 }
 
@@ -42,17 +52,29 @@ fn libsql_exec(db_name: &str, sql: &str) -> Result<(), String> {
 }
 
 fn libsql_exec_params(db_name: &str, sql: &str, params: &[&str]) -> Result<(), String> {
-    let resp = call_libsql_plugin("libsql", "exec_params", &json!({ "path": db_name, "sql": sql, "params": params }));
+    let resp = call_libsql_plugin(
+        "libsql",
+        "exec_params",
+        &json!({ "path": db_name, "sql": sql, "params": params }),
+    );
     plugin_ok_err(&resp)
 }
 
 fn libsql_query_params(db_name: &str, sql: &str, params: &[&str]) -> Result<Value, String> {
-    let resp = call_libsql_plugin("libsql", "query_params", &json!({ "path": db_name, "sql": sql, "params": params }));
+    let resp = call_libsql_plugin(
+        "libsql",
+        "query_params",
+        &json!({ "path": db_name, "sql": sql, "params": params }),
+    );
     let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if ok {
         Ok(resp.get("rows").cloned().unwrap_or(Value::Array(vec![])))
     } else {
-        Err(resp.get("error").and_then(|v| v.as_str()).unwrap_or("plugin call failed").to_string())
+        Err(resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("plugin call failed")
+            .to_string())
     }
 }
 
@@ -64,22 +86,35 @@ pub struct VecTableSpec<'a> {
 
 impl<'a> VecTableSpec<'a> {
     pub fn from_names(db_name: &'a str, names: &'a VecTableNames) -> VecTableSpec<'a> {
-        VecTableSpec { db_name, table: &names.table, index: &names.index }
+        VecTableSpec {
+            db_name,
+            table: &names.table,
+            index: &names.index,
+        }
     }
 
     pub fn rebuild_index(&self) -> Result<(), String> {
-        let _ = libsql_exec(self.db_name, &format!("DROP INDEX IF EXISTS {}", self.index));
-        libsql_exec(self.db_name, &format!(
-            "CREATE INDEX {} ON {}(libsql_vector_idx(embedding, 'metric=cosine'))",
-            self.index, self.table
-        ))
+        let _ = libsql_exec(
+            self.db_name,
+            &format!("DROP INDEX IF EXISTS {}", self.index),
+        );
+        libsql_exec(
+            self.db_name,
+            &format!(
+                "CREATE INDEX {} ON {}(libsql_vector_idx(embedding, 'metric=cosine'))",
+                self.index, self.table
+            ),
+        )
     }
 
     pub fn ensure_index(&self) {
-        let _ = libsql_exec(self.db_name, &format!(
+        let _ = libsql_exec(
+            self.db_name,
+            &format!(
             "CREATE INDEX IF NOT EXISTS {} ON {}(libsql_vector_idx(embedding, 'metric=cosine'))",
             self.index, self.table
-        ));
+        ),
+        );
     }
 
     pub fn drop_if_dim_mismatch_cfg(&self, cfg: &EmbedDimConfig) -> bool {
@@ -106,15 +141,22 @@ pub fn is_shadow_row_err(err: &str) -> bool {
 static INDEX_REBUILT_THIS_PASS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 pub fn begin_shadow_row_recovery_pass() {
-    *INDEX_REBUILT_THIS_PASS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *INDEX_REBUILT_THIS_PASS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 pub fn index_left_dirty_by_shadow_rows() -> Option<String> {
-    INDEX_REBUILT_THIS_PASS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    INDEX_REBUILT_THIS_PASS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 fn claim_single_rebuild_for_pass(index: &str) -> bool {
-    let mut claimed = INDEX_REBUILT_THIS_PASS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut claimed = INDEX_REBUILT_THIS_PASS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     match claimed.as_deref() {
         Some(already) if already == index => false,
         _ => {
@@ -133,7 +175,9 @@ pub fn exec_with_shadow_row_recovery(
     match spec.exec_params(sql, params) {
         Ok(()) => Ok(()),
         Err(e) if is_shadow_row_err(&e) => {
-            if !claim_single_rebuild_for_pass(spec.index) { return Err(e); }
+            if !claim_single_rebuild_for_pass(spec.index) {
+                return Err(e);
+            }
             on_recovery(&e);
             spec.rebuild_index()?;
             spec.exec_params(sql, params)
@@ -160,7 +204,10 @@ pub struct RecencyParams {
 
 impl RecencyParams {
     pub fn from_scoring(cfg: &ScoringConfig) -> RecencyParams {
-        RecencyParams { half_life_ms: cfg.half_life_ms, recency_floor: cfg.recency_floor }
+        RecencyParams {
+            half_life_ms: cfg.half_life_ms,
+            recency_floor: cfg.recency_floor,
+        }
     }
 }
 
@@ -177,19 +224,27 @@ pub struct QueryBudget {
 
 impl QueryBudget {
     pub fn pool(&self, limit: usize) -> usize {
-        limit.saturating_mul(self.pool_multiplier).max(self.pool_floor)
+        limit
+            .saturating_mul(self.pool_multiplier)
+            .max(self.pool_floor)
     }
 }
 
 impl Default for QueryBudget {
     fn default() -> Self {
-        QueryBudget { pool_multiplier: 5, pool_floor: 20 }
+        QueryBudget {
+            pool_multiplier: 5,
+            pool_floor: 20,
+        }
     }
 }
 
 impl QueryBudget {
     pub fn from_config(cfg: &QueryBudgetConfig) -> QueryBudget {
-        QueryBudget { pool_multiplier: cfg.pool_multiplier, pool_floor: cfg.pool_floor }
+        QueryBudget {
+            pool_multiplier: cfg.pool_multiplier,
+            pool_floor: cfg.pool_floor,
+        }
     }
 }
 

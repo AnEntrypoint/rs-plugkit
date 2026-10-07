@@ -26,6 +26,20 @@ State lives on disk under a project's `.gm/` directory: `prd.yml`,
 
 ## Spool dispatch ABI
 
+`dream-replay-cycle` accepts canonical `session_id`, optional opaque `cycle_id` and
+`after_dispatch_id`. The owner is a nonempty ASCII path component of at most 256
+bytes containing letters, digits, dots, underscores or hyphens, but not `.` or `..`.
+Supplied optional IDs must be nonempty strings, bounded to
+128 and 512 bytes respectively; malformed input fails. It summarizes up to eight
+recent recorded observations using
+same-owner completed dispatch-ledger evidence; it does not execute tools, evaluate
+sealed worlds, register policies or deploy strategies. A successful new summary
+returns `kind: "observations"`, `status: "replayed"`, `owner_session_id`, the echoed
+`cycle_id`, `last_dispatch_id` and `replay`. Missing verified evidence or an unchanged
+verified dispatch returns `status: "deferred"` with a reason and no acknowledgment
+ID. Ordinary pending-pipeline gates remain authoritative. This maintenance verb
+does not refresh agent phase-prose timestamps.
+
 Callers write request JSON to `.gm/exec-spool/in/<verb>/<N>.txt` (or
 `in/<lang>/<N>.<ext>` for language-execution stems); the watcher processes on
 read and writes `out/<N>.json` (metadata) alongside `out/<N>.out`/`.err` for
@@ -243,10 +257,11 @@ size/line-ratio disproportion + dense `\uXXXX`-escape-run detection across
 git-tracked source and a bounded `node_modules` walk), `kv`/`kv_get`/
 `kv_put`/`kv_delete`, `exec`/`exec_js`, `fetch`, `env_get`, `recall`,
 `codesearch`, `codeinsight` (symbol, call, import, complexity and duplicate queries; `callers`/`callees`/`impact` are aliases), `memorize`/`memorize-prune`, `health`, `filter`, the full git
-verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`,
-`git_add`, `git_commit`, `git_finalize`, `git_push`, `git_checkout`,
-`git_fetch`, `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`, `git_rm`, `git_revert`, `git_reset`, `git_poll`, `git_worktree_add`,
-`git_worktree_list`, `git_worktree_remove`, `git_worktree_prune`), plus `ci-status` (real
+verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git_remote`, `git_add`,
+`git_commit`, `git_finalize`, `git_push`, `git_checkout`, `git_merge`, `git_cherry_pick`, `git_fetch`,
+`git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`,
+`git_worktree`, `git_worktree_add`, `git_worktree_list`, `git_worktree_remove`, `git_worktree_prune`,
+`git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
 GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
 `prd-status`, `mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
 `fsm-validate`, `fsm-propose-override`, `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/
@@ -256,6 +271,42 @@ GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
 When a shell verb returns a `task_id`, use `task-output` with JSON body
 `{"id":"task-…"}` to retrieve it. Use `task-stop` with the same body to stop
 it. These are GM verb dispatches, not shell commands.
+
+`task-list {}` reports status without persisting results. The explicit
+`{"prepare_handoff":true}` diagnostic runs the host's handoff preparation and
+returns `handoff_status`, but transfers no ownership. It may write completed
+result snapshots. Active execution, children or output drains defer preparation;
+invalid or full storage refuses it without closing execution admission.
+Preserved results last 30 minutes after child exit and retain at most 64 KiB
+per stream. `task-output` reports omitted-byte counts, including a tighter
+`max_bytes` request; `task-stop` removes the retained result. These guarantees
+require a host with durable task-result support.
+
+`codeinsight` reads current source and refreshes its structural index before answering,
+without generating embeddings. Content hashes invalidate cached symbols even when file
+size and modification time are unchanged. Successful replies include `codeinsight_index`
+coverage for index-eligible files. Failed listings or stats, capped or budget-limited work,
+unreadable or oversized files, failed parses, and failed stores reject the query instead of
+presenting cached graph evidence as current. Use `action: "sync"`
+for a longer refresh before retrying a budget-limited query.
+
+An explicit `root` or `projectPath` requests access through the host before structural
+reads. Existing readable directories keep their current access. External roots must
+be existing project directories recognized by the host; a linked checkout's `.git`
+file counts as a project marker. This applies to `codeinsight_index` too.
+Relative roots anchor their database path at the dispatch project. Database opens
+create missing parent directories only beneath a host-readable ancestor.
+
+Readable empty files and supported files with long lines remain eligible for structural indexing.
+The host file-read ABI returns `0` on failure, reserved packed value `1` for successful empty UTF-8
+reads without allocation, and a pointer/length for nonempty reads. Empty-read success requires
+both a supporting host and guest; older components continue reporting that coverage incomplete.
+
+Call edges use unqualified names, not resolved definition bindings. `callers`, `callees`,
+`impact` and `tests` reject path, file, glob and line scope fields. Use path-scoped
+`outline`/`find` and `codesearch` to distinguish same-named definitions and exact call
+sites. Caller and impact replies label this resolution model and definition ambiguity;
+`through_ambiguous` remains an explicit impact traversal opt-in.
 
 Close a completed PRD row with `prd-resolve` and JSON body
 `{"id":"<prd-item-id>","witness_evidence":"<live evidence>"}`. An optional
@@ -269,9 +320,26 @@ round trip. On a non-green or unresolvable result, the response's
 `next_dispatch` field names `ci-status` so the caller can re-check once CI
 finishes.
 
+`git_worktree` accepts one action per dispatch:
+
+- `{"action":"list"}` returns structured `worktrees` from Git's NUL-delimited porcelain records.
+- `{"action":"add","path":"/absolute/checkout","ref":"HEAD","detach":true}` creates a linked checkout. `ref` defaults to `HEAD`; `detach` defaults to `true`. `detach:false` requires an explicit existing branch.
+- `{"action":"remove","path":"/absolute/checkout"}` removes a clean, unlocked linked checkout. The verb provides no force option; Git rejects dirty or locked worktrees.
+
+Unknown fields are refused for each action. Repository selectors and session fields retain the git-family contract. Relative paths resolve against the selected repository. Add and remove return the requested path; list returns Git's recorded paths.
+
+When enabling `extensions.worktreeConfig`, move a common `core.worktree` value into the primary repository's `config.worktree` before adding per-worktree configuration. Move `core.bare` there too if it is true. Keep the primary worktree value's path semantics unchanged. A common `core.worktree` under this extension applies to linked worktrees and can make `git rev-parse --show-toplevel` report an administrative gitdir. Verify that command in both primary and linked checkouts before dispatching further GM verbs. Per-worktree author configuration then uses `git config --worktree user.name` and `user.email`.
+
+`git_commit` consumes the whole index in a merge.
+The verb refuses `paths` or `files` or `add_all`.
+These requests do not stage files.
+Review the staged index before the commit.
+It does not add a pathspec to the commit.
+Unstaged and untracked files are not in the commit.
+
 `git_add`, `git_commit`, `git_finalize`, `git_diff`, `git_stash` and
 `git_checkout` take an optional `paths` (alias `files`) pathspec list
-(`git_checkout {paths, ref?}` restores just those files in the working tree from `ref`, default the index; it refuses an empty list, a leading `-` or `:`, `..`, an absolute path outside the repo, and anything under `.gm/` or `.agentplug*`, and answers `{restored, source, output}`). With it, `git_commit` and
+(`git_checkout {paths, ref?}` restores just those files in the working tree from `ref`, default the index; it refuses an empty list, a leading `-` or `:`, `..`, an absolute path outside the repo, and anything under `.gm/` or `.agentplug*` except `.gm/.last-scan-deps-ts`, `.gm/.last-scan-deps-result.json`, and `.agentplug-kv/codeinsight-edges/`, and answers `{restored, source, output}`). With it, `git_commit` and
 `git_finalize` stage and commit exactly those pathspecs (`git commit -- <paths>`,
 so entries another writer staged stay staged and uncommitted), the
 post-commit porcelain gate considers only those paths, and when dirt remains
@@ -282,7 +350,33 @@ reported rather than reconciled. `paths` together with `rev` on
 `git_finalize` is refused, as is an empty or non-string `paths`. Resolved-PRD
 `commit_comment` notes are bundled only by a commit whose scope covers
 `.gm/prd.yml` (no `paths`, or `paths` naming it or `.gm`); a narrower scoped
-commit leaves them pending so the row removal and its note land together.
+    commit leaves them pending so the row removal and its note land together.
+
+    `git_cherry_pick {rev, cwd?|repo?|root?|projectPath?}` first requires a clean
+    worktree, applies one existing commit without merging unrelated history, and
+    returns both before and after HEAD values. A conflict lists its paths and is
+    automatically aborted, so the target is not left in a cherry-pick state.
+
+An explicit `paths` outranks the protected-path exclusion list: an entry the
+caller named is never withheld, and a request whose every pathspec resolves
+under `.agentplug*` is refused rather than silently widening. A scoped
+`git_commit`/`git_finalize` whose paths stage nothing fails with
+`error_code: invalid_args` and `requested_paths` instead of reporting
+`nothing_to_commit`, so a pathspec that no-ops cannot fall through to
+committing the rest of the index.
+
+`git_commit` and `git_finalize` refuse before staging anything when the commit
+would reference a file that exists on disk, is untracked, is not gitignored
+and is not part of this commit (`error_code: dangling_reference`, one
+`dangling_references` entry per offender naming `from`, `line`, `specifier`
+and `target`, plus a `fixes` list). Specifiers are resolved the way the
+runtime would: relative first, then bare against the nearest `package.json`
+`exports` map (string, conditional object and `"./*"` wildcard) and npm
+workspaces under `packages/*`. `allow_dangling: ["<target>"]` waives named
+targets and `allow_dangling: true` waives all; either way the waived targets
+come back in `dangling_waived`. Scanning skips `node_modules/`, `dist/`,
+`vendor/`, `build/`, `coverage/`, `.git/`, `.gm/` and `.agentplug-kv/`, files
+above 512 KiB, non-JS/TS/JSON extensions, and stops after 400 files.
 
 An explicit `paths` outranks the protected-path exclusion list: an entry the
 caller named is never withheld, and a request whose every pathspec resolves
@@ -346,8 +440,8 @@ checkout.
 cargo build --release
 ```
 
-Outputs `target/wasm32-wasip1/release/plugkit.wasm` (or `plugkit-slim.wasm`
-via the slim build profile). Release artifacts for the wasm target are
+Outputs `target/wasm32-wasip1/release/rs_plugkit.wasm`. The release workflow
+publishes that artifact as `plugkit-slim.wasm`. Release artifacts for the wasm target are
 produced by `.github/workflows/release.yml` on `git push` to `main`, and
 published to `AnEntrypoint/plugkit-bin` as GitHub Releases assets,
 sha256-verified alongside each resolved release tag. `agentplug-runner`
@@ -355,6 +449,14 @@ polls and installs from these GitHub Releases directly
 (`agentplug-runner/src/download.rs`); there is no npm-publish step in this
 pipeline, so the `plugkit-wasm` npm package is not kept current by CI and
 should not be relied on as a live distribution channel.
+
+### Isolated source verification
+
+Keep each writer's checkout separate. Dependency compilation can reuse a target cache for the same Rust toolchain, target, profile, features and dependency lockfile. Cargo serializes builds in one target directory; avoid concurrent builds against that directory when their callers need to collect artifacts.
+
+Hold a single-writer lease across the build and artifact copy. Select the cache with `CARGO_TARGET_DIR`, build from the isolated checkout, then copy the resulting WASM or native library to a session-owned artifact directory before releasing the lease. Each diagnostic process reads that immutable copy. A separate target directory per writer can instead start from a filesystem snapshot or reflink of a compatible dependency cache; it must retain its own final artifacts.
+
+Record the checkout commit and uncommitted diff, Cargo lockfile digest, build command, Rust toolchain version and artifact SHA-256. Confirm source hashes are unchanged across the build and live diagnostic. Reuse dependencies only; rebuild changed source crates. A diagnostic artifact does not replace the installed runner or establish release provenance. Publish through the repository workflow and verify its artifact separately.
 
 ## Cascade
 
