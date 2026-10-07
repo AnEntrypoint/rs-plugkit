@@ -9722,7 +9722,7 @@ fn git_worktree_protected_segment(unified: &str) -> bool {
     })
 }
 
-fn git_worktree_target(body: &Value, cwd: Option<&str>, verb: &str) -> Result<(String, String), Value> {
+fn git_worktree_target(body: &Value, cwd: Option<&str>, verb: &str, outside_action: &str) -> Result<(String, String), Value> {
     let Some(raw) = body.get("path").and_then(|v| v.as_str()) else {
         return Err(json!({ "error": format!("{} requires a path", verb) }));
     };
@@ -9748,17 +9748,18 @@ fn git_worktree_target(body: &Value, cwd: Option<&str>, verb: &str) -> Result<(S
         return Ok((top, unified));
     }
     Err(json!({
-        "error": format!("{} refuses an absolute path outside the repository root {}", verb, top),
+        "error": format!("{} refuses an absolute path outside the repository root {}: allowOutsideRoot:true is required to {} the worktree at {}", verb, top, outside_action, spec),
         "root": top,
         "path": spec,
-        "hint": "pass allowOutsideRoot:true to place a worktree outside this repository"
+        "required": "allowOutsideRoot:true",
+        "hint": format!("pass allowOutsideRoot:true to {} a worktree outside this repository", outside_action)
     }))
 }
 
 fn git_worktree_add(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields("git_worktree_add", body, &["path", "ref", "create", "allowOutsideRoot"]) { return refusal; }
     let cwd = body_cwd(body);
-    let (root, path) = match git_worktree_target(body, cwd, "git_worktree_add") { Ok(v) => v, Err(detail) => return err_json("git_worktree_add", detail) };
+    let (root, path) = match git_worktree_target(body, cwd, "git_worktree_add", "place") { Ok(v) => v, Err(detail) => return err_json("git_worktree_add", detail) };
     let create = body.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
     let reference = body.get("ref").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
     if create && reference.is_none() { return err("git_worktree_add", "create:true requires a ref naming the new branch"); }
@@ -9831,7 +9832,7 @@ fn git_worktree_list(body: &Value) -> u64 {
 fn git_worktree_remove(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields("git_worktree_remove", body, &["path", "force", "allowOutsideRoot"]) { return refusal; }
     let cwd = body_cwd(body);
-    let (_, path) = match git_worktree_target(body, cwd, "git_worktree_remove") { Ok(v) => v, Err(detail) => return err_json("git_worktree_remove", detail) };
+    let (root, path) = match git_worktree_target(body, cwd, "git_worktree_remove", "remove") { Ok(v) => v, Err(detail) => return err_json("git_worktree_remove", detail) };
     let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
     let mut argv: Vec<&str> = vec!["worktree", "remove"];
     if force { argv.push("--force"); }
@@ -9841,7 +9842,7 @@ fn git_worktree_remove(body: &Value) -> u64 {
     let output = format!("{}{}",
         r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
         r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
-    if code != 0 { return err("git_worktree_remove", &output); }
+    if code != 0 { return err_json("git_worktree_remove", json!({ "error": output.trim(), "root": root, "path": path })); }
     ok("git_worktree_remove", json!({ "removed": true, "path": path, "output": output.trim() }))
 }
 
