@@ -4627,6 +4627,59 @@ fn git_commit_found_nothing_staged(sout: &str, serr: &str, cwd: Option<&str>) ->
         .get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0
 }
 
+fn git_commit_failed_for_missing_identity(sout: &str, serr: &str) -> bool {
+    for s in [sout, serr] {
+        if s.contains("Author identity unknown")
+            || s.contains("Please tell me who you are")
+            || s.contains("unable to auto-detect email address")
+            || s.contains("unable to auto-detect name")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn git_last_commit_identity(cwd: Option<&str>) -> Option<(String, String)> {
+    let r = git_call_argv(&["log", "-1", "--format=%an%x00%ae"], cwd);
+    if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) != 0 {
+        return None;
+    }
+    let mut parts = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").split('\0');
+    let name = parts.next().unwrap_or("").trim().to_string();
+    let email = parts.next().unwrap_or("").trim().to_string();
+    if name.is_empty() || email.is_empty() {
+        return None;
+    }
+    Some((name, email))
+}
+
+fn git_commit_argv(
+    message: &str,
+    allow_empty: bool,
+    scoped_paths: &[String],
+    identity: Option<&(String, String)>,
+) -> Vec<String> {
+    let mut argv: Vec<String> = Vec::new();
+    if let Some((name, email)) = identity {
+        argv.push("-c".to_string());
+        argv.push(format!("user.name={name}"));
+        argv.push("-c".to_string());
+        argv.push(format!("user.email={email}"));
+    }
+    argv.push("commit".to_string());
+    argv.push("-m".to_string());
+    argv.push(message.to_string());
+    if allow_empty {
+        argv.push("--allow-empty".to_string());
+    }
+    if !scoped_paths.is_empty() {
+        argv.push("--".to_string());
+        argv.extend(scoped_paths.iter().cloned());
+    }
+    argv
+}
+
 fn bundle_prd_commit_comments(cwd: Option<&str>, message: &str) -> String {
     let notes = crate::orchestrator::prd::drain_pending_commit_comments(cwd);
     if notes.is_empty() {
@@ -4730,22 +4783,38 @@ fn git_commit(body: &Value) -> u64 {
             }
         }
         let bundled_message = bundle_prd_commit_comments(cwd, message);
-        let mut argv: Vec<String> = vec!["commit".to_string(), "-m".to_string(), bundled_message];
-        if allow_empty { argv.push("--allow-empty".to_string()); }
-        if !scoped_paths.is_empty() {
-            argv.push("--".to_string());
-            argv.extend(scoped_paths.iter().cloned());
-        }
-        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
-        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-        if code != 0 {
+        let r = git_step_replayed_by_call_order(
+            plan,
+            &as_argv(&git_commit_argv(&bundled_message, allow_empty, scoped_paths, None)),
+            cwd,
+        )?;
+        if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
             let serr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
             let sout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
             if git_commit_found_nothing_staged(sout, serr, cwd) {
                 return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true }), cwd, &paths)));
             }
-            return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
+            let identity = if git_commit_failed_for_missing_identity(sout, serr) {
+                git_last_commit_identity(cwd)
+            } else {
+                None
+            };
+            let Some(identity) = identity else {
+                return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
+            };
+            let retried = git_step_replayed_by_call_order(
+                plan,
+                &as_argv(&git_commit_argv(&bundled_message, allow_empty, scoped_paths, Some(&identity))),
+                cwd,
+            )?;
+            if retried.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
+                let retry_serr = retried.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+                let retry_sout = retried.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+                if git_commit_found_nothing_staged(retry_sout, retry_serr, cwd) {
+                    return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true }), cwd, &paths)));
+                }
+                return Ok(err("git_commit", if retry_serr.is_empty() { retry_sout } else { retry_serr }));
+            }
         }
         let after_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
         let head_after = after_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
@@ -4901,13 +4970,23 @@ fn git_finalize(body: &Value) -> u64 {
             }));
         }
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
-        let mut commit_argv: Vec<String> = vec!["commit".to_string(), "-m".to_string(), bundled_message];
-        if scoped {
-            commit_argv.push("--".to_string());
-            commit_argv.extend(paths.iter().cloned());
+        let scoped_paths: &[String] = if scoped { &paths } else { &[] };
+        let mut cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, scoped_paths, None)), cwd_ref);
+        if cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
+            let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let sout = cr.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let identity = if git_commit_failed_for_missing_identity(&sout, &serr) {
+                git_last_commit_identity(cwd_ref)
+            } else {
+                None
+            };
+            if let Some(identity) = identity {
+                let retried = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, scoped_paths, Some(&identity))), cwd_ref);
+                if retried.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) == 0 {
+                    cr = retried;
+                }
+            }
         }
-        let commit_argv: Vec<&str> = commit_argv.iter().map(String::as_str).collect();
-        let cr = git_call_argv(&commit_argv, cwd_ref);
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if ccode != 0 {
             let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
@@ -5939,6 +6018,148 @@ fn git_reset(body: &Value) -> u64 {
     ok("git_reset", json!({ "reset_to": refspec, "mode": mode }))
 }
 
+fn git_worktree_protected_segment(unified: &str) -> bool {
+    unified.split('/').any(|segment| {
+        let lower = segment.to_ascii_lowercase();
+        GIT_PROTECTED_PATHSPECS.iter().any(|(name, _)| if name.ends_with('*') { lower.starts_with(name.trim_end_matches('*')) } else { lower == *name })
+    })
+}
+
+fn git_worktree_target(body: &Value, cwd: Option<&str>, verb: &str) -> Result<(String, String), Value> {
+    let Some(raw) = body.get("path").and_then(|v| v.as_str()) else {
+        return Err(json!({ "error": format!("{} requires a path", verb) }));
+    };
+    let spec = raw.trim();
+    if spec.is_empty() { return Err(json!({ "error": format!("{} path must not be empty", verb) })); }
+    if spec.starts_with('-') { return Err(json!({ "error": format!("{} path must not start with '-'", verb) })); }
+    let unified = spec.replace('\\', "/");
+    if unified.split('/').any(|segment| segment == "..") { return Err(json!({ "error": format!("{} path must not contain '..'", verb) })); }
+    if git_worktree_protected_segment(&unified) {
+        return Err(json!({ "error": format!("{} refuses a path inside the project's own .gm/ or .agentplug*", verb), "path": spec }));
+    }
+    let top = exec_git_in(cwd, "rev-parse --show-toplevel").trim().replace('\\', "/");
+    if top.is_empty() { return Err(json!({ "error": format!("{} needs a repository: not inside a git worktree", verb) })); }
+    if !crate::pkfs::is_absolute(spec) {
+        return Ok((top.clone(), format!("{}/{}", top.trim_end_matches('/'), unified)));
+    }
+    let top_dir = top.trim_end_matches('/');
+    let inside = unified.len() >= top_dir.len()
+        && unified.is_char_boundary(top_dir.len())
+        && unified[..top_dir.len()].eq_ignore_ascii_case(top_dir)
+        && matches!(unified[top_dir.len()..].chars().next(), None | Some('/'));
+    if inside || body.get("allowOutsideRoot").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Ok((top, unified));
+    }
+    Err(json!({
+        "error": format!("{} refuses an absolute path outside the repository root {}", verb, top),
+        "root": top,
+        "path": spec,
+        "hint": "pass allowOutsideRoot:true to place a worktree outside this repository"
+    }))
+}
+
+fn git_worktree_add(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_worktree_add", body, &["path", "ref", "create", "allowOutsideRoot"]) { return refusal; }
+    let cwd = body_cwd(body);
+    let (root, path) = match git_worktree_target(body, cwd, "git_worktree_add") { Ok(v) => v, Err(detail) => return err_json("git_worktree_add", detail) };
+    let create = body.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
+    let reference = body.get("ref").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
+    if create && reference.is_none() { return err("git_worktree_add", "create:true requires a ref naming the new branch"); }
+    if reference.is_some_and(|s| s.starts_with('-')) { return err("git_worktree_add", "ref must not start with '-'"); }
+    let mut argv: Vec<String> = vec!["worktree".to_string(), "add".to_string()];
+    if create {
+        argv.push("-b".to_string());
+        argv.push(reference.unwrap_or_default().to_string());
+        argv.push(path.clone());
+    } else {
+        if let Some(s) = reference { argv.push(s.to_string()); }
+        argv.push(path.clone());
+    }
+    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let r = git_call_argv(&argv_refs, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let output = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 { return err("git_worktree_add", &output); }
+    let branch = exec_git_in(Some(path.as_str()), "rev-parse --abbrev-ref HEAD").trim().to_string();
+    ok("git_worktree_add", json!({ "root": root, "path": path, "branch": branch, "created": true, "output": output.trim() }))
+}
+
+fn git_worktree_row(path: &str) -> serde_json::Map<String, Value> {
+    let mut row = serde_json::Map::new();
+    row.insert("path".to_string(), json!(path.replace('\\', "/")));
+    row.insert("head".to_string(), Value::Null);
+    row.insert("branch".to_string(), Value::Null);
+    row.insert("bare".to_string(), json!(false));
+    row.insert("detached".to_string(), json!(false));
+    row.insert("locked".to_string(), Value::Null);
+    row.insert("prunable".to_string(), Value::Null);
+    row
+}
+
+fn git_worktree_list(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_worktree_list", body, &[]) { return refusal; }
+    let cwd = body_cwd(body);
+    let r = git_call_argv(&["worktree", "list", "--porcelain"], cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let output = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 { return err("git_worktree_list", &output); }
+    let mut rows: Vec<Value> = Vec::new();
+    let mut row: Option<serde_json::Map<String, Value>> = None;
+    for line in output.lines() {
+        let line = line.trim_end();
+        if line.is_empty() { continue; }
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            if let Some(finished) = row.take() { rows.push(Value::Object(finished)); }
+            row = Some(git_worktree_row(rest.trim()));
+            continue;
+        }
+        let Some(current) = row.as_mut() else { continue; };
+        if let Some(rest) = line.strip_prefix("HEAD ") { current.insert("head".to_string(), json!(rest.trim())); }
+        else if let Some(rest) = line.strip_prefix("branch ") { current.insert("branch".to_string(), json!(rest.trim())); }
+        else if line == "bare" { current.insert("bare".to_string(), json!(true)); }
+        else if line == "detached" { current.insert("detached".to_string(), json!(true)); }
+        else if line == "locked" { current.insert("locked".to_string(), json!(true)); }
+        else if let Some(rest) = line.strip_prefix("locked ") { current.insert("locked".to_string(), json!(rest.trim())); }
+        else if line == "prunable" { current.insert("prunable".to_string(), json!(true)); }
+        else if let Some(rest) = line.strip_prefix("prunable ") { current.insert("prunable".to_string(), json!(rest.trim())); }
+    }
+    if let Some(finished) = row.take() { rows.push(Value::Object(finished)); }
+    ok("git_worktree_list", json!({ "count": rows.len(), "worktrees": rows }))
+}
+
+fn git_worktree_remove(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_worktree_remove", body, &["path", "force", "allowOutsideRoot"]) { return refusal; }
+    let cwd = body_cwd(body);
+    let (_, path) = match git_worktree_target(body, cwd, "git_worktree_remove") { Ok(v) => v, Err(detail) => return err_json("git_worktree_remove", detail) };
+    let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut argv: Vec<&str> = vec!["worktree", "remove"];
+    if force { argv.push("--force"); }
+    argv.push(path.as_str());
+    let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let output = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 { return err("git_worktree_remove", &output); }
+    ok("git_worktree_remove", json!({ "removed": true, "path": path, "output": output.trim() }))
+}
+
+fn git_worktree_prune(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_worktree_prune", body, &[]) { return refusal; }
+    let cwd = body_cwd(body);
+    let r = git_call_argv(&["worktree", "prune"], cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let output = format!("{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
+    if code != 0 { return err("git_worktree_prune", &output); }
+    ok("git_worktree_prune", json!({ "pruned": true, "output": output.trim() }))
+}
+
 fn rebase_failed(out: &str) -> bool {
     let l = out.to_lowercase();
     l.contains("conflict") || l.contains("could not apply") || l.contains("error:")
@@ -6538,6 +6759,10 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_rm" => git_rm(&body),
         "git_revert" => git_revert(&body),
         "git_reset" => git_reset(&body),
+        "git_worktree_add" => git_worktree_add(&body),
+        "git_worktree_list" => git_worktree_list(&body),
+        "git_worktree_remove" => git_worktree_remove(&body),
+        "git_worktree_prune" => git_worktree_prune(&body),
         "git_poll" => git_poll(&body),
         "forget" => forget(&body),
         "learn" => err_coded("learn", ERR_CODE_RETIRED_VERB, "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index)"),
