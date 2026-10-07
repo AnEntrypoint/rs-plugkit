@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+const HOST_FS_READ_EMPTY_SUCCESS: u64 = 1;
+
 macro_rules! host_abi_extern_block_and_host_imports_list_from_one_declaration {
     ($(fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?;)+) => {
         #[link(wasm_import_module = "env")]
@@ -43,9 +45,12 @@ pub fn plugin_call(plugin: &str, verb: &str, body: &Value) -> Value {
     let body_s = body.to_string();
     let packed = unsafe {
         host_plugin_call(
-            plugin.as_ptr(), plugin.len() as u32,
-            verb.as_ptr(), verb.len() as u32,
-            body_s.as_ptr(), body_s.len() as u32,
+            plugin.as_ptr(),
+            plugin.len() as u32,
+            verb.as_ptr(),
+            verb.len() as u32,
+            body_s.as_ptr(),
+            body_s.len() as u32,
         )
     };
     unpack_to_value(packed)
@@ -53,7 +58,14 @@ pub fn plugin_call(plugin: &str, verb: &str, body: &Value) -> Value {
 
 pub fn host_task(action: &str, params: &Value) -> Value {
     let params_s = params.to_string();
-    let packed = unsafe { host_task_proc(action.as_ptr(), action.len() as u32, params_s.as_ptr(), params_s.len() as u32) };
+    let packed = unsafe {
+        host_task_proc(
+            action.as_ptr(),
+            action.len() as u32,
+            params_s.as_ptr(),
+            params_s.len() as u32,
+        )
+    };
     unpack_to_value(packed)
 }
 
@@ -76,11 +88,17 @@ const DUBIOUS_OWNERSHIP_MARKER: &str = "detected dubious ownership in repository
 fn dubious_ownership_repository(stderr: &str) -> Option<String> {
     let rest = stderr.split_once(DUBIOUS_OWNERSHIP_MARKER)?.1;
     let repository = rest.split('\'').next()?.trim();
-    if repository.is_empty() { None } else { Some(repository.to_string()) }
+    if repository.is_empty() {
+        None
+    } else {
+        Some(repository.to_string())
+    }
 }
 
 fn comparable_path(path: &str) -> String {
-    path.replace('\\', "/").trim_end_matches('/').to_ascii_lowercase()
+    path.replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
 }
 
 fn is_absolute_path(path: &str) -> bool {
@@ -101,31 +119,88 @@ fn repository_contains_git_cwd(repository: &str, cwd: Option<&str>) -> bool {
 
 fn argv_trusting_repository(args: &str, repository: &str) -> String {
     let trimmed = args.trim();
-    let split_on_whitespace = || trimmed.split_whitespace().map(String::from).collect::<Vec<String>>();
+    let split_on_whitespace = || {
+        trimmed
+            .split_whitespace()
+            .map(String::from)
+            .collect::<Vec<String>>()
+    };
     let mut argv: Vec<String> = if trimmed.starts_with('[') {
         serde_json::from_str(trimmed).unwrap_or_else(|_| split_on_whitespace())
     } else {
         split_on_whitespace()
     };
-    argv.splice(0..0, ["-c".to_string(), format!("safe.directory={repository}")]);
+    argv.splice(
+        0..0,
+        ["-c".to_string(), format!("safe.directory={repository}")],
+    );
     serde_json::to_string(&argv).unwrap_or_default()
 }
 
+fn git_dispatch_cwd(cwd: Option<&str>) -> String {
+    match cwd {
+        Some(dir) if !dir.trim().is_empty() => dir.trim().to_string(),
+        _ => host_cwd_string().unwrap_or_default(),
+    }
+}
+
+fn annotate_repository_resolution(value: Value, resolved: &str) -> Value {
+    if !git_response_is_not_repository(&value) {
+        return value;
+    }
+    let stderr = value
+        .get("stderr")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let remedy = format!(
+        "{resolved} is not inside a git work tree -- pass an absolute cwd at the MCP dispatch level, or cwd/repo/root/projectPath in the verb body"
+    );
+    let merged = if stderr.is_empty() {
+        remedy
+    } else {
+        format!("{stderr}\n{remedy}")
+    };
+    let mut annotated = value;
+    if let Some(fields) = annotated.as_object_mut() {
+        fields.insert("stderr".to_string(), Value::String(merged));
+    }
+    annotated
+}
+
 fn git_call_host(args: &str, cwd: Option<&str>) -> Value {
-    let cwd_s = cwd.unwrap_or("");
-    let packed = unsafe { host_git(args.as_ptr(), args.len() as u32, cwd_s.as_ptr(), cwd_s.len() as u32) };
-    unpack_to_value(packed)
+    let resolved = git_dispatch_cwd(cwd);
+    let packed = unsafe {
+        host_git(
+            args.as_ptr(),
+            args.len() as u32,
+            resolved.as_ptr(),
+            resolved.len() as u32,
+        )
+    };
+    annotate_repository_resolution(unpack_to_value(packed), &resolved)
 }
 
 pub fn git_call_async(args: &str, cwd: Option<&str>) -> Value {
     let first = git_call_host(args, cwd);
-    let Some(repository) = first.get("stderr").and_then(|s| s.as_str()).and_then(dubious_ownership_repository) else { return first };
-    if !repository_contains_git_cwd(&repository, cwd) { return first; }
+    let Some(repository) = first
+        .get("stderr")
+        .and_then(|s| s.as_str())
+        .and_then(dubious_ownership_repository)
+    else {
+        return first;
+    };
+    if !repository_contains_git_cwd(&repository, cwd) {
+        return first;
+    }
     git_call_host(&argv_trusting_repository(args, &repository), cwd)
 }
 
 pub fn git_pending_token(v: &Value) -> Option<String> {
-    if !v.get("pending").and_then(|x| x.as_bool()).unwrap_or(false) { return None; }
+    if !v.get("pending").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return None;
+    }
     v.get("token").and_then(|x| x.as_str()).map(String::from)
 }
 
@@ -133,14 +208,26 @@ pub fn git_porcelain() -> String {
     porcelain_or_dirty(git_call("status --porcelain", None))
 }
 
-/// One `git status --porcelain` call, kept as data so a caller can tell a clean
-/// tree apart from one git could not fully read.
-///
-/// Windows MAX_PATH truncation makes git drop entries it cannot open: it warns on
-/// stderr and exits 0 (silent data loss), or exits non-zero. Neither may be
-/// reported as a dirty path -- every consumer of this string reads non-empty as
-/// "the worktree has work in it", so a fabricated `??` line is indistinguishable
-/// from a real untracked file and hard-blocks `git_finalize`.
+pub(crate) fn git_response_is_not_repository(v: &Value) -> bool {
+    let failed = !v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true)
+        || v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0;
+    if !failed {
+        return false;
+    }
+    let output = format!(
+        "{}{}",
+        v.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        v.get("stderr").and_then(|x| x.as_str()).unwrap_or(""),
+    );
+    output.to_ascii_lowercase().contains("not a git repository")
+}
+
+pub fn git_repository_absent() -> bool {
+    git_response_is_not_repository(&git_call("rev-parse --is-inside-work-tree", None))
+}
+
+pub(crate) const PORCELAIN_FAILED_MARKER: &str = "!!git-status-failed ";
+
 pub(crate) struct Porcelain {
     pub porcelain: String,
     pub partial: bool,
@@ -157,41 +244,68 @@ fn skipped_dir_from_stderr_line(line: &str) -> Option<String> {
     let rest = line.split_once(GIT_SKIPPED_DIR_MARKER)?.1;
     let start = rest.find('\'')? + 1;
     let end = rest.rfind('\'')?;
-    if end <= start { return None; }
+    if end <= start {
+        return None;
+    }
     let path = rest[start..end].trim();
-    if path.is_empty() { None } else { Some(path.to_string()) }
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
 }
 
 pub(crate) fn porcelain_from(v: &Value) -> Porcelain {
     let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
-    let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    let porcelain = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let stderr = v.get("stderr").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let parked = v.get("async_parked").and_then(|x| x.as_bool()).unwrap_or(false);
-    let truncated = v.get("stdout_truncated").and_then(|x| x.as_bool()).unwrap_or(false);
+    let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1);
+    let porcelain = v
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let stderr = v
+        .get("stderr")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let parked = v
+        .get("async_parked")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let truncated = ["stdout_truncated", "stderr_truncated"]
+        .iter()
+        .any(|field| v.get(*field).and_then(Value::as_bool) == Some(true));
     let mut skipped_paths: Vec<String> = Vec::new();
     for line in stderr.lines() {
-        let Some(path) = skipped_dir_from_stderr_line(line) else { continue };
-        if !skipped_paths.contains(&path) { skipped_paths.push(path); }
+        let Some(path) = skipped_dir_from_stderr_line(line) else {
+            continue;
+        };
+        if !skipped_paths.contains(&path) {
+            skipped_paths.push(path);
+        }
     }
     let failed = !ok || exit_code != 0;
-    let partial = failed || truncated || !skipped_paths.is_empty();
-    Porcelain { porcelain, partial, failed, parked, skipped_paths, stderr, exit_code }
+    let partial = failed || parked || truncated || !skipped_paths.is_empty();
+    Porcelain {
+        porcelain,
+        partial,
+        failed,
+        parked,
+        skipped_paths,
+        stderr,
+        exit_code,
+    }
 }
 
 pub(crate) fn porcelain_or_dirty(v: Value) -> String {
     let st = porcelain_from(&v);
-    // An async-parked envelope carries no status at all, so reading it as a clean
-    // tree would push over a worktree nobody examined. A real git failure is the
-    // opposite case: it still lists what it could read, so return that and let
-    // git_status surface the failure as a non-fatal `partial` note.
-    if st.parked {
+    if st.partial {
         let detail = if st.stderr.trim().is_empty() {
             format!("exit_code={}", st.exit_code)
         } else {
             format!("exit_code={} stderr={}", st.exit_code, st.stderr.trim())
         };
-        return format!("?? git-status-failed ({detail})");
+        return format!("{PORCELAIN_FAILED_MARKER}{detail}");
     }
     st.porcelain
 }
@@ -237,7 +351,9 @@ pub(crate) fn pack_ptr_len(ptr: usize, len: usize) -> u64 {
 }
 
 pub(crate) fn read_str(ptr: *const u8, len: u32) -> String {
-    if ptr.is_null() || len == 0 { return String::new(); }
+    if ptr.is_null() || len == 0 {
+        return String::new();
+    }
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -245,7 +361,9 @@ pub(crate) fn read_str(ptr: *const u8, len: u32) -> String {
 pub(crate) fn unpack_to_string(packed: u64) -> Option<String> {
     let p = (packed & 0xffff_ffff) as u32;
     let l = (packed >> 32) as u32;
-    if p == 0 || l == 0 { return None; }
+    if p == 0 || l == 0 {
+        return None;
+    }
     let bytes = unsafe { Vec::from_raw_parts(p as *mut u8, l as usize, l as usize) };
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -257,11 +375,17 @@ pub(crate) fn unpack_to_value(packed: u64) -> Value {
     }
 }
 
-pub fn unpack_to_value_pub(packed: u64) -> Value { unpack_to_value(packed) }
+pub fn unpack_to_value_pub(packed: u64) -> Value {
+    unpack_to_value(packed)
+}
 
-pub fn unpack_to_string_pub(packed: u64) -> Option<String> { unpack_to_string(packed) }
+pub fn unpack_to_string_pub(packed: u64) -> Option<String> {
+    unpack_to_string(packed)
+}
 
-pub fn pack_ptr_len_pub(ptr: usize, len: usize) -> u64 { pack_ptr_len(ptr, len) }
+pub fn pack_ptr_len_pub(ptr: usize, len: usize) -> u64 {
+    pack_ptr_len(ptr, len)
+}
 
 pub fn host_cwd_string() -> Option<String> {
     let packed = unsafe { host_cwd() };
@@ -275,20 +399,34 @@ pub fn host_allow_root(root: &str) -> bool {
 
 pub fn host_read(path: &str) -> Option<String> {
     let packed = unsafe { host_fs_read(path.as_ptr(), path.len() as u32) };
-    unpack_to_string(packed)
+    if packed == HOST_FS_READ_EMPTY_SUCCESS {
+        Some(String::new())
+    } else {
+        unpack_to_string(packed)
+    }
 }
 
 pub fn host_write(path: &str, data: &str) -> bool {
-    let rc = unsafe { host_fs_write(path.as_ptr(), path.len() as u32, data.as_ptr(), data.len() as u32) };
+    let rc = unsafe {
+        host_fs_write(
+            path.as_ptr(),
+            path.len() as u32,
+            data.as_ptr(),
+            data.len() as u32,
+        )
+    };
     rc != 0
 }
 
 pub fn host_cas_write(path: &str, expected: &str, data: &str) -> u32 {
     unsafe {
         host_fs_cas_write(
-            path.as_ptr(), path.len() as u32,
-            expected.as_ptr(), expected.len() as u32,
-            data.as_ptr(), data.len() as u32,
+            path.as_ptr(),
+            path.len() as u32,
+            expected.as_ptr(),
+            expected.len() as u32,
+            data.as_ptr(),
+            data.len() as u32,
         )
     }
 }
@@ -308,7 +446,16 @@ pub fn host_remove_file_never_directory(path: &str) -> bool {
 }
 
 pub fn host_kv_read(namespace: &str, key: &str) -> Option<String> {
-    if key.is_empty() { return None; }
-    let packed = unsafe { host_kv_get(namespace.as_ptr(), namespace.len() as u32, key.as_ptr(), key.len() as u32) };
+    if key.is_empty() {
+        return None;
+    }
+    let packed = unsafe {
+        host_kv_get(
+            namespace.as_ptr(),
+            namespace.len() as u32,
+            key.as_ptr(),
+            key.len() as u32,
+        )
+    };
     unpack_to_string(packed)
 }

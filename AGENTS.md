@@ -1,169 +1,29 @@
 # AGENTS.md
 
-`plugkit-core` is the wasm cdylib guest behind gm -- the FSM/PRD/mutables
-orchestrator, spool-dispatch verb handlers, code search, and memory/recall
-all live in this one crate, compiled to `plugkit.wasm`/`plugkit-slim.wasm`.
-It is host-agnostic; `agentplug-runner` (repo `AnEntrypoint/agentplug`) is
-the sole host that loads it. See `README.md` for the full architecture,
-spool ABI, and build/cascade details -- this file covers crate-internal
-conventions only.
+`plugkit-core` is gm's host-agnostic WASM guest: orchestration, spool verbs, code search and memory live in `crates/plugkit-core/src/`. `agentplug-runner` is the supported host. Follow the parent [AGENTS.md](../AGENTS.md) and gm skill; [README.md](README.md) owns architecture, verb inventory, spool ABI and release details.
 
-## Project structure
+## Work and verification
 
-```
-crates/plugkit-core/src/
-  lib.rs                 - crate root, wasm entry point
-  wasm_dispatch/         - per-verb dispatch handlers (git_*, fs_*, prd-*, ci-status, ...)
-  orchestrator/          - FSM phase graph, gates, transitions, served instruction prose
-  code_index.rs          - codesearch/codeinsight indexing pipeline
-  embed.rs               - BERT embedding (batched + per-item fallback)
-  vecstore.rs / vecns.rs - vector storage, namespacing
-  rssearch_vectors.rs    - vector search over libsql
-  git_commit_vectors.rs  - git-history-aware search ranking
-  memory_md.rs           - human-readable memory file I/O
-  dataflow.rs / dataflow_exec.rs - data-driven plugin pipeline schema + executor
-  dispatch_ledger.rs     - per-write audit tuple (id, hash, ts)
-  gates.rs               - transition gate predicates
-  config.rs / config_sync.rs / config_path.rs - three-tier config/prose resolution
-  prose.rs               - per-key prose resolution chain
-  gitignore.rs           - managed-gitignore block handling
-  pkfs.rs                - project-scoped filesystem helpers
-  filter.rs              - stdout -> compact-stdout transform
-  validation.rs          - shared input validation
-  legacy_reaper.rs        - stale-state cleanup
-  mediator.rs            - cross-verb coordination
-  poll_detect.rs          - polling-pattern detection/rejection
-  shared_db.rs / libsql_wasm.rs - libsql-backed storage
-  cache.rs / embed_marker.rs / evidence_receipt.rs / ragconfig.rs / browser_witness.rs
-```
+- Use GM MCP and the served workflow. Structural questions start with `callers`/`impact`, then `codesearch`; read only located paths. Give parallel agents distinct spool session IDs and disjoint writer ownership.
+- Source carries no comments except attributes, unsafe `SAFETY` rationale and license headers. Rustdoc is not published. Keep non-obvious current constraints here; make ordinary facts self-explanatory code. Keep text UTF-8 without a BOM and without decorative glyphs.
+- No synthetic tests, fixtures, mocks, fuzz harnesses or test frameworks. Verify changed behavior with a real build and live dispatch through the owning verb and supported host; read the actual output. Documentation-only changes require factual, scope and whitespace verification, not an unrelated rebuild.
+- Build the published guest with `cargo build -p rs-plugkit --release --target wasm32-wasip1 --features slim`; lint with the equivalent `cargo clippy`. `cargo check -p rs-plugkit --offline` additionally compiles native-only branches. The guest is not a standalone runtime.
+- Parser changes require live malformed and boundary inputs. `fsm-validate` reaches `FsmGraph::validate` for graph validation; exercise invalid structures, not legitimate FSM feedback cycles. Config/prose resolution has no dedicated validate-only verb: use a real project configuration and the actual resolving verb, and distinguish that side-effect witness from a dedicated validator. Malformed spool JSON must reach the actual in-file/parser, not be repaired by a wrapper first.
+- A verb adds its handler, `wasm_dispatch/verbs.rs` route, relevant gates/transitions, the parent verb contract and this README inventory together. Update both sides of a cross-repository ABI. Push scoped changes directly to `main` through GM git verbs; do not manufacture branches or PRs. The signed release/cascade workflow owns version bumps and publication; verify its result before claiming a release.
+- Keep this file below 30,000 bytes. Revalidate the complete file, retained notes/memories and repository history when compacting. Absorb only current reusable facts, discard duplicate or superseded narration, and snapshot exact records before explicit-key pruning. Do not sweep another writer's files or runtime caches into delivery.
 
-## Code style
+## Ownership map
 
-Follows the same discipline as gm's own `AGENTS.md` (parent repo): no
-source comments. A fact a name can carry goes in the name (this crate's long
-descriptive identifiers are deliberate); a non-obvious rationale that is still
-true goes in "Source invariants" below, 1-3 lines each, or in the gm recall
-store. Kept in source: `#[...]` attributes, `// SAFETY:` on `unsafe` blocks,
-license headers. Doc comments count as comments: rustdoc is never built or
-published. No synthetic test files or test frameworks of any kind --
-verification is a real build plus a live-witnessed dispatch through the
-actual spool, never a mock. No graphical/decorative glyphs in source or docs.
-No UTF-8 BOM.
+- `lib.rs`, `wasm_dispatch/`: guest entry point and per-verb handlers.
+- `orchestrator/`, `gates.rs`: phase graph, obligations, discipline/fiber lifecycle and served prose.
+- `code_index.rs`, `code_symbols.rs`, `git_commit_vectors.rs`: retrieval, structural indexing and history ranking.
+- `embed.rs`, `vecstore.rs`, `vecns.rs`, `rssearch_vectors.rs`: embeddings and vector namespaces.
+- `memory_md.rs`, `cache.rs`, `shared_db.rs`, `libsql_wasm.rs`: durable memory, cache and database ownership.
+- `config.rs`, `config_sync.rs`, `config_path.rs`, `prose.rs`: configuration tiers and bounded source resolution.
+- `dataflow.rs`, `dataflow_exec.rs`, `mediator.rs`, `dispatch_ledger.rs`: pipeline execution, routing and evidence.
+- `pkfs.rs`, `validation.rs`, `gitignore.rs`, `legacy_reaper.rs`, `poll_detect.rs`: project paths, boundaries and cleanup.
 
-## Development
-
-```bash
-cargo build -p rs-plugkit --release --target wasm32-wasip1 --features slim
-cargo clippy -p rs-plugkit --release --target wasm32-wasip1 --features slim
-cargo check -p rs-plugkit --offline
-```
-
-The first line is exactly what CI builds and publishes. The host `cargo check`
-is the only build that compiles `#[cfg(not(target_arch = "wasm32"))]` code.
-
-Omitting `--features slim` still builds, and produces a ~139MB module that
-embeds the model weights instead of fetching them -- never deploy that by
-hand.
-
-Deploying a local build: the live module is `~/.agentplug/plugins/gm.wasm`
-(`$AGENTPLUG_HOME/plugins/gm.wasm`), NOT `~/.gm-tools/plugkit.wasm` --
-`agentplug-runner` resolves `plugin_wasm_path("gm")` under the install dir,
-so overwriting the `.gm-tools` copy alone changes nothing a dispatch can
-observe. Copy the built `target/wasm32-wasip1/release/rs_plugkit.wasm` over
-`~/.agentplug/plugins/gm.wasm` (keep a `.pre-*` backup beside it, as the
-existing ones do). The daemon's `PluginModules::get_or_compile` compares the
-file's `(mtime, size)`, re-hashes it and recompiles on change, so no MCP or
-daemon restart is needed: the next dispatch picks the new module up, and the
-first one after a swap pays the recompile. Because `gm.version` there reads
-`local-dev-sideload-*`, the auto-updater never overwrites a sideload.
-
-There is no standalone way to "run" this crate outside a wasm host --
-verification means building, then dispatching real spool verbs against a
-project with `agentplug-runner` loaded (see gm's own `AGENTS.md` for the
-spool-dispatch ABI and boot procedure) and reading the actual response
-JSON, never asserting behavior from source reading alone.
-
-## Parser-shaped surfaces need adversarial input, not just hand-picked cases
-
-`orchestrator/fsm.rs`'s `graph.json` parsing, the
-`config.rs`/`config_sync.rs`/`prose.rs` three-tier resolution chain, and
-every `wasm_dispatch` handler's spool-JSON body parsing are parser-shaped.
-Externally-vendorable or caller-supplied input reaches this crate's own
-code at each surface. This is the class of surface a coverage-guided
-fuzzer earns its keep against, in a project that has one.
-
-This crate has no fuzz harness. A standing fuzz target is a test-adjacent
-artifact, and this project's no-test-file rule already excludes it. The
-adversarial-input coverage a fuzzer would otherwise buy comes from a
-live-witnessed batch instead, dispatched at DECIDE against the real verb
-for each surface, never a workaround through an unrelated verb.
-
-For `graph.json`: dispatch `fsm-validate` (`orchestrator/mod.rs` ->
-`fsm_vendor::handle_validate`, which calls `FsmGraph::validate()`
-directly) against a batch of malformed inputs -- an empty graph, a cyclic
-edge set, a graph missing its `gates` array. `fsm-validate` already exists
-and already routes to the real Rust validator; do not reach for `exec_js`
-as a workaround for a surface with its own sanctioned verb.
-
-For the config resolution chain (`config.rs`/`config_sync.rs`/`prose.rs`):
-no dedicated validate-only verb exists yet. Witnessing this surface today
-means constructing a real project-local `gm.config.json` with a deeply
-nested override chain and dispatching an ordinary config-reading verb
-(`instruction`, which resolves config on every call) against it, reading
-the live response for a crash or a silently wrong resolution -- add the
-missing dedicated verb as its own PRD row before treating this half of the
-sweep as covered by more than an ordinary-verb side effect.
-
-For `wasm_dispatch`'s own spool-body parsing: `dispatch_verb_inner` parses
-the body via `serde_json::from_str(&body_s).unwrap_or(Value::Null)` before
-any verb handler runs, so a verb dispatch can only witness this surface if
-the malformed body reaches the spool in the first place -- write a
-malformed `.txt` file directly to `.gm/exec-spool/in/<verb>/<N>.txt` (a
-`Write`-tool action, not an `exec_js` dispatch) and read the resulting
-`out/<N>.json` for a clean-reject versus a silent-wrong-parse.
-
-This is `decide.md`'s existing "degenerate input"/"boundary
-conditions"/"empty/overflow/reentry" sweep classes, named here explicitly
-against `orchestrator/fsm.rs`, `config.rs`, `config_sync.rs`, `prose.rs`,
-and `wasm_dispatch`'s body-parsing entry point. A session touching one of
-these files treats the sweep as covering this crate's own internals, not
-only the target project's code the crate was dispatched against.
-
-## Adding a verb
-
-1. Add the handler in the relevant `wasm_dispatch/` module.
-2. Wire it into the verb-dispatch match in `wasm_dispatch/verbs.rs`
-   (`dispatch_verb_inner`).
-3. If it changes phase/gate behavior, update `gates.rs` and/or
-   `orchestrator/transitions.rs`.
-4. Document the verb in gm's own `AGENTS.md` (Spool dispatch ABI section)
-   and this crate's `README.md` verb enumeration -- a verb only gm's
-   `AGENTS.md` or only this `README.md` know about is a documentation gap,
-   not a completed change.
-5. Push to `main`; the cascade (`cascade.yml` -> `release.yml`) builds and
-   publishes the new `plugkit.wasm`/`plugkit-slim.wasm`, no manual version
-   bump.
-
-## Testing
-
-No test files, no test frameworks, ever -- this repo is fully bound by the
-gm-family no-test-framework rule (see gm's own `AGENTS.md`, Coding Style
-section). A change is verified by a real build plus a live spool dispatch
-witnessing the actual behavior, read via `Read`/`exec_js`, never a
-`*.test.rs`/mock/fixture standing in for that witness.
-
-## Pull requests
-
-There are no branches or PRs in this workflow -- every change pushes
-straight to `main` (see gm's own `AGENTS.md`, direct-push-to-main rule).
-A branch or open PR found in this repo is a deviation to consolidate onto
-`main` or remove, not a review step to wait on.
-
-## Source invariants
-
-Non-obvious facts the code cannot carry, relocated from source comments.
-Each is still true of the current code; fix or delete an entry when that
-changes.
+## Indexing and search
 
 ### code_index.rs
 
@@ -269,6 +129,21 @@ changes.
   `get` (never a slice index, for the same reason), and it returns every match
   per line rather than the first, since two matches on one line are two real
   call sites for a call-graph trace.
+- One guest instance serves multiple projects. Static corpus/digest/embedding caches include the dispatch project; `project_scoped_cache_key` incorporates `host_cwd` when no root is explicit. Per-root KV namespaces also include `root_ns_suffix`; the no-root namespace is unsalted.
+- `SKIP_FILE_SUFFIXES` removes readable build artifacts such as `.rlib`, `.rmeta` and `.pdb` outside a directory named `target`; never infer that readable symbol names make an artifact source.
+- In `ensure_schema_at_cfg`, `rssearch_vectors` and `git_commit_vectors`, drop mismatched-width tables before `CREATE TABLE IF NOT EXISTS`, which does not replace an existing table.
+- `parse_manifest` accepts `MIN_READABLE_MANIFEST_VERSION..=MANIFEST_VERSION`; new fields are optional. Rejecting every old version invokes `purge_stale_manifest_row` and destroys incremental reuse.
+- `FileManifest::digest_hash`, including stat-only branches, records the same per-file value used by `current_digest`; `current_digest_cfg` uses the indexer's size cap. Hash-match reuse refreshes manifest mtime/size.
+- Deferred passes in code and memory indexing write `<digest>:partial=N`. Missing digests force repeated full work; partial digests never signify convergence. Raise actual configured budgets when the tree cannot converge.
+- `index_cfg_impl` visits the whole sorted listing, starts at `.gm/exec-spool/.codeinsight-cursor`, and wraps. `max_files` bounds fresh extraction, not the listed universe; a bounded prefix permanently starves later paths.
+- Per-file chunk caps bound fresh embeddings, not retained chunks: keep reusable embeddings, record deferred chunks in `skipped_no_embed`, and retry embed failures. Older manifests predating `FIRST_MANIFEST_VERSION_RECORDING_DEFERRED_CHUNKS` re-extract once with embedding reuse.
+- Charge fresh-file allowance and the one-file grace only after extraction proves a fresh embedding is needed. Reuse-only extraction consumes neither. `codeinsight_index` is the bulk indexing path; embedding work must stay within the host deadline rather than promise a fixed throughput.
+- Count vector-table rows through `GROUP BY` subqueries: unfiltered `COUNT(*)`/`COUNT(DISTINCT ...)` over the libsql `F32_BLOB` table can return zero. Structural tables are ordinary tables and do not need this workaround.
+- Store call edges once per file, not per edge: deletion must not scan an entire edge namespace for every changed file. `index_with_dead_code` stays opt-in because ordinary overview runs during every `instruction`.
+- `scan_literal` skips digest/index/embedding/vector/fusion work. Its file-count and byte limits are independent of embedding/digest limits, which must not silently shrink an exhaustive text answer.
+- Every coverage-affecting bound or unreadable file clears `exhaustive`; a binary skip does not. `host_read` returning `None` covers both I/O failure and invalid UTF-8: distinguish them with `host_stat`.
+- Request `file_cap + 1` entries from `list_scan_universe` to distinguish an exactly full listing from a truncated one. Scoped gitignored/non-git trees use their declared scan universe, not an unrelated indexed project.
+- Unicode lowercasing can change byte width. `LiteralMatcher::find_all` uses character-aligned matching when lengths differ, safe `get` slices, and every occurrence per line rather than one representative call site.
 
 ### scan_universe.rs
 
@@ -287,37 +162,27 @@ changes.
 
 ### code_symbols.rs
 
-- `sync_files` runs in a pass's spare time, after the chunk walk: its budget is the smaller of what the wall budget has left and `wall_budget_ms / SYMBOL_SYNC_BUDGET_DIVISOR`, and a walk that used the whole budget leaves symbols deferred to the next pass (`files_deferred`, `complete: false`). Syncing re-extracts every file, so it is never the pass's first claim. `ensure_current_insight` calls it through `sync_tree` when the digest is stale but a partial embed pass is pending, because that branch never re-indexes. It is gated by size, mtime and `SCHEMA_VERSION`: change the stored row shape, bump the version, and every file re-syncs once.
-- Symbols, metrics and imports live in plain libsql tables (`code_symbols`, `code_symbol_files`, `code_imports`), never in the `F32_BLOB` chunk table, so ordinary `COUNT(*)` works. Multi-row inserts stay under SQLite's 999-parameter limit (`columns x rows`).
-- Call edges are one KV row per file (`cef-<crc32(path)>` in `<code_ns>-edges-by-file`); the old per-edge namespace is purged by the first sync. Edge callee names are the last leaf of the callee expression (`a.b.c()` records `c`); `callee_name_for_call` finds that expression as the widest node that starts where the call starts, over nodes sorted by start and width.
-- Import specs are stored raw and resolved at query time against the indexed file set, so an edit to one file never stales another file's edges. Only specs that resolve to an indexed file count as edges.
-- `find` escapes `%`, `_` and `\` with `ESCAPE '\'`; stripping them made every snake_case query match nothing.
-- `impact` does not expand through a name with several definitions (name-keyed edges would merge unrelated functions); `through_ambiguous` opts in.
-- `cx` counts decision nodes inside the function byte range, nested closures included; boolean operators are not counted except Python's `boolean_operator`.
+- Structural queries first run bounded refresh without embeddings and refuse incomplete graph evidence. `sync_files` also runs during indexing and stale-insight maintenance; schema 3 records a current-byte FNV64 `source_hash` so same-size/mtime edits invalidate reuse. Failed parses retry. Bump the schema when stored shape changes.
+- Symbols, metrics and raw import specs live in `code_symbols`, `code_symbol_files` and `code_imports`, not vector chunks. Multi-row inserts stay within SQLite's 999-parameter bound.
+- JSON has no structural symbol support: scoped queries reject it; source-only coverage excludes it explicitly and observed JSON clears prior cached symbols/imports/edges. Cleanup failures make coverage incomplete; line length alone must not defer supported bounded source.
+- Resolved `index.max_file_bytes` has a 2 MiB minimum after typed configuration overlay; wall-time and indexed-chunk bounds still apply. The unnormalized default remains 256 KiB.
+- Public `index.max_chunks_per_file_per_pass` bounds vector work only; `0` disables chunk embeddings while keeping bounded BM25 text and full text manifests. Text-only indexing still reports deferred vectors explicitly.
+- Call edges use one `cef-<crc32(path)>` KV row in `<code_ns>-edges-by-file`; first sync purges the retired per-edge namespace. `callee_name_for_call` records the final callee-expression leaf, selecting the widest node starting at the call.
+- Raw import specs resolve at query time against indexed paths; only resolved indexed targets form edges. Changes in one file must not invalidate another file's stored import spelling.
+- `find` escapes `%`, `_` and `\` with SQL `ESCAPE '\'`; stripping them breaks snake-case queries. `cx` counts decisions within a function's byte range, nested closures included; Boolean operators count only for Python `boolean_operator`.
+- Edges are unqualified callee names, not definition-bound relationships. Callers/callees/impact/tests reject path/file/glob/line scopes they cannot represent; callers/impact disclose resolution and same-name ambiguity. `impact` does not transitively expand ambiguous names unless `through_ambiguous` is explicit. The README owns the public query contract.
 
-### ragconfig.rs
+### ragconfig.rs and search dispatch
 
-- `IndexConfig::pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound`
-  = 16000: the worst measured wasm BERT cost is 3.6-15.2 s per chunk. It divides
-  the remaining wall budget into a per-file chunk allowance; a lower value lets
-  one slow file overrun the wasmtime epoch deadline and poison the Store.
-- `IndexConfig::digest_max_files`/`prune_enumeration_file_cap`: files past the
-  cap are silently ignored (stale chunk rows survive, the digest can report
-  converged), so large monorepos must raise them.
-- `BulkEmbedBudgetConfig::git_commit_sync_hard_ceiling_ms` is an elapsed-time
-  stop independent of the `git_commit_min_embeds_per_pass` floor: `git show -p`
-  cost scales with diff size (measured ~43 s/commit on a binary-heavy repo).
-  Commits over `git_commit_full_diff_max_changed_lines`/`_max_files` (read from
-  cheap `--shortstat`) embed their subject only; the file cap catches binary
-  diffs that count ~0 lines.
-- `.gm/index-config.json` (`apply_project_local_index_overlay`) sits outside
-  the config tiers because `config::resolve_with` returns a project-vendored
-  tier whole and drops lower tiers: a project tier holding one index tweak would
-  lose the config-source prose, fsm and messages. Its lists only append.
-- `RetentionConfig` only reclaims space behind already-tombstoned rows and
-  never tombstones a live row; pruning stays an agent decision.
+- `pessimistic_ms_per_chunk_used_only_to_derive_a_budget_bound` derives fresh-chunk allowance from measured worst-case WASM embedding cost. Lowering it without measurement can overrun the epoch deadline and poison the Store.
+- `digest_max_files` and `prune_enumeration_file_cap` bound visibility as well as work; insufficient limits can leave stale chunks while reporting convergence. Large monorepos need adequate values.
+- Git-history sync has an elapsed hard ceiling independent of its minimum-embed floor. Cheap `--shortstat` chooses subject-only embedding above `git_commit_full_diff_max_changed_lines` or `_max_files`; the file limit covers binary-heavy zero-line diffs.
+- `.gm/index-config.json` is an overlay outside the configuration tiers: a project-vendored tier replaces lower tiers wholesale and would otherwise hide prose/FSM/messages. Overlay lists append, never replace.
+- `RetentionConfig` reclaims only already-tombstoned data; live-row pruning remains an explicit agent decision.
+- `codesearch_exhaustive` routes before root-sensitive retrieval and all embedding/index steps. Root-scoped dual retrieval never uses cwd-bound corpus/fusion/dataflow state; scope filtering applies to vector and BM25 hits with adequate over-fetching and an echoed effective scope.
+- `CODESEARCH_MODES`, `CODESEARCH_LIMIT_FIELDS` and `codesearch_result_limit` reject unknown modes and conflicting/ignored limits. Only an explicitly supplied limit bounds an exhaustive request. Filename mode must apply its accepted path, limit and output controls, not silently search the whole project.
 
-### wasm_dispatch/verbs.rs
+## Embedding, vectors and host boundaries
 
 - `project_path_rejection` is the single path guard for `fs_read`/`fs_readdir`/
   `fs_stat`/`fs_write`; the three read verbs pass `caller_opted_outside_root(body)`
@@ -404,22 +269,15 @@ changes.
   timeout-kill after the fast-forward itself already landed.
 - `git_log` parses `--pretty=format` on `\u{1f}` (never plain-text split, since
   subjects can hold spaces) for `sha`/`sha_full`/`author {name,email,date}`.
+### Cargo.toml and embed.rs
 
-### Cargo.toml, embed.rs
+- `slim` omits compiled-in safetensors and requires host `host_vec_embed`; the supported runner supplies it. Keep candle dependencies at the validated 0.8 WASM-compatible line unless the real target build proves a replacement.
+- A model-width change updates weights, `EMBED_DIM`, `bge_small_config().hidden_size`, `vecstore::EXPECTED_EMBED_DIM` and `EmbedDimConfig::default().dim` together.
+- BGE queries carry `BGE_QUERY_PREFIX`; passages do not. Every query embedding uses `condition_query`. Project-scoped embedding cache slots compare the stored full key even though their slot name is an `fnv1a64` hash.
+- `host_vec_embed` and `try_sibling_plugin_embed` are distinct host routes to the same BERT model. The sibling-plugin route preserves load/model diagnostics; it is not redundant merely because the model is shared.
+- `build.rs` embeds `PLUGKIT_SOURCE_SHA`. Fix `PLUGKIT_BUILD_SHA` for byte-for-byte A/B comparisons; deleting source lines changes panic locations even when tokens are otherwise identical.
 
-- `slim` leaves out embed.rs's compiled-in safetensors model (the wasm-side
-  embedding fallback). It is valid only under a host that implements
-  `host_vec_embed` (agentplug-runner does); CI publishes the slim build.
-- candle-* stay at 0.8: candle-core 0.11.0 does not compile for wasm32-wasip1
-  with `default-features = false` (undefined `CurrentCpuF16`/`BF16` aliases).
-- `EMBED_DIM` is the compiled model's width, not a setting: a model swap moves
-  the weights, `EMBED_DIM`, `bge_small_config().hidden_size`,
-  `vecstore::EXPECTED_EMBED_DIM` and `EmbedDimConfig::default().dim` together.
-- `condition_query`: BGE is asymmetric; queries carry `BGE_QUERY_PREFIX`,
-  passages never do, and every query-side embed goes through it.
-- `scoped_key`: one plugin instance serves concurrent projects, so embedding
-  cache keys carry the project cwd; a hit compares the stored full key, since
-  the slot is only an `fnv1a64` hash.
+### rssearch_vectors.rs, libsql_wasm.rs and host_abi.rs
 
 ### rssearch_vectors.rs, libsql_wasm.rs, host_abi.rs
 
@@ -455,30 +313,33 @@ changes.
   process have a `.git` owned by BUILTIN/Administrators, so every git call --
   including `gm_dir`'s `rev-parse --show-toplevel` -- failed and `gm_dir`
   panicked (`wasm unreachable`) on every stateful verb, codesearch included.
+- `host_read` recognizes the native `host_fs_read` packed empty-success marker `1` before pointer decoding. Only an actual successful empty read yields `Some("")`; `0` remains a read failure.
+- `ann_query_sql` uses `pool`, not final `limit`, for both `vector_top_k` and outer SQL LIMIT; recency rescoring and dedup require candidate headroom.
+- `SCHEMA_ENSURED`/`MIGRATION_COMPLETE` are process-lifetime memos. Destructive table recovery calls `forget_ensured_schema`/`forget_migration_complete`.
+- Parsed SQLite `ext=`/`rc=` codes are authoritative in `classify_error` and suppress text fallback; only `ShadowRow` is text-only. Corruption recovery deletes the shared database, so quoted words such as "malformed" must not trigger it.
+- `retry_on_busy` cannot sleep in the guest; each retry re-enters libsql's 8-second busy timeout. Total retries must fit the host dispatch deadline.
+- Synchronous `git_call` turns `{pending,token}` into failure, never a clean porcelain result. Only `git_step`/`git_poll` use `git_call_async`.
+- A dubious-ownership retry adds only the git-reported repository's scoped `safe.directory`, once, and only when that repository contains the requested cwd. Do not globally trust arbitrary paths.
 
 ### plugin_abi.rs
 
-- Drained to gm recall (`mem-ae3514f8ed9a27b4-980`, query "plugin_abi call
-  envelope parse_response AbiErrorKind"): the envelope-over-body merge order
-  in `call`, `parse_response`'s null/empty-object/no-`data` handling, and the
-  frozen `AbiErrorKind` wire strings with their text-sniffing fallback.
+- `call` merges `{abi,plugin,verb,body}` over the body's top-level fields, envelope last. Retain top-level fields for older sibling plugins that read them directly.
+- `parse_response` classifies null/empty-object replies as `PluginNotFound`; successful replies without `data` return the remaining object excluding `ok`/`abi`.
+- `AbiErrorKind` wire strings are frozen: `plugin-not-found`, `verb-not-supported`, `plugin-error`, `timeout`. Missing explicit kind uses the actual host error spelling, not an invented classification.
+- `KNOWN_PLUGINS` is only a diagnostic hint. The host capability allowlist is authoritative and includes plugins not listed here; do not turn the hint into access control.
 
-### scan_deps.rs
+## Git and filesystem delivery
 
-- Drained to gm recall (`mem-73c705bb66f60897-863`, query "scan_deps
-  find_suspicious_escapes walk_package is_force_included"):
-  `find_suspicious_escapes`/`count_hex_obfuscator_idents` escape-shape rules,
-  `walk_package`'s mtime+size package signature, and `scan_one_file`'s
-  blocked-read-vs-empty-file distinction.
+### wasm_dispatch/verbs.rs
 
-- The incremental package signature lives at
-  `.gm/exec-spool/.scan-deps-stamp.json`, not bare in `.gm/`, for the same
-  reason as the debounce stamp: a host that tracks `.gm/` in git was dirtied
-  by every `save_stamp` rewrite. `.gm/scan-deps-stamp.json` is read as a
-  fallback and never rewritten; `full:true` removes both. The stamp is
-  written only when its content changes -- serialising through
-  `serde_json::Map` keeps key order deterministic, so an unchanged
-  `node_modules` yields a byte-identical document.
+- Self-declared `discipline` controls `confinement_violation`/`capability_access_violation`; the spool carries no unforgeable caller identity. These catch accidental misuse, not hostile impersonation.
+- `browser`/`cdp` share `host_browser_exec`. Engine selection travels in opts JSON, never embedded in caller JS.
+- Scoped `git_commit`/`git_finalize` stage and commit only caller pathspecs, including concurrent-write amend. Refuse paths that stage nothing; never follow an empty scoped add with an unscoped commit. Default commit uses already-staged content; blanket staging requires explicit `add_all` (unscoped finalize owns its documented default).
+- `git_pathspec_scope` emits excludes before inclusions; reversing them can make Windows git silently stage nothing. Preserve explicit caller paths. Always exclude `.agentplug*`; distinguish ignored/untracked generated `.gm` state from explicitly requested tracked state. Receipts disclose withheld runtime dirt rather than silently widening delivery.
+- `git_commit` deduplicates a logical request by cwd, pre-commit HEAD, message and paths within `GIT_COMMIT_DEDUP_TTL_MS`; replay the real SHA rather than execute another commit.
+- `git_finalize {paths}` scopes porcelain probes and pushes its new explicit ref, so unrelated writer dirt does not block it. `git_push {rev}` never rebases a dirty shared checkout; remote movement returns the recovery `git_pull` then `git_push {rev:"HEAD"}`.
+- After a non-conflict pull failure, re-fetch and compare HEAD with the tracking ref before trusting timeout/hook/credential failure: the fast-forward may already have landed. Missing merge committer identity must name local `user.name`/`user.email` requirements; authentication is not commit identity, and tooling must not configure a global account silently.
+- Git verbs resolve the actual dispatch project and fail loudly outside a repository. `git_log` parses its formatted fields on `\u{1f}`, not spaces; subjects may contain spaces.
 
 ### config.rs, config_sync.rs, prose.rs
 
@@ -736,77 +597,100 @@ changes.
   rs-plugkit --lib` runs those four tests natively (`wasm_dispatch` is
   wasm-only, so a native test covers everything except the host reads and
   the verbs themselves).
+- An active merge consumes the complete prepared index. `git_commit` refuses explicit paths and `add_all` before staging. Neither ordinary unscoped commits nor merge commits add commit pathspecs.
+- `git_status` preserves observed paths, partial/skipped-read diagnostics, head SHA and branch. Failed, parked, truncated or skipped status cannot establish clean: commit/finalize refuse before mutation and string-only guards carry a non-porcelain failure marker.
 
 ### wasm_dispatch/dangling_refs.rs
 
-- The guard runs inside `git_commit` and `git_finalize` before anything is
-  staged, so a refusal leaves the index untouched.
-- Only files already staged plus whatever `paths`/`add_all` would stage are
-  scanned: the working tree is usually dirty with another writer's edits and a
-  commit is only answerable for its own contents -- a sibling agent's unrelated
-  dirt is never a reason to refuse.
-- A resolved target counts as an offender only when it exists on disk, is not
-  tracked, is not gitignored, and is not in this commit's own path set -- an
-  untracked file being committed in the same dispatch is the fix, not an error.
-- `git check-ignore` filters generated-but-ignored targets, so a build artifact
-  or a vendored blob, or a build output directory, never blocks a commit.
-- A file in the commit's own path set that exists on disk but cannot be read is
-  refused with `dangling_scan_unreadable` before any offender is judged: its
-  references were never extracted, so a clean scan of it would be a lie. A path
-  that is absent (a staged deletion) is not unreadable, and `allow_dangling:
-  true` waives the whole check, unreadable files included.
+- Validate before staging, so refusal leaves the index unchanged. Scan only already-staged files plus the proposed path/add-all scope, not sibling dirt.
+- A dangling target is an existing, untracked, non-ignored file outside this commit's path set. An untracked target included in the same commit is valid; `git check-ignore` excludes ignored generated output.
 
+- Every existing unreadable scoped source prevents a clean dangling-reference scan unless the caller explicitly waives the check. Empty readable files remain readable.
 
-### gates.rs
+## Configuration, prose and notifications
 
-- `LONGGAP_GATED_STATE_CHANGING_VERBS` is the entire long-gap gate surface:
-  `is_longgap_denial_exempt` exempts every verb NOT on it, so a verb added
-  later is ungated by default. The previous shape was an exempt read-only
-  allowlist, which inverted that default, and every read verb missing from it
-  was denied after `policy.longgap_threshold_ms` of idle -- `search`, an
-  alias of `codesearch`, among them. Denying a read verb guards nothing: it
-  neither loses state nor advances the phase, and the gate still fires on the
-  next state-changing verb.
-- `exec_js` and the shell stems stay ungated on purpose. One verb body carries
-  both `tar -tf` and `rm -rf`, and the friction that drove this was a
-  read-only `bash` denied with no way to tell the two apart; `deny_shell_git`
-  is the gate that governs shell verbs, runs before this one, and is
-  unaffected.
-- `LONGGAP_EXEMPT_WORK_VERBS` is exempted on top of that surface: the exec and
-  shell stems cannot be classified from the verb name alone, and
-  `git_add`/`git_commit`/`git_fetch`/`git_push`/`git_finalize` fired after
-  minutes of native work such as a build, when the gap is expected rather
-  than a sign the caller lost its instruction. They are still activity, so
-  they still restart the idle clock.
-- `long_gap_chain_belongs_to_this_session` keeps the gate inside the caller's
-  own in-flight chain: it does not fire when the phase is the terminal phase,
-  nor when the turn state's session is a different session than the caller's
-  (unknown on either side still fires). Project-wide phase state once let one
-  session's chain deny every other session in the same project.
-- `is_longgap_activity_exempt` is a different notion from denial exemption and
-  still means "does not count as activity": such a verb neither reads nor
-  rewrites `.gm/last-dispatch-ts`, so it never restarts the idle clock for
-  the verbs that follow it, and it leaves `prev_dispatch_ms == 0`, which
-  satisfies `idle_since_any` on its own. Adding a verb to
-  `policy.longgap_exempt_verbs` to silence a denial therefore makes the gate
-  fire more readily, not less.
+### config.rs, config_sync.rs and prose.rs
 
-### Other modules
+- A `ProjectVendored` win still refreshes lower repository tiers for `config_notify::record_change`; an override must not hide upstream drift.
+- `RESOLVE_CACHE` keys the per-call project cwd and has a short TTL; one process serves multiple projects. Resolve a dispatch's FSM graph once and pass it through state/transition operations rather than compare resolutions from different tiers.
+- `ensure_current` revalidates public `RepoSource` URLs at the git boundary. Disk sync state/locks are shared beside the checkout, not process-local; `try_lock` uses atomic non-recursive mkdir after creating parents.
+- The host ABI lacks rename. `config_sync` and `memory_md::rename_batch` use `fs.renameSync` through `host_exec_js`; in-place writes expose torn files.
+- `read_from_config_repo` reads the resolved cache directory, never a guessed global directory. Unsafe prose keys are terminal because later tiers also embed those keys in paths. `read_clean` treats whitespace-only content as absent and strips BOM/normalizes CRLF.
+- `tier3_user_wide_repo` falls through. Missing `.gm/instructions/source.json` reaches configured defaults; an explicitly empty file means not configured and skips that source. Do not conflate absent, empty, broken and unreachable outcomes.
 
-- `dataflow::default_document` is never executed: `verbs.rs` runs
-  `dataflow_exec::run` for recall/codesearch only when the tier is not
-  `CompiledDefault`. `dataflow_exec::run` executes steps in declaration order,
-  then fuse nodes (no topological scheduler); `plugin == "gm"` steps call
-  internal functions directly, never a wasm self-call through the host.
-- `legacy_reaper::RETIRED_ARTIFACTS` is a literal allowlist, never a glob and
-  never `gm.db`/`.gm/memories`; `reap_key` hashes it into `.gm/.legacy-reaped`,
-  so adding an entry re-runs the reap in every project.
-- `mediator::SELF_LANG_VERBS` (`go`, `rust`, `cpp`, ...) share one dispatch
-  arm but are not aliases: each reaches `shell_exec` as its own lang, so they
-  stay out of `VERB_ALIASES`.
-- `submodule_drift::submodule_head_sha`: `git rev-parse HEAD` inside an
-  uninitialized submodule dir answers with the parent repo's HEAD (exit 0), so
-  a dir without its own `.git` is skipped, never compared.
-- `.gm/exec-spool/.turn-browser-witnessed` is a flat `{file: hash}` map written
-  only by `browser_witness::record_witness`; `transitions.rs` reads the flat
-  shape and tolerates a nested `witnessed_hashes` wrapper.
+### orchestrator/config_notify.rs
+
+- Persist changes when recorded and drain onto the next instruction; no active dispatch may exist at change time. Delivery is once per session, with absent session IDs bucketed separately, not once per process.
+- Paths resolve through project-scoped `pkfs` per call. Never cache another project's pending notifications globally.
+- `MAX_RECORDS`, `MAX_SUMMARY_ITEMS`, `MAX_RECORD_AGE_MS` and `MAX_DELIVERED_TO` bound history and rosters, evicting oldest first. Advisory torn reads degrade to no pending changes; failed drain writes can repeat delivery but must not fail the work dispatch.
+- Skip no-op SHA changes; change IDs distinguish tier/SHA/time. Do not retry identical failed writes. Preserve unreadable timestamps rather than assume expiration; marking delivery happens during drain because no acknowledgement verb exists.
+
+## Cache and memory
+
+### cache.rs and embed_marker.rs
+
+- `cache::get` distinguishes store failure from cache miss; never overwrite on an unanswered lookup. Expiry is filtered by SELECT before sweeping. Every public operation ensures schema for its project; no process-global initialized flag.
+- LRU touch and budget enforcement are best-effort. Preserve the underlying libsql error for corruption classification. Integer columns may be integer, float or string; `row_i64` and chunk-row readers accept all three representations.
+- Shared parameter binding is text and writes return no row count. `NULLIF(?6,'')` represents SQL NULL; invalidation checks existence through `get` first.
+- Embedding generation markers are per table: one store's dimension check must not mask another table's stale width.
+
+### memory_md.rs
+
+- `vector_table` and `rssearch_vectors` must resolve configurable table names identically. Code namespace indexing belongs to tree-sitter, not Markdown memory digests.
+- `flat_vec_embedding` checks `cfg.dim()`, not a fixed literal. `keyword_scan` is a deterministic bounded file fallback requiring neither embedder nor libsql; the flat-KV fallback still requires libsql.
+- A purely deferred sync stores a partial digest, but failed/rekeyed passes do not. Orphan pruning requires full convergence: an incomplete manifest must not tombstone live memory.
+- Explicit-key `memorize-prune` marks the index before removing the file to prevent resurrection, and can remove real on-disk memories lacking vector rows. Never interpret failed semantic retrieval as an empty namespace.
+
+## Disciplines, fibers and executable calculus
+
+- `capability_proxy::resolve` and `discipline_note::requires_satisfied` use identical `resolve_key_realm`, Active-provider and `provides` rules. An unmapped `RealmTable` key returns empty; `resolve_key_realm` maps empty or self-named keys to the discipline realm.
+- `active_policies` alone advances discipline fibers, once per instruction; there is no push notification. Include disabled disciplines with stored state so they can become Inactive.
+- `build_interception_context` folds enabled-file order with right-biased `MergeKind::combine`; the last nonempty scalar declaration wins. `handle_check_removal` alone writes `enabled.txt`, using one snapshot and CAS.
+- Guest `fiber_lifecycle::transition` and host `PluginFiberLifecycle` match arm for arm. The executable guest reduction has only Inactive/Active/Unloading, not separate loading or failure states; a new failure-bearing state changes both sides. Codeinsight roles advance through their role-state files with unconditional satisfied targets because they declare no requirements.
+- `calculus::verify_calculus` and `formal/CordisCalculus/` change together. Verification silently stops at `max_states`; success covers only explored states, not the unexplored graph.
+- Base-registry unload's `retired || !satisfied` matches undefined target only because reload commits the current target. ExtendedRegistry has no retirement flag: unsatisfied requirements remove its target. Coeffects include only Active fibers; remaining reload iterations encode the pending effect/finish, and registry equivalence is unordered map equality.
+- `component_loader_dispatch::parse_entries` drops deserialization failures. `isolate` is tagged `{kind:"none"|"local"|"global"}`, not a Boolean/string paper notation. Only exact marker `clean` passes `claim_audit_clean`.
+
+## Orchestration replies and evidence
+
+- `state::read_state_with_graph`/`set_phase_with_session_with_graph` use one resolved graph. Residual checks execute fixed order and stop on first failure; `residual-check-fired` carries `<session_id>:<fired_at_ms>`, not mere file existence.
+- `has_compiled_default_for_prose_key` matches exactly `compiled_default_for_prose_key` plus `entry`; unknown keys otherwise receive ENTRY prose. `write_turn_summary` uses the already-drained config count rather than draining unseen notifications again.
+- Suppress instruction prose only when the caller asserts a hash it actually received. Stored last-sent hashes are not delivery acknowledgements.
+- Delta replies require the asserted current instruction hash and matching `known_reply_hash`. Equal fields are named as unchanged, removed fields are named separately, mandatory live fields stay inline, and `full_reply_at` names the full payload. No session means no delta; `full:true` forces full content. Never infer a client's knowledge from the last server write.
+- `investigate_readonly` serves no phase prose and cannot refresh phase-prose timestamps. Inline PRD/mutable row budgets bound payload arrays; exact counts and explicit full-list paths/verbs remain authoritative.
+- `mutables::handle_add` upserts IDs, collapses duplicates and prefers an already resolved row. `handle_list` remains the full-fidelity file view; deduplication must not reopen witnessed obligations.
+
+- `mutable-add` requires a nonempty caller-supplied ID and at least one payload field beyond the dispatch envelope. It never invents a placeholder row; `status` is a payload field.
+- `prd-list` accepts ID/status filters and defaults to brief rows. Internal evidence, gates and instruction summaries use `handle_list_full`, not that abbreviated public view.
+- `automatic_supply_chain_scan` runs on instruction, debounced by `.gm/exec-spool/.last-scan-deps-ts`/`SUPPLY_CHAIN_SCAN_DEBOUNCE_MS`. The cached result lives beside that stamp. Legacy root `.gm` paths are read-only fallbacks. Structural scans supplement, never replace, exact IOC searches.
+
+## Dependency scanning
+
+- `find_suspicious_escapes` requires at least four Unicode escapes decoding to an identifier, not arbitrary printable CSS punctuation. `count_hex_obfuscator_idents` covers escape-free `_0x` obfuscation; size ratio alone warns, never fails.
+- Package signatures combine maximum mtime and summed bytes; directory mtime misses in-place writes. `walk_package` uses the actual dependency tree and containment/visited guards. `IndexConfig::is_force_included` is substring-based, including descendants.
+- Oversized files warn without a full scan. A failed read after positive-size stat is a blocked read, not empty content; failed or blocked packages must not become stamped clean.
+- `scan_node_modules` preserves earlier signatures for unchanged or budget-deferred packages. `full:true` clears the prior stamp before walking. Never silently report truncated scans as complete.
+
+- Package signatures use `.gm/exec-spool/.scan-deps-stamp.json`; the legacy `.gm/scan-deps-stamp.json` is a read-only fallback. `full:true` clears both. Deterministic serialization and `write_if_changed` preserve identical cached bytes.
+
+## Dream-RSI replay
+
+- `dream-replay-cycle` is observation-only maintenance, separate from frozen-world
+  policy replay. It uses canonical actual-owner `session_id`, verifies recorded ledger
+  evidence through `automatic_replay`, and defers without an acknowledgment when no new
+  verified dispatch exists. It preserves pending-pipeline gates and never refreshes
+  agent phase clocks or records its own maintenance as a training observation.
+
+- Replay is frozen-world evidence, not execution or deployment authority. Observations, evaluator receipts, policies and discoveries remain bound to their actual completed dispatch and owner session; normal authorization/phase paths govern deployment.
+- Score each world as best attained quality minus `beta1 * summed cost` plus `beta2 * parallelism_bonus`; policy score is the mean over supplied worlds. Challenger selection requires a strict improvement over the incumbent on the same worlds. Betas are explicit finite nonnegative inputs, never arbitrary defaults.
+- One-shot replay's bonus is revealed node count divided by distinct recorded rounds. Omitted discovery rounds receive sequential positions for older records. Sealing constructs children from `parent_id`, not array adjacency.
+- `dream-replay-round` is session-owned progressive reveal: batches come from policy roots plus the current revealed frontier. Do not expose the full frozen world or treat unrevealed values as observed. Stateful round replay counts actual rounds, closes at `max_rounds` or `max_nodes`, includes the closing reveal in its tally, and rejects further calls after closure.
+- `max_online_rounds` requires explicit discovery rounds and bounds new distinct values, not repeated values in an existing batch. Policies without the cap remain unbounded. Reaching a cap requires sealing/replay before further online rollout.
+
+## Other contracts
+
+- `dataflow::default_document` is not executed for CompiledDefault; configured pipelines execute declared steps then fuse nodes, not a topological scheduler. `plugin == "gm"` calls internal functions, not WASM self-dispatch.
+- `legacy_reaper::RETIRED_ARTIFACTS` is an exact allowlist, never a glob or memory/database deletion. Its hash invalidates the reap marker when the allowlist changes.
+- `mediator::SELF_LANG_VERBS` share dispatch code but are not aliases; retain their distinct language passed to `shell_exec`.
+- `submodule_head_sha` skips uninitialized submodule directories without their own `.git`; running git there would return the parent's HEAD successfully.
+- Browser witnesses are the flat `{file:hash}` map written by `browser_witness::record_witness`; transition readers also tolerate the nested `witnessed_hashes` wrapper and compare actual source hashes.

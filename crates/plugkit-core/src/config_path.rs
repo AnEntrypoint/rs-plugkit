@@ -2,7 +2,7 @@ const MAX_COMPONENT_LEN: usize = 128;
 
 const MAX_PATH_LEN: usize = 512;
 
-const ALLOWED_URL_SCHEMES: &[&str] = &["https://", "http://", "ssh://", "git://"];
+const ALLOWED_URL_SCHEMES: &[&str] = &["https://", "ssh://"];
 
 fn check_component(component: &str, what: &str) -> Result<(), String> {
     if component.is_empty() {
@@ -16,8 +16,9 @@ fn check_component(component: &str, what: &str) -> Result<(), String> {
     }
     if component == "." || component == ".." {
         return Err(format!(
-            "{what}: path component {:?} would traverse outside the cache directory"
-        , component));
+            "{what}: path component {:?} would traverse outside the cache directory",
+            component
+        ));
     }
     for c in component.chars() {
         let ok = c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
@@ -155,10 +156,11 @@ pub fn validate_repo_url(url: &str) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "{what}: {:?} does not use an allowed transport. Permitted: {} or git's user@host:path form. \
-         Local paths and file:// are refused because a repo-backed tier exists to fetch from \
-         elsewhere, and ext:// is refused because git executes it as a command rather than \
-         fetching from it.",
+            "{what}: {:?} does not use an authenticated transport. Permitted: {} or git's user@host:path form. \
+             Local paths and file:// are refused because a repo-backed tier exists to fetch from \
+             elsewhere; http:// and git:// are refused because a config repo can carry executable \
+             hooks and must not be mutable by a network observer; ext:// is refused because git \
+             executes it as a command rather than fetching from it.",
         u,
         ALLOWED_URL_SCHEMES.join(", ")
     ))
@@ -186,7 +188,10 @@ pub fn validate_fetch_url(url: &str) -> Result<(), String> {
         return Err(format!("{what}: {:?} contains whitespace", u));
     }
     let lower = u.to_ascii_lowercase();
-    let Some(scheme) = ALLOWED_FETCH_SCHEMES.iter().find(|s| lower.starts_with(**s)) else {
+    let Some(scheme) = ALLOWED_FETCH_SCHEMES
+        .iter()
+        .find(|s| lower.starts_with(**s))
+    else {
         return Err(format!(
             "{what}: {:?} does not use an allowed transport. Permitted: {}. \
              file:// and data: are refused because fetch exists to reach the network, \
@@ -196,9 +201,7 @@ pub fn validate_fetch_url(url: &str) -> Result<(), String> {
         ));
     };
     let authority = &u[scheme.len()..];
-    let host_end = authority
-        .find(['/', '?', '#'])
-        .unwrap_or(authority.len());
+    let host_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
     let host = &authority[..host_end];
     let host = host.rsplit('@').next().unwrap_or(host);
     if host.is_empty() {
@@ -223,7 +226,8 @@ fn is_scp_like(u: &str) -> bool {
     if host.len() < 2 || !host.contains('.') {
         return false;
     }
-    host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    host.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
         && !host.starts_with('.')
         && !host.starts_with('-')
 }

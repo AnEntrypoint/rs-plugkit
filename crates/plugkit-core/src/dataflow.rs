@@ -66,11 +66,17 @@ impl Pipeline {
                 problems.push(format!("duplicate step id `{}`", s.id));
             }
             if s.plugin.trim().is_empty() || s.verb.trim().is_empty() {
-                problems.push(format!("step `{}` must name a non-empty plugin and verb", s.id));
+                problems.push(format!(
+                    "step `{}` must name a non-empty plugin and verb",
+                    s.id
+                ));
             }
             if let Some(cond) = &s.when {
                 if !self.conditions.iter().any(|c| &c.name == cond) {
-                    problems.push(format!("step `{}` references unknown condition `{cond}`", s.id));
+                    problems.push(format!(
+                        "step `{}` references unknown condition `{cond}`",
+                        s.id
+                    ));
                 }
             }
         }
@@ -86,18 +92,29 @@ impl Pipeline {
                 problems.push(format!("fuse node `{}` names no sources", f.id));
             }
             for src in &f.sources {
-                if !self.steps.iter().any(|s| &s.id == src) && !self.fuse.iter().any(|other| &other.id == src && other.id != f.id) {
+                if !self.steps.iter().any(|s| &s.id == src)
+                    && !self
+                        .fuse
+                        .iter()
+                        .any(|other| &other.id == src && other.id != f.id)
+                {
                     problems.push(format!("fuse node `{}` names unknown source `{src}`", f.id));
                 }
             }
             if !known_fuse_strategy(&f.strategy) {
-                problems.push(format!("fuse node `{}` names unknown strategy `{}`", f.id, f.strategy));
+                problems.push(format!(
+                    "fuse node `{}` names unknown strategy `{}`",
+                    f.id, f.strategy
+                ));
             }
         }
         if self.output.trim().is_empty() {
             problems.push("output must name a step or fuse-node id".to_string());
         } else if !seen_ids.contains(&self.output) {
-            problems.push(format!("output `{}` does not name any step or fuse node", self.output));
+            problems.push(format!(
+                "output `{}` does not name any step or fuse node",
+                self.output
+            ));
         }
         problems
     }
@@ -190,7 +207,11 @@ fn load_tier(raw: &str) -> Option<DataflowDocument> {
 pub fn document_detailed() -> (DataflowDocument, DataflowTier, String) {
     if let Some(raw) = pkfs::read_to_string(DATAFLOW_OVERRIDE_PATH) {
         if let Some(doc) = load_tier(&raw) {
-            return (doc, DataflowTier::LocalOverride, DATAFLOW_OVERRIDE_PATH.to_string());
+            return (
+                doc,
+                DataflowTier::LocalOverride,
+                DATAFLOW_OVERRIDE_PATH.to_string(),
+            );
         }
     }
     if let Some(path) = source_repo_dataflow_path() {
@@ -200,7 +221,11 @@ pub fn document_detailed() -> (DataflowDocument, DataflowTier, String) {
             }
         }
     }
-    (default_document(), DataflowTier::CompiledDefault, COMPILED_PATH.to_string())
+    (
+        default_document(),
+        DataflowTier::CompiledDefault,
+        COMPILED_PATH.to_string(),
+    )
 }
 
 pub fn document() -> DataflowDocument {
@@ -223,7 +248,9 @@ fn default_document() -> DataflowDocument {
                     id: "embed".to_string(),
                     plugin: "gm".to_string(),
                     verb: "embed_query".to_string(),
-                    input: InputMapping { fields: btreemap([("query", "request.query")]) },
+                    input: InputMapping {
+                        fields: btreemap([("query", "request.query")]),
+                    },
                     when: None,
                 },
                 StepNode {
@@ -231,7 +258,11 @@ fn default_document() -> DataflowDocument {
                     plugin: "gm".to_string(),
                     verb: "vector_search".to_string(),
                     input: InputMapping {
-                        fields: btreemap([("embedding", "steps.embed.embedding"), ("namespace", "request.code_namespace"), ("k", "request.k")]),
+                        fields: btreemap([
+                            ("embedding", "steps.embed.embedding"),
+                            ("namespace", "request.code_namespace"),
+                            ("k", "request.k"),
+                        ]),
                     },
                     when: None,
                 },
@@ -239,21 +270,29 @@ fn default_document() -> DataflowDocument {
                     id: "bm25".to_string(),
                     plugin: "gm".to_string(),
                     verb: "bm25_rank".to_string(),
-                    input: InputMapping { fields: btreemap([("query", "request.query"), ("k", "request.cand_k")]) },
+                    input: InputMapping {
+                        fields: btreemap([("query", "request.query"), ("k", "request.cand_k")]),
+                    },
                     when: None,
                 },
                 StepNode {
                     id: "commits".to_string(),
                     plugin: "gm".to_string(),
                     verb: "git_commit_rank".to_string(),
-                    input: InputMapping { fields: btreemap([("query", "request.query"), ("limit", "literal:10")]) },
+                    input: InputMapping {
+                        fields: btreemap([("query", "request.query"), ("limit", "literal:10")]),
+                    },
                     when: None,
                 },
             ],
             fuse: vec![FuseNode {
                 id: "presented".to_string(),
                 strategy: "present_both".to_string(),
-                sources: vec!["vector_search".to_string(), "bm25".to_string(), "commits".to_string()],
+                sources: vec![
+                    "vector_search".to_string(),
+                    "bm25".to_string(),
+                    "commits".to_string(),
+                ],
                 params: std::collections::BTreeMap::new(),
             }],
             conditions: vec![],
@@ -271,7 +310,11 @@ fn default_document() -> DataflowDocument {
                     plugin: "gm".to_string(),
                     verb: "extract_chunks".to_string(),
                     input: InputMapping {
-                        fields: btreemap([("path", "request.path"), ("source", "request.source"), ("lang", "request.lang")]),
+                        fields: btreemap([
+                            ("path", "request.path"),
+                            ("source", "request.source"),
+                            ("lang", "request.lang"),
+                        ]),
                     },
                     when: None,
                 },
@@ -279,7 +322,9 @@ fn default_document() -> DataflowDocument {
                     id: "embed_batch".to_string(),
                     plugin: "bert".to_string(),
                     verb: "embed_batch".to_string(),
-                    input: InputMapping { fields: btreemap([("texts", "steps.chunk.bodies")]) },
+                    input: InputMapping {
+                        fields: btreemap([("texts", "steps.chunk.bodies")]),
+                    },
                     when: None,
                 },
                 StepNode {
@@ -287,7 +332,10 @@ fn default_document() -> DataflowDocument {
                     plugin: "libsql".to_string(),
                     verb: "upsert_chunks".to_string(),
                     input: InputMapping {
-                        fields: btreemap([("chunks", "steps.chunk.chunks"), ("embeddings", "steps.embed_batch.embeddings")]),
+                        fields: btreemap([
+                            ("chunks", "steps.chunk.chunks"),
+                            ("embeddings", "steps.embed_batch.embeddings"),
+                        ]),
                     },
                     when: None,
                 },
@@ -307,7 +355,9 @@ fn default_document() -> DataflowDocument {
                     id: "embed".to_string(),
                     plugin: "gm".to_string(),
                     verb: "embed_query".to_string(),
-                    input: InputMapping { fields: btreemap([("query", "request.query")]) },
+                    input: InputMapping {
+                        fields: btreemap([("query", "request.query")]),
+                    },
                     when: None,
                 },
                 StepNode {
@@ -315,7 +365,11 @@ fn default_document() -> DataflowDocument {
                     plugin: "gm".to_string(),
                     verb: "search_with_recency".to_string(),
                     input: InputMapping {
-                        fields: btreemap([("embedding", "steps.embed.embedding"), ("namespaces", "request.namespaces"), ("limit", "request.limit")]),
+                        fields: btreemap([
+                            ("embedding", "steps.embed.embedding"),
+                            ("namespaces", "request.namespaces"),
+                            ("limit", "request.limit"),
+                        ]),
                     },
                     when: None,
                 },
@@ -326,9 +380,15 @@ fn default_document() -> DataflowDocument {
         },
     );
 
-    DataflowDocument { schema_version: DATAFLOW_SCHEMA_VERSION, pipelines }
+    DataflowDocument {
+        schema_version: DATAFLOW_SCHEMA_VERSION,
+        pipelines,
+    }
 }
 
 fn btreemap<const N: usize>(pairs: [(&str, &str); N]) -> std::collections::BTreeMap<String, Value> {
-    pairs.into_iter().map(|(k, v)| (k.to_string(), Value::String(v.to_string()))).collect()
+    pairs
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+        .collect()
 }

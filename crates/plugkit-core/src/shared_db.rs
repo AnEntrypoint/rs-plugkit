@@ -78,12 +78,18 @@ pub fn is_malformed_by_sqlite_error_code(err: &str) -> bool {
 
 pub fn recover_malformed_shared_db() -> bool {
     let path = shared_db_path();
-    crate::wasm_dispatch::emit_event("shared_db_recreated", serde_json::json!({
-        "path": path,
-        "reason": "database disk image is malformed; derived state dropped for full rebuild",
-    }));
+    crate::wasm_dispatch::emit_event(
+        "shared_db_recreated",
+        serde_json::json!({
+            "path": path,
+            "reason": "database disk image is malformed; derived state dropped for full rebuild",
+        }),
+    );
     if let Err(e) = recreate_shared_db(&path) {
-        crate::wasm_dispatch::emit_event("shared_db_recreate_failed", serde_json::json!({ "path": path, "error": e }));
+        crate::wasm_dispatch::emit_event(
+            "shared_db_recreate_failed",
+            serde_json::json!({ "path": path, "error": e }),
+        );
         return false;
     }
     crate::rssearch_vectors::forget_ensured_schema();
@@ -95,7 +101,11 @@ pub fn recover_malformed_shared_db() -> bool {
 pub fn shared_exec(sql: &str) -> Result<(), String> {
     let path = shared_db_path();
     crate::libsql_wasm::retry_on_busy(|| {
-        let resp = call_libsql_plugin("libsql", "exec", json!({ "db": SHARED_DB, "path": &path, "sql": sql }));
+        let resp = call_libsql_plugin(
+            "libsql",
+            "exec",
+            json!({ "db": SHARED_DB, "path": &path, "sql": sql }),
+        );
         plugin_ok(&resp)
     })
 }
@@ -103,7 +113,11 @@ pub fn shared_exec(sql: &str) -> Result<(), String> {
 pub fn shared_query(sql: &str) -> Result<Value, String> {
     let path = shared_db_path();
     crate::libsql_wasm::retry_on_busy(|| {
-        let resp = call_libsql_plugin("libsql", "query", json!({ "db": SHARED_DB, "path": &path, "sql": sql }));
+        let resp = call_libsql_plugin(
+            "libsql",
+            "query",
+            json!({ "db": SHARED_DB, "path": &path, "sql": sql }),
+        );
         plugin_rows(resp)
     })
 }

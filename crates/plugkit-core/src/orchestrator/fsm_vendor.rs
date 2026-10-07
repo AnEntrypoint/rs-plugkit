@@ -1,17 +1,18 @@
 #![cfg(target_arch = "wasm32")]
 
-use serde_json::{json, Value};
-use crate::pkfs;
 use super::instructions::{compiled_default_for_prose_key, has_compiled_default_for_prose_key};
 use super::residual::{
-    RESIDUAL_PRD_OPEN_DEFAULT, RESIDUAL_BROWSER_OPEN_DEFAULT, RESIDUAL_TASKS_RUNNING_DEFAULT,
-    RESIDUAL_DIRTY_TREE_DEFAULT, RESIDUAL_IMPERATIVE_DEFAULT,
+    RESIDUAL_BROWSER_OPEN_DEFAULT, RESIDUAL_DIRTY_TREE_DEFAULT, RESIDUAL_IMPERATIVE_DEFAULT,
+    RESIDUAL_PRD_OPEN_DEFAULT, RESIDUAL_TASKS_RUNNING_DEFAULT,
 };
 use super::{fsm, transitions};
+use crate::pkfs;
+use serde_json::{json, Value};
 
-const GATE_DEFAULTS: &[(&str, &str)] = &[
-    ("long-gap-no-instruction", crate::gates::GATE_LONG_GAP_NO_INSTRUCTION_DEFAULT),
-];
+const GATE_DEFAULTS: &[(&str, &str)] = &[(
+    "long-gap-no-instruction",
+    crate::gates::GATE_LONG_GAP_NO_INSTRUCTION_DEFAULT,
+)];
 
 const RESIDUAL_DEFAULTS: &[(&str, &str)] = &[
     ("prd-open", RESIDUAL_PRD_OPEN_DEFAULT),
@@ -66,8 +67,7 @@ const GM_CONFIG_EXAMPLE: &str = r#"{
 }
 "#;
 
-const EXAMPLE_HOOK: &str = r#"// Example FSM jit-hook (per fsm-framework-jit-hook-concreting). A hook
-const fs = require('fs');
+const EXAMPLE_HOOK: &str = r#"const fs = require('fs');
 return fs.existsSync('.gm/ship-approved');
 "#;
 
@@ -175,7 +175,10 @@ fn merge_policy_rows() -> Vec<PolicyRow> {
             },
         });
     }
-    if let Some(entry_row) = rows.iter_mut().find(|r| r.path == ".gm/instructions/entry.md") {
+    if let Some(entry_row) = rows
+        .iter_mut()
+        .find(|r| r.path == ".gm/instructions/entry.md")
+    {
         entry_row.class = "phase prose (also prepended to every other phase)";
         entry_row.reader = "crate::prose::resolve, served for ENTRY and concatenated AHEAD of every non-entry phase's prose";
         entry_row.note = Some("Overriding this replaces the orchestrator preamble served with EVERY phase, not just ENTRY.".to_string());
@@ -192,11 +195,26 @@ fn merge_policy_rows() -> Vec<PolicyRow> {
     });
 
     for generated in [
-        (".gm/instructions/fsm/predicates.md", "transitions::known_predicates()"),
-        (".gm/instructions/fsm/deviations.md", "deviations::DEVIATION_TABLE"),
-        (".gm/instructions/fsm/invariants.md", "the live fsm::graph().policy"),
-        (".gm/instructions/fsm/configurable.md", "the live graph plus KNOWN_POLICY_KEYS and the predicate/deviation registries"),
-        (".gm/instructions/fsm/merge-policy.md", "merge_policy_rows(), which walks the same registries the vendor pass writes from"),
+        (
+            ".gm/instructions/fsm/predicates.md",
+            "transitions::known_predicates()",
+        ),
+        (
+            ".gm/instructions/fsm/deviations.md",
+            "deviations::DEVIATION_TABLE",
+        ),
+        (
+            ".gm/instructions/fsm/invariants.md",
+            "the live fsm::graph().policy",
+        ),
+        (
+            ".gm/instructions/fsm/configurable.md",
+            "the live graph plus KNOWN_POLICY_KEYS and the predicate/deviation registries",
+        ),
+        (
+            ".gm/instructions/fsm/merge-policy.md",
+            "merge_policy_rows(), which walks the same registries the vendor pass writes from",
+        ),
     ] {
         rows.push(PolicyRow {
             path: generated.0.to_string(),
@@ -309,11 +327,19 @@ fn merge_policy_doc() -> String {
         let ph = if r.placeholders.is_empty() {
             "--".to_string()
         } else {
-            r.placeholders.iter().map(|p| format!("`{}`", p)).collect::<Vec<_>>().join(" ")
+            r.placeholders
+                .iter()
+                .map(|p| format!("`{}`", p))
+                .collect::<Vec<_>>()
+                .join(" ")
         };
         lines.push(format!(
             "| `{}` | {} | `{}` | {} | {} |",
-            r.path, r.class, r.policy.id(), ph, r.reader
+            r.path,
+            r.class,
+            r.policy.id(),
+            ph,
+            r.reader
         ));
     }
     lines.push(String::new());
@@ -323,7 +349,11 @@ fn merge_policy_doc() -> String {
         lines.push("## Per-artifact caveats".to_string());
         lines.push(String::new());
         for r in notes {
-            lines.push(format!("- `{}` -- {}", r.path, r.note.as_deref().unwrap_or("")));
+            lines.push(format!(
+                "- `{}` -- {}",
+                r.path,
+                r.note.as_deref().unwrap_or("")
+            ));
         }
         lines.push(String::new());
     }
@@ -389,7 +419,8 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
             );
             self_labeled_placeholder_text.as_str()
         };
-        let shadowed = crate::prose::config_repo_text(key).filter(|repo_text| repo_text.trim() != text.trim());
+        let shadowed =
+            crate::prose::config_repo_text(key).filter(|repo_text| repo_text.trim() != text.trim());
         let (ok, status) = write_if_absent_or_forced(&path, text, force);
         let mut row = json!({ "path": path, "ok": ok, "status": status });
         if let (Some(repo_text), true) = (shadowed, ok) {
@@ -408,7 +439,8 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
     let pre_vendor_graph_raw = fsm::vendored_graph_raw();
 
     let graph_path = ".gm/instructions/fsm/graph.json";
-    let (ok, status) = write_if_absent_or_forced(graph_path, &fsm::default_graph_json_pretty(), force);
+    let (ok, status) =
+        write_if_absent_or_forced(graph_path, &fsm::default_graph_json_pretty(), force);
     results.push(json!({ "path": graph_path, "ok": ok, "status": status }));
 
     let predicates_ref = {
@@ -443,7 +475,12 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
             String::new(),
         ];
         for (name, desc, sev) in crate::orchestrator::deviations::known_deviations() {
-            lines.push(format!("- `{}` (default `{}`) -- {}", name, sev.as_str(), desc));
+            lines.push(format!(
+                "- `{}` (default `{}`) -- {}",
+                name,
+                sev.as_str(),
+                desc
+            ));
         }
         lines.join("\n")
     };
@@ -543,11 +580,16 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
     }
 
     let browser_config_path = ".gm/browser-config.json";
-    let (ok, status) = write_if_absent_or_forced(browser_config_path, BROWSER_CONFIG_EXAMPLE, force);
+    let (ok, status) =
+        write_if_absent_or_forced(browser_config_path, BROWSER_CONFIG_EXAMPLE, force);
     results.push(json!({ "path": browser_config_path, "ok": ok, "status": status }));
 
     let daemon_project_config_path = ".gm/daemon-project-config.json";
-    let (ok, status) = write_if_absent_or_forced(daemon_project_config_path, DAEMON_PROJECT_CONFIG_EXAMPLE, force);
+    let (ok, status) = write_if_absent_or_forced(
+        daemon_project_config_path,
+        DAEMON_PROJECT_CONFIG_EXAMPLE,
+        force,
+    );
     results.push(json!({ "path": daemon_project_config_path, "ok": ok, "status": status }));
 
     let source_spec_path = ".gm/instructions/source.json.example";
@@ -561,7 +603,8 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
     }));
 
     let config_source_spec_path = ".gm/config.source.json.example";
-    let (ok, status) = write_if_absent_or_forced(config_source_spec_path, CONFIG_SOURCE_SPEC_EXAMPLE, force);
+    let (ok, status) =
+        write_if_absent_or_forced(config_source_spec_path, CONFIG_SOURCE_SPEC_EXAMPLE, force);
     results.push(json!({
         "path": config_source_spec_path,
         "ok": ok,

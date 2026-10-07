@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use super::gm_dir;
 use crate::pkfs;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 #[cfg(target_arch = "wasm32")]
 pub fn dispatch_session_id() -> Option<String> {
@@ -18,12 +18,24 @@ fn dispatch_session_id() -> Option<String> {
 pub struct Phase(String);
 
 impl Phase {
-    pub fn plan() -> Phase { Phase("PLAN".to_string()) }
-    pub fn execute() -> Phase { Phase("EXECUTE".to_string()) }
-    pub fn emit() -> Phase { Phase("EMIT".to_string()) }
-    pub fn verify() -> Phase { Phase("VERIFY".to_string()) }
-    pub fn consolidate() -> Phase { Phase("CONSOLIDATE".to_string()) }
-    pub fn complete() -> Phase { Phase("COMPLETE".to_string()) }
+    pub fn plan() -> Phase {
+        Phase("PLAN".to_string())
+    }
+    pub fn execute() -> Phase {
+        Phase("EXECUTE".to_string())
+    }
+    pub fn emit() -> Phase {
+        Phase("EMIT".to_string())
+    }
+    pub fn verify() -> Phase {
+        Phase("VERIFY".to_string())
+    }
+    pub fn consolidate() -> Phase {
+        Phase("CONSOLIDATE".to_string())
+    }
+    pub fn complete() -> Phase {
+        Phase("COMPLETE".to_string())
+    }
 
     pub fn as_str(&self) -> &str {
         &self.0
@@ -125,13 +137,19 @@ pub fn read_state_with_graph(g: &super::fsm::Graph) -> TurnState {
                 let now = now_ms();
                 let backup_path = format!("{}.corrupted-{}", ps, now);
                 let _ = pkfs::write(&backup_path, &s);
-                let detail = format!("turn-state.json parse failed ({}): backed up to {}", e, backup_path);
+                let detail = format!(
+                    "turn-state.json parse failed ({}): backed up to {}",
+                    e, backup_path
+                );
                 eprintln!("{}", detail);
                 #[cfg(target_arch = "wasm32")]
-                crate::wasm_dispatch::emit_event("turn-state-corrupted", serde_json::json!({
-                    "error": e.to_string(),
-                    "backupPath": backup_path,
-                }));
+                crate::wasm_dispatch::emit_event(
+                    "turn-state-corrupted",
+                    serde_json::json!({
+                        "error": e.to_string(),
+                        "backupPath": backup_path,
+                    }),
+                );
                 default_state_for_graph(g)
             }
         },
@@ -158,21 +176,37 @@ pub fn write_state(state: &TurnState) -> Result<(), std::io::Error> {
     if pkfs::write(&ps, &json) {
         Ok(())
     } else {
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "pkfs write failed"))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "pkfs write failed",
+        ))
     }
 }
 
-pub fn set_phase_with_session(phase: Phase, last_skill: Option<String>, session_id: Option<String>) -> Result<TurnState, std::io::Error> {
+pub fn set_phase_with_session(
+    phase: Phase,
+    last_skill: Option<String>,
+    session_id: Option<String>,
+) -> Result<TurnState, std::io::Error> {
     let g = super::fsm::graph();
     set_phase_with_session_with_graph(phase, last_skill, session_id, &g)
 }
 
-pub fn set_phase_with_session_with_graph(phase: Phase, last_skill: Option<String>, session_id: Option<String>, g: &super::fsm::Graph) -> Result<TurnState, std::io::Error> {
+pub fn set_phase_with_session_with_graph(
+    phase: Phase,
+    last_skill: Option<String>,
+    session_id: Option<String>,
+    g: &super::fsm::Graph,
+) -> Result<TurnState, std::io::Error> {
     let mut s = read_state_with_graph(g);
     let from = s.phase.as_str().to_string();
     let to = phase.as_str().to_string();
     if from != to {
-        s.phase_history.push(PhaseTransitionEntry { from, to, ts_ms: now_ms() });
+        s.phase_history.push(PhaseTransitionEntry {
+            from,
+            to,
+            ts_ms: now_ms(),
+        });
     }
     s.phase = phase;
     if last_skill.is_some() {
@@ -196,7 +230,10 @@ pub fn revert_last_transition() -> Result<TurnState, std::io::Error> {
             write_state(&s)?;
             Ok(s)
         }
-        None => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no recorded transition to revert")),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no recorded transition to revert",
+        )),
     }
 }
 
@@ -212,7 +249,10 @@ pub fn handle_status() -> (String, String, i32) {
         Err(e) => return (String::new(), format!("serialize error: {}", e), 1),
     };
     if let Value::Object(ref mut m) = payload {
-        m.insert("session_owner_before_this_dispatch".to_string(), json!(s.session_id));
+        m.insert(
+            "session_owner_before_this_dispatch".to_string(),
+            json!(s.session_id),
+        );
         m.insert("session_id".to_string(), json!(requesting_session_id));
         m.insert("session_mismatch".to_string(), json!(session_mismatch));
     }

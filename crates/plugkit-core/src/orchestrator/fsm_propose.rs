@@ -1,9 +1,9 @@
 #![cfg(target_arch = "wasm32")]
 
-use serde_json::{json, Value};
-use crate::pkfs;
-use crate::config_path::validate_prose_key;
 use super::fsm;
+use crate::config_path::validate_prose_key;
+use crate::pkfs;
+use serde_json::{json, Value};
 
 const INSTRUCTIONS_BASE: &str = ".gm/instructions";
 const GRAPH_PATH: &str = ".gm/instructions/fsm/graph.json";
@@ -13,19 +13,44 @@ fn prose_target_path(key: &str) -> Result<String, String> {
     validate_prose_key(key)?;
     let path = format!("{INSTRUCTIONS_BASE}/{key}.md");
     if !crate::config_path::path_contained_within(INSTRUCTIONS_BASE, &path) {
-        return Err(format!("prose key resolves to {path}, which escapes {INSTRUCTIONS_BASE}"));
+        return Err(format!(
+            "prose key resolves to {path}, which escapes {INSTRUCTIONS_BASE}"
+        ));
     }
     Ok(path)
 }
 
 pub fn handle_propose(content: &str) -> (String, String, i32) {
     let body: Value = serde_json::from_str(content.trim()).unwrap_or(Value::Null);
-    let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let proposed_text = body.get("proposed_text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let reason = body.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let witness = body.get("witness").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let user_confirmed = body.get("user_confirmed").and_then(|v| v.as_bool()).unwrap_or(false);
+    let kind = body
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let key = body
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let proposed_text = body
+        .get("proposed_text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let reason = body
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let witness = body
+        .get("witness")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let user_confirmed = body
+        .get("user_confirmed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     if !matches!(kind.as_str(), "prose" | "graph" | "config") {
         return (
@@ -66,7 +91,13 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
             }
             match prose_target_path(&key) {
                 Ok(p) => p,
-                Err(e) => return (json!({ "ok": false, "error": e }).to_string(), String::new(), 1),
+                Err(e) => {
+                    return (
+                        json!({ "ok": false, "error": e }).to_string(),
+                        String::new(),
+                        1,
+                    )
+                }
             }
         }
         "graph" => GRAPH_PATH.to_string(),
@@ -88,7 +119,9 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
                     .map(|(from, to, missing)| json!({ "from": from, "to": to, "missing_gates": missing }))
                     .collect();
             }
-            Err(e) => validation_problems.push(format!("proposed graph does not parse as valid JSON graph: {e}")),
+            Err(e) => validation_problems.push(format!(
+                "proposed graph does not parse as valid JSON graph: {e}"
+            )),
         }
     }
     if kind == "config" {
@@ -113,11 +146,20 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
 
     if !user_confirmed {
         let diff_summary = match &current_text {
-            Some(cur) if cur.trim() == proposed_text.trim() => "proposed text is identical to the current file -- no-op".to_string(),
-            Some(cur) => format!("current file is {} bytes, proposed is {} bytes", cur.len(), proposed_text.len()),
+            Some(cur) if cur.trim() == proposed_text.trim() => {
+                "proposed text is identical to the current file -- no-op".to_string()
+            }
+            Some(cur) => format!(
+                "current file is {} bytes, proposed is {} bytes",
+                cur.len(),
+                proposed_text.len()
+            ),
             None => format!("no file currently exists at {target_path} -- this would create it"),
         };
-        let gate_name = body.get("gate").and_then(|v| v.as_str()).unwrap_or(key.as_str());
+        let gate_name = body
+            .get("gate")
+            .and_then(|v| v.as_str())
+            .unwrap_or(key.as_str());
         let friction_query = format!("gate {gate_name} {reason}");
         let historical_friction_hits = super::recall::recall_hits(&friction_query, 5);
         return (
@@ -147,7 +189,10 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
     }
 
     if requires_authority {
-        let confirmation_witness = body.get("confirmation_witness").and_then(|v| v.as_str()).unwrap_or("");
+        let confirmation_witness = body
+            .get("confirmation_witness")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if confirmation_witness.trim().is_empty() {
             return (
                 json!({
@@ -198,5 +243,9 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
         "post_write_check": post_write_check,
         "note": "Write took the same path prose::resolve/fsm::graph_detailed/config::resolve already read on their next call -- no new read-path code, effective on next dispatch.",
     });
-    (payload.to_string(), String::new(), if write_ok { 0 } else { 1 })
+    (
+        payload.to_string(),
+        String::new(),
+        if write_ok { 0 } else { 1 },
+    )
 }

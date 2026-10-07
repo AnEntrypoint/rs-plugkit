@@ -31,7 +31,12 @@ fn short_sha(sha: &str) -> String {
     trimmed.chars().take(12).collect()
 }
 
-pub fn record_change(tier: &str, old_sha: &str, new_sha: &str, changed: &[String]) -> Option<String> {
+pub fn record_change(
+    tier: &str,
+    old_sha: &str,
+    new_sha: &str,
+    changed: &[String],
+) -> Option<String> {
     if old_sha.trim() == new_sha.trim() {
         return None;
     }

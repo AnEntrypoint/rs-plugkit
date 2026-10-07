@@ -1,7 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
+use crate::wasm_dispatch::{host_now_ms, host_read, host_write};
 use serde_json::{json, Value};
-use crate::wasm_dispatch::{host_read, host_write, host_now_ms};
 
 const MAX_ENTRIES: usize = 500;
 
@@ -9,7 +9,10 @@ fn ledger_path(cwd: &str) -> String {
     if cwd.is_empty() {
         ".gm/exec-spool/.dispatch-ledger.json".to_string()
     } else {
-        format!("{}/.gm/exec-spool/.dispatch-ledger.json", cwd.trim_end_matches('/').trim_end_matches('\\'))
+        format!(
+            "{}/.gm/exec-spool/.dispatch-ledger.json",
+            cwd.trim_end_matches('/').trim_end_matches('\\')
+        )
     }
 }
 
@@ -17,7 +20,13 @@ fn now_ms() -> u64 {
     unsafe { host_now_ms() }
 }
 
-pub fn record(cwd: &str, verb: &str, fingerprint: &str, exit_code: i64, session_id: Option<&str>) -> String {
+pub fn record(
+    cwd: &str,
+    verb: &str,
+    fingerprint: &str,
+    exit_code: i64,
+    session_id: Option<&str>,
+) -> String {
     let path = ledger_path(cwd);
     let existing = host_read(&path).unwrap_or_default();
     let mut list: Vec<Value> = if existing.trim().is_empty() {
@@ -66,5 +75,6 @@ pub fn lookup(cwd: &str, dispatch_id: &str) -> Option<Value> {
         Ok(Value::Array(a)) => a,
         _ => return None,
     };
-    list.into_iter().find(|e| e.get("dispatch_id").and_then(|v| v.as_str()) == Some(dispatch_id))
+    list.into_iter()
+        .find(|e| e.get("dispatch_id").and_then(|v| v.as_str()) == Some(dispatch_id))
 }

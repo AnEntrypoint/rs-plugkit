@@ -2,7 +2,9 @@
 
 use serde_json::json;
 
-use crate::wasm_dispatch::{host_cwd_string, host_read, host_remove_file_never_directory, host_stat, host_write};
+use crate::wasm_dispatch::{
+    host_cwd_string, host_read, host_remove_file_never_directory, host_stat, host_write,
+};
 
 const FNV1A_64_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV1A_64_PRIME: u64 = 0x100000001b3;

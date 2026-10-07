@@ -3,7 +3,9 @@
 use serde_json::{json, Value};
 
 use crate::ragconfig::RagConfig;
-use crate::shared_db::{shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB};
+use crate::shared_db::{
+    shared_ensure_open, shared_exec, shared_exec_params, shared_query_params, SHARED_DB,
+};
 use crate::vecns::{self, QueryBudget, VecTableSpec};
 use crate::wasm_dispatch::plugin_call;
 
@@ -27,7 +29,11 @@ static SCHEMA_ENSURED: std::sync::Mutex<Option<std::collections::HashSet<(String
     std::sync::Mutex::new(None);
 
 pub fn forget_ensured_schema() {
-    if let Some(seen) = SCHEMA_ENSURED.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+    if let Some(seen) = SCHEMA_ENSURED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
         seen.clear();
     }
 }
@@ -59,22 +65,38 @@ pub fn ensure_schema_cfg(cfg: &RagConfig) -> Result<(), String> {
 
 fn read_watermark(cfg: &RagConfig) -> Option<String> {
     let path = shared_db_path();
-    let sql = format!("SELECT hash FROM {} ORDER BY id DESC LIMIT 1", cfg.git_commits.table);
-    let resp = plugin_call("libsql", "query", &json!({ "db": SHARED_DB, "path": path, "sql": sql, "params": [] }));
+    let sql = format!(
+        "SELECT hash FROM {} ORDER BY id DESC LIMIT 1",
+        cfg.git_commits.table
+    );
+    let resp = plugin_call(
+        "libsql",
+        "query",
+        &json!({ "db": SHARED_DB, "path": path, "sql": sql, "params": [] }),
+    );
     if !resp.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
         return None;
     }
     let rows = resp.get("rows")?;
-    rows.as_array()?.first()?.get("hash")?.as_str().map(|s| s.to_string())
+    rows.as_array()?
+        .first()?
+        .get("hash")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 fn parse_log_entries(stdout: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for rec in stdout.split('\u{1e}') {
         let rec = rec.trim_matches(|c| c == '\u{0}' || c == '\n' || c == '\r');
-        if rec.is_empty() { continue; }
+        if rec.is_empty() {
+            continue;
+        }
         let mut parts = rec.splitn(2, '\u{0}');
-        let hash = match parts.next() { Some(h) if h.len() == 40 => h.to_string(), _ => continue };
+        let hash = match parts.next() {
+            Some(h) if h.len() == 40 => h.to_string(),
+            _ => continue,
+        };
         let subject = parts.next().unwrap_or("").to_string();
         out.push((hash, subject));
     }
@@ -83,23 +105,41 @@ fn parse_log_entries(stdout: &str) -> Vec<(String, String)> {
 
 fn measure_commit_change_scale_with_shortstat(hash: &str) -> Option<(usize, usize)> {
     let v = crate::wasm_dispatch::git_call_argv(
-        &["show", "--no-color", "--shortstat", "--first-parent", "--format=", hash],
+        &[
+            "show",
+            "--no-color",
+            "--shortstat",
+            "--first-parent",
+            "--format=",
+            hash,
+        ],
         None,
     );
     let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
     let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    if !ok || exit_code != 0 { return None; }
+    if !ok || exit_code != 0 {
+        return None;
+    }
     let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
     let line = stdout.lines().find(|l| !l.trim().is_empty())?;
     let mut files = 0usize;
     let mut churn = 0usize;
     for seg in line.split(',') {
         let seg = seg.trim();
-        if let Some(n) = seg.strip_suffix("file changed").or_else(|| seg.strip_suffix("files changed")) {
+        if let Some(n) = seg
+            .strip_suffix("file changed")
+            .or_else(|| seg.strip_suffix("files changed"))
+        {
             files = n.trim().parse().unwrap_or(0);
-        } else if let Some(n) = seg.strip_suffix("insertion(+)").or_else(|| seg.strip_suffix("insertions(+)")) {
+        } else if let Some(n) = seg
+            .strip_suffix("insertion(+)")
+            .or_else(|| seg.strip_suffix("insertions(+)"))
+        {
             churn += n.trim().parse::<usize>().unwrap_or(0);
-        } else if let Some(n) = seg.strip_suffix("deletion(-)").or_else(|| seg.strip_suffix("deletions(-)")) {
+        } else if let Some(n) = seg
+            .strip_suffix("deletion(-)")
+            .or_else(|| seg.strip_suffix("deletions(-)"))
+        {
             churn += n.trim().parse::<usize>().unwrap_or(0);
         }
     }
@@ -111,24 +151,36 @@ fn commit_diff_text(hash: &str, cfg: &RagConfig) -> String {
         let max_files = cfg.bulk_embed.git_commit_full_diff_max_files;
         let max_lines = cfg.bulk_embed.git_commit_full_diff_max_changed_lines;
         if files > max_files || churn > max_lines {
-            crate::wasm_dispatch::emit_event("git_commit_diff_skipped_oversized", json!({
-                "hash": hash,
-                "files_changed": files,
-                "churn_lines": churn,
-                "max_files": max_files,
-                "max_changed_lines": max_lines,
-                "reason": "full -p diff render would be the dominant per-commit cost on a commit this size (or this binary-heavy) -- embedding the subject line alone instead of blocking the whole sync pass on rendering+filtering one oversized patch",
-            }));
+            crate::wasm_dispatch::emit_event(
+                "git_commit_diff_skipped_oversized",
+                json!({
+                    "hash": hash,
+                    "files_changed": files,
+                    "churn_lines": churn,
+                    "max_files": max_files,
+                    "max_changed_lines": max_lines,
+                    "reason": "full -p diff render would be the dominant per-commit cost on a commit this size (or this binary-heavy) -- embedding the subject line alone instead of blocking the whole sync pass on rendering+filtering one oversized patch",
+                }),
+            );
             return String::new();
         }
     }
     let v = crate::wasm_dispatch::git_call_argv(
-        &["show", "--no-color", "--stat=200", "-p", "--first-parent", hash],
+        &[
+            "show",
+            "--no-color",
+            "--stat=200",
+            "-p",
+            "--first-parent",
+            hash,
+        ],
         None,
     );
     let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
     let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    if !ok || exit_code != 0 { return String::new(); }
+    if !ok || exit_code != 0 {
+        return String::new();
+    }
     let stdout = v.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
     let filtered: String = stdout
         .lines()
@@ -152,7 +204,10 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
     ensure_schema_cfg(cfg)?;
     let db_path = shared_db_path();
     let log = crate::wasm_dispatch::git_call(
-        &format!("log --format=%x00%H%x00%s%x1e -n {}", cfg.bulk_embed.git_commit_log_window),
+        &format!(
+            "log --format=%x00%H%x00%s%x1e -n {}",
+            cfg.bulk_embed.git_commit_log_window
+        ),
         None,
     );
     let ok = log.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
@@ -166,17 +221,27 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
         return Ok(json!({ "synced": true, "embedded": 0, "reason": "empty-history" }));
     }
 
-    let live_hashes: std::collections::HashSet<&str> = entries.iter().map(|(h, _)| h.as_str()).collect();
-    if let Ok(rows) = shared_query_params(&format!("SELECT hash FROM {} WHERE deleted=0", cfg.git_commits.table), &[]) {
+    let live_hashes: std::collections::HashSet<&str> =
+        entries.iter().map(|(h, _)| h.as_str()).collect();
+    if let Ok(rows) = shared_query_params(
+        &format!("SELECT hash FROM {} WHERE deleted=0", cfg.git_commits.table),
+        &[],
+    ) {
         if let Some(arr) = rows.as_array() {
             for row in arr {
                 if let Some(h) = row.get("hash").and_then(|v| v.as_str()) {
                     if !live_hashes.contains(h) {
                         let _ = shared_exec_params(
-                            &format!("UPDATE {} SET deleted=1 WHERE hash=?1", cfg.git_commits.table),
+                            &format!(
+                                "UPDATE {} SET deleted=1 WHERE hash=?1",
+                                cfg.git_commits.table
+                            ),
                             &[h],
                         );
-                        crate::wasm_dispatch::emit_event("git_commit_vector_reconciled_deleted", json!({ "hash": h }));
+                        crate::wasm_dispatch::emit_event(
+                            "git_commit_vector_reconciled_deleted",
+                            json!({ "hash": h }),
+                        );
                     }
                 }
             }
@@ -185,7 +250,9 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
 
     let watermark = read_watermark(cfg);
     let mut present: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Ok(rows) = shared_query_params(&format!("SELECT hash FROM {}", cfg.git_commits.table), &[]) {
+    if let Ok(rows) =
+        shared_query_params(&format!("SELECT hash FROM {}", cfg.git_commits.table), &[])
+    {
         if let Some(arr) = rows.as_array() {
             for row in arr {
                 if let Some(h) = row.get("hash").and_then(|v| v.as_str()) {
@@ -202,10 +269,17 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
     let mut consecutive_embed_failures: usize = 0;
     let embed_budget_ms = cfg.bulk_embed.git_commit_embed_budget_ms;
     let min_embeds_per_pass = cfg.bulk_embed.git_commit_min_embeds_per_pass as u32;
-    let hard_ceiling_ms = cfg.bulk_embed.git_commit_sync_hard_ceiling_ms.max(embed_budget_ms);
+    let hard_ceiling_ms = cfg
+        .bulk_embed
+        .git_commit_sync_hard_ceiling_ms
+        .max(embed_budget_ms);
     for (hash, subject) in &entries {
-        if present.contains(hash) { continue; }
-        if Some(hash.as_str()) == watermark.as_deref() { continue; }
+        if present.contains(hash) {
+            continue;
+        }
+        if Some(hash.as_str()) == watermark.as_deref() {
+            continue;
+        }
         let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }
             .saturating_sub(sync_pass_started_before_schema_and_log);
         if elapsed > hard_ceiling_ms {
@@ -216,38 +290,52 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
             deferred += 1;
             continue;
         }
-        crate::wasm_dispatch::emit_event("git_commit_vector_progress", json!({
-            "hash": hash,
-            "embedded_so_far": embedded,
-            "elapsed_ms": elapsed,
-            "window": entries.len(),
-        }));
+        crate::wasm_dispatch::emit_event(
+            "git_commit_vector_progress",
+            json!({
+                "hash": hash,
+                "embedded_so_far": embedded,
+                "elapsed_ms": elapsed,
+                "window": entries.len(),
+            }),
+        );
         let diff = commit_diff_text(hash, cfg);
         let text = if diff.is_empty() {
             subject.clone()
         } else {
             format!("{}\n\n{}", subject, diff)
         };
-        let vec: Vec<f32> = match crate::plugin_abi::call("bert", "embed", &json!({ "text": text })) {
+        let vec: Vec<f32> = match crate::plugin_abi::call("bert", "embed", &json!({ "text": text }))
+        {
             Ok(data) => {
                 consecutive_embed_failures = 0;
                 data.get("embedding")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect::<Vec<f32>>())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_f64().map(|f| f as f32))
+                            .collect::<Vec<f32>>()
+                    })
                     .unwrap_or_default()
             }
             Err(e) => {
                 consecutive_embed_failures += 1;
-                crate::wasm_dispatch::emit_event("git_commit_embed_failed", json!({
-                    "kind": e.kind.as_str(),
-                    "detail": e.message,
-                    "consecutive": consecutive_embed_failures,
-                }));
-                if consecutive_embed_failures >= max_consecutive_embed_failures {
-                    crate::wasm_dispatch::emit_event("git_commit_embed_circuit_open", json!({
+                crate::wasm_dispatch::emit_event(
+                    "git_commit_embed_failed",
+                    json!({
+                        "kind": e.kind.as_str(),
+                        "detail": e.message,
                         "consecutive": consecutive_embed_failures,
-                        "reason": "the embedder failed on every one of the last N commits, so it is down rather than tripping on one input; abandoning this sync pass. The next pass resumes from the same cursor.",
-                    }));
+                    }),
+                );
+                if consecutive_embed_failures >= max_consecutive_embed_failures {
+                    crate::wasm_dispatch::emit_event(
+                        "git_commit_embed_circuit_open",
+                        json!({
+                            "consecutive": consecutive_embed_failures,
+                            "reason": "the embedder failed on every one of the last N commits, so it is down rather than tripping on one input; abandoning this sync pass. The next pass resumes from the same cursor.",
+                        }),
+                    );
                     break;
                 }
                 Vec::new()
@@ -259,11 +347,14 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
         }
         if vec.len() != cfg.dim() {
             skipped += 1;
-            crate::wasm_dispatch::emit_event("git_commit_vector_dim_mismatch", json!({
-                "hash": hash,
-                "embed_dim": vec.len(),
-                "configured_dim": cfg.dim(),
-            }));
+            crate::wasm_dispatch::emit_event(
+                "git_commit_vector_dim_mismatch",
+                json!({
+                    "hash": hash,
+                    "embed_dim": vec.len(),
+                    "configured_dim": cfg.dim(),
+                }),
+            );
             continue;
         }
         let embedding_sql = format!("vector('{}')", vecns::qlit(&vec));
@@ -280,22 +371,38 @@ pub fn sync_incremental_cfg(cfg: &RagConfig) -> Result<Value, String> {
             Err(_) => skipped += 1,
         }
     }
-    crate::wasm_dispatch::emit_event("git_commit_vectors_synced", json!({
-        "embedded": embedded,
-        "deferred": deferred,
-        "skipped": skipped,
-        "window": entries.len(),
-    }));
+    crate::wasm_dispatch::emit_event(
+        "git_commit_vectors_synced",
+        json!({
+            "embedded": embedded,
+            "deferred": deferred,
+            "skipped": skipped,
+            "window": entries.len(),
+        }),
+    );
     Ok(json!({ "synced": true, "embedded": embedded, "deferred": deferred, "skipped": skipped }))
 }
 
 pub fn search(query_embedding: &Value, limit: usize) -> Result<Vec<(String, String, f64)>, String> {
-    search_cfg(query_embedding, limit, &resolved_config_for_current_dispatch())
+    search_cfg(
+        query_embedding,
+        limit,
+        &resolved_config_for_current_dispatch(),
+    )
 }
 
-pub fn search_cfg(query_embedding: &Value, limit: usize, cfg: &RagConfig) -> Result<Vec<(String, String, f64)>, String> {
-    let qvec = query_embedding.as_array()
-        .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect::<Vec<f32>>())
+pub fn search_cfg(
+    query_embedding: &Value,
+    limit: usize,
+    cfg: &RagConfig,
+) -> Result<Vec<(String, String, f64)>, String> {
+    let qvec = query_embedding
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_f64().map(|f| f as f32))
+                .collect::<Vec<f32>>()
+        })
         .ok_or_else(|| "git_commit_vectors search: invalid query embedding".to_string())?;
     if qvec.is_empty() {
         return Err("git_commit_vectors search: empty query embedding".to_string());
@@ -314,11 +421,21 @@ pub fn search_cfg(query_embedding: &Value, limit: usize, cfg: &RagConfig) -> Res
     let arr = rows.as_array().cloned().unwrap_or_default();
     let mut out = Vec::with_capacity(arr.len());
     for row in arr {
-        let hash = row.get("hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let message = row.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let hash = row
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let message = row
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let distance = row.get("distance").and_then(|v| v.as_f64()).unwrap_or(2.0);
         let cos = 1.0 - distance;
-        if hash.is_empty() { continue; }
+        if hash.is_empty() {
+            continue;
+        }
         out.push((hash, message, cos));
     }
     Ok(out)

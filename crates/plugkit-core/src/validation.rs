@@ -13,8 +13,13 @@ pub fn session_id_from_body(body: &Value) -> Option<String> {
 }
 
 pub fn validate_timeout_ms(body: &Value, fallback_opts: bool) -> Result<u64, Value> {
-    let raw = body.get("timeoutMs")
-        .or_else(|| if fallback_opts { body.get("opts").and_then(|o| o.get("timeoutMs")) } else { None });
+    let raw = body.get("timeoutMs").or_else(|| {
+        if fallback_opts {
+            body.get("opts").and_then(|o| o.get("timeoutMs"))
+        } else {
+            None
+        }
+    });
     let n = raw.and_then(|v| v.as_u64());
     match n {
         Some(n) if n >= MIN_TIMEOUT_MS => Ok(n),

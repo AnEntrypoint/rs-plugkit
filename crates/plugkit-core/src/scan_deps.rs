@@ -310,7 +310,9 @@ impl Containment {
             .filter_map(|dir| crate::wasm_dispatch::host_stat(dir))
             .filter_map(|stat| canonical_path_of(&stat))
             .collect();
-        Containment { allowed_canonical_roots }
+        Containment {
+            allowed_canonical_roots,
+        }
     }
 
     fn admits(&self, stat: &Value) -> bool {
@@ -525,7 +527,11 @@ fn scan_node_modules(root: &str, max_files: usize) -> NodeModulesScan {
             new_stamp.insert(pkg_dir.clone(), sig);
             continue;
         }
-        let failures_before = scan.findings.iter().filter(|f| f.severity == "fail").count();
+        let failures_before = scan
+            .findings
+            .iter()
+            .filter(|f| f.severity == "fail")
+            .count();
         let blocked_before = scan.blocked.len();
         scan.scanned += scan_file_list(
             &r.candidates,
@@ -533,7 +539,11 @@ fn scan_node_modules(root: &str, max_files: usize) -> NodeModulesScan {
             &mut scan.findings,
             &mut scan.blocked,
         );
-        let failures_after = scan.findings.iter().filter(|f| f.severity == "fail").count();
+        let failures_after = scan
+            .findings
+            .iter()
+            .filter(|f| f.severity == "fail")
+            .count();
         if failures_after == failures_before && scan.blocked.len() == blocked_before {
             new_stamp.insert(pkg_dir.clone(), sig);
         }

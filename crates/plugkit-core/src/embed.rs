@@ -83,7 +83,11 @@ fn try_sibling_plugin_embed(text: &str) -> Option<Vec<f32>> {
             return None;
         }
     };
-    let mut out: Vec<f32> = arr.iter().filter_map(|x| x.as_f64()).map(|x| x as f32).collect();
+    let mut out: Vec<f32> = arr
+        .iter()
+        .filter_map(|x| x.as_f64())
+        .map(|x| x as f32)
+        .collect();
     if out.len() != EMBED_DIM {
         record_embed_failure(format!(
             "bert sibling-plugin embed returned {} dimensions but this build expects exactly {EMBED_DIM}: the bert plugin's model and this binary's compiled-in width disagree. A retry will NOT help",
@@ -125,7 +129,6 @@ const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant p
 pub fn condition_query(query_text: &str) -> String {
     format!("{}{}", BGE_QUERY_PREFIX, query_text)
 }
-
 
 fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
     let rc = unsafe {
@@ -190,13 +193,16 @@ fn bge_small_config() -> Config {
 #[cfg(not(feature = "slim"))]
 fn load_wasm_model_uncached() -> Result<(Tokenizer, BertModel, Device), String> {
     gemm::set_wasm_simd128(true);
-    crate::wasm_dispatch::emit_event("gemm_simd128_flag_check", serde_json::json!({
-        "set_to": true,
-        "read_back": gemm::get_wasm_simd128(),
-    }));
+    crate::wasm_dispatch::emit_event(
+        "gemm_simd128_flag_check",
+        serde_json::json!({
+            "set_to": true,
+            "read_back": gemm::get_wasm_simd128(),
+        }),
+    );
 
-    let tokenizer = Tokenizer::from_bytes(TOKENIZER_JSON)
-        .map_err(|e| format!("tokenizer load: {}", e))?;
+    let tokenizer =
+        Tokenizer::from_bytes(TOKENIZER_JSON).map_err(|e| format!("tokenizer load: {}", e))?;
 
     let device = Device::Cpu;
 
@@ -204,16 +210,18 @@ fn load_wasm_model_uncached() -> Result<(Tokenizer, BertModel, Device), String> 
         .map_err(|e| format!("varbuilder safetensors: {}", e))?;
 
     let config = bge_small_config();
-    let model = BertModel::load(vb, &config)
-        .map_err(|e| format!("bert init: {}", e))?;
+    let model = BertModel::load(vb, &config).map_err(|e| format!("bert init: {}", e))?;
 
-    crate::wasm_dispatch::emit_event("embed.model-loaded", serde_json::json!({
-        "model": EMBED_MODEL_NAME,
-        "embed_dim": EMBED_DIM,
-        "num_hidden_layers": config.num_hidden_layers,
-        "safetensors_bytes": MODEL_SAFETENSORS.len(),
-        "tokenizer_bytes": TOKENIZER_JSON.len(),
-    }));
+    crate::wasm_dispatch::emit_event(
+        "embed.model-loaded",
+        serde_json::json!({
+            "model": EMBED_MODEL_NAME,
+            "embed_dim": EMBED_DIM,
+            "num_hidden_layers": config.num_hidden_layers,
+            "safetensors_bytes": MODEL_SAFETENSORS.len(),
+            "tokenizer_bytes": TOKENIZER_JSON.len(),
+        }),
+    );
 
     Ok((tokenizer, model, device))
 }
@@ -239,10 +247,13 @@ fn lazy_wasm_fallback() -> Option<&'static (Tokenizer, BertModel, Device)> {
 
 fn init_ctx() -> Result<EmbedCtx, String> {
     if probe_host_embed() {
-        crate::wasm_dispatch::emit_event("embed.host-delegated", serde_json::json!({
-            "embed_dim": EMBED_DIM,
-            "reason": "host_vec_embed probe returned EMBED_DIM; skipping wasm safetensors load",
-        }));
+        crate::wasm_dispatch::emit_event(
+            "embed.host-delegated",
+            serde_json::json!({
+                "embed_dim": EMBED_DIM,
+                "reason": "host_vec_embed probe returned EMBED_DIM; skipping wasm safetensors load",
+            }),
+        );
         elog("embed::init_ctx host-delegated (probe ok); skipping safetensors+tokenizer load");
         return Ok(EmbedCtx {
             tokenizer: None,
@@ -254,17 +265,23 @@ fn init_ctx() -> Result<EmbedCtx, String> {
 
     #[cfg(feature = "slim")]
     {
-        crate::wasm_dispatch::emit_event("embed.slim-build-no-fallback", serde_json::json!({
-            "reason": "this is a slim build (feature=slim): no wasm-embedded safetensors fallback exists, and the host_vec_embed probe just failed -- embedding is genuinely unavailable this session, not a bug",
-        }));
+        crate::wasm_dispatch::emit_event(
+            "embed.slim-build-no-fallback",
+            serde_json::json!({
+                "reason": "this is a slim build (feature=slim): no wasm-embedded safetensors fallback exists, and the host_vec_embed probe just failed -- embedding is genuinely unavailable this session, not a bug",
+            }),
+        );
         return Err("slim build has no wasm-side embedding fallback -- host_vec_embed must be implemented by the host (e.g. agentplug-runner's native candle path)".to_string());
     }
 
     #[cfg(not(feature = "slim"))]
     {
-        crate::wasm_dispatch::emit_event("embed.wasm-loading", serde_json::json!({
-            "reason": "host_vec_embed probe failed; loading wasm-side bert model",
-        }));
+        crate::wasm_dispatch::emit_event(
+            "embed.wasm-loading",
+            serde_json::json!({
+                "reason": "host_vec_embed probe failed; loading wasm-side bert model",
+            }),
+        );
         let (tokenizer, model, device) = load_wasm_model_uncached()?;
         Ok(EmbedCtx {
             tokenizer: Some(tokenizer),
@@ -294,18 +311,27 @@ fn ctx() -> Result<&'static EmbedCtx, &'static str> {
             };
             #[cfg(feature = "slim")]
             let (safetensors_bytes, tokenizer_bytes) = (0, 0);
-            crate::wasm_dispatch::emit_event("embed_init_ok", serde_json::json!({
-                "host_delegated": c.host_delegated,
-                "safetensors_bytes": safetensors_bytes,
-                "tokenizer_bytes": tokenizer_bytes,
-            }));
+            crate::wasm_dispatch::emit_event(
+                "embed_init_ok",
+                serde_json::json!({
+                    "host_delegated": c.host_delegated,
+                    "safetensors_bytes": safetensors_bytes,
+                    "tokenizer_bytes": tokenizer_bytes,
+                }),
+            );
             Ok(CTX.get_or_init(|| c))
         }
         Err(e) => {
-            elog(&format!("embed::init_ctx FAILED (will retry next call): {}", e));
-            crate::wasm_dispatch::emit_event("embed_init_fail", serde_json::json!({
-                "error": e,
-            }));
+            elog(&format!(
+                "embed::init_ctx FAILED (will retry next call): {}",
+                e
+            ));
+            crate::wasm_dispatch::emit_event(
+                "embed_init_fail",
+                serde_json::json!({
+                    "error": e,
+                }),
+            );
             Err("embed init failed")
         }
     }
@@ -313,10 +339,14 @@ fn ctx() -> Result<&'static EmbedCtx, &'static str> {
 
 fn l2_normalize(v: &mut [f32]) {
     let mut s = 0f32;
-    for x in v.iter() { s += *x * *x; }
+    for x in v.iter() {
+        s += *x * *x;
+    }
     let n = s.sqrt();
     if n > 0.0 {
-        for x in v.iter_mut() { *x /= n; }
+        for x in v.iter_mut() {
+            *x /= n;
+        }
     }
 }
 
@@ -359,17 +389,22 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
     if let Some(v) = try_host_embed(text) {
         return Some(v);
     }
-    let host_failure = last_embed_failure().unwrap_or_else(|| "host embedder unavailable".to_string());
+    let host_failure =
+        last_embed_failure().unwrap_or_else(|| "host embedder unavailable".to_string());
     if let Some(v) = try_sibling_plugin_embed(text) {
         elog("embed::embed_text host_vec_embed was unusable; served by the bert sibling plugin over host_plugin_call instead");
-        crate::wasm_dispatch::emit_event("embed.sibling_plugin_recovered", serde_json::json!({
-            "host_vec_embed_failure": host_failure,
-            "text_len": text.len(),
-        }));
+        crate::wasm_dispatch::emit_event(
+            "embed.sibling_plugin_recovered",
+            serde_json::json!({
+                "host_vec_embed_failure": host_failure,
+                "text_len": text.len(),
+            }),
+        );
         clear_embed_failure();
         return Some(v);
     }
-    let sibling_failure = last_embed_failure().unwrap_or_else(|| "bert sibling plugin unavailable".to_string());
+    let sibling_failure =
+        last_embed_failure().unwrap_or_else(|| "bert sibling plugin unavailable".to_string());
     let host_failure = format!("{host_failure}; then {sibling_failure}");
     let c = match ctx() {
         Ok(c) => c,
@@ -393,10 +428,13 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
         record_embed_failure(format!(
             "host-delegated embedding failed ({host_failure}) and no in-wasm fallback is available (slim build, or the lazy weight load itself failed), so nothing can produce a vector for this text"
         ));
-        crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
-            "step": "host_delegated_no_fallback",
-            "error": host_failure,
-        }));
+        crate::wasm_dispatch::emit_event(
+            "embed_fail",
+            serde_json::json!({
+                "step": "host_delegated_no_fallback",
+                "error": host_failure,
+            }),
+        );
         return None;
     }
 
@@ -417,7 +455,12 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
     run_embed_forward(tokenizer, model, &c.device, text)
 }
 
-fn run_embed_forward(tokenizer: &Tokenizer, model: &BertModel, device: &Device, text: &str) -> Option<Vec<f32>> {
+fn run_embed_forward(
+    tokenizer: &Tokenizer,
+    model: &BertModel,
+    device: &Device,
+    text: &str,
+) -> Option<Vec<f32>> {
     let t0 = now_ms();
     let enc = step!("tokenizer.encode", tokenizer.encode(text, true));
     let t_tokenize = now_ms();
@@ -436,12 +479,24 @@ fn run_embed_forward(tokenizer: &Tokenizer, model: &BertModel, device: &Device, 
         return None;
     }
 
-    let ids_t = step!("Tensor::from_vec(ids)", Tensor::from_vec(ids.clone(), (1, seq_len), device));
-    let mask_t = step!("Tensor::from_vec(mask)", Tensor::from_vec(mask.clone(), (1, seq_len), device));
-    let token_type_ids = step!("Tensor::zeros(token_type_ids)", Tensor::zeros((1, seq_len), DType::U32, device));
+    let ids_t = step!(
+        "Tensor::from_vec(ids)",
+        Tensor::from_vec(ids.clone(), (1, seq_len), device)
+    );
+    let mask_t = step!(
+        "Tensor::from_vec(mask)",
+        Tensor::from_vec(mask.clone(), (1, seq_len), device)
+    );
+    let token_type_ids = step!(
+        "Tensor::zeros(token_type_ids)",
+        Tensor::zeros((1, seq_len), DType::U32, device)
+    );
     let t_tensor_build = now_ms();
 
-    let hidden_raw = step!("model.forward", model.forward(&ids_t, &token_type_ids, Some(&mask_t)));
+    let hidden_raw = step!(
+        "model.forward",
+        model.forward(&ids_t, &token_type_ids, Some(&mask_t))
+    );
     let t_forward = now_ms();
     let total_ms = t_forward - t0;
     if total_ms > 1000 {
@@ -450,14 +505,17 @@ fn run_embed_forward(tokenizer: &Tokenizer, model: &BertModel, device: &Device, 
             total_ms, t_tokenize - t0, t_tensor_build - t_tokenize, t_forward - t_tensor_build, seq_len, text.len()
         );
         elog(&msg);
-        crate::wasm_dispatch::emit_event("embed_text_step_timing", serde_json::json!({
-            "total_ms": total_ms,
-            "tokenize_ms": t_tokenize - t0,
-            "tensor_build_ms": t_tensor_build - t_tokenize,
-            "forward_ms": t_forward - t_tensor_build,
-            "seq_len": seq_len,
-            "text_len": text.len(),
-        }));
+        crate::wasm_dispatch::emit_event(
+            "embed_text_step_timing",
+            serde_json::json!({
+                "total_ms": total_ms,
+                "tokenize_ms": t_tokenize - t0,
+                "tensor_build_ms": t_tensor_build - t_tokenize,
+                "forward_ms": t_forward - t_tensor_build,
+                "seq_len": seq_len,
+                "text_len": text.len(),
+            }),
+        );
     }
     drop(ids_t);
     drop(token_type_ids);
@@ -485,7 +543,11 @@ fn run_embed_forward(tokenizer: &Tokenizer, model: &BertModel, device: &Device, 
     let flat: Vec<f32> = step!("flat.to_vec1", flat_t.to_vec1());
     drop(flat_t);
     if flat.len() != EMBED_DIM {
-        elog(&format!("embed::embed_text dim mismatch: got={} expected={}", flat.len(), EMBED_DIM));
+        elog(&format!(
+            "embed::embed_text dim mismatch: got={} expected={}",
+            flat.len(),
+            EMBED_DIM
+        ));
         return None;
     }
     let mut out = flat;
@@ -494,7 +556,9 @@ fn run_embed_forward(tokenizer: &Tokenizer, model: &BertModel, device: &Device, 
 }
 
 pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
-    if texts.is_empty() { return Some(Vec::new()); }
+    if texts.is_empty() {
+        return Some(Vec::new());
+    }
     if texts.len() == 1 {
         return Some(vec![embed_text(&texts[0])]);
     }
@@ -511,25 +575,33 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
         }
         uncached_idx.push(i);
     }
-    if uncached_idx.is_empty() { return Some(out); }
+    if uncached_idx.is_empty() {
+        return Some(out);
+    }
 
     let mut still_uncached: Vec<usize> = Vec::new();
     for &i in &uncached_idx {
         let embedded = try_host_embed(&texts[i]).or_else(|| try_sibling_plugin_embed(&texts[i]));
         if let Some(v) = embedded {
             let cacheable = texts[i].len() <= plain_cache_max_text();
-            if cacheable { cache_put(&PLAIN_CACHE, &texts[i], &v); }
+            if cacheable {
+                cache_put(&PLAIN_CACHE, &texts[i], &v);
+            }
             out[i] = Some(v);
         } else {
             still_uncached.push(i);
         }
     }
-    if still_uncached.is_empty() { return Some(out); }
+    if still_uncached.is_empty() {
+        return Some(out);
+    }
 
     let c = match ctx() {
         Ok(c) => c,
         Err(_) => {
-            for &i in &still_uncached { out[i] = embed_text(&texts[i]); }
+            for &i in &still_uncached {
+                out[i] = embed_text(&texts[i]);
+            }
             return Some(out);
         }
     };
@@ -539,7 +611,9 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
     let (tokenizer, model) = match (c.tokenizer.as_ref(), c.model.as_ref()) {
         (Some(t), Some(m)) => (t, m),
         _ => {
-            for &i in &still_uncached { out[i] = embed_text(&texts[i]); }
+            for &i in &still_uncached {
+                out[i] = embed_text(&texts[i]);
+            }
             return Some(out);
         }
     };
@@ -548,8 +622,13 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
     let encodings = match tokenizer.encode_batch(batch_texts, true) {
         Ok(e) => e,
         Err(e) => {
-            elog(&format!("embed::embed_texts_batch tokenizer.encode_batch failed: {}; falling back per-item", e));
-            for &i in &still_uncached { out[i] = embed_text(&texts[i]); }
+            elog(&format!(
+                "embed::embed_texts_batch tokenizer.encode_batch failed: {}; falling back per-item",
+                e
+            ));
+            for &i in &still_uncached {
+                out[i] = embed_text(&texts[i]);
+            }
             return Some(out);
         }
     };
@@ -559,12 +638,17 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
     for enc in &encodings {
         let mut ids = enc.get_ids().to_vec();
         let mut mask = enc.get_attention_mask().to_vec();
-        if ids.len() > MAX_TOKENS { ids.truncate(MAX_TOKENS); mask.truncate(MAX_TOKENS); }
+        if ids.len() > MAX_TOKENS {
+            ids.truncate(MAX_TOKENS);
+            mask.truncate(MAX_TOKENS);
+        }
         per_item_ids.push(ids);
         per_item_mask.push(mask);
     }
 
-    let max_subbatch_items = crate::ragconfig::RagConfig::resolved().bulk_embed.max_subbatch_items;
+    let max_subbatch_items = crate::ragconfig::RagConfig::resolved()
+        .bulk_embed
+        .max_subbatch_items;
     let max_subbatch_items_times_max_len_budget = max_subbatch_items * MAX_TOKENS;
 
     let n = per_item_ids.len();
@@ -575,13 +659,18 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
         while end < n && (end - start) < max_subbatch_items {
             let candidate_max_len = sub_max_len.max(per_item_ids[end].len().max(1));
             let candidate_items = end - start + 1;
-            if candidate_items * candidate_max_len > max_subbatch_items_times_max_len_budget && candidate_items > 1 {
+            if candidate_items * candidate_max_len > max_subbatch_items_times_max_len_budget
+                && candidate_items > 1
+            {
                 break;
             }
             sub_max_len = candidate_max_len;
             end += 1;
         }
-        if end == start { end = start + 1; sub_max_len = sub_max_len.max(per_item_ids[start].len().max(1)); }
+        if end == start {
+            end = start + 1;
+            sub_max_len = sub_max_len.max(per_item_ids[start].len().max(1));
+        }
 
         let sub_ids = &per_item_ids[start..end];
         let sub_mask = &per_item_mask[start..end];
@@ -608,21 +697,42 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
             let token_type_ids = Tensor::zeros((batch_n, max_len), DType::U32, &c.device)
                 .map_err(|e| format!("Tensor::zeros(token_type_ids) batch: {}", e))?;
 
-            let hidden_raw = model.forward(&ids_t, &token_type_ids, Some(&mask_t))
+            let hidden_raw = model
+                .forward(&ids_t, &token_type_ids, Some(&mask_t))
                 .map_err(|e| format!("model.forward batch: {}", e))?;
-            let hidden = hidden_raw.to_dtype(DType::F32).map_err(|e| format!("hidden.to_dtype batch: {}", e))?;
-            let mask_f = mask_t.to_dtype(DType::F32).map_err(|e| format!("mask.to_dtype batch: {}", e))?;
-            let mask_e = mask_f.unsqueeze(2).map_err(|e| format!("mask.unsqueeze batch: {}", e))?;
-            let masked = hidden.broadcast_mul(&mask_e).map_err(|e| format!("broadcast_mul batch: {}", e))?;
-            let sum = masked.sum(1).map_err(|e| format!("masked.sum batch: {}", e))?;
-            let denom_s = mask_f.sum(1).map_err(|e| format!("mask.sum batch: {}", e))?;
-            let denom = denom_s.unsqueeze(1).map_err(|e| format!("denom.unsqueeze batch: {}", e))?;
-            let pooled = sum.broadcast_div(&denom).map_err(|e| format!("broadcast_div batch: {}", e))?;
+            let hidden = hidden_raw
+                .to_dtype(DType::F32)
+                .map_err(|e| format!("hidden.to_dtype batch: {}", e))?;
+            let mask_f = mask_t
+                .to_dtype(DType::F32)
+                .map_err(|e| format!("mask.to_dtype batch: {}", e))?;
+            let mask_e = mask_f
+                .unsqueeze(2)
+                .map_err(|e| format!("mask.unsqueeze batch: {}", e))?;
+            let masked = hidden
+                .broadcast_mul(&mask_e)
+                .map_err(|e| format!("broadcast_mul batch: {}", e))?;
+            let sum = masked
+                .sum(1)
+                .map_err(|e| format!("masked.sum batch: {}", e))?;
+            let denom_s = mask_f
+                .sum(1)
+                .map_err(|e| format!("mask.sum batch: {}", e))?;
+            let denom = denom_s
+                .unsqueeze(1)
+                .map_err(|e| format!("denom.unsqueeze batch: {}", e))?;
+            let pooled = sum
+                .broadcast_div(&denom)
+                .map_err(|e| format!("broadcast_div batch: {}", e))?;
 
             let mut results = Vec::with_capacity(batch_n);
             for row in 0..batch_n {
-                let row_t = pooled.get(row).map_err(|e| format!("pooled.get({}): {}", row, e))?;
-                let flat: Vec<f32> = row_t.to_vec1().map_err(|e| format!("row.to_vec1({}): {}", row, e))?;
+                let row_t = pooled
+                    .get(row)
+                    .map_err(|e| format!("pooled.get({}): {}", row, e))?;
+                let flat: Vec<f32> = row_t
+                    .to_vec1()
+                    .map_err(|e| format!("row.to_vec1({}): {}", row, e))?;
                 if flat.len() != EMBED_DIM {
                     results.push(None);
                     continue;
@@ -640,18 +750,25 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
                 for (j, &i) in sub_uncached.iter().enumerate() {
                     if let Some(v) = &results[j] {
                         let cacheable = texts[i].len() <= plain_cache_max_text();
-                        if cacheable { cache_put(&PLAIN_CACHE, &texts[i], v); }
+                        if cacheable {
+                            cache_put(&PLAIN_CACHE, &texts[i], v);
+                        }
                     }
                     out[i] = results[j].clone();
                 }
             }
             Err(e) => {
                 elog(&format!("embed::embed_texts_batch sub-batch failed: {}; falling back per-item for this sub-batch", e));
-                crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
-                    "step": "embed_texts_batch",
-                    "error": e,
-                }));
-                for &i in sub_uncached { out[i] = embed_text(&texts[i]); }
+                crate::wasm_dispatch::emit_event(
+                    "embed_fail",
+                    serde_json::json!({
+                        "step": "embed_texts_batch",
+                        "error": e,
+                    }),
+                );
+                for &i in sub_uncached {
+                    out[i] = embed_text(&texts[i]);
+                }
             }
         }
         start = end;
@@ -670,20 +787,28 @@ pub fn embed_text_json_passage(text: &str) -> Option<serde_json::Value> {
 
 pub fn embed_text_json_query(query_text: &str) -> Option<serde_json::Value> {
     let trimmed = query_text.trim();
-    if trimmed.is_empty() { return None; }
+    if trimmed.is_empty() {
+        return None;
+    }
 
     if let Some(cached) = query_cache_get(trimmed) {
-        crate::wasm_dispatch::emit_event("embed.query_cache_hit", serde_json::json!({
-            "query_len": trimmed.len(),
-        }));
+        crate::wasm_dispatch::emit_event(
+            "embed.query_cache_hit",
+            serde_json::json!({
+                "query_len": trimmed.len(),
+            }),
+        );
         return Some(vec_to_json(cached));
     }
 
     if let Some(spilled) = query_spill_get(trimmed) {
         query_cache_put(trimmed, &spilled);
-        crate::wasm_dispatch::emit_event("embed.query_spill_hit", serde_json::json!({
-            "query_len": trimmed.len(),
-        }));
+        crate::wasm_dispatch::emit_event(
+            "embed.query_spill_hit",
+            serde_json::json!({
+                "query_len": trimmed.len(),
+            }),
+        );
         return Some(vec_to_json(spilled));
     }
 
@@ -711,7 +836,10 @@ fn query_spill_get(text: &str) -> Option<Vec<f32>> {
     if parsed.get("t").and_then(|t| t.as_str()) != Some(text) {
         return None;
     }
-    let v: Vec<f32> = arr.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect();
+    let v: Vec<f32> = arr
+        .iter()
+        .filter_map(|x| x.as_f64().map(|f| f as f32))
+        .collect();
     if v.len() != arr.len() || v.is_empty() {
         return None;
     }
@@ -725,9 +853,12 @@ fn query_spill_put(text: &str, v: &[f32]) {
     let ns = QUERY_SPILL_NAMESPACE;
     unsafe {
         crate::wasm_dispatch::host_kv_put(
-            ns.as_ptr(), ns.len() as u32,
-            key.as_ptr(), key.len() as u32,
-            val.as_ptr(), val.len() as u32,
+            ns.as_ptr(),
+            ns.len() as u32,
+            key.as_ptr(),
+            key.len() as u32,
+            val.as_ptr(),
+            val.len() as u32,
         );
     }
 }
@@ -735,9 +866,11 @@ fn query_spill_put(text: &str, v: &[f32]) {
 fn vec_to_json(v: Vec<f32>) -> serde_json::Value {
     serde_json::Value::Array(
         v.into_iter()
-            .map(|f| serde_json::Number::from_f64(f as f64)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null))
+            .map(|f| {
+                serde_json::Number::from_f64(f as f64)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
+            })
             .collect(),
     )
 }
@@ -759,7 +892,10 @@ struct EmbedCache {
 
 impl EmbedCache {
     const fn new() -> Self {
-        Self { entries: BTreeMap::new(), order: VecDeque::new() }
+        Self {
+            entries: BTreeMap::new(),
+            order: VecDeque::new(),
+        }
     }
 }
 
@@ -767,15 +903,21 @@ static QUERY_CACHE: Mutex<EmbedCache> = Mutex::new(EmbedCache::new());
 static PLAIN_CACHE: Mutex<EmbedCache> = Mutex::new(EmbedCache::new());
 
 fn plain_cache_max_text() -> usize {
-    crate::ragconfig::RagConfig::resolved().embed_cache.plain_cache_max_text_bytes
+    crate::ragconfig::RagConfig::resolved()
+        .embed_cache
+        .plain_cache_max_text_bytes
 }
 
 fn query_cache_capacity() -> usize {
-    crate::ragconfig::RagConfig::resolved().embed_cache.query_cache_capacity
+    crate::ragconfig::RagConfig::resolved()
+        .embed_cache
+        .query_cache_capacity
 }
 
 fn query_cache_ttl_ms() -> i64 {
-    crate::ragconfig::RagConfig::resolved().embed_cache.query_cache_ttl_ms
+    crate::ragconfig::RagConfig::resolved()
+        .embed_cache
+        .query_cache_ttl_ms
 }
 
 fn now_ms() -> i64 {
@@ -797,7 +939,9 @@ fn cache_get(cache: &Mutex<EmbedCache>, key: &str) -> Option<Vec<f32>> {
     let mut guard = cache.lock().ok()?;
     let now = now_ms();
     let hit = match guard.entries.get(&slot) {
-        Some(e) if e.key == key && now - e.ts_ms < query_cache_ttl_ms() => Some(e.embedding.clone()),
+        Some(e) if e.key == key && now - e.ts_ms < query_cache_ttl_ms() => {
+            Some(e.embedding.clone())
+        }
         Some(_) => None,
         None => return None,
     };
@@ -811,9 +955,16 @@ fn cache_get(cache: &Mutex<EmbedCache>, key: &str) -> Option<Vec<f32>> {
 fn cache_put(cache: &Mutex<EmbedCache>, key: &str, embedding: &[f32]) {
     let key = scoped_key(key);
     let slot = cache_slot(&key);
-    let mut guard = match cache.lock() { Ok(g) => g, Err(_) => return };
+    let mut guard = match cache.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
     let now = now_ms();
-    let entry = CacheEntry { key, embedding: embedding.to_vec(), ts_ms: now };
+    let entry = CacheEntry {
+        key,
+        embedding: embedding.to_vec(),
+        ts_ms: now,
+    };
     if guard.entries.insert(slot, entry).is_none() {
         guard.order.push_back(slot);
     }

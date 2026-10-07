@@ -1,18 +1,25 @@
 #![cfg(target_arch = "wasm32")]
 
-use serde::Serialize;
-use super::fiber_lifecycle::{self, ActiveFiberSet, FiberLifecycle, SafeToWithdraw};
 use super::coeffect_realm::{InterceptionContext, MergeKind, RealmTable};
+use super::fiber_lifecycle::{self, ActiveFiberSet, FiberLifecycle, SafeToWithdraw};
 use super::gm_dir;
 use crate::pkfs;
+use serde::Serialize;
 
 fn audit_confluence(all: &[String]) -> Vec<MetatheoryViolation> {
     let enabled = enabled_names();
-    let initial_states: Vec<(String, FiberLifecycle)> =
-        all.iter().map(|n| (n.clone(), read_fiber_state(n))).collect();
+    let initial_states: Vec<(String, FiberLifecycle)> = all
+        .iter()
+        .map(|n| (n.clone(), read_fiber_state(n)))
+        .collect();
     let targets: Vec<(String, bool)> = all
         .iter()
-        .map(|n| (n.clone(), enabled.iter().any(|e| e == n) && requires_satisfied(n, &enabled)))
+        .map(|n| {
+            (
+                n.clone(),
+                enabled.iter().any(|e| e == n) && requires_satisfied(n, &enabled),
+            )
+        })
         .collect();
     if !fiber_lifecycle::check_confluence(&initial_states, &targets) {
         return vec![MetatheoryViolation {
@@ -33,15 +40,24 @@ fn valid_name_char(c: char) -> bool {
 }
 
 fn policy_path(discipline: &str) -> std::path::PathBuf {
-    gm_dir().join("disciplines").join(discipline).join("policy.md")
+    gm_dir()
+        .join("disciplines")
+        .join(discipline)
+        .join("policy.md")
 }
 
 fn requires_path(discipline: &str) -> std::path::PathBuf {
-    gm_dir().join("disciplines").join(discipline).join("requires.json")
+    gm_dir()
+        .join("disciplines")
+        .join(discipline)
+        .join("requires.json")
 }
 
 fn fiber_state_path(discipline: &str) -> std::path::PathBuf {
-    gm_dir().join("disciplines").join(discipline).join("fiber-state.json")
+    gm_dir()
+        .join("disciplines")
+        .join(discipline)
+        .join("fiber-state.json")
 }
 
 fn read_fiber_state(discipline: &str) -> FiberLifecycle {
@@ -49,7 +65,10 @@ fn read_fiber_state(discipline: &str) -> FiberLifecycle {
 }
 
 fn advance_fiber(discipline: &str, target_satisfied: bool) -> bool {
-    fiber_lifecycle::advance_fiber(&fiber_state_path(discipline).to_string_lossy(), target_satisfied)
+    fiber_lifecycle::advance_fiber(
+        &fiber_state_path(discipline).to_string_lossy(),
+        target_satisfied,
+    )
 }
 
 pub struct Component {
@@ -102,7 +121,11 @@ pub(crate) fn declared_realm(discipline: &str) -> String {
     let path_s = path.to_string_lossy().to_string();
     pkfs::read_to_string(&path_s)
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|v| v.get("realm").and_then(|r| r.as_str()).map(|s| s.to_string()))
+        .and_then(|v| {
+            v.get("realm")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_default()
 }
 
@@ -124,14 +147,20 @@ fn declared_isolation(discipline: &str) -> std::collections::BTreeMap<String, St
         .unwrap_or_default()
 }
 
-fn declared_interception(discipline: &str) -> std::collections::BTreeMap<String, (String, MergeKind)> {
+fn declared_interception(
+    discipline: &str,
+) -> std::collections::BTreeMap<String, (String, MergeKind)> {
     requires_json_value(discipline)
         .and_then(|v| v.get("interception").cloned())
         .and_then(|v| v.as_object().cloned())
         .map(|obj| {
             obj.into_iter()
                 .filter_map(|(k, v)| {
-                    let metadata = v.get("metadata").and_then(|m| m.as_str()).unwrap_or("").to_string();
+                    let metadata = v
+                        .get("metadata")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let merge = match v.get("merge").and_then(|m| m.as_str()) {
                         Some("set_union") => MergeKind::SetUnion,
                         _ => MergeKind::ScalarOverwrite,
@@ -164,7 +193,11 @@ fn build_interception_context(names: &[String]) -> InterceptionContext {
     ctx
 }
 
-pub(crate) fn resolve_key_realm(realm_table: &RealmTable, discipline_realm: &str, key: &str) -> String {
+pub(crate) fn resolve_key_realm(
+    realm_table: &RealmTable,
+    discipline_realm: &str,
+    key: &str,
+) -> String {
     let per_key = realm_table.realm_of(key);
     if per_key.is_empty() || per_key == key {
         discipline_realm.to_string()
@@ -199,14 +232,24 @@ pub fn handle(content: &str) -> (String, String, i32) {
     let parsed: Option<serde_json::Value> = serde_json::from_str(content).ok();
     let (discipline, text) = match &parsed {
         Some(v) => (
-            v.get("discipline").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            v.get("discipline")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            v.get("text")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
         ),
         None => (String::new(), String::new()),
     };
 
     if discipline.is_empty() {
-        return (String::new(), "discipline-note refused: discipline name required".to_string(), 1);
+        return (
+            String::new(),
+            "discipline-note refused: discipline name required".to_string(),
+            1,
+        );
     }
     if discipline.len() > note_cfg().max_name_len_hard_refuse_not_truncate {
         return (
@@ -222,13 +265,18 @@ pub fn handle(content: &str) -> (String, String, i32) {
     if !discipline.chars().all(valid_name_char) {
         return (
             String::new(),
-            "discipline-note refused: discipline name must be alnum/hyphen/underscore only".to_string(),
+            "discipline-note refused: discipline name must be alnum/hyphen/underscore only"
+                .to_string(),
             1,
         );
     }
 
     if text.is_empty() {
-        return (String::new(), "discipline-note refused: text required".to_string(), 1);
+        return (
+            String::new(),
+            "discipline-note refused: text required".to_string(),
+            1,
+        );
     }
     if text.contains('\n') || text.contains('\r') {
         return (
@@ -271,7 +319,11 @@ pub fn handle(content: &str) -> (String, String, i32) {
     updated.push('\n');
 
     if !pkfs::write(&path_s, &updated) {
-        return (String::new(), "discipline-note failed: write error".to_string(), 1);
+        return (
+            String::new(),
+            "discipline-note failed: write error".to_string(),
+            1,
+        );
     }
 
     let payload = serde_json::json!({
@@ -329,12 +381,23 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
     let parsed = serde_json::from_str::<serde_json::Value>(content).ok();
     let discipline = parsed
         .as_ref()
-        .and_then(|v| v.get("discipline").and_then(|x| x.as_str()).map(|s| s.to_string()))
+        .and_then(|v| {
+            v.get("discipline")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_default();
     if discipline.is_empty() {
-        return (String::new(), "discipline-check-removal refused: discipline name required".to_string(), 1);
+        return (
+            String::new(),
+            "discipline-check-removal refused: discipline name required".to_string(),
+            1,
+        );
     }
-    let want_remove = parsed.as_ref().and_then(|v| v.get("remove").and_then(|x| x.as_bool())).unwrap_or(false);
+    let want_remove = parsed
+        .as_ref()
+        .and_then(|v| v.get("remove").and_then(|x| x.as_bool()))
+        .unwrap_or(false);
     if want_remove && discipline == "default" {
         return (
             String::new(),
@@ -342,7 +405,11 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    let enabled_path = gm_dir().join("disciplines").join("enabled.txt").to_string_lossy().to_string();
+    let enabled_path = gm_dir()
+        .join("disciplines")
+        .join("enabled.txt")
+        .to_string_lossy()
+        .to_string();
     let original_content = pkfs::read_to_string(&enabled_path).unwrap_or_default();
     let names = parse_enabled_names(&original_content);
 
@@ -399,9 +466,20 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
         return (payload.to_string(), String::new(), 0);
     }
 
-    let remaining: Vec<&String> = names.iter().filter(|n| n.as_str() != discipline.as_str() && n.as_str() != "default").collect();
-    let new_content = remaining.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
-    let write_content = if new_content.is_empty() { String::new() } else { format!("{}\n", new_content) };
+    let remaining: Vec<&String> = names
+        .iter()
+        .filter(|n| n.as_str() != discipline.as_str() && n.as_str() != "default")
+        .collect();
+    let new_content = remaining
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let write_content = if new_content.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", new_content)
+    };
     match pkfs::cas_write(&enabled_path, &original_content, &write_content) {
         pkfs::CasWriteOutcome::Swapped => {}
         pkfs::CasWriteOutcome::Mismatch => {
@@ -412,7 +490,11 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
             );
         }
         pkfs::CasWriteOutcome::IoError => {
-            return (String::new(), "discipline-check-removal failed: could not write enabled.txt".to_string(), 1);
+            return (
+                String::new(),
+                "discipline-check-removal failed: could not write enabled.txt".to_string(),
+                1,
+            );
         }
     }
 
@@ -429,7 +511,10 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
 }
 
 pub fn dangling_requires(discipline: &str, all_known: &[String]) -> Vec<String> {
-    let all_caps: Vec<String> = all_known.iter().flat_map(|n| declared_provides(n)).collect();
+    let all_caps: Vec<String> = all_known
+        .iter()
+        .flat_map(|n| declared_provides(n))
+        .collect();
     declared_requires(discipline)
         .into_iter()
         .filter(|dep| !all_caps.iter().any(|cap| cap == dep))
@@ -455,7 +540,8 @@ fn all_known_discipline_dirs() -> Vec<String> {
             }
             let has_policy = pkfs::exists(&policy_path(name).to_string_lossy().to_string());
             let has_requires = pkfs::exists(&requires_path(name).to_string_lossy().to_string());
-            let has_fiber_state = pkfs::exists(&fiber_state_path(name).to_string_lossy().to_string());
+            let has_fiber_state =
+                pkfs::exists(&fiber_state_path(name).to_string_lossy().to_string());
             if has_policy || has_requires || has_fiber_state {
                 out.push(name.to_string());
             }
@@ -487,7 +573,10 @@ fn audit_preservation(all: &[String]) -> Vec<MetatheoryViolation> {
             violations.push(MetatheoryViolation {
                 theorem: "preservation (Theorem 59, disjoint provisions)",
                 discipline: format!("{} vs {}", v.incoming, v.existing),
-                detail: format!("both Active, same realm, and both provide {:?}", v.capability.split('\0').nth(1).unwrap_or(&v.capability)),
+                detail: format!(
+                    "both Active, same realm, and both provide {:?}",
+                    v.capability.split('\0').nth(1).unwrap_or(&v.capability)
+                ),
             });
         }
     }
@@ -521,7 +610,10 @@ fn audit_ordering(all: &[String]) -> Vec<MetatheoryViolation> {
             violations.push(MetatheoryViolation {
                 theorem: "ordering (Theorem 63)",
                 discipline: name.clone(),
-                detail: format!("non-Active fiber still named as relied-upon by {:?}", dependents),
+                detail: format!(
+                    "non-Active fiber still named as relied-upon by {:?}",
+                    dependents
+                ),
             });
         }
     }
@@ -540,7 +632,10 @@ fn audit_dangling_requires(all: &[String]) -> Vec<MetatheoryViolation> {
             violations.push(MetatheoryViolation {
                 theorem: "access control (Section 6.3, fail-closed requires)",
                 discipline: name.clone(),
-                detail: format!("requires names capability no known discipline provides: {:?}", dangling),
+                detail: format!(
+                    "requires names capability no known discipline provides: {:?}",
+                    dangling
+                ),
             });
         }
     }
@@ -598,12 +693,16 @@ pub fn active_policies() -> serde_json::Value {
                 .rev()
                 .collect::<Vec<_>>()
                 .join("\n");
-            let intercepted: serde_json::Map<String, serde_json::Value> = declared_interception(name)
-                .into_iter()
-                .map(|(key, (metadata, _kind))| {
-                    (key.clone(), serde_json::Value::String(interception_ctx.resolve(&key, &metadata)))
-                })
-                .collect();
+            let intercepted: serde_json::Map<String, serde_json::Value> =
+                declared_interception(name)
+                    .into_iter()
+                    .map(|(key, (metadata, _kind))| {
+                        (
+                            key.clone(),
+                            serde_json::Value::String(interception_ctx.resolve(&key, &metadata)),
+                        )
+                    })
+                    .collect();
             let mut entry = serde_json::json!({
                 "discipline": name,
                 "text": capped,

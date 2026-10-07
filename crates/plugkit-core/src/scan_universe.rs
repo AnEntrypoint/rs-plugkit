@@ -2,13 +2,17 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::code_index::{gitignore_excludes, is_dependency_noise_dir_segment, is_hidden_segment, is_skipped_dir_segment, list_dir, load_repo_gitignore};
+use crate::code_index::{
+    gitignore_excludes, is_dependency_noise_dir_segment, is_hidden_segment, is_skipped_dir_segment,
+    list_dir, load_repo_gitignore,
+};
 use crate::ragconfig::IndexConfig;
 use crate::wasm_dispatch::{git_call_argv, host_now_ms, host_stat};
 
 const GIT_LISTING_SPLIT_DEPTH_LIMIT: usize = 16;
 
 const NESTED_REPO_DEPTH_LIMIT: usize = 8;
+const LISTING_WALK_ANSWERABLE_BUDGET_MS: u64 = 20_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileSource {
@@ -64,7 +68,11 @@ fn prune_own_state(root: &str, files: Vec<String>) -> (Vec<String>, Vec<RuleExcl
             None => kept.push(file),
             Some(entry) => match pruned.iter_mut().find(|p| p.path == entry) {
                 Some(p) => p.files = Some(p.files.unwrap_or(0) + 1),
-                None => pruned.push(RuleExclusion { path: entry, rule: OWN_STATE_RULE, files: Some(1) }),
+                None => pruned.push(RuleExclusion {
+                    path: entry,
+                    rule: OWN_STATE_RULE,
+                    files: Some(1),
+                }),
             },
         }
     }
@@ -82,21 +90,34 @@ pub struct ScanUniverse {
 
 impl ScanUniverse {
     pub fn tracked_paths_deleted_from_worktree(&self) -> HashSet<String> {
-        if self.source != FileSource::Git { return HashSet::new(); }
+        if self.source != FileSource::Git {
+            return HashSet::new();
+        }
         let mut rel = Vec::new();
         match git_list_into(&self.target, &["--deleted"], None, 0, &mut rel) {
-            Ok(_) => rel.into_iter().map(|p| join_under(&self.target, &p)).collect(),
+            Ok(_) => rel
+                .into_iter()
+                .map(|p| join_under(&self.target, &p))
+                .collect(),
             Err(_) => HashSet::new(),
         }
     }
 }
 
 pub fn join_under(base: &str, rel: &str) -> String {
-    if base.ends_with('/') { format!("{base}{rel}") } else { format!("{base}/{rel}") }
+    if base.ends_with('/') {
+        format!("{base}{rel}")
+    } else {
+        format!("{base}/{rel}")
+    }
 }
 
 fn git_cwd(root: &str) -> Option<&str> {
-    if root.is_empty() || root == "." { None } else { Some(root) }
+    if root.is_empty() || root == "." {
+        None
+    } else {
+        Some(root)
+    }
 }
 
 fn git_exit_code(v: &Value) -> i64 {
@@ -104,7 +125,11 @@ fn git_exit_code(v: &Value) -> i64 {
 }
 
 fn git_stderr(v: &Value) -> String {
-    v.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim().to_string()
+    v.get("stderr")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 fn stat_is_directory(path: &str) -> Option<bool> {
@@ -119,7 +144,9 @@ fn stat_is_directory(path: &str) -> Option<bool> {
 fn scope_inside_root(root: &str, scope: &str) -> Option<String> {
     let abs_root = absolute_root_for_message(root).replace('\\', "/");
     let abs_root = abs_root.trim_end_matches('/');
-    if abs_root.is_empty() { return None; }
+    if abs_root.is_empty() {
+        return None;
+    }
     // Both folds are byte-length preserving and `scope` already uses '/' separators, so the tail
     // can be cut out of `scope` by length and keep the case the caller wrote.
     let folded_root = abs_root.to_ascii_lowercase();
@@ -128,7 +155,9 @@ fn scope_inside_root(root: &str, scope: &str) -> Option<String> {
         Some(rest) => rest,
         None => return None,
     };
-    if !rest.is_empty() && !rest.starts_with('/') { return None; }
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return None;
+    }
     let tail = rest.trim_start_matches('/');
     Some(scope[scope.len() - tail.len()..].to_string())
 }
@@ -147,11 +176,20 @@ fn relative_scope(root: &str, scope: &str) -> Result<Option<String>, String> {
     } else {
         normalized
     };
-    let segments: Vec<&str> = rooted.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+    let segments: Vec<&str> = rooted
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
     if segments.iter().any(|s| *s == "..") {
-        return Err(format!("path '{scope}' may not climb out of the search root with '..'"));
+        return Err(format!(
+            "path '{scope}' may not climb out of the search root with '..'"
+        ));
     }
-    Ok(if segments.is_empty() { None } else { Some(segments.join("/")) })
+    Ok(if segments.is_empty() {
+        None
+    } else {
+        Some(segments.join("/"))
+    })
 }
 
 fn child_names(dir: &str) -> Vec<String> {
@@ -165,7 +203,13 @@ fn child_names(dir: &str) -> Vec<String> {
     names
 }
 
-fn git_list_into(cwd_dir: &str, mode: &[&str], pathspec: Option<&str>, depth: usize, out: &mut Vec<String>) -> Result<bool, String> {
+fn git_list_into(
+    cwd_dir: &str,
+    mode: &[&str],
+    pathspec: Option<&str>,
+    depth: usize,
+    out: &mut Vec<String>,
+) -> Result<bool, String> {
     let mut argv = vec!["--literal-pathspecs", "ls-files", "-z"];
     argv.extend_from_slice(mode);
     if let Some(p) = pathspec {
@@ -174,19 +218,39 @@ fn git_list_into(cwd_dir: &str, mode: &[&str], pathspec: Option<&str>, depth: us
     }
     let r = git_call_argv(&argv, git_cwd(cwd_dir));
     if git_exit_code(&r) != 0 {
-        return Err(format!("git {} exited {}: {}", argv.join(" "), git_exit_code(&r), git_stderr(&r)));
+        return Err(format!(
+            "git {} exited {}: {}",
+            argv.join(" "),
+            git_exit_code(&r),
+            git_stderr(&r)
+        ));
     }
     let stdout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-    let capped = r.get("stdout_truncated").and_then(|x| x.as_bool()).unwrap_or(false);
+    let capped = r
+        .get("stdout_truncated")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     if !capped {
-        out.extend(stdout.split('\0').filter(|p| !p.is_empty()).map(String::from));
+        out.extend(
+            stdout
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(String::from),
+        );
         return Ok(true);
     }
-    let listed_dir = pathspec.map(|p| join_under(cwd_dir, p)).unwrap_or_else(|| cwd_dir.to_string());
+    let listed_dir = pathspec
+        .map(|p| join_under(cwd_dir, p))
+        .unwrap_or_else(|| cwd_dir.to_string());
     if depth >= GIT_LISTING_SPLIT_DEPTH_LIMIT || stat_is_directory(&listed_dir) != Some(true) {
         let mut entries: Vec<&str> = stdout.split('\0').collect();
         entries.pop();
-        out.extend(entries.into_iter().filter(|p| !p.is_empty()).map(String::from));
+        out.extend(
+            entries
+                .into_iter()
+                .filter(|p| !p.is_empty())
+                .map(String::from),
+        );
         return Ok(false);
     }
     let mut complete = true;
@@ -205,7 +269,10 @@ fn directory_is_gitignored(dir: &str) -> Result<bool, String> {
     match git_exit_code(&r) {
         0 => Ok(true),
         1 => Ok(false),
-        code => Err(format!("git check-ignore exited {code}: {}", git_stderr(&r))),
+        code => Err(format!(
+            "git check-ignore exited {code}: {}",
+            git_stderr(&r)
+        )),
     }
 }
 
@@ -236,6 +303,20 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec
     files.sort_unstable();
     files.dedup();
     Ok((files, complete))
+}
+
+fn runtime_artifact_rule(path: &str) -> Option<&'static str> {
+    let normalized_path = path.replace('\\', "/");
+    let mut segments = normalized_path.split('/');
+    while let Some(segment) = segments.next() {
+        if segment == ".agentplug-kv" {
+            return Some("agentplug_kv_cache");
+        }
+        if segment == ".gm" && segments.next() == Some("exec-spool") {
+            return Some("gm_exec_spool");
+        }
+    }
+    None
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -309,18 +390,34 @@ struct RuleRecordingWalk<'a> {
 impl RuleRecordingWalk<'_> {
     fn descend(&mut self, dir: &str) {
         for entry in list_dir(dir) {
-            if self.files.len() >= self.max_files || self.reached_deadline { return; }
+            if self.files.len() >= self.max_files || self.reached_deadline {
+                return;
+            }
             if unsafe { host_now_ms() } >= self.deadline_ms {
                 self.reached_deadline = true;
                 return;
             }
-            let name = entry.rsplit('/').next().unwrap_or(entry.as_str()).to_string();
-            if name == ".git" { continue; }
+            let name = entry
+                .rsplit('/')
+                .next()
+                .unwrap_or(entry.as_str())
+                .to_string();
+            if name == ".git" {
+                continue;
+            }
             let next = join_under(dir, &entry);
             let is_dir = stat_is_directory(&next).unwrap_or(false);
-            let rule = if self.cfg.is_force_included(&next) { None } else { self.exclusion_rule(&name, &next, is_dir) };
+            let rule = if self.cfg.is_force_included(&next) {
+                None
+            } else {
+                self.exclusion_rule(&name, &next, is_dir)
+            };
             match (rule, is_dir) {
-                (Some(rule), _) => self.excluded.push(RuleExclusion { path: next, rule, files: None }),
+                (Some(rule), _) => self.excluded.push(RuleExclusion {
+                    path: next,
+                    rule,
+                    files: None,
+                }),
                 (None, true) => self.descend(&next),
                 (None, false) => self.files.push(next),
             }
@@ -334,7 +431,9 @@ impl RuleRecordingWalk<'_> {
         if is_hidden_segment(name) { return Some("hidden_dir"); }
         let noise = match self.noise {
             NoiseDirs::ProjectNoiseList => is_skipped_dir_segment(name, self.cfg),
-            NoiseDirs::DependencyStoresVcsCachesOnly => is_dependency_noise_dir_segment(name, self.cfg),
+            NoiseDirs::DependencyStoresVcsCachesOnly => {
+                is_dependency_noise_dir_segment(name, self.cfg)
+            }
         };
         noise.then_some("noise_dir_name")
     }
@@ -344,7 +443,9 @@ impl RuleRecordingWalk<'_> {
 /// project, so a reply or an error that prints it verbatim tells the caller nothing about which
 /// project was searched.
 pub fn absolute_root_for_message(root: &str) -> String {
-    if crate::pkfs::is_absolute(root) { return root.to_string(); }
+    if crate::pkfs::is_absolute(root) {
+        return root.to_string();
+    }
     crate::pkfs::anchor(root).trim_end_matches("/.").to_string()
 }
 
@@ -377,7 +478,11 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
     let named_scope = rel.is_some();
     let target = rel.as_deref().map(|r| join_under(root, r)).unwrap_or_else(|| root.to_string());
     let universe = |files, source, listing_complete, excluded, walk_reason| ScanUniverse {
-        files, source, listing_complete, excluded, walk_reason,
+        files,
+        source,
+        listing_complete,
+        excluded,
+        walk_reason,
         target: target.clone(),
     };
     if named_scope {
@@ -397,8 +502,19 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         match directory_is_gitignored(&target) {
             Ok(false) => match git_worktree_files(&target, 0, no_ignore) {
                 Ok((files, complete)) => {
-                    let (files, pruned) = if named_scope { (files, Vec::new()) } else { prune_own_state(root, files) };
-                    return Ok(universe(files, FileSource::Git, complete, pruned, None));
+                    let (files, mut pruned) = if named_scope { (files, Vec::new()) } else { prune_own_state(root, files) };
+                    let mut kept = Vec::with_capacity(files.len());
+                    for path in files {
+                        match runtime_artifact_rule(&path) {
+                            Some(rule) => pruned.push(RuleExclusion {
+                                path,
+                                rule,
+                                files: None,
+                            }),
+                            None => kept.push(path),
+                        }
+                    }
+                    return Ok(universe(kept, FileSource::Git, complete, pruned, None));
                 }
                 Err(e) => WalkCause::GitListingFailed(e),
             },
@@ -409,27 +525,65 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
     let policy = walk_policy(cause, origin, no_ignore);
     let mut walk = RuleRecordingWalk {
         cfg,
-        gitignore: if policy.honour_gitignore { load_repo_gitignore(root) } else { None },
+        gitignore: if policy.honour_gitignore {
+            load_repo_gitignore(root)
+        } else {
+            None
+        },
         noise: policy.noise,
         named_scope,
         max_files,
-        deadline_ms: unsafe { host_now_ms() }.saturating_add(cfg.wall_budget_ms),
+        deadline_ms: unsafe { host_now_ms() }
+            .saturating_add(cfg.wall_budget_ms.min(LISTING_WALK_ANSWERABLE_BUDGET_MS)),
         reached_deadline: false,
         files: Vec::new(),
         excluded: Vec::new(),
     };
     walk.descend(&target);
-    Ok(universe(walk.files, FileSource::Walk, !walk.reached_deadline, walk.excluded, Some(policy.reason)))
+    Ok(universe(
+        walk.files,
+        FileSource::Walk,
+        !walk.reached_deadline,
+        walk.excluded,
+        Some(policy.reason),
+    ))
 }
 
 pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> Vec<String> {
     let bytes = root.as_bytes();
     let absolute = root.starts_with('/') || (bytes.len() >= 2 && bytes[1] == b':');
-    let (base, scope) = if root.is_empty() || root == "." || absolute { (if root.is_empty() { "." } else { root }, None) } else { (".", Some(root)) };
+    let (base, scope) = if root.is_empty() || root == "." || absolute {
+        (if root.is_empty() { "." } else { root }, None)
+    } else {
+        (".", Some(root))
+    };
     let project_node_modules = join_under(base, "node_modules/");
     let origin = if absolute { TargetOrigin::CallerNamed } else { TargetOrigin::ProjectDefault };
     match list_scan_universe(base, &scope.into_iter().collect::<Vec<&str>>(), max_files, cfg, origin, false, false) {
         Ok(u) => u.files.into_iter().filter(|p| !p.starts_with(&project_node_modules)).take(max_files).collect(),
         Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_artifact_rule;
+
+    #[test]
+    fn excludes_runtime_artifacts_without_hiding_source_paths() {
+        assert_eq!(
+            runtime_artifact_rule(".agentplug-kv/codeinsight/chunk.json"),
+            Some("agentplug_kv_cache")
+        );
+        assert_eq!(
+            runtime_artifact_rule("packages/.gm/exec-spool/out/result.json"),
+            Some("gm_exec_spool")
+        );
+        assert_eq!(
+            runtime_artifact_rule("packages\\.gm\\exec-spool\\out\\result.json"),
+            Some("gm_exec_spool")
+        );
+        assert_eq!(runtime_artifact_rule("packages/core/src/lib.rs"), None);
+        assert_eq!(runtime_artifact_rule(".gm/browser-config.json"), None);
     }
 }
