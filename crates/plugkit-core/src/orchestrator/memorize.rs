@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use super::gm_dir;
 use crate::pkfs;
+use std::path::PathBuf;
 
 pub fn memorize_inbox() -> PathBuf {
     gm_dir().join("exec-spool").join("in").join("memorize")
@@ -9,8 +9,8 @@ pub fn memorize_inbox() -> PathBuf {
 pub fn fire(body: &str) -> Result<String, std::io::Error> {
     let dir = memorize_inbox();
     #[cfg(target_arch = "wasm32")]
-    let n: u128 = (unsafe { crate::wasm_dispatch::host_now_ms() } as u128) * 1_000_000
-        + (body.len() as u128);
+    let n: u128 =
+        (unsafe { crate::wasm_dispatch::host_now_ms() } as u128) * 1_000_000 + (body.len() as u128);
     #[cfg(not(target_arch = "wasm32"))]
     let n: u128 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -21,7 +21,10 @@ pub fn fire(body: &str) -> Result<String, std::io::Error> {
     if pkfs::write(&ps, body) {
         Ok(p.display().to_string())
     } else {
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "pkfs write failed"))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "pkfs write failed",
+        ))
     }
 }
 
@@ -36,7 +39,12 @@ fn parsed_kind_or_default(content: &str) -> String {
 #[cfg(target_arch = "wasm32")]
 fn filter_tokens_keeping_lines(text: &str, keep: impl Fn(&str) -> bool) -> String {
     text.lines()
-        .map(|line| line.split_whitespace().filter(|tok| keep(tok)).collect::<Vec<_>>().join(" "))
+        .map(|line| {
+            line.split_whitespace()
+                .filter(|tok| keep(tok))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -45,7 +53,8 @@ fn filter_tokens_keeping_lines(text: &str, keep: impl Fn(&str) -> bool) -> Strin
 fn strip_sha_shaped_tokens(text: &str) -> String {
     filter_tokens_keeping_lines(text, |tok| {
         let cleaned = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-        !(cleaned.len() >= 7 && cleaned.len() <= 40
+        !(cleaned.len() >= 7
+            && cleaned.len() <= 40
             && cleaned.chars().all(|c| c.is_ascii_hexdigit())
             && cleaned.chars().any(|c| c.is_ascii_digit())
             && cleaned.chars().any(|c| c.is_ascii_alphabetic()))
@@ -59,7 +68,9 @@ fn strip_version_shaped_tokens(text: &str) -> String {
         let digits_dotted = cleaned.strip_prefix('v').unwrap_or(cleaned);
         let looks_semver = digits_dotted.split('.').count() >= 2
             && digits_dotted.len() >= 3
-            && digits_dotted.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && digits_dotted
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.')
             && digits_dotted.chars().any(|c| c.is_ascii_digit());
         !looks_semver
     })
@@ -77,14 +88,16 @@ fn strip_dated_audit_lines(text: &str) -> String {
     text.lines()
         .filter(|line| {
             let l = line.to_lowercase();
-            let has_date = l.contains("(202") || l.contains("(19")
-                || (l.len() >= 10 && l.as_bytes().windows(10).any(|w| {
-                    w.iter().take(4).all(|c| c.is_ascii_digit())
-                        && w[4] == b'-'
-                        && w[5..7].iter().all(|c| c.is_ascii_digit())
-                        && w[7] == b'-'
-                        && w[8..10].iter().all(|c| c.is_ascii_digit())
-                }));
+            let has_date = l.contains("(202")
+                || l.contains("(19")
+                || (l.len() >= 10
+                    && l.as_bytes().windows(10).any(|w| {
+                        w.iter().take(4).all(|c| c.is_ascii_digit())
+                            && w[4] == b'-'
+                            && w[5..7].iter().all(|c| c.is_ascii_digit())
+                            && w[7] == b'-'
+                            && w[8..10].iter().all(|c| c.is_ascii_digit())
+                    }));
             let audit_shaped = contains_whole_word(&l, "audit") || l.contains("(fixed)");
             !(has_date && audit_shaped)
         })
@@ -94,14 +107,21 @@ fn strip_dated_audit_lines(text: &str) -> String {
 
 #[cfg(target_arch = "wasm32")]
 fn has_generalizable_residue(text: &str) -> bool {
-    let stripped = strip_dated_audit_lines(&strip_version_shaped_tokens(&strip_sha_shaped_tokens(text)));
-    stripped.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphabetic())).count() >= 8
+    let stripped =
+        strip_dated_audit_lines(&strip_version_shaped_tokens(&strip_sha_shaped_tokens(text)));
+    stripped
+        .split_whitespace()
+        .filter(|w| w.chars().any(|c| c.is_alphabetic()))
+        .count()
+        >= 8
 }
 
 #[cfg(target_arch = "wasm32")]
 fn has_banned_glyph(text: &str) -> Option<char> {
     text.chars().find(|c| {
-        if c.is_ascii() { return false; }
+        if c.is_ascii() {
+            return false;
+        }
         matches!(*c,
             '\u{2190}'..='\u{21FF}'
             | '\u{2500}'..='\u{259F}'
@@ -125,22 +145,48 @@ fn is_derivable_state(text: &str) -> Option<String> {
     }
     let lower = t.to_lowercase();
     let bad: &[(&str, &str)] = &[
-        ("we used to ", "historical framing belongs in git log + CHANGELOG, not the recall index"),
-        ("used to do", "historical framing belongs in git log + CHANGELOG, not the recall index"),
-        ("previously did", "historical framing belongs in git log + CHANGELOG, not the recall index"),
-        ("(fixed)", "past-tense fix markers belong in commit messages"),
-        ("fixed in commit", "commit-fix references belong in git log, not the recall index"),
-        ("fix in commit", "commit-fix references belong in git log, not the recall index"),
+        (
+            "we used to ",
+            "historical framing belongs in git log + CHANGELOG, not the recall index",
+        ),
+        (
+            "used to do",
+            "historical framing belongs in git log + CHANGELOG, not the recall index",
+        ),
+        (
+            "previously did",
+            "historical framing belongs in git log + CHANGELOG, not the recall index",
+        ),
+        (
+            "(fixed)",
+            "past-tense fix markers belong in commit messages",
+        ),
+        (
+            "fixed in commit",
+            "commit-fix references belong in git log, not the recall index",
+        ),
+        (
+            "fix in commit",
+            "commit-fix references belong in git log, not the recall index",
+        ),
         ("changelog:", "changelog entries live in CHANGELOG.md"),
         ("changelog entry", "changelog entries live in CHANGELOG.md"),
-        ("dated audit", "dated audit entries belong in git log, not the recall index"),
-        ("(added 20", "dated (added YYYY-..) annotations belong in git log, not the recall index"),
+        (
+            "dated audit",
+            "dated audit entries belong in git log, not the recall index",
+        ),
+        (
+            "(added 20",
+            "dated (added YYYY-..) annotations belong in git log, not the recall index",
+        ),
         ("commit hash", "commit hashes are derivable from git log"),
         ("recent commit", "recent commits are derivable from git log"),
         ("git blame says", "git blame is derivable from the repo"),
     ];
     for (pat, msg) in bad {
-        if lower.contains(pat) { return Some(msg.to_string()); }
+        if lower.contains(pat) {
+            return Some(msg.to_string());
+        }
     }
     if !has_generalizable_residue(t) {
         return Some("memo is sha-only/version-only/dated-audit-only with no generalizable lesson surviving after those tokens/lines are stripped; per the exclusion principle, config-derivable, code-derivable, and state-of-tooling-snapshot content never enters the store".to_string());
@@ -223,9 +269,21 @@ fn drain_pending_embeddings(max_rows: usize) -> serde_json::Value {
     let mut attempted = 0usize;
     let mut last_error: Option<String> = None;
     for row in rows {
-        let namespace = row.get("namespace").and_then(|v| v.as_str()).unwrap_or("default").to_string();
-        let key = row.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let text = row.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let namespace = row
+            .get("namespace")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .to_string();
+        let key = row
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let text = row
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if key.is_empty() || text.is_empty() || attempted >= max_rows {
             if !key.is_empty() && !text.is_empty() {
                 kept.push(row);
@@ -241,7 +299,10 @@ fn drain_pending_embeddings(max_rows: usize) -> serde_json::Value {
                 continue;
             }
         };
-        let tencentdb = row.get("tencentdb").and_then(|v| v.as_bool()).unwrap_or(false);
+        let tencentdb = row
+            .get("tencentdb")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let write_result: Result<(), String> = if tencentdb {
             let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("l0");
             crate::tencentdb_memory::write(&namespace, kind, &text, &emb, now).map(|_| ())
@@ -259,12 +320,15 @@ fn drain_pending_embeddings(max_rows: usize) -> serde_json::Value {
     let still_pending = kept.len();
     write_pending_ledger(&kept);
     if embedded > 0 || still_pending > 0 {
-        crate::wasm_dispatch::emit_event("memorize_embed_backfill", serde_json::json!({
-            "embedded": embedded,
-            "still_pending": still_pending,
-            "attempted": attempted,
-            "last_error": last_error,
-        }));
+        crate::wasm_dispatch::emit_event(
+            "memorize_embed_backfill",
+            serde_json::json!({
+                "embedded": embedded,
+                "still_pending": still_pending,
+                "attempted": attempted,
+                "last_error": last_error,
+            }),
+        );
     }
     serde_json::json!({
         "embedded": embedded,
@@ -289,23 +353,33 @@ fn store_without_vector(
         | crate::memory_md::WriteOutcome::Updated(p)
         | crate::memory_md::WriteOutcome::Deduped(p) => Some(p),
         crate::memory_md::WriteOutcome::Invalid(reason) => {
-            crate::wasm_dispatch::emit_event("memory_md_write_invalid", serde_json::json!({
-                "key": key, "namespace": namespace, "reason": reason,
-            }));
-            return (String::new(), format!("memorize: md write invalid: {}", reason), 1);
+            crate::wasm_dispatch::emit_event(
+                "memory_md_write_invalid",
+                serde_json::json!({
+                    "key": key, "namespace": namespace, "reason": reason,
+                }),
+            );
+            return (
+                String::new(),
+                format!("memorize: md write invalid: {}", reason),
+                1,
+            );
         }
         crate::memory_md::WriteOutcome::Failed(p) => {
             return (String::new(), format!("memorize: md write failed at {}; the md corpus is the durable store, refusing an unbacked memory", p), 1);
         }
     };
     let queued_total = queue_pending_embedding(namespace, key, kind, text, why, tencentdb, now_ms);
-    crate::wasm_dispatch::emit_event("memorize_stored_without_vector", serde_json::json!({
-        "key": key,
-        "namespace": namespace,
-        "reason": why,
-        "pending_total": queued_total,
-        "tencentdb_push_pending": tencentdb,
-    }));
+    crate::wasm_dispatch::emit_event(
+        "memorize_stored_without_vector",
+        serde_json::json!({
+            "key": key,
+            "namespace": namespace,
+            "reason": why,
+            "pending_total": queued_total,
+            "tencentdb_push_pending": tencentdb,
+        }),
+    );
     let mut payload = serde_json::json!({
         "ok": true,
         "key": key,
@@ -329,7 +403,10 @@ fn store_without_vector(
     });
     if tencentdb {
         if let Some(obj) = payload.as_object_mut() {
-            obj.insert("tencentdb_push_pending".to_string(), serde_json::json!(true));
+            obj.insert(
+                "tencentdb_push_pending".to_string(),
+                serde_json::json!(true),
+            );
             obj.insert("tencentdb_note".to_string(), serde_json::json!(
                 "this namespace is routed to the tencentdb backend, which requires a vector on insert; the row is held in the local md corpus and pending ledger and is pushed to tencentdb by memorize-backfill once the embedding succeeds"
             ));
@@ -347,11 +424,17 @@ pub fn handle_backfill(content: &str) -> (String, String, i32) {
         .unwrap_or(EMBED_PENDING_LEDGER_MAX_ROWS as u64) as usize;
     let result = drain_pending_embeddings(max_rows);
     let embedded = result.get("embedded").and_then(|v| v.as_u64()).unwrap_or(0);
-    let still_pending = result.get("still_pending").and_then(|v| v.as_u64()).unwrap_or(0);
+    let still_pending = result
+        .get("still_pending")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let mut payload = result;
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("ok".to_string(), serde_json::json!(true));
-        obj.insert("pending_ledger".to_string(), serde_json::json!(EMBED_PENDING_LEDGER_FILE));
+        obj.insert(
+            "pending_ledger".to_string(),
+            serde_json::json!(EMBED_PENDING_LEDGER_FILE),
+        );
         obj.insert("summary".to_string(), serde_json::json!(format!(
             "backfilled {embedded} row(s) into the vector store; {still_pending} still have no vector"
         )));
@@ -361,7 +444,11 @@ pub fn handle_backfill(content: &str) -> (String, String, i32) {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn handle_backfill(_content: &str) -> (String, String, i32) {
-    ("{\"ok\":false,\"error\":\"memorize-backfill requires wasm32\"}".to_string(), String::new(), 1)
+    (
+        "{\"ok\":false,\"error\":\"memorize-backfill requires wasm32\"}".to_string(),
+        String::new(),
+        1,
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -375,7 +462,8 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     let parsed: Option<serde_json::Value> = serde_json::from_str(content).ok();
     let (text, namespace) = match parsed.as_ref().filter(|v| v.is_object()) {
         Some(v) => {
-            let fact = MEMO_TEXT_FIELDS.iter()
+            let fact = MEMO_TEXT_FIELDS
+                .iter()
                 .find_map(|field| v.get(*field).and_then(|x| x.as_str()))
                 .map(String::from);
             let Some(t) = fact else {
@@ -384,7 +472,11 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
                     MEMO_TEXT_FIELDS
                 ), 1);
             };
-            let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("default").to_string();
+            let ns = v
+                .get("namespace")
+                .and_then(|x| x.as_str())
+                .unwrap_or("default")
+                .to_string();
             (t, ns)
         }
         None => (content.trim().to_string(), "default".to_string()),
@@ -395,20 +487,36 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     if namespace == "default" {
         for tok in text.split_whitespace() {
             if let Some(rest) = tok.strip_prefix('@') {
-                let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
                 if !name.is_empty() {
                     const SIGIL_IGNORED_EVENT_REARM_COOLDOWN_MS: i64 = 5 * 60 * 1000;
-                    static SIGIL_IGNORED_EVENT_LAST_FIRED_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+                    static SIGIL_IGNORED_EVENT_LAST_FIRED_MS: std::sync::atomic::AtomicI64 =
+                        std::sync::atomic::AtomicI64::new(0);
                     let now = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
-                    let prev_fired_ms = SIGIL_IGNORED_EVENT_LAST_FIRED_MS.load(std::sync::atomic::Ordering::Relaxed);
-                    let cooldown_elapsed = now.saturating_sub(prev_fired_ms) >= SIGIL_IGNORED_EVENT_REARM_COOLDOWN_MS;
+                    let prev_fired_ms = SIGIL_IGNORED_EVENT_LAST_FIRED_MS
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let cooldown_elapsed =
+                        now.saturating_sub(prev_fired_ms) >= SIGIL_IGNORED_EVENT_REARM_COOLDOWN_MS;
                     if cooldown_elapsed
-                        && SIGIL_IGNORED_EVENT_LAST_FIRED_MS.compare_exchange(prev_fired_ms, now, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed).is_ok()
+                        && SIGIL_IGNORED_EVENT_LAST_FIRED_MS
+                            .compare_exchange(
+                                prev_fired_ms,
+                                now,
+                                std::sync::atomic::Ordering::Relaxed,
+                                std::sync::atomic::Ordering::Relaxed,
+                            )
+                            .is_ok()
                     {
-                        crate::wasm_dispatch::emit_event("discipline_sigil_ignored", serde_json::json!({
-                            "sigil": format!("@{}", name),
-                            "fallback_namespace": "default",
-                        }));
+                        crate::wasm_dispatch::emit_event(
+                            "discipline_sigil_ignored",
+                            serde_json::json!({
+                                "sigil": format!("@{}", name),
+                                "fallback_namespace": "default",
+                            }),
+                        );
                     }
                     break;
                 }
@@ -417,29 +525,48 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     }
     if let Some(reason) = is_derivable_state(&text) {
         let prefix: String = text.chars().take(60).collect();
-        crate::wasm_dispatch::emit_event("memorize_reject", serde_json::json!({
-            "reason": reason,
-            "text_prefix": prefix,
-            "namespace": namespace,
-        }));
-        return (String::new(), format!("rejected: {} -- memo not stored", reason), 1);
+        crate::wasm_dispatch::emit_event(
+            "memorize_reject",
+            serde_json::json!({
+                "reason": reason,
+                "text_prefix": prefix,
+                "namespace": namespace,
+            }),
+        );
+        return (
+            String::new(),
+            format!("rejected: {} -- memo not stored", reason),
+            1,
+        );
     }
     if let Some(dup_key) = crate::memory_md::find_body_hash_duplicate(&namespace, &text) {
-        crate::wasm_dispatch::emit_event("memorize_reject", serde_json::json!({
-            "reason": "byte-identical body already stored under a different key",
-            "duplicate_of": dup_key,
-            "namespace": namespace,
-        }));
-        return (String::new(), format!("rejected: byte-identical to existing memo {} -- memo not stored", dup_key), 1);
+        crate::wasm_dispatch::emit_event(
+            "memorize_reject",
+            serde_json::json!({
+                "reason": "byte-identical body already stored under a different key",
+                "duplicate_of": dup_key,
+                "namespace": namespace,
+            }),
+        );
+        return (
+            String::new(),
+            format!(
+                "rejected: byte-identical to existing memo {} -- memo not stored",
+                dup_key
+            ),
+            1,
+        );
     }
     if crate::tencentdb_memory::namespace_is_routed(&namespace) {
         let kind = parsed_kind_or_default(content);
         let emb = match crate::embed::embed_text_json(&text) {
             Some(v) => v,
             None => {
-                let why = crate::embed::last_embed_failure().unwrap_or_else(|| "no reason was recorded by the embedder".to_string());
+                let why = crate::embed::last_embed_failure()
+                    .unwrap_or_else(|| "no reason was recorded by the embedder".to_string());
                 let now = unsafe { crate::wasm_dispatch::host_now_ms() } as i64;
-                let content_hash = crate::hash::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
+                let content_hash =
+                    crate::hash::fnv1a64(format!("{}|{}", namespace, text).as_bytes());
                 let key = format!("mem-{:016x}-{}", content_hash, text.len());
                 return store_without_vector(&namespace, &key, &kind, &text, &why, true, now);
             }
@@ -454,7 +581,11 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
                 }
                 (payload.to_string(), String::new(), 0)
             }
-            Err(e) => (String::new(), format!("memorize-fire: tencentdb_backend write failed: {}", e), 1),
+            Err(e) => (
+                String::new(),
+                format!("memorize-fire: tencentdb_backend write failed: {}", e),
+                1,
+            ),
         };
     }
     let now = unsafe { crate::wasm_dispatch::host_now_ms() };
@@ -470,10 +601,13 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
             | crate::memory_md::WriteOutcome::Deduped(p) => Some(p),
             _ => None,
         };
-        crate::wasm_dispatch::emit_event("memorize_deduped", serde_json::json!({
-            "key": key,
-            "namespace": namespace,
-        }));
+        crate::wasm_dispatch::emit_event(
+            "memorize_deduped",
+            serde_json::json!({
+                "key": key,
+                "namespace": namespace,
+            }),
+        );
         let still_owes_vector = pending_ledger_contains(&namespace, &key);
         let payload = serde_json::json!({
             "ok": true,
@@ -495,15 +629,19 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     let emb_str = match crate::embed::embed_text_json(&text) {
         Some(v) => v.to_string(),
         None => {
-            let why = crate::embed::last_embed_failure().unwrap_or_else(|| "no reason was recorded by the embedder".to_string());
+            let why = crate::embed::last_embed_failure()
+                .unwrap_or_else(|| "no reason was recorded by the embedder".to_string());
             let msg = format!("memorize: embed_text failed for key={}; storing the row WITHOUT a vector rather than dropping the memo -- {}", key, why);
             let _ = unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
-            crate::wasm_dispatch::emit_event("memorize_embed_failed", serde_json::json!({
-                "key": key,
-                "namespace": namespace,
-                "error": why,
-                "degraded_to": "stored_without_vector",
-            }));
+            crate::wasm_dispatch::emit_event(
+                "memorize_embed_failed",
+                serde_json::json!({
+                    "key": key,
+                    "namespace": namespace,
+                    "error": why,
+                    "degraded_to": "stored_without_vector",
+                }),
+            );
             let kind = parsed_kind_or_default(content);
             return store_without_vector(&namespace, &key, &kind, &text, &why, false, now as i64);
         }
@@ -513,22 +651,33 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         | crate::memory_md::WriteOutcome::Updated(p)
         | crate::memory_md::WriteOutcome::Deduped(p) => Some(p),
         crate::memory_md::WriteOutcome::Invalid(reason) => {
-            crate::wasm_dispatch::emit_event("memory_md_write_invalid", serde_json::json!({
-                "key": key, "namespace": namespace, "reason": reason,
-            }));
-            return (String::new(), format!("memorize: md write invalid: {}", reason), 1);
+            crate::wasm_dispatch::emit_event(
+                "memory_md_write_invalid",
+                serde_json::json!({
+                    "key": key, "namespace": namespace, "reason": reason,
+                }),
+            );
+            return (
+                String::new(),
+                format!("memorize: md write invalid: {}", reason),
+                1,
+            );
         }
         crate::memory_md::WriteOutcome::Failed(p) => {
             return (String::new(), format!("memorize: md write failed at {}; the md corpus is the durable store, refusing an unbacked memory", p), 1);
         }
     };
-    let emb_val: serde_json::Value = serde_json::from_str(&emb_str).unwrap_or(serde_json::Value::Null);
+    let emb_val: serde_json::Value =
+        serde_json::from_str(&emb_str).unwrap_or(serde_json::Value::Null);
     if let Err(e) = crate::rssearch_vectors::write(&namespace, &key, &text, &emb_val, now as i64) {
-        crate::wasm_dispatch::emit_event("rssearch_vectors_write_failed", serde_json::json!({
-            "key": key,
-            "namespace": namespace,
-            "error": e,
-        }));
+        crate::wasm_dispatch::emit_event(
+            "rssearch_vectors_write_failed",
+            serde_json::json!({
+                "key": key,
+                "namespace": namespace,
+                "error": e,
+            }),
+        );
     }
     let backfilled = drain_pending_embeddings(EMBED_PENDING_DRAIN_PER_SUCCESSFUL_FIRE);
     let mut payload = serde_json::json!({
@@ -540,7 +689,12 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         "md_file": md_path,
         "agents_drain": agents_drain_obligation(),
     });
-    if backfilled.get("attempted").and_then(|v| v.as_u64()).unwrap_or(0) > 0 {
+    if backfilled
+        .get("attempted")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        > 0
+    {
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("embed_backfill".to_string(), backfilled);
         }
@@ -561,7 +715,9 @@ const DEFAULT_AGENTS_MD_DRAIN_THRESHOLD_BYTES: u64 = 30 * 1024;
 
 #[cfg(target_arch = "wasm32")]
 fn agents_md_drain_threshold_bytes() -> u64 {
-    crate::config::resolve().config.value
+    crate::config::resolve()
+        .config
+        .value
         .pointer("/memory/agents_md_drain_threshold_bytes")
         .and_then(|v| v.as_u64())
         .filter(|n| *n > 0)
@@ -579,19 +735,31 @@ fn agents_drain_obligation() -> serde_json::Value {
 
     let prior = crate::wasm_dispatch::host_read(AGENTS_DRAIN_STATE_FILE)
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    let prior_bytes = prior.as_ref().and_then(|v| v.get("agents_bytes")).and_then(|v| v.as_u64());
-    let prior_streak = prior.as_ref().and_then(|v| v.get("flat_streak")).and_then(|v| v.as_u64()).unwrap_or(0);
+    let prior_bytes = prior
+        .as_ref()
+        .and_then(|v| v.get("agents_bytes"))
+        .and_then(|v| v.as_u64());
+    let prior_streak = prior
+        .as_ref()
+        .and_then(|v| v.get("flat_streak"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     let drain_threshold_bytes = agents_md_drain_threshold_bytes();
     let over_threshold = bytes as u64 > drain_threshold_bytes;
     let dropped = prior_bytes.map(|p| (bytes as u64) < p).unwrap_or(false);
-    let flat_streak: u64 = if dropped || !over_threshold { 0 } else { prior_streak + 1 };
+    let flat_streak: u64 = if dropped || !over_threshold {
+        0
+    } else {
+        prior_streak + 1
+    };
 
     let new_state = serde_json::json!({ "agents_bytes": bytes as u64, "flat_streak": flat_streak });
     let _ = crate::wasm_dispatch::host_write(AGENTS_DRAIN_STATE_FILE, &new_state.to_string());
 
     let warn_active = over_threshold && flat_streak >= FLAT_STREAK_WARN_THRESHOLD as u64;
-    let warn_due_full = warn_active && due_for_full_text(flat_streak, FLAT_STREAK_WARN_THRESHOLD as u64);
+    let warn_due_full =
+        warn_active && due_for_full_text(flat_streak, FLAT_STREAK_WARN_THRESHOLD as u64);
     let instruction_due_full = over_threshold && due_for_full_text(flat_streak, 1);
 
     let back_pressure_warning: Option<String> = if warn_due_full {

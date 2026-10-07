@@ -64,12 +64,34 @@ impl Config {
 
     pub fn unknown_top_level_keys(&self) -> Vec<String> {
         const KNOWN: &[&str] = &[
-            "version", "instructions", "index", "memory", "memory_sync", "cache", "sync",
-            "fsm", "messages", "rag", "scoring", "embed", "rssearch", "git_commits",
-            "code_chunks", "code_index", "pipeline", "instruction_payload", "browser_witness",
-            "discipline_note", "claim_audit", "db_path", "memory_md_tables", "retention",
+            "version",
+            "instructions",
+            "index",
+            "memory",
+            "memory_sync",
+            "cache",
+            "sync",
+            "fsm",
+            "messages",
+            "rag",
+            "scoring",
+            "embed",
+            "rssearch",
+            "git_commits",
+            "code_chunks",
+            "code_index",
+            "pipeline",
+            "instruction_payload",
+            "browser_witness",
+            "discipline_note",
+            "claim_audit",
+            "db_path",
+            "memory_md_tables",
+            "retention",
         ];
-        let Some(obj) = self.value.as_object() else { return Vec::new() };
+        let Some(obj) = self.value.as_object() else {
+            return Vec::new();
+        };
         obj.keys()
             .filter(|k| !k.starts_with('_'))
             .filter(|k| !KNOWN.contains(&k.as_str()))
@@ -116,15 +138,18 @@ pub fn resolve_prose_repo_source(
     fetcher: &dyn RepoFetcher,
 ) -> Result<RepoSource, String> {
     let cleaned = spec_text.trim_start_matches('\u{feff}');
-    let v: Value = serde_json::from_str(cleaned)
-        .map_err(|e| format!("{spec_path}: not valid JSON: {e}"))?;
+    let v: Value =
+        serde_json::from_str(cleaned).map_err(|e| format!("{spec_path}: not valid JSON: {e}"))?;
     let obj = v
         .as_object()
         .ok_or_else(|| format!("{spec_path}: top level must be a JSON object"))?;
     let src = parse_source_entry(obj, spec_path, cache_root, tier_label)?;
-    fetcher
-        .refresh(&src)
-        .map_err(|e| format!("{spec_path}: could not refresh config repo {} ({e})", src.repo))?;
+    fetcher.refresh(&src).map_err(|e| {
+        format!(
+            "{spec_path}: could not refresh config repo {} ({e})",
+            src.repo
+        )
+    })?;
     Ok(src)
 }
 
@@ -132,7 +157,10 @@ pub struct NoopFetcher;
 
 impl RepoFetcher for NoopFetcher {
     fn refresh(&self, _src: &RepoSource) -> Result<(), String> {
-        Err("no RepoFetcher wired: repo-backed config sources require the git fetch implementation".to_string())
+        Err(
+            "no RepoFetcher wired: repo-backed config sources require the git fetch implementation"
+                .to_string(),
+        )
     }
 }
 
@@ -187,12 +215,15 @@ fn check_version(v: &Value, origin: &str) -> Result<u64, String> {
     };
     if n > SCHEMA_VERSION {
         #[cfg(target_arch = "wasm32")]
-        crate::wasm_dispatch::emit_event("config_version_ahead_of_build", serde_json::json!({
-            "origin": origin,
-            "config_version": n,
-            "build_schema_version": SCHEMA_VERSION,
-            "reason": "config was written against a newer schema than this build knows. Applying the keys this build recognises, since every field carries a serde default and an unknown key is reported rather than fatal. Upgrade the plugin to pick up the newer semantics.",
-        }));
+        crate::wasm_dispatch::emit_event(
+            "config_version_ahead_of_build",
+            serde_json::json!({
+                "origin": origin,
+                "config_version": n,
+                "build_schema_version": SCHEMA_VERSION,
+                "reason": "config was written against a newer schema than this build knows. Applying the keys this build recognises, since every field carries a serde default and an unknown key is reported rather than fatal. Upgrade the plugin to pick up the newer semantics.",
+            }),
+        );
         return Ok(n);
     }
     if n < MIN_READABLE_SCHEMA_VERSION {
@@ -246,7 +277,12 @@ fn type_name_of(v: &Value) -> &'static str {
     }
 }
 
-fn parse_source_entry(obj: &Map<String, Value>, origin: &str, cache_root: &str, tier_label: &str) -> Result<RepoSource, String> {
+fn parse_source_entry(
+    obj: &Map<String, Value>,
+    origin: &str,
+    cache_root: &str,
+    tier_label: &str,
+) -> Result<RepoSource, String> {
     let repo = obj
         .get("repo")
         .and_then(|x| x.as_str())
@@ -270,7 +306,9 @@ fn parse_source_entry(obj: &Map<String, Value>, origin: &str, cache_root: &str, 
     let raw_path = obj.get("path").and_then(|x| x.as_str()).unwrap_or("");
     crate::config_path::validate_source_path(raw_path).map_err(|e| format!("{origin}: {e}"))?;
     let path = raw_path.trim().trim_matches('/').to_string();
-    let entry_hash = crate::hash::fnv1a64(format!("{repo}|{}|{path}", reference.as_deref().unwrap_or("")).as_bytes());
+    let entry_hash = crate::hash::fnv1a64(
+        format!("{repo}|{}|{path}", reference.as_deref().unwrap_or("")).as_bytes(),
+    );
     let cache_dir = format!("{cache_root}/{entry_hash:016x}");
     Ok(RepoSource {
         repo,
@@ -281,15 +319,22 @@ fn parse_source_entry(obj: &Map<String, Value>, origin: &str, cache_root: &str, 
     })
 }
 
-fn parse_source_spec(text: &str, origin: &str, cache_root: &str, tier_label: &str) -> Result<Vec<RepoSource>, String> {
+fn parse_source_spec(
+    text: &str,
+    origin: &str,
+    cache_root: &str,
+    tier_label: &str,
+) -> Result<Vec<RepoSource>, String> {
     let cleaned = text.trim_start_matches('\u{feff}');
     if cleaned.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let v: Value = serde_json::from_str(cleaned)
-        .map_err(|e| format!("{origin}: not valid JSON: {e}"))?;
+    let v: Value =
+        serde_json::from_str(cleaned).map_err(|e| format!("{origin}: not valid JSON: {e}"))?;
     match &v {
-        Value::Object(obj) => Ok(vec![parse_source_entry(obj, origin, cache_root, tier_label)?]),
+        Value::Object(obj) => Ok(vec![parse_source_entry(
+            obj, origin, cache_root, tier_label,
+        )?]),
         Value::Array(items) => {
             if items.is_empty() {
                 return Err(format!("{origin}: source spec array must not be empty"));
@@ -299,7 +344,10 @@ fn parse_source_spec(text: &str, origin: &str, cache_root: &str, tier_label: &st
                 .enumerate()
                 .map(|(i, item)| {
                     let obj = item.as_object().ok_or_else(|| {
-                        format!("{origin}: array entry {i} must be a JSON object, found {}", type_name_of(item))
+                        format!(
+                            "{origin}: array entry {i} must be a JSON object, found {}",
+                            type_name_of(item)
+                        )
                     })?;
                     parse_source_entry(obj, &format!("{origin}[{i}]"), cache_root, tier_label)
                 })
@@ -326,7 +374,9 @@ fn validate_git_ref(reference: &str) -> Result<(), String> {
         ));
     }
     if r.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return Err(format!("`ref` {r:?} contains whitespace or a control character"));
+        return Err(format!(
+            "`ref` {r:?} contains whitespace or a control character"
+        ));
     }
     for bad in ["..", "@{", "//", "\\"] {
         if r.contains(bad) {
@@ -336,8 +386,12 @@ fn validate_git_ref(reference: &str) -> Result<(), String> {
     if r.ends_with('.') || r.ends_with(".lock") || r.starts_with('/') || r.ends_with('/') {
         return Err(format!("`ref` {r:?} is not a well-formed git ref"));
     }
-    if r.chars().any(|c| matches!(c, '~' | '^' | ':' | '?' | '*' | '[')) {
-        return Err(format!("`ref` {r:?} contains a character git reserves for revision syntax"));
+    if r.chars()
+        .any(|c| matches!(c, '~' | '^' | ':' | '?' | '*' | '['))
+    {
+        return Err(format!(
+            "`ref` {r:?} contains a character git reserves for revision syntax"
+        ));
     }
     Ok(())
 }
@@ -371,13 +425,32 @@ pub fn user_cache_root() -> Option<String> {
 fn home_dir() -> Option<String> {
     for key in ["HOME", "USERPROFILE"] {
         if let Some(s) = env_var(key) {
-            let t = s.trim().trim_end_matches(['/', '\\']);
-            if !t.is_empty() {
-                return Some(t.to_string());
+            let raw = s.trim();
+            if !is_absolute_home_dir(raw) {
+                continue;
             }
+            let t = raw.trim_end_matches(['/', '\\']);
+            if t.is_empty() {
+                return Some("/".to_string());
+            }
+            if t.len() == 2 && t.as_bytes()[1] == b':' {
+                return Some(raw.to_string());
+            }
+            return Some(t.to_string());
         }
     }
     None
+}
+
+fn is_absolute_home_dir(path: &str) -> bool {
+    if path.starts_with('/') || path.starts_with("\\\\") {
+        return true;
+    }
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
 }
 
 const PUBLISH_SWAP_READ_ATTEMPTS: u32 = 5;
@@ -458,7 +531,9 @@ fn load_repo_tier(
                 });
             }
             Load::Rejected { reason } => entry_failures.push(reason),
-            Load::Absent => entry_failures.push(format!("{}: no config file present", src.config_path())),
+            Load::Absent => {
+                entry_failures.push(format!("{}: no config file present", src.config_path()))
+            }
         }
     }
     match merged {
@@ -486,7 +561,9 @@ struct ResolveCacheEntry {
 }
 
 #[cfg(target_arch = "wasm32")]
-static RESOLVE_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, ResolveCacheEntry>>> = std::sync::Mutex::new(None);
+static RESOLVE_CACHE: std::sync::Mutex<
+    Option<std::collections::HashMap<String, ResolveCacheEntry>>,
+> = std::sync::Mutex::new(None);
 
 #[cfg(target_arch = "wasm32")]
 pub fn resolve() -> Resolution {
@@ -514,8 +591,15 @@ pub fn resolve() -> Resolution {
         _ => first_pass,
     };
     if let Ok(mut cache) = RESOLVE_CACHE.lock() {
-        cache.get_or_insert_with(std::collections::HashMap::new)
-            .insert(root, ResolveCacheEntry { ts_ms: now_ms, resolution: resolution.clone() });
+        cache
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(
+                root,
+                ResolveCacheEntry {
+                    ts_ms: now_ms,
+                    resolution: resolution.clone(),
+                },
+            );
     }
     resolution
 }
@@ -539,9 +623,21 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
     if let Some(text) = pkfs::read_to_string(&p1) {
         match parse_config(&text, &p1) {
             Load::Accepted(config) => {
-                let _ = load_repo_tier(&join(project_root, SOURCE_SPEC_REL), join(project_root, SOURCE_CACHE_REL), fetcher, Tier::ProjectRepoSpec.as_str()).0;
+                let _ = load_repo_tier(
+                    &join(project_root, SOURCE_SPEC_REL),
+                    join(project_root, SOURCE_CACHE_REL),
+                    fetcher,
+                    Tier::ProjectRepoSpec.as_str(),
+                )
+                .0;
                 if let Some(home) = home_dir() {
-                    let _ = load_repo_tier(&join(&home, SOURCE_SPEC_REL), join(&home, SOURCE_CACHE_REL), fetcher, Tier::UserRepoSpec.as_str()).0;
+                    let _ = load_repo_tier(
+                        &join(&home, SOURCE_SPEC_REL),
+                        join(&home, SOURCE_CACHE_REL),
+                        fetcher,
+                        Tier::UserRepoSpec.as_str(),
+                    )
+                    .0;
                 }
                 let _ = load_implicit_default_repo_tier(project_root, fetcher);
                 return Resolution {
@@ -550,7 +646,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
                     why: format!("project-vendored config at {p1}"),
                     rejected,
                     cache_dir: None,
-                }
+                };
             }
             Load::Rejected { reason } => rejected.push(reason),
             Load::Absent => {}
@@ -559,7 +655,12 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
 
     let p2_cache_dir = join(project_root, SOURCE_CACHE_REL);
     let p2 = join(project_root, SOURCE_SPEC_REL);
-    match load_repo_tier(&p2, p2_cache_dir.clone(), fetcher, Tier::ProjectRepoSpec.as_str()) {
+    match load_repo_tier(
+        &p2,
+        p2_cache_dir.clone(),
+        fetcher,
+        Tier::ProjectRepoSpec.as_str(),
+    ) {
         (Load::Accepted(config), winning_cache_dir) => {
             return Resolution {
                 config,
@@ -576,7 +677,12 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
     if let Some(home) = home_dir() {
         let p3_cache_dir = join(&home, SOURCE_CACHE_REL);
         let p3 = join(&home, SOURCE_SPEC_REL);
-        match load_repo_tier(&p3, p3_cache_dir.clone(), fetcher, Tier::UserRepoSpec.as_str()) {
+        match load_repo_tier(
+            &p3,
+            p3_cache_dir.clone(),
+            fetcher,
+            Tier::UserRepoSpec.as_str(),
+        ) {
             (Load::Accepted(config), winning_cache_dir) => {
                 return Resolution {
                     config,

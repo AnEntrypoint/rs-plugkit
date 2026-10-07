@@ -1,5 +1,5 @@
-use serde_yaml::Value;
 use crate::pkfs;
+use serde_yaml::Value;
 
 pub enum CasOutcome<T> {
     Write(Value, T),
@@ -15,7 +15,11 @@ pub fn cas_retry_write<T>(
     let mut attempt = 0;
     loop {
         attempt += 1;
-        let before_raw = if pkfs::exists(path_s) { pkfs::read_to_string(path_s).unwrap_or_default() } else { String::new() };
+        let before_raw = if pkfs::exists(path_s) {
+            pkfs::read_to_string(path_s).unwrap_or_default()
+        } else {
+            String::new()
+        };
         let doc: Value = if before_raw.trim().is_empty() {
             Value::Sequence(vec![])
         } else {
@@ -42,7 +46,10 @@ pub fn cas_retry_write<T>(
                 if attempt >= max_attempts {
                     return Err((
                         String::new(),
-                        format!("{} CAS failed after {} attempts: concurrent writer keeps changing {}", verb_label, max_attempts, path_s),
+                        format!(
+                            "{} CAS failed after {} attempts: concurrent writer keeps changing {}",
+                            verb_label, max_attempts, path_s
+                        ),
                         1,
                     ));
                 }

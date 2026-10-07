@@ -163,7 +163,10 @@ pub fn get(cfg: &CacheConfig, namespace: &str, key: &str) -> Result<Option<Entry
         expires_at: row_i64(row, "expires_at"),
         value,
     };
-    let touch = format!("UPDATE {} SET last_used_at=?1 WHERE namespace=?2 AND key=?3", TABLE);
+    let touch = format!(
+        "UPDATE {} SET last_used_at=?1 WHERE namespace=?2 AND key=?3",
+        TABLE
+    );
     let _ = shared_exec_params(&touch, &[&now_s, namespace, key]);
     Ok(Some(entry))
 }
@@ -178,7 +181,10 @@ pub fn put(
     validate_identity(namespace, key)?;
     let bytes = value.len();
     if bytes > cfg.max_value_bytes {
-        return Err(CacheError::ValueTooLarge { bytes, limit: cfg.max_value_bytes });
+        return Err(CacheError::ValueTooLarge {
+            bytes,
+            limit: cfg.max_value_bytes,
+        });
     }
     ensure_schema(cfg)?;
 
@@ -210,7 +216,15 @@ pub fn put(
     );
     shared_exec_params(
         &sql,
-        &[namespace, key, value, &hash, &now_s, expires_param, &bytes_s],
+        &[
+            namespace,
+            key,
+            value,
+            &hash,
+            &now_s,
+            expires_param,
+            &bytes_s,
+        ],
     )
     .map_err(store_err)?;
 
@@ -268,7 +282,10 @@ pub fn stats(cfg: &CacheConfig, namespace: &str) -> Result<(i64, i64), CacheErro
         Some(r) => r,
         None => return Ok((0, 0)),
     };
-    Ok((row_i64(row, "n").unwrap_or(0), row_i64(row, "b").unwrap_or(0)))
+    Ok((
+        row_i64(row, "n").unwrap_or(0),
+        row_i64(row, "b").unwrap_or(0),
+    ))
 }
 
 pub fn enforce_budget(cfg: &CacheConfig, namespace: &str) -> Result<usize, CacheError> {

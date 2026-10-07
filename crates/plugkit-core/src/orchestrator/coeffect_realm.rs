@@ -97,7 +97,10 @@ impl InterceptionContext {
     }
 
     fn kind_of(&self, key: &str) -> MergeKind {
-        self.merge_kind.get(key).copied().unwrap_or(MergeKind::ScalarOverwrite)
+        self.merge_kind
+            .get(key)
+            .copied()
+            .unwrap_or(MergeKind::ScalarOverwrite)
     }
 
     pub fn context_metadata(&self, key: &str) -> String {
