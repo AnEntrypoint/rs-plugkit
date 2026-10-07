@@ -68,7 +68,6 @@ pub fn clear_codeinsight_cfg(cfg: &crate::ragconfig::RagConfig) -> u32 {
             }
         }
     }
-    bm25_doc_cache_clear();
     fusion_corpus_cache_clear();
     cleared
 }
@@ -1322,7 +1321,6 @@ fn write_chunk(libsql_ok: bool, db_path: &str, fp: &str, c: &ChunkRecord, body: 
     }
     let emb_json = serde_json::json!({ "embedding": emb }).to_string();
     fv_put(&code_ns_for(project_path), &c.key, &emb_json);
-    bm25_doc_cache_invalidate(&c.key);
     persisted
 }
 
@@ -1330,7 +1328,6 @@ fn delete_chunk_keys(chunks: &[ChunkRecord], project_path: Option<&str>) {
     for c in chunks {
         fv_delete(&code_ns_for(project_path), &c.key);
         fv_delete(&code_vec_ns_for(project_path), &c.key);
-        bm25_doc_cache_invalidate(&c.key);
     }
 }
 
@@ -2312,26 +2309,6 @@ pub struct FusionCorpus {
     index_by_path_line: std::sync::Arc<std::collections::HashMap<(String, usize), usize>>,
 }
 
-struct Bm25DocEntry {
-    tf: std::collections::HashMap<String, u32>,
-    dl: f64,
-}
-
-static BM25_DOC_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, std::sync::Arc<Bm25DocEntry>>>> =
-    std::sync::Mutex::new(None);
-
-fn bm25_doc_cache_invalidate(key: &str) {
-    if let Ok(mut cache) = BM25_DOC_CACHE.lock() {
-        if let Some(m) = cache.as_mut() { m.remove(key); }
-    }
-}
-
-fn bm25_doc_cache_clear() {
-    if let Ok(mut cache) = BM25_DOC_CACHE.lock() {
-        *cache = None;
-    }
-}
-
 type CorpusIndexByLine = std::collections::HashMap<(String, usize), usize>;
 
 struct CachedCorpus {
@@ -2479,51 +2456,46 @@ impl FusionCorpus {
         let b = scoring.bm25_b_document_length_normalization;
         let q_tokens = rs_search::tokenize::tokenize(query);
         if q_tokens.is_empty() || self.metas.is_empty() { return Vec::new(); }
-        let mut cache = BM25_DOC_CACHE.lock().ok();
-        if let Some(guard) = cache.as_mut() {
-            guard.get_or_insert_with(std::collections::HashMap::new);
-        }
-        let mut doc_tfs: Vec<(usize, std::sync::Arc<Bm25DocEntry>)> = Vec::new();
+        // A chunk's term frequencies are only ever read back for the terms in the query, so the
+        // pass counts those and discards the rest. Keeping every term per chunk held ~5.3M
+        // entries (~300MB of wasm heap) to answer counts for at most q_tokens.len() of them.
+        let qn = q_tokens.len();
+        let q_index: std::collections::HashMap<&str, usize> =
+            q_tokens.iter().enumerate().map(|(i, t)| (t.as_str(), i)).collect();
+        let mut scratch: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut doc_tfs: Vec<(usize, f64, Vec<u32>)> = Vec::with_capacity(self.metas.len());
         for i in 0..self.metas.len() {
-            let key = self.metas[i].key.clone();
-            let cached = cache.as_ref()
-                .and_then(|c| c.as_ref())
-                .and_then(|m| m.get(&key))
-                .cloned();
-            // Sharing the cached entry by Arc matters: cloning 7486 term maps into a fresh Vec
-            // per query cost 4.6s of a dispatch, all of it copying bytes the cache already owned.
-            let entry = match cached {
-                Some(e) => e,
-                None => {
-                    let (tf, dl) = match compute_doc_tf(self, i) {
-                        Some(v) => v,
-                        None => continue,
-                    };
-                    std::sync::Arc::new(Bm25DocEntry { tf, dl })
+            let text = match doc_text_capped(self, i) { Some(t) => t, None => continue };
+            let mut counts = vec![0u32; qn];
+            let mut total = 0u32;
+            for word in text.split(|c: char| c.is_whitespace() || "(){}[]<>,;:\"'`=+*&|!?/\\#".contains(c)) {
+                if word.is_empty() { continue; }
+                // Drained rather than dropped so the one set's allocation serves every word:
+                // a fresh set per word was one allocation per word across the whole corpus.
+                scratch.clear();
+                rs_search::tokenize::add_word_tokens(word, &mut scratch);
+                for t in scratch.drain() {
+                    if let Some(&ti) = q_index.get(t.as_str()) { counts[ti] += 1; }
+                    total += 1;
                 }
-            };
-            if let Some(m) = cache.as_mut().and_then(|c| c.as_mut()) {
-                m.insert(key, std::sync::Arc::clone(&entry));
             }
-            doc_tfs.push((i, entry));
+            doc_tfs.push((i, total as f64, counts));
         }
-        drop(cache);
         if doc_tfs.is_empty() { return Vec::new(); }
         let n = doc_tfs.len() as f64;
-        let avgdl = doc_tfs.iter().map(|(_, e)| e.dl).sum::<f64>() / n;
+        let avgdl = doc_tfs.iter().map(|(_, dl, _)| *dl).sum::<f64>() / n;
         let avgdl = if avgdl > 0.0 { avgdl } else { 1.0 };
         let mut df: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
-        for t in &q_tokens {
-            let c = doc_tfs.iter().filter(|(_, e)| e.tf.contains_key(t)).count() as u32;
+        for (ti, t) in q_tokens.iter().enumerate() {
+            let c = doc_tfs.iter().filter(|(_, _, counts)| counts[ti] > 0).count() as u32;
             df.insert(t.as_str(), c);
         }
         let mut scored: Vec<(usize, f64)> = Vec::new();
-        for (i, e) in &doc_tfs {
+        for (i, dl, counts) in &doc_tfs {
             let mut score = 0.0;
             let mut rarest_matched_idf = 0.0f64;
-            let dl = e.dl;
-            for t in &q_tokens {
-                let f = *e.tf.get(t).unwrap_or(&0) as f64;
+            for (ti, t) in q_tokens.iter().enumerate() {
+                let f = counts[ti] as f64;
                 if f == 0.0 { continue; }
                 let d = *df.get(t.as_str()).unwrap_or(&0) as f64;
                 let idf = (1.0 + (n - d + 0.5) / (d + 0.5)).ln();
@@ -2553,27 +2525,21 @@ impl FusionCorpus {
     }
 }
 
-fn compute_doc_tf(corpus: &mut FusionCorpus, i: usize) -> Option<(std::collections::HashMap<String, u32>, f64)> {
+// A chunk of a minified or vendored file runs to 300KB against ~1KB for a normal one, so an
+// uncapped span let one file decide both the tokenizing cost and the length normalization;
+// 8192 is the cap `text_for_key` already applies to what a caller sees.
+const BM25_TF_BODY_CAP_BYTES: usize = 8192;
+
+fn doc_text_capped(corpus: &mut FusionCorpus, i: usize) -> Option<String> {
     let (path, name, ls, le) = {
         let m = &corpus.metas[i];
         (m.path.clone(), m.name.clone(), m.ls, m.le)
     };
     let index = corpus.file_index(&path)?;
     let body = index.slice(ls, le);
-    let tf = term_freqs(&format!("{} {} {}", path, name, body));
-    let dl = tf.values().sum::<u32>() as f64;
-    Some((tf, dl))
-}
-
-fn term_freqs(text: &str) -> std::collections::HashMap<String, u32> {
-    let mut out: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for word in text.split(|c: char| c.is_whitespace() || "(){}[]<>,;:\"'`=+*&|!?/\\#".contains(c)) {
-        if word.is_empty() { continue; }
-        let mut set = std::collections::HashSet::new();
-        rs_search::tokenize::add_word_tokens(word, &mut set);
-        for t in set { *out.entry(t).or_insert(0) += 1; }
-    }
-    out
+    let mut end = body.len().min(BM25_TF_BODY_CAP_BYTES);
+    while end > 0 && !body.is_char_boundary(end) { end -= 1; }
+    Some(format!("{} {} {}", path, name, &body[..end]))
 }
 
 fn git_commit_rank_fallback(query: &str, k: usize) -> Vec<(String, String, f64)> {
