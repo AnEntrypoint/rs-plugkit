@@ -18,6 +18,37 @@ use super::state::{read_state, Phase};
 use crate::pkfs;
 use serde_json::json;
 
+fn next_step_matches(note: &str, phase: &str, instruction: &str) -> bool {
+    let Some((header, body)) = note.split_once("\n\n---\n\n") else {
+        return false;
+    };
+    let phase_line = format!("Phase: {phase}");
+    header.starts_with("# Next step\n\n")
+        && header.lines().any(|line| line == phase_line)
+        && body == instruction
+}
+
+fn reconciled_next_step(
+    existing: &str,
+    phase: &str,
+    instruction: &str,
+    committed: impl FnOnce() -> Option<String>,
+    now_ms: impl FnOnce() -> u128,
+) -> Option<String> {
+    if next_step_matches(existing, phase, instruction) {
+        return None;
+    }
+    if let Some(note) = committed().filter(|note| next_step_matches(note, phase, instruction)) {
+        return Some(note);
+    }
+    Some(format!(
+        "# Next step\n\nPhase: {}\nUpdated: {}\n\n---\n\n{}",
+        phase,
+        now_ms(),
+        instruction
+    ))
+}
+
 #[cfg(target_arch = "wasm32")]
 fn payload_cfg() -> crate::ragconfig::InstructionPayloadConfig {
     crate::ragconfig::RagConfig::resolved().instruction_payload
@@ -752,19 +783,27 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let early_next_step_path = super::gm_dir().join("next-step.md");
     let early_next_step_path_s = early_next_step_path.to_string_lossy().to_string();
     let existing_next_step = pkfs::read_to_string(&early_next_step_path_s).unwrap_or_default();
-    let existing_body = existing_next_step
-        .splitn(2, "\n\n---\n\n")
-        .nth(1)
-        .unwrap_or("");
-    if existing_body != instruction || !existing_next_step.contains(&format!("Phase: {}\n", phase))
-    {
-        let early_next_step = format!(
-            "# Next step\n\nPhase: {}\nUpdated: {}\n\n---\n\n{}",
-            phase,
-            super::state::now_ms(),
-            instruction
-        );
-        let _ = pkfs::write(&early_next_step_path_s, &early_next_step);
+    if let Some(next_step) = reconciled_next_step(
+        &existing_next_step,
+        &phase,
+        &instruction,
+        || {
+            let root = early_next_step_path.parent()?.parent()?.to_string_lossy();
+            let result = crate::wasm_dispatch::git_call_argv(
+                &["show", "HEAD:.gm/next-step.md"],
+                Some(root.as_ref()),
+            );
+            if result.get("exit_code").and_then(|value| value.as_i64()) != Some(0) {
+                return None;
+            }
+            result
+                .get("stdout")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        },
+        super::state::now_ms,
+    ) {
+        let _ = pkfs::write(&early_next_step_path_s, &next_step);
     }
 
     let mutables_pending = dedup_rows_by_id_keeping_last(mutables::pending_detailed());

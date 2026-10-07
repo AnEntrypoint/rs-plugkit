@@ -3297,6 +3297,7 @@ fn verb_help_doc(verb: &str) -> Option<&'static str> {
         "fs_write" => Some(FS_WRITE_HELP),
         "fs_readdir" => Some(FS_READDIR_HELP),
         "fs_stat" => Some(FS_STAT_HELP),
+        "git_worktree" => Some("git_worktree {action: list} returns worktrees; {action: add, path, ref?: HEAD, detach?: true} creates a linked checkout; detach false requires an existing local branch name; {action: remove, path} removes a clean unlocked checkout without force. Unknown fields are refused per action. Repository selectors and session fields are accepted."),
         _ => None,
     }
 }
@@ -7353,6 +7354,11 @@ fn git_finalize(body: &Value) -> u64 {
             .parse()
             .unwrap_or(0);
         if !dirty && !no_upstream && ahead_n == 0 {
+            let (ci_status_summary, ci_validated_written) =
+                check_ci_status_and_write_validated_marker_if_green(
+                    cwd_ref,
+                    &head_before_any_commit,
+                );
             return ok(
                 "git_finalize",
                 with_exclusion_report(
@@ -7360,7 +7366,9 @@ fn git_finalize(body: &Value) -> u64 {
                         "nothing_to_commit": true,
                         "committed": false,
                         "pushed": false,
-                        "steps": [{"step": "commit", "nothing_to_commit": true}],
+                        "steps": [{"step": "commit", "nothing_to_commit": true}, {"step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written}],
+                        "ci_validated_marker_written": ci_validated_written,
+                        "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
                     }),
                     cwd_ref,
                     &paths,
@@ -8067,30 +8075,85 @@ fn ci_status_value(body: &Value) -> Result<Value, Value> {
         .cloned()
         .unwrap_or_default();
     if runs.is_empty() {
-        const NO_APPLICABLE_WORKFLOW_GRACE_SECS: i64 = 120;
-        let commit_epoch_secs =
-            crate::wasm_dispatch::git_call(&format!("log -1 --format=%ct {}", sha), cwd)
-                .get("stdout")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.trim().parse::<i64>().ok());
-        let now_secs = unsafe { host_now_ms() } as i64 / 1000;
-        let commit_age_secs = commit_epoch_secs.map(|ts| now_secs.saturating_sub(ts));
-        if commit_age_secs.is_some_and(|age| age >= NO_APPLICABLE_WORKFLOW_GRACE_SECS) {
-            return Ok(json!({
-                "ok": true, "verb": "ci-status", "data": {
-                    "status": "no_applicable_workflow", "repo": repo, "sha": sha,
-                    "failed_jobs": [], "run_url": Value::Null,
-                    "query": format!("head_sha={}", sha),
-                    "reason": format!("zero workflow runs matched head_sha={} after {}s -- this reports the miss, not its cause: a workflow that never triggered, a path filter, and a sha GitHub never saw are indistinguishable from this response alone", sha, commit_age_secs.unwrap()),
-                },
-            }));
+        let tree_url = format!(
+            "https://api.github.com/repos/{}/git/trees/{}?recursive=1",
+            repo, sha
+        );
+        let tree_packed = unsafe {
+            host_fetch(
+                tree_url.as_ptr(),
+                tree_url.len() as u32,
+                opts.as_ptr(),
+                opts.len() as u32,
+            )
+        };
+        let tree_response = unpack_to_value(tree_packed);
+        let tree_status = tree_response
+            .get("status")
+            .and_then(Value::as_i64)
+            .or_else(|| tree_response.get("statusCode").and_then(Value::as_i64))
+            .unwrap_or(0);
+        let tree_body = tree_response
+            .get("body")
+            .and_then(Value::as_str)
+            .or_else(|| tree_response.get("text").and_then(Value::as_str))
+            .unwrap_or("");
+        let tree: Value = serde_json::from_str(tree_body).unwrap_or(Value::Null);
+        let complete_tree =
+            tree_status == 200 && tree.get("truncated").and_then(Value::as_bool) == Some(false);
+        if let Some(entries) = tree
+            .get("tree")
+            .and_then(Value::as_array)
+            .filter(|_| complete_tree)
+        {
+            let paths: Option<Vec<&str>> = entries
+                .iter()
+                .map(|entry| {
+                    entry
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .filter(|path| !path.is_empty())
+                })
+                .collect();
+            if let Some(paths) = paths {
+                let workflow_paths: Vec<&str> = paths
+                    .into_iter()
+                    .filter(|path| {
+                        path.strip_prefix(".github/workflows/").is_some_and(|file| {
+                            !file.contains('/')
+                                && (file.ends_with(".yml") || file.ends_with(".yaml"))
+                        })
+                    })
+                    .collect();
+                if workflow_paths.is_empty() {
+                    return Ok(json!({
+                        "ok": true, "verb": "ci-status", "data": {
+                            "status": "no_applicable_workflow", "repo": repo, "sha": sha,
+                            "failed_jobs": [], "run_url": Value::Null,
+                            "query": format!("head_sha={}", sha),
+                            "reason": "a complete GitHub git tree for this exact sha contains no .github/workflows YAML files",
+                            "workflow_configuration": "absent",
+                            "evidence": {"source": "github_git_tree", "requested_sha": sha, "tree_sha": tree.get("sha"), "truncated": false, "entries": entries.len()}
+                        }
+                    }));
+                }
+                return Ok(json!({
+                    "ok": true, "verb": "ci-status", "data": {
+                        "status": "unknown", "repo": repo, "sha": sha,
+                        "failed_jobs": [], "run_url": Value::Null,
+                        "reason": "no workflow runs found for this sha; workflow definitions are present",
+                        "workflow_paths": workflow_paths
+                    }
+                }));
+            }
         }
         return Ok(json!({
             "ok": true, "verb": "ci-status", "data": {
                 "status": "unknown", "repo": repo, "sha": sha,
                 "failed_jobs": [], "run_url": Value::Null,
-                "reason": "no workflow runs found for this sha yet",
-            },
+                "reason": "no workflow runs found for this sha; absence of workflow definitions could not be proven from a complete GitHub git tree",
+                "workflow_tree_http_status": tree_status
+            }
         }));
     }
     const STALE_IN_PROGRESS_RUN_GRACE_SECS: i64 = 900;
@@ -8411,6 +8474,126 @@ fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Value) -> u64
     )
 }
 
+fn git_worktree(body: &Value) -> u64 {
+    const VERB: &str = "git_worktree";
+    let action = match body.get("action").and_then(Value::as_str) {
+        Some("add") => "add",
+        Some("list") => "list",
+        Some("remove") => "remove",
+        _ => return err(VERB, "action must be add, list or remove"),
+    };
+    let accepted: &[&str] = match action {
+        "add" => &["action", "path", "ref", "detach"],
+        "remove" => &["action", "path"],
+        _ => &["action"],
+    };
+    if let Some(refusal) = refuse_unknown_fields(VERB, body, accepted) {
+        return refusal;
+    }
+    let cwd = body_cwd(body);
+    if action == "list" {
+        let result = match run_git_checked(
+            &["worktree", "list", "--porcelain", "-z"],
+            cwd,
+            VERB,
+            "worktree list failed",
+        ) {
+            Ok(result) => result,
+            Err(error) => return error,
+        };
+        let output = result.get("stdout").and_then(Value::as_str).unwrap_or("");
+        let mut worktrees = Vec::new();
+        let mut entry = serde_json::Map::new();
+        for field in output.split('\0') {
+            if field.is_empty() {
+                if !entry.is_empty() {
+                    worktrees.push(Value::Object(std::mem::take(&mut entry)));
+                }
+                continue;
+            }
+            let (key, value) = field.split_once(' ').unwrap_or((field, ""));
+            entry.insert(
+                key.to_string(),
+                if value.is_empty() {
+                    json!(true)
+                } else {
+                    json!(value)
+                },
+            );
+        }
+        if !entry.is_empty() {
+            worktrees.push(Value::Object(entry));
+        }
+        return ok(VERB, json!({"action": action, "worktrees": worktrees}));
+    }
+    let path = match body.get("path").and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() && !value.contains(['\0', '\r', '\n']) => value,
+        _ => {
+            return err(
+                VERB,
+                "path must be a nonempty string without NUL or line breaks",
+            )
+        }
+    };
+    if action == "remove" {
+        if let Err(error) = run_git_checked(
+            &["worktree", "remove", "--", path],
+            cwd,
+            VERB,
+            "worktree remove failed",
+        ) {
+            return error;
+        }
+        return ok(VERB, json!({"action": action, "removed": path}));
+    }
+    let reference = match body.get("ref") {
+        None => "HEAD",
+        Some(Value::String(value))
+            if !value.trim().is_empty()
+                && !value.starts_with('-')
+                && !value.contains(['\0', '\r', '\n']) =>
+        {
+            value.as_str()
+        }
+        _ => {
+            return err(
+                VERB,
+                "ref must be a nonempty string without a leading '-' or line breaks",
+            )
+        }
+    };
+    let detach = match body.get("detach") {
+        None => true,
+        Some(Value::Bool(value)) => *value,
+        _ => return err(VERB, "detach must be a boolean"),
+    };
+    if !detach && body.get("ref").is_none() {
+        return err(
+            VERB,
+            "detach false requires an explicit existing branch ref",
+        );
+    }
+    if !detach {
+        let branch = format!("refs/heads/{}", reference);
+        let probe = git_call_argv(&["show-ref", "--verify", "--quiet", &branch], cwd);
+        if probe.get("exit_code").and_then(Value::as_i64) != Some(0) {
+            return err(VERB, "detach false requires an existing local branch name");
+        }
+    }
+    let mut argv = vec!["worktree", "add"];
+    if detach {
+        argv.push("--detach");
+    }
+    argv.extend(["--", path, reference]);
+    if let Err(error) = run_git_checked(&argv, cwd, VERB, "worktree add failed") {
+        return error;
+    }
+    ok(
+        VERB,
+        json!({"action": action, "added": path, "ref": reference, "detached": detach}),
+    )
+}
+
 fn git_checkout(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_checkout",
@@ -8514,7 +8697,7 @@ fn git_merge(body: &Value) -> u64 {
             "head_before": head_before,
             "head_after": head_after,
             "already_up_to_date": head_before == head_after,
-            "fast_forward": out.contains("Fast-forward"),
+            "fast_forward": out.lines().any(|line| line == "Fast-forward" || line.starts_with("Fast-forward (")),
             "output": out
         }),
     )
@@ -8796,16 +8979,6 @@ fn git_stash_list(body: &Value) -> u64 {
     )
 }
 
-const GIT_INIT_GITIGNORE_ENTRY: &str = ".gm/exec-spool/";
-const GIT_INIT_GITIGNORE_COVERING_ENTRIES: &[&str] = &[
-    ".gm",
-    ".gm/",
-    ".gm/*",
-    ".gm/exec-spool",
-    ".gm/exec-spool/",
-    ".gm/exec-spool/*",
-];
-
 fn git_init_target(body: &Value) -> Result<Option<String>, String> {
     let base = body_cwd(body).map(|c| c.trim()).filter(|c| !c.is_empty());
     let requested = body
@@ -8865,25 +9038,10 @@ fn git_init_gitignore(root: &str) -> &'static str {
     if !crate::wasm_dispatch::host_allow_root(root) {
         return "unwritable";
     }
-    let file = format!("{}/.gitignore", root.trim_end_matches('/'));
-    let existing = super::host_abi::host_read(&file).unwrap_or_default();
-    let covered = existing
-        .lines()
-        .map(|l| l.trim().trim_start_matches('/'))
-        .any(|l| GIT_INIT_GITIGNORE_COVERING_ENTRIES.contains(&l));
-    if covered {
-        return "present";
-    }
-    let separator = if existing.is_empty() || existing.ends_with('\n') {
-        ""
-    } else {
-        "\n"
-    };
-    let updated = format!("{}{}{}\n", existing, separator, GIT_INIT_GITIGNORE_ENTRY);
-    if super::host_abi::host_write(&file, &updated) {
-        "added"
-    } else {
-        "unwritable"
+    match crate::gitignore::ensure_managed_gitignore(root) {
+        Ok(true) => "added",
+        Ok(false) => "present",
+        Err(_) => "unwritable",
     }
 }
 
@@ -10129,6 +10287,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
             "ci-status" | "ci_status" => ci_status(&body),
             "git_branch" => git_branch(&body),
             "git_remote" => git_remote(&body),
+            "git_worktree" => git_worktree(&body),
             "git_checkout" => git_checkout(&body),
         "git_merge" => git_merge(&body),
         "git_merge_abort" => git_merge_abort(&body),
