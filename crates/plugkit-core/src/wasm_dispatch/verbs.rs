@@ -5642,11 +5642,24 @@ fn sql_deserialize(body: &Value) -> u64 {
 }
 
 fn codeinsight_index(body: &Value) -> u64 {
-    let root = body
+    let resolved_root = body
         .get("root")
         .and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
-        .filter(|p| !p.is_empty());
+        .filter(|p| !p.is_empty())
+        .map(crate::pkfs::anchor);
+    let root = resolved_root.as_deref();
+    if let Some(root) = root {
+        let accessible_directory = crate::wasm_dispatch::host_stat(root)
+            .and_then(|stat| stat.get("isDirectory").and_then(Value::as_bool))
+            == Some(true);
+        if !accessible_directory && !crate::wasm_dispatch::host_allow_root(root) {
+            return err(
+                "codeinsight_index",
+                &format!("root '{root}' is not an existing project directory the host will grant access to"),
+            );
+        }
+    }
     let max_files = body
         .get("max_files")
         .and_then(|v| v.as_u64())

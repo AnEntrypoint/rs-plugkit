@@ -535,9 +535,6 @@ pub fn ensure_schema_at(path: &str) -> Result<(), String> {
 }
 
 pub fn ensure_schema_at_cfg(path: &str, cfg: &crate::ragconfig::RagConfig) -> Result<(), String> {
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     libsql_wasm::open(path)?;
     let _ = drop_if_dim_mismatch_cfg(path, &cfg.code_chunks.table, &cfg.embed);
     let _ = drop_if_dim_mismatch_cfg(
@@ -573,7 +570,8 @@ fn project_db_filename(project_path: Option<&str>) -> String {
 pub(crate) fn project_db_path(project_path: Option<&str>) -> String {
     match project_path {
         Some(p) if !p.is_empty() => {
-            let root = p.trim_end_matches(['/', '\\']);
+            let anchored = crate::pkfs::anchor(p);
+            let root = anchored.trim_end_matches(['/', '\\']);
             let cfg = crate::ragconfig::RagConfig::resolved();
             format!(
                 "{}/{}/{}",

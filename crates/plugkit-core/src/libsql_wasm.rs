@@ -130,7 +130,59 @@ pub fn absolute_db_path(filename: &str) -> String {
     }
 }
 
+fn ensure_database_parent_directory(path: &str) -> Result<(), String> {
+    let Some(parent) = std::path::Path::new(path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    let readable_directory = |candidate: &std::path::Path| {
+        crate::wasm_dispatch::host_stat(&candidate.to_string_lossy())
+            .and_then(|stat| stat.get("isDirectory").and_then(Value::as_bool))
+            == Some(true)
+    };
+    if readable_directory(parent) {
+        return Ok(());
+    }
+    if parent
+        .to_string_lossy()
+        .split(['/', '\\'])
+        .any(|component| component == "..")
+        || !parent.ancestors().skip(1).any(readable_directory)
+    {
+        return Err(format!(
+            "database parent '{}' is outside the host's accessible directories",
+            parent.display()
+        ));
+    }
+    let encoded_parent =
+        serde_json::to_string(&parent.to_string_lossy()).map_err(|error| error.to_string())?;
+    let code = format!("require('node:fs').mkdirSync({encoded_parent}, {{recursive:true}});");
+    let opts = json!({"timeoutMs":5000}).to_string();
+    let packed = unsafe {
+        crate::wasm_dispatch::host_exec_js(
+            code.as_ptr(),
+            code.len() as u32,
+            opts.as_ptr(),
+            opts.len() as u32,
+        )
+    };
+    let result = crate::wasm_dispatch::unpack_to_value_pub(packed);
+    if result.get("exit_code").and_then(Value::as_i64) == Some(0)
+        && result.get("timed_out").and_then(Value::as_bool) != Some(true)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "cannot create database parent '{}': {result}",
+            parent.display()
+        ))
+    }
+}
+
 pub fn open(path: &str) -> Result<(), String> {
+    ensure_database_parent_directory(path)?;
     let resp = plugin_call("libsql", "open", &json!({ "path": path }));
     plugin_ok_err(&resp)
 }
