@@ -141,7 +141,7 @@ const LONGGAP_GATED_STATE_CHANGING_VERBS: &[&str] = &[
     "memorize-retention", "memorize_retention", "forget", "codeinsight_index",
     "tencentdb-memory-import", "config-sync-now", "discipline", "close",
     "git_add", "git_commit", "git_finalize", "git_push", "git_fetch", "git_pull",
-    "git_checkout", "git_merge", "git_merge_abort", "git_branch_delete", "git_rm",
+    "git_worktree", "git_checkout", "git_merge", "git_merge_abort", "git_branch_delete", "git_rm",
     "git_revert", "git_reset", "git_stash", "git_stash_pop", "git_stash_drop",
 ];
 
