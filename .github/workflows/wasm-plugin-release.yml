@@ -19,6 +19,10 @@ on:
         required: false
         type: string
         default: '.'
+      source_repository:
+        required: false
+        type: string
+        default: ''
       version_manifest:
         required: false
         type: string
@@ -69,6 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
+          repository: ${{ inputs.source_repository || github.repository }}
           token: ${{ secrets.publisher_token }}
           fetch-depth: 0
           ref: main
@@ -107,6 +112,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
+          repository: ${{ inputs.source_repository || github.repository }}
           ref: main
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
