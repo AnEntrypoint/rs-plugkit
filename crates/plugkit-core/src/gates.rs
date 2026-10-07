@@ -644,7 +644,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                 log_deviation("synthetic-test-file", &p);
                 if effective_severity_is_deny("synthetic-test-file") {
                     return GateVerdict::deny(format!(
-                        "synthetic-test-file: `{}` is a standing test file, and this project's policy.deviation_severity promotes this kind to deny. Doctrine is a live exec_js/browser witness run THIS turn, not a test case deferred to a later run.",
+                        "synthetic-test-file: `{}` is a standing test file, and this project's policy.deviation_severity promotes this kind to deny. Doctrine is a live exec_js witness run THIS turn, not a test case deferred to a later run.",
                         p
                     ));
                 }

@@ -16,9 +16,8 @@ is also retired and archived; this crate has never depended on it.)
 `plugkit-core` exposes a single wasm entry point that agentplug-runner calls
 per spool dispatch. The guest routes shared capabilities (`host_plugin_call`,
 `host_vec_embed`) to sibling wasm plugins (`bert`, `libsql`, `treesitter`)
-that agentplug-runner loads alongside it; browser automation and background
-task management are native in `agentplug-host`, not implemented in this
-crate at all.
+that agentplug-runner loads alongside it; background task management is
+native in `agentplug-host`, not implemented in this crate at all.
 
 State lives on disk under a project's `.gm/` directory: `prd.yml`,
 `mutables.yml`, `exec-spool/{in,out}/`, `gm.db`, `disciplines/<ns>/`,
