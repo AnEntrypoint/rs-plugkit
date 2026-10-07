@@ -256,7 +256,7 @@ git-tracked source and a bounded `node_modules` walk), `kv`/`kv_get`/
 `codesearch`, `codeinsight` (symbol, call, import, complexity and duplicate queries; `callers`/`callees`/`impact` are aliases), `memorize`/`memorize-prune`, `health`, `filter`, the full git
 verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git_remote`,
 `git_add`, `git_commit`, `git_finalize`, `git_push`, `git_checkout`, `git_merge`, `git_cherry_pick`,
-`git_fetch`, `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`, `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
+`git_fetch`, `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`, `git_worktree`, `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
 GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
 `prd-status`, `mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
 `fsm-validate`, `fsm-propose-override`, `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/
@@ -307,6 +307,16 @@ automatically, so a caller does not need a separate CI-poll-then-marker-write
 round trip. On a non-green or unresolvable result, the response's
 `next_dispatch` field names `ci-status` so the caller can re-check once CI
 finishes.
+
+`git_worktree` accepts one action per dispatch:
+
+- `{"action":"list"}` returns structured `worktrees` from Git's NUL-delimited porcelain records.
+- `{"action":"add","path":"/absolute/checkout","ref":"HEAD","detach":true}` creates a linked checkout. `ref` defaults to `HEAD`; `detach` defaults to `true`. `detach:false` requires an explicit existing branch.
+- `{"action":"remove","path":"/absolute/checkout"}` removes a clean, unlocked linked checkout. The verb provides no force option; Git rejects dirty or locked worktrees.
+
+Unknown fields are refused for each action. Repository selectors and session fields retain the git-family contract. Relative paths resolve against the selected repository. Add and remove return the requested path; list returns Git's recorded paths.
+
+When enabling `extensions.worktreeConfig`, move a common `core.worktree` value into the primary repository's `config.worktree` before adding per-worktree configuration. Move `core.bare` there too if it is true. Keep the primary worktree value's path semantics unchanged. A common `core.worktree` under this extension applies to linked worktrees and can make `git rev-parse --show-toplevel` report an administrative gitdir. Verify that command in both primary and linked checkouts before dispatching further GM verbs. Per-worktree author configuration then uses `git config --worktree user.name` and `user.email`.
 
 `git_commit` consumes the whole index in a merge.
 The verb refuses `paths` or `files` or `add_all`.
