@@ -2936,27 +2936,37 @@ const TERM_SPLIT_METACHARACTERS: &[char] = &['|', '(', ')', '[', ']', '{', '}', 
 
 const TERM_TRIM_CHARS: &[char] = &['"', '\'', '`', ',', ';', ':', '<', '>', '(', ')', '[', ']', '{', '}'];
 
+fn carries_regex_metacharacter(pattern: &str) -> bool {
+    pattern.chars().any(|c| TERM_SPLIT_METACHARACTERS.contains(&c))
+}
+
 /// Split a whitespace-separated query into its terms.
 ///
 /// Returns an empty vec when the query should stay one matcher: a single term, more than
 /// MAX_QUERY_TERMS terms, or a regex carrying a metacharacter (so `yama|ptrace_scope` keeps
 /// working as one alternation instead of being chopped into `yama|ptrace_scope` fragments).
-fn carries_regex_metacharacter(pattern: &str) -> bool {
-    pattern.chars().any(|c| TERM_SPLIT_METACHARACTERS.contains(&c))
-}
-
-fn query_terms(pattern: &str, regex: bool) -> Vec<String> {
+///
+/// The second element names the pieces that never became terms because they are shorter than two
+/// characters. It is populated only when the split really happened, because a query that stays one
+/// matcher is matched verbatim and loses nothing. A caller who typed `-> :: ?` otherwise gets a
+/// confident answer about `->` and `::` with no way to see that `?` was never searched for, which
+/// is the same unfalsifiable zero as a dropped term.
+fn query_terms(pattern: &str, regex: bool) -> (Vec<String>, Vec<String>) {
     if regex && carries_regex_metacharacter(pattern) {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let mut out: Vec<String> = Vec::new();
+    let mut ignored: Vec<String> = Vec::new();
     for raw in pattern.split_whitespace() {
         let term = raw.trim_matches(|c| TERM_TRIM_CHARS.contains(&c));
-        if term.chars().count() < 2 { continue; }
+        if term.chars().count() < 2 {
+            if !term.is_empty() && !ignored.iter().any(|t| t == term) { ignored.push(term.to_string()); }
+            continue;
+        }
         if !out.iter().any(|t| t == term) { out.push(term.to_string()); }
-        if out.len() > MAX_QUERY_TERMS { return Vec::new(); }
+        if out.len() > MAX_QUERY_TERMS { return (Vec::new(), Vec::new()); }
     }
-    if out.len() < 2 { Vec::new() } else { out }
+    if out.len() < 2 { (Vec::new(), Vec::new()) } else { (out, ignored) }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3161,7 +3171,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut read_ms = 0u64;
     let mut prewarm_ms = 0u64;
 
-    let terms = query_terms(req.pattern, req.regex);
+    let (terms, terms_ignored) = query_terms(req.pattern, req.regex);
     let want_and = req.term_combination == Some("and");
     // A multi-word query is ONE phrase unless the caller asks for the loose union: ranking
     // "fn sys_wait4" by how many of its terms a line carries answers with every `fn` in the tree
@@ -3446,10 +3456,21 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         && universe.listing_complete
         && !glob_matched_no_files;
 
+    let match_count = match req.output {
+        ScanOutput::Matches => matches.len(),
+        ScanOutput::Compact => compact_lines.len(),
+        ScanOutput::Files | ScanOutput::Count => lines_with_matches,
+    };
+    // A zero is only trustworthy if the caller can see what was searched for and how much was
+    // actually read, so a zero carries the coverage fields whether or not verbose was asked for.
+    // Without them an `exhaustive: true` with no matches is unfalsifiable: "the text really is
+    // absent" and "the term was never looked for" render identically.
+    let zero_hits = match_count == 0;
+
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), json!(true));
     out.insert("mode".to_string(), json!(if req.regex { "regex" } else { "literal" }));
-    if req.verbose {
+    if req.verbose || zero_hits {
         if req.output != ScanOutput::Matches { out.insert("output".to_string(), json!(req.output.label())); }
         out.insert("pattern".to_string(), json!(req.pattern));
         out.insert("root".to_string(), json!(crate::scan_universe::absolute_root_for_message(root)));
@@ -3466,10 +3487,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             out.insert("files_without_comment_syntax".to_string(), json!(files_without_comment_syntax));
         }
     }
-    if has_glob_filter && (req.verbose || glob_matched_no_files) { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
+    if has_glob_filter && (req.verbose || zero_hits || glob_matched_no_files) { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
     let file_source = universe.source.label();
-    if req.verbose || file_source != "git" {
+    if req.verbose || zero_hits || file_source != "git" {
         out.insert("file_source".to_string(), json!(file_source));
         out.insert("file_source_detail".to_string(), json!(universe.source.detail()));
     }
@@ -3542,11 +3563,12 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             "the query was matched as ONE phrase: a line must contain it verbatim, spaces included -- pass combine:\"or\" to split it into terms and rank by how many a line carries, or combine:\"and\" to require all of them on one line"
         ));
     }
-    let match_count = match req.output {
-        ScanOutput::Matches => matches.len(),
-        ScanOutput::Compact => compact_lines.len(),
-        ScanOutput::Files | ScanOutput::Count => lines_with_matches,
-    };
+    if multi && !terms_ignored.is_empty() {
+        out.insert("terms_ignored".to_string(), json!(terms_ignored));
+        out.insert("terms_ignored_note".to_string(), json!(
+            "these pieces of the query are shorter than 2 characters, so they never became terms and were NOT matched -- the \"terms\" block above is what this reply actually searched for; pass combine:\"phrase\" to match the whole query verbatim, punctuation and short pieces included"
+        ));
+    }
     if match_count == 0 {
         let mut hint = if multi {
             let mut detail: Vec<String> = Vec::new();
@@ -3579,7 +3601,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 req.pattern
             )
         } else {
-            format!("no line matched \"{}\" in {} files scanned", req.pattern, files_scanned)
+            format!(
+                "no line matched \"{}\" in {} files scanned: the pattern was matched verbatim as a substring, every character of it, punctuation included -- it was never tokenized, so this zero means the text is absent from those files",
+                req.pattern, files_scanned
+            )
         };
         hint.truncate(HINT_MAX_CHARS);
         out.insert("hint".to_string(), json!(hint));
@@ -3612,6 +3637,12 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("count".to_string(), json!(format!(
             "{lines_with_matches} lines, {occurrence_count} occurrences, {files_with_matches} files of {files_scanned} scanned"
         )));
+        if zero_hits {
+            out.insert("files_scanned".to_string(), json!(files_scanned));
+            out.insert("files_listed".to_string(), json!(files.len()));
+            out.insert("files_with_matches".to_string(), json!(files_with_matches));
+            out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
+        }
     }
     out.insert("exhaustive".to_string(), json!(exhaustive));
     if files_truncated {
@@ -3632,7 +3663,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("files_skipped_too_large".to_string(), json!(files_skipped_too_large));
         out.insert("max_file_bytes".to_string(), json!(LITERAL_SCAN_MAX_FILE_BYTES));
     }
-    if req.verbose && files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
+    if (req.verbose || zero_hits) && files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
     if files_skipped_binary > 0 { out.insert("files_skipped_binary".to_string(), json!(files_skipped_binary)); }
     if files_with_nul_scanned > 0 { out.insert("files_with_nul_scanned".to_string(), json!(files_with_nul_scanned)); }
     if files_unreadable > 0 {
