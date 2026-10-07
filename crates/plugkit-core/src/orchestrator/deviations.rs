@@ -146,6 +146,11 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
         Severity::Log,
     ),
     (
+        "push-transient-remote-rejection",
+        "`git_push` was rejected by the remote with a server-side 5xx (Internal Server Error / Service Unavailable) after its transient-retry budget was spent -- the local ref did not diverge, so git_pull reports 'Already up to date' and cannot help; this is a remote-side outage",
+        Severity::Log,
+    ),
+    (
         "push-remote-outpaces",
         "`git_push` found the remote ahead after its rebase-retry budget was spent -- another writer is pushing to the same branch concurrently",
         Severity::Log,
