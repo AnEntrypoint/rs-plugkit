@@ -2674,7 +2674,7 @@ pub fn search_filenames_at(pattern: &str, k: usize, cfg: &crate::ragconfig::RagC
         crate::scan_universe::TargetOrigin::ProjectDefault
     };
     let file_cap = cfg.index.digest_max_files.max(20000).min(LITERAL_SCAN_MAX_FILES).max(1);
-    let universe = match crate::scan_universe::list_scan_universe(root, &[], file_cap.saturating_add(1), &cfg.index, origin, false) {
+    let universe = match crate::scan_universe::list_scan_universe(root, &[], file_cap.saturating_add(1), &cfg.index, origin, false, false) {
         Ok(e) => e,
         Err(e) => return json!({ "ok": false, "error": e, "mode": "filename" }),
     };
@@ -2766,6 +2766,7 @@ impl ScanOutput {
 }
 
 pub const SCAN_OUTPUT_NAMES: &str = "\"matches\" (default, one object per match), \"compact\" (path:line: trimmed text), \"files\" (matching paths only), \"count\" (totals and the busiest files)";
+pub const NO_IGNORE_NOTE: &str = "this scan did not apply .gitignore/.codesearchignore: tracked, untracked and ignored files were all listed and scanned -- .git is not a worktree entry, so it stays out either way";
 pub const DEFAULT_REPLY_MAX_CHARS: usize = 24_000;
 pub const MAX_REPLY_MAX_CHARS: usize = 400_000;
 const COMPACT_TEXT_CHARS: usize = 160;
@@ -2806,6 +2807,11 @@ pub struct LiteralScan<'a> {
     /// Re-read rather than reuse: skip `git ls-files` for a directory walk of the target, and
     /// serve every file from `host_read` instead of the mtime-keyed content cache.
     pub refresh: bool,
+    /// Opt in to scanning files the project's .gitignore/.codesearchignore would otherwise hide.
+    /// The scan universe stops consulting those files, so ignored trees -- build output, vendored
+    /// dependencies, scratch scripts the project never committed -- are listed and scanned like any
+    /// other file. .git is never a worktree entry, so it stays out either way.
+    pub no_ignore: bool,
     pub output: ScanOutput,
     pub list_limit: Option<usize>,
     pub max_chars: usize,
@@ -3154,7 +3160,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let listing_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
     };
@@ -3490,7 +3496,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     if has_glob_filter && (req.verbose || zero_hits || glob_matched_no_files) { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
     let file_source = universe.source.label();
-    if req.verbose || zero_hits || file_source != "git" {
+    if req.verbose || zero_hits || file_source != "git" || req.no_ignore {
         out.insert("file_source".to_string(), json!(file_source));
         out.insert("file_source_detail".to_string(), json!(universe.source.detail()));
     }
@@ -3499,6 +3505,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("refreshed_note".to_string(), json!(
             "this scan re-read from disk: git ls-files was skipped for a directory walk and the mtime-keyed content cache was bypassed, so edits and untracked files are visible"
         ));
+    }
+    if req.no_ignore {
+        out.insert("no_ignore".to_string(), json!(true));
+        out.insert("no_ignore_note".to_string(), json!(NO_IGNORE_NOTE));
     }
     if !universe.listing_complete {
         out.insert("listing_incomplete".to_string(), json!(true));
@@ -3758,6 +3768,8 @@ pub struct CommentScan<'a> {
     pub max_files: usize,
     pub context: usize,
     pub refresh: bool,
+    /// Opt in to scanning gitignored files; see `LiteralScan::no_ignore`.
+    pub no_ignore: bool,
 }
 
 const COMMENT_TEXT_MAX_BYTES: usize = 2000;
@@ -4104,7 +4116,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     }
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
     };
@@ -4217,6 +4229,10 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         out.insert("refreshed_note".to_string(), json!(
             "this scan re-read from disk: git ls-files was skipped for a directory walk and the mtime-keyed content cache was bypassed, so edits and untracked files are visible"
         ));
+    }
+    if req.no_ignore {
+        out.insert("no_ignore".to_string(), json!(true));
+        out.insert("no_ignore_note".to_string(), json!(NO_IGNORE_NOTE));
     }
     if !universe.listing_complete {
         out.insert("listing_incomplete".to_string(), json!(true));
