@@ -5,6 +5,9 @@ use super::host_abi::{
     host_oxi_exec, host_read, pack, plugin_call as call_plugin, read_str, unpack_to_string,
     unpack_to_value,
 };
+use crate::commit_scope::{
+    blanket_stage_refusal, pathspec_covers_path, unrequested_stage_refusal,
+};
 use crate::git_index_lock::resolved_note;
 use crate::orchestrator::yaml_util::base64_decode;
 use serde_json::{json, Value};
@@ -7139,6 +7142,55 @@ fn bundle_prd_commit_comments(cwd: Option<&str>, message: &str) -> String {
     out
 }
 
+fn nul_separated_git_paths(cwd: Option<&str>, args: &str) -> Vec<String> {
+    let out = exec_git_in(cwd, args);
+    let mut paths: Vec<String> = Vec::new();
+    for entry in out.split('\0') {
+        if entry.is_empty() || paths.iter().any(|p| p == entry) {
+            continue;
+        }
+        paths.push(entry.to_string());
+    }
+    paths
+}
+
+const PRD_STATE_PATHSPEC: &str = ".gm/prd.yml";
+
+fn staged_paths_now(cwd: Option<&str>) -> Vec<String> {
+    nul_separated_git_paths(cwd, "diff --cached --name-only -z")
+}
+
+fn blanket_stage_would_take(cwd: Option<&str>) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for args in [
+        "diff --cached --name-only -z",
+        "diff --name-only -z",
+        "ls-files --others --exclude-standard -z",
+    ] {
+        for entry in nul_separated_git_paths(cwd, args) {
+            if !paths.contains(&entry) {
+                paths.push(entry);
+            }
+        }
+    }
+    paths.sort();
+    paths
+}
+
+fn staged_outside_requested(
+    cwd: Option<&str>,
+    before: &[String],
+    requested: &[String],
+) -> Vec<String> {
+    staged_paths_now(cwd)
+        .into_iter()
+        .filter(|path| {
+            !before.iter().any(|b| b == path)
+                && !requested.iter().any(|r| pathspec_covers_path(r, path))
+        })
+        .collect()
+}
+
 fn git_commit(body: &Value) -> u64 {
     git_async_entry("git_commit", body, |body, plan| {
         let cwd = body_cwd(body);
@@ -7204,7 +7256,7 @@ fn git_commit(body: &Value) -> u64 {
             .get("allow_whole_index")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let staged_before = if add_all || !paths.is_empty() {
+        let staged_before = if add_all {
             Vec::new()
         } else {
             let stdout = git_step_replayed_by_call_order(
@@ -7222,6 +7274,15 @@ fn git_commit(body: &Value) -> u64 {
                 .map(String::from)
                 .collect()
         };
+        if !add_all && paths.is_empty() && !allow_whole_index {
+            let sweep = blanket_stage_would_take(cwd);
+            if !sweep.is_empty() {
+                return Ok(err_json(
+                    "git_commit",
+                    blanket_stage_refusal("git_commit", &sweep),
+                ));
+            }
+        }
         let head_before_probe = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
         let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message, &paths, add_all);
         if let Some(prior) = git_commit_dedup_lookup(&dedup_key, cwd) {
@@ -7311,6 +7372,15 @@ fn git_commit(body: &Value) -> u64 {
             };
             let stage = git_step_replayed_by_call_order(plan, &as_argv(&stage_argv), cwd)?;
             write_steps.push(stage.clone());
+            if !add_all && !paths.is_empty() {
+                let extra = staged_outside_requested(cwd, &staged_before, &paths);
+                if !extra.is_empty() {
+                    return Ok(err_json(
+                        "git_commit",
+                        unrequested_stage_refusal("git_commit", &paths, &extra),
+                    ));
+                }
+            }
             stage_stderr = stage.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
             force_added_ignored_paths = ignored;
         }
@@ -7399,7 +7469,7 @@ fn git_commit(body: &Value) -> u64 {
         if !scan.waived.is_empty() {
             payload["dangling_waived"] = json!(scan.waived);
         }
-        if !allow_whole_index && !staged_before.is_empty() {
+        if !allow_whole_index && !add_all && paths.is_empty() && !staged_before.is_empty() {
             payload["whole_index_commit"] = json!(true);
             payload["staged_count"] = json!(staged_before.len());
             payload["staged_paths"] = json!(staged_before);
@@ -7407,6 +7477,10 @@ fn git_commit(body: &Value) -> u64 {
                 "this commit took the whole index ({} path(s)) because no paths were given; pass paths to scope it or allow_whole_index: true to accept it explicitly",
                 staged_before.len()
             ));
+        }
+        if allow_whole_index && paths.is_empty() {
+            payload["blanket_opt_in"] = json!("allow_whole_index");
+            payload["swept_paths"] = json!(blanket_stage_would_take(cwd));
         }
         let step_refs: Vec<&Value> = write_steps.iter().collect();
         Ok(ok(
@@ -7564,15 +7638,20 @@ fn git_finalize(body: &Value) -> u64 {
         .get("allow_whole_index")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let staged_before: Vec<String> = if scoped {
-        Vec::new()
-    } else {
-        exec_git_in(cwd_ref, "diff --cached --name-only -z")
-            .split('\0')
-            .filter(|e| !e.is_empty())
-            .map(String::from)
-            .collect()
-    };
+    let staged_before: Vec<String> = exec_git_in(cwd_ref, "diff --cached --name-only -z")
+        .split('\0')
+        .filter(|e| !e.is_empty())
+        .map(String::from)
+        .collect();
+    if !scoped && !allow_whole_index {
+        let sweep = blanket_stage_would_take(cwd_ref);
+        if !sweep.is_empty() {
+            return err_json(
+                "git_finalize",
+                blanket_stage_refusal("git_finalize", &sweep),
+            );
+        }
+    }
     let dirty = match checked_git_porcelain_scoped("git_finalize", cwd_ref, &paths) {
         Ok(porcelain) => !porcelain.trim().is_empty(),
         Err(refusal) => return refusal,
@@ -7620,6 +7699,15 @@ fn git_finalize(body: &Value) -> u64 {
             .trim()
             .to_string();
         write_steps.push(stage.clone());
+        if scoped {
+            let extra = staged_outside_requested(cwd_ref, &staged_before, &paths);
+            if !extra.is_empty() {
+                return err_json(
+                    "git_finalize",
+                    unrequested_stage_refusal("git_finalize", &paths, &extra),
+                );
+            }
+        }
         if stage_code != 0 {
             return err_json(
                 "git_finalize",
@@ -7708,7 +7796,24 @@ fn git_finalize(body: &Value) -> u64 {
             };
             let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
             let bundled_summary = bundled_message.lines().next().unwrap_or("").to_string();
-            let flush_stage = git_call_argv(&as_argv(&git_stage_argv(&[], cwd_ref)), cwd_ref);
+            let prd_abs = format!(
+                "{}/{}",
+                exec_git_in(cwd_ref, "rev-parse --show-toplevel").trim(),
+                PRD_STATE_PATHSPEC
+            );
+            let flush_paths: Vec<String> = if crate::pkfs::exists(&prd_abs) {
+                vec![PRD_STATE_PATHSPEC.to_string()]
+            } else {
+                Vec::new()
+            };
+            let flush_stage = if flush_paths.is_empty() {
+                json!({ "exit_code": 0, "stdout": "", "stderr": "" })
+            } else {
+                git_call_argv(
+                    &as_argv(&git_stage_argv_forced(&flush_paths, cwd_ref)),
+                    cwd_ref,
+                )
+            };
             write_steps.push(flush_stage.clone());
             let flush_code = flush_stage.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
             if flush_code != 0 {
@@ -7960,7 +8065,7 @@ fn git_finalize(body: &Value) -> u64 {
     if !dangling_waived.is_empty() {
         finalize_payload["dangling_waived"] = json!(dangling_waived);
     }
-    if !allow_whole_index && !staged_before.is_empty() {
+    if !allow_whole_index && !scoped && !staged_before.is_empty() {
         finalize_payload["whole_index_commit"] = json!(true);
         finalize_payload["staged_count"] = json!(staged_before.len());
         finalize_payload["staged_paths"] = json!(staged_before);
@@ -7968,6 +8073,10 @@ fn git_finalize(body: &Value) -> u64 {
             "this commit took the whole index ({} path(s)) because no paths were given; pass paths to scope it or allow_whole_index: true to accept it explicitly",
             staged_before.len()
         ));
+    }
+    if allow_whole_index && !scoped {
+        finalize_payload["blanket_opt_in"] = json!("allow_whole_index");
+        finalize_payload["swept_paths"] = json!(files_in_commit(cwd_ref));
     }
     let step_refs: Vec<&Value> = write_steps.iter().collect();
     ok(

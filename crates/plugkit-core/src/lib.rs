@@ -4,6 +4,8 @@ pub mod hash;
 
 pub mod git_index_lock;
 
+pub mod commit_scope;
+
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_dispatch;
 
