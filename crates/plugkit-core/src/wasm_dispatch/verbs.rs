@@ -8783,16 +8783,6 @@ fn git_stash_list(body: &Value) -> u64 {
     )
 }
 
-const GIT_INIT_GITIGNORE_ENTRY: &str = ".gm/exec-spool/";
-const GIT_INIT_GITIGNORE_COVERING_ENTRIES: &[&str] = &[
-    ".gm",
-    ".gm/",
-    ".gm/*",
-    ".gm/exec-spool",
-    ".gm/exec-spool/",
-    ".gm/exec-spool/*",
-];
-
 fn git_init_target(body: &Value) -> Result<Option<String>, String> {
     let base = body_cwd(body).map(|c| c.trim()).filter(|c| !c.is_empty());
     let requested = body
@@ -8852,25 +8842,10 @@ fn git_init_gitignore(root: &str) -> &'static str {
     if !crate::wasm_dispatch::host_allow_root(root) {
         return "unwritable";
     }
-    let file = format!("{}/.gitignore", root.trim_end_matches('/'));
-    let existing = super::host_abi::host_read(&file).unwrap_or_default();
-    let covered = existing
-        .lines()
-        .map(|l| l.trim().trim_start_matches('/'))
-        .any(|l| GIT_INIT_GITIGNORE_COVERING_ENTRIES.contains(&l));
-    if covered {
-        return "present";
-    }
-    let separator = if existing.is_empty() || existing.ends_with('\n') {
-        ""
-    } else {
-        "\n"
-    };
-    let updated = format!("{}{}{}\n", existing, separator, GIT_INIT_GITIGNORE_ENTRY);
-    if super::host_abi::host_write(&file, &updated) {
-        "added"
-    } else {
-        "unwritable"
+    match crate::gitignore::ensure_managed_gitignore(root) {
+        Ok(true) => "added",
+        Ok(false) => "present",
+        Err(_) => "unwritable",
     }
 }
 
