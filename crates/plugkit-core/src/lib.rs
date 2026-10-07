@@ -6,6 +6,8 @@ pub mod git_index_lock;
 
 pub mod commit_scope;
 
+pub mod git_worktree_argv;
+
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_dispatch;
 
