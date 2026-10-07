@@ -1657,7 +1657,7 @@ const DUAL_PHRASE_SCAN_PER_FILE_MATCHES: usize = 8;
 const DUAL_PHRASE_SCAN_COLLECT_MATCHES: usize =
     DUAL_PHRASE_SCAN_MAX_MATCHES * DUAL_PHRASE_SCAN_PER_FILE_MATCHES;
 
-fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig) -> (Vec<Value>, u64, bool) {
+fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig, no_ignore: bool) -> (Vec<Value>, u64, bool) {
     if rs_search::tokenize::tokenize(query).len() < 2 { return (Vec::new(), 0, false); }
     let scan = crate::code_index::LiteralScan {
         pattern: query,
@@ -1676,6 +1676,7 @@ fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::Rag
         term_combination: Some("phrase"),
         budget_ms: Some(DUAL_PHRASE_SCAN_BUDGET_MS),
         refresh: false,
+        no_ignore,
         output: crate::code_index::ScanOutput::Matches,
         list_limit: None,
         max_chars: usize::MAX,
@@ -1909,7 +1910,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         .collect();
     let commits = crate::code_index::git_commit_rank_at(root, query, 10);
     let commits_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, Some(root), cfg);
+    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, Some(root), cfg, scan_no_ignore_requested(body));
     let phrase_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let vector_reserve_ms = if prior_stage_ms.get("index_pass").is_some() {
         VECTOR_CHANNEL_COLD_RESERVE_MS
@@ -1995,6 +1996,7 @@ const CODESEARCH_MODES: &[&str] =&["dual", "literal", "regex", "filename"];
 
 const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "query", "mode", "path", "glob", "path_glob", "exclude", "exclude_glob", "exclude_globs", "case_insensitive", "whole_word", "comments_only",
+    "no_ignore", "include_ignored",
     "k", "max_results", "maxResults", "limit", "head_limit", "max_matches", "max_files", "output", "max_chars", "verbose", "docs", "timeout_ms",
     // `resolve_scan_target` reads these, and "root" is the escape hatch the out-of-root error tells
     // the caller to use, so refusing it here would leave that advice unusable. "cwd" is the
@@ -2215,6 +2217,7 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
         max_matches_per_file: None,
         context: 0,
         refresh: scan_refresh_requested(body),
+        no_ignore: scan_no_ignore_requested(body),
         output,
         list_limit,
         max_chars,
@@ -2246,6 +2249,7 @@ const GREP_ACCEPTED_FIELDS: &[&str] = &[
     "output_mode", "outputMode", "detail", "columns",
     "regex", "fixed_strings", "fixedStrings", "case_insensitive", "ignore_case", "whole_word",
     "context", "max_files",
+    "no_ignore", "include_ignored",
     "max_results", "maxResults", "limit", "max_matches", "k",
     "refresh", "no_cache", "force_disk", "file_source",
 ];
@@ -2287,6 +2291,10 @@ grep (alias \"rg\") is an exhaustive literal/regex scan of the tree. Every reply
                                                      and bypass the mtime-keyed content cache, so uncommitted
                                                      edits and untracked files are visible. \"file_source\":\"disk\"
                                                      and \"no_cache\":true are aliases.
+  {\"no_ignore\":true}                                 include files .gitignore would hide: build output, vendored
+                                                     trees and scratch scripts the project never committed are
+                                                     listed and scanned like any other file. \"include_ignored\"
+                                                     is an alias. .git is never listed either way.
   {\"mode\":\"pattern\"}                               scan for \"pattern\" (the default; naming it explicitly is
                                                      always accepted)
   {\"mode\":\"comments\"}                              find comment spans instead of a pattern (no \"pattern\" needed)
@@ -2326,7 +2334,11 @@ codesearch (aliases \"code_search\", \"search\") is the canonical search verb.
                                        \"or\" (ranked union of any term)
   {\"case_insensitive\":true, \"whole_word\":true}
   {\"refresh\":true}                    re-read from disk for the exhaustive modes: walk instead of
-                                       `git ls-files --cached` and bypass the content cache";
+                                       `git ls-files --cached` and bypass the content cache
+  {\"no_ignore\":true}                  include files .gitignore would hide, in every mode: build output,
+                                       vendored trees and scratch scripts the project never committed
+                                       are listed and scanned like any other file. \"include_ignored\"
+                                       is an alias. .git is never listed either way.";
 
 const FS_READ_HELP: &str = "\
 fs_read returns a file's contents.
@@ -2396,6 +2408,13 @@ fn scan_refresh_requested(body: &Value) -> bool {
     body.get("file_source").and_then(|v| v.as_str())
         .map(|s| s.eq_ignore_ascii_case("disk") || s.eq_ignore_ascii_case("walk"))
         .unwrap_or(false)
+}
+
+/// "no_ignore" is how ripgrep spells it; "include_ignored" says the same thing in the caller's own
+/// words. Both are opt-in, so neither changes a scan that does not name one.
+fn scan_no_ignore_requested(body: &Value) -> bool {
+    body.get("no_ignore").and_then(|v| v.as_bool()).unwrap_or(false)
+        || body.get("include_ignored").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 fn scan_scope_hint(scan_cap: u32) -> String {
@@ -2676,6 +2695,7 @@ fn grep(body: &Value) -> u64 {
         budget_ms: None,
         max_matches_per_file: None,
         refresh: scan_refresh_requested(body),
+        no_ignore: scan_no_ignore_requested(body),
         output: crate::code_index::ScanOutput::Matches,
         list_limit: None,
         max_chars: usize::MAX,
@@ -2777,6 +2797,7 @@ fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
         context,
         refresh: scan_refresh_requested(body),
+        no_ignore: scan_no_ignore_requested(body),
     };
     let scanned = crate::code_index::scan_comments(&scan, cfg);
     if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
@@ -2820,6 +2841,7 @@ fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: Option<&str>
         max_matches_per_file: None,
         context: 0,
         refresh: scan_refresh_requested(body),
+        no_ignore: false,
         output: crate::code_index::ScanOutput::Compact,
         list_limit: None,
         max_chars: usize::MAX,
@@ -3036,7 +3058,7 @@ fn codesearch(body: &Value) -> u64 {
     let commits: Vec<Value> = commit_ranked.iter()
         .map(|(hash, message, score)| json!({ "hash": hash, "message": message, "score": score }))
         .collect();
-    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, None, &cfg);
+    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, None, &cfg, scan_no_ignore_requested(body));
     let build_hit = |corpus: &mut crate::code_index::FusionCorpus, key: &str, score: Option<f64>, fallback_text: Option<&str>| -> Value {
         let text = corpus.text_for_key(key)
             .or_else(|| fallback_text.map(String::from))
@@ -4763,9 +4785,19 @@ fn git_commit(body: &Value) -> u64 {
         if !scan.offenders.is_empty() {
             return Ok(err_json("git_commit", super::dangling_refs::refusal_detail("git_commit", &scan)));
         }
+        let mut stage_stderr = String::new();
+        let mut force_added_ignored_paths: Vec<String> = Vec::new();
         if add_all || !paths.is_empty() {
             let staged_paths: &[String] = if add_all { &[] } else { &paths };
-            let _ = git_step_replayed_by_call_order(plan, &as_argv(&git_stage_argv(staged_paths, cwd)), cwd)?;
+            let ignored = ignored_requested_paths(plan, cwd, staged_paths)?;
+            let stage_argv = if ignored.is_empty() {
+                git_stage_argv(staged_paths, cwd)
+            } else {
+                git_stage_argv_forced(staged_paths, cwd)
+            };
+            let stage = git_step_replayed_by_call_order(plan, &as_argv(&stage_argv), cwd)?;
+            stage_stderr = stage.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            force_added_ignored_paths = ignored;
         }
         let scoped_paths: &[String] = if add_all { &[] } else { &paths };
         if !scoped_paths.is_empty() {
@@ -4775,8 +4807,12 @@ fn git_commit(body: &Value) -> u64 {
             check.extend(scoped_paths.iter().cloned());
             let r = git_step_replayed_by_call_order(plan, &as_argv(&check), cwd)?;
             if r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().is_empty() {
+                let unmatched = pathspecs_matching_nothing(cwd, scoped_paths);
+                if !unmatched.is_empty() {
+                    return Ok(err_json("git_commit", pathspec_matches_nothing_refusal("git_commit", scoped_paths, &unmatched)));
+                }
                 return Ok(err_json("git_commit", json!({
-                    "error": format!("no staged content for the requested pathspec(s): {}", scoped_paths.join(", ")),
+                    "error": format!("no staged content for the requested pathspec(s): {} -- git add reported: {}", scoped_paths.join(", "), if stage_stderr.is_empty() { "no matching file".to_string() } else { stage_stderr }),
                     "error_code": ERR_CODE_INVALID_ARGS,
                     "requested_paths": scoped_paths,
                 })));
@@ -4827,6 +4863,9 @@ fn git_commit(body: &Value) -> u64 {
         emit_event("git_commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary }));
         record_commit_in_liqology(&summary, &head_after);
         let mut payload = json!({ "committed": true, "sha": sha, "summary": summary });
+        if !force_added_ignored_paths.is_empty() {
+            payload["force_added_ignored_paths"] = json!(force_added_ignored_paths);
+        }
         if !scan.waived.is_empty() {
             payload["dangling_waived"] = json!(scan.waived);
         }
@@ -4961,8 +5000,18 @@ fn git_finalize(body: &Value) -> u64 {
             return err_json("git_finalize", super::dangling_refs::refusal_detail("git_finalize", &scan));
         }
         dangling_waived = scan.waived;
-        let _ = git_call_argv(&as_argv(&git_stage_argv(&paths, cwd_ref)), cwd_ref);
+        let ignored = ignored_requested_paths_now(cwd_ref, &paths);
+        let stage_argv = if ignored.is_empty() {
+            git_stage_argv(&paths, cwd_ref)
+        } else {
+            git_stage_argv_forced(&paths, cwd_ref)
+        };
+        let _ = git_call_argv(&as_argv(&stage_argv), cwd_ref);
         if scoped && paths_staged_nothing(cwd_ref, &paths) {
+            let unmatched = pathspecs_matching_nothing(cwd_ref, &paths);
+            if !unmatched.is_empty() {
+                return err_json("git_finalize", pathspec_matches_nothing_refusal("git_finalize", &paths, &unmatched));
+            }
             return err_json("git_finalize", json!({
                 "error": format!("no staged content for the requested pathspec(s): {}", paths.join(", ")),
                 "error_code": ERR_CODE_INVALID_ARGS,
@@ -5004,7 +5053,11 @@ fn git_finalize(body: &Value) -> u64 {
             summary = message.lines().next().unwrap_or("").to_string();
             emit_event("git.commit", json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary, "repo": repo }));
             record_commit_in_liqology(&summary, &head_after);
-            steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
+            let mut commit_step = json!({ "step": "commit", "sha": sha, "summary": summary });
+            if !ignored.is_empty() {
+                commit_step["force_added_ignored_paths"] = json!(ignored);
+            }
+            steps.push(commit_step);
         }
     } else if !scoped {
         let pending_notes = crate::orchestrator::prd::peek_pending_commit_comments(cwd_ref);
@@ -6331,6 +6384,39 @@ fn git_stage_argv(paths: &[String], cwd: Option<&str>) -> Vec<String> {
     let mut argv: Vec<String> = vec!["add".to_string(), "--".to_string()];
     argv.extend(git_pathspec_scope(paths, cwd));
     argv
+}
+
+fn git_stage_argv_forced(paths: &[String], cwd: Option<&str>) -> Vec<String> {
+    let mut argv: Vec<String> = vec!["add".to_string(), "--force".to_string(), "--".to_string()];
+    argv.extend(git_pathspec_scope(paths, cwd));
+    argv
+}
+
+fn parse_ignore_list(stdout: &str) -> Vec<String> {
+    stdout.lines().map(|line| line.trim()).filter(|line| !line.is_empty()).map(String::from).collect()
+}
+
+fn ignored_requested_paths(
+    plan: &mut GitPendingTokenReplayPlan,
+    cwd: Option<&str>,
+    paths: &[String],
+) -> Result<Vec<String>, u64> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut argv: Vec<String> = vec!["check-ignore".to_string(), "--".to_string()];
+    argv.extend(paths.iter().cloned());
+    let r = git_step_replayed_by_call_order(plan, &as_argv(&argv), cwd)?;
+    Ok(parse_ignore_list(r.get("stdout").and_then(|v| v.as_str()).unwrap_or("")))
+}
+
+fn ignored_requested_paths_now(cwd: Option<&str>, paths: &[String]) -> Vec<String> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let mut argv: Vec<String> = vec!["check-ignore".to_string(), "--".to_string()];
+    argv.extend(paths.iter().cloned());
+    parse_ignore_list(git_call_argv(&as_argv(&argv), cwd).get("stdout").and_then(|v| v.as_str()).unwrap_or(""))
 }
 
 fn git_porcelain_argv(paths: &[String], cwd: Option<&str>) -> Vec<String> {

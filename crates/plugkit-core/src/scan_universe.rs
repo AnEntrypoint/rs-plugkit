@@ -209,11 +209,15 @@ fn directory_is_gitignored(dir: &str) -> Result<bool, String> {
     }
 }
 
-fn git_worktree_files(dir: &str, nesting: usize) -> Result<(Vec<String>, bool), String> {
+/// `--exclude-standard` is the only thing keeping an ignored file out of the untracked listing, so
+/// dropping it is the whole of "no_ignore": tracked, untracked and ignored files all come back. .git
+/// is not a worktree entry, so it stays out either way.
+fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec<String>, bool), String> {
     let mut tracked = Vec::new();
     let mut untracked = Vec::new();
+    let others_mode: &[&str] = if no_ignore { &["--others"] } else { &["--others", "--exclude-standard"] };
     let mut complete = git_list_into(dir, &["--cached", "--recurse-submodules"], None, 0, &mut tracked)?;
-    complete &= git_list_into(dir, &["--others", "--exclude-standard"], None, 0, &mut untracked)?;
+    complete &= git_list_into(dir, others_mode, None, 0, &mut untracked)?;
     let mut files: Vec<String> = tracked.into_iter().map(|p| join_under(dir, &p)).collect();
     for entry in untracked {
         let Some(nested_repo) = entry.strip_suffix('/') else {
@@ -221,7 +225,7 @@ fn git_worktree_files(dir: &str, nesting: usize) -> Result<(Vec<String>, bool), 
             continue;
         };
         let nested_dir = join_under(dir, nested_repo);
-        match (nesting < NESTED_REPO_DEPTH_LIMIT).then(|| git_worktree_files(&nested_dir, nesting + 1)) {
+        match (nesting < NESTED_REPO_DEPTH_LIMIT).then(|| git_worktree_files(&nested_dir, nesting + 1, no_ignore)) {
             Some(Ok((nested_files, nested_complete))) => {
                 files.extend(nested_files);
                 complete &= nested_complete;
@@ -261,9 +265,11 @@ struct WalkPolicy {
 
 const DEPENDENCY_WALK_SKIPS: &str = "skipping only VCS, dependency-store, cache and tool directories (build-output directories such as dist/ are read)";
 
-fn walk_policy(cause: WalkCause, origin: TargetOrigin) -> WalkPolicy {
+const NO_IGNORE_WALK_NOTE: &str = "\"no_ignore\": true, so .gitignore/.codesearchignore rules were not applied";
+
+fn walk_policy(cause: WalkCause, origin: TargetOrigin, no_ignore: bool) -> WalkPolicy {
     let project = |reason: String| WalkPolicy { honour_gitignore: true, noise: NoiseDirs::ProjectNoiseList, reason };
-    match (cause, origin) {
+    let mut policy = match (cause, origin) {
         (WalkCause::GitListingFailed(e), _) => project(format!("git could not list the worktree, so it was walked directly ({e})")),
         (WalkCause::CallerForcedDisk, _) => project("the caller passed \"refresh\": true, so git ls-files was not consulted and the target was walked on disk".to_string()),
         (WalkCause::TargetGitignored, TargetOrigin::ProjectDefault) => project("the target is gitignored, so git lists nothing there and it was walked directly".to_string()),
@@ -278,7 +284,14 @@ fn walk_policy(cause: WalkCause, origin: TargetOrigin) -> WalkPolicy {
             noise: NoiseDirs::DependencyStoresVcsCachesOnly,
             reason: format!("the named target is not inside a git worktree ({e}); it was walked directly honouring its root's .gitignore, {DEPENDENCY_WALK_SKIPS}"),
         },
+    };
+    // "no_ignore" only ever widens a listing, so it is applied after the fact: every reason above
+    // keeps saying why the walk happened, and .gitignore simply stops being consulted.
+    if no_ignore && policy.honour_gitignore {
+        policy.honour_gitignore = false;
+        policy.reason = format!("{}; {NO_IGNORE_WALK_NOTE}", policy.reason);
     }
+    policy
 }
 
 struct RuleRecordingWalk<'a> {
@@ -335,10 +348,10 @@ pub fn absolute_root_for_message(root: &str) -> String {
     crate::pkfs::anchor(root).trim_end_matches("/.").to_string()
 }
 
-pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool) -> Result<ScanUniverse, String> {
-    let mut acc = list_scan_scope(root, scopes.first().copied(), max_files, cfg, origin, force_disk)?;
+pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool) -> Result<ScanUniverse, String> {
+    let mut acc = list_scan_scope(root, scopes.first().copied(), max_files, cfg, origin, force_disk, no_ignore)?;
     for scope in scopes.iter().skip(1) {
-        let next = list_scan_scope(root, Some(scope), max_files, cfg, origin, force_disk)?;
+        let next = list_scan_scope(root, Some(scope), max_files, cfg, origin, force_disk, no_ignore)?;
         acc.files.extend(next.files);
         acc.excluded.extend(next.excluded);
         acc.listing_complete &= next.listing_complete;
@@ -352,7 +365,7 @@ pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &I
     Ok(acc)
 }
 
-fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool) -> Result<ScanUniverse, String> {
+fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool) -> Result<ScanUniverse, String> {
     let rel = match scope {
         Some(s) => relative_scope(root, s)?,
         None => None,
@@ -382,7 +395,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         WalkCause::CallerForcedDisk
     } else {
         match directory_is_gitignored(&target) {
-            Ok(false) => match git_worktree_files(&target, 0) {
+            Ok(false) => match git_worktree_files(&target, 0, no_ignore) {
                 Ok((files, complete)) => {
                     let (files, pruned) = if named_scope { (files, Vec::new()) } else { prune_own_state(root, files) };
                     return Ok(universe(files, FileSource::Git, complete, pruned, None));
@@ -393,7 +406,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
             Err(e) => WalkCause::OutsideWorktree(e),
         }
     };
-    let policy = walk_policy(cause, origin);
+    let policy = walk_policy(cause, origin, no_ignore);
     let mut walk = RuleRecordingWalk {
         cfg,
         gitignore: if policy.honour_gitignore { load_repo_gitignore(root) } else { None },
@@ -415,7 +428,7 @@ pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> 
     let (base, scope) = if root.is_empty() || root == "." || absolute { (if root.is_empty() { "." } else { root }, None) } else { (".", Some(root)) };
     let project_node_modules = join_under(base, "node_modules/");
     let origin = if absolute { TargetOrigin::CallerNamed } else { TargetOrigin::ProjectDefault };
-    match list_scan_universe(base, &scope.into_iter().collect::<Vec<&str>>(), max_files, cfg, origin, false) {
+    match list_scan_universe(base, &scope.into_iter().collect::<Vec<&str>>(), max_files, cfg, origin, false, false) {
         Ok(u) => u.files.into_iter().filter(|p| !p.starts_with(&project_node_modules)).take(max_files).collect(),
         Err(_) => Vec::new(),
     }
