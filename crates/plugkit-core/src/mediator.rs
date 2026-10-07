@@ -7,7 +7,6 @@ pub enum Subsystem {
     Sql,
     Memory,
     Exec,
-    Browser,
     Orchestrator,
     Meta,
 }
@@ -20,7 +19,6 @@ impl Subsystem {
             Subsystem::Sql => "sql",
             Subsystem::Memory => "memory",
             Subsystem::Exec => "exec",
-            Subsystem::Browser => "browser",
             Subsystem::Orchestrator => "orchestrator",
             Subsystem::Meta => "meta",
         }
@@ -105,7 +103,6 @@ pub const EXEC_VERBS: &[&str] = &[
     "java",
     "deno",
 ];
-pub const BROWSER_VERBS: &[&str] = &["browser", "cdp"];
 pub const META_VERBS: &[&str] = &[
     "health",
     "config_resolve",
@@ -160,7 +157,6 @@ pub fn all_verbs_by_subsystem() -> Vec<(Subsystem, &'static [&'static str])> {
         (Subsystem::Sql, SQL_VERBS),
         (Subsystem::Memory, MEMORY_VERBS),
         (Subsystem::Exec, EXEC_VERBS),
-        (Subsystem::Browser, BROWSER_VERBS),
         (
             Subsystem::Orchestrator,
             crate::orchestrator::ORCHESTRATOR_VERBS,

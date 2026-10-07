@@ -479,7 +479,7 @@ fn reorientation_ts(session_id: Option<&str>) -> i64 {
 
 #[cfg(target_arch = "wasm32")]
 pub fn admit_dispatch(verb: &str) -> Admission {
-    if !matches!(verb, "codesearch" | "fetch" | "serp" | "browser" | "cdp" | "exec_js") { return Admission::Allow; }
+    if !matches!(verb, "codesearch" | "fetch" | "exec_js") { return Admission::Allow; }
     let Some(session_id) = crate::orchestrator::state::dispatch_session_id() else { return Admission::Allow; };
     let strategy = active_strategy(Some(&session_id));
     match veto_reason(verb, &strategy, super::state::now_ms() as i64, reorientation_ts(Some(&session_id))) {

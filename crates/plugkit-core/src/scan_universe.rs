@@ -584,6 +584,5 @@ mod tests {
             Some("gm_exec_spool")
         );
         assert_eq!(runtime_artifact_rule("packages/core/src/lib.rs"), None);
-        assert_eq!(runtime_artifact_rule(".gm/browser-config.json"), None);
     }
 }

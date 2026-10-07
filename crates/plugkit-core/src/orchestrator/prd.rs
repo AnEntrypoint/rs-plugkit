@@ -851,7 +851,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             "deviation_kind": "prd-resolve-no-witness",
             "deviation_severity": "deny",
             "prd_id": id_target,
-            "hint": "resolve requires non-empty witness_evidence (file:line | codesearch hit | exec snippet | browser page.evaluate result). A row cannot be marked completed without evidence the work is real - this gate exists because an agent under closure-pressure marked undone tasks completed with an absent witness. Body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\", \"commit_comment\": \"<optional one-line resolution note, bundled into the next commit message>\"}. Do the work, capture its witness, then resolve.",
+            "hint": "resolve requires non-empty witness_evidence (file:line | codesearch hit | exec snippet). A row cannot be marked completed without evidence the work is real - this gate exists because an agent under closure-pressure marked undone tasks completed with an absent witness. Body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\", \"commit_comment\": \"<optional one-line resolution note, bundled into the next commit message>\"}. Do the work, capture its witness, then resolve.",
         }).to_string();
         return (
             body,
@@ -922,7 +922,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                                         "deviation_severity": "deny",
                                         "prd_id": id_target,
                                         "duplicate_of": other_id,
-                                        "hint": "Identical witness text across structurally distinct PRD rows is the rubber-stamp tell -- generic phrasing like 'code written and tested' copy-pasted across multiple ids means the rows were marked completed without each one's own real, distinct evidence. Every row's witness_evidence must be specific to what THAT row actually did: a distinct file:line, a distinct exec_js/browser output, a distinct codesearch hit. If the rows genuinely share one piece of evidence (rare), that itself is a sign they should have been one row, not three -- re-scope via prd-add instead of resolving separately with copy-pasted text.",
+                                        "hint": "Identical witness text across structurally distinct PRD rows is the rubber-stamp tell -- generic phrasing like 'code written and tested' copy-pasted across multiple ids means the rows were marked completed without each one's own real, distinct evidence. Every row's witness_evidence must be specific to what THAT row actually did: a distinct file:line, a distinct exec_js output, a distinct codesearch hit. If the rows genuinely share one piece of evidence (rare), that itself is a sign they should have been one row, not three -- re-scope via prd-add instead of resolving separately with copy-pasted text.",
                                     }).to_string();
                                         return (body, format!("prd-resolve refused: duplicate witness_evidence for {}", id_target), 1);
                                     }
