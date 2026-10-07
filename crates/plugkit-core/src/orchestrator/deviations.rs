@@ -116,18 +116,8 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
         Severity::Log,
     ),
     (
-        "browser-witness-missing",
-        "a client-side file was edited this session but never witnessed in a browser dispatch -- disk-Read is necessary and insufficient, the live page is the authority",
-        Severity::Deny,
-    ),
-    (
-        "browser-witness-hash-mismatch",
-        "a client-side file was witnessed in the browser, then edited again -- the recorded witness hash no longer matches the file's current content",
-        Severity::Deny,
-    ),
-    (
         "synthetic-test-file",
-        "the working tree carries a standing test file (a `*.test.*`/`*.spec.*` path, or a `test/`/`__tests__/`/`spec/` directory) -- doctrine is live exec_js/browser witnesses, not framework legwork deferred to a later run",
+        "the working tree carries a standing test file (a `*.test.*`/`*.spec.*` path, or a `test/`/`__tests__/`/`spec/` directory) -- doctrine is live exec_js witnesses, not framework legwork deferred to a later run",
         Severity::Log,
     ),
     (

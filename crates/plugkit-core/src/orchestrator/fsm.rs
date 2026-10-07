@@ -193,14 +193,12 @@ fn default_pseudo_phases() -> Vec<(String, String)> {
     vec![
         ("ENTRY".to_string(), "entry".to_string()),
         ("ORCHESTRATOR".to_string(), "entry".to_string()),
-        ("BROWSER".to_string(), "browser".to_string()),
     ]
 }
 
 fn default_residual_checks_ordered_by_priority() -> Vec<String> {
     vec![
         "prd-open".to_string(),
-        "browser-open".to_string(),
         "tasks-running".to_string(),
         "dirty-tree".to_string(),
     ]
@@ -674,7 +672,7 @@ fn default_graph() -> Graph {
             Edge { from: "CONC".into(), to: "SEC".into(), gates: vec![] },
             Edge { from: "SEC".into(), to: "RES".into(), gates: vec!["no-secrets-in-diff".into()] },
             Edge { from: "RES".into(), to: "DECIDE".into(), gates: vec!["no-unchecked-panics-in-diff".into()] },
-            Edge { from: "DECIDE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into(), "worktree-clean".into(), "residual-scan-fired".into(), "ci-validated-fresh".into(), "browser-witness-coverage".into(), "app-loads-witnessed".into(), "submodules-clean".into(), "claim-audit-clean".into(), "no-hedge-language-in-diff".into(), "split-context-swept".into()] },
+            Edge { from: "DECIDE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into(), "worktree-clean".into(), "residual-scan-fired".into(), "ci-validated-fresh".into(), "submodules-clean".into(), "claim-audit-clean".into(), "no-hedge-language-in-diff".into(), "split-context-swept".into()] },
             Edge { from: "PROVE".into(), to: "SPECIFY".into(), gates: vec![] },
             Edge { from: "EMIT".into(), to: "SPECIFY".into(), gates: vec![] },
             Edge { from: "STATE".into(), to: "EMIT".into(), gates: vec![] },
@@ -731,22 +729,6 @@ fn default_graph() -> Graph {
                 message: "transition rejected: CI/CD validation not witnessed fresh -- .gm/exec-spool/.ci-validated missing, stale, or not matching current HEAD sha. Witness the pipeline green for the pushed HEAD, then fs_write .gm/exec-spool/.ci-validated with {\"head_sha\":\"<git rev-parse HEAD>\"} and re-attempt.".into(),
             },
             GateDef {
-                name: "browser-witness-coverage".into(),
-                predicate: Some("browser-witness-coverage".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: client-edit-no-witness -- one or more client-side files edited this session lack a matching browser-witness. Dispatch `browser` to page.evaluate the invariant each edit establishes, then re-attempt.".into(),
-            },
-            GateDef {
-                name: "app-loads-witnessed".into(),
-                predicate: Some("app-loads-witnessed".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: this project declares a browser entrypoint (.gm/browser-config.json present) but no same-turn `browser` dispatch recorded a healthy app-loads witness. Absence of file edits is never grounds to skip this -- a confirmation/audit turn asserting the app works is itself a claim, and that claim needs the same live witness a code-change turn needs. Dispatch `browser` against the real running app, confirm it loads with zero console/page errors, then re-attempt.".into(),
-            },
-            GateDef {
                 name: "claim-audit-clean".into(),
                 predicate: Some("claim-audit-clean".into()),
                 hook: None,
@@ -776,7 +758,7 @@ fn default_graph() -> Graph {
                 hook: None,
                 hook_mode: HookMode::PredicateOnly,
                 next_dispatch: None,
-                message: "transition rejected: standing test file(s) introduced in the working diff -- VERIFY doctrine forbids them; verification is a live exec_js/browser witness against real code, never a suite. Remove the file(s) and re-attempt with a live witness.".into(),
+                message: "transition rejected: standing test file(s) introduced in the working diff -- VERIFY doctrine forbids them; verification is a live exec_js witness against real code, never a suite. Remove the file(s) and re-attempt with a live witness.".into(),
             },
             GateDef {
                 name: "no-admit-deferral-markers".into(),

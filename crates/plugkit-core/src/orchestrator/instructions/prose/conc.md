@@ -24,7 +24,7 @@ Every sweep is witnessed live, same turn -- a pass that depends on the interleav
 
 **Contention.** No unbounded queue, no lock convoy, no retry storm: every wait has a bound, every retry a cap, every hot lock held for the shortest possible section. A path whose cost grows superlinearly with concurrent callers is a defect even when its measured mean is excellent -- bound the worst case, not the average.
 
-**Machine fit.** The common access pattern is the one the layout is optimized for; the common case is the fall-through, not the jump. Profile to locate (`exec_js opts.profile:true`, browser `profile`/`trace` prefixes), then eliminate by live measurement, never intuit.
+**Machine fit.** The common access pattern is the one the layout is optimized for; the common case is the fall-through, not the jump. Profile to locate (`exec_js opts.profile:true`), then eliminate by live measurement, never intuit.
 
 ## Discovery
 

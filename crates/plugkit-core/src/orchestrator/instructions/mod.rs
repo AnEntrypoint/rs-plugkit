@@ -1,4 +1,3 @@
-pub mod browser;
 pub mod conc;
 pub mod decide;
 pub mod emit;
@@ -206,7 +205,6 @@ pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
     match key {
         "emit" => emit::TEXT,
         "update_docs" => update_docs::TEXT,
-        "browser" => browser::TEXT,
         "specify" => specify::TEXT,
         "prove" => prove::TEXT,
         "state" => state::TEXT,
@@ -224,7 +222,6 @@ pub fn has_compiled_default_for_prose_key(key: &str) -> bool {
         key,
         "emit"
             | "update_docs"
-            | "browser"
             | "entry"
             | "entry-extended"
             | "specify"
@@ -857,7 +854,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let dream_rsi_replay = super::dream_rsi::automatic_replay(notify_session.as_deref());
     let config_changed = super::config_notify::drain_for_session(notify_session.as_deref());
     let running_tasks = super::task::live_running_tasks();
-    let open_browser_sessions = super::task::open_browser_sessions();
     let stuck_spool = super::task::stuck_spool();
     let unsupervised_watcher = expire_stale_marker(read_spool_json(".pre-supervised-watcher.json"));
     let gm_plugkit_stale = expire_stale_marker(read_spool_json(".gm-plugkit-stale.json"));
@@ -995,7 +991,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "wrapper_stale_in_memory": wrapper_stale_in_memory,
         "config_repo_unreachable": config_repo_unreachable,
         "running_tasks": running_tasks,
-        "open_browser_sessions": open_browser_sessions,
         "stuck_spool": stuck_spool,
         "unsupervised_watcher": unsupervised_watcher,
         "should_residual_scan": should_scan,

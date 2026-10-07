@@ -1,9 +1,8 @@
 use super::events::{emit_event, install_panic_hook, log_deviation_push};
 use super::host_abi::{
-    git_call, git_call_argv, host_browser_exec, host_env_get, host_exec_js, host_fetch,
-    host_fs_readdir, host_kv_delete, host_kv_get, host_kv_put, host_kv_query, host_now_ms,
-    host_oxi_exec, host_read, pack, plugin_call as call_plugin, read_str, unpack_to_string,
-    unpack_to_value,
+    git_call, git_call_argv, host_env_get, host_exec_js, host_fetch, host_fs_readdir,
+    host_kv_delete, host_kv_get, host_kv_put, host_kv_query, host_now_ms, host_read, pack,
+    plugin_call as call_plugin, read_str, unpack_to_string, unpack_to_value,
 };
 use crate::orchestrator::yaml_util::base64_decode;
 use serde_json::{json, Value};
@@ -182,8 +181,6 @@ fn embed_passage(text: &str) -> Option<Value> {
     }
 }
 
-pub const BROWSER_DEFAULT_TIMEOUT_MS: u64 = 180_000;
-
 pub const ERR_CODE_FAILED: &str = "failed";
 pub const ERR_CODE_RETIRED_VERB: &str = "retired_verb";
 pub const ERR_CODE_UNSUPPORTED: &str = "unsupported_by_design";
@@ -215,8 +212,6 @@ fn persisted_paths_compatibility_surface_report() -> Value {
         ".gm/claim-audit-fired",
         ".gm/last-instruction-ts",
         ".gm/exec-spool/.ci-validated",
-        ".gm/exec-spool/.turn-browser-edits.json",
-        ".gm/exec-spool/.turn-browser-witnessed",
         ".gm/exec-spool/.gate-deviation-repeats.json",
     ];
     let live: Vec<Value> = paths
@@ -248,9 +243,6 @@ const VERB_CAPABILITIES: &[(&str, Capability)] = &[
     ("kv_put", Capability::KvNamespace),
     ("fetch", Capability::Unguarded),
     ("exec_js", Capability::Unguarded),
-    ("serp", Capability::Unguarded),
-    ("browser", Capability::Unguarded),
-    ("cdp", Capability::Unguarded),
 ];
 
 fn verbs_with_capability(cap: Capability) -> Vec<&'static str> {
@@ -273,9 +265,6 @@ fn guarded_verb_is_dispatchable(verb: &str) -> bool {
             | "kv_put"
             | "fetch"
             | "exec_js"
-            | "serp"
-            | "browser"
-            | "cdp"
     )
 }
 
@@ -324,7 +313,7 @@ fn guard_surface_report() -> Value {
         "conformance": capability_conformance(),
         "unguarded": {
             "verbs": verbs_with_capability(Capability::Unguarded),
-            "note": "These reach the network, a Node process, and a real browser with no allowlist of their own. That is deliberate -- they exist to run arbitrary caller-supplied work -- but it means the trust boundary for them is the CALLER, not this layer.",
+            "note": "These reach the network and a Node process with no allowlist of their own. That is deliberate -- they exist to run arbitrary caller-supplied work -- but it means the trust boundary for them is the CALLER, not this layer.",
         },
     })
 }
@@ -4797,472 +4786,6 @@ fn shell_exec(body: &Value, body_s: &str, lang: &str) -> u64 {
     }
 }
 
-fn browser_page_health_or_none_for_session_management_body(v: &Value) -> Option<bool> {
-    let debug = v.get("debug")?;
-    let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
-    let page_errors_empty = debug
-        .get("pageErrors")
-        .and_then(|a| a.as_array())
-        .map(|a| a.is_empty())
-        .unwrap_or(true);
-    let console_clean = debug
-        .get("console")
-        .and_then(|a| a.as_array())
-        .map(|entries| {
-            !entries.iter().any(|e| {
-                e.get("level")
-                    .and_then(|l| l.as_str())
-                    .map(|l| l.eq_ignore_ascii_case("error"))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(true);
-    Some(ok && page_errors_empty && console_clean)
-}
-
-fn record_app_loads_witness_from_response(cwd: &str, v: &Value) {
-    let Some(healthy) = browser_page_health_or_none_for_session_management_body(v) else {
-        return;
-    };
-    let detail = if healthy {
-        "browser dispatch reached the page with ok:true, zero pageErrors, zero console error-level lines".to_string()
-    } else {
-        let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
-        let page_err_count = v
-            .get("debug")
-            .and_then(|d| d.get("pageErrors"))
-            .and_then(|a| a.as_array())
-            .map(|a| a.len())
-            .unwrap_or(0);
-        format!("browser dispatch unhealthy: ok={ok}, pageErrors={page_err_count}")
-    };
-    crate::browser_witness::record_app_loads_witness_unconditional_on_edits(cwd, healthy, &detail);
-}
-
-const BROWSER_SUPPORTED_BODY_SHAPES: &str = "sessionId=<id>\\n<expr> (optional session-routing prefix, stacks with the rest), or a bare JS expression to evaluate";
-
-fn serp_default_oxibrowser_headless_engine(body: &Value, body_s: &str) -> u64 {
-    let envelope_code = body
-        .get("code")
-        .or_else(|| body.get("body"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty());
-    let code = match envelope_code {
-        Some(c) => c,
-        None if body.is_object() => {
-            return err_json(
-                "serp",
-                json!({
-                    "error": "serp takes a plain-text body, never a JSON object. The supplied JSON object carries neither a `code` nor a `body` string field, so there is no script to run.",
-                    "error_code": ERR_CODE_INVALID_ARGS,
-                    "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
-                    "received_keys": body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
-                    "note": "for real-Chrome/playwright-style capabilities this verb does not yet cover, use the cdp verb (or the browser verb for lightpanda/steel CDP) instead",
-                }),
-            )
-        }
-        None => body_s.to_string(),
-    };
-    if code.trim().is_empty() {
-        return err_json(
-            "serp",
-            json!({
-                "error": "serp body is empty -- provide one of the supported plain-text shapes",
-                "error_code": ERR_CODE_INVALID_ARGS,
-                "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
-                "note": "for real-Chrome/playwright-style capabilities this verb does not yet cover, use the cdp verb (or the browser verb for lightpanda/steel CDP) instead",
-            }),
-        );
-    }
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-    let explicit_sid = body
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let session_id = if !explicit_sid.is_empty() {
-        explicit_sid
-    } else if let Some(dispatch_sid) =
-        super::events::current_dispatch_session_id().filter(|s| !s.trim().is_empty())
-    {
-        dispatch_sid
-    } else {
-        host_read(".gm/exec-spool/.session-current")
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default()
-    };
-    let timeout_ms = match body.get("timeoutMs") {
-        None | Some(Value::Null) => BROWSER_DEFAULT_TIMEOUT_MS,
-        Some(raw) => match raw.as_u64() {
-            Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
-            Some(n) => {
-                return err_json(
-                    "serp",
-                    json!({
-                        "error": "timeoutMs below floor",
-                        "error_code": ERR_CODE_INVALID_ARGS,
-                        "min": crate::validation::MIN_TIMEOUT_MS,
-                        "received": n,
-                    }),
-                )
-            }
-            None => {
-                return err_json(
-                    "serp",
-                    json!({
-                        "error": "timeoutMs must be a positive integer number of milliseconds -- a string, float or negative value is rejected rather than silently falling back to the default budget",
-                        "error_code": ERR_CODE_INVALID_ARGS,
-                        "min": crate::validation::MIN_TIMEOUT_MS,
-                        "received": raw.clone(),
-                    }),
-                )
-            }
-        },
-    };
-    let opts = json!({ "timeoutMs": timeout_ms }).to_string();
-    let packed = unsafe {
-        host_oxi_exec(
-            code.as_ptr(),
-            code.len() as u32,
-            cwd.as_ptr(),
-            cwd.len() as u32,
-            session_id.as_ptr(),
-            session_id.len() as u32,
-            opts.as_ptr(),
-            opts.len() as u32,
-        )
-    };
-    match unpack_to_string(packed) {
-        Some(s) => {
-            let v: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
-            let transport_ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
-                && !v
-                    .get("timed_out")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(false)
-                && v.get("exit_code")
-                    .and_then(|n| n.as_i64())
-                    .map(|c| c == 0)
-                    .unwrap_or(true);
-            let mut v = v;
-            if transport_ok {
-                let witnessed =
-                    crate::browser_witness::witness_all_pending_edits_by_rehashing_current_content(
-                        &cwd,
-                    );
-                if witnessed > 0 {
-                    if let Some(obj) = v.as_object_mut() {
-                        obj.insert("witness_marked".to_string(), json!(witnessed));
-                    }
-                }
-                record_app_loads_witness_from_response(cwd, &v);
-                ok("serp", v)
-            } else {
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("witness_skipped_transport_failure".to_string(), json!(true));
-                    obj.insert("note".to_string(), json!("serp (oxibrowser) dispatch failed transport-level checks -- if this is a capability oxibrowser does not support, retry via the cdp verb (real Chrome, playwright-style) or the browser verb (lightpanda/steel CDP)"));
-                }
-                record_app_loads_witness_from_response(cwd, &v);
-                err_json("serp", v)
-            }
-        }
-        None => err_json(
-            "serp",
-            json!({
-                "error": "host_oxi_exec returned empty -- the oxibrowser host produced no bytes at all (NOT a script that returned undefined). Check .status.json ts freshness and reboot if stale, or re-dispatch. If oxibrowser cannot handle this workload, use the cdp verb (real Chrome) or the browser verb (lightpanda/steel CDP) instead.",
-                "error_code": ERR_CODE_FAILED,
-                "timeout_ms": timeout_ms,
-                "session_id": session_id,
-                "retryable": true,
-                "note": "for real-Chrome/playwright-style capabilities, use the cdp verb or the browser verb instead",
-            }),
-        ),
-    }
-}
-
-fn browser_lightpanda_or_steel_cdp_engine(body: &Value, body_s: &str) -> u64 {
-    let envelope_code = body
-        .get("code")
-        .or_else(|| body.get("body"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty());
-    let code = match envelope_code {
-        Some(c) => c,
-        None if body.is_object() => {
-            return err_json(
-                "browser",
-                json!({
-                    "error": "browser takes a plain-text body, never a JSON object. The supplied JSON object carries neither a `code` nor a `body` string field, so there is no script to run.",
-                    "error_code": ERR_CODE_INVALID_ARGS,
-                    "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
-                    "received_keys": body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
-                    "note": "browser dials lightpanda (default) or steel-browser (when configured) over CDP; for the in-process pure-Rust engine use the serp verb, for a real Chrome escape hatch use cdp",
-                }),
-            )
-        }
-        None => body_s.to_string(),
-    };
-    if code.trim().is_empty() {
-        return err_json(
-            "browser",
-            json!({
-                "error": "browser body is empty -- provide one of the supported plain-text shapes",
-                "error_code": ERR_CODE_INVALID_ARGS,
-                "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
-                "note": "browser dials lightpanda (default) or steel-browser (when configured) over CDP; for the in-process pure-Rust engine use the serp verb, for a real Chrome escape hatch use cdp",
-            }),
-        );
-    }
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-    let explicit_sid = body
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let session_id = if !explicit_sid.is_empty() {
-        explicit_sid
-    } else if let Some(dispatch_sid) =
-        super::events::current_dispatch_session_id().filter(|s| !s.trim().is_empty())
-    {
-        dispatch_sid
-    } else {
-        host_read(".gm/exec-spool/.session-current")
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default()
-    };
-    let timeout_ms = match body.get("timeoutMs") {
-        None | Some(Value::Null) => BROWSER_DEFAULT_TIMEOUT_MS,
-        Some(raw) => match raw.as_u64() {
-            Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
-            Some(n) => {
-                return err_json(
-                    "browser",
-                    json!({
-                        "error": "timeoutMs below floor",
-                        "error_code": ERR_CODE_INVALID_ARGS,
-                        "min": crate::validation::MIN_TIMEOUT_MS,
-                        "received": n,
-                    }),
-                )
-            }
-            None => {
-                return err_json(
-                    "browser",
-                    json!({
-                        "error": "timeoutMs must be a positive integer number of milliseconds -- a string, float or negative value is rejected rather than silently falling back to the default budget",
-                        "error_code": ERR_CODE_INVALID_ARGS,
-                        "min": crate::validation::MIN_TIMEOUT_MS,
-                        "received": raw.clone(),
-                    }),
-                )
-            }
-        },
-    };
-    let opts = json!({ "timeoutMs": timeout_ms, "engine": "lightpanda" }).to_string();
-    let packed = unsafe {
-        host_browser_exec(
-            code.as_ptr(),
-            code.len() as u32,
-            cwd.as_ptr(),
-            cwd.len() as u32,
-            session_id.as_ptr(),
-            session_id.len() as u32,
-            opts.as_ptr(),
-            opts.len() as u32,
-        )
-    };
-    match unpack_to_string(packed) {
-        Some(s) => {
-            let v: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
-            let transport_ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
-                && !v
-                    .get("timed_out")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(false)
-                && v.get("exit_code")
-                    .and_then(|n| n.as_i64())
-                    .map(|c| c == 0)
-                    .unwrap_or(true);
-            let mut v = v;
-            if transport_ok {
-                let witnessed =
-                    crate::browser_witness::witness_all_pending_edits_by_rehashing_current_content(
-                        &cwd,
-                    );
-                if witnessed > 0 {
-                    if let Some(obj) = v.as_object_mut() {
-                        obj.insert("witness_marked".to_string(), json!(witnessed));
-                    }
-                }
-                record_app_loads_witness_from_response(cwd, &v);
-                ok("browser", v)
-            } else {
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("witness_skipped_transport_failure".to_string(), json!(true));
-                    obj.insert("note".to_string(), json!("browser (lightpanda/steel) dispatch failed transport-level checks -- if lightpanda is unavailable on this platform (no native Windows binary, WSL2/Docker required), configure steel-browser or fall back to the cdp verb (real Chrome)"));
-                }
-                record_app_loads_witness_from_response(cwd, &v);
-                err_json("browser", v)
-            }
-        }
-        None => err_json(
-            "browser",
-            json!({
-                "error": "host_browser_exec returned empty for the browser verb -- the lightpanda/steel host produced no bytes at all (NOT a script that returned undefined). Check .status.json ts freshness and reboot if stale, or re-dispatch. If neither lightpanda nor steel-browser is reachable, use the cdp verb (real Chrome) instead.",
-                "error_code": ERR_CODE_FAILED,
-                "timeout_ms": timeout_ms,
-                "session_id": session_id,
-                "retryable": true,
-                "note": "for real-Chrome/playwright-style capabilities, use the cdp verb instead",
-            }),
-        ),
-    }
-}
-
-fn cdp_real_chrome_escape_hatch(body: &Value, body_s: &str) -> u64 {
-    let envelope_code = body
-        .get("code")
-        .or_else(|| body.get("body"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty());
-    let code = match envelope_code {
-        Some(c) => c,
-        None if body.is_object() => {
-            return err_json(
-                "cdp",
-                json!({
-                    "error": "cdp takes a plain-text body, never a JSON object. The supplied JSON object carries neither a `code` nor a `body` string field, so there is no script to run; evaluating the raw JSON text as JavaScript would launch a Chrome instance only to fail with an opaque SyntaxError.",
-                    "error_code": ERR_CODE_INVALID_ARGS,
-                    "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
-                    "received_keys": body.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
-                }),
-            )
-        }
-        None => body_s.to_string(),
-    };
-    if code.trim().is_empty() {
-        return err_json(
-            "cdp",
-            json!({
-                "error": "cdp body is empty -- provide one of the supported plain-text shapes",
-                "error_code": ERR_CODE_INVALID_ARGS,
-                "supported_shapes": BROWSER_SUPPORTED_BODY_SHAPES,
-            }),
-        );
-    }
-    let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-    let explicit_sid = body
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let session_id = if !explicit_sid.is_empty() {
-        explicit_sid
-    } else if let Some(dispatch_sid) =
-        super::events::current_dispatch_session_id().filter(|s| !s.trim().is_empty())
-    {
-        dispatch_sid
-    } else {
-        host_read(".gm/exec-spool/.session-current")
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default()
-    };
-    let timeout_ms = match body.get("timeoutMs") {
-        None | Some(Value::Null) => BROWSER_DEFAULT_TIMEOUT_MS,
-        Some(raw) => match raw.as_u64() {
-            Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => n,
-            Some(n) => {
-                return err_json(
-                    "cdp",
-                    json!({
-                        "error": "timeoutMs below floor",
-                        "error_code": ERR_CODE_INVALID_ARGS,
-                        "min": crate::validation::MIN_TIMEOUT_MS,
-                        "received": n,
-                    }),
-                )
-            }
-            None => {
-                return err_json(
-                    "cdp",
-                    json!({
-                        "error": "timeoutMs must be a positive integer number of milliseconds -- a string, float or negative value is rejected rather than silently falling back to the default budget",
-                        "error_code": ERR_CODE_INVALID_ARGS,
-                        "min": crate::validation::MIN_TIMEOUT_MS,
-                        "received": raw.clone(),
-                    }),
-                )
-            }
-        },
-    };
-    let opts = json!({ "timeoutMs": timeout_ms, "engine": "chrome" }).to_string();
-    let packed = unsafe {
-        host_browser_exec(
-            code.as_ptr(),
-            code.len() as u32,
-            cwd.as_ptr(),
-            cwd.len() as u32,
-            session_id.as_ptr(),
-            session_id.len() as u32,
-            opts.as_ptr(),
-            opts.len() as u32,
-        )
-    };
-    match unpack_to_string(packed) {
-        Some(s) => {
-            let v: Value = serde_json::from_str(&s).unwrap_or(Value::String(s));
-            let transport_ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
-                && !v
-                    .get("timed_out")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(false)
-                && v.get("exit_code")
-                    .and_then(|n| n.as_i64())
-                    .map(|c| c == 0)
-                    .unwrap_or(true);
-            let mut v = v;
-            if transport_ok {
-                let witnessed =
-                    crate::browser_witness::witness_all_pending_edits_by_rehashing_current_content(
-                        &cwd,
-                    );
-                if witnessed > 0 {
-                    if let Some(obj) = v.as_object_mut() {
-                        obj.insert("witness_marked".to_string(), json!(witnessed));
-                    }
-                }
-                record_app_loads_witness_from_response(cwd, &v);
-                ok("cdp", v)
-            } else {
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("witness_skipped_transport_failure".to_string(), json!(true));
-                }
-                record_app_loads_witness_from_response(cwd, &v);
-                err_json("cdp", v)
-            }
-        }
-        None => err_json(
-            "cdp",
-            json!({
-                "error": "host_browser_exec returned empty -- the cdp host produced no bytes at all (NOT a script that returned undefined). Two known causes: (1) a genuinely dead/crashed daemon worker -- check .status.json ts freshness and reboot if stale; (2) the host DID produce a real response but the wasm-to-guest write failed on a wasmtime epoch-interruption deadline mid-handoff (agentplug daemon.log line 'write_guest_bytes: ... hit the epoch deadline ... returning 0') -- in that case Chrome may have launched and even completed the dispatch, but the result never reached this response. Either way the fix is the same: re-dispatch.",
-                "error_code": ERR_CODE_FAILED,
-                "timeout_ms": timeout_ms,
-                "session_id": session_id,
-                "retryable": true,
-            }),
-        ),
-    }
-}
-
 fn db_display_label_not_identity(body: &Value) -> String {
     body.get("db_name")
         .or_else(|| body.get("db"))
@@ -5530,27 +5053,6 @@ fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u6
                     rag_obj.insert(
                         "instruction_payload_orient_noun_limit".to_string(),
                         json!(rag.instruction_payload.orient_noun_limit),
-                    );
-                    rag_obj.insert(
-                        "browser_witness_always_extensions".to_string(),
-                        json!(
-                            rag.browser_witness
-                                .always_browser_extensions_regardless_of_directory
-                        ),
-                    );
-                    rag_obj.insert(
-                        "browser_witness_conditional_extensions".to_string(),
-                        json!(
-                            rag.browser_witness
-                                .conditional_extensions_only_under_browser_dir_prefixes
-                        ),
-                    );
-                    rag_obj.insert(
-                        "browser_witness_dir_prefixes".to_string(),
-                        json!(
-                            rag.browser_witness
-                                .browser_dir_prefixes_normalized_slash_lowercase
-                        ),
                     );
                     rag_obj.insert(
                         "discipline_note_max_name_len".to_string(),
@@ -10441,10 +9943,7 @@ fn request_fingerprint(verb: &str, body_s: &str) -> String {
 fn verb_body_must_be_json(verb: &str) -> bool {
     !matches!(
         verb,
-        "serp"
-            | "browser"
-            | "cdp"
-            | "exec_js"
+        "exec_js"
             | "nodejs"
             | "javascript"
             | "node"
@@ -10733,8 +10232,6 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
     if !gate.allowed {
         return pack(gate.to_denial_json(verb).to_string());
     }
-    let cwd_for_witness = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-    crate::browser_witness::record_from_body(cwd_for_witness, body);
     if crate::orchestrator::is_orchestrator_verb(verb) {
         let (out, err_msg, code) = crate::orchestrator::dispatch(verb, "", body_s);
         #[cfg(target_arch = "wasm32")]
@@ -10787,9 +10284,6 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "kv_query" => kv_query(&body),
         "exec_js" | "nodejs" | "javascript" | "node" | "js" => exec_js(&body, &body_s),
         "lang" => lang(&body),
-        "serp" => serp_default_oxibrowser_headless_engine(&body, &body_s),
-        "browser" => browser_lightpanda_or_steel_cdp_engine(&body, &body_s),
-        "cdp" => cdp_real_chrome_escape_hatch(&body, &body_s),
         "health" => health(&body),
         "config_resolve" => config_resolve_report_winning_tier_and_any_rejected_tier(&body),
         "config-sync-now" => config_sync_now_force_immediate_refresh(&body),

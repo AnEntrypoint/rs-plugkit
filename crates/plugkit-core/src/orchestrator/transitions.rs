@@ -47,8 +47,6 @@ fn predicate_fn_for(name: &str) -> PredicateFn {
         "res-obligations-ready" => pred_res_obligations_ready as PredicateFn,
         "worktree-clean" => pred_worktree_clean,
         "ci-validated-fresh" => ci_validation_fresh as PredicateFn,
-        "browser-witness-coverage" => pred_browser_witness_coverage,
-        "app-loads-witnessed" => pred_app_loads_witnessed as PredicateFn,
         "claim-audit-clean" => pred_claim_audit_clean,
         "submodules-clean" => pred_submodules_clean,
         "no-synthetic-test-files" => pred_no_synthetic_test_files as PredicateFn,
@@ -98,17 +96,6 @@ fn pred_res_obligations_ready() -> bool {
 }
 fn pred_worktree_clean() -> bool {
     !worktree_dirty()
-}
-fn pred_browser_witness_coverage() -> bool {
-    check_browser_witness_coverage_for_cwd("").is_empty()
-}
-#[cfg(target_arch = "wasm32")]
-fn pred_app_loads_witnessed() -> bool {
-    crate::browser_witness::app_loads_witnessed_this_stop_window("")
-}
-#[cfg(not(target_arch = "wasm32"))]
-fn pred_app_loads_witnessed() -> bool {
-    true
 }
 #[cfg(target_arch = "wasm32")]
 fn pred_claim_audit_clean() -> bool {
@@ -177,7 +164,7 @@ fn residual_scan_denial_detail() -> String {
     let marker_path = super::yaml_util::residual_marker_path();
     match super::yaml_util::read_residual_marker() {
         ResidualMarker::Absent => format!(
-            "`{}` does not exist or is empty: no `residual-scan` has ever reached the fired state in this project. A response of `scan: \"skipped\"` (PRD open, browser session open, task running, dirty tree) returns exit code 0 but does NOT write the marker -- clear that skip reason, then re-dispatch `residual-scan`.",
+            "`{}` does not exist or is empty: no `residual-scan` has ever reached the fired state in this project. A response of `scan: \"skipped\"` (PRD open, task running, dirty tree) returns exit code 0 but does NOT write the marker -- clear that skip reason, then re-dispatch `residual-scan`.",
             marker_path
         ),
         ResidualMarker::Live { session_id, fired_at_ms } => {
@@ -274,7 +261,7 @@ fn pred_no_synthetic_test_files() -> bool {
         "deviation.synthetic-test-file",
         serde_json::json!({
             "files": found,
-            "reason": "VERIFY doctrine forbids standing test files: delete them and replace their assertions with a live exec_js/browser witness, then re-verify",
+            "reason": "VERIFY doctrine forbids standing test files: delete them and replace their assertions with a live exec_js witness, then re-verify",
         }),
     );
     false
@@ -722,110 +709,6 @@ fn split_context_swept() -> bool {
     true
 }
 
-#[cfg(target_arch = "wasm32")]
-fn check_browser_witness_coverage_for_cwd(cwd: &str) -> Vec<String> {
-    let edits_path = if cwd.is_empty() {
-        ".gm/exec-spool/.turn-browser-edits.json".to_string()
-    } else {
-        format!(
-            "{}/.gm/exec-spool/.turn-browser-edits.json",
-            cwd.trim_end_matches('/').trim_end_matches('\\')
-        )
-    };
-    let edits_raw = crate::pkfs::read_to_string(&edits_path).unwrap_or_default();
-    if edits_raw.trim().is_empty() {
-        return vec![];
-    }
-    let edits: Vec<serde_json::Value> = match serde_json::from_str::<serde_json::Value>(&edits_raw)
-    {
-        Ok(serde_json::Value::Array(arr)) => arr,
-        _ => return vec![],
-    };
-    if edits.is_empty() {
-        return vec![];
-    }
-    let witness_path = if cwd.is_empty() {
-        ".gm/exec-spool/.turn-browser-witnessed".to_string()
-    } else {
-        format!(
-            "{}/.gm/exec-spool/.turn-browser-witnessed",
-            cwd.trim_end_matches('/').trim_end_matches('\\')
-        )
-    };
-    let witness_raw = crate::pkfs::read_to_string(&witness_path).unwrap_or_default();
-    let witnessed_hashes: serde_json::Map<String, serde_json::Value> =
-        match serde_json::from_str::<serde_json::Value>(&witness_raw) {
-            Ok(serde_json::Value::Object(m)) => {
-                let mut merged = serde_json::Map::new();
-                if let Some(serde_json::Value::Object(legacy)) = m.get("witnessed_hashes") {
-                    for (k, v) in legacy {
-                        if v.is_string() {
-                            merged.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
-                for (k, v) in &m {
-                    if k != "witnessed_hashes" && v.is_string() {
-                        merged.insert(k.clone(), v.clone());
-                    }
-                }
-                merged
-            }
-            _ => serde_json::Map::new(),
-        };
-    let mut unwitnessed: Vec<String> = vec![];
-    for entry in edits.iter() {
-        let file = match entry.get("file").and_then(|v| v.as_str()) {
-            Some(f) if !f.is_empty() => f,
-            _ => continue,
-        };
-        if !crate::browser_witness::is_browser_running_file(file) {
-            continue;
-        }
-        let edit_hash = entry.get("hash").and_then(|v| v.as_str()).unwrap_or("");
-        let current_hash = crate::browser_witness::hash_file_short(file);
-        if current_hash.is_empty() {
-            continue;
-        }
-        let witness_hash = witnessed_hashes
-            .get(file)
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let matches = !witness_hash.is_empty()
-            && (current_hash.starts_with(witness_hash)
-                || witness_hash.starts_with(current_hash.as_str()));
-        if !matches {
-            let kind = if witness_hash.is_empty() {
-                "browser-witness-missing"
-            } else {
-                "browser-witness-hash-mismatch"
-            };
-            crate::wasm_dispatch::emit_event(
-                &format!("deviation.{kind}"),
-                serde_json::json!({
-                    "file": file,
-                    "kind": kind,
-                    "severity": super::deviations::effective_severity(kind).as_str(),
-                    "edit_hash": edit_hash,
-                    "current_hash": current_hash,
-                    "witness_hash": witness_hash,
-                    "reason": if witness_hash.is_empty() {
-                        "this file was edited but never witnessed in a browser dispatch"
-                    } else {
-                        "this file was witnessed, then edited again -- the witness is stale"
-                    },
-                }),
-            );
-            unwitnessed.push(file.to_string());
-        }
-    }
-    unwitnessed
-}
-#[cfg(not(target_arch = "wasm32"))]
-fn check_browser_witness_coverage_for_cwd(_cwd: &str) -> Vec<String> {
-    vec![]
-}
-
 pub enum HookOutcome {
     Passed,
     Missing,
@@ -1021,8 +904,6 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
                             "res-obligations-ready" => "mutable-add",
                             "worktree-clean" => "git_finalize",
                             "ci-validated-fresh" => "ci-status",
-                            "browser-witness-coverage" => "browser",
-                            "app-loads-witnessed" => "browser",
                             "claim-audit-clean" => "claim-audit",
                             "submodules-clean" => "git_add",
                             _ => "instruction",

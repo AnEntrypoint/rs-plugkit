@@ -238,9 +238,6 @@
   (and to the absorb-concurrent-write `--amend`) and refuses when the paths
   stage nothing: the unscoped commit that used to follow an empty stage is
   what made a narrowed request widen to the whole index.
-- `browser` and `cdp` share `host_browser_exec`; the engine travels in the opts
-  JSON (`"engine"`), never inside the code body, so the host picks
-  lightpanda/steel/chrome without re-escaping caller JS.
 - `git_commit`/`git_finalize` default to committing exactly what is already
   staged; blanket `git add -A` needs `add_all: true` (or, for `git_finalize`
   with no `paths`, stays the default there); `paths`/`files` stages only those
@@ -252,8 +249,8 @@
 - Every staging path (`git_add`, `git_commit`, `git_finalize`, the porcelain
   probes and `git_push`'s dirty gate) appends `GIT_PROTECTED_PATHSPECS`
   (`:(top,exclude).gm`, `:(top,exclude).agentplug*`) after the caller's
-  pathspecs, so the project's own runtime state (Chrome profile dirs, KV
-  cache) is never staged, committed or counted as dirt whatever `paths` or
+  pathspecs, so the project's own runtime state (the KV cache and the rest of
+  `.gm/`) is never staged, committed or counted as dirt whatever `paths` or
   `.gitignore` say; receipts list them under `excluded`.
 - `git_finalize` given `paths` scopes its porcelain checks to those paths
   (`git_porcelain_scoped`) and pushes by explicit ref (its own new HEAD)
@@ -339,7 +336,6 @@
 ### wasm_dispatch/verbs.rs
 
 - Self-declared `discipline` controls `confinement_violation`/`capability_access_violation`; the spool carries no unforgeable caller identity. These catch accidental misuse, not hostile impersonation.
-- `browser`/`cdp` share `host_browser_exec`. Engine selection travels in opts JSON, never embedded in caller JS.
 - Scoped `git_commit`/`git_finalize` stage and commit only caller pathspecs, including concurrent-write amend. Refuse paths that stage nothing; never follow an empty scoped add with an unscoped commit. Default commit uses already-staged content; blanket staging requires explicit `add_all` (unscoped finalize owns its documented default).
 - `git_pathspec_scope` emits excludes before inclusions; reversing them can make Windows git silently stage nothing. Preserve explicit caller paths. Always exclude `.agentplug*`; distinguish ignored/untracked generated `.gm` state from explicitly requested tracked state. Receipts disclose withheld runtime dirt rather than silently widening delivery.
 - `git_commit` deduplicates a logical request by cwd, pre-commit HEAD, message and paths within `GIT_COMMIT_DEDUP_TTL_MS`; replay the real SHA rather than execute another commit.
@@ -573,7 +569,7 @@
 - `admit_dispatch` RANKS, IT NEVER REFUSES. It returns `Admission::Allow` or
   `Admission::Advisory`, and the advisory is attached to a dispatch that ran
   (`dream_rsi_advisory`). It used to return `Err` for
-  `codesearch|fetch|serp|browser|cdp|exec_js` once any gate-drift failure
+  `codesearch|fetch|exec_js` once any gate-drift failure
   (`gate_denied`/`unknown_verb`/`retired_verb`) armed
   `replay-recorded-successes-first` for the session and that verb had no
   success newer than its own last such failure -- and a refused dispatch was
@@ -699,4 +695,3 @@
 - `legacy_reaper::RETIRED_ARTIFACTS` is an exact allowlist, never a glob or memory/database deletion. Its hash invalidates the reap marker when the allowlist changes.
 - `mediator::SELF_LANG_VERBS` share dispatch code but are not aliases; retain their distinct language passed to `shell_exec`.
 - `submodule_head_sha` skips uninitialized submodule directories without their own `.git`; running git there would return the parent's HEAD successfully.
-- Browser witnesses are the flat `{file:hash}` map written by `browser_witness::record_witness`; transition readers also tolerate the nested `witnessed_hashes` wrapper and compare actual source hashes.

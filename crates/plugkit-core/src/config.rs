@@ -82,7 +82,6 @@ impl Config {
             "code_index",
             "pipeline",
             "instruction_payload",
-            "browser_witness",
             "discipline_note",
             "claim_audit",
             "db_path",

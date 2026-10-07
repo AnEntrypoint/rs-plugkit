@@ -373,48 +373,6 @@ impl Default for DisciplineNoteConfig {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct BrowserWitnessConfig {
-    pub always_browser_extensions_regardless_of_directory: Vec<String>,
-    pub conditional_extensions_only_under_browser_dir_prefixes: Vec<String>,
-    pub browser_dir_prefixes_normalized_slash_lowercase: Vec<String>,
-}
-
-impl Default for BrowserWitnessConfig {
-    fn default() -> Self {
-        BrowserWitnessConfig {
-            always_browser_extensions_regardless_of_directory: [
-                ".html", ".htm", ".tsx", ".jsx", ".vue", ".svelte",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-            conditional_extensions_only_under_browser_dir_prefixes: [
-                ".mjs", ".cjs", ".js", ".ts", ".css", ".scss", ".sass",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-            browser_dir_prefixes_normalized_slash_lowercase: [
-                "public/",
-                "site/",
-                "app/",
-                "pages/",
-                "components/",
-                "client/",
-                "web/",
-                "src/frontend/",
-                "packages/web-app/",
-                "frontend/",
-                "webapp/",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct InstructionPayloadConfig {
     pub ready_wave_limit: usize,
     pub mutables_pending_rows_inlined_limit: usize,
@@ -576,7 +534,6 @@ pub struct RagConfig {
     pub claim_audit: ClaimAuditConfig,
     pub pipeline: PipelineConfig,
     pub instruction_payload: InstructionPayloadConfig,
-    pub browser_witness: BrowserWitnessConfig,
     pub discipline_note: DisciplineNoteConfig,
     pub memory_sync: MemorySyncBudgetConfig,
     pub embed_cache: EmbedCacheConfig,
@@ -603,7 +560,6 @@ impl Default for RagConfig {
             claim_audit: ClaimAuditConfig::default(),
             pipeline: PipelineConfig::default(),
             instruction_payload: InstructionPayloadConfig::default(),
-            browser_witness: BrowserWitnessConfig::default(),
             discipline_note: DisciplineNoteConfig::default(),
             retention: RetentionConfig::default(),
             memory_sync: MemorySyncBudgetConfig::default(),
@@ -1177,31 +1133,6 @@ impl RagConfig {
             "instruction_payload",
             "extra_orient_stopwords",
             &mut cfg.instruction_payload.orient_stopwords_compared_lowercase,
-            &mut problems,
-        );
-
-        append_present_strings_or_record_problem(
-            "browser_witness",
-            "extra_always_browser_extensions",
-            &mut cfg
-                .browser_witness
-                .always_browser_extensions_regardless_of_directory,
-            &mut problems,
-        );
-        append_present_strings_or_record_problem(
-            "browser_witness",
-            "extra_conditional_extensions",
-            &mut cfg
-                .browser_witness
-                .conditional_extensions_only_under_browser_dir_prefixes,
-            &mut problems,
-        );
-        append_present_strings_or_record_problem(
-            "browser_witness",
-            "extra_dir_prefixes",
-            &mut cfg
-                .browser_witness
-                .browser_dir_prefixes_normalized_slash_lowercase,
             &mut problems,
         );
 

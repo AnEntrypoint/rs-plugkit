@@ -49,9 +49,6 @@ pub mod legacy_reaper;
 pub mod gates;
 
 #[cfg(target_arch = "wasm32")]
-pub mod browser_witness;
-
-#[cfg(target_arch = "wasm32")]
 pub mod dispatch_ledger;
 pub mod evidence_receipt;
 
