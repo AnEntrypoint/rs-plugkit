@@ -2967,17 +2967,12 @@ pub fn ensure_current_insight() -> Value {
     let prior_partial = stored
         .as_deref()
         .is_some_and(|digest| digest.contains(":partial="));
-    let cold_start = stored.is_none();
     let index = if stale && !prior_partial {
-        if cold_start {
-            index_cfg(".", cfg.index.prune_pass_file_limit_ceiling, &cfg)
-        } else {
-            index_topup(
-                ".",
-                cfg.index.prune_pass_file_limit_ceiling,
-                cfg.index.incremental_topup_wall_budget_ms,
-            )
-        }
+        index_topup(
+            ".",
+            cfg.index.prune_pass_file_limit_ceiling,
+            cfg.index.incremental_topup_wall_budget_ms,
+        )
     } else {
         let symbols = if stale {
             crate::code_symbols::sync_tree(&cfg, None)
