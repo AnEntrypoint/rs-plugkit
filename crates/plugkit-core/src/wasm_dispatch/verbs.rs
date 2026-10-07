@@ -7341,6 +7341,11 @@ fn git_finalize(body: &Value) -> u64 {
             .parse()
             .unwrap_or(0);
         if !dirty && !no_upstream && ahead_n == 0 {
+            let (ci_status_summary, ci_validated_written) =
+                check_ci_status_and_write_validated_marker_if_green(
+                    cwd_ref,
+                    &head_before_any_commit,
+                );
             return ok(
                 "git_finalize",
                 with_exclusion_report(
@@ -7348,7 +7353,9 @@ fn git_finalize(body: &Value) -> u64 {
                         "nothing_to_commit": true,
                         "committed": false,
                         "pushed": false,
-                        "steps": [{"step": "commit", "nothing_to_commit": true}],
+                        "steps": [{"step": "commit", "nothing_to_commit": true}, {"step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written}],
+                        "ci_validated_marker_written": ci_validated_written,
+                        "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
                     }),
                     cwd_ref,
                     &paths,
@@ -8055,30 +8062,85 @@ fn ci_status_value(body: &Value) -> Result<Value, Value> {
         .cloned()
         .unwrap_or_default();
     if runs.is_empty() {
-        const NO_APPLICABLE_WORKFLOW_GRACE_SECS: i64 = 120;
-        let commit_epoch_secs =
-            crate::wasm_dispatch::git_call(&format!("log -1 --format=%ct {}", sha), cwd)
-                .get("stdout")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.trim().parse::<i64>().ok());
-        let now_secs = unsafe { host_now_ms() } as i64 / 1000;
-        let commit_age_secs = commit_epoch_secs.map(|ts| now_secs.saturating_sub(ts));
-        if commit_age_secs.is_some_and(|age| age >= NO_APPLICABLE_WORKFLOW_GRACE_SECS) {
-            return Ok(json!({
-                "ok": true, "verb": "ci-status", "data": {
-                    "status": "no_applicable_workflow", "repo": repo, "sha": sha,
-                    "failed_jobs": [], "run_url": Value::Null,
-                    "query": format!("head_sha={}", sha),
-                    "reason": format!("zero workflow runs matched head_sha={} after {}s -- this reports the miss, not its cause: a workflow that never triggered, a path filter, and a sha GitHub never saw are indistinguishable from this response alone", sha, commit_age_secs.unwrap()),
-                },
-            }));
+        let tree_url = format!(
+            "https://api.github.com/repos/{}/git/trees/{}?recursive=1",
+            repo, sha
+        );
+        let tree_packed = unsafe {
+            host_fetch(
+                tree_url.as_ptr(),
+                tree_url.len() as u32,
+                opts.as_ptr(),
+                opts.len() as u32,
+            )
+        };
+        let tree_response = unpack_to_value(tree_packed);
+        let tree_status = tree_response
+            .get("status")
+            .and_then(Value::as_i64)
+            .or_else(|| tree_response.get("statusCode").and_then(Value::as_i64))
+            .unwrap_or(0);
+        let tree_body = tree_response
+            .get("body")
+            .and_then(Value::as_str)
+            .or_else(|| tree_response.get("text").and_then(Value::as_str))
+            .unwrap_or("");
+        let tree: Value = serde_json::from_str(tree_body).unwrap_or(Value::Null);
+        let complete_tree =
+            tree_status == 200 && tree.get("truncated").and_then(Value::as_bool) == Some(false);
+        if let Some(entries) = tree
+            .get("tree")
+            .and_then(Value::as_array)
+            .filter(|_| complete_tree)
+        {
+            let paths: Option<Vec<&str>> = entries
+                .iter()
+                .map(|entry| {
+                    entry
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .filter(|path| !path.is_empty())
+                })
+                .collect();
+            if let Some(paths) = paths {
+                let workflow_paths: Vec<&str> = paths
+                    .into_iter()
+                    .filter(|path| {
+                        path.strip_prefix(".github/workflows/").is_some_and(|file| {
+                            !file.contains('/')
+                                && (file.ends_with(".yml") || file.ends_with(".yaml"))
+                        })
+                    })
+                    .collect();
+                if workflow_paths.is_empty() {
+                    return Ok(json!({
+                        "ok": true, "verb": "ci-status", "data": {
+                            "status": "no_applicable_workflow", "repo": repo, "sha": sha,
+                            "failed_jobs": [], "run_url": Value::Null,
+                            "query": format!("head_sha={}", sha),
+                            "reason": "a complete GitHub git tree for this exact sha contains no .github/workflows YAML files",
+                            "workflow_configuration": "absent",
+                            "evidence": {"source": "github_git_tree", "requested_sha": sha, "tree_sha": tree.get("sha"), "truncated": false, "entries": entries.len()}
+                        }
+                    }));
+                }
+                return Ok(json!({
+                    "ok": true, "verb": "ci-status", "data": {
+                        "status": "unknown", "repo": repo, "sha": sha,
+                        "failed_jobs": [], "run_url": Value::Null,
+                        "reason": "no workflow runs found for this sha; workflow definitions are present",
+                        "workflow_paths": workflow_paths
+                    }
+                }));
+            }
         }
         return Ok(json!({
             "ok": true, "verb": "ci-status", "data": {
                 "status": "unknown", "repo": repo, "sha": sha,
                 "failed_jobs": [], "run_url": Value::Null,
-                "reason": "no workflow runs found for this sha yet",
-            },
+                "reason": "no workflow runs found for this sha; absence of workflow definitions could not be proven from a complete GitHub git tree",
+                "workflow_tree_http_status": tree_status
+            }
         }));
     }
     const STALE_IN_PROGRESS_RUN_GRACE_SECS: i64 = 900;
@@ -8622,7 +8684,7 @@ fn git_merge(body: &Value) -> u64 {
             "head_before": head_before,
             "head_after": head_after,
             "already_up_to_date": head_before == head_after,
-            "fast_forward": out.contains("Fast-forward"),
+            "fast_forward": out.lines().any(|line| line == "Fast-forward" || line.starts_with("Fast-forward (")),
             "output": out
         }),
     )
