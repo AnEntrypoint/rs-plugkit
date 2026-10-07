@@ -760,6 +760,17 @@ fn sync_tree_with_budget(
 ) -> Value {
     let started = host_now_ms();
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
+    let accessible_directory = crate::wasm_dispatch::host_stat(root)
+        .and_then(|stat| stat.get("isDirectory").and_then(Value::as_bool))
+        == Some(true);
+    if !accessible_directory && !crate::wasm_dispatch::host_allow_root(root) {
+        return json!({
+            "ok": false,
+            "complete": false,
+            "listing_complete": false,
+            "error": format!("root '{root}' is not an existing project directory the host will grant access to"),
+        });
+    }
     let mut files = match code_index::collect_files_checked(
         root,
         cfg.index.digest_max_files.saturating_add(1),
@@ -2096,7 +2107,8 @@ fn text_field<'a>(body: &'a Value, keys: &[&str]) -> Option<&'a str> {
 
 pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     let action = text_field(body, &["action", "mode"]).unwrap_or("overview");
-    let project_path = text_field(body, &["root", "projectPath"]);
+    let project_root = text_field(body, &["root", "projectPath"]).map(crate::pkfs::anchor);
+    let project_path = project_root.as_deref();
     if matches!(action, "callers" | "callees" | "impact" | "tests") {
         let unsupported: Vec<&str> = [
             "path",

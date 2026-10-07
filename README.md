@@ -285,6 +285,13 @@ unreadable or oversized files, failed parses, and failed stores reject the query
 presenting cached graph evidence as current. Use `action: "sync"`
 for a longer refresh before retrying a budget-limited query.
 
+An explicit `root` or `projectPath` requests access through the host before structural
+reads. Existing readable directories keep their current access. External roots must
+be existing project directories recognized by the host; a linked checkout's `.git`
+file counts as a project marker. This applies to `codeinsight_index` too.
+Relative roots anchor their database path at the dispatch project. Database opens
+create missing parent directories only beneath a host-readable ancestor.
+
 Readable empty files and supported files with long lines remain eligible for structural indexing.
 The host file-read ABI returns `0` on failure, reserved packed value `1` for successful empty UTF-8
 reads without allocation, and a pointer/length for nonempty reads. Empty-read success requires
