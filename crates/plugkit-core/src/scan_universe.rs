@@ -17,6 +17,7 @@ const LISTING_WALK_ANSWERABLE_BUDGET_MS: u64 = 20_000;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileSource {
     Git,
+    Committed,
     Walk,
     SingleFile,
 }
@@ -25,6 +26,7 @@ impl FileSource {
     pub fn label(self) -> &'static str {
         match self {
             FileSource::Git => "git",
+            FileSource::Committed => "committed",
             FileSource::Walk => "walk",
             FileSource::SingleFile => "file",
         }
@@ -33,6 +35,7 @@ impl FileSource {
     pub fn detail(self) -> &'static str {
         match self {
             FileSource::Git => "git ls-files --cached: tracked files only, so a file created since the last git add is not listed; pass \"refresh\": true to walk the disk instead",
+            FileSource::Committed => "git ls-files --cached for the file set and git show HEAD:<path> for every blob: what is committed, so a working-tree edit, an untracked file and a staged-but-uncommitted change are all invisible here",
             FileSource::Walk => "filesystem walk under the target: every file on disk that no exclusion rule dropped",
             FileSource::SingleFile => "one file named by \"path\", read straight from disk",
         }
@@ -449,10 +452,10 @@ pub fn absolute_root_for_message(root: &str) -> String {
     crate::pkfs::anchor(root).trim_end_matches("/.").to_string()
 }
 
-pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool) -> Result<ScanUniverse, String> {
-    let mut acc = list_scan_scope(root, scopes.first().copied(), max_files, cfg, origin, force_disk, no_ignore)?;
+pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool, committed: bool) -> Result<ScanUniverse, String> {
+    let mut acc = list_scan_scope(root, scopes.first().copied(), max_files, cfg, origin, force_disk, no_ignore, committed)?;
     for scope in scopes.iter().skip(1) {
-        let next = list_scan_scope(root, Some(scope), max_files, cfg, origin, force_disk, no_ignore)?;
+        let next = list_scan_scope(root, Some(scope), max_files, cfg, origin, force_disk, no_ignore, committed)?;
         acc.files.extend(next.files);
         acc.excluded.extend(next.excluded);
         acc.listing_complete &= next.listing_complete;
@@ -466,7 +469,7 @@ pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &I
     Ok(acc)
 }
 
-fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool) -> Result<ScanUniverse, String> {
+fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool, committed: bool) -> Result<ScanUniverse, String> {
     let rel = match scope {
         Some(s) => relative_scope(root, s)?,
         None => None,
@@ -492,9 +495,15 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                 scope.unwrap_or(""),
                 absolute_root_for_message(root),
             )),
-            Some(false) => return Ok(universe(vec![target.clone()], FileSource::SingleFile, true, Vec::new(), None)),
+            Some(false) => return Ok(universe(vec![target.clone()], if committed { FileSource::Committed } else { FileSource::SingleFile }, true, Vec::new(), None)),
             Some(true) => {}
         }
+    }
+    if committed {
+        let mut tracked = Vec::new();
+        let complete = git_list_into(&target, &["--cached"], None, 0, &mut tracked)?;
+        let files = tracked.into_iter().map(|p| join_under(&target, &p)).collect();
+        return Ok(universe(files, FileSource::Committed, complete, Vec::new(), None));
     }
     let cause = if force_disk {
         WalkCause::CallerForcedDisk
@@ -559,7 +568,7 @@ pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> 
     };
     let project_node_modules = join_under(base, "node_modules/");
     let origin = if absolute { TargetOrigin::CallerNamed } else { TargetOrigin::ProjectDefault };
-    match list_scan_universe(base, &scope.into_iter().collect::<Vec<&str>>(), max_files, cfg, origin, false, false) {
+    match list_scan_universe(base, &scope.into_iter().collect::<Vec<&str>>(), max_files, cfg, origin, false, false, false) {
         Ok(u) => u.files.into_iter().filter(|p| !p.starts_with(&project_node_modules)).take(max_files).collect(),
         Err(_) => Vec::new(),
     }

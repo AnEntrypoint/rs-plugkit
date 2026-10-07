@@ -2234,7 +2234,7 @@ const DUAL_PHRASE_SCAN_PER_FILE_MATCHES: usize = 8;
 const DUAL_PHRASE_SCAN_COLLECT_MATCHES: usize =
     DUAL_PHRASE_SCAN_MAX_MATCHES * DUAL_PHRASE_SCAN_PER_FILE_MATCHES;
 
-fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig, no_ignore: bool) -> (Vec<Value>, u64, bool) {
+fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig, no_ignore: bool, committed: bool) -> (Vec<Value>, u64, bool) {
     if rs_search::tokenize::tokenize(query).len() < 2 { return (Vec::new(), 0, false); }
     let scan = crate::code_index::LiteralScan {
         pattern: query,
@@ -2254,6 +2254,7 @@ fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::Rag
         budget_ms: Some(DUAL_PHRASE_SCAN_BUDGET_MS),
         refresh: false,
         no_ignore,
+        committed,
         output: crate::code_index::ScanOutput::Matches,
         list_limit: None,
         max_chars: usize::MAX,
@@ -2419,6 +2420,7 @@ fn literal_fallback_scan(body: &Value, term: &str, k: usize) -> Option<Value> {
         max_matches_per_file: None,
         context: 0,
         refresh: false,
+        committed: scan_committed_requested(body),
         verbose: false,
     };
     let out = crate::code_index::scan_literal(&scan, &cfg);
@@ -2793,7 +2795,7 @@ fn codesearch_at_root(
     let commits = crate::code_index::git_commit_rank_at(root, query, 10);
     let commits_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let (mut phrase_hits, mut phrase_total, phrase_exhaustive) =
-        dual_phrase_hits(query, Some(root), cfg, scan_no_ignore_requested(body));
+        dual_phrase_hits(query, Some(root), cfg, scan_no_ignore_requested(body), scan_committed_requested(body));
     let vector_reserve_ms = if prior_stage_ms.get("index_pass").is_some() {
         VECTOR_CHANNEL_COLD_RESERVE_MS
     } else {
@@ -2914,6 +2916,7 @@ const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "docs",
     "timeout_ms",
     "refresh",
+    "committed",
     "no_cache",
     "force_disk",
     "root",
@@ -3232,6 +3235,7 @@ fn codesearch_exhaustive(
         context: 0,
         refresh: scan_refresh_requested(body),
         no_ignore: scan_no_ignore_requested(body),
+        committed: scan_committed_requested(body),
         output,
         list_limit,
         max_chars,
@@ -3462,6 +3466,11 @@ fn scan_refresh_requested(body: &Value) -> bool {
 fn scan_no_ignore_requested(body: &Value) -> bool {
     body.get("no_ignore").and_then(|v| v.as_bool()).unwrap_or(false)
         || body.get("include_ignored").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn scan_committed_requested(body: &Value) -> bool {
+    body.get("committed").and_then(|v| v.as_bool()).unwrap_or(false)
+        || body.get("committed_content").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 fn scan_scope_hint(scan_cap: u32) -> String {
@@ -3841,6 +3850,7 @@ fn grep(body: &Value) -> u64 {
         max_matches_per_file: None,
         refresh: scan_refresh_requested(body),
         no_ignore: scan_no_ignore_requested(body),
+        committed: scan_committed_requested(body),
         output: crate::code_index::ScanOutput::Matches,
         list_limit: None,
         max_chars: usize::MAX,
@@ -3969,6 +3979,7 @@ fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> u64 {
         context,
         refresh: scan_refresh_requested(body),
         no_ignore: scan_no_ignore_requested(body),
+        committed: scan_committed_requested(body),
     };
     let scanned = crate::code_index::scan_comments(&scan, cfg);
     if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
@@ -4017,6 +4028,7 @@ fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: Option<&str>
         context: 0,
         refresh: scan_refresh_requested(body),
         no_ignore: false,
+        committed: scan_committed_requested(body),
         output: crate::code_index::ScanOutput::Compact,
         list_limit: None,
         max_chars: usize::MAX,
@@ -4369,7 +4381,7 @@ fn codesearch_dispatch(body: &Value) -> u64 {
         .iter()
         .map(|(hash, message, score)| json!({ "hash": hash, "message": message, "score": score }))
         .collect();
-    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, None, &cfg, scan_no_ignore_requested(body));
+    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, None, &cfg, scan_no_ignore_requested(body), scan_committed_requested(body));
     let build_hit = |corpus: &mut crate::code_index::FusionCorpus, key: &str, score: Option<f64>, fallback_text: Option<&str>| -> Value {
         let text = corpus.text_for_key(key)
             .or_else(|| fallback_text.map(String::from))
