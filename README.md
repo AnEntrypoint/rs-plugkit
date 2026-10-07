@@ -438,6 +438,14 @@ polls and installs from these GitHub Releases directly
 pipeline, so the `plugkit-wasm` npm package is not kept current by CI and
 should not be relied on as a live distribution channel.
 
+### Isolated source verification
+
+Keep each writer's checkout separate. Dependency compilation can reuse a target cache for the same Rust toolchain, target, profile, features and dependency lockfile. Cargo serializes builds in one target directory; avoid concurrent builds against that directory when their callers need to collect artifacts.
+
+Hold a single-writer lease across the build and artifact copy. Select the cache with `CARGO_TARGET_DIR`, build from the isolated checkout, then copy the resulting WASM or native library to a session-owned artifact directory before releasing the lease. Each diagnostic process reads that immutable copy. A separate target directory per writer can instead start from a filesystem snapshot or reflink of a compatible dependency cache; it must retain its own final artifacts.
+
+Record the checkout commit and uncommitted diff, Cargo lockfile digest, build command, Rust toolchain version and artifact SHA-256. Confirm source hashes are unchanged across the build and live diagnostic. Reuse dependencies only; rebuild changed source crates. A diagnostic artifact does not replace the installed runner or establish release provenance. Publish through the repository workflow and verify its artifact separately.
+
 ## Cascade
 
 A push to `AnEntrypoint/{rs-codeinsight, rs-search, rs-plugkit}` triggers
