@@ -3297,6 +3297,7 @@ fn verb_help_doc(verb: &str) -> Option<&'static str> {
         "fs_write" => Some(FS_WRITE_HELP),
         "fs_readdir" => Some(FS_READDIR_HELP),
         "fs_stat" => Some(FS_STAT_HELP),
+        "git_worktree" => Some("git_worktree {action: list} returns worktrees; {action: add, path, ref?: HEAD, detach?: true} creates a linked checkout; detach false requires an existing local branch name; {action: remove, path} removes a clean unlocked checkout without force. Unknown fields are refused per action. Repository selectors and session fields are accepted."),
         _ => None,
     }
 }
@@ -8460,6 +8461,126 @@ fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Value) -> u64
     )
 }
 
+fn git_worktree(body: &Value) -> u64 {
+    const VERB: &str = "git_worktree";
+    let action = match body.get("action").and_then(Value::as_str) {
+        Some("add") => "add",
+        Some("list") => "list",
+        Some("remove") => "remove",
+        _ => return err(VERB, "action must be add, list or remove"),
+    };
+    let accepted: &[&str] = match action {
+        "add" => &["action", "path", "ref", "detach"],
+        "remove" => &["action", "path"],
+        _ => &["action"],
+    };
+    if let Some(refusal) = refuse_unknown_fields(VERB, body, accepted) {
+        return refusal;
+    }
+    let cwd = body_cwd(body);
+    if action == "list" {
+        let result = match run_git_checked(
+            &["worktree", "list", "--porcelain", "-z"],
+            cwd,
+            VERB,
+            "worktree list failed",
+        ) {
+            Ok(result) => result,
+            Err(error) => return error,
+        };
+        let output = result.get("stdout").and_then(Value::as_str).unwrap_or("");
+        let mut worktrees = Vec::new();
+        let mut entry = serde_json::Map::new();
+        for field in output.split('\0') {
+            if field.is_empty() {
+                if !entry.is_empty() {
+                    worktrees.push(Value::Object(std::mem::take(&mut entry)));
+                }
+                continue;
+            }
+            let (key, value) = field.split_once(' ').unwrap_or((field, ""));
+            entry.insert(
+                key.to_string(),
+                if value.is_empty() {
+                    json!(true)
+                } else {
+                    json!(value)
+                },
+            );
+        }
+        if !entry.is_empty() {
+            worktrees.push(Value::Object(entry));
+        }
+        return ok(VERB, json!({"action": action, "worktrees": worktrees}));
+    }
+    let path = match body.get("path").and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() && !value.contains(['\0', '\r', '\n']) => value,
+        _ => {
+            return err(
+                VERB,
+                "path must be a nonempty string without NUL or line breaks",
+            )
+        }
+    };
+    if action == "remove" {
+        if let Err(error) = run_git_checked(
+            &["worktree", "remove", "--", path],
+            cwd,
+            VERB,
+            "worktree remove failed",
+        ) {
+            return error;
+        }
+        return ok(VERB, json!({"action": action, "removed": path}));
+    }
+    let reference = match body.get("ref") {
+        None => "HEAD",
+        Some(Value::String(value))
+            if !value.trim().is_empty()
+                && !value.starts_with('-')
+                && !value.contains(['\0', '\r', '\n']) =>
+        {
+            value.as_str()
+        }
+        _ => {
+            return err(
+                VERB,
+                "ref must be a nonempty string without a leading '-' or line breaks",
+            )
+        }
+    };
+    let detach = match body.get("detach") {
+        None => true,
+        Some(Value::Bool(value)) => *value,
+        _ => return err(VERB, "detach must be a boolean"),
+    };
+    if !detach && body.get("ref").is_none() {
+        return err(
+            VERB,
+            "detach false requires an explicit existing branch ref",
+        );
+    }
+    if !detach {
+        let branch = format!("refs/heads/{}", reference);
+        let probe = git_call_argv(&["show-ref", "--verify", "--quiet", &branch], cwd);
+        if probe.get("exit_code").and_then(Value::as_i64) != Some(0) {
+            return err(VERB, "detach false requires an existing local branch name");
+        }
+    }
+    let mut argv = vec!["worktree", "add"];
+    if detach {
+        argv.push("--detach");
+    }
+    argv.extend(["--", path, reference]);
+    if let Err(error) = run_git_checked(&argv, cwd, VERB, "worktree add failed") {
+        return error;
+    }
+    ok(
+        VERB,
+        json!({"action": action, "added": path, "ref": reference, "detached": detach}),
+    )
+}
+
 fn git_checkout(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_checkout",
@@ -8563,7 +8684,7 @@ fn git_merge(body: &Value) -> u64 {
             "head_before": head_before,
             "head_after": head_after,
             "already_up_to_date": head_before == head_after,
-            "fast_forward": out.contains("Fast-forward"),
+            "fast_forward": out.lines().any(|line| line == "Fast-forward" || line.starts_with("Fast-forward (")),
             "output": out
         }),
     )
@@ -8845,16 +8966,6 @@ fn git_stash_list(body: &Value) -> u64 {
     )
 }
 
-const GIT_INIT_GITIGNORE_ENTRY: &str = ".gm/exec-spool/";
-const GIT_INIT_GITIGNORE_COVERING_ENTRIES: &[&str] = &[
-    ".gm",
-    ".gm/",
-    ".gm/*",
-    ".gm/exec-spool",
-    ".gm/exec-spool/",
-    ".gm/exec-spool/*",
-];
-
 fn git_init_target(body: &Value) -> Result<Option<String>, String> {
     let base = body_cwd(body).map(|c| c.trim()).filter(|c| !c.is_empty());
     let requested = body
@@ -8914,25 +9025,10 @@ fn git_init_gitignore(root: &str) -> &'static str {
     if !crate::wasm_dispatch::host_allow_root(root) {
         return "unwritable";
     }
-    let file = format!("{}/.gitignore", root.trim_end_matches('/'));
-    let existing = super::host_abi::host_read(&file).unwrap_or_default();
-    let covered = existing
-        .lines()
-        .map(|l| l.trim().trim_start_matches('/'))
-        .any(|l| GIT_INIT_GITIGNORE_COVERING_ENTRIES.contains(&l));
-    if covered {
-        return "present";
-    }
-    let separator = if existing.is_empty() || existing.ends_with('\n') {
-        ""
-    } else {
-        "\n"
-    };
-    let updated = format!("{}{}{}\n", existing, separator, GIT_INIT_GITIGNORE_ENTRY);
-    if super::host_abi::host_write(&file, &updated) {
-        "added"
-    } else {
-        "unwritable"
+    match crate::gitignore::ensure_managed_gitignore(root) {
+        Ok(true) => "added",
+        Ok(false) => "present",
+        Err(_) => "unwritable",
     }
 }
 
@@ -10178,6 +10274,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
             "ci-status" | "ci_status" => ci_status(&body),
             "git_branch" => git_branch(&body),
             "git_remote" => git_remote(&body),
+            "git_worktree" => git_worktree(&body),
             "git_checkout" => git_checkout(&body),
         "git_merge" => git_merge(&body),
         "git_merge_abort" => git_merge_abort(&body),
