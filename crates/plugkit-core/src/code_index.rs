@@ -3848,7 +3848,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
                 .any(|glob| glob.admits(root, scope, path))
     };
     let file_cap = cfg.index.digest_max_files.max(20000).min(LITERAL_SCAN_MAX_FILES).max(1);
-    let universe = match crate::scan_universe::list_scan_universe(root, &[], file_cap.saturating_add(1), &cfg.index, origin, false, false) {
+    let universe = match crate::scan_universe::list_scan_universe(root, &[], file_cap.saturating_add(1), &cfg.index, origin, false, false, req.committed) {
         Ok(e) => e,
         Err(e) => return json!({ "ok": false, "error": e, "mode": "filename" }),
     };
@@ -4114,11 +4114,26 @@ pub struct LiteralScan<'a> {
     /// dependencies, scratch scripts the project never committed -- are listed and scanned like any
     /// other file. .git is never a worktree entry, so it stays out either way.
     pub no_ignore: bool,
+    pub committed: bool,
     pub output: ScanOutput,
     pub list_limit: Option<usize>,
     pub max_chars: usize,
     pub spill_name: String,
     pub verbose: bool,
+}
+
+fn committed_file_text(root: Option<&str>, path: &str) -> Option<String> {
+    let base = root.unwrap_or("").trim_end_matches('/');
+    let rel = match base.is_empty() {
+        true => path,
+        false => path.strip_prefix(&format!("{base}/"))?,
+    };
+    let spec = format!("HEAD:{rel}");
+    let r = crate::wasm_dispatch::git_call_argv(&["show", &spec], root);
+    if r.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0) != 0 {
+        return None;
+    }
+    r.get("stdout").and_then(|v| v.as_str()).map(str::to_string)
 }
 
 fn path_is_inside_dependency_store(path: &str) -> bool {
@@ -4529,7 +4544,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let listing_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore, req.committed) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
     };
@@ -4671,12 +4686,14 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 }
                 continue;
             }
-            if size == 0 {
+            if size == 0 && !req.committed {
                 files_scanned += 1;
                 continue;
             }
         }
-        let content = if mtime_ms > 0 {
+        let content = if req.committed {
+            committed_file_text(req.root, path)
+        } else if mtime_ms > 0 {
             match cache.get(path, mtime_ms, size) {
                 Some(cached) => Some(cached),
                 None => {
@@ -4967,6 +4984,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             "file_source_detail".to_string(),
             json!(universe.source.detail()),
         );
+    }
+    if req.committed {
+        out.insert("committed".to_string(), json!(true));
+        out.insert("committed_note".to_string(), json!("every file was read from HEAD, so a working-tree edit, an untracked file and a staged-but-uncommitted change are all invisible to this scan"));
     }
     if req.refresh {
         out.insert("refreshed".to_string(), json!(true));
@@ -5355,6 +5376,7 @@ pub struct CommentScan<'a> {
     pub refresh: bool,
     /// Opt in to scanning gitignored files; see `LiteralScan::no_ignore`.
     pub no_ignore: bool,
+    pub committed: bool,
 }
 
 const COMMENT_TEXT_MAX_BYTES: usize = 2000;
@@ -5835,7 +5857,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     }
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore, req.committed) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
     };
@@ -5898,12 +5920,14 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
                 files_skipped_too_large += 1;
                 continue;
             }
-            if size == 0 {
+            if size == 0 && !req.committed {
                 files_scanned += 1;
                 continue;
             }
         }
-        let content = if mtime_ms > 0 {
+        let content = if req.committed {
+            committed_file_text(req.root, path)
+        } else if mtime_ms > 0 {
             match cache.get(path, mtime_ms, size) {
                 Some(cached) => Some(cached),
                 None => {
@@ -5972,6 +5996,10 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         out.insert("paths_not_read_count".to_string(), json!(unread_paths.len()));
         out.insert("paths_not_read".to_string(), json!(unread_paths.iter().take(SKIPPED_SAMPLE_LEN).cloned().collect::<Vec<_>>()));
         out.insert("paths_not_read_note".to_string(), json!("the hit cap was reached before these named paths were opened, so nothing in them can appear above: the paths list above is what you asked for, files_scanned is what was actually read -- raise max_results or scan these paths one per call"));
+    }
+    if req.committed {
+        out.insert("committed".to_string(), json!(true));
+        out.insert("committed_note".to_string(), json!("every file was read from HEAD, so a working-tree edit, an untracked file and a staged-but-uncommitted change are all invisible to this scan"));
     }
     if req.refresh {
         out.insert("refreshed".to_string(), json!(true));
