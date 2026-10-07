@@ -9987,15 +9987,7 @@ fn git_worktree_add(body: &Value) -> u64 {
     let reference = body.get("ref").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
     if create && reference.is_none() { return err("git_worktree_add", "create:true requires a ref naming the new branch"); }
     if reference.is_some_and(|s| s.starts_with('-')) { return err("git_worktree_add", "ref must not start with '-'"); }
-    let mut argv: Vec<String> = vec!["worktree".to_string(), "add".to_string()];
-    if create {
-        argv.push("-b".to_string());
-        argv.push(reference.unwrap_or_default().to_string());
-        argv.push(path.clone());
-    } else {
-        if let Some(s) = reference { argv.push(s.to_string()); }
-        argv.push(path.clone());
-    }
+    let argv = crate::git_worktree_argv::worktree_add_argv(create, reference, &path);
     let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
     let r = git_call_argv(&argv_refs, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
