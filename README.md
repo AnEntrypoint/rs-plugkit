@@ -257,7 +257,7 @@ git-tracked source and a bounded `node_modules` walk), `kv`/`kv_get`/
 `kv_put`/`kv_delete`, `exec`/`exec_js`, `fetch`, `env_get`, `recall`,
 `codesearch`, `codeinsight` (symbol, call, import, complexity and duplicate queries; `callers`/`callees`/`impact` are aliases), `memorize`/`memorize-prune`, `health`, `filter`, the full git
 verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git_remote`, `git_add`,
-`git_commit`, `git_finalize`, `git_push`, `git_checkout`, `git_merge`, `git_cherry_pick`, `git_fetch`,
+`git_commit`, `git_amend`, `git_finalize`, `git_push`, `git_checkout`, `git_merge`, `git_cherry_pick`, `git_fetch`,
 `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`,
 `git_worktree`, `git_worktree_add`, `git_worktree_list`, `git_worktree_remove`, `git_worktree_prune`,
 `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
@@ -379,6 +379,13 @@ under `.agentplug*` is refused rather than silently widening. A scoped
 `error_code: invalid_args` and `requested_paths` instead of reporting
 `nothing_to_commit`, so a pathspec that no-ops cannot fall through to
 committing the rest of the index.
+
+`git_commit {amend:true}` and the `git_amend` alias rewrite HEAD (`git commit
+--amend`) with the same body fields; they refuse `pushed_commit_refused` when
+HEAD is reachable from a `refs/remotes/` ref and `amend requires an existing HEAD
+commit` on an unborn branch. A `paths` value that is not an array of strings is
+refused, never silently narrowed. `nothing_to_commit` answers echo
+`requested_paths`.
 
 `git_commit` and `git_finalize` refuse before staging anything when the commit
 would reference a file that exists on disk, is untracked, is not gitignored
