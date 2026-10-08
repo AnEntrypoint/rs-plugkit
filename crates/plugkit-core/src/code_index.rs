@@ -1752,8 +1752,6 @@ const SYMBOL_SYNC_BUDGET_DIVISOR: u64 = 4;
 
 const ENUMERATION_BUDGET_DIVISOR: u64 = 4;
 
-const EMBED_WALK_HEADROOM_DIVISOR: u64 = 2;
-
 #[derive(Clone)]
 struct ChunkRecord {
     key: String,
@@ -2382,6 +2380,7 @@ fn index_cfg_impl(
     } else {
         0
     };
+    let walk_share_ms = index_wall_budget_ms.saturating_sub(embed_budget_ms);
     let mut measured_embed_ms_per_chunk = pessimistic_ms_per_chunk;
     let mut treesitter_failures = 0u32;
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
@@ -2401,7 +2400,7 @@ fn index_cfg_impl(
             None => continue,
         };
         let elapsed = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
-        if elapsed > index_wall_budget_ms {
+        if elapsed > walk_share_ms {
             deferred_files += 1;
             first_deferred.get_or_insert_with(|| fp.clone());
             continue;
@@ -2587,11 +2586,8 @@ fn index_cfg_impl(
         let remaining_ms = index_wall_budget_ms.saturating_sub(elapsed_now);
         let budget_chunks = (remaining_ms / pessimistic_ms_per_chunk).max(1) as usize;
         let embed_remaining = embed_budget_ms.saturating_sub(embed_ms_spent);
-        let walk_ahead_of_schedule = elapsed_before_extraction
-            .saturating_mul(EMBED_WALK_HEADROOM_DIVISOR)
-            < index_wall_budget_ms;
         let embed_allowance =
-            if embed_remaining == 0 || !walk_ahead_of_schedule || max_chunks_per_file_per_pass == 0
+            if embed_remaining == 0 || max_chunks_per_file_per_pass == 0
             {
                 0
             } else {
@@ -2621,7 +2617,7 @@ fn index_cfg_impl(
 
         if fresh_needed > 0 {
             let fresh_file_allowance_spent = fresh_files_this_pass >= limit;
-            let under_floor = remaining_ms < pessimistic_ms_per_chunk;
+            let under_floor = embed_remaining < measured_embed_ms_per_chunk;
             if fresh_file_allowance_spent || (under_floor && floor_grace_used_this_pass) {
                 deferred_files += 1;
                 first_deferred.get_or_insert_with(|| fp.clone());
