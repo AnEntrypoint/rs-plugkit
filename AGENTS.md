@@ -699,3 +699,10 @@
 - `legacy_reaper::RETIRED_ARTIFACTS` is an exact allowlist, never a glob or memory/database deletion. Its hash invalidates the reap marker when the allowlist changes.
 - `mediator::SELF_LANG_VERBS` share dispatch code but are not aliases; retain their distinct language passed to `shell_exec`.
 - `submodule_head_sha` skips uninitialized submodule directories without their own `.git`; running git there would return the parent's HEAD successfully.
+
+## Lean graph and compiled prose
+
+- `orchestrator/lean_graph.json` and `orchestrator/instructions/prose/*.md` are vendored copies of `gm-config/fsm/graph.json` and `gm-config/prose/*.md`. `fsm::default_graph()` parses the lean graph; `instructions/lean_prose.rs` maps each lean prose key to its file. `entry` and `entry-extended` stay separate compiled prose.
+- Re-sync: copy both sources from the gm-config commit named by `config.rs` `DEFAULT_REPO_PINNED_SHA`, regenerate `instructions/lean_prose.rs` from every `prose/*.md` except `entry` and `entry-extended`, delete prose files no longer in gm-config, and keep the pin on that commit.
+- A state with `"entry": true` is a graph root and skips the unreachable-state check. A configured graph that fails validation makes `instruction` and `transition` return the validation error; neither serves the compiled default in its place.
+- A gate with `"advisory": true` never blocks; its message is returned in the `advisory` array of the `transition` reply.

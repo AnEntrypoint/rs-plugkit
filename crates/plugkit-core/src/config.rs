@@ -14,7 +14,7 @@ pub const SOURCE_CACHE_REL: &str = ".gm/config-source-cache";
 
 pub const DEFAULT_REPO_URL: &str = "https://github.com/AnEntrypoint/gm-config";
 
-pub const DEFAULT_REPO_PINNED_SHA: &str = "2097260cefef15b539220568c03592bcc2bd9498";
+pub const DEFAULT_REPO_PINNED_SHA: &str = "5e992d2c71eeac619ef92377550dbba938d59bec";
 
 pub const DEFAULT_REPO_CACHE_REL: &str = ".gm/config-source-cache-default";
 
