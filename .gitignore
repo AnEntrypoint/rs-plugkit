@@ -11,3 +11,5 @@ Cargo.lock
 /crates/plugkit-core/.gm/
 .gm/config-source-cache-default.*.sync.json
 .cycle-state.json
+# engine diagnostic rewritten on every gate denial; runtime state
+.gm/fsm-graph-rejected.json
