@@ -1,4 +1,11 @@
-## 2026-10-08 - Offline release signing removed
+## 2026-10-08 - allowOutsideRoot reads reach directories nested under a marked ancestor
+
+**Changes:** `outside_root_read_granted` in `wasm_dispatch/verbs.rs` asks the host for a grant on the path and then on every ancestor (stopping before the drive root), not only on the immediate parent. Before, `C:\Users\user\AppData\Local\Temp\claude\<project>\<session>\scratchpad` was refused with `allowOutsideRoot:true` even though `Temp` carries a `.gm` marker, because only `Temp\claude\<project>\<session>` and its parent were ever asked. Writes are unchanged: `fs_write` still never reaches this check.
+
+**Measured live after sideloading the rebuilt guest:** `fs_readdir` of the session scratchpad with `allowOutsideRoot:true` listed its entries (three repeat calls); `fs_read` with the opt-in returned lines; `fs_write` to the same directory is still refused as project-only; `fs_readdir` of `C:\Windows\System32\drivers` (no marker on itself or any ancestor) is still refused.
+
+**Not changed:** a directory with no project marker on itself or any ancestor is still refused. Serving arbitrary non-project directories needs the `agentplug-host` sandbox widened as well.
+
 
 **Changes:** `wasm-plugin-release.yml` no longer has the `signing-preflight` job, the `release_signing_key_id` and `release_signing_public_key` inputs, the `release_signing_key` secret, or the "Attach offline signatures" step; `bump` and `release` no longer depend on the preflight job. `release.yml` no longer passes the signing inputs or secret. The publish step still uploads `release-assets/*` and the fetch check still runs over every asset.
 
