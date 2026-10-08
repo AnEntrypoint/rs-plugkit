@@ -771,17 +771,18 @@ fn sync_tree_with_budget(
             "error": format!("root '{root}' is not an existing project directory the host will grant access to"),
         });
     }
-    let mut files = match code_index::collect_files_checked(
+    let enumeration = match code_index::collect_files_checked_within(
         root,
         cfg.index.digest_max_files.saturating_add(1),
         &cfg.index,
     ) {
-        Ok(files) => files,
+        Ok(enumeration) => enumeration,
         Err(error) => {
             return json!({ "ok": false, "complete": false, "listing_complete": false, "error": error })
         }
     };
-    let listing_complete = files.len() <= cfg.index.digest_max_files;
+    let listing_complete = enumeration.complete && enumeration.files.len() <= cfg.index.digest_max_files;
+    let mut files = enumeration.files;
     files.truncate(cfg.index.digest_max_files);
     let mut report = sync_files(
         &files,

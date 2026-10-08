@@ -575,11 +575,18 @@ pub fn scan_deps(body: &Value) -> Value {
     let mut findings: Vec<FileFinding> = Vec::new();
     let mut blocked: Vec<BlockedRead> = Vec::new();
 
-    let tracked = if is_absolute_root(root) {
-        crate::scan_universe::project_source_files(root, cfg.digest_max_files, &cfg)
+    let (tracked, tracked_complete) = if is_absolute_root(root) {
+        (crate::scan_universe::project_source_files(root, cfg.digest_max_files, &cfg), true)
     } else {
-        crate::code_index::collect_files(root, cfg.digest_max_files, &cfg)
+        let enumeration = crate::code_index::collect_files_within(root, cfg.digest_max_files, &cfg);
+        (enumeration.files, enumeration.complete)
     };
+    if !tracked_complete {
+        blocked.push(BlockedRead {
+            path: root.to_string(),
+            reason: "wall budget expired while listing files; the scan is incomplete".into(),
+        });
+    }
     let tracked_scanned = scan_file_list(&tracked, tracked.len(), &mut findings, &mut blocked);
 
     if force_full {
