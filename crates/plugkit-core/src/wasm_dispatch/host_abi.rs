@@ -1,4 +1,8 @@
-use serde_json::Value;
+use crate::git_index_lock::{
+    is_index_lock_contention, retry_while_index_lock_contention, unresolved_message, GitAttempt,
+    IndexLockReport,
+};
+use serde_json::{json, Value};
 
 const HOST_FS_READ_EMPTY_SUCCESS: u64 = 1;
 
@@ -190,7 +194,15 @@ fn git_call_host(args: &str, cwd: Option<&str>) -> Value {
     annotate_repository_resolution(unpack_to_value(packed), &resolved)
 }
 
-pub fn git_call_async(args: &str, cwd: Option<&str>) -> Value {
+fn git_attempt_from(v: &Value) -> GitAttempt {
+    GitAttempt {
+        exit_code: v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0),
+        stdout: v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        stderr: v.get("stderr").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+    }
+}
+
+fn git_call_async_once(args: &str, cwd: Option<&str>) -> Value {
     let first = git_call_host(args, cwd);
     let Some(repository) = first
         .get("stderr")
@@ -203,6 +215,43 @@ pub fn git_call_async(args: &str, cwd: Option<&str>) -> Value {
         return first;
     }
     git_call_host(&argv_trusting_repository(args, &repository), cwd)
+}
+
+fn annotate_index_lock_contention(value: Value, report: &IndexLockReport) -> Value {
+    let mut out = value;
+    let attempt = git_attempt_from(&out);
+    if attempt.exit_code != 0 && is_index_lock_contention(&attempt) {
+        let note = unresolved_message(report);
+        let stderr = if attempt.stderr.is_empty() {
+            note
+        } else {
+            format!("{}\n{}", note, attempt.stderr)
+        };
+        if let Some(fields) = out.as_object_mut() {
+            fields.insert("stderr".to_string(), Value::String(stderr));
+        }
+    }
+    if let Some(fields) = out.as_object_mut() {
+        fields.insert(
+            "index_lock_contention".to_string(),
+            json!({
+                "lock": report.lock,
+                "attempts": report.attempts,
+                "waited_ms": report.waited_ms,
+                "resolved": report.resolved,
+            }),
+        );
+    }
+    out
+}
+
+pub fn git_call_async(args: &str, cwd: Option<&str>) -> Value {
+    let mut run = || git_call_async_once(args, cwd);
+    let (value, report) = retry_while_index_lock_contention(&mut run, git_attempt_from);
+    match report {
+        None => value,
+        Some(report) => annotate_index_lock_contention(value, &report),
+    }
 }
 
 pub fn git_pending_token(v: &Value) -> Option<String> {
