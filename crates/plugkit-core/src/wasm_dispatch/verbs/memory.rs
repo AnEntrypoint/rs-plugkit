@@ -56,22 +56,21 @@ pub(super) fn rssearch_vector_hits(
         sync.get("converged")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
-    } else if !crate::memory_md::has_stored_digest(&memory_namespaces) {
-        let fresh_clone_never_synced_sync =
-            crate::memory_md::sync_index(&memory_namespaces, now_ms);
+    } else if crate::memory_md::has_converged_digest(&memory_namespaces) {
+        true
+    } else {
+        let bounded_resume_sync = crate::memory_md::sync_index(&memory_namespaces, now_ms);
         emit_event(
-            "recall_first_touch_sync",
+            "recall_read_path_sync",
             json!({
                 "namespaces": memory_namespaces,
-                "result": fresh_clone_never_synced_sync,
+                "result": bounded_resume_sync,
             }),
         );
-        fresh_clone_never_synced_sync
+        bounded_resume_sync
             .get("converged")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
-    } else {
-        crate::memory_md::has_stored_digest(&memory_namespaces)
     };
     let search_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     emit_event(
@@ -177,6 +176,14 @@ pub(super) fn recall_reply(
     }
     if !full {
         reply["expand"] = json!("recall {key:\"<hit key>\"} for one full memory; recall {query, full:true} for full text of all hits");
+    }
+    reply
+}
+
+pub(super) fn with_index_progress(mut reply: Value, converged: bool) -> Value {
+    reply["index_converged"] = json!(converged);
+    if !converged {
+        reply["index_note"] = json!("the memory index has not converged: this answer ranks only the vectors indexed so far. Each recall advances indexing by one bounded slice, so repeat the recall until index_converged is true");
     }
     reply
 }
@@ -300,13 +307,16 @@ pub(super) fn recall(body: &Value) -> u64 {
             if md_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
                 return ok(
                     "recall",
-                    recall_reply(
-                        body,
-                        "vector_top_k",
-                        namespace,
-                        &derived_query,
-                        &md_hits,
-                        &vector_hits,
+                    with_index_progress(
+                        recall_reply(
+                            body,
+                            "vector_top_k",
+                            namespace,
+                            &derived_query,
+                            &md_hits,
+                            &vector_hits,
+                        ),
+                        true,
                     ),
                 );
             }
@@ -317,13 +327,16 @@ pub(super) fn recall(body: &Value) -> u64 {
         let annotated = annotate_hits_with_score(vec_hits);
         return ok(
             "recall",
-            recall_reply(
-                body,
-                "vector_top_k",
-                namespace,
-                &derived_query,
-                &annotated,
-                &vector_hits,
+            with_index_progress(
+                recall_reply(
+                    body,
+                    "vector_top_k",
+                    namespace,
+                    &derived_query,
+                    &annotated,
+                    &vector_hits,
+                ),
+                mem_ns.is_some(),
             ),
         );
     }
@@ -377,7 +390,7 @@ pub(super) fn recall(body: &Value) -> u64 {
         &vector_hits,
     );
     reply["degraded"] = json!(degraded);
-    ok("recall", reply)
+    ok("recall", with_index_progress(reply, mem_ns.is_some()))
 }
 
 pub(super) const DIAGNOSTIC_EVENT_COOLDOWN_MS: i64 = 5 * 60 * 1000;
