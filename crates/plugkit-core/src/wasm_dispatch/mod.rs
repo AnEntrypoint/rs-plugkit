@@ -15,6 +15,7 @@ pub use host_abi::{
     host_vec_search, host_write, pack_ptr_len_pub, plugin_call, unpack_to_string_pub,
     unpack_to_value_pub,
 };
+pub(crate) use verbs::GIT_PROTECTED_PATHSPECS;
 pub use verbs::dispatch_verb;
 pub use verbs::{embed_query, memory_recall_backend, route_hint, vec_search_local};
 pub use verbs::{

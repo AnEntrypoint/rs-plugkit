@@ -153,8 +153,11 @@ fn pred_lean_always_true() -> bool {
 
 #[cfg(target_arch = "wasm32")]
 fn lean_worktree_clean() -> bool {
-    let st = crate::wasm_dispatch::host_abi::porcelain_from(&crate::wasm_dispatch::git_call(
-        "status --porcelain",
+    let mut argv: Vec<&str> = vec!["status", "--porcelain", "--"];
+    argv.extend(crate::wasm_dispatch::GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
+    argv.push(":/");
+    let st = crate::wasm_dispatch::host_abi::porcelain_from(&crate::wasm_dispatch::git_call_argv(
+        &argv,
         None,
     ));
     !st.partial && st.porcelain.trim().is_empty()
