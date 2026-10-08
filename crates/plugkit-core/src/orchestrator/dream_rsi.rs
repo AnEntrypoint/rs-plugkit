@@ -342,7 +342,7 @@ pub fn observe_dispatch(
         .unwrap_or(0);
     let mutable_open_count = crate::orchestrator::mutables::pending_detailed().len();
     let quality = if exit_code == 0 {
-        1.0 / (1.0 + (prd_open_count + mutable_open_count) as f64)
+        1.0
     } else {
         0.0
     };
