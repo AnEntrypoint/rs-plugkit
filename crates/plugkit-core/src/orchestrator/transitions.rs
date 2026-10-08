@@ -216,7 +216,7 @@ fn pred_lean_net_negative() -> bool {
 }
 
 fn advisory_messages(graph: &fsm::Graph, from: &str, to: &str) -> Vec<String> {
-    let Some(edge) = graph.edge_between(from, to) else {
+    let Some(edge) = graph.transition_edge(from, to) else {
         return Vec::new();
     };
     edge.gates
@@ -998,16 +998,24 @@ fn predicate_detail(_predicate_name: Option<&str>) -> Option<String> {
     None
 }
 
+fn entry_refusal(graph: &fsm::Graph, from: &str, to: &str) -> Option<String> {
+    graph.is_entry_state(to).then(|| {
+        format!(
+            "transition rejected: entry state `{}` can only be entered from the terminal state `{}`, not from `{}`.",
+            to, graph.policy.terminal_phase, from
+        )
+    })
+}
+
 fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, String, i32)> {
-    let Some(edge) = graph.edge_between(from, to) else {
-        return Some((
-            String::new(),
+    let Some(edge) = graph.transition_edge(from, to) else {
+        let message = entry_refusal(graph, from, to).unwrap_or_else(|| {
             format!(
                 "transition rejected: no edge from `{}` to `{}` in the active FSM graph -- there is no legal direct path between these phases.",
                 from, to
-            ),
-            1,
-        ));
+            )
+        });
+        return Some((String::new(), message, 1));
     };
     for gate_name in &edge.gates {
         let Some(g) = graph.gate(gate_name) else {
@@ -1056,11 +1064,11 @@ fn hook_denial_detail_or_none_if_predicate_caused_it(g: &GateDef) -> Option<Stri
 
 pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
     let graph = fsm::graph();
-    let Some(edge) = graph.edge_between(from, to) else {
-        return (
-            vec![format!("no edge from `{from}` to `{to}` in the active FSM graph -- no legal direct path between these phases")],
-            Some("instruction".to_string()),
-        );
+    let Some(edge) = graph.transition_edge(from, to) else {
+        let residual = entry_refusal(&graph, from, to).unwrap_or_else(|| {
+            format!("no edge from `{from}` to `{to}` in the active FSM graph -- no legal direct path between these phases")
+        });
+        return (vec![residual], Some("instruction".to_string()));
     };
     let mut residuals = Vec::new();
     let mut next_dispatch: Option<String> = None;
@@ -1167,7 +1175,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
     }
     let advisory = advisory_messages(&graph, cur_phase.as_str(), target.as_str());
     let edge = graph
-        .edge_between(cur_phase.as_str(), target.as_str())
+        .transition_edge(cur_phase.as_str(), target.as_str())
         .map(|e| {
             serde_json::json!({
                 "from": e.from,
