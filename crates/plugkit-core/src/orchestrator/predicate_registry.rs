@@ -20,6 +20,11 @@ pub const PREDICATE_REGISTRY: &[(&str, &str)] = &[
     ("split-context-swept", "true when the working diff touches at most one file, OR .gm/exec-spool/.split-context-swept exists with a head_sha matching the current `git rev-parse HEAD` -- a witnessed independent-Agent adversarial review for the exact pushed multi-file commit. A self-reviewed multi-file diff has not been adversarially swept."),
     ("no-graphical-symbols-in-diff", "true when new lines in the working diff introduce no decorative non-ASCII glyph (arrows, box-drawing, stars, bullets, checks/crosses, emoji) outside a binary/frozen-changelog/icon-font exemption path. Matches AGENTS.md's own no-graphical-symbols discipline as a real gate instead of an on-sight-only rule. Emits deviation.graphical-symbol naming the offending lines when it fails."),
     ("idempotent-dispatch-replay-safe", "true when the most recent N dispatch audit-tuples (id, hash, ts) for the current stop window contain no exact-duplicate (id, hash) pair recorded as two DIFFERENT outcomes -- a same-input dispatch replayed must reach the same result (f-compose-f-equals-f), never a second, different mutation applied on top of the first. Emits deviation.non-idempotent-replay naming the conflicting tuples when it fails."),
+    ("lean-one-task-in-flight", "BLOCKING. True when at most one row of .gm/prd.yml has an in-progress status."),
+    ("lean-contract-only-description", "ADVISORY. Code cannot tell whether prose restates the code, so the predicate always returns true and never refuses."),
+    ("lean-verifier-independent", "ADVISORY. Code cannot observe what a verifier agent read, so the predicate always returns true and never refuses."),
+    ("lean-net-negative", "BLOCKING. True when the working tree diff against HEAD has added lines less than or equal to removed lines. A growth reason is not read, so a growing change is refused."),
+    ("lean-contract-recorded", "BLOCKING. True when every .gm/prd.yml row is closed and the worktree is clean. The reason text in the commit message is not read."),
 ];
 
 pub fn generated_predicates_md() -> String {

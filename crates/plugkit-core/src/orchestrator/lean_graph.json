@@ -1,0 +1,2200 @@
+{
+  "schema_version": 2,
+  "source": "skills/dream-rsi/lean-graph.json (lean SKILL.md Graph section)",
+  "states": [
+    {
+      "key": "G_START",
+      "prose_key": "g_start",
+      "label": "one task in flight",
+      "kind": "gate",
+      "phase": null
+    },
+    {
+      "key": "G_CONTRACT",
+      "prose_key": "g_contract",
+      "label": "contract is the only durable description",
+      "kind": "gate",
+      "phase": null
+    },
+    {
+      "key": "G_INDEP",
+      "prose_key": "g_indep",
+      "label": "verifier has not read the implementation",
+      "kind": "gate",
+      "phase": null
+    },
+    {
+      "key": "G_NET",
+      "prose_key": "g_net",
+      "label": "change closes net-negative, or states why not",
+      "kind": "gate",
+      "phase": null
+    },
+    {
+      "key": "G_DONE",
+      "prose_key": "g_done",
+      "label": "contract satisfied and recorded",
+      "kind": "gate",
+      "phase": null
+    },
+    {
+      "key": "G_SWEEP",
+      "prose_key": "g_sweep",
+      "label": "full sweep, all phases",
+      "kind": "gate",
+      "phase": null
+    },
+    {
+      "key": "G_FIXPOINT",
+      "prose_key": "g_fixpoint",
+      "label": "sweep changed nothing",
+      "kind": "terminal",
+      "phase": null
+    },
+    {
+      "key": "G_SURFACE",
+      "prose_key": "g_surface",
+      "label": "variant did not decrease",
+      "kind": "terminal",
+      "phase": null
+    },
+    {
+      "key": "JTBD",
+      "prose_key": "jtbd",
+      "label": "Jobs To Be Done - Clayton Christensen",
+      "kind": "principle",
+      "phase": "P1"
+    },
+    {
+      "key": "XYPROB",
+      "prose_key": "xyprob",
+      "label": "XY Problem",
+      "kind": "principle",
+      "phase": "P1"
+    },
+    {
+      "key": "EARS",
+      "prose_key": "ears",
+      "label": "EARS Requirements Syntax - Alistair Mavin",
+      "kind": "principle",
+      "phase": "P1"
+    },
+    {
+      "key": "INVEST",
+      "prose_key": "invest",
+      "label": "INVEST - Bill Wake",
+      "kind": "principle",
+      "phase": "P1"
+    },
+    {
+      "key": "THINSLICE",
+      "prose_key": "thinslice",
+      "label": "Thin Vertical Slice - Alistair Cockburn",
+      "kind": "principle",
+      "phase": "P1"
+    },
+    {
+      "key": "SPIKE",
+      "prose_key": "spike",
+      "label": "Spike Solution - Kent Beck",
+      "kind": "principle",
+      "phase": "P1"
+    },
+    {
+      "key": "YAGNI",
+      "prose_key": "yagni",
+      "label": "YAGNI - Ron Jeffries",
+      "kind": "principle",
+      "phase": "P1"
+    },
+    {
+      "key": "LIVEPLAN",
+      "prose_key": "liveplan",
+      "label": "Live Plan, Current Task Only",
+      "kind": "principle",
+      "phase": "P1"
+    },
+    {
+      "key": "UBIQ",
+      "prose_key": "ubiq",
+      "label": "Ubiquitous Language - Eric Evans",
+      "kind": "principle",
+      "phase": "P2"
+    },
+    {
+      "key": "CLEANNAME",
+      "prose_key": "cleanname",
+      "label": "Intention-Revealing Names - Robert C. Martin",
+      "kind": "principle",
+      "phase": "P2"
+    },
+    {
+      "key": "MILNER",
+      "prose_key": "milner",
+      "label": "Well-Typed Programs Cannot Go Wrong - Robin Milner",
+      "kind": "principle",
+      "phase": "P2"
+    },
+    {
+      "key": "ILLEGAL",
+      "prose_key": "illegal",
+      "label": "Make Illegal States Unrepresentable - Yaron Minsky",
+      "kind": "principle",
+      "phase": "P2"
+    },
+    {
+      "key": "PARSEDV",
+      "prose_key": "parsedv",
+      "label": "Parse, Don't Validate - Alexis King",
+      "kind": "principle",
+      "phase": "P2"
+    },
+    {
+      "key": "WADLER",
+      "prose_key": "wadler",
+      "label": "Theorems for Free - Philip Wadler",
+      "kind": "principle",
+      "phase": "P2"
+    },
+    {
+      "key": "DBC",
+      "prose_key": "dbc",
+      "label": "Design by Contract - Bertrand Meyer",
+      "kind": "principle",
+      "phase": "P2"
+    },
+    {
+      "key": "CQS",
+      "prose_key": "cqs",
+      "label": "Command-Query Separation - Bertrand Meyer",
+      "kind": "principle",
+      "phase": "P2"
+    },
+    {
+      "key": "PARNAS",
+      "prose_key": "parnas",
+      "label": "Information Hiding - David Parnas",
+      "kind": "principle",
+      "phase": "P2"
+    },
+    {
+      "key": "DEEPMOD",
+      "prose_key": "deepmod",
+      "label": "Deep Modules - John Ousterhout",
+      "kind": "principle",
+      "phase": "P2"
+    },
+    {
+      "key": "ACCEPTPORT",
+      "prose_key": "acceptport",
+      "label": "Ports and Adapters - Alistair Cockburn",
+      "kind": "principle",
+      "phase": "P2"
+    },
+    {
+      "key": "COMMENTSMELL",
+      "prose_key": "commentsmell",
+      "label": "A Comment Is a Deodorant for Bad Smells - Fowler and Beck",
+      "kind": "principle",
+      "phase": "P2"
+    },
+    {
+      "key": "TOTALITY",
+      "prose_key": "totality",
+      "label": "Total Functional Programming - David Turner",
+      "kind": "principle",
+      "phase": "P3"
+    },
+    {
+      "key": "GUARD",
+      "prose_key": "guard",
+      "label": "Guard Clause - Martin Fowler",
+      "kind": "principle",
+      "phase": "P3"
+    },
+    {
+      "key": "SLAP",
+      "prose_key": "slap",
+      "label": "Single Level of Abstraction - Kent Beck",
+      "kind": "principle",
+      "phase": "P3"
+    },
+    {
+      "key": "STRUCTPROG",
+      "prose_key": "structprog",
+      "label": "Structured Programming - Edsger Dijkstra",
+      "kind": "principle",
+      "phase": "P3"
+    },
+    {
+      "key": "IMMUT",
+      "prose_key": "immut",
+      "label": "Purely Functional Data Structures - Chris Okasaki",
+      "kind": "principle",
+      "phase": "P3"
+    },
+    {
+      "key": "OWNERSHIP",
+      "prose_key": "ownership",
+      "label": "Ownership and Borrowing - Matsakis and Klock",
+      "kind": "principle",
+      "phase": "P3"
+    },
+    {
+      "key": "DRY",
+      "prose_key": "dry",
+      "label": "Don't Repeat Yourself - Hunt and Thomas",
+      "kind": "principle",
+      "phase": "P3"
+    },
+    {
+      "key": "KISS",
+      "prose_key": "kiss",
+      "label": "KISS - Kelly Johnson",
+      "kind": "principle",
+      "phase": "P3"
+    },
+    {
+      "key": "DIJKSTRATEST",
+      "prose_key": "dijkstratest",
+      "label": "Testing Shows Presence, Never Absence - Edsger Dijkstra",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "ORACLEBIAS",
+      "prose_key": "oraclebias",
+      "label": "Implementation-Biased Test Generation - LLM test-generation study",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "INDEPVER",
+      "prose_key": "indepver",
+      "label": "Independence-Based Verification - Grabowski",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "ADVERSARIAL",
+      "prose_key": "adversarial",
+      "label": "Adversarial Red-Blue Agent Verification - Thukkaram",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "HUGHES",
+      "prose_key": "hughes",
+      "label": "QuickCheck Property-Based Testing - Claessen and Hughes",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "PBTAGENT",
+      "prose_key": "pbtagent",
+      "label": "Agentic Property-Based Testing - Hypothesis agent study",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "INVARIANTRUN",
+      "prose_key": "invariantrun",
+      "label": "Stateful Invariant Runs over Random Call Sequences - Foundry and Hypothesis",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "METAMORPH",
+      "prose_key": "metamorph",
+      "label": "Metamorphic Testing - T. Y. Chen",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "FUZZ",
+      "prose_key": "fuzz",
+      "label": "Coverage-Guided Fuzzing - Michal Zalewski",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "CONTRACTTEST",
+      "prose_key": "contracttest",
+      "label": "Consumer-Driven Contract Test - Ian Robinson",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "CHARTEST",
+      "prose_key": "chartest",
+      "label": "Characterization Test, Legacy Only - Michael Feathers",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "AGENTQA",
+      "prose_key": "agentqa",
+      "label": "Agent-Native QA over MCP",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "LLMJUDGE",
+      "prose_key": "llmjudge",
+      "label": "LLM as a Judge",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "SANITIZE",
+      "prose_key": "sanitize",
+      "label": "Sanitizer and Static Analysis Gate",
+      "kind": "principle",
+      "phase": "P4"
+    },
+    {
+      "key": "CONVCOM",
+      "prose_key": "convcom",
+      "label": "Conventional Commits",
+      "kind": "principle",
+      "phase": "P5"
+    },
+    {
+      "key": "RULE5072",
+      "prose_key": "rule5072",
+      "label": "50/72 Commit Format - Tim Pope",
+      "kind": "principle",
+      "phase": "P5"
+    },
+    {
+      "key": "WHYNOTWHAT",
+      "prose_key": "whynotwhat",
+      "label": "The Diff Records What, the Message Records Why",
+      "kind": "principle",
+      "phase": "P5"
+    },
+    {
+      "key": "GITSTATE",
+      "prose_key": "gitstate",
+      "label": "Git Is the State - stateless runtime, Kapale",
+      "kind": "principle",
+      "phase": "P5"
+    },
+    {
+      "key": "BLAME",
+      "prose_key": "blame",
+      "label": "git blame as the Index",
+      "kind": "principle",
+      "phase": "P5"
+    },
+    {
+      "key": "BISECT",
+      "prose_key": "bisect",
+      "label": "git bisect as the Regression Oracle - Linus Torvalds",
+      "kind": "principle",
+      "phase": "P5"
+    },
+    {
+      "key": "SEMVER",
+      "prose_key": "semver",
+      "label": "Semantic Versioning - Tom Preston-Werner",
+      "kind": "principle",
+      "phase": "P5"
+    },
+    {
+      "key": "ADRN",
+      "prose_key": "adrn",
+      "label": "ADR, Irreversible Forks Only - Michael Nygard",
+      "kind": "principle",
+      "phase": "P5"
+    },
+    {
+      "key": "NODELETE",
+      "prose_key": "nodelete",
+      "label": "Agents Avoid Deleting Code - Ebrahimi et al.",
+      "kind": "principle",
+      "phase": "P6"
+    },
+    {
+      "key": "GUARDANDGO",
+      "prose_key": "guardandgo",
+      "label": "Guard-and-Go Fallback Accumulation - Vector Labs",
+      "kind": "principle",
+      "phase": "P6"
+    },
+    {
+      "key": "TYPE4",
+      "prose_key": "type4",
+      "label": "Type-4 Semantic Clones in Agent Pull Requests",
+      "kind": "principle",
+      "phase": "P6"
+    },
+    {
+      "key": "CHURN",
+      "prose_key": "churn",
+      "label": "Rising Churn and Duplication - Harding and Kloster, GitClear",
+      "kind": "principle",
+      "phase": "P6"
+    },
+    {
+      "key": "SLOPDRIFT",
+      "prose_key": "slopdrift",
+      "label": "Behavioural Drift over Long Trajectories - Orlanski et al.",
+      "kind": "principle",
+      "phase": "P6"
+    },
+    {
+      "key": "DELETIONGATE",
+      "prose_key": "deletiongate",
+      "label": "Deletion-Completeness Check",
+      "kind": "principle",
+      "phase": "P6"
+    },
+    {
+      "key": "DIFFBUDGET",
+      "prose_key": "diffbudget",
+      "label": "Net-Negative Diff Target",
+      "kind": "principle",
+      "phase": "P6"
+    },
+    {
+      "key": "REACHABLE",
+      "prose_key": "reachable",
+      "label": "Reachability Analysis",
+      "kind": "principle",
+      "phase": "P6"
+    },
+    {
+      "key": "TARPIT",
+      "prose_key": "tarpit",
+      "label": "Out of the Tar Pit - Moseley and Marks",
+      "kind": "principle",
+      "phase": "P6"
+    },
+    {
+      "key": "LEANSW",
+      "prose_key": "leansw",
+      "label": "A Plea for Lean Software - Niklaus Wirth",
+      "kind": "principle",
+      "phase": "P6"
+    },
+    {
+      "key": "KOLMOGOROV",
+      "prose_key": "kolmogorov",
+      "label": "Kolmogorov Complexity - Kolmogorov and Chaitin",
+      "kind": "principle",
+      "phase": "P6"
+    },
+    {
+      "key": "SMALLESTSET",
+      "prose_key": "smallestset",
+      "label": "The Smallest Set of High-Signal Tokens",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "CONTEXTROT",
+      "prose_key": "contextrot",
+      "label": "Context Rot - Hong et al.",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "REWORK",
+      "prose_key": "rework",
+      "label": "Rework Loops Dominate Token Spend",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "PROGDISC",
+      "prose_key": "progdisc",
+      "label": "Progressive Disclosure via SKILL.md",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "HEADERONLY",
+      "prose_key": "headeronly",
+      "label": "Header Loads, Body Fires on Trigger",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "AGENTSMD",
+      "prose_key": "agentsmd",
+      "label": "AGENTS.md Hierarchical, Not Encyclopaedic",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "NODUPEDOC",
+      "prose_key": "nodupedoc",
+      "label": "Reference, Never Restate",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "SUBAGENT",
+      "prose_key": "subagent",
+      "label": "Subagent Context Isolation",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "COMPACT",
+      "prose_key": "compact",
+      "label": "Phase-Boundary Compaction",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "OBSCOMPRESS",
+      "prose_key": "obscompress",
+      "label": "Observational Context Compression",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "MEMTOOL",
+      "prose_key": "memtool",
+      "label": "Server-Side Memory Across Sessions",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "STABLEPREFIX",
+      "prose_key": "stableprefix",
+      "label": "Stable Prefix for Cache Hits",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "TOOLBUDGET",
+      "prose_key": "toolbudget",
+      "label": "Tool and MCP Definition Overhead",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "GREPFIRST",
+      "prose_key": "grepfirst",
+      "label": "Exact-String Retrieval Before Embedding Retrieval",
+      "kind": "principle",
+      "phase": "P7"
+    },
+    {
+      "key": "OUSTERHOUTC",
+      "prose_key": "ousterhoutc",
+      "label": "Comments Capture What Code Cannot - John Ousterhout",
+      "kind": "tension",
+      "phase": "P8"
+    },
+    {
+      "key": "NAURTHEORY",
+      "prose_key": "naurtheory",
+      "label": "Programming as Theory Building - Peter Naur",
+      "kind": "tension",
+      "phase": "P8"
+    },
+    {
+      "key": "TACIT",
+      "prose_key": "tacit",
+      "label": "Tacit Knowledge Resists Specification",
+      "kind": "tension",
+      "phase": "P8"
+    },
+    {
+      "key": "HYRUM",
+      "prose_key": "hyrum",
+      "label": "Hyrum's Law - Hyrum Wright",
+      "kind": "tension",
+      "phase": "P8"
+    },
+    {
+      "key": "REGEVIDENCE",
+      "prose_key": "regevidence",
+      "label": "Regulated Environments Need an Evidence Trail",
+      "kind": "tension",
+      "phase": "P8"
+    },
+    {
+      "key": "MAINTCOST",
+      "prose_key": "maintcost",
+      "label": "Measured Maintenance Cost of Agent Code",
+      "kind": "tension",
+      "phase": "P8"
+    },
+    {
+      "key": "SPECDRIFT",
+      "prose_key": "specdrift",
+      "label": "Silent Spec-Code Drift - Grabowski",
+      "kind": "tension",
+      "phase": "P8"
+    },
+    {
+      "key": "CTXEXPLODE",
+      "prose_key": "ctxexplode",
+      "label": "Context Explosion in Whole-Repo Reasoning - Grabowski",
+      "kind": "tension",
+      "phase": "P8"
+    },
+    {
+      "key": "FIXPOINT",
+      "prose_key": "fixpoint",
+      "label": "Least Fixed Point - Kleene and Tarski",
+      "kind": "principle",
+      "phase": "P9"
+    },
+    {
+      "key": "MONOTONE",
+      "prose_key": "monotone",
+      "label": "Monotonic Improvement Only",
+      "kind": "principle",
+      "phase": "P9"
+    },
+    {
+      "key": "REGRESSGUARD",
+      "prose_key": "regressguard",
+      "label": "No Regression Across Sweeps",
+      "kind": "principle",
+      "phase": "P9"
+    },
+    {
+      "key": "VARIANT",
+      "prose_key": "variant",
+      "label": "Well-Founded Variant - Robert Floyd",
+      "kind": "principle",
+      "phase": "P9"
+    },
+    {
+      "key": "BOUNDEDRETRY",
+      "prose_key": "boundedretry",
+      "label": "Bounded Retry, Then Surface",
+      "kind": "principle",
+      "phase": "P9"
+    },
+    {
+      "key": "RICE",
+      "entry": true,
+      "prose_key": "rice",
+      "label": "Rice's Theorem - Henry Gordon Rice",
+      "kind": "principle",
+      "phase": "P9"
+    },
+    {
+      "key": "HALTING",
+      "prose_key": "halting",
+      "label": "Halting Problem - Alan Turing",
+      "kind": "principle",
+      "phase": "P9"
+    },
+    {
+      "key": "LEHMAN",
+      "prose_key": "lehman",
+      "label": "Lehman's Laws of Software Evolution - Meir Lehman",
+      "kind": "principle",
+      "phase": "P9"
+    },
+    {
+      "key": "KNUTHOPT",
+      "prose_key": "knuthopt",
+      "label": "Premature Optimization - Donald Knuth",
+      "kind": "principle",
+      "phase": "P9"
+    },
+    {
+      "key": "LOWERBOUND",
+      "prose_key": "lowerbound",
+      "label": "Lower Bound Reached - information-theoretic argument",
+      "kind": "principle",
+      "phase": "P9"
+    }
+  ],
+  "edges": [
+    {
+      "from": "JTBD",
+      "to": "XYPROB",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "XYPROB",
+      "to": "EARS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "EARS",
+      "to": "INVEST",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "INVEST",
+      "to": "THINSLICE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "THINSLICE",
+      "to": "SPIKE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SPIKE",
+      "to": "YAGNI",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "YAGNI",
+      "to": "LIVEPLAN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "UBIQ",
+      "to": "CLEANNAME",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CLEANNAME",
+      "to": "MILNER",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MILNER",
+      "to": "ILLEGAL",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "ILLEGAL",
+      "to": "PARSEDV",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PARSEDV",
+      "to": "WADLER",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "WADLER",
+      "to": "DBC",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DBC",
+      "to": "CQS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CQS",
+      "to": "PARNAS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PARNAS",
+      "to": "DEEPMOD",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DEEPMOD",
+      "to": "ACCEPTPORT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CLEANNAME",
+      "to": "COMMENTSMELL",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "TOTALITY",
+      "to": "GUARD",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GUARD",
+      "to": "SLAP",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SLAP",
+      "to": "STRUCTPROG",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "STRUCTPROG",
+      "to": "IMMUT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "IMMUT",
+      "to": "OWNERSHIP",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "OWNERSHIP",
+      "to": "DRY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DRY",
+      "to": "KISS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DIJKSTRATEST",
+      "to": "ORACLEBIAS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "ORACLEBIAS",
+      "to": "INDEPVER",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "INDEPVER",
+      "to": "ADVERSARIAL",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "ADVERSARIAL",
+      "to": "HUGHES",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "HUGHES",
+      "to": "PBTAGENT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PBTAGENT",
+      "to": "INVARIANTRUN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "INVARIANTRUN",
+      "to": "METAMORPH",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "METAMORPH",
+      "to": "FUZZ",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FUZZ",
+      "to": "CONTRACTTEST",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CONTRACTTEST",
+      "to": "CHARTEST",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "AGENTQA",
+      "to": "LLMJUDGE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "LLMJUDGE",
+      "to": "SANITIZE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CONVCOM",
+      "to": "RULE5072",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "RULE5072",
+      "to": "WHYNOTWHAT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "WHYNOTWHAT",
+      "to": "GITSTATE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GITSTATE",
+      "to": "BLAME",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "BLAME",
+      "to": "BISECT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "BISECT",
+      "to": "SEMVER",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SEMVER",
+      "to": "ADRN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "NODELETE",
+      "to": "GUARDANDGO",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GUARDANDGO",
+      "to": "TYPE4",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "TYPE4",
+      "to": "CHURN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CHURN",
+      "to": "SLOPDRIFT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SLOPDRIFT",
+      "to": "DELETIONGATE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DELETIONGATE",
+      "to": "REACHABLE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REACHABLE",
+      "to": "DIFFBUDGET",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "TARPIT",
+      "to": "LEANSW",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "LEANSW",
+      "to": "KOLMOGOROV",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SMALLESTSET",
+      "to": "CONTEXTROT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CONTEXTROT",
+      "to": "REWORK",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REWORK",
+      "to": "PROGDISC",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PROGDISC",
+      "to": "HEADERONLY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "HEADERONLY",
+      "to": "AGENTSMD",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "AGENTSMD",
+      "to": "NODUPEDOC",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "NODUPEDOC",
+      "to": "SUBAGENT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SUBAGENT",
+      "to": "COMPACT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "COMPACT",
+      "to": "OBSCOMPRESS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "OBSCOMPRESS",
+      "to": "MEMTOOL",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MEMTOOL",
+      "to": "STABLEPREFIX",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "STABLEPREFIX",
+      "to": "TOOLBUDGET",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "TOOLBUDGET",
+      "to": "GREPFIRST",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "OUSTERHOUTC",
+      "to": "NAURTHEORY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "NAURTHEORY",
+      "to": "TACIT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "HYRUM",
+      "to": "REGEVIDENCE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REGEVIDENCE",
+      "to": "MAINTCOST",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SPECDRIFT",
+      "to": "CTXEXPLODE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FIXPOINT",
+      "to": "MONOTONE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MONOTONE",
+      "to": "REGRESSGUARD",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REGRESSGUARD",
+      "to": "VARIANT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "VARIANT",
+      "to": "BOUNDEDRETRY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "RICE",
+      "to": "HALTING",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "HALTING",
+      "to": "LEHMAN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "KNUTHOPT",
+      "to": "LOWERBOUND",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_START",
+      "to": "JTBD",
+      "kind": "forward",
+      "label": null,
+      "gates": [
+        "lean-one-task-in-flight"
+      ]
+    },
+    {
+      "from": "LIVEPLAN",
+      "to": "G_CONTRACT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_CONTRACT",
+      "to": "UBIQ",
+      "kind": "forward",
+      "label": null,
+      "gates": [
+        "lean-contract-only-description"
+      ]
+    },
+    {
+      "from": "ACCEPTPORT",
+      "to": "TOTALITY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "KISS",
+      "to": "G_INDEP",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_INDEP",
+      "to": "DIJKSTRATEST",
+      "kind": "forward",
+      "label": null,
+      "gates": [
+        "lean-verifier-independent"
+      ]
+    },
+    {
+      "from": "SANITIZE",
+      "to": "G_NET",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_NET",
+      "to": "NODELETE",
+      "kind": "forward",
+      "label": null,
+      "gates": [
+        "lean-net-negative"
+      ]
+    },
+    {
+      "from": "DIFFBUDGET",
+      "to": "CONVCOM",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "ADRN",
+      "to": "G_DONE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_DONE",
+      "to": "G_SWEEP",
+      "kind": "forward",
+      "label": null,
+      "gates": [
+        "lean-contract-recorded"
+      ]
+    },
+    {
+      "from": "SMALLESTSET",
+      "to": "G_START",
+      "kind": "backreference",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_SWEEP",
+      "to": "FIXPOINT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FIXPOINT",
+      "to": "G_FIXPOINT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_SWEEP",
+      "to": "G_START",
+      "kind": "backreference",
+      "label": "a gate reopened",
+      "gates": []
+    },
+    {
+      "from": "G_SWEEP",
+      "to": "G_INDEP",
+      "kind": "backreference",
+      "label": "a property was falsified",
+      "gates": []
+    },
+    {
+      "from": "G_SWEEP",
+      "to": "KNUTHOPT",
+      "kind": "backreference",
+      "label": "a budget sits above its floor",
+      "gates": []
+    },
+    {
+      "from": "G_SWEEP",
+      "to": "G_NET",
+      "kind": "backreference",
+      "label": "the artifact grew",
+      "gates": []
+    },
+    {
+      "from": "G_SWEEP",
+      "to": "SMALLESTSET",
+      "kind": "backreference",
+      "label": "context spend rose per unit of change",
+      "gates": []
+    },
+    {
+      "from": "G_SWEEP",
+      "to": "OUSTERHOUTC",
+      "kind": "backreference",
+      "label": "a tension fired",
+      "gates": []
+    },
+    {
+      "from": "G_FIXPOINT",
+      "to": "LOWERBOUND",
+      "kind": "backreference",
+      "label": "no gate reopened, no counterexample, no growth",
+      "gates": []
+    },
+    {
+      "from": "G_FIXPOINT",
+      "to": "G_SWEEP",
+      "kind": "backreference",
+      "label": "a later sweep reopened a gate",
+      "gates": []
+    },
+    {
+      "from": "VARIANT",
+      "to": "G_SURFACE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "BOUNDEDRETRY",
+      "to": "G_SURFACE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "KOLMOGOROV",
+      "to": "PARNAS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DBC",
+      "to": "INDEPVER",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "ILLEGAL",
+      "to": "HUGHES",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "ACCEPTPORT",
+      "to": "CONTRACTTEST",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "WHYNOTWHAT",
+      "to": "BLAME",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MAINTCOST",
+      "to": "DELETIONGATE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PROGDISC",
+      "to": "AGENTQA",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "XYPROB",
+      "to": "JTBD",
+      "kind": "backreference",
+      "label": "the stated problem is not the real one",
+      "gates": []
+    },
+    {
+      "from": "EARS",
+      "to": "DBC",
+      "kind": "backreference",
+      "label": "the requirement is not falsifiable",
+      "gates": []
+    },
+    {
+      "from": "INVEST",
+      "to": "THINSLICE",
+      "kind": "backreference",
+      "label": "the task depends on another task",
+      "gates": []
+    },
+    {
+      "from": "THINSLICE",
+      "to": "PARNAS",
+      "kind": "backreference",
+      "label": "the slice cuts across a module boundary",
+      "gates": []
+    },
+    {
+      "from": "SPIKE",
+      "to": "LIVEPLAN",
+      "kind": "backreference",
+      "label": "the unknown survived the spike",
+      "gates": []
+    },
+    {
+      "from": "YAGNI",
+      "to": "TARPIT",
+      "kind": "backreference",
+      "label": "generality has one caller",
+      "gates": []
+    },
+    {
+      "from": "LIVEPLAN",
+      "to": "G_START",
+      "kind": "backreference",
+      "label": "the plan outlived its task",
+      "gates": []
+    },
+    {
+      "from": "G_CONTRACT",
+      "to": "SPECDRIFT",
+      "kind": "backreference",
+      "label": "a second durable description appeared",
+      "gates": []
+    },
+    {
+      "from": "UBIQ",
+      "to": "ILLEGAL",
+      "kind": "backreference",
+      "label": "the domain term is absent from the type",
+      "gates": []
+    },
+    {
+      "from": "CLEANNAME",
+      "to": "UBIQ",
+      "kind": "backreference",
+      "label": "the name cannot carry the meaning",
+      "gates": []
+    },
+    {
+      "from": "COMMENTSMELL",
+      "to": "CLEANNAME",
+      "kind": "backreference",
+      "label": "prose was needed to explain the code",
+      "gates": []
+    },
+    {
+      "from": "MILNER",
+      "to": "ILLEGAL",
+      "kind": "backreference",
+      "label": "a stuck state is reachable",
+      "gates": []
+    },
+    {
+      "from": "ILLEGAL",
+      "to": "DBC",
+      "kind": "backreference",
+      "label": "the type cannot express the rule",
+      "gates": []
+    },
+    {
+      "from": "PARSEDV",
+      "to": "ILLEGAL",
+      "kind": "backreference",
+      "label": "validation repeats in the interior",
+      "gates": []
+    },
+    {
+      "from": "WADLER",
+      "to": "MILNER",
+      "kind": "backreference",
+      "label": "the signature permits what the contract forbids",
+      "gates": []
+    },
+    {
+      "from": "DBC",
+      "to": "WADLER",
+      "kind": "backreference",
+      "label": "the contract lives in prose, not in the signature",
+      "gates": []
+    },
+    {
+      "from": "CQS",
+      "to": "DBC",
+      "kind": "backreference",
+      "label": "a query mutated state",
+      "gates": []
+    },
+    {
+      "from": "PARNAS",
+      "to": "DEEPMOD",
+      "kind": "backreference",
+      "label": "a decision is not hidden by any module",
+      "gates": []
+    },
+    {
+      "from": "DEEPMOD",
+      "to": "OUSTERHOUTC",
+      "kind": "backreference",
+      "label": "the interface needs prose to be usable",
+      "gates": []
+    },
+    {
+      "from": "ACCEPTPORT",
+      "to": "PARNAS",
+      "kind": "backreference",
+      "label": "an adapter leaked into the core",
+      "gates": []
+    },
+    {
+      "from": "TOTALITY",
+      "to": "PARSEDV",
+      "kind": "backreference",
+      "label": "a partial function escaped its domain",
+      "gates": []
+    },
+    {
+      "from": "GUARD",
+      "to": "SLAP",
+      "kind": "backreference",
+      "label": "the branch structure still needs explanation",
+      "gates": []
+    },
+    {
+      "from": "SLAP",
+      "to": "DEEPMOD",
+      "kind": "backreference",
+      "label": "the function mixes abstraction levels",
+      "gates": []
+    },
+    {
+      "from": "STRUCTPROG",
+      "to": "GUARD",
+      "kind": "backreference",
+      "label": "control flow is untraceable",
+      "gates": []
+    },
+    {
+      "from": "IMMUT",
+      "to": "OWNERSHIP",
+      "kind": "backreference",
+      "label": "shared mutable state crossed a boundary",
+      "gates": []
+    },
+    {
+      "from": "OWNERSHIP",
+      "to": "IMMUT",
+      "kind": "backreference",
+      "label": "a borrow outlived its owner",
+      "gates": []
+    },
+    {
+      "from": "DRY",
+      "to": "KOLMOGOROV",
+      "kind": "backreference",
+      "label": "one fact has two representations",
+      "gates": []
+    },
+    {
+      "from": "KISS",
+      "to": "YAGNI",
+      "kind": "backreference",
+      "label": "the solution exceeds the problem",
+      "gates": []
+    },
+    {
+      "from": "G_INDEP",
+      "to": "INDEPVER",
+      "kind": "backreference",
+      "label": "the verifier read the implementation",
+      "gates": []
+    },
+    {
+      "from": "DIJKSTRATEST",
+      "to": "INVARIANTRUN",
+      "kind": "backreference",
+      "label": "green does not mean correct",
+      "gates": []
+    },
+    {
+      "from": "ORACLEBIAS",
+      "to": "G_INDEP",
+      "kind": "backreference",
+      "label": "the assertion mirrors the code",
+      "gates": []
+    },
+    {
+      "from": "INDEPVER",
+      "to": "ADVERSARIAL",
+      "kind": "backreference",
+      "label": "the two agents shared context",
+      "gates": []
+    },
+    {
+      "from": "ADVERSARIAL",
+      "to": "ORACLEBIAS",
+      "kind": "backreference",
+      "label": "the verifier adopted the implementer's assumptions",
+      "gates": []
+    },
+    {
+      "from": "HUGHES",
+      "to": "ILLEGAL",
+      "kind": "backreference",
+      "label": "the property is falsified",
+      "gates": []
+    },
+    {
+      "from": "PBTAGENT",
+      "to": "METAMORPH",
+      "kind": "backreference",
+      "label": "the proposed property restates the code",
+      "gates": []
+    },
+    {
+      "from": "INVARIANTRUN",
+      "to": "DBC",
+      "kind": "backreference",
+      "label": "the invariant broke under a call sequence",
+      "gates": []
+    },
+    {
+      "from": "METAMORPH",
+      "to": "LLMJUDGE",
+      "kind": "backreference",
+      "label": "no oracle exists for the direct output",
+      "gates": []
+    },
+    {
+      "from": "FUZZ",
+      "to": "PARSEDV",
+      "kind": "backreference",
+      "label": "the input crashed the parser",
+      "gates": []
+    },
+    {
+      "from": "CONTRACTTEST",
+      "to": "HYRUM",
+      "kind": "backreference",
+      "label": "a consumer broke on an unpromised behaviour",
+      "gates": []
+    },
+    {
+      "from": "CHARTEST",
+      "to": "SPECDRIFT",
+      "kind": "backreference",
+      "label": "current behaviour is the only description left",
+      "gates": []
+    },
+    {
+      "from": "LLMJUDGE",
+      "to": "INDEPVER",
+      "kind": "backreference",
+      "label": "judge and author are the same model",
+      "gates": []
+    },
+    {
+      "from": "AGENTQA",
+      "to": "SANITIZE",
+      "kind": "backreference",
+      "label": "verification needs a human dashboard",
+      "gates": []
+    },
+    {
+      "from": "SANITIZE",
+      "to": "TOTALITY",
+      "kind": "backreference",
+      "label": "a sanitizer or analyser reports",
+      "gates": []
+    },
+    {
+      "from": "CONVCOM",
+      "to": "WHYNOTWHAT",
+      "kind": "backreference",
+      "label": "the message says what, not why",
+      "gates": []
+    },
+    {
+      "from": "RULE5072",
+      "to": "CONVCOM",
+      "kind": "backreference",
+      "label": "the subject does not stand alone",
+      "gates": []
+    },
+    {
+      "from": "WHYNOTWHAT",
+      "to": "ADRN",
+      "kind": "backreference",
+      "label": "the reason is unrecoverable from history",
+      "gates": []
+    },
+    {
+      "from": "GITSTATE",
+      "to": "LIVEPLAN",
+      "kind": "backreference",
+      "label": "state exists outside the repository",
+      "gates": []
+    },
+    {
+      "from": "BLAME",
+      "to": "RULE5072",
+      "kind": "backreference",
+      "label": "the introducing commit explains nothing",
+      "gates": []
+    },
+    {
+      "from": "BISECT",
+      "to": "LIVEPLAN",
+      "kind": "backreference",
+      "label": "no commit isolates the change",
+      "gates": []
+    },
+    {
+      "from": "SEMVER",
+      "to": "CONTRACTTEST",
+      "kind": "backreference",
+      "label": "a promise broke without a major bump",
+      "gates": []
+    },
+    {
+      "from": "ADRN",
+      "to": "YAGNI",
+      "kind": "backreference",
+      "label": "a reversible decision was recorded",
+      "gates": []
+    },
+    {
+      "from": "G_NET",
+      "to": "DIFFBUDGET",
+      "kind": "backreference",
+      "label": "the artifact grew",
+      "gates": []
+    },
+    {
+      "from": "NODELETE",
+      "to": "DELETIONGATE",
+      "kind": "backreference",
+      "label": "the old path survives beside the new",
+      "gates": []
+    },
+    {
+      "from": "GUARDANDGO",
+      "to": "DELETIONGATE",
+      "kind": "backreference",
+      "label": "a fallback was added, not removed",
+      "gates": []
+    },
+    {
+      "from": "TYPE4",
+      "to": "DRY",
+      "kind": "backreference",
+      "label": "two functions mean the same thing",
+      "gates": []
+    },
+    {
+      "from": "CHURN",
+      "to": "G_NET",
+      "kind": "backreference",
+      "label": "the diff is net-positive again",
+      "gates": []
+    },
+    {
+      "from": "SLOPDRIFT",
+      "to": "INVARIANTRUN",
+      "kind": "backreference",
+      "label": "behaviour drifted across iterations",
+      "gates": []
+    },
+    {
+      "from": "DELETIONGATE",
+      "to": "REACHABLE",
+      "kind": "backreference",
+      "label": "superseded code is still reachable",
+      "gates": []
+    },
+    {
+      "from": "REACHABLE",
+      "to": "DIFFBUDGET",
+      "kind": "backreference",
+      "label": "an entry point has no caller",
+      "gates": []
+    },
+    {
+      "from": "TARPIT",
+      "to": "ILLEGAL",
+      "kind": "backreference",
+      "label": "the state is accidental",
+      "gates": []
+    },
+    {
+      "from": "LEANSW",
+      "to": "KOLMOGOROV",
+      "kind": "backreference",
+      "label": "size grew without a reason",
+      "gates": []
+    },
+    {
+      "from": "KOLMOGOROV",
+      "to": "DEEPMOD",
+      "kind": "backreference",
+      "label": "the description exceeds the content",
+      "gates": []
+    },
+    {
+      "from": "SMALLESTSET",
+      "to": "COMPACT",
+      "kind": "backreference",
+      "label": "context grew without new signal",
+      "gates": []
+    },
+    {
+      "from": "CONTEXTROT",
+      "to": "SUBAGENT",
+      "kind": "backreference",
+      "label": "quality fell as the window filled",
+      "gates": []
+    },
+    {
+      "from": "REWORK",
+      "to": "G_INDEP",
+      "kind": "backreference",
+      "label": "iteration, not generation, spent the budget",
+      "gates": []
+    },
+    {
+      "from": "PROGDISC",
+      "to": "HEADERONLY",
+      "kind": "backreference",
+      "label": "the body loaded when it was not needed",
+      "gates": []
+    },
+    {
+      "from": "HEADERONLY",
+      "to": "AGENTSMD",
+      "kind": "backreference",
+      "label": "the header does not predict the trigger",
+      "gates": []
+    },
+    {
+      "from": "AGENTSMD",
+      "to": "NODUPEDOC",
+      "kind": "backreference",
+      "label": "the file restates the README",
+      "gates": []
+    },
+    {
+      "from": "NODUPEDOC",
+      "to": "DRY",
+      "kind": "backreference",
+      "label": "two documents describe one fact",
+      "gates": []
+    },
+    {
+      "from": "SUBAGENT",
+      "to": "OBSCOMPRESS",
+      "kind": "backreference",
+      "label": "the subagent returned raw output",
+      "gates": []
+    },
+    {
+      "from": "COMPACT",
+      "to": "OBSCOMPRESS",
+      "kind": "backreference",
+      "label": "compaction cut an active subgoal",
+      "gates": []
+    },
+    {
+      "from": "OBSCOMPRESS",
+      "to": "GREPFIRST",
+      "kind": "backreference",
+      "label": "an exact string was paraphrased away",
+      "gates": []
+    },
+    {
+      "from": "MEMTOOL",
+      "to": "COMPACT",
+      "kind": "backreference",
+      "label": "history is replayed each session",
+      "gates": []
+    },
+    {
+      "from": "STABLEPREFIX",
+      "to": "TOOLBUDGET",
+      "kind": "backreference",
+      "label": "the cache is missing",
+      "gates": []
+    },
+    {
+      "from": "TOOLBUDGET",
+      "to": "PROGDISC",
+      "kind": "backreference",
+      "label": "tool definitions dominate the prompt",
+      "gates": []
+    },
+    {
+      "from": "GREPFIRST",
+      "to": "SMALLESTSET",
+      "kind": "backreference",
+      "label": "retrieval returned approximate matches",
+      "gates": []
+    },
+    {
+      "from": "OUSTERHOUTC",
+      "to": "WHYNOTWHAT",
+      "kind": "backreference",
+      "label": "the knowledge has no home in the code",
+      "gates": []
+    },
+    {
+      "from": "NAURTHEORY",
+      "to": "MEMTOOL",
+      "kind": "backreference",
+      "label": "the theory died with the session",
+      "gates": []
+    },
+    {
+      "from": "TACIT",
+      "to": "ADRN",
+      "kind": "backreference",
+      "label": "the constraint was never stated anywhere",
+      "gates": []
+    },
+    {
+      "from": "HYRUM",
+      "to": "CONTRACTTEST",
+      "kind": "backreference",
+      "label": "an unpromised behaviour became a contract",
+      "gates": []
+    },
+    {
+      "from": "REGEVIDENCE",
+      "to": "ADRN",
+      "kind": "backreference",
+      "label": "the audit needs an artifact git does not hold",
+      "gates": []
+    },
+    {
+      "from": "MAINTCOST",
+      "to": "G_NET",
+      "kind": "backreference",
+      "label": "merged code costs more than it saved",
+      "gates": []
+    },
+    {
+      "from": "SPECDRIFT",
+      "to": "G_CONTRACT",
+      "kind": "backreference",
+      "label": "two descriptions disagree",
+      "gates": []
+    },
+    {
+      "from": "CTXEXPLODE",
+      "to": "PROGDISC",
+      "kind": "backreference",
+      "label": "the agent must read the whole repository",
+      "gates": []
+    },
+    {
+      "from": "G_DONE",
+      "to": "G_INDEP",
+      "kind": "backreference",
+      "label": "the contract is not satisfied",
+      "gates": []
+    },
+    {
+      "from": "FIXPOINT",
+      "to": "MONOTONE",
+      "kind": "backreference",
+      "label": "the sweep produced a change",
+      "gates": []
+    },
+    {
+      "from": "MONOTONE",
+      "to": "REGRESSGUARD",
+      "kind": "backreference",
+      "label": "a measure moved the wrong way",
+      "gates": []
+    },
+    {
+      "from": "REGRESSGUARD",
+      "to": "INVARIANTRUN",
+      "kind": "backreference",
+      "label": "an earlier sweep's gain was lost",
+      "gates": []
+    },
+    {
+      "from": "VARIANT",
+      "to": "BOUNDEDRETRY",
+      "kind": "backreference",
+      "label": "the open-condition count did not fall",
+      "gates": []
+    },
+    {
+      "from": "BOUNDEDRETRY",
+      "to": "G_SURFACE",
+      "kind": "backreference",
+      "label": "the same condition fired twice with no new information",
+      "gates": []
+    },
+    {
+      "from": "RICE",
+      "to": "BOUNDEDRETRY",
+      "kind": "backreference",
+      "label": "no analyser decides the property",
+      "gates": []
+    },
+    {
+      "from": "HALTING",
+      "to": "VARIANT",
+      "kind": "backreference",
+      "label": "no analyser decides termination of the sweep",
+      "gates": []
+    },
+    {
+      "from": "LEHMAN",
+      "to": "G_START",
+      "kind": "backreference",
+      "label": "the environment changed under a converged system",
+      "gates": []
+    },
+    {
+      "from": "KNUTHOPT",
+      "to": "G_SWEEP",
+      "kind": "backreference",
+      "label": "the profile contradicts the assumption",
+      "gates": []
+    },
+    {
+      "from": "LOWERBOUND",
+      "to": "G_FIXPOINT",
+      "kind": "backreference",
+      "label": "the bound is already reached, stop here",
+      "gates": []
+    },
+    {
+      "from": "G_SURFACE",
+      "to": "ADRN",
+      "kind": "backreference",
+      "label": "the ambiguity is human-owned",
+      "gates": []
+    }
+  ],
+  "gates": [
+    {
+      "name": "lean-one-task-in-flight",
+      "predicate": "lean-one-task-in-flight",
+      "hook_mode": "predicate-only",
+      "next_dispatch": "prd-list",
+      "message": "transition rejected (blocking, lean gate \"one task in flight\"): more than one plan row is in progress. Finish or abandon the other task, leaving at most one in-progress row, then re-attempt."
+    },
+    {
+      "name": "lean-contract-only-description",
+      "predicate": "lean-contract-only-description",
+      "hook_mode": "predicate-only",
+      "message": "advisory (lean gate \"contract is the only durable description\", not enforced): types, names and signatures should carry the meaning, and a rule the type cannot express should become a precondition in the signature. Code cannot check prose restatement, so this condition never refuses a transition.",
+      "advisory": true
+    },
+    {
+      "name": "lean-verifier-independent",
+      "predicate": "lean-verifier-independent",
+      "hook_mode": "predicate-only",
+      "message": "advisory (lean gate \"verifier has not read the implementation\", not enforced): the checking agent should work from the contract in a separate context with no shared history. Code cannot observe what a verifier read, so this condition never refuses a transition.",
+      "advisory": true
+    },
+    {
+      "name": "lean-net-negative",
+      "predicate": "lean-net-negative",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, lean gate \"change closes net-negative, or states why not\"): the working change adds more lines than it removes. Remove superseded paths until the net line change is zero or negative. The predicate does not read a growth reason, so a growing change cannot pass this gate yet."
+    },
+    {
+      "name": "lean-contract-recorded",
+      "predicate": "lean-contract-recorded",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, lean gate \"contract satisfied and recorded\"): a .gm/prd.yml row is still open or the worktree is not clean. Close every row and commit the change. The reason text in the commit message is not checked by code."
+    }
+  ],
+  "policy": {
+    "initial_phase": "JTBD",
+    "terminal_phase": "G_FIXPOINT"
+  }
+}

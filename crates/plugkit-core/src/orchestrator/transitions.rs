@@ -58,6 +58,11 @@ fn predicate_fn_for(name: &str) -> PredicateFn {
         "split-context-swept" => split_context_swept as PredicateFn,
         "no-graphical-symbols-in-diff" => pred_no_graphical_symbols_in_diff as PredicateFn,
         "idempotent-dispatch-replay-safe" => pred_idempotent_dispatch_replay_safe as PredicateFn,
+        "lean-one-task-in-flight" => pred_lean_one_task_in_flight as PredicateFn,
+        "lean-contract-only-description" => pred_lean_always_true as PredicateFn,
+        "lean-verifier-independent" => pred_lean_always_true as PredicateFn,
+        "lean-net-negative" => pred_lean_net_negative as PredicateFn,
+        "lean-contract-recorded" => pred_lean_contract_recorded as PredicateFn,
         other => panic!("predicate_registry names a predicate with no matching function: {other}"),
     }
 }
@@ -108,6 +113,115 @@ fn pred_claim_audit_clean() -> bool {
 }
 fn pred_submodules_clean() -> bool {
     super::submodule_drift::submodules_clean()
+}
+
+fn lean_prd_items() -> Option<Vec<serde_json::Value>> {
+    let (body, _err, code) = prd::handle_list_full();
+    if code != 0 {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(&body)
+        .ok()?
+        .get("items")?
+        .as_array()
+        .cloned()
+}
+
+fn lean_row_status(item: &serde_json::Value) -> String {
+    item.get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pending")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+}
+
+fn pred_lean_one_task_in_flight() -> bool {
+    let Some(items) = lean_prd_items() else {
+        return false;
+    };
+    items
+        .iter()
+        .filter(|it| lean_row_status(it) == "in-progress")
+        .count()
+        <= 1
+}
+
+fn pred_lean_always_true() -> bool {
+    true
+}
+
+#[cfg(target_arch = "wasm32")]
+fn lean_worktree_clean() -> bool {
+    let st = crate::wasm_dispatch::host_abi::porcelain_from(&crate::wasm_dispatch::git_call(
+        "status --porcelain",
+        None,
+    ));
+    !st.partial && st.porcelain.trim().is_empty()
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn lean_worktree_clean() -> bool {
+    false
+}
+
+fn pred_lean_contract_recorded() -> bool {
+    let Some(items) = lean_prd_items() else {
+        return false;
+    };
+    if items
+        .iter()
+        .any(|it| prd::status_is_open(&lean_row_status(it)))
+    {
+        return false;
+    }
+    lean_worktree_clean()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn pred_lean_net_negative() -> bool {
+    let st = crate::wasm_dispatch::host_abi::porcelain_from(&crate::wasm_dispatch::git_call(
+        "diff --numstat HEAD",
+        None,
+    ));
+    if st.partial {
+        return false;
+    }
+    let mut added: u64 = 0;
+    let mut removed: u64 = 0;
+    for line in st.porcelain.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut cols = line.splitn(3, '\t');
+        let (Some(a), Some(d), Some(_path)) = (cols.next(), cols.next(), cols.next()) else {
+            return false;
+        };
+        if a == "-" && d == "-" {
+            continue;
+        }
+        let (Ok(a), Ok(d)) = (a.parse::<u64>(), d.parse::<u64>()) else {
+            return false;
+        };
+        added = added.saturating_add(a);
+        removed = removed.saturating_add(d);
+    }
+    added <= removed
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn pred_lean_net_negative() -> bool {
+    false
+}
+
+fn advisory_messages(graph: &fsm::Graph, from: &str, to: &str) -> Vec<String> {
+    let Some(edge) = graph.edge_between(from, to) else {
+        return Vec::new();
+    };
+    edge.gates
+        .iter()
+        .filter_map(|name| graph.gate(name))
+        .filter(|g| g.advisory)
+        .map(|g| g.message.clone())
+        .collect()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -896,6 +1010,9 @@ fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, S
         let Some(g) = graph.gate(gate_name) else {
             continue;
         };
+        if g.advisory {
+            continue;
+        }
         if !evaluate_gate(g) {
             let detail = hook_denial_detail_or_none_if_predicate_caused_it(g)
                 .or_else(|| predicate_detail(g.predicate.as_deref()));
@@ -948,6 +1065,9 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
         let Some(g) = graph.gate(gate_name) else {
             continue;
         };
+        if g.advisory {
+            continue;
+        }
         if !evaluate_gate(g) {
             residuals.push(match hook_denial_detail_or_none_if_predicate_caused_it(g)
                 .or_else(|| predicate_detail(g.predicate.as_deref()))
@@ -996,7 +1116,10 @@ pub fn handle(_content: &str) -> (String, String, i32) {
 pub fn handle(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     let mut session_id: Option<String> = None;
-    let graph = fsm::graph();
+    let (graph, graph_tier, graph_path) = fsm::graph_detailed();
+    if let Some(refusal) = fsm::configured_graph_refusal(graph_tier) {
+        return (String::new(), refusal, 1);
+    }
     let cur = read_state_with_graph(&graph);
     let cur_phase = cur.phase.clone();
     let target = if trimmed.is_empty() {
@@ -1039,6 +1162,18 @@ pub fn handle(content: &str) -> (String, String, i32) {
     if let Some(r) = gate_rejection(&graph, cur_phase.as_str(), target.as_str()) {
         return r;
     }
+    let advisory = advisory_messages(&graph, cur_phase.as_str(), target.as_str());
+    let edge = graph
+        .edge_between(cur_phase.as_str(), target.as_str())
+        .map(|e| {
+            serde_json::json!({
+                "from": e.from,
+                "to": e.to,
+                "kind": e.kind,
+                "label": e.label,
+                "phase": e.phase,
+            })
+        });
 
     let skill = next_skill(&target, &graph);
     match set_phase_with_session_with_graph(target.clone(), Some(skill.clone()), session_id, &graph)
@@ -1097,6 +1232,10 @@ pub fn handle(content: &str) -> (String, String, i32) {
             let payload = serde_json::json!({
                 "phase": s.phase.as_str(),
                 "phase_label": skill,
+                "graph_tier": graph_tier.as_str(),
+                "graph_path": graph_path,
+                "edge": edge,
+                "advisory": advisory,
                 "recall_hits": crate::recall_compact::compact_hits(&hits, false),
             });
             (payload.to_string(), String::new(), 0)
