@@ -2928,6 +2928,7 @@ const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "comments_only",
     "no_ignore",
     "include_ignored",
+    "exhaustive",
     "k",
     "max_results",
     "maxResults",
@@ -3489,6 +3490,7 @@ fn scan_refresh_requested(body: &Value) -> bool {
 fn scan_no_ignore_requested(body: &Value) -> bool {
     body.get("no_ignore").and_then(|v| v.as_bool()).unwrap_or(false)
         || body.get("include_ignored").and_then(|v| v.as_bool()).unwrap_or(false)
+        || body.get("exhaustive").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 fn scan_scope_hint(scan_cap: u32) -> String {
@@ -4208,8 +4210,17 @@ fn codesearch(body: &Value) -> u64 {
     pack(v.to_string())
 }
 
+fn codesearch_comments_requested(body: &Value) -> bool {
+    body.get("mode").and_then(|v| v.as_str()) == Some("comments")
+        || body.get("comments").and_then(|v| v.as_bool()).unwrap_or(false)
+        || body.get("comments_only").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
 fn codesearch_dispatch(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
+    if codesearch_comments_requested(body) {
+        return grep_comments(body, &cfg);
+    }
     let Some(raw_query) = body.get("query") else {
         return err_retry_same_verb("codesearch", CODESEARCH_QUERY_SHAPE);
     };
