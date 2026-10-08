@@ -10074,24 +10074,100 @@ fn git_revert(body: &Value) -> u64 {
     )
 }
 
+fn staged_index_paths(cwd: Option<&str>) -> Vec<String> {
+    let r = git_call_argv(&["diff", "--cached", "--name-only", "-z"], cwd);
+    r.get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 fn git_reset(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
     let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("mixed");
+    let paths: Vec<String> = body
+        .get("paths")
+        .or_else(|| body.get("files"))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if paths.is_empty() {
+        let allow_whole_tree = body
+            .get("allow_whole_tree")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !allow_whole_tree {
+            return err_json(
+                "git_reset",
+                json!({
+                    "error": "git_reset without paths resets the whole index, which unstages every path any other writer has staged; name paths to unstage only those, or pass allow_whole_tree:true to reset the whole index on purpose",
+                    "error_code": "whole_tree_reset_refused",
+                    "hint": "git_reset {\"paths\":[\"src/foo.js\"]} unstages just src/foo.js and leaves every other staged path staged",
+                }),
+            );
+        }
+    } else if mode != "mixed" {
+        return err_json(
+            "git_reset",
+            json!({
+                "error": format!("git reset --{mode} takes no pathspec: a pathspec only rewrites the named index entries, so --{mode} would instead move HEAD or discard worktree content for every path, not the named one"),
+                "error_code": "git_reset_path_mode_unsupported",
+                "hint": "git_reset {paths:[...]} unstages the named paths; git_revert {paths:[...]} discards their worktree changes",
+            }),
+        );
+    }
     let mode_flag = match mode {
         "soft" => "--soft",
         "hard" => "--hard",
         _ => "--mixed",
     };
-    if let Err(e) = run_git_checked(
-        &["reset", mode_flag, refspec],
-        cwd,
-        "git_reset",
-        "reset failed",
-    ) {
+    let mut argv: Vec<String> = vec![
+        "reset".to_string(),
+        mode_flag.to_string(),
+        refspec.to_string(),
+    ];
+    if !paths.is_empty() {
+        argv.push("--".to_string());
+        argv.extend(paths.iter().cloned());
+    }
+    let staged_before = staged_index_paths(cwd);
+    if let Err(e) = run_git_checked(&as_argv(&argv), cwd, "git_reset", "reset failed") {
         return e;
     }
-    ok("git_reset", json!({ "reset_to": refspec, "mode": mode }))
+    let staged_after = staged_index_paths(cwd);
+    let unstaged: Vec<String> = staged_before
+        .iter()
+        .filter(|was| !staged_after.iter().any(|now| now == *was))
+        .cloned()
+        .collect();
+    let normalized = git_pathspecs_normalized(cwd, &paths);
+    let index_changed_outside_request = staged_after
+        .iter()
+        .any(|now| !staged_before.iter().any(|was| was == now))
+        || unstaged
+            .iter()
+            .any(|path| !git_request_covers(&normalized, path));
+    ok(
+        "git_reset",
+        json!({
+            "scope": if paths.is_empty() { "whole_index" } else { "paths" },
+            "paths": paths,
+            "reset_to": refspec,
+            "mode": mode,
+            "unstaged": unstaged,
+            "unstaged_count": unstaged.len(),
+            "still_staged_count": staged_after.len(),
+            "index_changed_outside_request": index_changed_outside_request,
+        }),
+    )
 }
 
 fn git_worktree_protected_segment(unified: &str) -> bool {
