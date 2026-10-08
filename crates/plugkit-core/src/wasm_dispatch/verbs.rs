@@ -2135,7 +2135,7 @@ fn stamp_request_identity(
     fingerprint: &str,
     body_parse_failed: bool,
     dispatch_id: Option<&str>,
-) -> u64 {
+) -> String {
     if let Some(obj) = value.as_object_mut() {
         obj.insert("request_fingerprint".to_string(), json!(fingerprint));
         if body_parse_failed {
@@ -2145,7 +2145,7 @@ fn stamp_request_identity(
             obj.insert("dispatch_id".to_string(), json!(id));
         }
     }
-    pack(value.to_string())
+    value.to_string()
 }
 
 const BODY_PARSE_SNIPPET_LEAD_BYTES: usize = 32;
@@ -2251,7 +2251,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     super::events::set_dispatch_session_id(None);
     let result_value = super::host_abi::unpack_to_value(result_packed);
     #[cfg(target_arch = "wasm32")]
-    let dispatch_id = {
+    let recorded: Option<(String, i64, bool)> = {
         let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
         let exit_code = if result_value
             .get("ok")
@@ -2274,29 +2274,42 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
                 exit_code,
                 dispatch_session_id.as_deref(),
             );
-            if let Some(session_id) = dispatch_session_id.as_deref() {
-                let gate_drift = exit_code != 0
-                    && crate::orchestrator::dream_rsi::failure_is_gate_drift(&result_value);
-                crate::orchestrator::dream_rsi::observe_dispatch(
-                    session_id,
-                    &dispatch_id,
-                    &verb,
-                    &fingerprint,
-                    exit_code,
-                    gate_drift,
-                );
-            }
-            Some(dispatch_id)
+            let gate_drift = exit_code != 0
+                && crate::orchestrator::dream_rsi::failure_is_gate_drift(&result_value);
+            Some((dispatch_id, exit_code, gate_drift))
         }
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let dispatch_id: Option<String> = None;
-    stamp_request_identity(
+    let recorded: Option<(String, i64, bool)> = None;
+    let reply = stamp_request_identity(
         result_value,
         &fingerprint,
         body_parse_failed,
-        dispatch_id.as_deref(),
-    )
+        recorded.as_ref().map(|(dispatch_id, _, _)| dispatch_id.as_str()),
+    );
+    #[cfg(target_arch = "wasm32")]
+    if let (Some((dispatch_id, exit_code, gate_drift)), Some(session_id)) =
+        (recorded, dispatch_session_id.as_deref())
+    {
+        let lean_node = body
+            .get("lean_node")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|node| !node.is_empty());
+        crate::orchestrator::dream_rsi::observe_dispatch(
+            crate::orchestrator::dream_rsi::ObservedDispatch {
+                session_id,
+                dispatch_id: &dispatch_id,
+                verb: &verb,
+                fingerprint: &fingerprint,
+                exit_code,
+                gate_drift,
+                reply: &reply,
+                lean_node,
+            },
+        );
+    }
+    pack(reply)
 }
 
 fn codeinsight_action(verb: &str, action: &str, body: &Value) -> u64 {
