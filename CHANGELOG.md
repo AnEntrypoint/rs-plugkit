@@ -1,3 +1,7 @@
+## 2026-10-08 - sideloaded builds are traceable to origin/main
+
+**Changes:** `health` reports `source_sha` (the commit `build.rs` embedded), and `gm/scripts/triage/sideload-plugkit.sh` builds only from a tree that contains `origin/main`, recording the built commit and wasm hash in `~/.agentplug/plugins/gm.build.json`.
+
 ## 2026-10-08 - allowOutsideRoot reads reach directories nested under a marked ancestor
 
 **Changes:** `outside_root_read_granted` in `wasm_dispatch/verbs.rs` asks the host for a grant on the path and then on every ancestor (stopping before the drive root), not only on the immediate parent. Before, `C:\Users\user\AppData\Local\Temp\claude\<project>\<session>\scratchpad` was refused with `allowOutsideRoot:true` even though `Temp` carries a `.gm` marker, because only `Temp\claude\<project>\<session>` and its parent were ever asked. Writes are unchanged: `fs_write` still never reaches this check.
