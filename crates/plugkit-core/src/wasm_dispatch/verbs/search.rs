@@ -252,9 +252,9 @@ pub(super) fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) 
         return compact;
     };
     let found = scan
-        .get("match_count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+        .get("matches")
+        .and_then(|v| v.as_array())
+        .map_or(0, |matches| matches.len() as u64);
     if found > 0 {
         let mut out = scan;
         if let Some(map) = out.as_object_mut() {
@@ -678,6 +678,8 @@ pub(super) fn merge_stage_ms(prior: Value, now: Value) -> Value {
 
 pub(super) const REGEX_SCAN_DEFAULT_BUDGET_MS: u64 = 20_000;
 
+pub(super) const LITERAL_SCAN_DEFAULT_BUDGET_MS: u64 = 25_000;
+
 pub(super) const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
 
 pub(super) const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
@@ -980,7 +982,11 @@ pub(super) fn codesearch_exhaustive(
         );
     }
     let budget_ms = match body.get("timeout_ms") {
-        None | Some(Value::Null) => regex.then_some(REGEX_SCAN_DEFAULT_BUDGET_MS),
+        None | Some(Value::Null) => Some(if regex {
+            REGEX_SCAN_DEFAULT_BUDGET_MS
+        } else {
+            LITERAL_SCAN_DEFAULT_BUDGET_MS
+        }),
         Some(value) => match value.as_u64() {
             Some(n) if n > 0 => Some(n.min(cfg.index.wall_budget_ms)),
             _ => {
