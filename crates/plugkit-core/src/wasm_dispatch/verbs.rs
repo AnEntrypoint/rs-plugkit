@@ -1,8 +1,9 @@
 use super::events::{emit_event, install_panic_hook, log_deviation_push};
 use super::host_abi::{
-    git_call, git_call_argv, host_env_get, host_exec_js, host_fetch, host_fs_readdir,
-    host_kv_delete, host_kv_get, host_kv_put, host_kv_query, host_now_ms, host_read, pack,
-    plugin_call as call_plugin, read_str, unpack_to_string, unpack_to_value,
+    crawl_cdp_call, git_call, git_call_argv, host_env_get, host_exec_js, host_fetch,
+    host_fs_readdir, host_kv_delete, host_kv_get, host_kv_put, host_kv_query, host_now_ms,
+    host_read, pack, plugin_call as call_plugin, plugin_call_text, read_str, unpack_to_string,
+    unpack_to_value,
 };
 use crate::orchestrator::yaml_util::base64_decode;
 use serde_json::{json, Value};
@@ -814,6 +815,47 @@ fn fetch(body: &Value) -> u64 {
         ok("fetch", v)
     } else {
         err_json("fetch", v)
+    }
+}
+
+const CRAWL_ENGINE_CDP: &str = "cdp";
+const CRAWL_ENGINE_LIGHTPANDA: &str = "lightpanda";
+const CRAWL_ERR_UNKNOWN_ENGINE: &str = "unknown_engine";
+
+fn split_crawl_engine(body_s: &str) -> (&str, &str) {
+    let (first, rest) = body_s.split_once('\n').unwrap_or((body_s, ""));
+    match first.trim().strip_prefix("engine=") {
+        Some(name) => (name.trim(), rest),
+        None => (CRAWL_ENGINE_CDP, body_s),
+    }
+}
+
+fn crawl(body_s: &str) -> u64 {
+    let (engine, request) = split_crawl_engine(body_s);
+    match engine {
+        CRAWL_ENGINE_CDP => crawl_reply(crawl_cdp_call(request)),
+        CRAWL_ENGINE_LIGHTPANDA => {
+            crawl_reply(plugin_call_text("lightpanda", "crawl", request))
+        }
+        other => err_coded(
+            "crawl",
+            CRAWL_ERR_UNKNOWN_ENGINE,
+            &format!(
+                "unknown crawl engine \"{other}\": the first line must be engine=cdp (headful Chrome over CDP, the default) or engine=lightpanda (headless)"
+            ),
+        ),
+    }
+}
+
+fn crawl_reply(reply: Value) -> u64 {
+    match reply {
+        Value::Object(_) => pack(reply.to_string()),
+        Value::Null => err_coded("crawl", ERR_CODE_FAILED, "host returned no reply for crawl"),
+        other => err_coded(
+            "crawl",
+            ERR_CODE_FAILED,
+            &format!("host crawl reply is not a JSON object: {other}"),
+        ),
     }
 }
 
@@ -9956,6 +9998,7 @@ fn verb_body_must_be_json(verb: &str) -> bool {
             | "zsh"
             | "powershell"
             | "ps1"
+            | "crawl"
     )
 }
 
@@ -10278,6 +10321,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "fs_stat" => fs_stat(&body),
         "scan_deps" | "scan-deps" => scan_deps(&body),
         "fetch" => fetch(&body),
+        "crawl" => crawl(&body_s),
         "env_get" => env_get(&body),
         "kv_get" => kv_get(&body),
         "kv_put" => kv_put(&body),

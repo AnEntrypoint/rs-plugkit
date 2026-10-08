@@ -279,6 +279,7 @@
 - BGE queries carry `BGE_QUERY_PREFIX`; passages do not. Every query embedding uses `condition_query`. Project-scoped embedding cache slots compare the stored full key even though their slot name is an `fnv1a64` hash.
 - `host_vec_embed` and `try_sibling_plugin_embed` are distinct host routes to the same BERT model. The sibling-plugin route preserves load/model diagnostics; it is not redundant merely because the model is shared.
 - `build.rs` embeds `PLUGKIT_SOURCE_SHA`. Fix `PLUGKIT_BUILD_SHA` for byte-for-byte A/B comparisons; deleting source lines changes panic locations even when tokens are otherwise identical.
+- `crawl_cdp` is a required host import: a runner that does not export it cannot instantiate this guest, so the guest and the runner ship together. `crawl` takes a plain-text body, so it is listed in `verb_body_must_be_json`'s non-JSON set and receives the body verbatim; `engine=lightpanda` reaches the `lightpanda` sibling through `plugin_call_text`, which passes the raw bytes rather than a JSON-encoded string.
 
 ### rssearch_vectors.rs, libsql_wasm.rs and host_abi.rs
 
