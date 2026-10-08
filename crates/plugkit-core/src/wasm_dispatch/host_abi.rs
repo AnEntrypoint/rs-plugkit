@@ -1,6 +1,13 @@
 use serde_json::Value;
 
 const HOST_FS_READ_EMPTY_SUCCESS: u64 = 1;
+/// The file exists but another process holds it (Windows sharing violation): retryable, and
+/// nothing at all like "missing".
+const HOST_FS_READ_LOCKED: u64 = 2;
+/// The bytes on disk are not valid UTF-8, so they cannot come back as text.
+const HOST_FS_READ_NOT_UTF8: u64 = 3;
+
+static LAST_FS_READ_STATUS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 macro_rules! host_abi_extern_block_and_host_imports_list_from_one_declaration {
     ($(fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?;)+) => {
@@ -399,10 +406,22 @@ pub fn host_allow_root(root: &str) -> bool {
 
 pub fn host_read(path: &str) -> Option<String> {
     let packed = unsafe { host_fs_read(path.as_ptr(), path.len() as u32) };
+    LAST_FS_READ_STATUS.store(packed, std::sync::atomic::Ordering::Relaxed);
     if packed == HOST_FS_READ_EMPTY_SUCCESS {
         Some(String::new())
     } else {
         unpack_to_string(packed)
+    }
+}
+
+/// Why the most recent `host_read` returned `None`. Empty is a success and any pointer is a
+/// success, so only the two failure codes the host can name come back; `None` means the read
+/// failed for a reason the host did not classify (missing, a directory, permissions).
+pub fn host_read_failure_kind() -> Option<&'static str> {
+    match LAST_FS_READ_STATUS.load(std::sync::atomic::Ordering::Relaxed) {
+        HOST_FS_READ_LOCKED => Some("locked"),
+        HOST_FS_READ_NOT_UTF8 => Some("not-utf8"),
+        _ => None,
     }
 }
 
