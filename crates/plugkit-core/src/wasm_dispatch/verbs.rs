@@ -5832,14 +5832,16 @@ fn git_commit_dedup_key(
     message: &str,
     paths: &[String],
     add_all: bool,
+    amend: bool,
 ) -> String {
     format!(
-        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
         cwd.unwrap_or(""),
         head_before,
         message,
         paths.join(","),
-        add_all
+        add_all,
+        amend
     )
 }
 
@@ -7063,6 +7065,7 @@ fn git_last_commit_identity(cwd: Option<&str>) -> Option<(String, String)> {
 fn git_commit_argv(
     message: &str,
     allow_empty: bool,
+    amend: bool,
     scoped_paths: &[String],
     identity: Option<&(String, String)>,
 ) -> Vec<String> {
@@ -7074,6 +7077,9 @@ fn git_commit_argv(
         argv.push(format!("user.email={email}"));
     }
     argv.push("commit".to_string());
+    if amend {
+        argv.push("--amend".to_string());
+    }
     argv.push("-m".to_string());
     argv.push(message.to_string());
     if allow_empty {
@@ -7150,6 +7156,39 @@ fn git_commit(body: &Value) -> u64 {
             .get("add_all")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let amend = body
+            .get("amend")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if amend {
+            let head_now = exec_git_in(cwd, "rev-parse --verify --quiet HEAD")
+                .trim()
+                .to_string();
+            if head_now.is_empty() {
+                return Ok(err_json(
+                    "git_commit",
+                    json!({
+                        "error": "amend refuses to run with no commit at HEAD: there is no parent to amend into",
+                        "error_code": "amend_requires_head",
+                        "next_dispatch": "git_commit",
+                    }),
+                ));
+            }
+            let published_in = git_remote_refs_containing(cwd, &head_now);
+            if !published_in.is_empty() {
+                return Ok(err_json(
+                    "git_commit",
+                    json!({
+                        "error": format!("amend refuses to rewrite {} -- it is already published at {}", &head_now[..head_now.len().min(10)], published_in.join(", ")),
+                        "error_code": "pushed_commit_refused",
+                        "published_in": published_in,
+                        "head": head_now,
+                        "hint": "amending a pushed commit rewrites history every clone already has; commit a follow-up instead",
+                        "next_dispatch": "git_commit",
+                    }),
+                ));
+            }
+        }
         let merge_probe = git_step_replayed_by_call_order(
             plan,
             &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"],
@@ -7205,7 +7244,7 @@ fn git_commit(body: &Value) -> u64 {
                 .collect()
         };
         let head_before_probe = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-        let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message, &paths, add_all);
+        let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message, &paths, add_all, amend);
         if let Some(prior) = git_commit_dedup_lookup(&dedup_key, cwd) {
             let sha = prior
                 .get("sha")
@@ -7228,7 +7267,7 @@ fn git_commit(body: &Value) -> u64 {
         let status_r =
             git_step_replayed_by_call_order(plan, &as_argv(&git_porcelain_argv(&[], cwd)), cwd)?;
         let porcelain = require_complete_git_porcelain("git_commit", &status_r)?;
-        if porcelain.trim().is_empty() && !allow_empty {
+        if porcelain.trim().is_empty() && !allow_empty && !amend {
             return Ok(ok(
                 "git_commit",
                 with_exclusion_report(json!({ "nothing_to_commit": true }), cwd, &paths),
@@ -7241,7 +7280,7 @@ fn git_commit(body: &Value) -> u64 {
                 cwd,
             )?;
             let scoped_porcelain = require_complete_git_porcelain("git_commit", &scoped_r)?;
-            if scoped_porcelain.trim().is_empty() && !allow_empty {
+            if scoped_porcelain.trim().is_empty() && !allow_empty && !amend {
                 let unmatched = pathspecs_matching_nothing(cwd, &paths);
                 if !unmatched.is_empty() && unmatched.len() == paths.len() {
                     return Ok(err_json(
@@ -7366,7 +7405,7 @@ fn git_commit(body: &Value) -> u64 {
         let bundled_message = bundle_prd_commit_comments(cwd, message);
         let r = git_step_replayed_by_call_order(
             plan,
-            &as_argv(&git_commit_argv(&bundled_message, allow_empty, commit_paths, None)),
+            &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, commit_paths, None)),
             cwd,
         )?;
         if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
@@ -7388,7 +7427,7 @@ fn git_commit(body: &Value) -> u64 {
             };
             let retried = git_step_replayed_by_call_order(
                 plan,
-                &as_argv(&git_commit_argv(&bundled_message, allow_empty, commit_paths, Some(&identity))),
+                &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, commit_paths, Some(&identity))),
                 cwd,
             )?;
             if retried.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
@@ -7650,7 +7689,7 @@ fn git_finalize(body: &Value) -> u64 {
         }
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
         let scoped_paths: &[String] = if scoped { &paths } else { &[] };
-        let mut cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, scoped_paths, None)), cwd_ref);
+        let mut cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, None)), cwd_ref);
         if cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
             let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let sout = cr.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -7660,7 +7699,7 @@ fn git_finalize(body: &Value) -> u64 {
                 None
             };
             if let Some(identity) = identity {
-                let retried = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, scoped_paths, Some(&identity))), cwd_ref);
+                let retried = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, Some(&identity))), cwd_ref);
                 if retried.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) == 0 {
                     cr = retried;
                 }
@@ -10170,6 +10209,214 @@ fn git_reset(body: &Value) -> u64 {
     )
 }
 
+fn git_remote_refs_containing(cwd: Option<&str>, rev: &str) -> Vec<String> {
+    let r = git_call_argv(
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "--contains",
+            rev,
+            "refs/remotes/",
+        ],
+        cwd,
+    );
+    r.get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn git_reset_head(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields(
+        "git_reset_head",
+        body,
+        &["to", "count", "mode", "allow_staged"],
+    ) {
+        return refusal;
+    }
+    let cwd = body_cwd(body);
+    let head_probe = git_call_argv(&["rev-parse", "--verify", "--quiet", "HEAD"], cwd);
+    if head_probe.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1) != 0 {
+        return err_json(
+            "git_reset_head",
+            json!({
+                "error": "no commit at HEAD: there is no commit to move back from",
+                "error_code": ERR_CODE_INVALID_ARGS,
+            }),
+        );
+    }
+    let head_sha = head_probe
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let named_target = body
+        .get("to")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let count = body.get("count").and_then(|v| v.as_i64());
+    if named_target.is_some() && count.is_some() {
+        return err_json(
+            "git_reset_head",
+            json!({
+                "error": "pass either to (a revision) or count (how many commits back), never both",
+                "error_code": ERR_CODE_INVALID_ARGS,
+            }),
+        );
+    }
+    let back = count.unwrap_or(1);
+    if back < 1 {
+        return err_json(
+            "git_reset_head",
+            json!({
+                "error": format!("count must be at least 1, got {back}"),
+                "error_code": ERR_CODE_INVALID_ARGS,
+            }),
+        );
+    }
+    let target_rev = named_target.unwrap_or_else(|| format!("HEAD~{back}"));
+    if target_rev.starts_with('-') {
+        return err("git_reset_head", "to must not start with '-'");
+    }
+    let peeled = format!("{target_rev}^{{commit}}");
+    let resolved = git_call_argv(&["rev-parse", "--verify", "--quiet", &peeled], cwd);
+    if resolved.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1) != 0 {
+        return err_json(
+            "git_reset_head",
+            json!({
+                "error": format!("cannot resolve {target_rev} to a commit in this repository"),
+                "error_code": "unresolvable_target",
+            }),
+        );
+    }
+    let target_sha = resolved
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if target_sha == head_sha {
+        return err_json(
+            "git_reset_head",
+            json!({
+                "error": format!("HEAD is already at {target_rev} -- there is no commit to collapse"),
+                "error_code": "already_at_target",
+                "head": head_sha,
+            }),
+        );
+    }
+    let ancestry = git_call_argv(&["merge-base", "--is-ancestor", &target_sha, &head_sha], cwd);
+    match ancestry.get("exit_code").and_then(|v| v.as_i64()) {
+        Some(0) => {}
+        Some(1) => {
+            return err_json(
+                "git_reset_head",
+                json!({
+                    "error": format!("{target_rev} is not an ancestor of HEAD, so moving there discards published or unrelated commits instead of collapsing the ones on top"),
+                    "error_code": "target_not_ancestor_of_head",
+                    "target": target_sha,
+                    "head": head_sha,
+                }),
+            );
+        }
+        _ => return err("git_reset_head", "unable to compare HEAD with the requested target"),
+    }
+    let published_in = git_remote_refs_containing(cwd, &head_sha);
+    if !published_in.is_empty() {
+        return err_json(
+            "git_reset_head",
+            json!({
+                "error": format!("refusing to move HEAD off {} -- it is already published at {}", &head_sha[..head_sha.len().min(10)], published_in.join(", ")),
+                "error_code": "pushed_commit_refused",
+                "published_in": published_in,
+                "head": head_sha,
+                "hint": "a pushed commit belongs to every clone that already fetched it; revert it instead",
+            }),
+        );
+    }
+    let staged = staged_index_paths(cwd);
+    let allow_staged = body
+        .get("allow_staged")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !staged.is_empty() && !allow_staged {
+        return err_json(
+            "git_reset_head",
+            json!({
+                "error": format!("the index holds {} staged path(s) this request did not name, and moving HEAD rewrites the index out from under whoever staged them: {}", staged.len(), staged.join(", ")),
+                "error_code": "staged_paths_present",
+                "staged": staged,
+                "staged_count": staged.len(),
+                "hint": "git_reset {paths:[...]} to unstage your own first, or pass allow_staged:true to accept rewriting the index",
+            }),
+        );
+    }
+    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("mixed");
+    let mode_flag = match mode {
+        "soft" => "--soft",
+        "mixed" => "--mixed",
+        "hard" => {
+            return err_json(
+                "git_reset_head",
+                json!({
+                    "error": "mode:hard rewrites the worktree, which this verb never does; git_revert {paths:[...]} discards worktree changes deliberately",
+                    "error_code": "git_reset_head_hard_refused",
+                }),
+            );
+        }
+        _ => {
+            return err_json(
+                "git_reset_head",
+                json!({
+                    "error": format!("mode must be soft or mixed, got {mode}"),
+                    "error_code": ERR_CODE_INVALID_ARGS,
+                }),
+            );
+        }
+    };
+    let argv = ["reset", mode_flag, target_sha.as_str()];
+    if let Err(e) = run_git_checked(&argv, cwd, "git_reset_head", "reset failed") {
+        return e;
+    }
+    let range = format!("{target_sha}..{head_sha}");
+    let log = git_call_argv(&["log", "-z", "--format=%H%x09%s", &range], cwd);
+    let dropped: Vec<Value> = log
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .split('\0')
+        .filter(|entry| !entry.trim().is_empty())
+        .filter_map(|entry| {
+            let (sha, subject) = entry.split_once('\t')?;
+            let sha = sha.trim();
+            Some(json!({
+                "sha": sha,
+                "sha_short": sha.chars().take(10).collect::<String>(),
+                "subject": subject,
+            }))
+        })
+        .collect();
+    ok(
+        "git_reset_head",
+        json!({
+            "moved": true,
+            "mode": mode,
+            "from": head_sha,
+            "to": target_sha,
+            "dropped": dropped,
+            "dropped_count": dropped.len(),
+            "worktree_untouched": true,
+        }),
+    )
+}
+
 fn git_worktree_protected_segment(unified: &str) -> bool {
     unified.split('/').any(|segment| {
         let lower = segment.to_ascii_lowercase();
@@ -11358,6 +11605,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_rm" => git_rm(&body),
         "git_revert" => git_revert(&body),
         "git_reset" => git_reset(&body),
+        "git_reset_head" => git_reset_head(&body),
         "git_worktree_add" => git_worktree_add(&body),
         "git_worktree_list" => git_worktree_list(&body),
         "git_worktree_remove" => git_worktree_remove(&body),
