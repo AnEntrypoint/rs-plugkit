@@ -1,0 +1,4 @@
+- id: plugin-abi-known-plugins-missing-liqology-crux
+  subject: wasm_dispatch/plugin_abi.rs's KNOWN_PLUGINS allowlist (a typo-hint list) is missing liqology and crux, which gm does call -- surfaced while sweeping rs-plugkit-dead-code-residue but out of that session's assigned scope (orchestrator/*.rs, dataflow.rs, config.rs, prose.rs, embed_marker.rs only; wasm_dispatch/verbs.rs and friends are owned by other concurrent sessions). Needs a one-line fix by whoever owns plugin_abi.rs next.
+  session_id: lanmower-rsplugkit-orch-1
+  status: unknown

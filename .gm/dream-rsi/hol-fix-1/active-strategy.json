@@ -1,0 +1,1 @@
+{"evidence":[{"dispatch_id":"1791222364441-500-742f8b5c9b6fe3f9","exit_code":1,"fingerprint":"4b2a990dc1b89df6","gate_drift":true,"mutable_open_count":1,"prd_open_count":2,"quality":0.0,"ts":1791222364475,"verb":"prd-update"}],"failed_dispatch_count":1,"gate_drift_failure_count":1,"observation_count":1,"selection":"replay-recorded-successes-first","successful_dispatch_count":0}

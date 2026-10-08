@@ -1,0 +1,1 @@
+{"evidence":[{"dispatch_id":"1790590997479-413-801c5a19413a48ad","exit_code":0,"fingerprint":"bce36f106070f524","mutable_open_count":1,"prd_open_count":1,"quality":0.3333333333333333,"ts":1790590997487,"verb":"git_diff"}],"failed_dispatch_count":0,"observation_count":1,"selection":"continue-current-exploration","successful_dispatch_count":1}

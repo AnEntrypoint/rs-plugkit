@@ -1,0 +1,1 @@
+commit the memorize-prune on-disk fallback fix (memory_md.rs, rssearch_vectors.rs, wasm_dispatch/verbs.rs) and push
