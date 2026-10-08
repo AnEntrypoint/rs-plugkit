@@ -1318,7 +1318,7 @@ pub(super) fn git_commit_argv(
     }
     argv.push("-m".to_string());
     argv.push(message.to_string());
-    if allow_empty {
+    if allow_empty || amend {
         argv.push("--allow-empty".to_string());
     }
     if !scoped_paths.is_empty() {
