@@ -516,13 +516,20 @@ fn outside_root_read_granted(path: &str) -> bool {
         return true;
     }
     let slashed = path.replace('\\', "/");
-    match slashed.rfind('/') {
-        Some(i) if i > 0 => {
-            let parent = &slashed[..i];
-            !parent.is_empty() && crate::wasm_dispatch::host_allow_root(parent)
+    let mut ancestor = slashed.as_str();
+    while let Some(i) = ancestor.rfind('/') {
+        if i == 0 {
+            break;
         }
-        _ => false,
+        ancestor = &ancestor[..i];
+        if ancestor.ends_with(':') {
+            break;
+        }
+        if crate::wasm_dispatch::host_allow_root(ancestor) {
+            return true;
+        }
     }
+    false
 }
 
 fn outside_root_not_granted_message(path: &str) -> String {
