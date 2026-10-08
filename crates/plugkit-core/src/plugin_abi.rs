@@ -6,7 +6,7 @@ use crate::wasm_dispatch::plugin_call;
 
 pub const ABI_VERSION: u64 = 1;
 
-pub const KNOWN_PLUGINS: &[&str] = &["libsql", "bert", "treesitter"];
+pub const KNOWN_PLUGINS: &[&str] = &["libsql", "bert", "treesitter", "crux", "lightpanda"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbiErrorKind {
