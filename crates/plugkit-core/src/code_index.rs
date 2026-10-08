@@ -729,7 +729,9 @@ pub(crate) fn collect_files(
     max_files: usize,
     cfg: &crate::ragconfig::IndexConfig,
 ) -> Vec<String> {
-    collect_files_impl(root, max_files, cfg, false).unwrap_or_default()
+    collect_files_impl(root, max_files, cfg, false, None)
+        .map(|enumeration| enumeration.files)
+        .unwrap_or_default()
 }
 
 pub(crate) fn collect_files_checked(
@@ -737,7 +739,16 @@ pub(crate) fn collect_files_checked(
     max_files: usize,
     cfg: &crate::ragconfig::IndexConfig,
 ) -> Result<Vec<String>, String> {
-    collect_files_impl(root, max_files, cfg, true)
+    collect_files_impl(root, max_files, cfg, true, None).map(|enumeration| enumeration.files)
+}
+
+fn collect_files_checked_until(
+    root: &str,
+    max_files: usize,
+    cfg: &crate::ragconfig::IndexConfig,
+    deadline_ms: u64,
+) -> Result<FileEnumeration, String> {
+    collect_files_impl(root, max_files, cfg, true, Some(deadline_ms))
 }
 
 fn collect_files_impl(
@@ -745,7 +756,8 @@ fn collect_files_impl(
     max_files: usize,
     cfg: &crate::ragconfig::IndexConfig,
     checked: bool,
-) -> Result<Vec<String>, String> {
+    deadline_ms: Option<u64>,
+) -> Result<FileEnumeration, String> {
     let gi = load_repo_gitignore(root);
     let entries = if checked {
         list_dir_checked(root)?
@@ -753,11 +765,14 @@ fn collect_files_impl(
         list_dir(root)
     };
     if entries.is_empty() {
-        return Ok(Vec::new());
+        return Ok(FileEnumeration {
+            files: Vec::new(),
+            complete: true,
+        });
     }
     let has_slashes = entries.iter().any(|e| e.contains('/'));
     if has_slashes {
-        return Ok(entries
+        let files: Vec<String> = entries
             .into_iter()
             .filter(|p| {
                 if cfg.is_force_included(p) {
@@ -776,11 +791,43 @@ fn collect_files_impl(
                 !gitignore_excludes(&gi, p, false)
             })
             .take(max_files)
-            .collect());
+            .collect();
+        return Ok(FileEnumeration {
+            files,
+            complete: true,
+        });
     }
     let mut files = Vec::new();
-    walk_posix(root, max_files, &mut files, &gi, cfg, checked)?;
-    Ok(files)
+    let mut clock = WalkClock {
+        deadline_ms,
+        expired: false,
+    };
+    walk_posix(root, max_files, &mut files, &gi, cfg, checked, &mut clock)?;
+    Ok(FileEnumeration {
+        files,
+        complete: !clock.expired,
+    })
+}
+
+struct FileEnumeration {
+    files: Vec<String>,
+    complete: bool,
+}
+
+struct WalkClock {
+    deadline_ms: Option<u64>,
+    expired: bool,
+}
+
+impl WalkClock {
+    fn expired(&mut self) -> bool {
+        if !self.expired {
+            if let Some(deadline) = self.deadline_ms {
+                self.expired = unsafe { crate::wasm_dispatch::host_now_ms() } >= deadline;
+            }
+        }
+        self.expired
+    }
 }
 
 fn walk_posix(
@@ -790,8 +837,9 @@ fn walk_posix(
     gi: &Option<ignore::gitignore::Gitignore>,
     cfg: &crate::ragconfig::IndexConfig,
     checked: bool,
+    clock: &mut WalkClock,
 ) -> Result<(), String> {
-    if files.len() >= max_files {
+    if files.len() >= max_files || clock.expired() {
         return Ok(());
     }
     let root_force_included = cfg.is_force_included(root);
@@ -804,7 +852,7 @@ fn walk_posix(
         list_dir(root)
     };
     for entry in entries {
-        if files.len() >= max_files {
+        if files.len() >= max_files || clock.expired() {
             return Ok(());
         }
         let next = if root.ends_with('/') {
@@ -833,7 +881,7 @@ fn walk_posix(
         if !is_dir_entry {
             files.push(next);
         } else {
-            walk_posix(&next, max_files, files, gi, cfg, checked)?;
+            walk_posix(&next, max_files, files, gi, cfg, checked, clock)?;
         }
     }
     Ok(())
@@ -1679,6 +1727,8 @@ const EMBED_BUDGET_DIVISOR: u64 = 3;
 
 const SYMBOL_SYNC_BUDGET_DIVISOR: u64 = 4;
 
+const ENUMERATION_BUDGET_DIVISOR: u64 = 4;
+
 const EMBED_WALK_HEADROOM_DIVISOR: u64 = 2;
 
 #[derive(Clone)]
@@ -2213,10 +2263,16 @@ fn index_cfg_impl(
         .min(cfg.index.prune_pass_file_limit_ceiling);
     let prune_enumeration_cap = cfg.index.prune_enumeration_file_cap;
     let enumeration_cap = limit.max(prune_enumeration_cap);
-    let mut full_files =
-        match collect_files_checked(r, enumeration_cap.saturating_add(1), &cfg.index) {
-            Ok(files) => files,
-            Err(error) => {
+    let enumeration_deadline = unsafe { crate::wasm_dispatch::host_now_ms() }
+        .saturating_add(cfg.index.wall_budget_ms / ENUMERATION_BUDGET_DIVISOR);
+    let enumeration = match collect_files_checked_until(
+        r,
+        enumeration_cap.saturating_add(1),
+        &cfg.index,
+        enumeration_deadline,
+    ) {
+        Ok(enumeration) => enumeration,
+        Err(error) => {
                 return json!({
                     "ok": false,
                     "error": "file_enumeration_failed",
@@ -2228,7 +2284,10 @@ fn index_cfg_impl(
                 });
             }
         };
-    let enumeration_was_complete = full_files.len() <= enumeration_cap;
+    let enumeration_partial_reason = (!enumeration.complete).then_some("wall_budget_exhausted");
+    let files_enumerated = enumeration.files.len();
+    let mut full_files = enumeration.files;
+    let enumeration_was_complete = enumeration.complete && full_files.len() <= enumeration_cap;
     full_files.truncate(enumeration_cap);
     full_files.sort_by(|a, b| canonical_index_path(a).cmp(canonical_index_path(b)));
     let resume_cursor = stored_index_cursor_at(project_path);
@@ -2887,6 +2946,8 @@ fn index_cfg_impl(
         "complete": pass_complete,
         "enumeration_complete": enumeration_was_complete,
         "enumeration_file_cap": enumeration_cap,
+        "enumeration_partial_reason": enumeration_partial_reason,
+        "files_enumerated": files_enumerated,
     })
 }
 
