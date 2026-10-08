@@ -3966,6 +3966,29 @@ const LITERAL_SCAN_MAX_LINE_BYTES: usize = 512;
 
 const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Per-scan override for `LITERAL_SCAN_MAX_FILE_BYTES`. A run log is tens of megabytes, so the
+/// default ceiling drops exactly the file a debugging session needs to search; set this to raise it
+/// for the scans that need it instead of paying the cost on every scan in every project.
+pub const LITERAL_SCAN_MAX_FILE_BYTES_ENV: &str = "GM_LITERAL_SCAN_MAX_FILE_BYTES";
+
+/// A file over this ceiling is never read, so it is never searched. Reads the env override on every
+/// call rather than caching it: a dispatch may set the variable after the module was first used.
+pub fn literal_scan_max_file_bytes() -> u64 {
+    let key = LITERAL_SCAN_MAX_FILE_BYTES_ENV;
+    let packed = unsafe {
+        crate::wasm_dispatch::host_env_get(key.as_ptr(), key.len() as u32)
+    };
+    match crate::wasm_dispatch::host_abi::unpack_to_string_pub(packed) {
+        Some(raw) => raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(LITERAL_SCAN_MAX_FILE_BYTES),
+        None => LITERAL_SCAN_MAX_FILE_BYTES,
+    }
+}
+
 const INLINE_CODESEARCH_MATCH_LIMIT: usize = 100;
 static CODESEARCH_ARTIFACT_SEQUENCE: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -4604,6 +4627,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut files_quota_truncated = 0usize;
     let mut files_skipped_too_large: Vec<String> = Vec::new();
     let mut files_skipped_too_large_count = 0usize;
+    let max_file_bytes = literal_scan_max_file_bytes();
     let mut files_skipped_binary_extension = 0usize;
     let mut files_skipped_binary = 0usize;
     let mut files_with_nul_scanned = 0usize;
@@ -4664,7 +4688,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             None => (0, 0),
         };
         if stat.is_some() {
-            if size > LITERAL_SCAN_MAX_FILE_BYTES {
+            if size > max_file_bytes {
                 files_skipped_too_large_count += 1;
                 if files_skipped_too_large.len() < SKIPPED_SAMPLE_LEN {
                     files_skipped_too_large.push(path.clone());
@@ -5114,6 +5138,13 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 req.pattern, files_scanned
             )
         };
+        if files_skipped_too_large_count > 0 {
+            hint.push_str(&format!(
+                " -- CAUTION: {} file(s) were over the {} byte ceiling and never read, so this zero does NOT mean the text is absent",
+                files_skipped_too_large_count,
+                max_file_bytes
+            ));
+        }
         let mut hint_end = hint.len().min(HINT_MAX_CHARS);
         while !hint.is_char_boundary(hint_end) {
             hint_end -= 1;
@@ -5187,7 +5218,17 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         );
         out.insert(
             "max_file_bytes".to_string(),
-            json!(LITERAL_SCAN_MAX_FILE_BYTES),
+            json!(max_file_bytes),
+        );
+        // A skipped file was never opened, so a zero-match answer over this scope is not evidence
+        // that the text is absent. Say so in a field of its own instead of leaving it to
+        // "files_skipped_too_large" and `partial_reason`, which are easy to read past.
+        out.insert(
+            "files_skipped_too_large_warning".to_string(),
+            json!(format!(
+                "{} file(s) were over the max_file_bytes ceiling ({}) and were NOT read, so they were NOT searched -- any match count below excludes them and a zero here is NOT proof the text is absent. Raise the ceiling with the {} env var (bytes), or scope with \"path\" to the files you need.",
+                files_skipped_too_large_count, max_file_bytes, LITERAL_SCAN_MAX_FILE_BYTES_ENV
+            )),
         );
     }
     if req.verbose && files_skipped_binary_extension > 0 {
@@ -5865,6 +5906,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     let mut files_skipped_binary = 0usize;
     let mut files_skipped_binary_extension = 0usize;
     let mut files_skipped_too_large = 0usize;
+    let max_file_bytes = literal_scan_max_file_bytes();
     let mut files_skipped_no_syntax: Vec<String> = Vec::new();
     let mut matches_truncated = false;
     let mut entered_paths = 0usize;
@@ -5894,7 +5936,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
             None => (0, 0),
         };
         if stat.is_some() {
-            if size > LITERAL_SCAN_MAX_FILE_BYTES {
+            if size > max_file_bytes {
                 files_skipped_too_large += 1;
                 continue;
             }
@@ -6046,7 +6088,14 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         );
         out.insert(
             "max_file_bytes".to_string(),
-            json!(LITERAL_SCAN_MAX_FILE_BYTES),
+            json!(max_file_bytes),
+        );
+        out.insert(
+            "files_skipped_too_large_warning".to_string(),
+            json!(format!(
+                "{} file(s) were over the max_file_bytes ceiling ({}) and were NOT read, so they were NOT searched -- any match count below excludes them and a zero here is NOT proof the text is absent. Raise the ceiling with the {} env var (bytes), or scope with \"path\" to the files you need.",
+                files_skipped_too_large, max_file_bytes, LITERAL_SCAN_MAX_FILE_BYTES_ENV
+            )),
         );
     }
     if files_unreadable > 0 {
