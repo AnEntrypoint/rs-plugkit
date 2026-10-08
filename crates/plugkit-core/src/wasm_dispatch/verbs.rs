@@ -858,12 +858,41 @@ pub fn memory_recall_backend(query_embedding: &Value, namespace: &str, limit: u3
         .filter(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
 }
 
+fn recall_reply(mode: &str, namespace: &str, derived_query: &str, hits: &Value, vector_hits: &Value, full: bool) -> Value {
+    let mut reply = json!({
+        "mode": mode,
+        "namespace": namespace,
+        "derived_query": derived_query,
+        "hits": crate::recall_compact::compact_hits(hits, full),
+    });
+    if full {
+        reply["vector_hits"] = vector_hits.clone();
+    } else {
+        reply["expand"] = json!("recall {key:\"<hit key>\"} for one full memory; recall {query, full:true} for full text of all hits");
+    }
+    reply
+}
+
+fn recall_by_key(namespace: &str, key: &str) -> u64 {
+    let valid = !key.is_empty() && key.len() <= 128 && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid { return err("recall", "key must be 1-128 chars of [A-Za-z0-9_-], the mem-<hash>-<n> key a compact recall hit reports"); }
+    let Some(path) = crate::memory_md::md_path(namespace, key) else { return err("recall", &format!("namespace '{namespace}' has no memories directory")) };
+    match host_read(&path) {
+        Some(text) => ok("recall", json!({ "key": key, "namespace": namespace, "text": text })),
+        None => err("recall", &format!("no memory file for key '{key}' in namespace '{namespace}'")),
+    }
+}
+
 fn recall(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(cfg.budget.default_limit as u64) as u32;
     let namespace = body.get("namespace").and_then(|v| v.as_str()).unwrap_or(&cfg.namespaces.default);
+    if let Some(key) = body.get("key").and_then(|v| v.as_str()) {
+        return recall_by_key(namespace, key);
+    }
     if query.is_empty() { return err("recall", "query required"); }
+    let full = crate::recall_compact::wants_full(body);
     if crate::tencentdb_memory::namespace_is_routed(namespace) {
         let embedding = embed_query(query);
         return match crate::tencentdb_memory::recall(&embedding, namespace, limit as usize) {
@@ -894,26 +923,14 @@ fn recall(body: &Value) -> u64 {
         let now_ms = unsafe { host_now_ms() } as i64;
         if let Ok(md_hits) = crate::rssearch_vectors::search_memory_hits_cfg(&embedding, mem_ns, limit as usize, now_ms, &cfg) {
             if md_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
-                return ok("recall", json!({
-                    "mode": "vector_top_k",
-                    "namespace": namespace,
-                    "derived_query": derived_query,
-                    "hits": md_hits,
-                    "vector_hits": vector_hits,
-                }));
+                return ok("recall", recall_reply("vector_top_k", namespace, &derived_query, &md_hits, &vector_hits, full));
             }
         }
     }
     let vec_hits = vec_search_local(&embedding, namespace, limit);
     if !vec_hits.is_null() && vec_hits.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
         let annotated = annotate_hits_with_score(vec_hits);
-        return ok("recall", json!({
-            "mode": "vector_top_k",
-            "namespace": namespace,
-            "derived_query": derived_query,
-            "hits": annotated,
-            "vector_hits": vector_hits,
-        }));
+        return ok("recall", recall_reply("vector_top_k", namespace, &derived_query, &annotated, &vector_hits, full));
     }
     let packed = unsafe { host_kv_query(namespace.as_ptr(), namespace.len() as u32, query.as_ptr(), query.len() as u32) };
     let kv_hits = unpack_to_value(packed);
@@ -946,14 +963,9 @@ fn recall(body: &Value) -> u64 {
         );
     }
 
-    ok("recall", json!({
-        "mode": "fallback_like",
-        "degraded": degraded,
-        "namespace": namespace,
-        "derived_query": derived_query,
-        "hits": annotated,
-        "vector_hits": vector_hits,
-    }))
+    let mut reply = recall_reply("fallback_like", namespace, &derived_query, &annotated, &vector_hits, full);
+    reply["degraded"] = json!(degraded);
+    ok("recall", reply)
 }
 
 const DIAGNOSTIC_EVENT_COOLDOWN_MS: i64 = 5 * 60 * 1000;
@@ -1468,6 +1480,11 @@ fn unindexed_on_disk_candidates(namespace: &str) -> (Vec<Value>, usize) {
     (out, total)
 }
 
+fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) -> Value {
+    let opts = crate::codesearch_rank::RankOptions::from_body(body, k as usize);
+    if opts.verbose { raw } else { crate::codesearch_rank::compact_dual(query, &raw, &opts) }
+}
+
 fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate::ragconfig::RagConfig) -> u64 {
     if !crate::wasm_dispatch::host_allow_root(root) {
         return err("codesearch", &format!("root '{root}' is not a real, existing directory the host will grant access to"));
@@ -1516,7 +1533,7 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
         })
         .collect();
     let commits = crate::code_index::git_commit_rank_at(root, query, 10);
-    ok("codesearch", json!({
+    let raw = json!({
         "mode": "dual",
         "root": root,
         "vector_hits": vector_hits,
@@ -1528,7 +1545,8 @@ fn codesearch_at_root(body: &Value, root: &str, query: &str, k: u32, cfg: &crate
             "commits": { "independent": true, "indexed_root": root },
         },
         "degraded": vres.get("degraded").cloned().unwrap_or(json!(false)),
-    }))
+    });
+    ok("codesearch", compact_dual_reply(body, query, k, raw))
 }
 
 const CODESEARCH_MODES: &[&str] = &["dual", "literal", "regex", "filename"];
@@ -1681,6 +1699,48 @@ fn codesearch_exhaustive(body: &Value, query: &str, regex: bool, cfg: &crate::ra
     ok("codesearch", out)
 }
 
+fn codesearch_identifier(body: &Value, query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig, opts: &crate::codesearch_rank::RankOptions) -> Option<Value> {
+    if let Some(r) = root {
+        if r != "." && !crate::wasm_dispatch::host_allow_root(r) { return None; }
+    }
+    let scan_root = root.filter(|r| *r != "." && *r != "./");
+    let path = body.get("path").and_then(|v| v.as_str()).filter(|p| !p.is_empty());
+    let exclude_globs: Vec<String> = if opts.include_docs {
+        Vec::new()
+    } else {
+        ["*.md", "*.mdx", "*.rst", "*.txt", "docs/**", "**/docs/**"].iter().map(|g| g.to_string()).collect()
+    };
+    for whole_word in [true, false] {
+        let scan = crate::code_index::LiteralScan {
+            pattern: query,
+            root: scan_root,
+            path,
+            regex: false,
+            case_insensitive: false,
+            whole_word,
+            comments_only: false,
+            include_globs: Vec::new(),
+            exclude_globs: exclude_globs.clone(),
+            max_matches: crate::codesearch_rank::IDENTIFIER_SCAN_MAX_MATCHES,
+            max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
+            output: crate::code_index::ScanOutput::Compact,
+            list_limit: None,
+            max_chars: crate::code_index::MAX_REPLY_MAX_CHARS,
+            spill_name: format!("codesearch-symbol-{}.txt", unsafe { host_now_ms() }),
+        };
+        let out = crate::code_index::scan_literal(&scan, cfg);
+        if out.get("ok").and_then(|b| b.as_bool()) == Some(false) { return None; }
+        let lines: Vec<String> = out.get("matches").and_then(|m| m.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let complete = out.get("exhaustive").and_then(|b| b.as_bool()).unwrap_or(false);
+        if let Some(report) = crate::codesearch_rank::identifier_report(query, &lines, opts, complete) {
+            return Some(report);
+        }
+    }
+    None
+}
+
 fn codesearch(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
     let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
@@ -1709,6 +1769,12 @@ fn codesearch(body: &Value) -> u64 {
     let root = body.get("root").and_then(|v| v.as_str())
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
         .filter(|p| !p.is_empty());
+    let rank_opts = crate::codesearch_rank::RankOptions::from_body(body, k as usize);
+    if mode == "dual" && !rank_opts.verbose && crate::codesearch_rank::is_identifier(query) {
+        if let Some(report) = codesearch_identifier(body, query, root, &cfg, &rank_opts) {
+            return ok("codesearch", report);
+        }
+    }
     if let Some(root) = root {
         return codesearch_at_root(body, root, query, k, &cfg);
     }
@@ -1817,9 +1883,9 @@ fn codesearch(body: &Value) -> u64 {
         .map(|(key, score)| build_hit(&mut corpus, key, Some(*score), None))
         .collect();
     if !vec_ids.is_empty() || !bm25_ids.is_empty() {
-        return ok("codesearch", json!({
+        return ok("codesearch", compact_dual_reply(body, query, k, json!({
             "mode": "dual", "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response, "commits": commits,
-        }));
+        })));
     }
     let ns = cfg.namespaces.code.as_str();
     let packed = unsafe { host_kv_query(ns.as_ptr(), ns.len() as u32, query.as_ptr(), query.len() as u32) };
@@ -1850,10 +1916,10 @@ fn codesearch(body: &Value) -> u64 {
         );
     }
 
-    ok("codesearch", json!({
+    ok("codesearch", compact_dual_reply(body, query, k, json!({
         "mode": "fallback_kv", "degraded": vec_unavailable,
         "hits": hits, "commits": commits, "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response,
-    }))
+    })))
 }
 
 const LIFECYCLE_STALE_WARN_MS: u64 = 30 * 60 * 1000;
