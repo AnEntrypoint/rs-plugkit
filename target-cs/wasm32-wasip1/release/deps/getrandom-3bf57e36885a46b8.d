@@ -1,0 +1,11 @@
+C:/dev/gm/rs-plugkit/target-cs\wasm32-wasip1\release\deps\getrandom-3bf57e36885a46b8.d: C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\lib.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\error.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\util.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\custom.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\wasi.rs
+
+C:/dev/gm/rs-plugkit/target-cs\wasm32-wasip1\release\deps\libgetrandom-3bf57e36885a46b8.rlib: C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\lib.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\error.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\util.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\custom.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\wasi.rs
+
+C:/dev/gm/rs-plugkit/target-cs\wasm32-wasip1\release\deps\libgetrandom-3bf57e36885a46b8.rmeta: C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\lib.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\error.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\util.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\custom.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\wasi.rs
+
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\lib.rs:
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\error.rs:
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\util.rs:
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\custom.rs:
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getrandom-0.2.17\src\wasi.rs:
