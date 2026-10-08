@@ -11,14 +11,16 @@ pub(super) fn git_commit_dedup_key(
     message: &str,
     paths: &[String],
     add_all: bool,
+    amend: bool,
 ) -> String {
     format!(
-        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
         cwd.unwrap_or(""),
         head_before,
         message,
         paths.join(","),
-        add_all
+        add_all,
+        amend
     )
 }
 
@@ -191,6 +193,7 @@ pub(super) fn git_async_reenter(verb: &str, body: &Value) -> u64 {
         "git_status" => git_status(body),
         "git_add" => git_add(body),
         "git_commit" => git_commit(body),
+        "git_amend" => git_amend(body),
         "git_log" => git_log(body),
         "git_diff" => git_diff(body),
         "git_remote" => git_remote(body),
@@ -1298,6 +1301,7 @@ pub(super) fn git_last_commit_identity(cwd: Option<&str>) -> Option<(String, Str
 pub(super) fn git_commit_argv(
     message: &str,
     allow_empty: bool,
+    amend: bool,
     scoped_paths: &[String],
     identity: Option<&(String, String)>,
 ) -> Vec<String> {
@@ -1309,6 +1313,9 @@ pub(super) fn git_commit_argv(
         argv.push(format!("user.email={email}"));
     }
     argv.push("commit".to_string());
+    if amend {
+        argv.push("--amend".to_string());
+    }
     argv.push("-m".to_string());
     argv.push(message.to_string());
     if allow_empty {
@@ -1383,6 +1390,14 @@ pub(super) fn staged_outside_requested(
         .collect()
 }
 
+pub(super) fn git_amend(body: &Value) -> u64 {
+    let mut amended = body.clone();
+    if let Some(fields) = amended.as_object_mut() {
+        fields.insert("amend".to_string(), json!(true));
+    }
+    git_commit(&amended)
+}
+
 pub(super) fn git_commit(body: &Value) -> u64 {
     git_async_entry("git_commit", body, |body, plan| {
         let cwd = body_cwd(body);
@@ -1398,20 +1413,58 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             .get("allow_empty")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let paths: Vec<String> = body
-            .get("paths")
-            .or_else(|| body.get("files"))
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
+        let amend = body
+            .get("amend")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let paths: Vec<String> = match body.get("paths").or_else(|| body.get("files")) {
+            None => Vec::new(),
+            Some(v) if v.is_null() => Vec::new(),
+            Some(v) => {
+                let Some(entries) = v.as_array() else {
+                    return Ok(err("git_commit", "paths must be an array of strings"));
+                };
+                let strings: Vec<String> = entries
+                    .iter()
                     .filter_map(|x| x.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .collect();
+                if strings.len() != entries.len() {
+                    return Ok(err(
+                        "git_commit",
+                        &format!(
+                            "paths must be an array of strings: {} of {} entries are not strings and were refused rather than dropped",
+                            entries.len() - strings.len(),
+                            entries.len()
+                        ),
+                    ));
+                }
+                strings
+            }
+        };
         let add_all = body
             .get("add_all")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        if amend {
+            let head_probe = git_call_argv(&["rev-parse", "--verify", "--quiet", "HEAD"], cwd);
+            if head_probe.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) != 0 {
+                return Ok(err("git_commit", "amend requires an existing HEAD commit; this repository has no commits yet"));
+            }
+            let published = git_call_argv(
+                &["for-each-ref", "--count=1", "--contains", "HEAD", "--format=%(refname)", "refs/remotes"],
+                cwd,
+            );
+            let remote_refs = published.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+            if !remote_refs.is_empty() {
+                return Ok(err_json(
+                    "git_commit",
+                    json!({
+                        "error": format!("HEAD is already reachable from a remote-tracking ref ({remote_refs}), so amending would rewrite published history; refused"),
+                        "error_code": "pushed_commit_refused",
+                    }),
+                ));
+            }
+        }
         let merge_probe = git_step_replayed_by_call_order(
             plan,
             &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"],
@@ -1476,7 +1529,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             }
         }
         let head_before_probe = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-        let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message, &paths, add_all);
+        let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message, &paths, add_all, amend);
         if let Some(prior) = git_commit_dedup_lookup(&dedup_key, cwd) {
             let sha = prior
                 .get("sha")
@@ -1499,10 +1552,10 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         let status_r =
             git_step_replayed_by_call_order(plan, &as_argv(&git_porcelain_argv(&[], cwd)), cwd)?;
         let porcelain = require_complete_git_porcelain("git_commit", &status_r)?;
-        if porcelain.trim().is_empty() && !allow_empty {
+        if porcelain.trim().is_empty() && !allow_empty && !amend {
             return Ok(ok(
                 "git_commit",
-                with_exclusion_report(json!({ "nothing_to_commit": true }), cwd, &paths),
+                with_exclusion_report(json!({ "nothing_to_commit": true, "requested_paths": paths }), cwd, &paths),
             ));
         }
         if !paths.is_empty() {
@@ -1601,7 +1654,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         let bundled_message = bundle_prd_commit_comments(cwd, message);
         let r = git_step_replayed_by_call_order(
             plan,
-            &as_argv(&git_commit_argv(&bundled_message, allow_empty, scoped_paths, None)),
+            &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, scoped_paths, None)),
             cwd,
         )?;
         write_steps.push(r.clone());
@@ -1611,7 +1664,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             if git_commit_found_nothing_staged(sout, serr, cwd) {
                 return Ok(ok(
                     "git_commit",
-                    with_exclusion_report(json!({ "nothing_to_commit": true }), cwd, &paths),
+                    with_exclusion_report(json!({ "nothing_to_commit": true, "requested_paths": paths }), cwd, &paths),
                 ));
             }
             let identity = if git_commit_failed_for_missing_identity(sout, serr) {
@@ -1624,14 +1677,14 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             };
             let retried = git_step_replayed_by_call_order(
                 plan,
-                &as_argv(&git_commit_argv(&bundled_message, allow_empty, scoped_paths, Some(&identity))),
+                &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, scoped_paths, Some(&identity))),
                 cwd,
             )?;
             if retried.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
                 let retry_serr = retried.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
                 let retry_sout = retried.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
                 if git_commit_found_nothing_staged(retry_sout, retry_serr, cwd) {
-                    return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true }), cwd, &paths)));
+                    return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true, "requested_paths": paths }), cwd, &paths)));
                 }
                 return Ok(err("git_commit", if retry_serr.is_empty() { retry_sout } else { retry_serr }));
             }
@@ -1655,6 +1708,10 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         );
         record_commit_in_liqology(&summary, &head_after);
         let mut payload = json!({ "committed": true, "sha": sha, "summary": summary });
+        if amend {
+            payload["amended"] = json!(true);
+            payload["replaced_sha_full"] = json!(head_before);
+        }
         if !force_added_ignored_paths.is_empty() {
             payload["force_added_ignored_paths"] = json!(force_added_ignored_paths);
         }
@@ -1930,7 +1987,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         }
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
         let scoped_paths: &[String] = if scoped { &paths } else { &[] };
-        let mut cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, scoped_paths, None)), cwd_ref);
+        let mut cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, None)), cwd_ref);
         if cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
             let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let sout = cr.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -1940,7 +1997,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                 None
             };
             if let Some(identity) = identity {
-                let retried = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, scoped_paths, Some(&identity))), cwd_ref);
+                let retried = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, Some(&identity))), cwd_ref);
                 if retried.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) == 0 {
                     cr = retried;
                 }

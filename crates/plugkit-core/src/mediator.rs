@@ -42,6 +42,7 @@ pub const GIT_VERBS: &[&str] = &[
     "git_push",
     "git_add",
     "git_commit",
+    "git_amend",
     "git_finalize",
     "git_log",
     "git_diff",
