@@ -1,3 +1,9 @@
+## 2026-10-08 - Offline release signing removed
+
+**Changes:** `wasm-plugin-release.yml` no longer has the `signing-preflight` job, the `release_signing_key_id` and `release_signing_public_key` inputs, the `release_signing_key` secret, or the "Attach offline signatures" step; `bump` and `release` no longer depend on the preflight job. `release.yml` no longer passes the signing inputs or secret. The publish step still uploads `release-assets/*` and the fetch check still runs over every asset.
+
+**Not changed:** the `.wasm.sha256` sidecar, which is the only integrity artifact published. No runtime code in rs-plugkit or agentplug read a `.sig` file, so no consumer changes. The 2026-09-14 entry below describes the sign step as it was then and is kept as history.
+
 ## 2026-10-08 - crawl verb
 
 **Changes:** `crawl` is routed in `wasm_dispatch/verbs.rs`. Its plain-text body starts with `engine=cdp` (default) or `engine=lightpanda`. `cdp` calls the new `crawl_cdp` host import; `lightpanda` calls the `lightpanda` sibling's `crawl` verb with the raw body. Host replies pass through unchanged; an unknown engine answers `error_code: unknown_engine`. The standalone `cdp` verb is replaced by `crawl engine=cdp`.
