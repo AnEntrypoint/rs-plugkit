@@ -304,14 +304,35 @@ fn observation_is_gate_drift_failure(observation: &Value) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn observe_dispatch(
-    session_id: &str,
-    dispatch_id: &str,
-    verb: &str,
-    fingerprint: &str,
-    exit_code: i64,
-    gate_drift: bool,
-) {
+fn reply_sha256_hex(reply: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(reply.as_bytes()))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub struct ObservedDispatch<'a> {
+    pub session_id: &'a str,
+    pub dispatch_id: &'a str,
+    pub verb: &'a str,
+    pub fingerprint: &'a str,
+    pub exit_code: i64,
+    pub gate_drift: bool,
+    pub reply: &'a str,
+    pub lean_node: Option<&'a str>,
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
+    let ObservedDispatch {
+        session_id,
+        dispatch_id,
+        verb,
+        fingerprint,
+        exit_code,
+        gate_drift,
+        reply,
+        lean_node,
+    } = observed;
     if verb.starts_with("dream-")
         || matches!(
             verb,
@@ -347,7 +368,22 @@ pub fn observe_dispatch(
         0.0
     };
     let ts = super::state::now_ms() as i64;
-    observations.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "exit_code": exit_code, "gate_drift": gate_drift, "prd_open_count": prd_open_count, "mutable_open_count": mutable_open_count, "quality": quality, "ts": ts }));
+    let mut observation = json!({
+        "dispatch_id": dispatch_id,
+        "verb": verb,
+        "fingerprint": fingerprint,
+        "exit_code": exit_code,
+        "gate_drift": gate_drift,
+        "prd_open_count": prd_open_count,
+        "mutable_open_count": mutable_open_count,
+        "quality": quality,
+        "ts": ts,
+        "reply_sha256": reply_sha256_hex(reply),
+    });
+    if let Some(node) = lean_node {
+        observation["lean_node"] = json!(node);
+    }
+    observations.push(observation);
     if observations.len() > 256 {
         observations.drain(0..observations.len() - 256);
     }
