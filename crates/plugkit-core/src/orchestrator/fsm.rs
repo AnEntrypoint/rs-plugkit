@@ -7,6 +7,8 @@ pub struct StateNode {
     pub prose_key: String,
     #[serde(default)]
     pub skill: Option<String>,
+    #[serde(default)]
+    pub entry: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,6 +17,12 @@ pub struct Edge {
     pub to: String,
     #[serde(default)]
     pub gates: Vec<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub phase: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +36,8 @@ pub struct GateDef {
     pub hook_mode: HookMode,
     #[serde(default)]
     pub next_dispatch: Option<String>,
+    #[serde(default)]
+    pub advisory: bool,
     pub message: String,
 }
 
@@ -562,7 +572,7 @@ impl Graph {
         }
 
         for s in &self.states {
-            if s.key == self.policy.initial_phase {
+            if s.key == self.policy.initial_phase || s.entry {
                 continue;
             }
             if !self.edges.iter().any(|e| e.to == s.key) {
@@ -647,170 +657,17 @@ fn hook_file_exists(hook: &str) -> bool {
     resolve_hook_path(hook).is_some()
 }
 
+const LEAN_GRAPH_JSON: &str = include_str!("lean_graph.json");
+
 fn default_graph() -> Graph {
-    let mut policy = Policy::default();
-    policy.initial_phase = "SPECIFY".into();
-    Graph {
+    serde_json::from_str::<Graph>(LEAN_GRAPH_JSON).unwrap_or_else(|_| Graph {
         schema_version: GRAPH_SCHEMA_VERSION,
         min_plugkit_version: None,
-        states: vec![
-            StateNode { key: "SPECIFY".into(), prose_key: "specify".into(), skill: Some("gm-prove".into()) },
-            StateNode { key: "PROVE".into(), prose_key: "prove".into(), skill: Some("gm-emit".into()) },
-            StateNode { key: "EMIT".into(), prose_key: "emit".into(), skill: Some("gm-state".into()) },
-            StateNode { key: "STATE".into(), prose_key: "state".into(), skill: Some("gm-conc".into()) },
-            StateNode { key: "CONC".into(), prose_key: "conc".into(), skill: Some("gm-sec".into()) },
-            StateNode { key: "SEC".into(), prose_key: "sec".into(), skill: Some("gm-res".into()) },
-            StateNode { key: "RES".into(), prose_key: "res".into(), skill: Some("gm-decide".into()) },
-            StateNode { key: "DECIDE".into(), prose_key: "decide".into(), skill: Some("gm-complete".into()) },
-            StateNode { key: "COMPLETE".into(), prose_key: "update_docs".into(), skill: Some("update-docs".into()) },
-        ],
-        edges: vec![
-            Edge { from: "SPECIFY".into(), to: "PROVE".into(), gates: vec![] },
-            Edge { from: "PROVE".into(), to: "EMIT".into(), gates: vec!["mutables-all-resolved".into()] },
-            Edge { from: "EMIT".into(), to: "STATE".into(), gates: vec!["no-synthetic-test-files".into(), "no-graphical-symbols-in-diff".into(), "no-admit-deferral-markers".into()] },
-            Edge { from: "STATE".into(), to: "CONC".into(), gates: vec!["idempotent-dispatch-replay-safe".into()] },
-            Edge { from: "CONC".into(), to: "SEC".into(), gates: vec![] },
-            Edge { from: "SEC".into(), to: "RES".into(), gates: vec!["no-secrets-in-diff".into()] },
-            Edge { from: "RES".into(), to: "DECIDE".into(), gates: vec!["no-unchecked-panics-in-diff".into()] },
-            Edge { from: "DECIDE".into(), to: "COMPLETE".into(), gates: vec!["prd-all-closed".into(), "mutables-all-resolved".into(), "worktree-clean".into(), "residual-scan-fired".into(), "ci-validated-fresh".into(), "submodules-clean".into(), "claim-audit-clean".into(), "no-hedge-language-in-diff".into(), "split-context-swept".into()] },
-            Edge { from: "PROVE".into(), to: "SPECIFY".into(), gates: vec![] },
-            Edge { from: "EMIT".into(), to: "SPECIFY".into(), gates: vec![] },
-            Edge { from: "STATE".into(), to: "EMIT".into(), gates: vec![] },
-            Edge { from: "STATE".into(), to: "SPECIFY".into(), gates: vec![] },
-            Edge { from: "CONC".into(), to: "STATE".into(), gates: vec![] },
-            Edge { from: "CONC".into(), to: "EMIT".into(), gates: vec![] },
-            Edge { from: "SEC".into(), to: "STATE".into(), gates: vec![] },
-            Edge { from: "SEC".into(), to: "EMIT".into(), gates: vec![] },
-            Edge { from: "RES".into(), to: "EMIT".into(), gates: vec![] },
-            Edge { from: "RES".into(), to: "SPECIFY".into(), gates: vec![] },
-            Edge { from: "DECIDE".into(), to: "SPECIFY".into(), gates: vec![] },
-            Edge { from: "DECIDE".into(), to: "PROVE".into(), gates: vec![] },
-            Edge { from: "COMPLETE".into(), to: "COMPLETE".into(), gates: vec![] },
-        ],
-        gates: vec![
-            GateDef {
-                name: "residual-scan-fired".into(),
-                predicate: Some("residual-scan-fired".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: Some("residual-scan".into()),
-                message: "transition rejected: residual-scan gate is false -- .gm/residual-check-fired does not currently read as a fired scan. The appended reason names which case this is (never fired / fired-then-invalidated / foreign session / unreadable). Dispatch `residual-scan` as the LAST verb before this transition: a later prd-add, mutable-add, prd-defer or mutable-defer invalidates the marker.".into(),
-            },
-            GateDef {
-                name: "prd-all-closed".into(),
-                predicate: Some("prd-all-closed".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: Some("prd-resolve".into()),
-                message: "transition rejected: PRD items still pending -- execute or remove them before transitioning.".into(),
-            },
-            GateDef {
-                name: "mutables-all-resolved".into(),
-                predicate: Some("mutables-all-resolved".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: Some("mutable-resolve".into()),
-                message: "transition rejected: mutables still pending -- resolve them with witness_evidence before transitioning.".into(),
-            },
-            GateDef {
-                name: "worktree-clean".into(),
-                predicate: Some("worktree-clean".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: worktree dirty -- commit or revert before declaring done; an unpushed delta is an unwitnessed slice.".into(),
-            },
-            GateDef {
-                name: "ci-validated-fresh".into(),
-                predicate: Some("ci-validated-fresh".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: CI/CD validation not witnessed fresh -- .gm/exec-spool/.ci-validated missing, stale, or not matching current HEAD sha. Witness the pipeline green for the pushed HEAD, then fs_write .gm/exec-spool/.ci-validated with {\"head_sha\":\"<git rev-parse HEAD>\"} and re-attempt.".into(),
-            },
-            GateDef {
-                name: "claim-audit-clean".into(),
-                predicate: Some("claim-audit-clean".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: claim-audit not fired in this stop window, or a prior fire found a stale claim -- dispatch `claim-audit` to scan AGENTS.md for shipped/validated/fixed claims referencing a commit hash and verify each hash actually exists in this repo's git log; resolve any stale finding before re-attempting.".into(),
-            },
-            GateDef {
-                name: "split-context-swept".into(),
-                predicate: Some("split-context-swept".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: this diff touches more than one file and has not been adversarially swept by an independent reviewer -- dispatch one or more Agent reviewers (blind to the implementer's own reasoning, prompted only to refute) against the diff, then fs_write .gm/exec-spool/.split-context-swept with {\"head_sha\":\"<git rev-parse HEAD>\"} and re-attempt.".into(),
-            },
-            GateDef {
-                name: "submodules-clean".into(),
-                predicate: Some("submodules-clean".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: submodule pointer drift -- one or more of this repo's tracked submodule gitlinks no longer match that submodule's own real checked-out HEAD (dispatch `submodule-check` to see which paths and their recorded-vs-actual SHAs). `git add <drifted-path>` for each, then git_commit/git_finalize to update this repo's own pointer before re-attempting. A submodule directory with no `.git` of its own (never `git submodule update --init`'d) is not drift and is skipped automatically.".into(),
-            },
-            GateDef {
-                name: "no-synthetic-test-files".into(),
-                predicate: Some("no-synthetic-test-files".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: standing test file(s) introduced in the working diff -- VERIFY doctrine forbids them; verification is a live exec_js witness against real code, never a suite. Remove the file(s) and re-attempt with a live witness.".into(),
-            },
-            GateDef {
-                name: "no-admit-deferral-markers".into(),
-                predicate: Some("no-admit-deferral-markers".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: an admit/deferral marker (TODO/FIXME/XXX/HACK/unimplemented!/todo!/'not (yet) implemented') landed in the working diff -- a marker stands in for a complete proof. Finish the work or remove the marker, then re-attempt.".into(),
-            },
-            GateDef {
-                name: "no-secrets-in-diff".into(),
-                predicate: Some("no-secrets-in-diff".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: a line in the working diff matches a high-confidence secret shape (API key, private key header, inline-password connection string, bearer literal). Route the secret through an env var or secret store, never a tracked literal, then re-attempt.".into(),
-            },
-            GateDef {
-                name: "no-unchecked-panics-in-diff".into(),
-                predicate: Some("no-unchecked-panics-in-diff".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: a new non-test line panics, throws, or unwraps with no visible handling -- the exception model requires every raised error handled or explicitly propagated, never left to crash uncaught. Propagate (Result/catch) or remove, then re-attempt.".into(),
-            },
-            GateDef {
-                name: "no-hedge-language-in-diff".into(),
-                predicate: Some("no-hedge-language-in-diff".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: a hedge/deferral phrase in touched prose stands in for a decision ('todo later', 'in a future session', 'as a stopgap', 'good enough for now', 'left as an exercise', 'out of scope for this'). Commit to the real answer or remove the hedge, then re-attempt.".into(),
-            },
-            GateDef {
-                name: "no-graphical-symbols-in-diff".into(),
-                predicate: Some("no-graphical-symbols-in-diff".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: a decorative non-ASCII glyph landed in tracked source/prose (arrow, box-drawing, star, bullet, check/cross, emoji). Convert to its plain-ASCII equivalent, then re-attempt.".into(),
-            },
-            GateDef {
-                name: "idempotent-dispatch-replay-safe".into(),
-                predicate: Some("idempotent-dispatch-replay-safe".into()),
-                hook: None,
-                hook_mode: HookMode::PredicateOnly,
-                next_dispatch: None,
-                message: "transition rejected: the same (id, hash) dispatch audit tuple was recorded with two different outcomes this stop window -- a replayed dispatch must reach the same result (f-compose-f-equals-f), never a second different mutation. Resolve the divergence, then re-attempt.".into(),
-            },
-        ],
-        policy,
-    }
+        states: Vec::new(),
+        edges: Vec::new(),
+        gates: Vec::new(),
+        policy: Policy::default(),
+    })
 }
 
 const GRAPH_OVERRIDE_PATH: &str = ".gm/instructions/fsm/graph.json";
@@ -1220,6 +1077,22 @@ fn absent_policy_keys(raw: &str) -> Vec<String> {
 
 pub fn vendored_graph_raw() -> Option<String> {
     pkfs::read_to_string(GRAPH_OVERRIDE_PATH)
+}
+
+pub fn configured_graph_refusal(tier: GraphTier) -> Option<String> {
+    if tier != GraphTier::CompiledDefault {
+        return None;
+    }
+    let rejection = graph_rejection()?;
+    let kind = rejection.get("kind")?.as_str()?;
+    if kind != "invalid" && kind != "malformed" {
+        return None;
+    }
+    let path = rejection.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let detail = rejection.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+    Some(format!(
+        "configured FSM graph at {path} failed to load ({kind}): {detail}. The compiled default is not served in its place -- fix the graph at its source and re-dispatch."
+    ))
 }
 
 pub fn graph_rejection() -> Option<serde_json::Value> {

@@ -1,14 +1,6 @@
-pub mod conc;
-pub mod decide;
-pub mod emit;
 pub mod entry;
 pub mod entry_extended;
-pub mod prove;
-pub mod res;
-pub mod sec;
-pub mod specify;
-pub mod state;
-pub mod update_docs;
+pub mod lean_prose;
 
 use super::mutables;
 use super::prd;
@@ -201,37 +193,22 @@ fn should_residual_scan(prd_pending: usize, running_tasks_count: usize) -> bool 
     prd_pending == 0 && running_tasks_count == 0
 }
 
+fn lean_prose_text(key: &str) -> Option<&'static str> {
+    lean_prose::LEAN_PROSE
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, text)| *text)
+}
+
 pub fn compiled_default_for_prose_key(key: &str) -> &'static str {
     match key {
-        "emit" => emit::TEXT,
-        "update_docs" => update_docs::TEXT,
-        "specify" => specify::TEXT,
-        "prove" => prove::TEXT,
-        "state" => state::TEXT,
-        "conc" => conc::TEXT,
-        "sec" => sec::TEXT,
-        "res" => res::TEXT,
-        "decide" => decide::TEXT,
         "entry-extended" => entry_extended::TEXT,
-        _ => entry::TEXT,
+        _ => lean_prose_text(key).unwrap_or(entry::TEXT),
     }
 }
 
 pub fn has_compiled_default_for_prose_key(key: &str) -> bool {
-    matches!(
-        key,
-        "emit"
-            | "update_docs"
-            | "entry"
-            | "entry-extended"
-            | "specify"
-            | "prove"
-            | "state"
-            | "conc"
-            | "sec"
-            | "res"
-            | "decide"
-    )
+    matches!(key, "entry" | "entry-extended") || lean_prose_text(key).is_some()
 }
 
 pub fn fnv1a64(text: &str) -> u64 {
@@ -539,7 +516,10 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "instruction::handle start body_len={}",
         content.len()
     ));
-    let graph = super::fsm::graph();
+    let (graph, graph_tier, graph_path) = super::fsm::graph_detailed();
+    if let Some(refusal) = super::fsm::configured_graph_refusal(graph_tier) {
+        return (String::new(), refusal, 1);
+    }
     let trimmed = content.trim();
     let mut session_id_opt: Option<String> = None;
     let mut prompt_opt: Option<String> = None;
@@ -951,6 +931,11 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
 
     let mut payload = json!({
         "phase": phase,
+        "fsm_graph": {
+            "tier": graph_tier.as_str(),
+            "path": graph_path,
+            "initial_phase": graph.policy.initial_phase,
+        },
         "fsm_graph_rejected": super::fsm::graph_rejection(),
         "fsm_gates_weaker_than_default": super::fsm::gates_missing_vs_default(&graph)
             .into_iter()
