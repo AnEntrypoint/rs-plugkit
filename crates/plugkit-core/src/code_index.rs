@@ -751,6 +751,29 @@ fn collect_files_checked_until(
     collect_files_impl(root, max_files, cfg, true, Some(deadline_ms))
 }
 
+// A walk that outlives the configured wall budget keeps what it listed and reports
+// `complete: false`; callers treat that as partial coverage, never as a full listing.
+pub(crate) fn collect_files_within(
+    root: &str,
+    max_files: usize,
+    cfg: &crate::ragconfig::IndexConfig,
+) -> FileEnumeration {
+    let deadline_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_add(cfg.wall_budget_ms);
+    collect_files_impl(root, max_files, cfg, false, Some(deadline_ms)).unwrap_or(FileEnumeration {
+        files: Vec::new(),
+        complete: false,
+    })
+}
+
+pub(crate) fn collect_files_checked_within(
+    root: &str,
+    max_files: usize,
+    cfg: &crate::ragconfig::IndexConfig,
+) -> Result<FileEnumeration, String> {
+    let deadline_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_add(cfg.wall_budget_ms);
+    collect_files_impl(root, max_files, cfg, true, Some(deadline_ms))
+}
+
 fn collect_files_impl(
     root: &str,
     max_files: usize,
@@ -809,9 +832,9 @@ fn collect_files_impl(
     })
 }
 
-struct FileEnumeration {
-    files: Vec<String>,
-    complete: bool,
+pub(crate) struct FileEnumeration {
+    pub(crate) files: Vec<String>,
+    pub(crate) complete: bool,
 }
 
 struct WalkClock {
@@ -3211,7 +3234,9 @@ pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Op
         }
     }
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
-    let files = collect_files(root, cfg.index.digest_max_files, &cfg.index);
+    let enumeration = collect_files_within(root, cfg.index.digest_max_files, &cfg.index);
+    let listing_complete = enumeration.complete;
+    let files = enumeration.files;
     let cache_path = file_digest_cache_path_for(project_path);
     let mut file_digests = load_file_digest_cache(&cache_path);
     let mut cache_dirty = false;
@@ -3258,6 +3283,11 @@ pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Op
         save_file_digest_cache(&cache_path, &file_digests);
     }
     let digest = digest_from_entries(entries);
+    let digest = if listing_complete {
+        digest
+    } else {
+        format!("{digest}:partial=expired")
+    };
     if let Ok(mut cache) = DIGEST_CACHE.lock() {
         cache
             .get_or_insert_with(std::collections::HashMap::new)
