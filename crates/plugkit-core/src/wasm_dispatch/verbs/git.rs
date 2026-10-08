@@ -2700,7 +2700,7 @@ pub(super) fn ci_status_resolve_repo_preferring_unambiguous_github_repo_field(
             return Ok(explicit.to_string());
         }
     }
-    let url = exec_git_in(cwd, "config --get remote.origin.url")
+    let url = exec_git_in(cwd, "remote get-url origin")
         .trim()
         .to_string();
     if url.is_empty() {
