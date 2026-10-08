@@ -3391,6 +3391,9 @@ pub(super) fn git_checkout(body: &Value) -> u64 {
 }
 
 pub(super) fn git_merge(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_merge", body, &["ref", "ff_only", "message"]) {
+        return refusal;
+    }
     let cwd = body_cwd(body);
     let refspec = body
         .get("ref")
@@ -4115,6 +4118,27 @@ pub(super) fn git_reset(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
     let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("mixed");
+    let paths: Vec<String> = body
+        .get("paths")
+        .or_else(|| body.get("files"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if !paths.is_empty() {
+        if mode != "mixed" {
+            return err("git_reset", "paths scope the index only: mode must be mixed or omitted");
+        }
+        let blocked = hard_excluded_pathspecs(&paths);
+        if !blocked.is_empty() {
+            return err_json("git_reset", protected_pathspec_refusal("git_reset", &blocked));
+        }
+        let mut argv: Vec<&str> = vec!["reset", refspec, "--"];
+        argv.extend(paths.iter().map(String::as_str));
+        if let Err(e) = run_git_checked(&argv, cwd, "git_reset", "reset failed") {
+            return e;
+        }
+        return ok("git_reset", json!({ "reset_to": refspec, "mode": "mixed", "paths": paths }));
+    }
     let mode_flag = match mode {
         "soft" => "--soft",
         "hard" => "--hard",
