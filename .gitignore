@@ -9,3 +9,5 @@ Cargo.lock
 .gm/last-instruction-ts
 /.agentplug-kv/
 /crates/plugkit-core/.gm/
+.gm/config-source-cache-default.*.sync.json
+.cycle-state.json
