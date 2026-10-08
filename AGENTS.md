@@ -204,9 +204,12 @@
   `outside_root_read_granted` asks for that grant through the same
   `host_fs_allow_root` `scan_deps` already uses -- it adds no capability a caller
   could not already reach by dispatching `scan_deps` at that root. It tries the
-  path itself then its parent, because `host_fs_allow_root` grants directories
-  only and `fs_read`/`fs_stat` are handed file paths. A directory with no project
-  marker is still refused, and the refusal says which roots the host will serve
+  path itself, then each ancestor up to (not including) the drive root, because
+  `host_fs_allow_root` grants directories only and `fs_read`/`fs_stat` are handed
+  file paths. A marked ancestor grants its whole subtree, so a directory nested
+  under one (`Temp\claude\<project>\<session>\scratchpad` under `Temp\.gm`) is
+  served. A directory with no project marker on itself or any ancestor is still
+  refused, and the refusal says which roots the host will serve
   rather than the "not found or empty" the host's silent `None` would otherwise
   surface. Coverage of arbitrary non-project directories needs the host side
   widened too, which is an `agentplug` rebuild and runner swap, not a gm change.
