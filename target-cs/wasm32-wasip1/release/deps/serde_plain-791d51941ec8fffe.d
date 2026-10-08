@@ -1,0 +1,11 @@
+C:/dev/gm/rs-plugkit/target-cs\wasm32-wasip1\release\deps\serde_plain-791d51941ec8fffe.d: C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\lib.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\de.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\error.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\macros.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\ser.rs
+
+C:/dev/gm/rs-plugkit/target-cs\wasm32-wasip1\release\deps\libserde_plain-791d51941ec8fffe.rlib: C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\lib.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\de.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\error.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\macros.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\ser.rs
+
+C:/dev/gm/rs-plugkit/target-cs\wasm32-wasip1\release\deps\libserde_plain-791d51941ec8fffe.rmeta: C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\lib.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\de.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\error.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\macros.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\ser.rs
+
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\lib.rs:
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\de.rs:
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\error.rs:
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\macros.rs:
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_plain-1.0.2\src\ser.rs:

@@ -1,0 +1,3 @@
+cargo:rustc-env=PLUGKIT_SOURCE_SHA=7ca7fdec234682ece89da4c32db389c037c54a4a
+cargo:rerun-if-env-changed=PLUGKIT_BUILD_SHA
+cargo:rerun-if-changed=C:/dev/gm/.git/modules/rs-plugkit/worktrees/pk-main/HEAD

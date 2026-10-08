@@ -1,0 +1,3 @@
+cargo:rustc-env=PLUGKIT_SOURCE_SHA=941f5b1244797a93d7ef7443cfd568ed826bc84e
+cargo:rerun-if-env-changed=PLUGKIT_BUILD_SHA
+cargo:rerun-if-changed=C:/dev/gm/.git/modules/rs-plugkit/worktrees/plugkit-cs/HEAD

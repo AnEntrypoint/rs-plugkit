@@ -1,0 +1,11 @@
+C:/dev/gm/rs-plugkit/target-cs\wasm32-wasip1\release\deps\crc32fast-d063ec91bd0e2f88.d: C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\lib.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\baseline.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\combine.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\specialized\mod.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\table.rs
+
+C:/dev/gm/rs-plugkit/target-cs\wasm32-wasip1\release\deps\libcrc32fast-d063ec91bd0e2f88.rlib: C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\lib.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\baseline.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\combine.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\specialized\mod.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\table.rs
+
+C:/dev/gm/rs-plugkit/target-cs\wasm32-wasip1\release\deps\libcrc32fast-d063ec91bd0e2f88.rmeta: C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\lib.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\baseline.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\combine.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\specialized\mod.rs C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\table.rs
+
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\lib.rs:
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\baseline.rs:
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\combine.rs:
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\specialized\mod.rs:
+C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crc32fast-1.5.2\src\table.rs:
