@@ -16,6 +16,7 @@ mod git;
 mod search;
 mod memory;
 use git::*;
+pub(crate) use git::GIT_PROTECTED_PATHSPECS;
 use search::*;
 pub use memory::*;
 use super::{dangling_refs, host_abi};

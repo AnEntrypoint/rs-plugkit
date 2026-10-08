@@ -3624,7 +3624,7 @@ pub(super) const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &[
     "git_root_override",
     "_plan",
 ];
-pub(super) const GIT_PROTECTED_PATHSPECS: &[(&str, &str)] = &[
+pub(crate) const GIT_PROTECTED_PATHSPECS: &[(&str, &str)] = &[
     (".gm", ":(top,exclude).gm"),
     (".agentplug*", ":(top,exclude).agentplug*"),
 ];
