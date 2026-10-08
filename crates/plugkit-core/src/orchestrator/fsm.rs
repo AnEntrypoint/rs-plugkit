@@ -310,6 +310,27 @@ impl Graph {
             .find(|e| e.from.eq_ignore_ascii_case(from) && e.to.eq_ignore_ascii_case(to))
     }
 
+    pub fn is_entry_state(&self, key: &str) -> bool {
+        self.state(key).is_some_and(|s| s.entry)
+    }
+
+    pub fn transition_edge(&self, from: &str, to: &str) -> Option<Edge> {
+        if !self.is_entry_state(to) {
+            return self.edge_between(from, to).cloned();
+        }
+        if !from.eq_ignore_ascii_case(&self.policy.terminal_phase) {
+            return None;
+        }
+        Some(self.edge_between(from, to).cloned().unwrap_or_else(|| Edge {
+            from: from.to_string(),
+            to: to.to_string(),
+            gates: Vec::new(),
+            label: Some("entry".to_string()),
+            kind: Some("entry".to_string()),
+            phase: None,
+        }))
+    }
+
     pub fn gate(&self, name: &str) -> Option<&GateDef> {
         self.gates
             .iter()
