@@ -352,7 +352,7 @@ fn store_meta_digest(ns: &str, digest: &str) {
     );
 }
 
-pub fn has_stored_digest(namespaces: &[String]) -> bool {
+pub fn has_converged_digest(namespaces: &[String]) -> bool {
     if ensure_meta_table().is_err() {
         return false;
     }
@@ -360,8 +360,9 @@ pub fn has_stored_digest(namespaces: &[String]) -> bool {
         if crate::ragconfig::NamespaceConfig::default().is_code(ns) {
             continue;
         }
-        if meta_digest(ns).is_none() {
-            return false;
+        match meta_digest(ns) {
+            Some(digest) if !digest.contains(":partial=") => {}
+            _ => return false,
         }
     }
     true

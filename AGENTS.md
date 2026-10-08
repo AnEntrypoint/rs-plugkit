@@ -510,7 +510,7 @@
   own hand-written SQL rather than reusing `crate::rssearch_vectors`'s
   resolution; both must resolve it the same way or a configured rename leaves
   this module querying a table that no longer exists.
-- `has_stored_digest`/the sync pass both skip the code namespace: it is fed by
+- `has_converged_digest`/the sync pass both skip the code namespace: it is fed by
   the tree-sitter indexer, not by markdown memory files, so it has no corpus
   digest to sync here.
 - `flat_vec_embedding` rejects a stale-width embedding by comparing against
