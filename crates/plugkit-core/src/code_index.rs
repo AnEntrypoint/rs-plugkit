@@ -724,20 +724,63 @@ pub(crate) fn is_hidden_segment(seg: &str) -> bool {
     seg.starts_with('.') && seg != "." && seg != ".."
 }
 
+pub(crate) struct Enumeration {
+    pub(crate) files: Vec<String>,
+    pub(crate) complete: bool,
+}
+
+struct WalkDeadline {
+    at_ms: Option<u64>,
+    expired: bool,
+}
+
+impl WalkDeadline {
+    fn new(at_ms: Option<u64>) -> Self {
+        Self {
+            at_ms,
+            expired: false,
+        }
+    }
+
+    fn exceeded(&mut self) -> bool {
+        if !self.expired {
+            if let Some(at) = self.at_ms {
+                self.expired = unsafe { crate::wasm_dispatch::host_now_ms() } >= at;
+            }
+        }
+        self.expired
+    }
+}
+
 pub(crate) fn collect_files(
     root: &str,
     max_files: usize,
     cfg: &crate::ragconfig::IndexConfig,
 ) -> Vec<String> {
-    collect_files_impl(root, max_files, cfg, false).unwrap_or_default()
+    collect_files_impl(root, max_files, cfg, false, None)
+        .map(|enumeration| enumeration.files)
+        .unwrap_or_default()
+}
+
+pub(crate) fn collect_files_within(
+    root: &str,
+    max_files: usize,
+    cfg: &crate::ragconfig::IndexConfig,
+    deadline_ms: u64,
+) -> Enumeration {
+    collect_files_impl(root, max_files, cfg, false, Some(deadline_ms)).unwrap_or(Enumeration {
+        files: Vec::new(),
+        complete: false,
+    })
 }
 
 pub(crate) fn collect_files_checked(
     root: &str,
     max_files: usize,
     cfg: &crate::ragconfig::IndexConfig,
-) -> Result<Vec<String>, String> {
-    collect_files_impl(root, max_files, cfg, true)
+    deadline_ms: u64,
+) -> Result<Enumeration, String> {
+    collect_files_impl(root, max_files, cfg, true, Some(deadline_ms))
 }
 
 fn collect_files_impl(
@@ -745,7 +788,8 @@ fn collect_files_impl(
     max_files: usize,
     cfg: &crate::ragconfig::IndexConfig,
     checked: bool,
-) -> Result<Vec<String>, String> {
+    deadline_ms: Option<u64>,
+) -> Result<Enumeration, String> {
     let gi = load_repo_gitignore(root);
     let entries = if checked {
         list_dir_checked(root)?
@@ -753,11 +797,14 @@ fn collect_files_impl(
         list_dir(root)
     };
     if entries.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Enumeration {
+            files: Vec::new(),
+            complete: true,
+        });
     }
     let has_slashes = entries.iter().any(|e| e.contains('/'));
     if has_slashes {
-        return Ok(entries
+        let files = entries
             .into_iter()
             .filter(|p| {
                 if cfg.is_force_included(p) {
@@ -776,11 +823,27 @@ fn collect_files_impl(
                 !gitignore_excludes(&gi, p, false)
             })
             .take(max_files)
-            .collect());
+            .collect();
+        return Ok(Enumeration {
+            files,
+            complete: true,
+        });
     }
     let mut files = Vec::new();
-    walk_posix(root, max_files, &mut files, &gi, cfg, checked)?;
-    Ok(files)
+    let mut deadline = WalkDeadline::new(deadline_ms);
+    walk_posix(
+        root,
+        max_files,
+        &mut files,
+        &gi,
+        cfg,
+        checked,
+        &mut deadline,
+    )?;
+    Ok(Enumeration {
+        files,
+        complete: !deadline.expired,
+    })
 }
 
 fn walk_posix(
@@ -790,6 +853,7 @@ fn walk_posix(
     gi: &Option<ignore::gitignore::Gitignore>,
     cfg: &crate::ragconfig::IndexConfig,
     checked: bool,
+    deadline: &mut WalkDeadline,
 ) -> Result<(), String> {
     if files.len() >= max_files {
         return Ok(());
@@ -804,7 +868,7 @@ fn walk_posix(
         list_dir(root)
     };
     for entry in entries {
-        if files.len() >= max_files {
+        if files.len() >= max_files || deadline.exceeded() {
             return Ok(());
         }
         let next = if root.ends_with('/') {
@@ -833,7 +897,7 @@ fn walk_posix(
         if !is_dir_entry {
             files.push(next);
         } else {
-            walk_posix(&next, max_files, files, gi, cfg, checked)?;
+            walk_posix(&next, max_files, files, gi, cfg, checked, deadline)?;
         }
     }
     Ok(())
@@ -2213,22 +2277,35 @@ fn index_cfg_impl(
         .min(cfg.index.prune_pass_file_limit_ceiling);
     let prune_enumeration_cap = cfg.index.prune_enumeration_file_cap;
     let enumeration_cap = limit.max(prune_enumeration_cap);
-    let mut full_files =
-        match collect_files_checked(r, enumeration_cap.saturating_add(1), &cfg.index) {
-            Ok(files) => files,
-            Err(error) => {
-                return json!({
-                    "ok": false,
-                    "error": "file_enumeration_failed",
-                    "reason": error,
-                    "root": r,
-                    "complete": false,
-                    "enumeration_complete": false,
-                    "removed_files": 0,
-                });
-            }
-        };
-    let enumeration_was_complete = full_files.len() <= enumeration_cap;
+    let index_wall_budget_ms: u64 = cfg.index.wall_budget_ms;
+    let started = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let enumeration = match collect_files_checked(
+        r,
+        enumeration_cap.saturating_add(1),
+        &cfg.index,
+        started.saturating_add(index_wall_budget_ms),
+    ) {
+        Ok(enumeration) => enumeration,
+        Err(error) => {
+            return json!({
+                "ok": false,
+                "error": "file_enumeration_failed",
+                "reason": error,
+                "root": r,
+                "complete": false,
+                "enumeration_complete": false,
+                "removed_files": 0,
+            });
+        }
+    };
+    let files_enumerated = enumeration.files.len();
+    let enumeration_was_complete = enumeration.complete && files_enumerated <= enumeration_cap;
+    let enumeration_partial_reason: Option<&'static str> = if enumeration.complete {
+        None
+    } else {
+        Some("wall_budget_exhausted_during_enumeration")
+    };
+    let mut full_files = enumeration.files;
     full_files.truncate(enumeration_cap);
     full_files.sort_by(|a, b| canonical_index_path(a).cmp(canonical_index_path(b)));
     let resume_cursor = stored_index_cursor_at(project_path);
@@ -2247,7 +2324,7 @@ fn index_cfg_impl(
         );
         let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
     }
-    if full_files.is_empty() && !prior.is_empty() {
+    if full_files.is_empty() && !prior.is_empty() && enumeration_was_complete {
         let msg = format!(
             "code_index: ABORTED root={} scanned zero files while {} prior manifests exist -- refusing to treat scan-failure as delete-everything; host_fs_readdir likely returned nothing for this root (sandbox containment or wrong root?)",
             r, prior.len()
@@ -2277,8 +2354,6 @@ fn index_cfg_impl(
             "by_language": {},
         });
     }
-    let index_wall_budget_ms: u64 = cfg.index.wall_budget_ms;
-    let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let mut indexed = 0;
     let mut chunked = 0;
     let mut embedded = 0;
@@ -2886,6 +2961,8 @@ fn index_cfg_impl(
         "pass_ms": pass_ms,
         "complete": pass_complete,
         "enumeration_complete": enumeration_was_complete,
+        "files_enumerated": files_enumerated,
+        "enumeration_partial_reason": enumeration_partial_reason,
         "enumeration_file_cap": enumeration_cap,
     })
 }
@@ -3150,7 +3227,13 @@ pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Op
         }
     }
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
-    let files = collect_files(root, cfg.index.digest_max_files, &cfg.index);
+    let files = collect_files_within(
+        root,
+        cfg.index.digest_max_files,
+        &cfg.index,
+        now_ms.saturating_add(cfg.index.wall_budget_ms),
+    )
+    .files;
     let cache_path = file_digest_cache_path_for(project_path);
     let mut file_digests = load_file_digest_cache(&cache_path);
     let mut cache_dirty = false;
