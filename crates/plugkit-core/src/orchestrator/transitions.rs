@@ -113,16 +113,15 @@ fn pool_concurrency_shortfall() -> usize {
 }
 
 pub(super) fn pred_pool_floor_met() -> bool {
-    pool_concurrency_shortfall() == 0
+    super::pool_slots::slot_state(".")["action"].as_str() != Some("launch")
 }
 
-#[cfg(target_arch = "wasm32")]
 fn pool_floor_denial_detail() -> String {
-    let open = pool_open_row_count();
+    let slots = super::pool_slots::slot_state(".");
     let shortfall = pool_concurrency_shortfall();
     format!(
-        "{} PRD row(s) open with a concurrency shortfall of {}: the subagents running for this session do not yet cover the open slices. Launch the available slices as subagents (dispatch `instruction` for the slices to launch) before re-attempting.",
-        open, shortfall
+        "pool-floor-met denied: open_rows={} live={} free={} action={} shortfall={}; launch gm-worker subagents for the candidates in .gm/pool slots, and on a spawn refusal dispatch pool-observe with its text.",
+        slots["open_rows"], slots["live"], slots["free"], slots["action"], shortfall
     )
 }
 
@@ -324,23 +323,50 @@ fn residual_scan_denial_detail() -> String {
     }
 }
 
-fn prd_has_open_items() -> bool {
+fn fold_last_block_wins(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut folded: Vec<serde_json::Value> = Vec::new();
+    let mut position: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for item in items {
+        match item.get("id").and_then(|v| v.as_str()) {
+            Some(id) => match position.get(id) {
+                Some(&at) => folded[at] = item.clone(),
+                None => {
+                    position.insert(id.to_string(), folded.len());
+                    folded.push(item.clone());
+                }
+            },
+            None => folded.push(item.clone()),
+        }
+    }
+    folded
+}
+
+pub(super) fn prd_open_rows() -> Vec<serde_json::Value> {
     let (body, _err, code) = prd::handle_list_full();
-    if code != 0 { return false; }
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return false };
-    let Some(items) = v.get("items").and_then(|v| v.as_array()) else { return false };
-    items.iter().any(|it| {
-        let status = it
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("pending");
-        let blocked_external = it
-            .get("blockedBy")
-            .and_then(|v| v.as_array())
-            .map(|seq| seq.iter().any(|x| x.as_str() == Some("external")))
-            .unwrap_or(false);
-        prd::status_is_open(status) && !blocked_external
-    })
+    if code != 0 { return Vec::new(); }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return Vec::new() };
+    let Some(items) = v.get("items").and_then(|v| v.as_array()) else { return Vec::new() };
+    let folded = fold_last_block_wins(items);
+    folded
+        .iter()
+        .filter(|it| {
+            let status = it
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("pending");
+            let blocked_external = it
+                .get("blockedBy")
+                .and_then(|v| v.as_array())
+                .map(|seq| seq.iter().any(|x| x.as_str() == Some("external")))
+                .unwrap_or(false);
+            prd::status_is_open(status) && !blocked_external
+        })
+        .cloned()
+        .collect()
+}
+
+fn prd_has_open_items() -> bool {
+    !prd_open_rows().is_empty()
 }
 
 #[cfg(target_arch = "wasm32")]
