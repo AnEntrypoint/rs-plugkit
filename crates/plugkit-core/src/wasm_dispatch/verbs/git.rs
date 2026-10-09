@@ -3379,6 +3379,8 @@ pub(super) fn git_worktree(body: &Value) -> u64 {
     )
 }
 
+const BRANCH_CREATE_REFUSED: &str = "BRANCH_CREATE_REFUSED: this project keeps all work on main; creating a branch is refused";
+
 pub(super) fn git_checkout(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_checkout",
@@ -3407,17 +3409,16 @@ pub(super) fn git_checkout(body: &Value) -> u64 {
         .get("create")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let argv: Vec<&str> = if create {
-        vec!["checkout", "-b", refspec]
-    } else {
-        vec!["checkout", refspec]
-    };
+    if create {
+        return err("git_checkout", BRANCH_CREATE_REFUSED);
+    }
+    let argv: Vec<&str> = vec!["checkout", refspec];
     if let Err(e) = run_git_checked(&argv, cwd, "git_checkout", "checkout failed") {
         return e;
     }
     ok(
         "git_checkout",
-        json!({ "checked_out": refspec, "created": create }),
+        json!({ "checked_out": refspec, "created": false }),
     )
 }
 
