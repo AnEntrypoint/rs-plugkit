@@ -175,13 +175,19 @@ struct RefreshLock {
     token: String,
 }
 
-fn try_lock(src: &RepoSource) -> Option<RefreshLock> {
+enum LockProbe {
+    Acquired(RefreshLock),
+    Held,
+    Failed(String),
+}
+
+fn try_lock(src: &RepoSource) -> LockProbe {
     let path = lock_path(src);
     let Ok(p) = serde_json::to_string(&path) else {
-        return None;
+        return LockProbe::Failed("lock path is not representable".to_string());
     };
     let Ok(parent_p) = serde_json::to_string(&cache_root(src)) else {
-        return None;
+        return LockProbe::Failed("cache root is not representable".to_string());
     };
     let code = format!(
         "const fs=require('fs');const p={p};const staleMs={LOCK_STALE_MS};\
@@ -190,27 +196,35 @@ fn try_lock(src: &RepoSource) -> Option<RefreshLock> {
              process.stdout.write((function(){{\
              function acquire(){{\
                const token=process.pid+'-'+Date.now()+'-'+Math.random().toString(36).slice(2);\
-               try{{fs.mkdirSync(p);}}catch(e){{return 'busy';}}\
+               try{{fs.mkdirSync(p);}}catch(e){{return e.code==='EEXIST'?'busy':'failed:mkdir:'+e.code;}}\
                try{{fs.writeFileSync(p+'/owner',token,{{flag:'wx'}});return 'acquired:'+token;}}\
-               catch(e){{try{{fs.rmSync(p,{{recursive:true,force:true}});}}catch(e2){{}}return 'busy';}}\
+               catch(e){{try{{fs.rmSync(p,{{recursive:true,force:true}});}}catch(e2){{}}return 'failed:owner:'+e.code;}}\
              }}\
              let first=acquire();if(first!=='busy'){{return first;}}\
-             let st=null;try{{st=fs.statSync(p);}}catch(e2){{return 'busy';}}\
+             let st=null;try{{st=fs.statSync(p);}}catch(e2){{return e2.code==='ENOENT'?'busy':'failed:stat:'+e2.code;}}\
              if(Date.now()-st.mtimeMs<=staleMs){{return 'busy';}}\
              const aside=p+'.stale-'+process.pid+'-'+Date.now();\
-             try{{fs.renameSync(p,aside);}}catch(e3){{return 'busy';}}\
+             try{{fs.renameSync(p,aside);}}catch(e3){{return 'failed:stale-rename:'+e3.code;}}\
              try{{fs.rmSync(aside,{{recursive:true,force:true}});}}catch(e4){{}}\
              return acquire();\
              }})());"
     );
-    let token = exec_js_stdout(&code, 15000)?
-        .trim()
-        .strip_prefix("acquired:")?
-        .to_string();
-    if token.is_empty() {
-        None
-    } else {
-        Some(RefreshLock { path, token })
+    let Some(reply) = exec_js_stdout(&code, 15000) else {
+        return LockProbe::Failed("the host exec returned no stdout".to_string());
+    };
+    let text = reply.trim();
+    if text == "busy" {
+        return LockProbe::Held;
+    }
+    if let Some(token) = text.strip_prefix("acquired:").filter(|t| !t.is_empty()) {
+        return LockProbe::Acquired(RefreshLock {
+            path,
+            token: token.to_string(),
+        });
+    }
+    match text.strip_prefix("failed:") {
+        Some(kind) => LockProbe::Failed(kind.to_string()),
+        None => LockProbe::Failed("unexpected lock probe reply".to_string()),
     }
 }
 
@@ -496,19 +510,36 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
         }
     }
 
-    let Some(lock) = try_lock(src) else {
-        return match have_local {
-            Some(sha) => Ok(SyncOutcome {
-                sha: Some(sha),
-                changed: false,
-                degraded_reason: st.degraded_reason.clone(),
-                detail: "another refresh in progress; serving current checkout".to_string(),
-            }),
-            None => Err(format!(
-                "another process is cloning {} and no local checkout exists yet",
-                src.repo
-            )),
-        };
+    let lock = match try_lock(src) {
+        LockProbe::Acquired(lock) => lock,
+        LockProbe::Held => {
+            return match have_local {
+                Some(sha) => Ok(SyncOutcome {
+                    sha: Some(sha),
+                    changed: false,
+                    degraded_reason: st.degraded_reason.clone(),
+                    detail: "another refresh in progress; serving current checkout".to_string(),
+                }),
+                None => Err(format!(
+                    "another process is cloning {} and no local checkout exists yet",
+                    src.repo
+                )),
+            };
+        }
+        LockProbe::Failed(reason) => {
+            let detail = format!("config refresh lock probe failed ({reason})");
+            return match have_local {
+                Some(sha) => Ok(degraded(
+                    Some(sha),
+                    format!("{detail}; serving current checkout"),
+                    src,
+                )),
+                None => {
+                    emit_degraded(None, &detail, src);
+                    Err(format!("{detail}; no local checkout to fall back to"))
+                }
+            };
+        }
     };
 
     let result = refresh_locked(src, &mut st, now, have_local.clone(), &lock);

@@ -1,10 +1,12 @@
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 use super::transitions::prd_open_rows_with_recency;
 use crate::pkfs;
 
-pub const HEARTBEAT_LIVE_MS: u64 = 10 * 60 * 1000;
+pub const HEARTBEAT_LIVE_MS: u64 = 5 * 60 * 1000;
 const HEARTBEAT_REAP_MS: u64 = 60 * 60 * 1000;
+const DEFAULT_SPAWN_CEILING: usize = 20;
 const CEILING_KEYWORDS: [&str; 3] = ["maximum", "ceiling", "limit"];
 
 #[cfg(target_arch = "wasm32")]
@@ -23,12 +25,72 @@ fn pool_dir(project_root: &str) -> String {
     format!("{}/.gm/pool", project_root)
 }
 
-fn heartbeat_field(body: &str, key: &str) -> Option<String> {
-    body.lines()
-        .map(|line| line.trim().trim_start_matches('\u{feff}'))
-        .find_map(|line| line.strip_prefix(key))
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+#[derive(Default)]
+struct HeartbeatIdentity {
+    session: Option<String>,
+    rows: Vec<String>,
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn row_names(value: &str) -> Vec<String> {
+    value.split(',').filter_map(non_empty).collect()
+}
+
+fn is_positional_row(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let dated = bytes.len() >= 10
+        && bytes[..10]
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| if index == 4 || index == 7 { *byte == b'-' } else { byte.is_ascii_digit() });
+    !line.contains(char::is_whitespace) && !line.contains([':', '=']) && !dated
+}
+
+fn heartbeat_identity(body: &str) -> HeartbeatIdentity {
+    let mut identity = HeartbeatIdentity::default();
+    let lines: Vec<&str> = body
+        .lines()
+        .map(|raw| raw.trim().trim_start_matches('\u{feff}').trim())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let lead_token = lines
+        .first()
+        .and_then(|line| line.split_whitespace().next())
+        .filter(|token| !token.contains([':', '=']))
+        .and_then(non_empty);
+    let bare_format = lead_token.is_some();
+    for line in &lines {
+        if let Some(name) = line.strip_prefix("session:").and_then(non_empty) {
+            identity.session = identity.session.or(Some(name));
+        }
+        if let Some(value) = line.strip_prefix("row:") {
+            identity.rows.extend(row_names(value));
+        }
+        for token in line.split_whitespace() {
+            if let Some(value) = token.strip_prefix("session=") {
+                identity.session = identity.session.or_else(|| non_empty(value));
+            } else if let Some(value) = token.strip_prefix("row=") {
+                identity.rows.extend(row_names(value));
+            }
+        }
+    }
+    let words: Vec<&str> = lines.iter().copied().flat_map(|line| line.split_whitespace()).collect();
+    for pair in words.windows(2) {
+        if pair[0] == "row" && is_positional_row(pair[1]) {
+            identity.rows.extend(row_names(pair[1]));
+        }
+    }
+    identity.session = identity.session.or(lead_token);
+    if identity.rows.is_empty() && bare_format {
+        if let Some(second) = lines.get(1).copied().filter(|line| is_positional_row(line)) {
+            identity.rows = row_names(second);
+        }
+    }
+    identity
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -43,12 +105,20 @@ fn remove_file(_path: &str) -> bool {
 
 struct LiveHeartbeats {
     count: usize,
+    sessions: Vec<String>,
     rows: Vec<String>,
+    words: BTreeSet<String>,
     reaped: Vec<String>,
 }
 
 fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
-    let mut live = LiveHeartbeats { count: 0, rows: Vec::new(), reaped: Vec::new() };
+    let mut live = LiveHeartbeats {
+        count: 0,
+        sessions: Vec::new(),
+        rows: Vec::new(),
+        words: BTreeSet::new(),
+        reaped: Vec::new(),
+    };
     let Some(Value::Array(entries)) = pkfs::readdir(dir) else {
         return live;
     };
@@ -87,18 +157,25 @@ fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         if age_ms > HEARTBEAT_LIVE_MS {
             continue;
         }
-        let Some(body) = pkfs::read_to_string(&path) else {
-            continue;
-        };
-        if heartbeat_field(&body, "session:").is_none() {
+        let body = pkfs::read_to_string(&path).unwrap_or_default();
+        let identity = heartbeat_identity(&body);
+        if identity.session.is_none() {
             continue;
         }
+        live.words.extend(
+            body.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                .filter(|word| !word.is_empty())
+                .map(str::to_string),
+        );
         live.count += 1;
-        if let Some(row) = heartbeat_field(&body, "row:") {
-            live.rows.push(row);
+        if let Some(session) = identity.session {
+            live.sessions.push(session);
         }
+        live.rows.extend(identity.rows);
     }
+    live.sessions.sort();
     live.rows.sort();
+    live.rows.dedup();
     live
 }
 
@@ -122,6 +199,19 @@ fn ceiling_from_refusal(text: &str) -> Option<u64> {
         .ok()
 }
 
+fn held_rows(live: &LiveHeartbeats, work: &[(Value, usize)]) -> Vec<String> {
+    let mut rows = live.rows.clone();
+    rows.extend(
+        work.iter()
+            .filter_map(|(row, _)| row.get("id").and_then(Value::as_str))
+            .filter(|id| live.words.contains(*id))
+            .map(str::to_string),
+    );
+    rows.sort();
+    rows.dedup();
+    rows
+}
+
 pub fn slot_state(project_root: &str) -> Value {
     let dir = pool_dir(project_root);
     let live = read_heartbeats(&dir, now_ms());
@@ -132,7 +222,8 @@ pub fn slot_state(project_root: &str) -> Value {
         .partition(|(row, _)| super::pool_rank::is_blocker_row(row));
     let blockers: Vec<Value> = blocker_entries.into_iter().map(|(row, _)| row).collect();
     let open_rows = work.len();
-    let ranked = super::pool_rank::rank(&work, &blockers, &live.rows);
+    let live_rows = held_rows(&live, &work);
+    let ranked = super::pool_rank::rank(&work, &blockers, &live_rows);
     let candidates = ranked["candidates"].clone();
     let action = match (open_rows, free) {
         (0, _) => "none",
@@ -141,7 +232,8 @@ pub fn slot_state(project_root: &str) -> Value {
     };
     json!({
         "live": live.count,
-        "live_rows": live.rows,
+        "live_rows": live_rows,
+        "live_sessions": live.sessions,
         "open_rows": open_rows,
         "blocker_rows": blockers.len(),
         "candidates": candidates,
@@ -151,6 +243,10 @@ pub fn slot_state(project_root: &str) -> Value {
         "action": action,
         "reaped_heartbeats": live.reaped,
     })
+}
+
+pub fn spawn_ceiling(slots: &Value) -> usize {
+    slots["ceiling"].as_u64().map_or(DEFAULT_SPAWN_CEILING, |ceiling| ceiling as usize)
 }
 
 pub fn slots_prose(slots: &Value) -> String {
@@ -177,15 +273,20 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         .filter(|s| !s.is_empty());
     let dir = pool_dir(".");
     let refused_ceiling = refusal.as_deref().and_then(ceiling_from_refusal);
-    let ceiling = refused_ceiling.or_else(|| read_ceiling(&dir));
-    let record = json!({
-        "ceiling": ceiling,
-        "observed_live": observed_live,
-        "refusal_text": refusal,
-        "ts": now_ms(),
-    });
-    if !pkfs::write(&format!("{}/ceiling.json", dir), &record.to_string()) {
-        return (String::new(), "pool-observe: could not write .gm/pool/ceiling.json".to_string(), 1);
+    let record_path = format!("{}/ceiling.json", dir);
+    if observed_live.is_some() || refusal.is_some() {
+        let previous: Value = pkfs::read_to_string(&record_path)
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or(Value::Null);
+        let record = json!({
+            "ceiling": refused_ceiling.or_else(|| read_ceiling(&dir)),
+            "observed_live": observed_live.or_else(|| previous["observed_live"].as_u64()),
+            "refusal_text": refusal.or_else(|| previous["refusal_text"].as_str().map(str::to_string)),
+            "ts": now_ms(),
+        });
+        if !pkfs::write(&record_path, &record.to_string()) {
+            return (String::new(), "pool-observe: could not write .gm/pool/ceiling.json".to_string(), 1);
+        }
     }
     let out = json!({
         "ok": true,

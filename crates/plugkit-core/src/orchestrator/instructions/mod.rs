@@ -298,34 +298,32 @@ fn prd_items_json() -> Vec<serde_json::Value> {
     Vec::new()
 }
 
+const LAUNCH_LIST_MAX: usize = 32;
+
 pub(crate) fn concurrency_shortfall(
     running: usize,
-    slices_available: usize,
+    spawn_ceiling: usize,
+    candidates: &[String],
 ) -> Option<serde_json::Value> {
-    let shortfall = slices_available.saturating_sub(running);
+    let shortfall = spawn_ceiling.saturating_sub(running);
     if shortfall == 0 {
         return None;
     }
+    let launch: Vec<&str> = candidates
+        .iter()
+        .take(shortfall.min(LAUNCH_LIST_MAX))
+        .map(String::as_str)
+        .collect();
+    let launch_count = launch.len();
     Some(json!({
         "running": running,
-        "slices_available": slices_available,
+        "spawn_ceiling": spawn_ceiling,
         "shortfall": shortfall,
+        "launch": launch,
+        "launch_count": launch_count,
+        "unfilled_slots": shortfall.saturating_sub(candidates.len()),
+        "refill_on": "completion_notice",
     }))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn running_subagents(session: Option<&str>, window_ms: u64) -> usize {
-    let Some(parent) = session.filter(|s| !s.is_empty()) else {
-        return 0;
-    };
-    let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-    let now = unsafe { crate::wasm_dispatch::host_now_ms() };
-    crate::dispatch_ledger::subagent_running_count(&cwd, parent, now, window_ms)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn running_subagents(_session: Option<&str>, _window_ms: u64) -> usize {
-    0
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -995,13 +993,22 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         graph.policy.longgap_threshold_ms,
     );
 
-    let subagents_running = running_subagents(
-        session_id_opt.as_deref(),
-        graph.policy.concurrency_window_ms,
-    );
-    let concurrency_shortfall_field = concurrency_shortfall(subagents_running, prd_pending);
-
     let slots = super::pool_slots::slot_state(".");
+    let subagents_running = slots["live"].as_u64().unwrap_or(0) as usize;
+    let launch_candidates: Vec<String> = slots["candidates"]
+        .as_array()
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|id| id.as_str().map(str::to_string))
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+    let concurrency_shortfall_field = concurrency_shortfall(
+        subagents_running,
+        super::pool_slots::spawn_ceiling(&slots),
+        &launch_candidates,
+    );
+
     let slots_prose = super::pool_slots::slots_prose(&slots);
     let monitor = super::pool_slots::monitor_block(&slots);
     let mut payload = json!({

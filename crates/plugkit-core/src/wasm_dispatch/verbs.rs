@@ -2437,7 +2437,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
     if !gate.allowed {
         return pack(gate.to_denial_json(verb).to_string());
     }
-    if crate::orchestrator::is_orchestrator_verb(verb) {
+    if crate::orchestrator::is_orchestrator_verb(verb) && !help_requested(body) {
         let (out, err_msg, code) = crate::orchestrator::dispatch(verb, "", body_s);
         #[cfg(target_arch = "wasm32")]
         {

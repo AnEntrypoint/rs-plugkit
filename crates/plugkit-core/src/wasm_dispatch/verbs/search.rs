@@ -815,6 +815,14 @@ pub(super) fn resolve_scan_target(body: &Value) -> Result<(Option<&str>, Vec<Str
             root = None;
         } else if !crate::wasm_dispatch::host_allow_root(candidate) {
             let scope = candidate.strip_prefix("./").unwrap_or(candidate);
+            if crate::pkfs::is_absolute(scope)
+                && crate::scan_universe::scope_inside_root(".", &scope.replace('\\', "/")).is_none()
+            {
+                let project = crate::scan_universe::absolute_root_for_message(".");
+                return Err(format!(
+                    "root '{candidate}' is not a directory the host will grant access to: it carries no project marker (.git, .gm, package.json, Cargo.toml, go.mod, pyproject.toml) and it lies outside the dispatch project '{project}', so nothing was searched; the named root is refused, not replaced by the cwd"
+                ));
+            }
             let valid_relative_scope = !scope.starts_with('/')
                 && scope
                     .split('/')
@@ -1223,6 +1231,21 @@ fs_stat stats one path inside the project. {\"path\":\"<relative path>\"}, requi
                                   or a directory carrying a project marker (.git, .gm, package.json,
                                   Cargo.toml, go.mod, pyproject.toml).";
 
+pub(super) const PRD_RESOLVE_HELP: &str = "\
+prd-resolve {id, witness_evidence, commit_comment, keep_status}, plus a witness binding.
+  witness_evidence: a file:line, codesearch hit or exec snippet specific to this row. Required
+                    unless keep_status:true (aliases preserve_status, leave_pending), which
+                    annotates the row without completing it and needs no binding.
+  binding, EITHER: witness_dispatch_id, the dispatch_id of a gm dispatch in this project's
+                   dispatch ledger, copied from that dispatch's reply.
+  binding, OR all four of: witness_exit_code (integer, must be 0), witness_output_sha256
+                   (64 lowercase hex sha256 of the witness output file), witness_output_path
+                   (that output file, relative to the project root, no .. segments) and
+                   witness_ts (RFC 3339 timestamp). The file is re-read and re-hashed, and any
+                   mismatch is refused.
+  id aliases: prd_id, mutable_id, item_id, slug, key. commit_comment aliases: commit_message,
+  resolution_note (a one-line note bundled into the next commit). A help request writes no state.";
+
 pub(super) fn help_requested(body: &Value) -> bool {
     match body.get("help") {
         Some(Value::Bool(b)) => *b,
@@ -1243,6 +1266,7 @@ pub(super) fn verb_help_doc(verb: &str) -> Option<&'static str> {
         "fs_write" => Some(FS_WRITE_HELP),
         "fs_readdir" => Some(FS_READDIR_HELP),
         "fs_stat" => Some(FS_STAT_HELP),
+        "prd-resolve" => Some(PRD_RESOLVE_HELP),
         "git_worktree" => Some("git_worktree {action: list} returns worktrees; {action: add, path, ref?: HEAD, detach?: true} creates a linked checkout; detach false requires an existing local branch name; {action: remove, path} removes a clean unlocked checkout without force. Unknown fields are refused per action. Repository selectors and session fields are accepted."),
         _ => None,
     }
@@ -1292,16 +1316,14 @@ pub(super) fn scan_scope_hint(scan_cap: u32) -> String {
 
 /// Counters that describe the scan to a human sitting in front of it and nothing else: the cache is
 /// internal, the phase split is profiling, and the listed/unreadable counts are already folded into
-/// `partial_reason` on the scans where they left the answer incomplete. `excluded_by_rule_summary`
-/// stays -- it names which rule hid which subtree, which is the one a caller can act on.
+/// `partial_reason` on the scans where they left the answer incomplete. `excluded_by_rule`, its count
+/// and `excluded_by_rule_summary` stay: they name every path a rule hid, which is what a caller acts on.
 pub(super) const SCAN_TELEMETRY_DROPPED: &[&str] = &[
     "scan_cache",
     "phase_ms",
     "files_listed",
     "files_unreadable",
     "files_with_nul_scanned",
-    "excluded_by_rule",
-    "excluded_by_rule_count",
 ];
 
 /// A bounded scan still answers, so it stays `ok` -- and `ok: true` beside an empty `matches` reads
@@ -1349,6 +1371,23 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
             "{untyped} oversize files with no extension were skipped before reading"
         ));
     }
+    let excluded = num("excluded_by_rule_count");
+    if excluded > 0 {
+        let rules: Vec<String> = out
+            .get("excluded_by_rule_summary")
+            .and_then(|v| v.as_object())
+            .map(|summary| {
+                summary
+                    .iter()
+                    .map(|(rule, n)| format!("{rule} x{}", n.as_u64().unwrap_or(0)))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+        bounds.push(format!(
+            "{excluded} paths were excluded by rule ({}) and are named in excluded_by_rule",
+            rules.join(", ")
+        ));
+    }
     let reason = if bounds.is_empty() {
         "the scan did not cover the whole scope".to_string()
     } else {
@@ -1360,6 +1399,11 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
 }
 
 pub(super) fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_cap: u32) -> Option<String> {
+    // A rule that dropped paths from the scope is a coverage gap, as a bound is: the walk finished,
+    // but not over every file in the scope, so the verdict is false and `excluded_by_rule` names it.
+    if out.get("excluded_by_rule_count").and_then(|v| v.as_u64()).unwrap_or(0) > 0 {
+        out.insert("exhaustive".to_string(), json!(false));
+    }
     let partial = scan_partial_reason(out);
     for key in SCAN_TELEMETRY_DROPPED {
         out.remove(*key);

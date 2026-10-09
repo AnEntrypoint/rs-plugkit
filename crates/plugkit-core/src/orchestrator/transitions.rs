@@ -381,6 +381,11 @@ fn synthetic_test_files_added_in_working_diff() -> Vec<String> {
     let porcelain = crate::wasm_dispatch::git_porcelain();
     let mut found = Vec::new();
     for line in porcelain.lines() {
+        let status = line.get(0..2).unwrap_or("");
+        let introduced = status == "??" || status.starts_with('A');
+        if !introduced {
+            continue;
+        }
         let path = line.get(3..).unwrap_or("").trim();
         if path.is_empty() {
             continue;
@@ -412,7 +417,7 @@ pub(super) fn pred_no_synthetic_test_files() -> bool {
         "deviation.synthetic-test-file",
         serde_json::json!({
             "files": found,
-            "reason": "VERIFY doctrine forbids standing test files: delete them and replace their assertions with a live exec_js witness, then re-verify",
+            "reason": "VERIFY doctrine forbids standing test files: delete only the test files this walk created this session; a tracked test file is left byte-identical and reported as tracked",
         }),
     );
     false

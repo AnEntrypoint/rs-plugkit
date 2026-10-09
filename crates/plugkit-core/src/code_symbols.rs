@@ -572,8 +572,11 @@ fn extract_file(
 
 const DEFERRED_SET_NAMES_LIMIT: usize = 256;
 const DEFERRED_PARTIAL_REASON: &str = "the symbol refresh deferred this file in this pass, so the outline is its cached row and may be stale; codeinsight_index.deferred_set names the deferred files, and deferred_set_truncated says when that list is cut short";
-const DEFERRED_NEVER_INDEXED_REASON: &str = "the symbol refresh deferred this file before it was ever indexed, so the empty outline is not evidence that the file has no symbols";
+const DEFERRED_NEVER_INDEXED_REASON: &str = "the symbol refresh deferred this file before it was ever indexed, so the empty outline is not evidence that the file has no symbols; codeinsight_index.deferred_set names the deferred files";
 const UNLISTED_PARTIAL_REASON: &str = "the file is not in the current listing, so the outline is its cached row from an earlier pass";
+const FAILED_PARTIAL_REASON: &str = "the symbol refresh could not fully read, parse or store this file in this pass, so the outline is its cached row and may be stale or incomplete";
+const REFRESH_NOT_RUN_PARTIAL_REASON: &str = "the symbol refresh did not reach the file listing in this pass, so the outline is its cached row, if one exists, and may be stale; codeinsight_index.error names the cause";
+const UNINDEXED_IN_PASS_REASON: &str = "the symbol refresh did not index this file in this pass, so the empty outline is not evidence that the file has no symbols";
 
 fn record_deferred(
     deferred_paths: &mut Vec<String>,
@@ -585,6 +588,12 @@ fn record_deferred(
         *focus_deferred = true;
     }
     deferred_paths.push(fp.to_string());
+}
+
+fn record_focus_failure(focus_failed: &mut bool, focus: Option<&str>, fp: &str) {
+    if focus == Some(fp) {
+        *focus_failed = true;
+    }
 }
 
 const STORE_BUSY_REFRESH_NOTE: &str = "the shared libsql store is held by another writer (its lock directory is present), so this pass did not refresh the symbol index; the raw store error is withheld";
@@ -644,6 +653,7 @@ pub(crate) fn sync_files(
     let mut seen: HashSet<String> = HashSet::new();
     let mut deferred_paths: Vec<String> = Vec::new();
     let mut focus_deferred = false;
+    let mut focus_failed = false;
     let mut unreadable = 0u32;
     let mut oversized = 0u32;
     let mut store_failures = 0u32;
@@ -669,6 +679,7 @@ pub(crate) fn sync_files(
                 }
                 if !write_edges(&fp, &[], project_path) {
                     store_failures += 1;
+                    record_focus_failure(&mut focus_failed, focus, &fp);
                     continue;
                 }
                 let path = sql_text(&fp);
@@ -678,6 +689,7 @@ pub(crate) fn sync_files(
                         store_busy = true;
                     }
                     store_failures += 1;
+                    record_focus_failure(&mut focus_failed, focus, &fp);
                 }
             }
             continue;
@@ -705,10 +717,12 @@ pub(crate) fn sync_files(
             .or_else(|| host_read(&format!("/{fp}")))
         else {
             unreadable += 1;
+            record_focus_failure(&mut focus_failed, focus, &fp);
             continue;
         };
         if content.len() > size_cap {
             oversized += 1;
+            record_focus_failure(&mut focus_failed, focus, &fp);
             continue;
         }
         let source_hash = format!("{:016x}", crate::hash::fnv1a64(content.as_bytes()));
@@ -735,6 +749,9 @@ pub(crate) fn sync_files(
             unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
         }
         parse_failures += failed;
+        if failed > 0 {
+            record_focus_failure(&mut focus_failed, focus, &fp);
+        }
         match store_file(&db, &fp, &file, project_path) {
             Ok(()) => {
                 synced += 1;
@@ -746,6 +763,7 @@ pub(crate) fn sync_files(
                     store_busy = true;
                 }
                 store_failures += 1;
+                record_focus_failure(&mut focus_failed, focus, &fp);
             }
         }
     }
@@ -801,6 +819,8 @@ pub(crate) fn sync_files(
     if let Some(path) = focus {
         let state = if focus_deferred {
             "deferred"
+        } else if focus_failed {
+            "failed"
         } else if seen.contains(path) {
             "covered"
         } else {
@@ -832,6 +852,7 @@ fn sync_tree_with_budget(
             "ok": false,
             "complete": false,
             "listing_complete": false,
+            "root_granted": false,
             "error": format!("root '{root}' is not an existing project directory the host will grant access to"),
         });
     }
@@ -1824,31 +1845,32 @@ fn status(project_path: Option<&str>) -> Value {
     })
 }
 
-fn only_deferred_incomplete(refresh: &Value) -> bool {
-    let count = |key: &str| refresh.get(key).and_then(Value::as_u64);
-    let flag = |key: &str| refresh.get(key).and_then(Value::as_bool);
-    count("files_deferred").is_some_and(|n| n > 0)
-        && ["treesitter_failures", "files_unreadable", "files_oversized", "store_failures"]
-            .iter()
-            .all(|&key| count(key) == Some(0))
-        && flag("listing_complete") == Some(true)
-        && flag("empty_listing_with_cached_files") == Some(false)
+fn outline_partial_reason(focus_state: Option<&str>) -> Option<&'static str> {
+    match focus_state {
+        Some("covered") => None,
+        Some("deferred") => Some(DEFERRED_PARTIAL_REASON),
+        Some("failed") => Some(FAILED_PARTIAL_REASON),
+        Some("unlisted") => Some(UNLISTED_PARTIAL_REASON),
+        _ => Some(REFRESH_NOT_RUN_PARTIAL_REASON),
+    }
 }
 
 fn outline(db: &str, path: &str, refresh: &Value) -> Result<Value, String> {
     let normalized = normalized_path(path);
     let refresh_complete = refresh.get("complete").and_then(Value::as_bool) == Some(true);
-    let focus_state = refresh
-        .pointer("/focus/state")
-        .and_then(Value::as_str)
-        .unwrap_or("covered");
+    let focus_state = refresh.pointer("/focus/state").and_then(Value::as_str);
     let file = rows(
         db,
         &format!("SELECT lang, loc, symbols FROM {FILES_TABLE} WHERE path=?1"),
         &[&normalized],
     );
     let Some(file) = file.first() else {
-        if !refresh_complete && focus_state == "deferred" {
+        if !refresh_complete && matches!(focus_state, Some("deferred") | Some("failed") | None) {
+            let reason = if focus_state == Some("deferred") {
+                DEFERRED_NEVER_INDEXED_REASON
+            } else {
+                UNINDEXED_IN_PASS_REASON
+            };
             return Ok(json!({
                 "path": normalized,
                 "lang": Value::Null,
@@ -1857,7 +1879,7 @@ fn outline(db: &str, path: &str, refresh: &Value) -> Result<Value, String> {
                 "outline": Vec::<String>::new(),
                 "partial": true,
                 "current": false,
-                "partial_reason": DEFERRED_NEVER_INDEXED_REASON,
+                "partial_reason": reason,
             }));
         }
         let like = format!("%{normalized}%");
@@ -1906,11 +1928,7 @@ fn outline(db: &str, path: &str, refresh: &Value) -> Result<Value, String> {
         "outline": lines,
     });
     if !refresh_complete {
-        let reason = match focus_state {
-            "deferred" => Some(DEFERRED_PARTIAL_REASON),
-            "unlisted" => Some(UNLISTED_PARTIAL_REASON),
-            _ => None,
-        };
+        let reason = outline_partial_reason(focus_state);
         result["partial"] = json!(reason.is_some());
         result["current"] = json!(reason.is_none());
         if let Some(reason) = reason {
@@ -2267,7 +2285,18 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     );
     let refresh_complete = refresh.get("complete").and_then(Value::as_bool) == Some(true);
     let answer_from_index = refresh.get("store_busy").and_then(Value::as_bool) == Some(true) && action == "callers";
-    if !refresh_complete && !(action == "outline" && only_deferred_incomplete(&refresh)) && !answer_from_index {
+    if !refresh_complete && action != "outline" && !answer_from_index {
+        if refresh.get("root_granted").and_then(Value::as_bool) == Some(false) {
+            return Err(format!(
+                "root '{}' is not a directory the host grants access to, so {action} read no index for it; a retry does not grant access",
+                project_path.unwrap_or_default()
+            ));
+        }
+        if let Some(root) = project_path {
+            return Err(format!(
+                "root '{root}': symbol index refresh is incomplete, so {action} read no current answer from it; cached graph is not current evidence. Run action=sync and retry. Refresh: {refresh}"
+            ));
+        }
         return Err(format!("symbol index refresh is incomplete; cached graph is not current evidence. Run action=sync and retry. Refresh: {refresh}"));
     }
     let limit = body

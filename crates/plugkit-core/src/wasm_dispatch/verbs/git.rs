@@ -837,6 +837,165 @@ pub(super) fn pushed_commits_published(repo: Option<&str>, from: Option<&str>, t
     })
 }
 
+fn bin_drift_check_js(base: &str, repo: &str) -> String {
+    format!(
+        r#"(() => {{
+  const cp = require('child_process');
+  const path = require('path');
+  const repoDir = path.resolve({base}, {repo});
+  const script = path.join(repoDir, 'scripts', 'check-bin-drift.mjs');
+  const r = cp.spawnSync(process.execPath, [script], {{ cwd: repoDir, encoding: 'utf8', windowsHide: true, timeout: 120000 }});
+  process.stdout.write(JSON.stringify({{ exit_code: r.status, output: String(r.stdout || '') + String(r.stderr || ''), error: r.error ? String(r.error.message || r.error) : null }}));
+}})();"#,
+        base = serde_json::to_string(base).unwrap_or_else(|_| "\"\"".to_string()),
+        repo = serde_json::to_string(repo).unwrap_or_else(|_| "\"\"".to_string()),
+    )
+}
+
+fn bin_drift_gate_input(path: &str) -> bool {
+    path.starts_with("bin/")
+        || path.starts_with("src/")
+        || path == "package.json"
+        || path == "scripts/"
+        || path == "scripts/build.mjs"
+        || path == "scripts/check-bin-drift.mjs"
+}
+
+fn bin_drift_tracks_gate(repo: Option<&str>, rev: &str) -> bool {
+    let gate_blob = format!("{}:scripts/check-bin-drift.mjs", rev);
+    git_call_argv(&["cat-file", "-e", gate_blob.as_str()], repo)
+        .get("exit_code")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(1)
+        == 0
+}
+
+fn bin_drift_run(repo: Option<&str>) -> Result<(), String> {
+    let checkout = repo.unwrap_or("the checkout");
+    let base = super::host_abi::host_cwd_string().unwrap_or_default();
+    let code = bin_drift_check_js(&base, repo.unwrap_or(""));
+    let opts = json!({ "timeoutMs": 150000 }).to_string();
+    let packed = unsafe {
+        super::host_abi::host_exec_js(
+            code.as_ptr(),
+            code.len() as u32,
+            opts.as_ptr(),
+            opts.len() as u32,
+        )
+    };
+    let envelope: Value = super::host_abi::unpack_to_string(packed)
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or(Value::Null);
+    let inner: Value = envelope
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap_or(Value::Null);
+    if inner.is_null() {
+        return Err(format!(
+            "the host returned no check result, so check-bin-drift did not run. Run: node scripts/check-bin-drift.mjs in {checkout}. If it reports STALE, run: npm run build, commit bin/gm-mcp-server.js with the src/ change, then retry."
+        ));
+    }
+    if inner.get("exit_code").and_then(|v| v.as_i64()) == Some(0) {
+        return Ok(());
+    }
+    let exit = inner
+        .get("exit_code")
+        .and_then(|v| v.as_i64())
+        .map_or_else(|| "none".to_string(), |c| c.to_string());
+    let output = inner
+        .get("output")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let error = inner.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    let spawn_error = if error.is_empty() {
+        String::new()
+    } else {
+        format!(" spawn error: {error}")
+    };
+    let mut message = format!("check-bin-drift exit {exit}. {output}{spawn_error}");
+    if !output.contains("npm run build") {
+        message.push_str(&format!(
+            "\nRun: node scripts/check-bin-drift.mjs in {checkout} to see the failure. If it reports STALE, run: npm run build, commit bin/gm-mcp-server.js with the src/ change, then retry."
+        ));
+    }
+    Err(message)
+}
+
+fn bin_drift_refusal(
+    repo: Option<&str>,
+    source_sha: &str,
+    gate_inputs_dirty: bool,
+) -> Option<String> {
+    if !bin_drift_tracks_gate(repo, source_sha) {
+        return None;
+    }
+    let head_sha = resolve_ref(repo, "HEAD").unwrap_or_default();
+    if gate_inputs_dirty || source_sha != head_sha.as_str() {
+        return Some(format!(
+            "bin drift gate cannot certify {source_sha}: check-bin-drift reads bin/, src/ and the build inputs from the checkout, so the push must be HEAD ({head_sha}) with no uncommitted changes under those paths. Commit or revert them, then push again. After the commit, run: node scripts/check-bin-drift.mjs; if it reports STALE, run: npm run build, then commit bin/gm-mcp-server.js with the src/ change."
+        ));
+    }
+    bin_drift_run(repo)
+        .err()
+        .map(|detail| format!("bin drift gate refused the push: {detail}"))
+}
+
+fn bin_drift_pathspec_covers(pathspecs: &[String], path: &str) -> bool {
+    pathspecs.iter().any(|spec| {
+        let dir = spec.trim().trim_end_matches('/');
+        dir == "." || path == dir || path.starts_with(format!("{dir}/").as_str())
+    })
+}
+
+fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool) -> Option<String> {
+    let head_sha = resolve_ref(repo, "HEAD")?;
+    if !bin_drift_tracks_gate(repo, &head_sha) {
+        return None;
+    }
+    let index_only = !add_all && paths.is_empty();
+    let porcelain = git_push_porcelain_in(repo);
+    let mut touches_gate = false;
+    let mut outside: Vec<String> = Vec::new();
+    for line in porcelain.lines() {
+        let path = line.get(3..).unwrap_or("").trim().trim_matches('"');
+        if !bin_drift_gate_input(path) {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        let staged = bytes.first().map_or(false, |&x| x != b' ' && x != b'?');
+        let unstaged = bytes.get(1).map_or(false, |&y| y != b' ');
+        let in_commit = if add_all {
+            true
+        } else if index_only {
+            staged
+        } else {
+            bin_drift_pathspec_covers(paths, path)
+        };
+        if in_commit {
+            touches_gate = true;
+        }
+        if !in_commit || (index_only && unstaged) {
+            outside.push(path.to_string());
+        }
+    }
+    if !touches_gate {
+        return None;
+    }
+    if !outside.is_empty() {
+        let listed: Vec<String> = outside.iter().take(12).cloned().collect();
+        return Some(format!(
+            "bin drift gate refused the commit: the commit changes build inputs, but these gate inputs are outside the commit or have unstaged changes: {}. Stage them in this commit or revert them, then commit again. bin/gm-mcp-server.js must match a fresh build of the committed src/: run npm run build and include bin/gm-mcp-server.js in the same commit.",
+            listed.join(", ")
+        ));
+    }
+    bin_drift_run(repo)
+        .err()
+        .map(|detail| format!("bin drift gate refused the commit: {detail}"))
+}
+
 pub(super) fn git_push(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let explicit_branch = body
@@ -916,6 +1075,31 @@ pub(super) fn git_push(body: &Value) -> u64 {
             )
         }
     };
+    let gate_inputs_dirty = porcelain.lines().any(|line| {
+        let path = line.get(3..).unwrap_or("").trim().trim_matches('"');
+        bin_drift_gate_input(path)
+    });
+    if let Some(reason) =
+        bin_drift_refusal(repo.as_deref(), &local_source_before, gate_inputs_dirty)
+    {
+        log_deviation_push("push-bin-drift", &branch);
+        return pack(
+            json!({
+                "ok": false,
+                "verb": "git_push",
+                "gate_denied": true,
+                "repo": repo,
+                "branch": branch,
+                "source_ref": source_ref,
+                "source_sha": local_source_before,
+                "reason": reason,
+                "next_dispatch": "instruction",
+                "next_dispatch_hint": "instruction",
+                "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
+            })
+            .to_string(),
+        );
+    }
     let preserved_dirty_worktree = explicit_source_ref.is_some() && !porcelain.trim().is_empty();
     if preserved_dirty_worktree {
         emit_event(
@@ -1553,6 +1737,18 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             return Ok(ok(
                 "git_commit",
                 with_exclusion_report(json!({ "nothing_to_commit": true, "requested_paths": paths }), cwd, &paths),
+            ));
+        }
+        if let Some(reason) = bin_drift_commit_refusal(cwd, &paths, add_all) {
+            return Ok(err_json(
+                "git_commit",
+                json!({
+                    "error": reason,
+                    "gate_denied": true,
+                    "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
+                    "next_dispatch": "instruction",
+                    "next_dispatch_hint": "instruction",
+                }),
             ));
         }
         if !paths.is_empty() {

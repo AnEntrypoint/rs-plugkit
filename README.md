@@ -331,9 +331,9 @@ project's ledger, which keeps the 500 most recent dispatches), or all of
 file), `witness_output_path` (that file, relative to the project root) and
 `witness_ts` (RFC 3339). A binding is re-hashed against its file and refused on
 any mismatch, and a row closed by binding records `witness_binding`. A dispatch id
-that appears only inside `witness_evidence` is named in the reply as
+that appears only inside `witness_evidence` is named in a refusal as
 `witness_dispatch_id_in_evidence` with `witness_dispatch_id_field`; it verifies only
-when passed as `witness_dispatch_id`. An optional `commit_comment` attaches a
+when passed as `witness_dispatch_id`. A verified reply names the bound id in `witness_dispatch_id_in_evidence` (null when a binding closed the row). An optional `commit_comment` attaches a
 one-line resolution note to the next GM commit. `prd-list` takes `limit`, folds
 repeated blocks of an id to the last block, and replies with `total` (matches) and
 `store_total` (stored blocks).
