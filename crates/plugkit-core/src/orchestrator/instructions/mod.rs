@@ -985,10 +985,16 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     );
     let concurrency_shortfall_field = concurrency_shortfall(subagents_running, prd_pending);
 
+    let slots = super::pool_slots::slot_state(".");
+    let slots_prose = super::pool_slots::slots_prose(&slots);
+    let monitor = super::pool_slots::monitor_block(&slots);
     let mut payload = json!({
         "subagents_running": subagents_running,
         "concurrency_shortfall": concurrency_shortfall_field,
         "phase": phase,
+        "slots": slots,
+        "monitor": monitor,
+        "slots_prose": slots_prose,
         "fsm_graph": {
             "tier": graph_tier.as_str(),
             "path": graph_path,
