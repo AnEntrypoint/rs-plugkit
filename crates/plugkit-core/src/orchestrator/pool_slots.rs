@@ -52,14 +52,18 @@ fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         return live;
     };
     for entry in entries {
+        let name = match entry.as_str() {
+            Some(bare) => bare.to_string(),
+            None => match entry.get("name").and_then(Value::as_str) {
+                Some(obj_name) => obj_name.to_string(),
+                None => continue,
+            },
+        };
         let is_file = entry
             .get("is_file")
             .or_else(|| entry.get("isFile"))
             .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let Some(name) = entry.get("name").and_then(Value::as_str) else {
-            continue;
-        };
+            .unwrap_or(true);
         if !is_file || !name.ends_with(".live") {
             continue;
         }
