@@ -245,7 +245,11 @@ try {
   });
   check('re-resolving a row with its own binding is idempotent', rebound.ok && rebound.data?.resolved === 'c', rebound.error ?? '');
 } finally {
-  fs.rmSync(root, { recursive: true, force: true });
+  try {
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
+  } catch (error) {
+    console.log(`NOTE scratch project not removed (${error.code ?? error.message}): ${root}`);
+  }
 }
 
 console.log(failures.length === 0 ? 'RESULT: PASS' : `RESULT: FAIL (${failures.length} checks failed: ${failures.join('; ')})`);
