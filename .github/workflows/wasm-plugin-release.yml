@@ -27,6 +27,10 @@ on:
         required: false
         type: string
         default: 'Cargo.toml'
+      dependency_repos:
+        required: false
+        type: string
+        default: ''
       pre_build_steps:
         required: false
         type: string
@@ -43,7 +47,48 @@ on:
         required: true
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      deps: ${{ steps.check.outputs.deps }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ${{ inputs.source_repository || github.repository }}
+          fetch-depth: 1
+          ref: main
+
+      - name: Skip when neither this source nor its dependencies moved since the last release
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.publisher_token }}
+          DEPENDENCY_REPOS: ${{ inputs.dependency_repos }}
+          RELEASE_REPO: ${{ inputs.release_repo }}
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse HEAD)
+          deps=""
+          for repo in $DEPENDENCY_REPOS; do
+            sha=$(git ls-remote "https://github.com/$repo.git" refs/heads/main | cut -f1)
+            deps="$deps$repo@$sha "
+          done
+          deps=${deps% }
+          body=$(gh api "repos/$RELEASE_REPO/releases/latest" --jq '.body' 2>/dev/null || true)
+          recorded_head=$(printf '%s\n' "$body" | sed -n 's/^source-head: //p')
+          recorded_deps=$(printf '%s\n' "$body" | sed -n 's/^source-deps: //p')
+          skip=false
+          if [ -n "$recorded_head" ] && [ "$head" = "$recorded_head" ] && [ "$deps" = "$recorded_deps" ]; then
+            skip=true
+            echo "sources and dependencies unchanged since ${recorded_head:0:9}; no release"
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          echo "deps=$deps" >> "$GITHUB_OUTPUT"
+
   bump:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.bump.outputs.version }}
@@ -66,8 +111,8 @@ jobs:
           GH_TOKEN: ${{ secrets.publisher_token }}
         run: |
           set -e
-          git config user.name "gm-bot"
-          git config user.email "noreply@github.com"
+          git config user.name "lanmower"
+          git config user.email "lanmower@users.noreply.github.com"
           git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
           MANIFEST="${{ inputs.version_manifest }}"
           CURRENT=$(grep '^version' "$MANIFEST" | head -1 | sed 's/.*= *"//;s/"//')
@@ -80,13 +125,19 @@ jobs:
             echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
           else
             git commit -m "chore: auto-bump version to $NEW_VERSION [skip ci]"
-            git push origin HEAD:main
+            pushed=false
+            for attempt in 1 2 3; do
+              if git push origin HEAD:main; then pushed=true; break; fi
+              git pull --rebase -q origin main
+            done
+            [ "$pushed" = true ] || { echo "::error::could not push the version bump after 3 attempts"; exit 1; }
             echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           fi
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   release:
-    needs: bump
+    needs: [plan, bump]
+    if: needs.plan.outputs.skip != 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -142,24 +193,21 @@ jobs:
           VER: ${{ needs.bump.outputs.version }}
           REPO: ${{ inputs.release_repo }}
           TITLE_PREFIX: ${{ inputs.release_title_prefix }}
+          SOURCE_HEAD: ${{ needs.bump.outputs.commit }}
+          SOURCE_DEPS: ${{ needs.plan.outputs.deps }}
           SHA: ${{ github.sha }}
         working-directory: ${{ inputs.crate_dir }}
         shell: bash
         run: |
           set -e
+          NOTES=$(printf 'source-head: %s\nsource-deps: %s\nAuto-published from CI at %s' "$SOURCE_HEAD" "$SOURCE_DEPS" "$SHA")
           if ! gh release view "v$VER" --repo "$REPO" >/dev/null 2>&1; then
             gh release create "v$VER" \
               --repo "$REPO" \
               --title "$TITLE_PREFIX v$VER" \
-              --notes "Auto-published from CI at $SHA"
+              --notes "$NOTES"
           fi
           gh release upload "v$VER" --repo "$REPO" --clobber release-assets/*
-
-      - name: Ask gm to advance its submodule pins
-        env:
-          GH_TOKEN: ${{ secrets.publisher_token }}
-        shell: bash
-        run: gh api repos/AnEntrypoint/gm/dispatches -f event_type=submodule-released || echo "::warning::gm dispatch failed; bump-pins will pick this up on its next schedule"
 
       - name: Verify every uploaded asset is actually fetchable, not just reported as uploaded
         env:
@@ -179,3 +227,9 @@ jobs:
             fi
           done
           echo "[ok] all $(ls release-assets | wc -l) release assets confirmed fetchable at $base"
+
+      - name: Ask gm to advance its submodule pins
+        env:
+          GH_TOKEN: ${{ secrets.publisher_token }}
+        shell: bash
+        run: gh api repos/AnEntrypoint/gm/dispatches -f event_type=submodule-released || echo "::warning::gm dispatch failed; bump-pins will pick this up on its next schedule"
