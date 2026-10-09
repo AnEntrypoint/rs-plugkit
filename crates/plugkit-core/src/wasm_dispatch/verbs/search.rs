@@ -1210,9 +1210,16 @@ fs_read returns a file's contents.
 Paged replies add \"total_lines\", \"offset\", \"returned_lines\" and \"has_more_lines\".";
 
 pub(super) const FS_WRITE_HELP: &str = "\
-fs_write writes a file inside the project.
+fs_write writes a file inside the project. There is no append mode: a write replaces the whole file.
   {\"path\":\"<relative path>\"}     required, relative and within the project
-  {\"content\":\"<text>\"}           required; \"data\" is an alias
+  {\"content\":\"<text>\"}           required, as a JSON string with \\n for each newline;
+                                   \"data\" and \"text\" are aliases
+  {\"content\":[\"<line>\", ...]}    an array of lines is accepted too, joined with \\n plus a trailing
+                                   newline, so a caller never has to escape newlines by hand
+  {\"allow_empty\":true}            permit writing \"\" on purpose (truncating the file)
+Raw (non-JSON) body: accepted when the first line is a path= directive, the rest is the contents:
+  path=<relative path>
+  <the file contents>
 Returns {\"bytes\": <written>}. A write outside the root is always refused, allowOutsideRoot included: that
 flag widens the read verbs only.";
 
