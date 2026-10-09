@@ -14,7 +14,6 @@ pub const SOURCE_CACHE_REL: &str = ".gm/config-source-cache";
 
 pub const DEFAULT_REPO_URL: &str = "https://github.com/AnEntrypoint/gm-config";
 
-pub const DEFAULT_REPO_PINNED_SHA: &str = "5e992d2c71eeac619ef92377550dbba938d59bec";
 pub const DEFAULT_REPO_REFERENCE: &str = "main";
 
 pub const DEFAULT_REPO_CACHE_REL: &str = ".gm/config-source-cache-default";
@@ -776,7 +775,6 @@ pub fn resolve_and_report(project_root: &str, fetcher: &dyn RepoFetcher) -> Reso
             "tier": r.tier.as_str(),
             "why": r.why,
             "version": r.config.version,
-            "pinned_sha": if r.tier == Tier::ImplicitDefaultRepo { Some(DEFAULT_REPO_PINNED_SHA) } else { None },
         }),
     );
     r
