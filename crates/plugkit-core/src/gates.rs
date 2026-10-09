@@ -321,6 +321,42 @@ fn is_transition_to_complete(verb: &str, body: &Value) -> bool {
             .unwrap_or(false)
 }
 
+fn fanout_slice_count(prose: &str) -> Option<u64> {
+    let marker = "Fan-out:";
+    let line = prose.lines().find(|l| l.contains(marker))?;
+    let rest = &line[line.find(marker)? + marker.len()..];
+    rest.split(|c: char| !c.is_ascii_digit())
+        .find(|s| !s.is_empty())?
+        .parse()
+        .ok()
+}
+
+fn check_fanout_missed(to: &str, body: &Value) {
+    let Some(parent) = body
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let prose = crate::prose::resolve(&to.to_ascii_lowercase(), "");
+    if !fanout_slice_count(&prose).is_some_and(|n| n >= 2) {
+        return;
+    }
+    let since_ms: u64 = host_read(&crate::pkfs::anchor(".gm/last-instruction-ts"))
+        .unwrap_or_default()
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    if crate::dispatch_ledger::subagent_dispatches_since(&cwd, parent, since_ms) == 0 {
+        log_deviation(
+            "fanout-missed",
+            &format!("node={} parent_session={} since_ms={}", to, parent, since_ms),
+        );
+    }
+}
+
 fn effective_severity_is_deny(kind: &str) -> bool {
     crate::orchestrator::deviations::effective_severity(kind)
         == crate::orchestrator::deviations::Severity::Deny
@@ -582,6 +618,12 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     } else {
         None
     };
+
+    if is_complete_transition {
+        if let Some(to) = requested_to_phase.as_deref() {
+            check_fanout_missed(to, body);
+        }
+    }
 
     if let Some(to) = requested_to_phase {
         let from = current_phase_key();
