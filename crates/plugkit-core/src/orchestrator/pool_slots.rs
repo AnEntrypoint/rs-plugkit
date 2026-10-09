@@ -194,7 +194,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     (out.to_string(), String::new(), 0)
 }
 
-const MONITOR_FLOOR: u64 = 12;
+const MONITOR_FLOOR: u64 = 10;
 const MONITOR_ALARM_ACTION: &str = "refill from slots.candidates until a spawn refusal names the ceiling; when candidates run out, dispatch a traversal hop to log node-only PRDs; the loop is wait {\"ms\":60000}, then instruction, then launch the free slots";
 const WORKER_BRIEF_PATH: &str = "C:/dev/spoint/.gm/config-source-cache-default/prose/worker.md";
 
