@@ -1163,6 +1163,7 @@ mode:\"comments\" -- one pass for every comment in the tree, column-1 and inline
                             \"comments\". \"inline\":true marks a comment with code before it on the same line.
              plus \"comment_count\", \"directive_count\", \"files\", \"output\" (path:line:column: text),
              \"file_source\", \"file_source_detail\" and \"exhaustive\".
+             files and output list comments only; a directive is counted in directive_count and listed in directives alone.
 
 Every scan reports \"file_source\" and \"file_source_detail\": \"git\" means `git ls-files --cached`
 (tracked files only), \"walk\" a filesystem walk and \"file\" a single file read straight from disk.

@@ -6387,7 +6387,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         let (file_comments, file_directives) = scan_content_for_comments(&content, syntax);
         let file_lines: Vec<&str> = if req.context > 0 { content.lines().collect() } else { Vec::new() };
         if file_comments.is_empty() && file_directives.is_empty() { continue; }
-        files_with_comments += 1;
+        if !file_comments.is_empty() { files_with_comments += 1; }
         for span in &file_comments {
             if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
             comments.push(comment_span_json(path, span.syntax, span, req.context, &file_lines));
@@ -6453,7 +6453,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     out.insert("files_listed".to_string(), json!(files.len()));
     let comment_paths: Vec<Value> = {
         let mut seen: Vec<String> = Vec::new();
-        for hit in comments.iter().chain(directives.iter()) {
+        for hit in comments.iter() {
             let p = hit
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -6466,9 +6466,8 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         seen.into_iter().map(|p| json!(p)).collect()
     };
     out.insert("files".to_string(), Value::Array(comment_paths));
-    let ordered_hits: Vec<Value> = comments.iter().chain(directives.iter()).cloned().collect();
     out.insert("output".to_string(), Value::Array(
-        grep_content_lines(&ordered_hits, req.context, true).into_iter().map(|line| json!(line)).collect(),
+        grep_content_lines(&comments, req.context, true).into_iter().map(|line| json!(line)).collect(),
     ));
     if cache_hits + cache_misses > 0 {
         out.insert(
