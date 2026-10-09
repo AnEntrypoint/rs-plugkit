@@ -4584,8 +4584,8 @@ where
     out
 }
 
-/// Names every path a scan-universe rule dropped. A non-zero `excluded_by_rule_count` is a coverage
-/// gap, and `finish_scan_reply` clears `exhaustive` on it, so every exhaustive scan calls this.
+/// Counts every path a scan-universe rule dropped and names the first few. The summary holds the
+/// count per rule; `finish_scan_reply` decides which rules clear `exhaustive`.
 fn insert_excluded_by_rule(
     out: &mut serde_json::Map<String, Value>,
     excluded: &[crate::scan_universe::RuleExclusion],
@@ -4593,7 +4593,7 @@ fn insert_excluded_by_rule(
     if excluded.is_empty() {
         return;
     }
-    let cap = 200usize;
+    let cap = 5usize;
     let shown: Vec<Value> = excluded
         .iter()
         .take(cap)
@@ -4672,6 +4672,8 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
     let files_matching_glob = files.iter().filter(|p| admitted(p)).count();
     let glob_matched_no_files = has_glob_filter && !files.is_empty() && files_matching_glob == 0;
+    let glob_outside_path =
+        crate::path_glob::alternatives_outside_scopes(&req.include_globs, req.paths);
 
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let listing_ms = started_ms.saturating_sub(listing_started_ms);
@@ -5046,7 +5048,8 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         && files_skipped_too_large_count == 0
         && files_unreadable == 0
         && universe.listing_complete
-        && !glob_matched_no_files;
+        && !glob_matched_no_files
+        && glob_outside_path.is_empty();
 
     let match_count = match req.output {
         ScanOutput::Matches => matches.len(),
@@ -5257,6 +5260,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         }
     }
     out.insert("exhaustive".to_string(), json!(exhaustive));
+    if !glob_outside_path.is_empty() {
+        out.insert("glob_outside_path".to_string(), json!(glob_outside_path));
+    }
     if files_truncated {
         out.insert("files_truncated".to_string(), json!(true));
         out.insert("files_truncated_at".to_string(), json!(file_cap));
@@ -5419,6 +5425,14 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("reply_truncated".to_string(), json!(true));
         out.insert("max_chars".to_string(), json!(req.max_chars));
         out.insert("spilled_count".to_string(), json!(spilled_count));
+        let mut busiest = file_line_counts.clone();
+        busiest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let count_rows: Vec<String> = busiest.into_iter().map(|(p, n)| format!("{n} {p}")).collect();
+        let (counts_shown, counts_rest) = split_lines_at_budget(count_rows, REPLY_METADATA_RESERVE_CHARS);
+        out.insert("counts_by_file".to_string(), json!(counts_shown));
+        if !counts_rest.is_empty() {
+            out.insert("counts_by_file_omitted".to_string(), json!(counts_rest.len()));
+        }
         match spill_lines_to_out_file(&req.spill_name, &spilled) {
             Some(file) => {
                 out.insert("spill_file".to_string(), json!(file));
