@@ -101,6 +101,11 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
         Severity::Log,
     ),
     (
+        "fanout-missed",
+        "a graph node whose served prose declares a multi-slice `Fan-out:` line completed with zero subagent dispatches recorded for that node in the turn -- the declared fan-out was skipped",
+        Severity::Log,
+    ),
+    (
         "residual-dirty-tree",
         "`residual-scan` found an uncommitted/untracked delta in the worktree -- every porcelain entry needs triage (commit, gitignore, or revert) before close-out",
         Severity::Log,
