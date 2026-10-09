@@ -2,6 +2,7 @@ use super::fsm::{self, GateDef, HookMode};
 use super::mutables;
 use super::prd;
 use super::recall;
+use super::predicate_registry::{PredicateFn, PREDICATE_REGISTRY};
 use super::state::{read_state_with_graph, set_phase_with_session_with_graph, Phase};
 
 pub fn next_skill(current: &Phase, g: &fsm::Graph) -> String {
@@ -33,85 +34,48 @@ pub fn handle_predicates_md(_content: &str) -> (String, String, i32) {
     (payload.to_string(), String::new(), 0)
 }
 
-type PredicateFn = fn() -> bool;
-
-fn predicate_fn_for(name: &str) -> PredicateFn {
-    match name {
-        "residual-scan-fired" => residual_scan_fired as PredicateFn,
-        "prd-all-closed" => pred_prd_all_closed,
-        "mutables-all-resolved" => pred_mutables_all_resolved,
-        "mutables-all-typed" => pred_mutables_all_typed as PredicateFn,
-        "state-obligations-ready" => pred_state_obligations_ready as PredicateFn,
-        "conc-obligations-ready" => pred_conc_obligations_ready as PredicateFn,
-        "sec-obligations-ready" => pred_sec_obligations_ready as PredicateFn,
-        "res-obligations-ready" => pred_res_obligations_ready as PredicateFn,
-        "worktree-clean" => pred_worktree_clean,
-        "ci-validated-fresh" => ci_validation_fresh as PredicateFn,
-        "claim-audit-clean" => pred_claim_audit_clean,
-        "submodules-clean" => pred_submodules_clean,
-        "no-synthetic-test-files" => pred_no_synthetic_test_files as PredicateFn,
-        "remote-hook-refused" => pred_remote_hook_refused,
-        "no-admit-deferral-markers" => pred_no_admit_deferral_markers as PredicateFn,
-        "no-secrets-in-diff" => pred_no_secrets_in_diff as PredicateFn,
-        "no-unchecked-panics-in-diff" => pred_no_unchecked_panics_in_diff as PredicateFn,
-        "no-hedge-language-in-diff" => pred_no_hedge_language_in_diff as PredicateFn,
-        "split-context-swept" => split_context_swept as PredicateFn,
-        "no-graphical-symbols-in-diff" => pred_no_graphical_symbols_in_diff as PredicateFn,
-        "idempotent-dispatch-replay-safe" => pred_idempotent_dispatch_replay_safe as PredicateFn,
-        "lean-one-task-in-flight" => pred_lean_one_task_in_flight as PredicateFn,
-        "lean-contract-only-description" => pred_lean_always_true as PredicateFn,
-        "lean-verifier-independent" => pred_lean_always_true as PredicateFn,
-        "lean-net-negative" => pred_lean_net_negative as PredicateFn,
-        "lean-contract-recorded" => pred_lean_contract_recorded as PredicateFn,
-        other => panic!("predicate_registry names a predicate with no matching function: {other}"),
-    }
+fn predicate_table() -> &'static [(&'static str, &'static str, PredicateFn)] {
+    PREDICATE_REGISTRY
 }
 
-fn predicate_table() -> Vec<(&'static str, &'static str, PredicateFn)> {
-    super::predicate_registry::PREDICATE_REGISTRY
-        .iter()
-        .map(|(name, desc)| (*name, *desc, predicate_fn_for(name)))
-        .collect()
-}
-
-fn pred_remote_hook_refused() -> bool {
+pub(super) fn pred_remote_hook_refused() -> bool {
     false
 }
 
-fn pred_prd_all_closed() -> bool {
+pub(super) fn pred_prd_all_closed() -> bool {
     !prd_has_open_items()
 }
-fn pred_mutables_all_resolved() -> bool {
+pub(super) fn pred_mutables_all_resolved() -> bool {
     mutables::pending_detailed().is_empty()
 }
-fn pred_mutables_all_typed() -> bool {
+pub(super) fn pred_mutables_all_typed() -> bool {
     mutables::all_typed()
 }
-fn pred_state_obligations_ready() -> bool {
+pub(super) fn pred_state_obligations_ready() -> bool {
     mutables::state_obligations_ready()
 }
-fn pred_conc_obligations_ready() -> bool {
+pub(super) fn pred_conc_obligations_ready() -> bool {
     mutables::conc_obligations_ready()
 }
-fn pred_sec_obligations_ready() -> bool {
+pub(super) fn pred_sec_obligations_ready() -> bool {
     mutables::sec_obligations_ready()
 }
-fn pred_res_obligations_ready() -> bool {
+pub(super) fn pred_res_obligations_ready() -> bool {
     mutables::res_obligations_ready()
 }
-fn pred_worktree_clean() -> bool {
+pub(super) fn pred_worktree_clean() -> bool {
     !worktree_dirty()
 }
 #[cfg(target_arch = "wasm32")]
-fn pred_claim_audit_clean() -> bool {
+pub(super) fn pred_claim_audit_clean() -> bool {
     crate::wasm_dispatch::host_abi::git_repository_absent()
         || super::claim_audit::claim_audit_clean()
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_claim_audit_clean() -> bool {
+pub(super) fn pred_claim_audit_clean() -> bool {
     true
 }
-fn pred_submodules_clean() -> bool {
+pub(super) fn pred_submodules_clean() -> bool {
     super::submodule_drift::submodules_clean()
 }
 
@@ -136,7 +100,7 @@ fn lean_row_status(item: &serde_json::Value) -> String {
         .replace('_', "-")
 }
 
-fn pred_lean_one_task_in_flight() -> bool {
+pub(super) fn pred_lean_one_task_in_flight() -> bool {
     let Some(items) = lean_prd_items() else {
         return false;
     };
@@ -147,7 +111,7 @@ fn pred_lean_one_task_in_flight() -> bool {
         <= 1
 }
 
-fn pred_lean_always_true() -> bool {
+pub(super) fn pred_lean_always_true() -> bool {
     true
 }
 
@@ -167,7 +131,7 @@ fn lean_worktree_clean() -> bool {
     false
 }
 
-fn pred_lean_contract_recorded() -> bool {
+pub(super) fn pred_lean_contract_recorded() -> bool {
     let Some(items) = lean_prd_items() else {
         return false;
     };
@@ -181,7 +145,7 @@ fn pred_lean_contract_recorded() -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn pred_lean_net_negative() -> bool {
+pub(super) fn pred_lean_net_negative() -> bool {
     let st = crate::wasm_dispatch::host_abi::porcelain_from(&crate::wasm_dispatch::git_call(
         "diff --numstat HEAD",
         None,
@@ -211,7 +175,7 @@ fn pred_lean_net_negative() -> bool {
     added <= removed
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_lean_net_negative() -> bool {
+pub(super) fn pred_lean_net_negative() -> bool {
     false
 }
 
@@ -263,7 +227,7 @@ fn residual_scan_marker_matches_current_session_or_is_within_longgap_threshold(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn residual_scan_fired() -> bool {
+pub(super) fn residual_scan_fired() -> bool {
     match super::yaml_util::read_residual_marker() {
         super::yaml_util::ResidualMarker::Live { session_id, fired_at_ms } =>
             residual_scan_marker_matches_current_session_or_is_within_longgap_threshold(&session_id, fired_at_ms),
@@ -271,7 +235,7 @@ fn residual_scan_fired() -> bool {
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn residual_scan_fired() -> bool {
+pub(super) fn residual_scan_fired() -> bool {
     false
 }
 
@@ -369,7 +333,7 @@ fn synthetic_test_files_added_in_working_diff() -> Vec<String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn pred_no_synthetic_test_files() -> bool {
+pub(super) fn pred_no_synthetic_test_files() -> bool {
     let found = synthetic_test_files_added_in_working_diff();
     if found.is_empty() {
         return true;
@@ -385,7 +349,7 @@ fn pred_no_synthetic_test_files() -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_no_synthetic_test_files() -> bool {
+pub(super) fn pred_no_synthetic_test_files() -> bool {
     true
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -512,7 +476,7 @@ fn needle_first_occurrence_sits_inside_quoted_string_literal(text: &str, needle:
 }
 
 #[cfg(target_arch = "wasm32")]
-fn pred_no_admit_deferral_markers() -> bool {
+pub(super) fn pred_no_admit_deferral_markers() -> bool {
     const COLON_MARKERS: &[&str] = &[
         "TODO:",
         "FIXME:",
@@ -559,12 +523,12 @@ fn pred_no_admit_deferral_markers() -> bool {
     false
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_no_admit_deferral_markers() -> bool {
+pub(super) fn pred_no_admit_deferral_markers() -> bool {
     true
 }
 
 #[cfg(target_arch = "wasm32")]
-fn pred_no_secrets_in_diff() -> bool {
+pub(super) fn pred_no_secrets_in_diff() -> bool {
     let mut found = Vec::new();
     for (path, line_no, text) in added_lines_in_diff() {
         let looks_like_aws_key = text.contains("AKIA")
@@ -611,12 +575,12 @@ fn pred_no_secrets_in_diff() -> bool {
     false
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_no_secrets_in_diff() -> bool {
+pub(super) fn pred_no_secrets_in_diff() -> bool {
     true
 }
 
 #[cfg(target_arch = "wasm32")]
-fn pred_no_unchecked_panics_in_diff() -> bool {
+pub(super) fn pred_no_unchecked_panics_in_diff() -> bool {
     let mut found = Vec::new();
     for (path, line_no, text) in added_lines_in_diff() {
         if is_test_scoped_path(&path) {
@@ -664,12 +628,12 @@ fn pred_no_unchecked_panics_in_diff() -> bool {
     false
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_no_unchecked_panics_in_diff() -> bool {
+pub(super) fn pred_no_unchecked_panics_in_diff() -> bool {
     true
 }
 
 #[cfg(target_arch = "wasm32")]
-fn pred_no_hedge_language_in_diff() -> bool {
+pub(super) fn pred_no_hedge_language_in_diff() -> bool {
     const HEDGES: &[&str] = &[
         "todo later",
         "in a future session",
@@ -704,7 +668,7 @@ fn pred_no_hedge_language_in_diff() -> bool {
     false
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_no_hedge_language_in_diff() -> bool {
+pub(super) fn pred_no_hedge_language_in_diff() -> bool {
     true
 }
 
@@ -727,7 +691,7 @@ fn graphical_symbol_lines_in_diff() -> Vec<String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn pred_no_graphical_symbols_in_diff() -> bool {
+pub(super) fn pred_no_graphical_symbols_in_diff() -> bool {
     let found = graphical_symbol_lines_in_diff();
     if found.is_empty() {
         return true;
@@ -742,12 +706,12 @@ fn pred_no_graphical_symbols_in_diff() -> bool {
     false
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_no_graphical_symbols_in_diff() -> bool {
+pub(super) fn pred_no_graphical_symbols_in_diff() -> bool {
     true
 }
 
 #[cfg(target_arch = "wasm32")]
-fn pred_idempotent_dispatch_replay_safe() -> bool {
+pub(super) fn pred_idempotent_dispatch_replay_safe() -> bool {
     let raw = crate::pkfs::read_to_string(".gm/exec-spool/.audit-tuples.json").unwrap_or_default();
     if raw.trim().is_empty() {
         return true;
@@ -801,12 +765,12 @@ fn pred_idempotent_dispatch_replay_safe() -> bool {
     false
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn pred_idempotent_dispatch_replay_safe() -> bool {
+pub(super) fn pred_idempotent_dispatch_replay_safe() -> bool {
     true
 }
 
 #[cfg(target_arch = "wasm32")]
-fn ci_validation_fresh() -> bool {
+pub(super) fn ci_validation_fresh() -> bool {
     if crate::wasm_dispatch::host_abi::git_repository_absent() {
         return true;
     }
@@ -833,7 +797,7 @@ fn ci_validation_fresh() -> bool {
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn ci_validation_fresh() -> bool {
+pub(super) fn ci_validation_fresh() -> bool {
     true
 }
 
@@ -860,7 +824,7 @@ fn working_diff_touched_file_count() -> usize {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn split_context_swept() -> bool {
+pub(super) fn split_context_swept() -> bool {
     if working_diff_touched_file_count() <= 1 {
         return true;
     }
@@ -888,7 +852,7 @@ fn split_context_swept() -> bool {
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn split_context_swept() -> bool {
+pub(super) fn split_context_swept() -> bool {
     true
 }
 

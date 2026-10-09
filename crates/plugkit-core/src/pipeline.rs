@@ -28,15 +28,9 @@ pub fn ensure_pipeline_schema() -> Result<(), String> {
 pub fn hmac_key() -> Result<String, String> {
     let k = "GM_PIPELINE_HMAC_KEY";
     let packed = unsafe { host_env_get(k.as_ptr(), k.len() as u32) };
-    let ptr = (packed & 0xFFFF_FFFF) as u32;
-    let len = (packed >> 32) as u32;
-    if ptr != 0 && len != 0 {
-        let s = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-        if !s.is_empty() {
-            return Ok(String::from_utf8_lossy(s).into_owned());
-        }
-    }
-    Err("GM_PIPELINE_HMAC_KEY is not set".to_string())
+    crate::wasm_dispatch::unpack_to_string_pub(packed)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "GM_PIPELINE_HMAC_KEY is not set".to_string())
 }
 
 use crate::hash::fnv1a64;

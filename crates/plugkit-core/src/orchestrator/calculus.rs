@@ -94,7 +94,7 @@ impl Registry {
             return None;
         }
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().retired = true;
+        next.fibers.get_mut(name)?.retired = true;
         Some(next)
     }
 
@@ -114,7 +114,7 @@ impl Registry {
             return None;
         }
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state = LifecycleState::Active;
+        next.fibers.get_mut(name)?.state = LifecycleState::Active;
         Some(next)
     }
 
@@ -128,7 +128,7 @@ impl Registry {
             return None;
         }
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state = LifecycleState::Inactive;
+        next.fibers.get_mut(name)?.state = LifecycleState::Inactive;
         Some(next)
     }
 
@@ -439,7 +439,7 @@ impl ExtendedRegistry {
         }
         let omega = fiber.requires.clone();
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Reloading {
+        next.fibers.get_mut(name)?.state = ExtendedLifecycle::Reloading {
             remaining_iterations,
             committed: omega,
         };
@@ -462,7 +462,7 @@ impl ExtendedRegistry {
             return None;
         }
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Reloading {
+        next.fibers.get_mut(name)?.state = ExtendedLifecycle::Reloading {
             remaining_iterations: remaining - 1,
             committed,
         };
@@ -482,7 +482,7 @@ impl ExtendedRegistry {
             return None;
         }
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Active { committed };
+        next.fibers.get_mut(name)?.state = ExtendedLifecycle::Active { committed };
         Some(next)
     }
 
@@ -497,7 +497,7 @@ impl ExtendedRegistry {
             return None;
         }
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Unloading {
+        next.fibers.get_mut(name)?.state = ExtendedLifecycle::Unloading {
             committed,
             outcome: None,
         };
@@ -511,7 +511,7 @@ impl ExtendedRegistry {
             _ => return None,
         };
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Unloading {
+        next.fibers.get_mut(name)?.state = ExtendedLifecycle::Unloading {
             committed,
             outcome: Some(error),
         };
@@ -529,7 +529,7 @@ impl ExtendedRegistry {
             return None;
         }
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Unloading {
+        next.fibers.get_mut(name)?.state = ExtendedLifecycle::Unloading {
             committed,
             outcome: None,
         };
@@ -546,7 +546,7 @@ impl ExtendedRegistry {
             return None;
         }
         let mut next = self.clone();
-        next.fibers.get_mut(name).unwrap().state = ExtendedLifecycle::Inactive { outcome };
+        next.fibers.get_mut(name)?.state = ExtendedLifecycle::Inactive { outcome };
         Some(next)
     }
 

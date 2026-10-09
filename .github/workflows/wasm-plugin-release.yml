@@ -47,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.bump.outputs.version }}
+      commit: ${{ steps.bump.outputs.commit }}
     defaults:
       run:
         working-directory: ${{ inputs.crate_dir }}
@@ -82,6 +83,7 @@ jobs:
             git push origin HEAD:main
             echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           fi
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   release:
     needs: bump
@@ -93,12 +95,16 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ inputs.source_repository || github.repository }}
-          ref: main
+          ref: ${{ needs.bump.outputs.commit }}
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
         with:
           toolchain: stable
           targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7
+        with:
+          key: wasm-plugin-${{ inputs.published_asset_basename }}
 
       - name: Pre-build steps
         if: inputs.pre_build_steps != ''
@@ -148,6 +154,12 @@ jobs:
               --notes "Auto-published from CI at $SHA"
           fi
           gh release upload "v$VER" --repo "$REPO" --clobber release-assets/*
+
+      - name: Ask gm to advance its submodule pins
+        env:
+          GH_TOKEN: ${{ secrets.publisher_token }}
+        shell: bash
+        run: gh api repos/AnEntrypoint/gm/dispatches -f event_type=submodule-released || echo "::warning::gm dispatch failed; bump-pins will pick this up on its next schedule"
 
       - name: Verify every uploaded asset is actually fetchable, not just reported as uploaded
         env:

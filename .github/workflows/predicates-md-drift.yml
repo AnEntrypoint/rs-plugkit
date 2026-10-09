@@ -25,15 +25,8 @@ jobs:
         with:
           toolchain: stable
       - name: generate predicates.md from the live registry
-        run: |
-          cat > gen_driver.rs <<'DRIVER'
-          include!("rs-plugkit/crates/plugkit-core/src/orchestrator/predicate_registry.rs");
-          fn main() {
-              print!("{}", generated_predicates_md());
-          }
-          DRIVER
-          rustc --edition 2021 gen_driver.rs -o /tmp/gen_driver
-          /tmp/gen_driver > /tmp/generated-predicates.md
+        working-directory: rs-plugkit
+        run: cargo run -q -p rs-plugkit --example predicates_md > /tmp/generated-predicates.md
       - name: diff generated output against gm-config's committed copy
         run: |
           if ! diff -u gm-config/fsm/predicates.md /tmp/generated-predicates.md; then

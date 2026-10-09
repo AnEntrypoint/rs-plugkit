@@ -7,7 +7,7 @@ use crate::code_index::{
     list_dir, load_repo_gitignore,
 };
 use crate::ragconfig::IndexConfig;
-use crate::wasm_dispatch::{git_call_argv, host_now_ms, host_stat};
+use crate::wasm_dispatch::{git_call_argv, host_now_ms, host_stat_is_directory};
 
 const GIT_LISTING_SPLIT_DEPTH_LIMIT: usize = 16;
 
@@ -132,12 +132,6 @@ fn git_stderr(v: &Value) -> String {
         .to_string()
 }
 
-fn stat_is_directory(path: &str) -> Option<bool> {
-    host_stat(path)
-        .filter(|v| !v.is_null())
-        .and_then(|v| v.get("isDirectory").and_then(|b| b.as_bool()))
-}
-
 /// A caller who spells out the whole location still means a place inside the search root, so an
 /// absolute `path` under that root is rewritten to the relative scope the rest of the scan works
 /// with. `None` means the location is not under the root at all.
@@ -242,7 +236,7 @@ fn git_list_into(
     let listed_dir = pathspec
         .map(|p| join_under(cwd_dir, p))
         .unwrap_or_else(|| cwd_dir.to_string());
-    if depth >= GIT_LISTING_SPLIT_DEPTH_LIMIT || stat_is_directory(&listed_dir) != Some(true) {
+    if depth >= GIT_LISTING_SPLIT_DEPTH_LIMIT || host_stat_is_directory(&listed_dir) != Some(true) {
         let mut entries: Vec<&str> = stdout.split('\0').collect();
         entries.pop();
         out.extend(
@@ -406,7 +400,7 @@ impl RuleRecordingWalk<'_> {
                 continue;
             }
             let next = join_under(dir, &entry);
-            let is_dir = stat_is_directory(&next).unwrap_or(false);
+            let is_dir = host_stat_is_directory(&next).unwrap_or(false);
             let rule = if self.cfg.is_force_included(&next) {
                 None
             } else {
@@ -486,7 +480,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         target: target.clone(),
     };
     if named_scope {
-        match stat_is_directory(&target) {
+        match host_stat_is_directory(&target) {
             None => return Err(format!(
                 "path '{}' does not exist under search root '{}' -- paths resolve relative to that root, which is the dispatch project unless `root` names another directory; if the path lives in a different project, pass that project's directory as `root` (or dispatch with its cwd)",
                 scope.unwrap_or(""),

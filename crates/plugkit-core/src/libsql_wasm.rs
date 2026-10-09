@@ -138,9 +138,7 @@ fn ensure_database_parent_directory(path: &str) -> Result<(), String> {
         return Ok(());
     };
     let readable_directory = |candidate: &std::path::Path| {
-        crate::wasm_dispatch::host_stat(&candidate.to_string_lossy())
-            .and_then(|stat| stat.get("isDirectory").and_then(Value::as_bool))
-            == Some(true)
+        crate::wasm_dispatch::host_stat_is_directory(&candidate.to_string_lossy()) == Some(true)
     };
     if readable_directory(parent) {
         return Ok(());

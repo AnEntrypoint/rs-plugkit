@@ -3,7 +3,12 @@ name: release
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
   workflow_dispatch:
+
+concurrency:
+  group: rs-plugkit-release
+  cancel-in-progress: false
 
 jobs:
   publish:

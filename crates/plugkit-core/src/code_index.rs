@@ -843,12 +843,15 @@ struct WalkClock {
 }
 
 impl WalkClock {
-    fn expired(&mut self) -> bool {
+    fn observe_deadline(&mut self) {
         if !self.expired {
             if let Some(deadline) = self.deadline_ms {
                 self.expired = unsafe { crate::wasm_dispatch::host_now_ms() } >= deadline;
             }
         }
+    }
+
+    fn is_expired(&self) -> bool {
         self.expired
     }
 }
@@ -862,7 +865,8 @@ fn walk_posix(
     checked: bool,
     clock: &mut WalkClock,
 ) -> Result<(), String> {
-    if files.len() >= max_files || clock.expired() {
+    clock.observe_deadline();
+    if files.len() >= max_files || clock.is_expired() {
         return Ok(());
     }
     let root_force_included = cfg.is_force_included(root);
@@ -875,7 +879,8 @@ fn walk_posix(
         list_dir(root)
     };
     for entry in entries {
-        if files.len() >= max_files || clock.expired() {
+        clock.observe_deadline();
+        if files.len() >= max_files || clock.is_expired() {
             return Ok(());
         }
         let next = if root.ends_with('/') {
@@ -892,7 +897,7 @@ fn walk_posix(
                 continue;
             }
         }
-        let is_dir = host_stat(&next).and_then(|v| v.get("isDirectory").and_then(|b| b.as_bool()));
+        let is_dir = crate::wasm_dispatch::host_stat_is_directory(&next);
         let is_dir_entry = match is_dir {
             Some(value) => value,
             None if checked => return Err(format!("file stat failed for {next}")),
@@ -4471,13 +4476,16 @@ impl ScanCache {
         }
     }
 
-    fn get(&mut self, path: &str, mtime_ms: u64, size: u64) -> Option<String> {
+    fn peek(&self, path: &str, mtime_ms: u64, size: u64) -> Option<String> {
         let entry = self.entries.get(path)?;
         if entry.mtime_ms != mtime_ms || entry.size != size {
             return None;
         }
-        self.hits += 1;
         Some(entry.content.clone())
+    }
+
+    fn record_hit(&mut self) {
+        self.hits += 1;
     }
 
     fn insert(&mut self, path: &str, mtime_ms: u64, size: u64, content: &str) {
@@ -4761,8 +4769,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             }
         }
         let content = if mtime_ms > 0 {
-            match cache.get(path, mtime_ms, size) {
-                Some(cached) => Some(cached),
+            match cache.peek(path, mtime_ms, size) {
+                Some(cached) => {
+                    cache.record_hit();
+                    Some(cached)
+                }
                 None => {
                     let fresh = host_read(path);
                     if let Some(ref text) = fresh {
@@ -5988,8 +5999,11 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
             }
         }
         let content = if mtime_ms > 0 {
-            match cache.get(path, mtime_ms, size) {
-                Some(cached) => Some(cached),
+            match cache.peek(path, mtime_ms, size) {
+                Some(cached) => {
+                    cache.record_hit();
+                    Some(cached)
+                }
                 None => {
                     let fresh = host_read(path);
                     if let Some(ref text) = fresh {

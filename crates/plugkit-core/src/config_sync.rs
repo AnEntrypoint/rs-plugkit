@@ -404,7 +404,7 @@ fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcom
     crate::wasm_dispatch::emit_event(
         "config_sync_degraded",
         json!({
-            "repo": src.repo,
+            "repo": src.repo.as_str(),
             "ref": src.reference.as_deref().unwrap_or("HEAD"),
             "cache_dir": src.cache_dir,
             "sha": sha,
@@ -420,8 +420,6 @@ fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcom
 }
 
 pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome, String> {
-    crate::config_path::validate_repo_url(&src.repo)?;
-
     let mut st = read_state(src);
     let now = now_ms();
     let have_local = local_sha(src);

@@ -104,7 +104,7 @@
 
 - `resolve_with`: a `ProjectVendored` win still runs lower repository tiers' `load_repo_tier` for its side effect, so `config_notify::record_change` keeps upstream drift visible.
 - `RESOLVE_CACHE` is keyed by the per-call `host_cwd_string()` with a 2 s TTL. Pass a dispatch's resolved FSM graph through `read_state_with_graph` and `set_phase_with_session_with_graph`; separate resolutions can see different tiers.
-- `config_sync::ensure_current` revalidates `RepoSource` URLs (`validate_repo_url`) where the string reaches `git`. Config repositories come only through approved remote transports; fetch is HTTP(S) with a nonempty authority.
+- `RepoSource.repo` is a `config_path::RepoUrl`, parsed once in `parse_source_entry`; `config_sync` never revalidates it. Config repositories come only through approved remote transports; fetch is HTTP(S) with a nonempty authority.
 - Prose keys and source paths are untrusted relative paths: accept only safe components. An unsafe prose key is terminal, since later tiers embed it in paths.
 - `ensure_current` debounces on the last probe time whether or not a checkout exists, recording it in memory as well as on disk; a failed `.sync.json` write under load would otherwise re-run `git ls-remote` on every dispatch.
 - Sync state and locks live on disk beside the checkout, never in statics, since the `$HOME` user-tier cache is shared by every project. `try_lock` is a non-recursive `mkdirSync` after creating parents.
