@@ -3701,6 +3701,7 @@ pub(super) const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &[
     "projectPath",
     "git_root_override",
     "_plan",
+    "full_response",
 ];
 pub(crate) const GIT_PROTECTED_PATHSPECS: &[(&str, &str)] = &[
     (".gm", ":(top,exclude).gm"),
