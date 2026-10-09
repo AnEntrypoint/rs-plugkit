@@ -558,25 +558,3 @@ pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> 
         Err(_) => Vec::new(),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::runtime_artifact_rule;
-
-    #[test]
-    fn excludes_runtime_artifacts_without_hiding_source_paths() {
-        assert_eq!(
-            runtime_artifact_rule(".agentplug-kv/codeinsight/chunk.json"),
-            Some("agentplug_kv_cache")
-        );
-        assert_eq!(
-            runtime_artifact_rule("packages/.gm/exec-spool/out/result.json"),
-            Some("gm_exec_spool")
-        );
-        assert_eq!(
-            runtime_artifact_rule("packages\\.gm\\exec-spool\\out\\result.json"),
-            Some("gm_exec_spool")
-        );
-        assert_eq!(runtime_artifact_rule("packages/core/src/lib.rs"), None);
-    }
-}

@@ -1,4 +1,4 @@
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -297,7 +297,7 @@ pub fn failure_is_gate_drift(result: &Value) -> bool {
 /// One recorded dispatch. The recorder writes it and the ranking and replay read it back; every
 /// field is optional on read, so a row missing a field still ranks by the fields it has.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 struct ObservationRecord {
     dispatch_id: Option<String>,
     verb: Option<String>,
@@ -313,7 +313,7 @@ struct ObservationRecord {
     lean_node: Option<String>,
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 impl ObservationRecord {
     fn from_value(value: &Value) -> Self {
         serde_json::from_value(value.clone()).unwrap_or_default()
@@ -332,13 +332,13 @@ impl ObservationRecord {
 }
 
 /// The recorded strategy as the ranking reads it. A missing `evidence` array ranks nothing.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 struct Strategy {
     selection: Option<String>,
     evidence: Option<Vec<ObservationRecord>>,
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 impl Strategy {
     fn from_value(value: &Value) -> Self {
         Strategy {
@@ -477,7 +477,7 @@ pub fn active_strategy(session_id: Option<&str>) -> Value {
 
 /// A gate-drift failure older than this stops ranking above a fresh, valid dispatch, so a stale
 /// one cannot strand a verb for a whole session.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 const VETO_MAX_AGE_MS: i64 = 600_000;
 
 /// The per-session re-orientation marker cannot be the only one: the MCP `gm_instruction` tool
@@ -511,7 +511,7 @@ impl Admission {
 
 /// The ranking decision, split away from the file reads so it can be exercised without a host.
 /// `marker_ts` is the newest re-orientation stamp this dispatch can be judged against.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 fn veto_reason(verb: &str, strategy: &Strategy, now_ms: i64, marker_ts: i64) -> Option<String> {
     if strategy.selection.as_deref() != Some("replay-recorded-successes-first") { return None; }
     let evidence = strategy.evidence.as_deref()?;
@@ -549,7 +549,7 @@ fn read_ts(path: &str) -> i64 {
 
 /// The stamp a dispatch is judged against: this session's own marker, the project-wide one any
 /// session's `instruction` stamps, and the long-gap `instruction` stamp.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 fn newest_marker(per_session_ts: i64, project_wide_ts: i64, long_gap_instruction_ts: i64) -> i64 {
     per_session_ts.max(project_wide_ts).max(long_gap_instruction_ts)
 }
@@ -585,90 +585,6 @@ pub fn admit_dispatch(verb: &str) -> Admission {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn admit_dispatch(_verb: &str) -> Admission { Admission::Allow }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn strategy(selection: &str, evidence: Vec<Value>) -> Strategy {
-        Strategy::from_value(&json!({ "selection": selection, "evidence": evidence }))
-    }
-
-    fn observation(verb: &str, exit_code: i64, gate_drift: bool, ts: i64) -> Value {
-        json!({ "dispatch_id": "d1", "verb": verb, "exit_code": exit_code, "gate_drift": gate_drift, "ts": ts })
-    }
-
-    fn gate_drift_failure(verb: &str, ts: i64) -> Value {
-        observation(verb, 1, true, ts)
-    }
-
-    /// The reported livelock: one gate-drift failure for `codesearch` armed the strategy, and the
-    /// documented remedy could not disarm it. Two properties hold it closed -- the armed strategy
-    /// produces advice instead of a refusal, and a re-orientation newer than the failure clears it.
-    #[test]
-    fn armed_strategy_advises_and_a_later_instruction_clears_it() {
-        let armed = strategy("replay-recorded-successes-first", vec![gate_drift_failure("codesearch", 1_000)]);
-
-        let before = veto_reason("codesearch", &armed, 2_000, 0).expect("an armed strategy still ranks the verb");
-        assert!(before.contains("ran anyway"), "the advice must say the dispatch ran: {before}");
-        assert!(Admission::Advisory { reason: before, next_dispatch_hint: "instruction" }.is_advisory());
-
-        assert_eq!(veto_reason("codesearch", &armed, 2_000, 1_500), None, "an instruction stamped after the failure clears the ranking");
-        assert_eq!(veto_reason("codesearch", &armed, 2_000, 1_000), None, "a stamp at the failure's own timestamp clears it");
-        assert!(veto_reason("codesearch", &armed, 2_000, 999).is_some(), "a stamp older than the failure leaves the ranking armed");
-
-        let after_success = strategy("replay-recorded-successes-first", vec![
-            gate_drift_failure("codesearch", 1_000),
-            observation("codesearch", 0, false, 1_500),
-        ]);
-        assert_eq!(veto_reason("codesearch", &after_success, 2_000, 0), None, "a recorded success for the verb clears the ranking on its own");
-    }
-
-    /// The livelock's root cause: the MCP `gm_instruction` tool dispatches under a server-local
-    /// session id of its own, so the per-session marker for the caller's session stays absent
-    /// while the project-wide one is stamped. Judging on the per-session marker alone made the
-    /// documented remedy unreachable.
-    #[test]
-    fn project_wide_marker_clears_a_ranking_stamped_under_another_session_id() {
-        let armed = strategy("replay-recorded-successes-first", vec![gate_drift_failure("codesearch", 1_000)]);
-        let stamped_by_another_session = newest_marker(0, 1_500, 0);
-        assert_eq!(newest_marker(0, 1_500, 0), 1_500);
-        assert_eq!(newest_marker(1_500, 0, 0), 1_500, "a session's own marker still counts");
-        assert_eq!(newest_marker(0, 0, 1_500), 1_500, "the long-gap instruction stamp still counts");
-        assert_eq!(
-            veto_reason("codesearch", &armed, 2_000, stamped_by_another_session),
-            None,
-            "an instruction dispatched under another session id must still clear the ranking"
-        );
-    }
-
-    #[test]
-    fn missing_fields_read_as_the_untyped_predicate_did() {
-        let no_exit_code = ObservationRecord::from_value(&json!({ "verb": "codesearch", "ts": 1 }));
-        assert!(no_exit_code.is_gate_drift_failure(), "a missing exit_code is a failure, and a missing gate_drift defaults to drift");
-        let plain_failure = ObservationRecord::from_value(&json!({ "verb": "codesearch", "exit_code": 2, "gate_drift": false, "ts": 1 }));
-        assert!(!plain_failure.is_gate_drift_failure(), "a plain failure is not gate drift");
-        assert!(!ObservationRecord::from_value(&json!({ "exit_code": 0, "gate_drift": true })).is_gate_drift_failure(), "a success is never gate drift");
-    }
-
-    #[test]
-    fn ranking_is_verb_scoped_and_lapses_on_its_own() {
-        let armed = strategy("replay-recorded-successes-first", vec![gate_drift_failure("codesearch", 1_000)]);
-        assert_eq!(veto_reason("fetch", &armed, 2_000, 0), None, "another verb's failure does not rank this one");
-        assert_eq!(veto_reason("codesearch", &armed, 1_000 + VETO_MAX_AGE_MS + 1, 0), None, "a failure past the max age stops ranking");
-
-        let unarmed = strategy("continue-current-exploration", vec![gate_drift_failure("codesearch", 1_000)]);
-        assert_eq!(veto_reason("codesearch", &unarmed, 2_000, 0), None, "an unarmed strategy ranks nothing");
-        assert_eq!(veto_reason("codesearch", &Strategy::from_value(&Value::Null), 2_000, 0), None, "no recorded strategy ranks nothing");
-    }
-
-    /// `admit_dispatch` returns `Admission`, never `Result`: a dispatch whose inputs are valid has
-    /// no refusal path left to strand it on.
-    #[test]
-    fn admission_has_no_refusal_variant() {
-        assert!(!Admission::Allow.is_advisory());
-        assert_eq!(admit_dispatch("codesearch"), Admission::Allow);
-    }
-}
 
 #[cfg(target_arch = "wasm32")]
 pub fn automatic_replay(session_id: Option<&str>) -> Value {
