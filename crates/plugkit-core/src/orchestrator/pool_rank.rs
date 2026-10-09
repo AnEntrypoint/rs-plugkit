@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-const CANDIDATE_CAP: usize = 50;
+const CANDIDATE_CAP: usize = 100;
 const BROWSER_WORDS: [&str; 6] = ["cdp", "browser", "chrome", "headful", "live page", "boot"];
 const GPU_WORDS: [&str; 9] = ["gpu", "webgpu", "amd", "nvidia", "accelerated", "gpulock", "frame-time", "p50", "dpr"];
 const DESIGN_WORDS: [&str; 4] = ["design decision", "cluster-enabled", "circumnavigat", "planet wrap"];
