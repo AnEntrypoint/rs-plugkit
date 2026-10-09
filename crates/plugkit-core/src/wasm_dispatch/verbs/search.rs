@@ -485,6 +485,28 @@ pub(super) fn apply_scope_echo(reply: &mut Value, scope: &PathScope, channels: &
     }
 }
 
+fn emit_codeinsight_pass_outcome(reason: &str, root: &str, pass: &Value) {
+    let changed_files_count = pass
+        .get("changed_files_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let event = if changed_files_count > 0 {
+        "codeinsight_rebuild"
+    } else {
+        "codeinsight_resume"
+    };
+    emit_event(
+        event,
+        json!({
+            "reason": reason,
+            "root": root,
+            "pass_ok": pass.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "changed_files_count": changed_files_count,
+            "changed_files": pass.get("changed_files").cloned().unwrap_or_else(|| json!([])),
+        }),
+    );
+}
+
 pub(super) fn codesearch_at_root(
     body: &Value,
     root: &str,
@@ -522,10 +544,6 @@ pub(super) fn codesearch_at_root(
             } else {
                 "digest-mismatch"
             };
-            emit_event(
-                "codeinsight_rebuild",
-                json!({ "reason": reason, "root": root, "stored_then_current": current }),
-            );
             let index_started = unsafe { crate::wasm_dispatch::host_now_ms() };
             let cold_budget_ms = match caller_remaining_ms() {
                 Some(remaining) => COLD_INDEX_PASS_BUDGET_MS.min(remaining.saturating_sub(DUAL_SEARCH_RESERVE_MS)),
@@ -536,6 +554,7 @@ pub(super) fn codesearch_at_root(
             } else {
                 crate::code_index::index_at_topup(root, cfg.index.prune_pass_file_limit_ceiling, root, cfg.index.incremental_topup_wall_budget_ms)
             };
+            emit_codeinsight_pass_outcome(reason, root, &index_result);
             let index_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(index_started);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
@@ -2087,14 +2106,20 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             .unwrap_or(false)
     {
         let cleared = crate::code_index::clear_codeinsight_full_cfg(&cfg);
-        emit_event(
-            "codeinsight_rebuild",
-            json!({ "reason": "explicit-rebuild", "keys_cleared": cleared }),
-        );
-        let _ = crate::code_index::index_topup(
+        let pass = crate::code_index::index_topup(
             ".",
             cfg.index.prune_pass_file_limit_ceiling,
             COLD_INDEX_PASS_BUDGET_MS,
+        );
+        emit_event(
+            "codeinsight_rebuild",
+            json!({
+                "reason": "explicit-rebuild",
+                "keys_cleared": cleared,
+                "pass_ok": pass.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                "changed_files_count": pass.get("changed_files_count").cloned().unwrap_or_else(|| json!(0)),
+                "changed_files": pass.get("changed_files").cloned().unwrap_or_else(|| json!([])),
+            }),
         );
         let mut retry = body.clone();
         if let Some(obj) = retry.as_object_mut() {
@@ -2118,23 +2143,20 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             } else {
                 "digest-mismatch"
             };
-            emit_event(
-                "codeinsight_rebuild",
-                json!({ "reason": reason, "stored_then_current": current }),
-            );
-            if cold_start {
-                let _ = crate::code_index::index_topup(
+            let pass = if cold_start {
+                crate::code_index::index_topup(
                     ".",
                     cfg.index.prune_pass_file_limit_ceiling,
                     COLD_INDEX_PASS_BUDGET_MS,
-                );
+                )
             } else {
-                let _ = crate::code_index::index_topup(
+                crate::code_index::index_topup(
                     ".",
                     cfg.index.prune_pass_file_limit_ceiling,
                     cfg.index.incremental_topup_wall_budget_ms,
-                );
-            }
+                )
+            };
+            emit_codeinsight_pass_outcome(reason, ".", &pass);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
