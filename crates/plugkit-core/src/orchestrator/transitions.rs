@@ -82,6 +82,39 @@ pub(super) fn pred_submodules_clean() -> bool {
     super::submodule_drift::submodules_clean()
 }
 
+pub(super) const POOL_FLOOR: usize = 12;
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn pool_live_count() -> usize {
+    let pool_dir = super::gm_dir().join("pool").to_string_lossy().to_string();
+    match crate::pkfs::readdir(&pool_dir) {
+        Some(serde_json::Value::Array(entries)) => entries
+            .iter()
+            .filter(|e| e.get("is_file").and_then(|v| v.as_bool()).unwrap_or(false))
+            .filter(|e| e.get("name").and_then(|v| v.as_str()).is_some_and(|n| n.ends_with(".live")))
+            .count(),
+        _ => 0,
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn pool_live_count() -> usize {
+    0
+}
+
+pub(super) fn pred_pool_floor_met() -> bool {
+    !prd_has_open_items() || pool_live_count() >= POOL_FLOOR
+}
+
+#[cfg(target_arch = "wasm32")]
+fn pool_floor_denial_detail() -> String {
+    format!(
+        "live subagent count is {} (.gm/pool/*.live) against a floor of {} while PRD rows are pending; spawn gm-worker subagents until at least {} are live, then re-attempt",
+        pool_live_count(),
+        POOL_FLOOR,
+        POOL_FLOOR
+    )
+}
+
 fn lean_prd_items() -> Option<Vec<serde_json::Value>> {
     let (body, _err, code) = prd::handle_list_full();
     if code != 0 {
@@ -947,6 +980,7 @@ fn predicate_detail(predicate_name: Option<&str>) -> Option<String> {
             let detail = residual_scan_denial_detail();
             (!detail.is_empty()).then_some(detail)
         }
+        Some("pool-floor-met") => Some(pool_floor_denial_detail()),
         _ => None,
     }
 }

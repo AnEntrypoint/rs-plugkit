@@ -1,4 +1,4 @@
-use super::transitions::{ci_validation_fresh, pred_claim_audit_clean, pred_conc_obligations_ready, pred_idempotent_dispatch_replay_safe, pred_lean_always_true, pred_lean_contract_recorded, pred_lean_net_negative, pred_lean_one_task_in_flight, pred_mutables_all_resolved, pred_mutables_all_typed, pred_no_admit_deferral_markers, pred_no_graphical_symbols_in_diff, pred_no_hedge_language_in_diff, pred_no_secrets_in_diff, pred_no_synthetic_test_files, pred_no_unchecked_panics_in_diff, pred_prd_all_closed, pred_remote_hook_refused, pred_res_obligations_ready, pred_sec_obligations_ready, pred_state_obligations_ready, pred_submodules_clean, pred_worktree_clean, residual_scan_fired, split_context_swept};
+use super::transitions::{ci_validation_fresh, pred_claim_audit_clean, pred_conc_obligations_ready, pred_idempotent_dispatch_replay_safe, pred_lean_always_true, pred_lean_contract_recorded, pred_lean_net_negative, pred_lean_one_task_in_flight, pred_mutables_all_resolved, pred_mutables_all_typed, pred_no_admit_deferral_markers, pred_pool_floor_met, pred_no_graphical_symbols_in_diff, pred_no_hedge_language_in_diff, pred_no_secrets_in_diff, pred_no_synthetic_test_files, pred_no_unchecked_panics_in_diff, pred_prd_all_closed, pred_remote_hook_refused, pred_res_obligations_ready, pred_sec_obligations_ready, pred_state_obligations_ready, pred_submodules_clean, pred_worktree_clean, residual_scan_fired, split_context_swept};
 
 pub type PredicateFn = fn() -> bool;
 
@@ -29,6 +29,7 @@ pub const PREDICATE_REGISTRY: &[(&str, &str, PredicateFn)] = &[
     ("lean-hop-witness-receipt", "ADVISORY. A hop's transition must name an executed witness (a command, crawl result or codesearch output) in its walk note. No receipt writer exists yet, so the predicate always returns true; it becomes BLOCKING once a writer records each hop's witness.", pred_lean_always_true),
     ("lean-verifier-independent", "ADVISORY. Code cannot observe what a verifier agent read, so the predicate always returns true and never refuses.", pred_lean_always_true),
     ("lean-net-negative", "BLOCKING. True when the working tree diff against HEAD has added lines less than or equal to removed lines. A growth reason is not read, so a growing change is refused.", pred_lean_net_negative),
+    ("pool-floor-met", "BLOCKING. True when at least 12 `.gm/pool/*.live` files exist under the project's .gm directory, or when no PRD row is pending. Each live subagent writes its own .live file on start and deletes it on finish. The denial names the live count and the floor of 12.", pred_pool_floor_met),
     ("lean-contract-recorded", "BLOCKING. True when every .gm/prd.yml row is closed and the worktree is clean. The reason text in the commit message is not read.", pred_lean_contract_recorded),
 ];
 
