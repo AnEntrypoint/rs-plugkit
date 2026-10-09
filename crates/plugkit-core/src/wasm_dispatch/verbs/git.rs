@@ -3800,19 +3800,228 @@ pub(super) fn git_merge(body: &Value) -> u64 {
     )
 }
 
+pub(super) const MERGE_ABORT_SHELF_MESSAGE: &str = "gm merge-abort shelf";
+
+pub(super) const GIT_MERGE_ABORT_HELP: &str = "\
+git_merge_abort {} restores the pre-merge HEAD: {aborted, merge_in_progress, head}, plus
+{preserved_paths, restored} when a merge was in progress.
+  preserve: false (default true) never shelves anything -- a reset that cannot run is reported
+            instead of worked around.
+  No merge in progress is a clean reply: {aborted:false, merge_in_progress:false, head}, never a
+  raw git error. MERGE_HEAD is repo-wide state, so dispatch it only on a repo you own.
+  `git merge --abort` runs `git reset --merge`, which refuses while the index and the worktree
+  disagree for a path -- typically a file git auto-merged that another session then edited in the
+  worktree. The verb shelves exactly those paths with
+  `git stash push --keep-index -- <paths>`, which leaves the index content in the worktree so the
+  reset can run, aborts, then pops the shelf so the edits land back in the worktree as unstaged
+  edits. Nothing is discarded silently: if the shelf or the pop cannot run, the reply says so and
+  names the stash entry that still holds the edits.
+  Unmerged (conflicted) paths are never shelved -- they are reported in `conflicted` and the verb
+  refuses rather than rewriting a conflict another session is resolving.
+  A refusal names every path blocking the reset in `blocking_paths` and gives `next_dispatch`:
+  git_add {paths:[...]} to accept the worktree version, or git_stash {paths:[...]} then
+  git_merge_abort then git_stash_pop.";
+
+pub(super) fn git_exit_code(result: &Value) -> i64 {
+    result
+        .get("exit_code")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0)
+}
+
+pub(super) fn git_output_text(result: &Value) -> String {
+    format!(
+        "{}{}",
+        result.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        result.get("stderr").and_then(|x| x.as_str()).unwrap_or("")
+    )
+}
+
+pub(super) fn git_name_only(cwd: Option<&str>, argv: &[&str]) -> Vec<String> {
+    git_call_argv(argv, cwd)
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+pub(super) fn git_merge_in_progress(cwd: Option<&str>) -> bool {
+    git_call_argv(&["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], cwd)
+        .get("exit_code")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(1)
+        == 0
+}
+
 pub(super) fn git_merge_abort(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_merge_abort", body, &["preserve"]) {
+        return refusal;
+    }
     let cwd = body_cwd(body);
-    if let Err(e) = run_git_checked(
-        &["merge", "--abort"],
-        cwd,
-        "git_merge_abort",
-        "merge abort failed",
-    ) {
-        return e;
+    let preserve = body
+        .get("preserve")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let head_now = || exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    if !git_merge_in_progress(cwd) {
+        return ok(
+            "git_merge_abort",
+            json!({ "aborted": false, "merge_in_progress": false, "head": head_now() }),
+        );
+    }
+    let first = git_call_argv(&["merge", "--abort"], cwd);
+    if git_exit_code(&first) == 0 {
+        return ok(
+            "git_merge_abort",
+            json!({
+                "aborted": true,
+                "merge_in_progress": false,
+                "preserved_paths": [],
+                "restored": true,
+                "head": head_now(),
+            }),
+        );
+    }
+    let first_out = git_output_text(&first);
+    let blocking = git_name_only(cwd, &["diff", "--name-only"]);
+    let conflicted = git_name_only(cwd, &["diff", "--name-only", "--diff-filter=U"]);
+    let shelvable: Vec<String> = blocking
+        .iter()
+        .filter(|p| !conflicted.contains(p))
+        .cloned()
+        .collect();
+    let refuse = |error: String, extra: Value| -> u64 {
+        let mut payload = json!({
+            "error": error,
+            "aborted": false,
+            "merge_in_progress": true,
+            "blocking_paths": blocking.clone(),
+            "conflicted": conflicted.clone(),
+            "head": head_now(),
+            "next_dispatch": {
+                "accept_worktree": { "verb": "git_add", "paths": blocking.clone() },
+                "shelf_first": ["git_stash", "git_merge_abort", "git_stash_pop"],
+            },
+        });
+        if let (Some(dst), Some(src)) = (payload.as_object_mut(), extra.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        err_json("git_merge_abort", payload)
+    };
+    let uptodate_class =
+        first_out.contains("not uptodate") || first_out.contains("Could not reset index file");
+    if !preserve || !uptodate_class || shelvable.is_empty() {
+        let reason = if !preserve {
+            "preserve:false -- refusing to shelve worktree edits to make the reset run"
+        } else if shelvable.is_empty() {
+            "no shelvable path explains the reset failure -- nothing was modified"
+        } else {
+            "the reset failure is not the index/worktree mismatch this verb can shelve around"
+        };
+        return refuse(
+            first_out,
+            json!({
+                "reason": reason,
+                "hint": "git_add the blocking paths to accept the worktree version, then git_commit; or git_stash them, git_merge_abort, git_stash_pop",
+            }),
+        );
+    }
+    let mut argv: Vec<&str> = vec![
+        "stash",
+        "push",
+        "--keep-index",
+        "--message",
+        MERGE_ABORT_SHELF_MESSAGE,
+        "--",
+    ];
+    for p in &shelvable {
+        argv.push(p.as_str());
+    }
+    let shelved = git_call_argv(&argv, cwd);
+    if git_exit_code(&shelved) != 0 {
+        return refuse(
+            git_output_text(&shelved),
+            json!({ "reason": "shelving the blocking paths failed -- the merge state and every worktree edit are untouched" }),
+        );
+    }
+    let shelf_created = !git_output_text(&shelved).contains("No local changes to save");
+    let shelf_ref = if shelf_created {
+        exec_git_in(cwd, "stash list -1 --format=%gd").trim().to_string()
+    } else {
+        String::new()
+    };
+    let still_blocking: Vec<String> = git_name_only(cwd, &["diff", "--name-only"])
+        .into_iter()
+        .filter(|p| shelvable.contains(p))
+        .collect();
+    if !still_blocking.is_empty() {
+        if shelf_created {
+            let _ = git_call_argv(&["stash", "pop", shelf_ref.as_str()], cwd);
+        }
+        return refuse(
+            format!(
+                "the shelf left these paths still disagreeing with the index: {}",
+                still_blocking.join(", ")
+            ),
+            json!({
+                "reason": "the shelf did not make the worktree agree with the index, so the reset was not retried; the shelf was popped back",
+                "still_blocking": still_blocking,
+            }),
+        );
+    }
+    let second = git_call_argv(&["merge", "--abort"], cwd);
+    if git_exit_code(&second) != 0 {
+        let restored = if shelf_created {
+            git_exit_code(&git_call_argv(&["stash", "pop", shelf_ref.as_str()], cwd)) == 0
+        } else {
+            true
+        };
+        return refuse(
+            git_output_text(&second),
+            json!({
+                "reason": "the abort still failed after shelving -- the shelf was popped back, so no edit is lost",
+                "shelf_ref": shelf_ref,
+                "restored": restored,
+            }),
+        );
+    }
+    let mut restored = true;
+    let mut restore_out = String::new();
+    if shelf_created {
+        let pop = git_call_argv(&["stash", "pop", shelf_ref.as_str()], cwd);
+        restore_out = git_output_text(&pop);
+        restored = git_exit_code(&pop) == 0;
+    }
+    if !restored {
+        return err_json(
+            "git_merge_abort",
+            json!({
+                "error": restore_out,
+                "aborted": true,
+                "merge_in_progress": false,
+                "preserved_paths": shelvable,
+                "restored": false,
+                "stash": shelf_ref,
+                "head": head_now(),
+                "hint": "the merge is aborted and the edits still sit in that stash entry -- git_stash_pop {ref} once the worktree is quiet, or git_stash_list to see it",
+            }),
+        );
     }
     ok(
         "git_merge_abort",
-        json!({ "aborted": true, "head": exec_git_in(cwd, "rev-parse HEAD").trim() }),
+        json!({
+            "aborted": true,
+            "merge_in_progress": false,
+            "preserved_paths": shelvable,
+            "restored": true,
+            "stash_popped": shelf_ref,
+            "head": head_now(),
+        }),
     )
 }
 
