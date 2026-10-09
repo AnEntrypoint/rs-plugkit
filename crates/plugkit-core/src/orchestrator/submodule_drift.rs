@@ -8,6 +8,7 @@ const KNOWN_SUBMODULES: &[&str] = &[
     "agentplug-treesitter",
 ];
 
+#[cfg(target_arch = "wasm32")]
 const SUBMODULE_GITLINK_MODE: &str = "160000";
 
 #[derive(serde::Serialize)]

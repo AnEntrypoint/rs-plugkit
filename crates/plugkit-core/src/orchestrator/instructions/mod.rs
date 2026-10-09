@@ -2,13 +2,20 @@ pub mod entry;
 pub mod entry_extended;
 pub mod lean_prose;
 
+#[cfg(target_arch = "wasm32")]
 use super::mutables;
+#[cfg(target_arch = "wasm32")]
 use super::prd;
+#[cfg(target_arch = "wasm32")]
 use super::recall;
+#[cfg(target_arch = "wasm32")]
 use super::state::{read_state, Phase};
+#[cfg(target_arch = "wasm32")]
 use crate::pkfs;
+#[cfg(target_arch = "wasm32")]
 use serde_json::json;
 
+#[cfg(target_arch = "wasm32")]
 fn next_step_matches(note: &str, phase: &str, instruction: &str) -> bool {
     let Some((header, body)) = note.split_once("\n\n---\n\n") else {
         return false;
@@ -19,6 +26,7 @@ fn next_step_matches(note: &str, phase: &str, instruction: &str) -> bool {
         && body == instruction
 }
 
+#[cfg(target_arch = "wasm32")]
 fn reconciled_next_step(
     existing: &str,
     phase: &str,
@@ -443,8 +451,6 @@ fn ilog(msg: &str) {
     }
     let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
 }
-#[cfg(not(target_arch = "wasm32"))]
-fn ilog(_msg: &str) {}
 
 #[cfg(target_arch = "wasm32")]
 fn idev(event: &str, detail: &str) {
@@ -465,9 +471,8 @@ fn idev(event: &str, detail: &str) {
     let line = format!("evt: {}", evt);
     let _ = unsafe { host_log(1, line.as_ptr(), line.len() as u32) };
 }
-#[cfg(not(target_arch = "wasm32"))]
-fn idev(_event: &str, _detail: &str) {}
 
+#[cfg(target_arch = "wasm32")]
 const INVESTIGATE_READONLY_MODES: &[&str] = &[
     "investigate_readonly",
     "readonly",
@@ -476,10 +481,12 @@ const INVESTIGATE_READONLY_MODES: &[&str] = &[
     "readonly_investigate",
 ];
 
+#[cfg(target_arch = "wasm32")]
 fn is_investigate_readonly_mode(mode: &str) -> bool {
     INVESTIGATE_READONLY_MODES.contains(&mode)
 }
 
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn body_requests_investigate_readonly(body: &serde_json::Value) -> bool {
     body.get("mode")
         .and_then(|m| m.as_str())
