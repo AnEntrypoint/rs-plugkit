@@ -23,11 +23,12 @@ fn pool_dir(project_root: &str) -> String {
     format!("{}/.gm/pool", project_root)
 }
 
-fn parse_row(body: &str) -> Option<String> {
+fn heartbeat_field(body: &str, key: &str) -> Option<String> {
     body.lines()
-        .find_map(|line| line.trim().strip_prefix("row:"))
-        .map(|row| row.trim().to_string())
-        .filter(|row| !row.is_empty())
+        .map(|line| line.trim().trim_start_matches('\u{feff}'))
+        .find_map(|line| line.strip_prefix(key))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -86,8 +87,14 @@ fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         if age_ms > HEARTBEAT_LIVE_MS {
             continue;
         }
+        let Some(body) = pkfs::read_to_string(&path) else {
+            continue;
+        };
+        if heartbeat_field(&body, "session:").is_none() {
+            continue;
+        }
         live.count += 1;
-        if let Some(row) = pkfs::read_to_string(&path).and_then(|body| parse_row(&body)) {
+        if let Some(row) = heartbeat_field(&body, "row:") {
             live.rows.push(row);
         }
     }
@@ -115,17 +122,13 @@ fn ceiling_from_refusal(text: &str) -> Option<u64> {
         .ok()
 }
 
-fn is_blocker_row(row: &Value) -> bool {
-    row.get("id").and_then(Value::as_str).is_some_and(super::pool_rank::is_blocker_id)
-}
-
 pub fn slot_state(project_root: &str) -> Value {
     let dir = pool_dir(project_root);
     let live = read_heartbeats(&dir, now_ms());
     let ceiling = read_ceiling(&dir);
     let free = ceiling.map(|c| c.saturating_sub(live.count as u64));
     let (blockers, work): (Vec<Value>, Vec<Value>) =
-        prd_open_rows().into_iter().partition(is_blocker_row);
+        prd_open_rows().into_iter().partition(super::pool_rank::is_blocker_row);
     let open_rows = work.len();
     let ranked = super::pool_rank::rank(&work, &blockers, &live.rows);
     let candidates = ranked["candidates"].clone();
