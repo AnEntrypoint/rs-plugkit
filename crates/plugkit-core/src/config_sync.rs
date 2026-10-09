@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::config::{RepoFetcher, RepoSource};
 
-const DEFAULT_DEBOUNCE_MS: u64 = 15 * 60 * 1000;
+const DEFAULT_DEBOUNCE_MS: u64 = 15 * 1000;
 
 const BACKOFF_BASE_MS: u64 = 60 * 1000;
 
