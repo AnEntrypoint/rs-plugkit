@@ -82,62 +82,6 @@ pub(super) fn pred_submodules_clean() -> bool {
     super::submodule_drift::submodules_clean()
 }
 
-pub(super) const POOL_CANARY: usize = 12;
-const POOL_HEADROOM_CPU_PERCENT: u64 = 80;
-const POOL_HEADROOM_MIN_FREE_MB: u64 = 2048;
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn pool_live_count() -> usize {
-    let pool_dir = super::gm_dir().join("pool").to_string_lossy().to_string();
-    match crate::pkfs::readdir(&pool_dir) {
-        Some(serde_json::Value::Array(entries)) => entries
-            .iter()
-            .filter(|e| e.get("is_file").and_then(|v| v.as_bool()).unwrap_or(false))
-            .filter(|e| e.get("name").and_then(|v| v.as_str()).is_some_and(|n| n.ends_with(".live")))
-            .count(),
-        _ => 0,
-    }
-}
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) fn pool_live_count() -> usize {
-    0
-}
-
-#[cfg(target_arch = "wasm32")]
-fn pool_state_json(name: &str) -> Option<serde_json::Value> {
-    let path = super::gm_dir().join("pool").join(name).to_string_lossy().to_string();
-    crate::pkfs::read_to_string(&path).and_then(|body| serde_json::from_str(&body).ok())
-}
-#[cfg(not(target_arch = "wasm32"))]
-fn pool_state_json(_name: &str) -> Option<serde_json::Value> {
-    None
-}
-
-fn pool_spawn_ceiling() -> Option<usize> {
-    pool_state_json("spawn-ceiling.json")?
-        .get("ceiling")?
-        .as_u64()
-        .map(|ceiling| ceiling as usize)
-}
-
-fn pool_spawn_ceiling_reached() -> bool {
-    pool_spawn_ceiling().is_some_and(|ceiling| pool_live_count() >= ceiling)
-}
-
-fn pool_headroom_exhausted() -> bool {
-    let Some(state) = pool_state_json("headroom.json") else {
-        return false;
-    };
-    let cpu_percent = state.get("cpu_percent").and_then(|v| v.as_u64());
-    let free_memory_mb = state.get("free_memory_mb").and_then(|v| v.as_u64());
-    cpu_percent.is_some_and(|cpu| cpu >= POOL_HEADROOM_CPU_PERCENT)
-        || free_memory_mb.is_some_and(|free| free < POOL_HEADROOM_MIN_FREE_MB)
-}
-
-pub(super) fn pred_pool_floor_met() -> bool {
-    !prd_has_open_items() || pool_spawn_ceiling_reached() || pool_headroom_exhausted()
-}
-
 #[cfg(target_arch = "wasm32")]
 fn pool_open_row_count() -> usize {
     lean_prd_items().map_or(0, |items| {
@@ -149,25 +93,36 @@ fn pool_open_row_count() -> usize {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn pool_floor_denial_detail() -> String {
-    let live = pool_live_count();
-    let canary = if live < POOL_CANARY {
-        format!(" CANARY ALARM: live count {} is under {}.", live, POOL_CANARY)
+fn pool_concurrency_shortfall() -> usize {
+    let open = pool_open_row_count();
+    let session = super::state::read_state().session_id.unwrap_or_default();
+    let running = if session.is_empty() {
+        0
     } else {
-        String::new()
+        let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+        let now = unsafe { crate::wasm_dispatch::host_now_ms() };
+        let window = super::fsm::graph().policy.concurrency_window_ms;
+        crate::dispatch_ledger::subagent_running_count(&cwd, &session, now, window)
     };
-    let ceiling = match pool_spawn_ceiling() {
-        Some(ceiling) => format!("spawn ceiling {} not reached at live {}", ceiling, live),
-        None => format!("no spawn ceiling recorded at live {}", live),
-    };
+    open.saturating_sub(running)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn pool_concurrency_shortfall() -> usize {
+    usize::from(prd_has_open_items())
+}
+
+pub(super) fn pred_pool_floor_met() -> bool {
+    pool_concurrency_shortfall() == 0
+}
+
+#[cfg(target_arch = "wasm32")]
+fn pool_floor_denial_detail() -> String {
+    let open = pool_open_row_count();
+    let shortfall = pool_concurrency_shortfall();
     format!(
-        "{} PRD rows open with live pool {}; {}; headroom not exhausted (CPU under {} percent and free memory at least {} MB, per .gm/pool/headroom.json); spawn gm-worker subagents until a spawn refusal names the ceiling or headroom is exhausted, then re-attempt.{}",
-        pool_open_row_count(),
-        live,
-        ceiling,
-        POOL_HEADROOM_CPU_PERCENT,
-        POOL_HEADROOM_MIN_FREE_MB,
-        canary
+        "{} PRD row(s) open with a concurrency shortfall of {}: the subagents running for this session do not yet cover the open slices. Launch the available slices as subagents (dispatch `instruction` for the slices to launch) before re-attempting.",
+        open, shortfall
     )
 }
 

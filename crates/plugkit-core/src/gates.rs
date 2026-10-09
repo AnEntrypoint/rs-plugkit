@@ -362,6 +362,27 @@ fn check_fanout_missed(to: &str, body: &Value) {
     }
 }
 
+fn concurrency_refusal_at_complete(body: &Value, open_rows: usize) -> Option<String> {
+    let policy = crate::orchestrator::fsm::graph().policy;
+    let parent = body
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let now = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let running = parent.map_or(0, |p| {
+        crate::dispatch_ledger::subagent_running_count(&cwd, p, now, policy.concurrency_window_ms)
+    });
+    let shortfall = open_rows.saturating_sub(running);
+    if shortfall == 0 {
+        return None;
+    }
+    Some(format!(
+        "concurrency-shortfall: {} open slice(s) available, {} subagent(s) running, shortfall {}. Launch the available slices as subagents before COMPLETE; dispatch `instruction` for the slices to launch.",
+        open_rows, running, shortfall
+    ))
+}
+
 fn effective_severity_is_deny(kind: &str) -> bool {
     crate::orchestrator::deviations::effective_severity(kind)
         == crate::orchestrator::deviations::Severity::Deny
@@ -702,6 +723,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     if is_complete_transition {
         let (body_s, _err, code) = crate::orchestrator::prd::handle_list_full();
         let mut anti_shape: Vec<String> = Vec::new();
+        let mut open_rows = 0usize;
         if code == 0 {
             if let Ok(v) = serde_json::from_str::<Value>(&body_s) {
                 if let Some(items) = v.get("items").and_then(|v| v.as_array()) {
@@ -711,6 +733,7 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                             .and_then(|v| v.as_str())
                             .unwrap_or("pending");
                         if crate::orchestrator::prd::status_is_open(status) {
+                            open_rows += 1;
                             continue;
                         }
                         let witness = it
@@ -731,6 +754,11 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                         }
                     }
                 }
+            }
+        }
+        if open_rows > 0 {
+            if let Some(reason) = concurrency_refusal_at_complete(body, open_rows) {
+                return GateVerdict::deny(reason).with_next("instruction");
             }
         }
         if !anti_shape.is_empty() && effective_severity_is_deny("prd-anti-shape") {
