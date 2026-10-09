@@ -1,9 +1,11 @@
 use serde_json::{json, Value};
+use std::cmp::Reverse;
+use std::collections::HashSet;
 
-const CANDIDATE_CAP: usize = 100;
 const BROWSER_WORDS: [&str; 6] = ["cdp", "browser", "chrome", "headful", "live page", "boot"];
 const GPU_WORDS: [&str; 9] = ["gpu", "webgpu", "amd", "nvidia", "accelerated", "gpulock", "frame-time", "p50", "dpr"];
 const DESIGN_WORDS: [&str; 4] = ["design decision", "cluster-enabled", "circumnavigat", "planet wrap"];
+const OUTCOME_KINDS: [&str; 2] = ["outcome", "witness-outcome"];
 
 fn text_field<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
     row.get(key).and_then(Value::as_str)
@@ -73,7 +75,46 @@ fn blocked_row_of(blocker_id: &str) -> Option<&str> {
     blocker_id.split("-blocker-").next().filter(|p| !p.is_empty())
 }
 
-pub fn rank(work: &[Value], blockers: &[Value], live_rows: &[String]) -> Value {
+fn has_id_segment(id: &str, segment: &str) -> bool {
+    id.split('-').any(|part| part == segment)
+}
+
+fn is_outcome_row(row: &Value) -> bool {
+    let by_id = row_id(row).is_some_and(|id| has_id_segment(id, "outcome") || id.contains("outcome-hop"));
+    let by_kind = text_field(row, "kind")
+        .is_some_and(|kind| OUTCOME_KINDS.iter().any(|known| kind.trim().eq_ignore_ascii_case(known)));
+    by_id || by_kind
+}
+
+fn is_refuted_row(row: &Value) -> bool {
+    let by_id = row_id(row).is_some_and(|id| has_id_segment(id, "refuted"));
+    let by_title = ["title", "subject"]
+        .iter()
+        .filter_map(|key| text_field(row, key))
+        .any(|text| text.trim_start().to_ascii_uppercase().starts_with("REFUTED"));
+    by_id || by_title
+}
+
+fn severity_rank(row: &Value) -> u8 {
+    match text_field(row, "severity").map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("critical" | "p0") => 4,
+        Some("high" | "p1") => 3,
+        Some("low" | "p3") => 1,
+        _ => 2,
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct Ranked {
+    arm_rank: u8,
+    pending_blocked: bool,
+    severity: Reverse<u8>,
+    recency: Reverse<usize>,
+    id: String,
+    arm: Option<&'static str>,
+}
+
+pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -> Value {
     let pending_blocked: Vec<&str> = blockers
         .iter()
         .filter_map(row_id)
@@ -82,14 +123,15 @@ pub fn rank(work: &[Value], blockers: &[Value], live_rows: &[String]) -> Value {
     let is_live = |id: &str| live_rows.iter().any(|r| r == id);
     let live_arms: Vec<&str> = work
         .iter()
-        .filter(|r| row_id(r).is_some_and(is_live))
-        .filter_map(arm)
+        .filter(|(row, _)| row_id(row).is_some_and(is_live))
+        .filter_map(|(row, _)| arm(row))
         .collect();
-    let mut gpu_taken = live_arms.contains(&"gpu");
-    let mut browser_taken = live_arms.contains(&"browser");
+    let mut gpu_offered = live_arms.contains(&"gpu");
+    let mut browser_offered = live_arms.contains(&"browser");
     let (mut gpu, mut browser, mut design, mut node, mut blocked) = (0usize, 0usize, 0usize, 0usize, 0usize);
-    let mut eligible: Vec<(u8, bool, String)> = Vec::new();
-    for row in work {
+    let (mut outcome, mut refuted) = (0usize, 0usize);
+    let mut ranked: Vec<Ranked> = Vec::new();
+    for (row, recency) in work {
         let Some(id) = row_id(row) else { continue };
         let is_pending_blocked = pending_blocked.contains(&id);
         if is_pending_blocked {
@@ -108,26 +150,41 @@ pub fn rank(work: &[Value], blockers: &[Value], live_rows: &[String]) -> Value {
         if row_arm.is_none() {
             node += 1;
         }
+        if is_outcome_row(row) {
+            outcome += 1;
+            continue;
+        }
+        if is_refuted_row(row) {
+            refuted += 1;
+            continue;
+        }
         if is_live(id) {
             continue;
         }
-        match row_arm {
-            Some("gpu") if gpu_taken => continue,
-            Some("gpu") => gpu_taken = true,
-            Some("browser") if browser_taken => continue,
-            Some("browser") => browser_taken = true,
+        ranked.push(Ranked {
+            arm_rank: u8::from(row_arm.is_some()),
+            pending_blocked: is_pending_blocked,
+            severity: Reverse(severity_rank(row)),
+            recency: Reverse(*recency),
+            id: id.to_string(),
+            arm: row_arm,
+        });
+    }
+    ranked.sort();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut candidates: Vec<String> = Vec::new();
+    for entry in ranked {
+        match entry.arm {
+            Some("gpu") if gpu_offered => continue,
+            Some("gpu") => gpu_offered = true,
+            Some("browser") if browser_offered => continue,
+            Some("browser") => browser_offered = true,
             _ => {}
         }
-        let arm_rank = u8::from(row_arm.is_some());
-        eligible.push((arm_rank, is_pending_blocked, id.to_string()));
+        if seen.insert(entry.id.clone()) {
+            candidates.push(entry.id);
+        }
     }
-    eligible.sort();
-    eligible.dedup_by(|a, b| a.2 == b.2);
-    let candidates: Vec<String> = eligible
-        .into_iter()
-        .take(CANDIDATE_CAP)
-        .map(|(_, _, id)| id)
-        .collect();
     json!({
         "candidates": candidates,
         "supply": {
@@ -138,6 +195,8 @@ pub fn rank(work: &[Value], blockers: &[Value], live_rows: &[String]) -> Value {
             "gpu_arm_rows": gpu,
             "browser_arm_rows": browser,
             "design_decision_rows": design,
+            "excluded_outcome_rows": outcome,
+            "excluded_refuted_rows": refuted,
         },
     })
 }

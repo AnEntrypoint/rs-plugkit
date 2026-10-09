@@ -323,33 +323,32 @@ fn residual_scan_denial_detail() -> String {
     }
 }
 
-fn fold_last_block_wins(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    let mut folded: Vec<serde_json::Value> = Vec::new();
+fn fold_last_block_wins(items: &[serde_json::Value]) -> Vec<(serde_json::Value, usize)> {
+    let mut folded: Vec<(serde_json::Value, usize)> = Vec::new();
     let mut position: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for item in items {
+    for (index, item) in items.iter().enumerate() {
         match item.get("id").and_then(|v| v.as_str()) {
             Some(id) => match position.get(id) {
-                Some(&at) => folded[at] = item.clone(),
+                Some(&at) => folded[at] = (item.clone(), index),
                 None => {
                     position.insert(id.to_string(), folded.len());
-                    folded.push(item.clone());
+                    folded.push((item.clone(), index));
                 }
             },
-            None => folded.push(item.clone()),
+            None => folded.push((item.clone(), index)),
         }
     }
     folded
 }
 
-pub(super) fn prd_open_rows() -> Vec<serde_json::Value> {
+pub(super) fn prd_open_rows_with_recency() -> Vec<(serde_json::Value, usize)> {
     let (body, _err, code) = prd::handle_list_full();
     if code != 0 { return Vec::new(); }
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return Vec::new() };
     let Some(items) = v.get("items").and_then(|v| v.as_array()) else { return Vec::new() };
-    let folded = fold_last_block_wins(items);
-    folded
-        .iter()
-        .filter(|it| {
+    fold_last_block_wins(items)
+        .into_iter()
+        .filter(|(it, _)| {
             let status = it
                 .get("status")
                 .and_then(|v| v.as_str())
@@ -361,8 +360,11 @@ pub(super) fn prd_open_rows() -> Vec<serde_json::Value> {
                 .unwrap_or(false);
             prd::status_is_open(status) && !blocked_external
         })
-        .cloned()
         .collect()
+}
+
+pub(super) fn prd_open_rows() -> Vec<serde_json::Value> {
+    prd_open_rows_with_recency().into_iter().map(|(row, _)| row).collect()
 }
 
 fn prd_has_open_items() -> bool {
