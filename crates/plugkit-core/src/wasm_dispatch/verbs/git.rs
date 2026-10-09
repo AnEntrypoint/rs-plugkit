@@ -3123,7 +3123,7 @@ pub(super) fn git_remote(body: &Value) -> u64 {
     })
 }
 
-pub(super) fn git_checkout_pathspec(raw: &str, top: &str, prefix: &str) -> Result<String, &'static str> {
+pub(super) fn git_checkout_pathspec(raw: &str, top: &str, prefix: &str) -> Result<(String, bool), &'static str> {
     let spec = raw.trim();
     if spec.is_empty() {
         return Err("empty pathspec");
@@ -3168,7 +3168,47 @@ pub(super) fn git_checkout_pathspec(raw: &str, top: &str, prefix: &str) -> Resul
     {
         return Err("the project's own .gm/ and .agentplug* are never restored");
     }
-    Ok(for_git)
+    let restorable = is_restorable_transient_generated_path(&from_top);
+    Ok((for_git, restorable))
+}
+
+fn checkout_diff(source: Option<&str>, scope: &[&str], cwd: Option<&str>) -> Result<Vec<String>, String> {
+    let mut argv: Vec<&str> = vec!["diff", "--name-only"];
+    if let Some(s) = source {
+        argv.push(s);
+    }
+    argv.push("--");
+    argv.extend(scope.iter().copied());
+    let r = git_call_argv(&argv, cwd);
+    let stdout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
+        let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+        return Err(format!("{}{}", stdout, stderr).trim().to_string());
+    }
+    Ok(stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+fn checkout_restore(source_arg: Option<&str>, scope: &[&str], cwd: Option<&str>) -> Result<String, String> {
+    let mut argv: Vec<&str> = vec!["restore"];
+    if let Some(a) = source_arg {
+        argv.push(a);
+    }
+    argv.push("--");
+    argv.extend(scope.iter().copied());
+    let r = git_call_argv(&argv, cwd);
+    let output = format!(
+        "{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or("")
+    );
+    if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
+        return Err(output.trim().to_string());
+    }
+    Ok(output.trim().to_string())
 }
 
 pub(super) fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Value) -> u64 {
@@ -3206,13 +3246,15 @@ pub(super) fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Va
     let prefix = exec_git_in(cwd, "rev-parse --show-prefix")
         .trim()
         .replace('\\', "/");
-    let mut specs: Vec<String> = vec![];
+    let mut regular: Vec<String> = vec![];
+    let mut exempt: Vec<String> = vec![];
     for item in items {
         let Some(raw) = item.as_str() else {
             return err("git_checkout", "every entry of paths must be a string");
         };
         match git_checkout_pathspec(raw, &top, &prefix) {
-            Ok(spec) => specs.push(spec),
+            Ok((spec, true)) => exempt.push(spec),
+            Ok((spec, false)) => regular.push(spec),
             Err(reason) => {
                 return err_json(
                     "git_checkout",
@@ -3221,41 +3263,77 @@ pub(super) fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Va
             }
         }
     }
-    let mut scope: Vec<&str> = specs.iter().map(|s| s.as_str()).collect();
-    scope.extend(GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
-    let mut diff_argv: Vec<&str> = vec!["diff", "--name-only"];
-    if let Some(s) = source {
-        diff_argv.push(s);
+    let protected: Vec<&str> = GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec).collect();
+    let regular_scope: Vec<&str> = regular.iter().map(|s| s.as_str()).collect();
+    let exempt_scope: Vec<&str> = exempt.iter().map(|s| s.as_str()).collect();
+    let mut guarded_scope: Vec<&str> = regular_scope.clone();
+    guarded_scope.extend(protected.iter().copied());
+    let (guarded, blocked): (Vec<String>, Vec<String>) = if regular.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let unguarded = match checkout_diff(source, &regular_scope, cwd) {
+            Ok(v) => v,
+            Err(e) => return err("git_checkout", &e),
+        };
+        let guarded = match checkout_diff(source, &guarded_scope, cwd) {
+            Ok(v) => v,
+            Err(e) => return err("git_checkout", &e),
+        };
+        let blocked: Vec<String> = {
+            let kept: std::collections::HashSet<&str> = guarded.iter().map(String::as_str).collect();
+            unguarded
+                .iter()
+                .filter(|p| !kept.contains(p.as_str()))
+                .cloned()
+                .collect()
+        };
+        (guarded, blocked)
+    };
+    if !blocked.is_empty() {
+        let shown: Vec<&str> = blocked.iter().take(20).map(String::as_str).collect();
+        let more = blocked.len() - shown.len();
+        return err(
+            "git_checkout",
+            &format!(
+                "refused by policy: the project's own .gm/ and .agentplug* are never restored; {} named path(s) fall under it: {}{}",
+                blocked.len(),
+                shown.join(", "),
+                if more > 0 { format!(" (and {} more)", more) } else { String::new() }
+            ),
+        );
     }
-    diff_argv.push("--");
-    diff_argv.extend(scope.iter().copied());
-    let differing: Vec<String> = git_call_argv(&diff_argv, cwd)
-        .get("stdout")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
+    let exempt_differing = if exempt_scope.is_empty() {
+        Vec::new()
+    } else {
+        match checkout_diff(source, &exempt_scope, cwd) {
+            Ok(v) => v,
+            Err(e) => return err("git_checkout", &e),
+        }
+    };
     let source_arg = source.map(|s| format!("--source={}", s));
-    let mut argv: Vec<&str> = vec!["restore"];
-    if let Some(a) = &source_arg {
-        argv.push(a.as_str());
+    let mut outputs: Vec<String> = vec![];
+    if !regular.is_empty() {
+        match checkout_restore(source_arg.as_deref(), &guarded_scope, cwd) {
+            Ok(o) => outputs.push(o),
+            Err(e) => return err("git_checkout", &e),
+        }
     }
-    argv.push("--");
-    argv.extend(scope.iter().copied());
-    let r = git_call_argv(&argv, cwd);
-    let output = format!(
-        "{}{}",
-        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
-        r.get("stderr").and_then(|x| x.as_str()).unwrap_or("")
-    );
-    if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
-        return err("git_checkout", &output);
+    if !exempt_scope.is_empty() {
+        match checkout_restore(source_arg.as_deref(), &exempt_scope, cwd) {
+            Ok(o) => outputs.push(o),
+            Err(e) => return err("git_checkout", &e),
+        }
     }
+    let mut restored = guarded;
+    restored.extend(exempt_differing);
+    let output = outputs
+        .into_iter()
+        .filter(|o| !o.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
     ok(
         "git_checkout",
-        json!({ "restored": differing, "source": source.unwrap_or("index"), "output": output.trim() }),
+        json!({ "restored": restored, "source": source.unwrap_or("index"), "output": output }),
     )
 }
 
