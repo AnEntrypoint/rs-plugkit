@@ -685,11 +685,31 @@ fn fs_read(body: &Value) -> u64 {
     }
 }
 
+fn content_value_to_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+    let items = value.as_array()?;
+    let mut joined = items
+        .iter()
+        .map(|item| match item {
+            Value::String(line) => line.clone(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !joined.is_empty() {
+        joined.push('\n');
+    }
+    Some(joined)
+}
+
 fn fs_write(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let content = ["content", "data", "text"]
         .iter()
-        .find_map(|key| body.get(*key).and_then(|v| v.as_str()));
+        .find_map(|key| body.get(*key).and_then(content_value_to_text));
     let allow_empty = body
         .get("allow_empty")
         .and_then(|v| v.as_bool())
@@ -715,11 +735,15 @@ fn fs_write(body: &Value) -> u64 {
             "fs_write",
             json!({
                 "error": format!(
-                    "fs_write needs the file contents as a string under one of content|data|text -- the body carried {}",
+                    "fs_write needs the file contents under one of content|data|text, as a JSON string or as an array of lines -- the body carried {} and none of those keys held a string or an array",
                     if received_keys.is_empty() { "<no keys>".to_string() } else { received_keys.join(", ") }
                 ),
                 "error_code": ERR_CODE_INVALID_ARGS,
                 "accepted_content_keys": ["content", "data", "text"],
+                "accepted_content_shapes": [
+                    "a JSON string, with \\n for each newline",
+                    "an array of lines, joined with \\n plus a trailing newline"
+                ],
                 "received_keys": received_keys,
                 "next_dispatch": "fs_write",
             }),
@@ -736,7 +760,7 @@ fn fs_write(body: &Value) -> u64 {
             }),
         );
     }
-    if super::host_abi::host_write(path, content) {
+    if super::host_abi::host_write(path, &content) {
         ok("fs_write", json!({ "bytes": content.len(), "path": path }))
     } else {
         err("fs_write", "write failed")
@@ -2229,6 +2253,29 @@ fn strip_timeout_ms_prefix_directive(body_s: &str) -> (Option<u64>, &str) {
     (None, body_s)
 }
 
+fn strip_path_prefix_directive(body_s: &str) -> Option<(&str, &str)> {
+    let trimmed = body_s.trim_start();
+    for prefix in ["path=", "fs_path="] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let (value_line, remainder) = rest.split_once('\n').unwrap_or((rest, ""));
+            let value = value_line.trim();
+            if !value.is_empty() {
+                return Some((value, remainder));
+            }
+            break;
+        }
+    }
+    None
+}
+
+fn raw_file_body_as_json(verb: &str, body_s: &str) -> Option<Value> {
+    if verb != "fs_write" {
+        return None;
+    }
+    let (path, contents) = strip_path_prefix_directive(body_s)?;
+    Some(json!({ "path": path, "content": contents }))
+}
+
 fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
     let verb = read_str(verb_ptr as *const u8, verb_len);
     let raw_body_s = read_str(body_ptr as *const u8, body_len);
@@ -2240,15 +2287,21 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         (None, raw_body_s.clone())
     };
     let fingerprint = request_fingerprint(&verb, &body_s);
-    let parse_failure: Option<serde_json::Error> = if body_is_json && !body_s.is_empty() {
+    let mut parse_failure: Option<serde_json::Error> = if body_is_json && !body_s.is_empty() {
         serde_json::from_str::<Value>(&body_s).err()
     } else {
         None
     };
-    let body_parse_failed = parse_failure.is_some();
-    let body: Value = if body_s.is_empty() { Value::Null } else {
+    let mut body: Value = if body_s.is_empty() { Value::Null } else {
         serde_json::from_str(&body_s).unwrap_or(Value::Null)
     };
+    if parse_failure.is_some() {
+        if let Some(synthesized) = raw_file_body_as_json(&verb, &body_s) {
+            body = synthesized;
+            parse_failure = None;
+        }
+    }
+    let body_parse_failed = parse_failure.is_some();
     set_caller_budget(caller_timeout_ms);
     let dispatch_session_id = body.get("sessionId").and_then(|v| v.as_str())
         .or_else(|| body.get("session_id").and_then(|v| v.as_str()))
