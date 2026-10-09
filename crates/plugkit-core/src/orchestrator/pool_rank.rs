@@ -21,7 +21,13 @@ fn arm(row: &Value) -> Option<&str> {
 }
 
 pub fn is_blocker_id(id: &str) -> bool {
-    id.contains("-blocker-")
+    id.to_ascii_lowercase().contains("blocker")
+}
+
+pub fn is_blocker_row(row: &Value) -> bool {
+    row_id(row).is_some_and(is_blocker_id)
+        || text_field(row, "subject")
+            .is_some_and(|s| s.trim_start().to_ascii_uppercase().starts_with("BLOCKER"))
 }
 
 fn blocked_row_of(blocker_id: &str) -> Option<&str> {
