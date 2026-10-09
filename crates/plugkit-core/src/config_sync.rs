@@ -342,10 +342,12 @@ fn publish_staged(src: &RepoSource, staging: &str, lock: &RefreshLock) -> Result
     let had_live = crate::pkfs::exists(&src.cache_dir);
     if had_live && !rename(&src.cache_dir, &retired) {
         remove_tree(&staging);
-        return Err(format!(
-            "could not move {} aside to publish a new checkout",
-            src.cache_dir
-        ));
+        return update_checkout_in_place(src).map_err(|e| {
+            format!(
+                "could not move {} aside to publish a new checkout, and the in-place update also failed: {e}",
+                src.cache_dir
+            )
+        });
     }
     if !rename(&staging, &src.cache_dir) {
         if had_live {
@@ -358,6 +360,29 @@ fn publish_staged(src: &RepoSource, staging: &str, lock: &RefreshLock) -> Result
         ));
     }
     remove_tree(&retired);
+    Ok(())
+}
+
+/// Used when the live checkout cannot be renamed aside: a pack file held
+/// read-shared inside it makes Windows refuse the directory rename. Updating
+/// in place needs no rename, and git only writes new pack files and rewrites
+/// working-tree files. Files are rewritten one at a time, so a concurrent
+/// reader can briefly see a mix of old and new prose.
+fn update_checkout_in_place(src: &RepoSource) -> Result<(), String> {
+    let cache = src.cache_dir.as_str();
+    let reference = src
+        .reference
+        .as_deref()
+        .filter(|r| !r.is_empty())
+        .unwrap_or("HEAD");
+    git(
+        &["-c", "gc.auto=0", "fetch", "--depth", "1", "origin", reference],
+        Some(cache),
+    )?;
+    git(
+        &["-c", "gc.auto=0", "checkout", "--force", "FETCH_HEAD"],
+        Some(cache),
+    )?;
     Ok(())
 }
 
