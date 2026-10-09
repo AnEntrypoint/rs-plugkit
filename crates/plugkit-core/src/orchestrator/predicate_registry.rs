@@ -29,7 +29,7 @@ pub const PREDICATE_REGISTRY: &[(&str, &str, PredicateFn)] = &[
     ("lean-hop-witness-receipt", "ADVISORY. A hop's transition must name an executed witness (a command, crawl result or codesearch output) in its walk note. No receipt writer exists yet, so the predicate always returns true; it becomes BLOCKING once a writer records each hop's witness.", pred_lean_always_true),
     ("lean-verifier-independent", "ADVISORY. Code cannot observe what a verifier agent read, so the predicate always returns true and never refuses.", pred_lean_always_true),
     ("lean-net-negative", "BLOCKING. True when the working tree diff against HEAD has added lines less than or equal to removed lines. A growth reason is not read, so a growing change is refused.", pred_lean_net_negative),
-    ("pool-floor-met", "BLOCKING. True when no PRD row is pending, or the live `.gm/pool/*.live` count has reached the spawn ceiling in `.gm/pool/spawn-ceiling.json`, or headroom is exhausted per `.gm/pool/headroom.json` (CPU at or above 80 percent or free memory under 2048 MB). The denial names the open row count, the live count and the headroom reason; 12 is a canary alarm recorded in the denial, never the gate.", pred_pool_floor_met),
+    ("pool-floor-met", "BLOCKING. True when the concurrency shortfall is zero: open PRD rows minus the subagents running for this session (dispatch_ledger subagent_running_count) is not above zero. The denial names the open row count and the shortfall.", pred_pool_floor_met),
     ("lean-contract-recorded", "BLOCKING. True when every .gm/prd.yml row is closed and the worktree is clean. The reason text in the commit message is not read.", pred_lean_contract_recorded),
 ];
 
