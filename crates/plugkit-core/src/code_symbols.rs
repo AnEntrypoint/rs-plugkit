@@ -587,6 +587,13 @@ fn record_deferred(
     deferred_paths.push(fp.to_string());
 }
 
+const STORE_BUSY_REFRESH_NOTE: &str = "the shared libsql store is held by another writer (its lock directory is present), so this pass did not refresh the symbol index; the raw store error is withheld";
+
+fn is_store_busy_error(err: &str) -> bool {
+    libsql_wasm::classify_error(err) == libsql_wasm::LibsqlErrorKind::Busy
+        || err.to_ascii_lowercase().contains("database is locked")
+}
+
 pub(crate) fn sync_files(
     files: &[String],
     project_path: Option<&str>,
@@ -598,6 +605,9 @@ pub(crate) fn sync_files(
 ) -> Value {
     let db = db_path(project_path);
     if let Err(e) = ensure_schema(&db) {
+        if is_store_busy_error(&e) {
+            return json!({ "ok": false, "complete": false, "store_busy": true, "error": STORE_BUSY_REFRESH_NOTE });
+        }
         return json!({ "ok": false, "error": e });
     }
     purge_legacy_edges(started_ms, budget_ms);
@@ -637,6 +647,7 @@ pub(crate) fn sync_files(
     let mut unreadable = 0u32;
     let mut oversized = 0u32;
     let mut store_failures = 0u32;
+    let mut store_busy = false;
     let mut unsupported = 0u32;
     for raw in files {
         let fp = raw
@@ -662,7 +673,10 @@ pub(crate) fn sync_files(
                 }
                 let path = sql_text(&fp);
                 let script = format!("BEGIN; DELETE FROM {SYMBOLS_TABLE} WHERE path={path}; DELETE FROM {IMPORTS_TABLE} WHERE path={path}; DELETE FROM {FILES_TABLE} WHERE path={path}; COMMIT;");
-                if libsql_wasm::exec(&db, &script).is_err() {
+                if let Err(e) = libsql_wasm::exec(&db, &script) {
+                    if is_store_busy_error(&e) {
+                        store_busy = true;
+                    }
                     store_failures += 1;
                 }
             }
@@ -721,12 +735,18 @@ pub(crate) fn sync_files(
             unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
         }
         parse_failures += failed;
-        if store_file(&db, &fp, &file, project_path).is_ok() {
-            synced += 1;
-            symbols_written += file.symbols.len();
-            edges_written += file.edges.len();
-        } else {
-            store_failures += 1;
+        match store_file(&db, &fp, &file, project_path) {
+            Ok(()) => {
+                synced += 1;
+                symbols_written += file.symbols.len();
+                edges_written += file.edges.len();
+            }
+            Err(e) => {
+                if is_store_busy_error(&e) {
+                    store_busy = true;
+                }
+                store_failures += 1;
+            }
         }
     }
     let mut removed = 0u32;
@@ -740,7 +760,10 @@ pub(crate) fn sync_files(
                 .collect::<Vec<_>>()
                 .join(",");
             let script = format!("BEGIN; DELETE FROM {SYMBOLS_TABLE} WHERE path IN ({list}); DELETE FROM {IMPORTS_TABLE} WHERE path IN ({list}); DELETE FROM {FILES_TABLE} WHERE path IN ({list}); COMMIT;");
-            if libsql_wasm::exec(&db, &script).is_err() {
+            if let Err(e) = libsql_wasm::exec(&db, &script) {
+                if is_store_busy_error(&e) {
+                    store_busy = true;
+                }
                 store_failures += 1;
                 continue;
             }
@@ -761,6 +784,7 @@ pub(crate) fn sync_files(
         "files_unreadable": unreadable,
         "files_oversized": oversized,
         "store_failures": store_failures,
+        "store_busy": store_busy,
         "files_without_symbol_support": unsupported,
         "complete": deferred == 0 && parse_failures == 0 && unreadable == 0 && oversized == 0 && store_failures == 0,
         "elapsed_ms": host_now_ms().saturating_sub(started_ms),
@@ -2242,7 +2266,8 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
         focus.as_deref(),
     );
     let refresh_complete = refresh.get("complete").and_then(Value::as_bool) == Some(true);
-    if !refresh_complete && !(action == "outline" && only_deferred_incomplete(&refresh)) {
+    let answer_from_index = refresh.get("store_busy").and_then(Value::as_bool) == Some(true) && action == "callers";
+    if !refresh_complete && !(action == "outline" && only_deferred_incomplete(&refresh)) && !answer_from_index {
         return Err(format!("symbol index refresh is incomplete; cached graph is not current evidence. Run action=sync and retry. Refresh: {refresh}"));
     }
     let limit = body
@@ -2328,6 +2353,11 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
             ACTIONS.join(", ")
         )),
     }?;
+    if answer_from_index {
+        output["store"] = json!("busy");
+        output["index_current"] = json!(false);
+        output["answered_from"] = json!("persisted call-edge index (host KV); the symbol index was not refreshed because the libsql store was busy, and definition lookups read that store and may be empty this pass");
+    }
     output["codeinsight_index"] = refresh;
     Ok(output)
 }
