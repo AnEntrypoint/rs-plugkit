@@ -862,7 +862,7 @@ fn split_crawl_engine(body_s: &str) -> (&str, &str) {
     let (first, rest) = body_s.split_once('\n').unwrap_or((body_s, ""));
     match first.trim().strip_prefix("engine=") {
         Some(name) => (name.trim(), rest),
-        None => (CRAWL_ENGINE_LIGHTPANDA, body_s),
+        None => (CRAWL_ENGINE_CDP, body_s),
     }
 }
 
@@ -883,7 +883,7 @@ fn crawl_engine(engine: &str, request: &str) -> u64 {
         other => err_coded(
             "crawl",
             CRAWL_ERR_UNKNOWN_ENGINE,
-            &format!("unknown crawl engine \"{other}\": the first line must be engine=lightpanda (headless, the default) or engine=cdp (headful Chrome over CDP)"),
+            &format!("unknown crawl engine \"{other}\": the first line must be engine=cdp (headful Chrome over CDP, the default) or engine=lightpanda (headless, explicit only)"),
         ),
     }
 }
