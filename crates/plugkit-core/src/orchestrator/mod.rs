@@ -21,6 +21,7 @@ pub mod memory_component;
 pub mod mutables;
 pub mod prd;
 pub mod predicate_registry;
+pub mod pool_slots;
 pub mod recall;
 pub mod residual;
 pub mod state;
@@ -421,6 +422,7 @@ orchestrator_dispatch_table! {
     "prd-add" => prd::handle_add(content),
     "prd-resolve" => prd::handle_resolve(content),
     "prd-list" => prd::handle_list(content),
+    "pool-observe" => pool_slots::handle_observe(content),
     "prd-defer" => prd::handle_defer(content),
     "task-spawn" => task::handle_spawn(content),
     "task-list" => task::handle_list(content),

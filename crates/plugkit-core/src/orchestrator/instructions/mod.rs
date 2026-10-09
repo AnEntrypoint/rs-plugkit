@@ -949,8 +949,12 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         graph.policy.longgap_threshold_ms,
     );
 
+    let slots = super::pool_slots::slot_state(".");
+    let slots_prose = super::pool_slots::slots_prose(&slots);
     let mut payload = json!({
         "phase": phase,
+        "slots": slots,
+        "slots_prose": slots_prose,
         "fsm_graph": {
             "tier": graph_tier.as_str(),
             "path": graph_path,
