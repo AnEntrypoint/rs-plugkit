@@ -26,6 +26,7 @@ pub mod pool_slots;
 pub mod recall;
 pub mod residual;
 pub mod state;
+pub mod subagent;
 pub mod submodule_drift;
 pub mod task;
 pub mod transitions;
@@ -431,6 +432,8 @@ orchestrator_dispatch_table! {
     "task-list" => task::handle_list(content),
     "task-stop" => task::handle_stop(content),
     "task-output" => task::handle_output(content),
+    "subagent-start" => subagent::handle_start(content),
+    "subagent-end" => subagent::handle_end(content),
     "memorize-continue" => handle_memorize_continue(content),
     "fsm-vendor" => fsm_vendor::handle_vendor(content),
     "fsm-validate" => fsm_vendor::handle_validate(content),
