@@ -702,10 +702,14 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     (payload.to_string(), String::new(), 0)
 }
 
+#[cfg(target_arch = "wasm32")]
 const AGENTS_DRAIN_STATE_FILE: &str = ".gm/exec-spool/.agents-drain-state.json";
+#[cfg(target_arch = "wasm32")]
 const FLAT_STREAK_WARN_THRESHOLD: u32 = 3;
+#[cfg(target_arch = "wasm32")]
 const FULL_TEXT_REPEAT_INTERVAL: u64 = 10;
 
+#[cfg(target_arch = "wasm32")]
 fn due_for_full_text(streak: u64, first_at: u64) -> bool {
     streak >= first_at && (streak - first_at) % FULL_TEXT_REPEAT_INTERVAL == 0
 }

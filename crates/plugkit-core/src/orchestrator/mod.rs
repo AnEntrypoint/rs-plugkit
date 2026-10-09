@@ -329,6 +329,7 @@ macro_rules! orchestrator_dispatch_table {
     ( $content:ident, $( $verb:literal => $handler:expr ),+ $(,)? ) => {
         pub const ORCHESTRATOR_VERBS: &[&str] = &[ $( $verb ),+ ];
 
+#[cfg(target_arch = "wasm32")]
         const DISPATCH_ARM_VERBS: &[&str] = &[ $( $verb ),+ ];
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -348,6 +349,7 @@ macro_rules! orchestrator_dispatch_table {
     };
 }
 
+#[cfg(target_arch = "wasm32")]
 fn assert_verb_sets_agree() {
     for v in ORCHESTRATOR_VERBS {
         assert!(
@@ -375,15 +377,8 @@ fn handle_memorize_continue(content: &str) -> (String, String, i32) {
     (result.to_string(), String::new(), if ok { 0 } else { 1 })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn handle_memorize_continue(_content: &str) -> (String, String, i32) {
-    (
-        "{\"ok\":false,\"error\":\"memorize-continue requires wasm32\"}".to_string(),
-        String::new(),
-        1,
-    )
-}
 
+#[cfg(target_arch = "wasm32")]
 fn verb_has_dispatch_arm(verb: &str) -> bool {
     DISPATCH_ARM_VERBS.contains(&verb)
 }

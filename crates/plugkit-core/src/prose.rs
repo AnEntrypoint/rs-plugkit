@@ -267,15 +267,18 @@ fn read_from_config_repo(_key: &str) -> SourceRead {
     )
 }
 
+#[cfg(target_arch = "wasm32")]
 const MESSAGE_NAMESPACES: &[(&str, &str)] =
     &[("gates/", "gates_dir"), ("residual/", "residual_dir")];
 
+#[cfg(target_arch = "wasm32")]
 struct CacheLocation {
     dir: String,
     stem: String,
     declaring_field: String,
 }
 
+#[cfg(target_arch = "wasm32")]
 fn instructions_location(config: Option<&serde_json::Value>, key: &str) -> CacheLocation {
     CacheLocation {
         dir: config
@@ -289,6 +292,7 @@ fn instructions_location(config: Option<&serde_json::Value>, key: &str) -> Cache
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn message_location(config: Option<&serde_json::Value>, key: &str) -> Option<CacheLocation> {
     let messages = config?.get("messages")?;
     for &(namespace, field) in MESSAGE_NAMESPACES {
@@ -308,6 +312,7 @@ fn message_location(config: Option<&serde_json::Value>, key: &str) -> Option<Cac
     None
 }
 
+#[cfg(target_arch = "wasm32")]
 fn read_from_cache_root(cache: &str, key: &str) -> SourceRead {
     let config = pkfs::read_to_string(&format!("{cache}/gm.config.json")).and_then(|raw| {
         serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')).ok()

@@ -833,8 +833,11 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     if trimmed.is_empty() {
         return (String::new(), "missing PRD item id".to_string(), 1);
     }
-    let (id_target, witness, commit_comment, witness_dispatch_id, resolve_cwd) =
-        parse_resolve_target(trimmed);
+    let parsed = parse_resolve_target(trimmed);
+    let (id_target, witness, commit_comment, witness_dispatch_id) =
+        (parsed.0, parsed.1, parsed.2, parsed.3);
+#[cfg(target_arch = "wasm32")]
+    let resolve_cwd = parsed.4;
     let policy = super::fsm::graph().policy;
     let status_kept = keeps_status(trimmed);
     let has_witness = witness

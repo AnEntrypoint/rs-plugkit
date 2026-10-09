@@ -724,6 +724,7 @@ pub(crate) fn is_hidden_segment(seg: &str) -> bool {
     seg.starts_with('.') && seg != "." && seg != ".."
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn collect_files(
     root: &str,
     max_files: usize,
@@ -734,6 +735,7 @@ pub(crate) fn collect_files(
         .unwrap_or_default()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn collect_files_checked(
     root: &str,
     max_files: usize,
@@ -3463,15 +3465,18 @@ pub struct FusionCorpus {
     index_by_path_line: std::sync::Arc<std::collections::HashMap<(String, usize), usize>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct Bm25DocEntry {
     tf: std::collections::HashMap<String, u32>,
     dl: f64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 static BM25_DOC_CACHE: std::sync::Mutex<
     Option<std::collections::HashMap<String, std::sync::Arc<Bm25DocEntry>>>,
 > = std::sync::Mutex::new(None);
 
+#[cfg(not(target_arch = "wasm32"))]
 fn bm25_doc_cache_invalidate(key: &str) {
     if let Ok(mut cache) = BM25_DOC_CACHE.lock() {
         if let Some(m) = cache.as_mut() {
@@ -3480,6 +3485,7 @@ fn bm25_doc_cache_invalidate(key: &str) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn bm25_doc_cache_clear() {
     if let Ok(mut cache) = BM25_DOC_CACHE.lock() {
         *cache = None;
