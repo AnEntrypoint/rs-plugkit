@@ -52,7 +52,11 @@ fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         return live;
     };
     for entry in entries {
-        let is_file = entry.get("is_file").and_then(Value::as_bool).unwrap_or(false);
+        let is_file = entry
+            .get("is_file")
+            .or_else(|| entry.get("isFile"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let Some(name) = entry.get("name").and_then(Value::as_str) else {
             continue;
         };
@@ -60,8 +64,11 @@ fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
             continue;
         }
         let path = format!("{}/{}", dir, name);
-        let mtime = pkfs::stat(&path)
-            .and_then(|s| s.get("mtime_ms").and_then(Value::as_f64));
+        let mtime = pkfs::stat(&path).and_then(|s| {
+            s.get("mtime_ms")
+                .or_else(|| s.get("mtimeMs"))
+                .and_then(Value::as_f64)
+        });
         let Some(mtime_ms) = mtime.map(|m| m as u64) else {
             continue;
         };
