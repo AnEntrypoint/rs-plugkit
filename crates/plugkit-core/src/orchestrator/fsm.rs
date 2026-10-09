@@ -751,28 +751,46 @@ pub fn graph() -> Graph {
     graph_detailed().0
 }
 
+struct GraphMemo {
+    raw: String,
+    tier: GraphTier,
+    path: String,
+    resolved: (Graph, GraphTier, String),
+}
+
+static GRAPH_MEMO: std::sync::Mutex<Option<GraphMemo>> = std::sync::Mutex::new(None);
+
+fn resolve_graph_memoized(raw: &str, path: &str, tier: GraphTier) -> (Graph, GraphTier, String) {
+    if let Ok(memo) = GRAPH_MEMO.lock() {
+        if let Some(m) = memo.as_ref() {
+            if m.tier == tier && m.path == path && m.raw == raw {
+                return m.resolved.clone();
+            }
+        }
+    }
+    let resolved = match load_tier(raw, path, tier) {
+        Some(g) => (g, tier, path.to_string()),
+        None => (default_graph(), GraphTier::CompiledDefault, COMPILED_PATH.to_string()),
+    };
+    if let Ok(mut memo) = GRAPH_MEMO.lock() {
+        *memo = Some(GraphMemo {
+            raw: raw.to_string(),
+            tier,
+            path: path.to_string(),
+            resolved: resolved.clone(),
+        });
+    }
+    resolved
+}
+
 pub fn graph_detailed() -> (Graph, GraphTier, String) {
     if let Some(raw) = pkfs::read_to_string(GRAPH_OVERRIDE_PATH) {
-        return match load_tier(&raw, GRAPH_OVERRIDE_PATH, GraphTier::LocalOverride) {
-            Some(g) => (g, GraphTier::LocalOverride, GRAPH_OVERRIDE_PATH.to_string()),
-            None => (
-                default_graph(),
-                GraphTier::CompiledDefault,
-                COMPILED_PATH.to_string(),
-            ),
-        };
+        return resolve_graph_memoized(&raw, GRAPH_OVERRIDE_PATH, GraphTier::LocalOverride);
     }
 
     if let Some(path) = source_repo_graph_path() {
         if let Some(raw) = pkfs::read_to_string(&path) {
-            return match load_tier(&raw, &path, GraphTier::SourceRepo) {
-                Some(g) => (g, GraphTier::SourceRepo, path),
-                None => (
-                    default_graph(),
-                    GraphTier::CompiledDefault,
-                    COMPILED_PATH.to_string(),
-                ),
-            };
+            return resolve_graph_memoized(&raw, &path, GraphTier::SourceRepo);
         }
     }
 
@@ -926,6 +944,9 @@ fn record_graph_rejection_at(path: &str, tier: GraphTier, kind: &str, detail: &s
 }
 
 fn clear_graph_rejection() {
+    if let Ok(mut memo) = GRAPH_MEMO.lock() {
+        *memo = None;
+    }
     if crate::pkfs::exists(GRAPH_REJECTION_PATH) {
         let _ = crate::pkfs::write(GRAPH_REJECTION_PATH, "");
     }
