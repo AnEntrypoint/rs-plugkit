@@ -95,6 +95,16 @@ fn is_refuted_row(row: &Value) -> bool {
     by_id || by_title
 }
 
+fn has_blocker_notes(row: &Value) -> bool {
+    match row.get("blocker_notes") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(notes)) => !notes.is_empty(),
+        Some(Value::String(note)) => !note.trim().is_empty(),
+        Some(Value::Object(fields)) => !fields.is_empty(),
+        Some(_) => true,
+    }
+}
+
 fn severity_rank(row: &Value) -> u8 {
     match text_field(row, "severity").map(|s| s.trim().to_ascii_lowercase()).as_deref() {
         Some("critical" | "p0") => 4,
@@ -159,6 +169,9 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -
             continue;
         }
         if is_live(id) {
+            continue;
+        }
+        if has_blocker_notes(row) {
             continue;
         }
         ranked.push(Ranked {
