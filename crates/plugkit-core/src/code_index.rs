@@ -918,16 +918,16 @@ fn walk_posix(
 }
 
 pub fn extract_chunks(
-    _path: &str,
+    path: &str,
     source: &str,
     lang_name: &str,
 ) -> Vec<(String, String, usize, usize, String)> {
-    extract_chunks_reporting_plugin_failure(_path, source, lang_name).0
+    extract_chunks_reporting_plugin_failure(path, source, lang_name).0
 }
 
 type ChunkTuple = (String, String, usize, usize, String);
 
-fn parse_nodes(source: &str, lang_name: &str) -> Option<Vec<Value>> {
+fn parse_nodes(path: &str, source: &str, lang_name: &str) -> Option<Vec<Value>> {
     let resp = plugin_call(
         "treesitter",
         "parse",
@@ -937,6 +937,7 @@ fn parse_nodes(source: &str, lang_name: &str) -> Option<Vec<Value>> {
         crate::wasm_dispatch::emit_event(
             "code_index_treesitter_failed",
             json!({
+                "path": path,
                 "lang": lang_name,
                 "plugin_failure": plugin_failure_code(&resp),
                 "source_len": source.len(),
@@ -950,6 +951,7 @@ fn parse_nodes(source: &str, lang_name: &str) -> Option<Vec<Value>> {
             crate::wasm_dispatch::emit_event(
                 "code_index_treesitter_failed",
                 json!({
+                    "path": path,
                     "lang": lang_name,
                     "plugin_failure": crate::wasm_dispatch::PLUGIN_FAIL_MALFORMED,
                     "source_len": source.len(),
@@ -1001,11 +1003,11 @@ fn chunks_from_nodes(source: &str, nodes: &[Value]) -> Vec<ChunkTuple> {
 }
 
 pub fn extract_chunks_reporting_plugin_failure(
-    _path: &str,
+    path: &str,
     source: &str,
     lang_name: &str,
 ) -> (Vec<ChunkTuple>, bool) {
-    match parse_nodes(source, lang_name) {
+    match parse_nodes(path, source, lang_name) {
         Some(nodes) => (chunks_from_nodes(source, &nodes), false),
         None => (Vec::new(), true),
     }
@@ -1331,8 +1333,8 @@ fn imports_from_nodes(source: &str, lang_name: &str, sorted_nodes: &[RawNode]) -
     out
 }
 
-pub(crate) fn analyze_source(source: &str, lang_name: &str) -> SourceAnalysis {
-    let Some(nodes) = parse_nodes(source, lang_name) else {
+pub(crate) fn analyze_source(path: &str, source: &str, lang_name: &str) -> SourceAnalysis {
+    let Some(nodes) = parse_nodes(path, source, lang_name) else {
         return SourceAnalysis {
             chunks: Vec::new(),
             metrics: Vec::new(),
@@ -2390,6 +2392,7 @@ fn index_cfg_impl(
     let walk_share_ms = index_wall_budget_ms.saturating_sub(embed_budget_ms);
     let mut measured_embed_ms_per_chunk = pessimistic_ms_per_chunk;
     let mut treesitter_failures = 0u32;
+    let mut changed_files: Vec<String> = Vec::new();
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut digest_entries: Vec<(String, u32)> = Vec::with_capacity(files.len());
@@ -2636,6 +2639,7 @@ fn index_cfg_impl(
             fresh_files_this_pass += 1;
         }
 
+        changed_files.push(fp.clone());
         if let Some(m) = prior.get(fp) {
             delete_chunk_keys(&m.chunks, project_path);
         }
@@ -2875,6 +2879,7 @@ fn index_cfg_impl(
             fv_delete(&manifest_ns_for(project_path), fp);
             fusion_corpus_cache_invalidate(project_path);
             removed_files += 1;
+            changed_files.push(fp.clone());
         }
     }
     if libsql_ok && enumeration_was_complete {
@@ -2943,6 +2948,12 @@ fn index_cfg_impl(
     }
     let silently_empty_due_to_plugin_failure =
         indexed > 0 && chunked == 0 && treesitter_failures >= indexed as u32;
+    let changed_files_count = changed_files.len();
+    let changed_files_report: Vec<String> = changed_files
+        .iter()
+        .take(CHANGED_FILES_REPORT_LIMIT)
+        .cloned()
+        .collect();
     json!({
         "ok": !silently_empty_due_to_plugin_failure,
         "files_scanned": files.len(),
@@ -2952,6 +2963,8 @@ fn index_cfg_impl(
         "reused": reused,
         "reused_files": reused_files,
         "removed_files": removed_files,
+        "changed_files": changed_files_report,
+        "changed_files_count": changed_files_count,
         "skipped_no_embed": skipped_no_embed,
         "embed_requests": embed_requests,
         "embed_failed": embed_failed,
@@ -3313,7 +3326,8 @@ fn digest_path_for(project_path: Option<&str>) -> String {
 }
 
 const PARTIAL_TOPUP_TS_PATH: &str = ".gm/exec-spool/.codeinsight-topup-ts";
-const PARTIAL_TOPUP_MIN_INTERVAL_MS: u64 = 300_000;
+const PARTIAL_TOPUP_MIN_INTERVAL_MS: u64 = 600_000;
+const CHANGED_FILES_REPORT_LIMIT: usize = 64;
 
 fn partial_topup_ts_path_for(project_path: Option<&str>) -> String {
     match project_path {
