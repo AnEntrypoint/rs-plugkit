@@ -3026,11 +3026,36 @@ pub(super) fn ci_status(body: &Value) -> u64 {
 }
 
 pub(super) fn git_branch(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_branch", body, &["remote", "all"]) {
+        return refusal;
+    }
+    for flag in ["remote", "all"] {
+        match body.get(flag) {
+            None | Some(Value::Null) | Some(Value::Bool(_)) => {}
+            Some(_) => {
+                return err_json(
+                    "git_branch",
+                    json!({
+                        "error": format!("git_branch: {} must be a boolean", flag),
+                        "invalid_fields": [flag],
+                    }),
+                );
+            }
+        }
+    }
+    let requested = |key: &str| body.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+    let listing_args = if requested("all") {
+        "branch --no-color -a"
+    } else if requested("remote") {
+        "branch --no-color -r"
+    } else {
+        "branch --no-color"
+    };
     let cwd = body_cwd(body);
     let current = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD")
         .trim()
         .to_string();
-    let listing = exec_git_in(cwd, "branch --no-color");
+    let listing = exec_git_in(cwd, listing_args);
     let branches: Vec<String> = listing
         .lines()
         .map(|l| l.trim_start_matches('*').trim().to_string())
