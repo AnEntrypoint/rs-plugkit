@@ -296,10 +296,16 @@ fn read_from_config_repo(key: &str) -> SourceRead {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn read_from_config_repo(_key: &str) -> SourceRead {
-    SourceRead::ConfigRepoUnreachable(
-        "gm-config (the mandatory default prose source) requires wasm32 (config::resolve's git-backed fetcher is a wasm-host-bridge operation)".to_string()
-    )
+fn read_from_config_repo(key: &str) -> SourceRead {
+    match crate::config_sync_native::ensure_default_cache() {
+        Ok(cache) => match crate::config_sync_native::read_cache_prose(&cache, key) {
+            Some(text) => SourceRead::Hit(text),
+            None => SourceRead::Miss,
+        },
+        Err(reason) => SourceRead::ConfigRepoUnreachable(format!(
+            "gm-config (the mandatory default prose source) did not sync: {reason}"
+        )),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
