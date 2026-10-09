@@ -1337,6 +1337,24 @@ pub(super) const SCAN_TELEMETRY_DROPPED: &[&str] = &[
 /// A bounded scan still answers, so it stays `ok` -- and `ok: true` beside an empty `matches` reads
 /// as "there is nothing there" when it means "this did not look at everything". The bound that fired
 /// rides at the top of the envelope, where a caller meets it before the answer.
+/// gm's own state (`.gm/`, `.agentplug-kv/`) is not code. Its exclusions are named in
+/// `excluded_by_rule_summary` but do not count toward `exhaustive`; every other rule drops code.
+const GM_STATE_EXCLUSION_RULES: &[&str] = &["gm_state_dir", "agentplug_kv_cache"];
+
+/// The rule-excluded paths that are code, the only exclusions that clear `exhaustive`.
+pub(super) fn code_exclusion_count(out: &serde_json::Map<String, Value>) -> u64 {
+    out.get("excluded_by_rule_summary")
+        .and_then(|v| v.as_object())
+        .map(|summary| {
+            summary
+                .iter()
+                .filter(|(rule, _)| !GM_STATE_EXCLUSION_RULES.contains(&rule.as_str()))
+                .map(|(_, n)| n.as_u64().unwrap_or(0))
+                .sum::<u64>()
+        })
+        .unwrap_or(0)
+}
+
 pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Option<String> {
     if out.get("exhaustive").and_then(|v| v.as_bool()) != Some(false) {
         return None;
@@ -1379,7 +1397,7 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
             "{untyped} oversize files with no extension were skipped before reading"
         ));
     }
-    let excluded = num("excluded_by_rule_count");
+    let excluded = code_exclusion_count(out);
     if excluded > 0 {
         let rules: Vec<String> = out
             .get("excluded_by_rule_summary")
@@ -1387,6 +1405,7 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
             .map(|summary| {
                 summary
                     .iter()
+                    .filter(|(rule, _)| !GM_STATE_EXCLUSION_RULES.contains(&rule.as_str()))
                     .map(|(rule, n)| format!("{rule} x{}", n.as_u64().unwrap_or(0)))
                     .collect::<Vec<String>>()
             })
@@ -1394,6 +1413,15 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
         bounds.push(format!(
             "{excluded} paths were excluded by rule ({}) and are named in excluded_by_rule",
             rules.join(", ")
+        ));
+    }
+    let outside = out
+        .get("glob_outside_path")
+        .and_then(|v| v.as_array())
+        .map_or(0, |paths| paths.len());
+    if outside > 0 {
+        bounds.push(format!(
+            "{outside} glob alternatives name a directory outside path and were not scanned"
         ));
     }
     let reason = if bounds.is_empty() {
@@ -1407,9 +1435,9 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
 }
 
 pub(super) fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_cap: u32) -> Option<String> {
-    // A rule that dropped paths from the scope is a coverage gap, as a bound is: the walk finished,
-    // but not over every file in the scope, so the verdict is false and `excluded_by_rule` names it.
-    if out.get("excluded_by_rule_count").and_then(|v| v.as_u64()).unwrap_or(0) > 0 {
+    // A rule that dropped code paths from the scope is a coverage gap, as a bound is: the walk
+    // finished, but not over every code file in the scope. gm's own state is named, never counted.
+    if code_exclusion_count(out) > 0 {
         out.insert("exhaustive".to_string(), json!(false));
     }
     let partial = scan_partial_reason(out);
@@ -2036,19 +2064,9 @@ pub(super) fn codesearch_identifier(
 
 pub(super) fn codesearch(body: &Value) -> u64 {
     let packed = codesearch_dispatch(body);
-    let mut v = unpack_to_value(packed);
+    let v = unpack_to_value(packed);
     if !v.is_object() {
         return packed;
-    }
-    if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
-        if let Some(obj) = v.as_object_mut() {
-            obj.entry("modes".to_string()).or_insert_with(|| json!({
-                "literal": "exhaustive path:line substring search -- pass mode:\"literal\" when you can name the symbol or string exactly",
-                "regex": "the same, with a regex query",
-                "filename": "path-only match",
-                "dual": "ranked BM25+vector retrieval (the default)"
-            }));
-        }
     }
     pack(v.to_string())
 }
