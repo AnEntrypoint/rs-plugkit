@@ -814,24 +814,26 @@ pub fn register_policy(content: &str) -> Result<Value, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
+const DISPATCH_PAYLOAD_KEYS: [&str; 9] = [
+    "data", "result", "output", "text", "matches", "edges", "chunks", "rows", "stdout",
+];
+
+#[cfg(target_arch = "wasm32")]
 pub fn dispatch_output_bytes(result: &Value) -> u64 {
-    fn has_text_payload(value: &Value) -> bool {
+    fn payload_text_bytes(value: &Value) -> u64 {
         match value {
-            Value::String(text) => !text.trim().is_empty(),
-            Value::Array(items) => items.iter().any(has_text_payload),
-            Value::Object(fields) => fields.values().any(has_text_payload),
-            Value::Null | Value::Bool(_) | Value::Number(_) => false,
+            Value::String(text) if text.trim().is_empty() => 0,
+            Value::String(text) => text.len() as u64,
+            Value::Array(items) => items.iter().map(payload_text_bytes).sum(),
+            Value::Object(fields) => fields
+                .iter()
+                .filter(|(key, _)| DISPATCH_PAYLOAD_KEYS.contains(&key.as_str()))
+                .map(|(_, child)| payload_text_bytes(child))
+                .sum(),
+            Value::Null | Value::Bool(_) | Value::Number(_) => 0,
         }
     }
-    let mut payload = result.clone();
-    if let Some(fields) = payload.as_object_mut() {
-        fields.remove("ok");
-    }
-    if has_text_payload(&payload) {
-        payload.to_string().len() as u64
-    } else {
-        0
-    }
+    payload_text_bytes(result)
 }
 
 #[cfg(target_arch = "wasm32")]

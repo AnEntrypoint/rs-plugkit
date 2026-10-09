@@ -26,6 +26,7 @@ pub fn record(
     fingerprint: &str,
     exit_code: i64,
     session_id: Option<&str>,
+    output_bytes: Option<u64>,
 ) -> String {
     let path = ledger_path(cwd);
     let existing = host_read(&path).unwrap_or_default();
@@ -53,6 +54,7 @@ pub fn record(
         "fingerprint": fingerprint,
         "ts": ts,
         "exit_code": exit_code,
+        "output_bytes": output_bytes,
         "session_id": session_id,
     });
     list.push(entry);
