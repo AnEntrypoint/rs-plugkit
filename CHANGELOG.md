@@ -1,3 +1,9 @@
+## 2026-10-09 - prd-list folds and limits; prd-resolve binds non-dispatch witnesses
+
+**Changes:** `prd-list` takes `limit`, folds repeated blocks of an id to the last block before filtering, and replies with `total` (matches), `store_total` (stored blocks), `limit` and `truncated`. `prd-resolve` closes a row only with a verified `witness_dispatch_id` or a complete witness binding (`witness_exit_code` 0, `witness_output_sha256`, `witness_output_path`, `witness_ts`); the runtime re-hashes the output file and names the exact missing or invalid field. A dispatch id outside the ledger is reported as `aged_out` (older than the oldest retained entry) or `not_recorded`, and an id present only in `witness_evidence` is named as `witness_dispatch_id_field` rather than verified. `sha2` moves out of the wasm-only dependency table.
+
+**Not changed:** the dispatch ledger keeps 500 entries per project, so a dispatch id older than that cannot be verified; binding by output hash does not depend on the window.
+
 ## 2026-10-08 - sideloaded builds are traceable to origin/main
 
 **Changes:** `health` reports `source_sha` (the commit `build.rs` embedded), and `gm/scripts/triage/sideload-plugkit.sh` builds only from a tree that contains `origin/main`, recording the built commit and wasm hash in `~/.agentplug/plugins/gm.build.json`.

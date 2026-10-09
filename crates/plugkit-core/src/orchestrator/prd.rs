@@ -320,16 +320,50 @@ pub fn handle_list_full() -> (String, String, i32) {
     )
 }
 
+fn request_limit(request: &serde_json::Value) -> Result<Option<usize>, String> {
+    match request.get("limit") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+            .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
+            .ok_or_else(|| "prd-list limit must be a non-negative integer".to_string()),
+    }
+}
+
+fn fold_last_blocks(rows: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut last_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let id = row_text(row, &["id"]);
+        if !id.is_empty() {
+            last_index.insert(id, index);
+        }
+    }
+    rows.into_iter()
+        .enumerate()
+        .filter(|(index, row)| {
+            let id = row_text(row, &["id"]);
+            id.is_empty() || last_index.get(&id) == Some(index)
+        })
+        .map(|(_, row)| row)
+        .collect()
+}
+
 pub fn handle_list(content: &str) -> (String, String, i32) {
     let request = request_object(content);
+    let limit = match request_limit(&request) {
+        Ok(limit) => limit,
+        Err(message) => return (String::new(), message, 1),
+    };
     let rows = match load_rows() {
         Ok(rows) => rows,
         Err((message, code)) => return (String::new(), message, code),
     };
-    let total = rows.len();
+    let store_total = rows.len();
     let wanted_ids = request_strings(&request, PRD_ROW_ID_FIELDS);
     let wanted_statuses = request_strings(&request, PRD_ROW_STATUS_FIELDS);
-    let selected: Vec<serde_json::Value> = rows
+    let selected: Vec<serde_json::Value> = fold_last_blocks(rows)
         .into_iter()
         .filter(|row| {
             let id = row_text(row, &["id"]);
@@ -346,27 +380,34 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             format!(
                 "no PRD row with id {} of the {} rows in .gm/prd.yml -- pass no id for the listing",
                 wanted_ids.join(", "),
-                total
+                store_total
             ),
             1,
         );
     }
+    let matched = selected.len();
+    let shown = limit.map_or(matched, |n| n.min(matched));
+    let truncated = shown < matched;
+    let window: Vec<serde_json::Value> = selected.into_iter().take(shown).collect();
     let brief_flag = request_flag(&request, PRD_BRIEF_BODY_FIELDS);
     let full_flag = request_flag(&request, PRD_FULL_BODY_FIELDS);
     let want_full =
         full_flag.unwrap_or_else(|| brief_flag.map(|b| !b).unwrap_or(!wanted_ids.is_empty()));
     let items: Vec<serde_json::Value> = if want_full {
-        selected
+        window
     } else {
-        selected.iter().map(brief_row).collect()
+        window.iter().map(brief_row).collect()
     };
     let reply = serde_json::json!({
         "items": items,
         "count": items.len(),
-        "total": total,
+        "total": matched,
+        "store_total": store_total,
+        "limit": limit,
+        "truncated": truncated,
         "brief": !want_full,
         "full": want_full,
-        "hint": "pass {\"id\":\"<row id>\"} for one full row, {\"status\":\"pending\"} to filter, or {\"full\":true} for every full body",
+        "hint": "pass {\"id\":\"<row id>\"} for one full row (repeated blocks of an id fold to the last one), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), or {\"full\":true} for every full body",
     });
     (reply.to_string(), String::new(), 0)
 }
@@ -842,6 +883,238 @@ fn deviation_refuses(kind: &str) -> bool {
     super::deviations::effective_severity(kind) == super::deviations::Severity::Deny
 }
 
+const WITNESS_BINDING_FIELDS: &[&str] = &[
+    "witness_exit_code",
+    "witness_output_sha256",
+    "witness_output_path",
+    "witness_ts",
+];
+
+const WITNESS_OUTPUT_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+const WITNESS_BINDING_HINT: &str = "bind the witness with witness_exit_code (integer, must be 0), witness_output_sha256 (sha256 of the witness output file, 64 lowercase hex), witness_output_path (that output file, relative to the project root, no .. segments) and witness_ts (RFC 3339 timestamp). prd-resolve re-reads the file, re-hashes it and refuses on any mismatch.";
+
+struct VerifiedWitness {
+    exit_code: i64,
+    output_sha256: String,
+    output_path: String,
+    ts: String,
+}
+
+impl VerifiedWitness {
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "exit_code": self.exit_code,
+            "output_sha256": self.output_sha256,
+            "output_path": self.output_path,
+            "ts": self.ts,
+        })
+    }
+
+    fn to_yaml(&self) -> Value {
+        let mut map = serde_yaml::Mapping::new();
+        map.insert(
+            Value::String("exit_code".to_string()),
+            serde_yaml::to_value(self.exit_code).unwrap_or(Value::Null),
+        );
+        map.insert(
+            Value::String("output_sha256".to_string()),
+            Value::String(self.output_sha256.clone()),
+        );
+        map.insert(
+            Value::String("output_path".to_string()),
+            Value::String(self.output_path.clone()),
+        );
+        map.insert(
+            Value::String("ts".to_string()),
+            Value::String(self.ts.clone()),
+        );
+        Value::Mapping(map)
+    }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_relative_project_path(path: &str) -> bool {
+    !path.is_empty()
+        && !pkfs::is_absolute(path)
+        && !path.contains(':')
+        && path.split(['/', '\\']).all(|segment| segment != "..")
+}
+
+fn is_rfc3339_timestamp(ts: &str) -> bool {
+    let bytes = ts.as_bytes();
+    let digits = |from: usize, len: usize| -> Option<u32> {
+        let end = from.checked_add(len)?;
+        let part = bytes.get(from..end)?;
+        if !part.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        std::str::from_utf8(part).ok()?.parse().ok()
+    };
+    let at = |index: usize, want: u8| bytes.get(index).copied() == Some(want);
+    let (Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        digits(5, 2),
+        digits(8, 2),
+        digits(11, 2),
+        digits(14, 2),
+        digits(17, 2),
+    ) else {
+        return false;
+    };
+    if digits(0, 4).is_none()
+        || !at(4, b'-')
+        || !at(7, b'-')
+        || !(at(10, b'T') || at(10, b't'))
+        || !at(13, b':')
+        || !at(16, b':')
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return false;
+    }
+    let mut index = 19;
+    if at(index, b'.') {
+        index += 1;
+        let fraction_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == fraction_start {
+            return false;
+        }
+    }
+    match bytes.get(index).copied() {
+        Some(b'Z') | Some(b'z') => index + 1 == bytes.len(),
+        Some(b'+') | Some(b'-') => {
+            digits(index + 1, 2).is_some_and(|h| h <= 23)
+                && at(index + 3, b':')
+                && digits(index + 4, 2).is_some_and(|m| m <= 59)
+                && index + 6 == bytes.len()
+        }
+        _ => false,
+    }
+}
+
+fn verify_witness_binding(
+    request: &serde_json::Value,
+) -> Result<VerifiedWitness, (&'static str, String)> {
+    use sha2::{Digest, Sha256};
+    let exit_code = match request.get("witness_exit_code").and_then(|v| v.as_i64()) {
+        Some(0) => 0,
+        Some(code) => {
+            return Err((
+                "witness_exit_code",
+                format!(
+                    "exit code {} is not 0 -- a witness closes a row only with exit code 0",
+                    code
+                ),
+            ))
+        }
+        None => {
+            return Err((
+                "witness_exit_code",
+                "must be an integer exit code".to_string(),
+            ))
+        }
+    };
+    let output_sha256 = request
+        .get("witness_output_sha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !is_sha256_hex(&output_sha256) {
+        return Err((
+            "witness_output_sha256",
+            "must be 64 lowercase hex characters, the sha256 of the witness output file"
+                .to_string(),
+        ));
+    }
+    let output_path = request
+        .get("witness_output_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !is_relative_project_path(&output_path) {
+        return Err((
+            "witness_output_path",
+            "must be a relative path inside the project root with no .. segments".to_string(),
+        ));
+    }
+    let ts = request
+        .get("witness_ts")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !is_rfc3339_timestamp(&ts) {
+        return Err((
+            "witness_ts",
+            "must be an RFC 3339 timestamp such as 2026-10-09T13:44:57Z".to_string(),
+        ));
+    }
+    let content = pkfs::read_to_string(&output_path).ok_or_else(|| {
+        (
+            "witness_output_path",
+            format!(
+                "output file {} is not readable under the project root",
+                output_path
+            ),
+        )
+    })?;
+    if content.len() > WITNESS_OUTPUT_MAX_BYTES {
+        return Err((
+            "witness_output_path",
+            format!(
+                "output file {} is larger than {} bytes",
+                output_path, WITNESS_OUTPUT_MAX_BYTES
+            ),
+        ));
+    }
+    let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+    if digest != output_sha256 {
+        return Err((
+            "witness_output_sha256",
+            format!(
+                "sha256 of {} is {}, not the claimed {}",
+                output_path, digest, output_sha256
+            ),
+        ));
+    }
+    Ok(VerifiedWitness {
+        exit_code,
+        output_sha256,
+        output_path,
+        ts,
+    })
+}
+
+fn dispatch_id_in_text(text: &str) -> Option<String> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .find(|token| {
+            let mut parts = token.split('-');
+            match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                (Some(ts), Some(seq), Some(hash), None) => {
+                    ts.len() >= 10
+                        && ts.bytes().all(|b| b.is_ascii_digit())
+                        && !seq.is_empty()
+                        && seq.bytes().all(|b| b.is_ascii_digit())
+                        && (1..=16).contains(&hash.len())
+                        && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                }
+                _ => false,
+            }
+        })
+        .map(str::to_string)
+}
+
 pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -876,27 +1149,158 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    #[cfg(target_arch = "wasm32")]
-    if let Some(dispatch_id) = witness_dispatch_id.as_ref() {
-        let cwd = resolve_cwd.as_deref().unwrap_or("");
-        if crate::dispatch_ledger::lookup(cwd, dispatch_id).is_none() {
+    let binding_request = request_object(trimmed);
+    let binding_present: Vec<&str> = WITNESS_BINDING_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| binding_request.get(*field).is_some_and(|v| !v.is_null()))
+        .collect();
+    let binding_missing: Vec<&str> = WITNESS_BINDING_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| !binding_present.contains(field))
+        .collect();
+    let mut witness_binding: Option<VerifiedWitness> = None;
+    if !binding_present.is_empty() {
+        if !binding_missing.is_empty() {
             let body = serde_json::json!({
-                "error": format!("prd-resolve refused: witness_dispatch_id {} not found in this guest's dispatch ledger", dispatch_id),
-                "deviation_kind": "prd-resolve-fabricated-dispatch",
+                "error": format!(
+                    "prd-resolve refused: witness binding for {} is incomplete, missing {}",
+                    id_target,
+                    binding_missing.join(", ")
+                ),
+                "deviation_kind": "prd-resolve-unbound-witness",
                 "deviation_severity": "deny",
                 "prd_id": id_target,
-                "witness_dispatch_id": dispatch_id,
-                "hint": "witness_dispatch_id must be the `dispatch_id` field returned in a PRIOR spool response (every verb's response now carries one). This id was not found in .gm/exec-spool/.dispatch-ledger.json, so it does not correspond to a real dispatch that actually ran -- either it was invented, or it belongs to a different cwd/project. Resolve again either omitting witness_dispatch_id, or with the exact dispatch_id copied from the response of the dispatch that produced this row's evidence.",
-            }).to_string();
+                "missing_fields": binding_missing,
+                "hint": WITNESS_BINDING_HINT,
+            })
+            .to_string();
             return (
                 body,
                 format!(
-                    "prd-resolve refused: unknown witness_dispatch_id for {}",
+                    "prd-resolve refused: incomplete witness binding for {}",
                     id_target
                 ),
                 1,
             );
         }
+        match verify_witness_binding(&binding_request) {
+            Ok(verified) => witness_binding = Some(verified),
+            Err((field, reason)) => {
+                let body = serde_json::json!({
+                    "error": format!("prd-resolve refused: {} is invalid for {}: {}", field, id_target, reason),
+                    "deviation_kind": "prd-resolve-witness-binding-invalid",
+                    "deviation_severity": "deny",
+                    "prd_id": id_target,
+                    "field": field,
+                    "reason": reason,
+                    "hint": WITNESS_BINDING_HINT,
+                })
+                .to_string();
+                return (
+                    body,
+                    format!("prd-resolve refused: invalid {} for {}", field, id_target),
+                    1,
+                );
+            }
+        }
+    }
+    let evidence_dispatch_id = dispatch_id_in_text(witness.as_deref().unwrap_or(""));
+    #[cfg(target_arch = "wasm32")]
+    let (dispatch_verified, evidence_in_ledger) = {
+        let cwd = resolve_cwd.as_deref().unwrap_or("");
+        let evidence_in_ledger = evidence_dispatch_id
+            .as_deref()
+            .map(|id| crate::dispatch_ledger::lookup(cwd, id).is_some());
+        let dispatch_verified = match witness_dispatch_id.as_deref() {
+            None => false,
+            Some(dispatch_id) if crate::dispatch_ledger::lookup(cwd, dispatch_id).is_some() => {
+                true
+            }
+            Some(_) if witness_binding.is_some() => false,
+            Some(dispatch_id) => {
+                let id_ts = dispatch_id
+                    .split('-')
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok());
+                let window = crate::dispatch_ledger::window(cwd);
+                let aged_out = matches!(
+                    window,
+                    Some((len, oldest))
+                        if len >= crate::dispatch_ledger::RETAINED_ENTRIES
+                            && id_ts.is_some_and(|t| t < oldest)
+                );
+                let kind = if aged_out {
+                    "prd-resolve-unbound-witness"
+                } else {
+                    "prd-resolve-fabricated-dispatch"
+                };
+                if aged_out && !deviation_refuses(kind) {
+                    false
+                } else {
+                    let (reason, hint) = if aged_out {
+                        ("aged_out", "the ledger keeps only the most recent ledger_retained_entries dispatches of a project; this id is older than its oldest retained entry, so the dispatch ran but aged out of the window. Bind the witness instead: witness_exit_code 0, witness_output_sha256, witness_output_path and witness_ts do not depend on the ledger.")
+                    } else {
+                        ("not_recorded", "no dispatch with this id is in this project's .gm/exec-spool/.dispatch-ledger.json and the id is not older than the ledger's oldest entry, so the cwd may be another project or the id may be invented. Pass the dispatch_id copied from the response of the dispatch that produced the evidence, or bind the witness with witness_exit_code, witness_output_sha256, witness_output_path and witness_ts.")
+                    };
+                    let body = serde_json::json!({
+                        "error": format!(
+                            "prd-resolve refused: witness_dispatch_id {} is not in this project's dispatch ledger ({})",
+                            dispatch_id, reason
+                        ),
+                        "deviation_kind": kind,
+                        "deviation_severity": "deny",
+                        "prd_id": id_target,
+                        "witness_dispatch_id": dispatch_id,
+                        "witness_dispatch_id_field": "witness_dispatch_id",
+                        "reason": reason,
+                        "ledger_retained_entries": crate::dispatch_ledger::RETAINED_ENTRIES,
+                        "ledger_entries": window.map(|(len, _)| len),
+                        "ledger_oldest_ts": window.map(|(_, oldest)| oldest),
+                        "hint": hint,
+                    })
+                    .to_string();
+                    return (
+                        body,
+                        format!(
+                            "prd-resolve refused: witness_dispatch_id {} not in the dispatch ledger for {}",
+                            dispatch_id, id_target
+                        ),
+                        1,
+                    );
+                }
+            }
+        };
+        (dispatch_verified, evidence_in_ledger)
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let (dispatch_verified, evidence_in_ledger) = (witness_dispatch_id.is_some(), None::<bool>);
+    if !status_kept
+        && witness_binding.is_none()
+        && witness_dispatch_id.is_none()
+        && deviation_refuses("prd-resolve-unbound-witness")
+    {
+        let body = serde_json::json!({
+            "error": format!(
+                "prd-resolve refused: witness for {} is unbound -- pass witness_dispatch_id, or all of witness_exit_code, witness_output_sha256, witness_output_path and witness_ts",
+                id_target
+            ),
+            "deviation_kind": "prd-resolve-unbound-witness",
+            "deviation_severity": "deny",
+            "prd_id": id_target,
+            "missing_fields": ["witness_dispatch_id", "witness_exit_code", "witness_output_sha256", "witness_output_path", "witness_ts"],
+            "witness_dispatch_id_field": "witness_dispatch_id",
+            "witness_dispatch_id_in_evidence": evidence_dispatch_id,
+            "witness_dispatch_id_in_ledger": evidence_in_ledger,
+            "hint": WITNESS_BINDING_HINT,
+        })
+        .to_string();
+        return (
+            body,
+            format!("prd-resolve refused: unbound witness for {}", id_target),
+            1,
+        );
     }
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
@@ -908,6 +1312,59 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         );
     }
 
+    if !status_kept
+        && policy.reject_duplicate_witness
+        && deviation_refuses("prd-resolve-duplicate-witness")
+    {
+        if let Some(binding) = witness_binding.as_ref() {
+            if let Some(existing) = pkfs::read_to_string(&path_s) {
+                if let Ok(doc) = serde_yaml::from_str::<Value>(&existing) {
+                    if let Some(seq) = doc.as_sequence() {
+                        for item in seq {
+                            let Some(map) = item.as_mapping() else {
+                                continue;
+                            };
+                            let other_id = map
+                                .get(&Value::String("id".to_string()))
+                                .and_then(|v| v.as_str());
+                            if other_id == Some(id_target.as_str()) {
+                                continue;
+                            }
+                            let other_sha = map
+                                .get(&Value::String("witness_binding".to_string()))
+                                .and_then(|b| b.as_mapping())
+                                .and_then(|b| b.get(&Value::String("output_sha256".to_string())))
+                                .and_then(|v| v.as_str());
+                            if other_sha == Some(binding.output_sha256.as_str()) {
+                                let body = serde_json::json!({
+                                    "error": format!(
+                                        "prd-resolve refused: witness binding for {} reuses output_sha256 {}, already bound to {}",
+                                        id_target,
+                                        binding.output_sha256,
+                                        other_id.unwrap_or("?")
+                                    ),
+                                    "deviation_kind": "prd-resolve-duplicate-witness",
+                                    "deviation_severity": "deny",
+                                    "prd_id": id_target,
+                                    "duplicate_of": other_id,
+                                    "hint": "One witness output closes one row. A row that really shares a witness with another row should be re-scoped with prd-add, not closed with the same output file.",
+                                })
+                                .to_string();
+                                return (
+                                    body,
+                                    format!(
+                                        "prd-resolve refused: duplicate witness binding for {}",
+                                        id_target
+                                    ),
+                                    1,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     if !status_kept
         && policy.reject_duplicate_witness
         && deviation_refuses("prd-resolve-duplicate-witness")
@@ -992,6 +1449,12 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                                     Value::String(w.clone()),
                                 );
                             }
+                            if let Some(binding) = witness_binding.as_ref() {
+                                map.insert(
+                                    Value::String("witness_binding".to_string()),
+                                    binding.to_yaml(),
+                                );
+                            }
                             if let Some(c) = commit_comment.as_ref() {
                                 map.insert(
                                     Value::String("commit_comment".to_string()),
@@ -1043,7 +1506,18 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 serde_json::json!({ "id": id_target }),
             );
             let outcome_key = if status_kept { "annotated" } else { "resolved" };
-            (serde_json::json!({ outcome_key: id_target, "status_kept": status_kept, "commit_comment_attached": commit_comment.is_some(), "witness_dispatch_id_verified": witness_dispatch_id.is_some() }).to_string(), String::new(), 0)
+            let reply = serde_json::json!({
+                outcome_key: id_target,
+                "status_kept": status_kept,
+                "commit_comment_attached": commit_comment.is_some(),
+                "witness_bound": witness_binding.is_some(),
+                "witness_binding": witness_binding.as_ref().map(VerifiedWitness::to_json),
+                "witness_dispatch_id_verified": dispatch_verified,
+                "witness_dispatch_id_field": "witness_dispatch_id",
+                "witness_dispatch_id_in_evidence": evidence_dispatch_id,
+                "witness_dispatch_id_in_ledger": evidence_in_ledger,
+            });
+            (reply.to_string(), String::new(), 0)
         }
         Err((out, err, rc)) => (out, err, rc),
     }
