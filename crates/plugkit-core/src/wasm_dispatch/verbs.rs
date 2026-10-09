@@ -441,6 +441,22 @@ fn next_dispatch_hint_for(verb: &str) -> Value {
     }
 }
 
+fn session_not_implemented_in_guest(verb: &str, canonical: &str) -> u64 {
+    let reason = format!(
+        "{canonical} needs a browser session registry, and this guest holds none: crawl sessions are owned by the host's crawl_cdp entry point and the lightpanda sibling, and neither exposes a list or close call to the guest"
+    );
+    pack(
+        json!({
+            "ok": false,
+            "verb": verb,
+            "error_code": "not_implemented_in_guest",
+            "reason": reason,
+            "next_dispatch_hint": next_dispatch_hint_for(verb),
+        })
+        .to_string(),
+    )
+}
+
 fn err(verb: &str, reason: &str) -> u64 {
     err_coded(verb, ERR_CODE_FAILED, reason)
 }
@@ -846,23 +862,28 @@ fn split_crawl_engine(body_s: &str) -> (&str, &str) {
     let (first, rest) = body_s.split_once('\n').unwrap_or((body_s, ""));
     match first.trim().strip_prefix("engine=") {
         Some(name) => (name.trim(), rest),
-        None => (CRAWL_ENGINE_CDP, body_s),
+        None => (CRAWL_ENGINE_LIGHTPANDA, body_s),
     }
 }
 
 fn crawl(body_s: &str) -> u64 {
     let (engine, request) = split_crawl_engine(body_s);
+    crawl_engine(engine, request)
+}
+
+fn chrome(body_s: &str) -> u64 {
+    let (_, request) = split_crawl_engine(body_s);
+    crawl_engine(CRAWL_ENGINE_CDP, request)
+}
+
+fn crawl_engine(engine: &str, request: &str) -> u64 {
     match engine {
         CRAWL_ENGINE_CDP => crawl_reply(crawl_cdp_call(request)),
-        CRAWL_ENGINE_LIGHTPANDA => {
-            crawl_reply(plugin_call_text("lightpanda", "crawl", request))
-        }
+        CRAWL_ENGINE_LIGHTPANDA => crawl_reply(plugin_call_text("lightpanda", "crawl", request)),
         other => err_coded(
             "crawl",
             CRAWL_ERR_UNKNOWN_ENGINE,
-            &format!(
-                "unknown crawl engine \"{other}\": the first line must be engine=cdp (headful Chrome over CDP, the default) or engine=lightpanda (headless)"
-            ),
+            &format!("unknown crawl engine \"{other}\": the first line must be engine=lightpanda (headless, the default) or engine=cdp (headful Chrome over CDP)"),
         ),
     }
 }
@@ -2126,6 +2147,7 @@ fn verb_body_must_be_json(verb: &str) -> bool {
             | "powershell"
             | "ps1"
             | "crawl"
+            | "chrome"
     )
 }
 
@@ -2462,6 +2484,9 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "scan_deps" | "scan-deps" => scan_deps(&body),
         "fetch" => fetch(&body),
         "crawl" => crawl(&body_s),
+        "chrome" => chrome(&body_s),
+        "session-list" | "session_list" => session_not_implemented_in_guest(verb, "session-list"),
+        "session-close-all" | "session_close_all" => session_not_implemented_in_guest(verb, "session-close-all"),
         "env_get" => env_get(&body),
         "kv_get" => kv_get(&body),
         "kv_put" => kv_put(&body),
