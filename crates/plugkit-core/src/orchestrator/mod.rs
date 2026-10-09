@@ -420,6 +420,7 @@ orchestrator_dispatch_table! {
     "component-loader-hmr" => component_loader_dispatch::handle_hmr(content),
     "auto-recall" => recall::handle_auto_recall(content),
     "instruction" => instructions::handle_instruction(content),
+    "pool-brief" => pool_slots::handle_brief(content),
     "prd-add" => prd::handle_add(content),
     "prd-resolve" => prd::handle_resolve(content),
     "prd-list" => prd::handle_list(content),
