@@ -366,14 +366,25 @@ fn rows_truncation_note(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn ready_wave(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
+fn ready_wave(items: &[serde_json::Value], session: Option<&str>) -> Vec<serde_json::Value> {
+    let Some(session) = session else {
+        return Vec::new();
+    };
+    let owned = |it: &serde_json::Value| {
+        it.get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s == session)
+            .unwrap_or(false)
+    };
     let completed_ids: std::collections::HashSet<String> = items
         .iter()
+        .filter(|it| owned(it))
         .filter(|it| !item_is_open(it))
         .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
         .collect();
     let unblocked: Vec<serde_json::Value> = items
         .iter()
+        .filter(|it| owned(it))
         .filter(|it| item_is_open(it))
         .filter(|it| {
             it.get("blockedBy")
@@ -735,19 +746,21 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     };
 
     let instruction_hash = format!("{:016x}", fnv1a64(&instruction));
-    let prior_instruction_hash = notify_session.as_deref().and_then(|sid| {
-        read_spool_json(&format!(".last-instruction-hash-{sid}.json"))
-            .get("hash")
-            .and_then(|h| h.as_str())
-            .map(|s| s.to_string())
-    });
+    let prior_marker = notify_session
+        .as_deref()
+        .map(|sid| read_spool_json(&format!(".last-instruction-hash-{sid}.json")))
+        .unwrap_or(serde_json::Value::Null);
+    let prior_instruction_hash = prior_marker
+        .get("hash")
+        .and_then(|h| h.as_str())
+        .map(|s| s.to_string());
     let instruction_unchanged = !requests_entry_extended
         && asserted_instruction_hash.as_deref() == Some(instruction_hash.as_str());
     let instruction_suppressible_but_unasserted = !requests_entry_extended
         && asserted_instruction_hash.is_none()
         && prior_instruction_hash.as_deref() == Some(instruction_hash.as_str());
     if let Some(sid) = notify_session.as_deref() {
-        let marker = json!({ "hash": instruction_hash, "ts": super::state::now_ms() });
+        let marker = json!({ "hash": instruction_hash, "phase": phase, "ts": super::state::now_ms() });
         let _ = pkfs::write(
             &super::gm_dir()
                 .join("exec-spool")
@@ -856,7 +869,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
 
     let prompt = read_last_prompt();
     let nouns = orient_nouns(&prompt);
-    let wave = ready_wave(&prd_items);
+    let wave = ready_wave(&prd_items, session_id_opt.as_deref());
     let mutables_pending_count = mutables_pending.len();
 
     let payload_limits = payload_cfg();
