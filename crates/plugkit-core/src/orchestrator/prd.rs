@@ -74,41 +74,40 @@ pub fn drain_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)>
         "prd-drain-commit-comments",
         |mut doc: Value| {
             drained.clear();
-            let mut closed_rows_removed = 0usize;
+            let comment_key = Value::String("commit_comment".to_string());
             if let Some(seq) = doc.as_sequence_mut() {
-                let before = seq.len();
-                seq.retain(|item| {
-                    let Some(map) = item.as_mapping() else {
-                        return true;
+                for item in seq.iter_mut() {
+                    let Some(map) = item.as_mapping_mut() else {
+                        continue;
                     };
                     let status = map
                         .get(&Value::String("status".to_string()))
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     if status_is_open(status) {
-                        return true;
+                        continue;
                     }
+                    let comment = map
+                        .get(&comment_key)
+                        .and_then(|v| v.as_str())
+                        .map(|c| c.trim().to_string())
+                        .filter(|c| !c.is_empty());
+                    let Some(comment) = comment else {
+                        continue;
+                    };
                     let id = map
                         .get(&Value::String("id".to_string()))
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let comment = map
-                        .get(&Value::String("commit_comment".to_string()))
-                        .and_then(|v| v.as_str())
-                        .map(|c| c.trim().to_string())
-                        .filter(|c| !c.is_empty());
-                    if let Some(c) = comment {
-                        drained.push((id, c));
-                    }
-                    false
-                });
-                closed_rows_removed = before - seq.len();
+                    drained.push((id, comment));
+                    map.remove(&comment_key);
+                }
             }
-            if closed_rows_removed == 0 {
+            if drained.is_empty() {
                 return cas::CasOutcome::Abort(
                     String::new(),
-                    "no closed PRD rows to drain".to_string(),
+                    "no closed PRD row carries a commit_comment".to_string(),
                     0,
                 );
             }
