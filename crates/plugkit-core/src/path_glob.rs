@@ -9,6 +9,10 @@ pub struct PathGlob {
 
 impl PathGlob {
     pub fn parse(pattern: &str) -> Result<PathGlob, String> {
+        Self::parse_with_case(pattern, true)
+    }
+
+    pub fn parse_with_case(pattern: &str, case_insensitive: bool) -> Result<PathGlob, String> {
         let normalized = pattern.trim().replace('\\', "/");
         let normalized = normalized.trim_start_matches("./");
         if normalized.is_empty() {
@@ -17,7 +21,7 @@ impl PathGlob {
             ));
         }
         let glob = GlobBuilder::new(normalized)
-            .case_insensitive(true)
+            .case_insensitive(case_insensitive)
             .literal_separator(false)
             .empty_alternates(true)
             .build()

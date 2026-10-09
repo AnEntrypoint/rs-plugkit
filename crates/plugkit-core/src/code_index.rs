@@ -3900,39 +3900,20 @@ pub fn git_commit_rank_at(root: &str, query: &str, k: usize) -> Vec<Value> {
     ranked
 }
 
-fn glob_match_simple(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    let (mut pi, mut ti, mut star, mut match_i) = (0usize, 0usize, None::<usize>, 0usize);
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some(pi);
-            match_i = ti;
-            pi += 1;
-        } else if let Some(sp) = star {
-            pi = sp + 1;
-            match_i += 1;
-            ti = match_i;
-        } else {
-            return false;
-        }
-    }
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == p.len()
-}
-
 pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
     let needle = if req.case_insensitive {
         req.pattern.to_lowercase()
     } else {
         req.pattern.to_owned()
     };
-    let is_glob = needle.contains('*') || needle.contains('?');
+    let name_glob = if crate::path_glob::looks_like_glob(req.pattern) {
+        match crate::path_glob::PathGlob::parse_with_case(req.pattern, req.case_insensitive) {
+            Ok(parsed) => Some(parsed),
+            Err(error) => return json!({ "ok": false, "error": error, "mode": "filename" }),
+        }
+    } else {
+        None
+    };
     let root = req.root.filter(|p| !p.is_empty()).unwrap_or(".");
     let scope = req.paths.first().copied().filter(|p| !p.is_empty());
     let origin = if req.root.filter(|p| !p.is_empty()).is_some() {
@@ -3972,16 +3953,14 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
     let mut paths: Vec<String> = full_files
         .iter()
         .filter(|path| admitted(path))
-        .filter(|p| {
-            let lp = if req.case_insensitive {
-                p.to_lowercase()
-            } else {
-                (*p).clone()
-            };
-            if is_glob {
-                glob_match_simple(&needle, &lp)
-                    || glob_match_simple(&needle, lp.rsplit('/').next().unwrap_or(&lp))
-            } else {
+        .filter(|p| match &name_glob {
+            Some(glob) => glob.admits(root, scope, p),
+            None => {
+                let lp = if req.case_insensitive {
+                    p.to_lowercase()
+                } else {
+                    (*p).clone()
+                };
                 lp.contains(&needle)
             }
         })
@@ -4036,6 +4015,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
     out.insert("scanned".to_string(), json!(full_files.len()));
     out.insert("file_source".to_string(), json!(universe.source.label()));
     out.insert("exhaustive".to_string(), json!(exhaustive));
+    insert_excluded_by_rule(&mut out, &universe.excluded);
     if matches_truncated {
         out.insert("matches_truncated".to_string(), json!(true));
         out.insert("matches_truncated_at".to_string(), json!(limit));
@@ -4604,6 +4584,43 @@ where
     out
 }
 
+/// Names every path a scan-universe rule dropped. A non-zero `excluded_by_rule_count` is a coverage
+/// gap, and `finish_scan_reply` clears `exhaustive` on it, so every exhaustive scan calls this.
+fn insert_excluded_by_rule(
+    out: &mut serde_json::Map<String, Value>,
+    excluded: &[crate::scan_universe::RuleExclusion],
+) {
+    if excluded.is_empty() {
+        return;
+    }
+    let cap = 200usize;
+    let shown: Vec<Value> = excluded
+        .iter()
+        .take(cap)
+        .map(|e| match e.files {
+            Some(files) => json!({ "path": e.path, "rule": e.rule, "files": files }),
+            None => json!({ "path": e.path, "rule": e.rule }),
+        })
+        .collect();
+    let mut paths_by_rule = serde_json::Map::new();
+    for e in excluded {
+        let seen = paths_by_rule
+            .get(e.rule)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        paths_by_rule.insert(e.rule.to_string(), json!(seen + 1));
+    }
+    out.insert("excluded_by_rule".to_string(), json!(shown));
+    out.insert(
+        "excluded_by_rule_summary".to_string(),
+        Value::Object(paths_by_rule),
+    );
+    out.insert(
+        "excluded_by_rule_count".to_string(),
+        json!(excluded.len()),
+    );
+}
+
 pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
     if req.pattern.is_empty() {
         return json!({ "ok": false, "error": "pattern required -- an exhaustive scan needs something to match" });
@@ -5100,46 +5117,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             out.insert("walk_reason".to_string(), json!(reason));
         }
     }
-    let pruned_by_foreign_rule = universe
-        .excluded
-        .iter()
-        .filter(|e| e.rule != crate::scan_universe::OWN_STATE_RULE)
-        .count();
-    if !req.verbose && pruned_by_foreign_rule > 0 {
-        out.insert(
-            "excluded_by_rule_count".to_string(),
-            json!(pruned_by_foreign_rule),
-        );
-    }
-    if req.verbose && !universe.excluded.is_empty() {
-        let cap = 200usize;
-        let shown: Vec<Value> = universe
-            .excluded
-            .iter()
-            .take(cap)
-            .map(|e| match e.files {
-                Some(files) => json!({ "path": e.path, "rule": e.rule, "files": files }),
-                None => json!({ "path": e.path, "rule": e.rule }),
-            })
-            .collect();
-        let mut paths_by_rule = serde_json::Map::new();
-        for e in &universe.excluded {
-            let seen = paths_by_rule
-                .get(e.rule)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            paths_by_rule.insert(e.rule.to_string(), json!(seen + 1));
-        }
-        out.insert("excluded_by_rule".to_string(), json!(shown));
-        out.insert(
-            "excluded_by_rule_summary".to_string(),
-            Value::Object(paths_by_rule),
-        );
-        out.insert(
-            "excluded_by_rule_count".to_string(),
-            json!(universe.excluded.len()),
-        );
-    }
+    insert_excluded_by_rule(&mut out, &universe.excluded);
     out.insert("term_combination".to_string(), json!(combination.label()));
     if let Some(quota) = per_file_quota {
         out.insert("max_matches_per_file".to_string(), json!(quota));
@@ -6184,6 +6162,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     out.insert("elapsed_ms".to_string(), json!(elapsed_ms));
     out.insert("max_matches".to_string(), json!(max_matches));
     out.insert("exhaustive".to_string(), json!(exhaustive));
+    insert_excluded_by_rule(&mut out, &universe.excluded);
     if files_truncated {
         out.insert("files_truncated".to_string(), json!(true));
         out.insert("files_truncated_at".to_string(), json!(file_cap));
