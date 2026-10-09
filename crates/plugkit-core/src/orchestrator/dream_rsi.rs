@@ -17,6 +17,9 @@ struct Policy {
     id: String,
     roots: Vec<String>,
     max_nodes: usize,
+    attempt: Option<u64>,
+    group_size: Option<u64>,
+    stop: Option<String>,
 }
 
 struct World {
@@ -82,6 +85,9 @@ fn parse_policy(value: &Value) -> Result<Policy, String> {
         id,
         roots,
         max_nodes,
+        attempt: value.get("attempt").and_then(Value::as_u64),
+        group_size: value.get("group_size").and_then(Value::as_u64),
+        stop: value.get("stop").and_then(Value::as_str).map(ToOwned::to_owned),
     })
 }
 
@@ -232,9 +238,15 @@ fn evaluate_worlds(
             .iter()
             .filter_map(|replay| replay.get("cost").and_then(Value::as_u64))
             .sum::<u64>();
-        rankings.push(
-            json!({ "policy_id": policy.id, "score": score, "cost": cost, "replays": replays }),
-        );
+        rankings.push(json!({
+            "policy_id": policy.id,
+            "score": score,
+            "cost": cost,
+            "attempt": policy.attempt,
+            "group_size": policy.group_size,
+            "stop": policy.stop,
+            "replays": replays,
+        }));
     }
     let baseline = rankings
         .iter()
@@ -264,12 +276,23 @@ fn evaluate_worlds(
         })
         .cloned()
         .unwrap_or(baseline.clone());
+    let declared = |key: &str| {
+        let value = selected.get(key).cloned().unwrap_or(Value::Null);
+        if value.is_null() {
+            baseline.get(key).cloned().unwrap_or(Value::Null)
+        } else {
+            value
+        }
+    };
     Ok(json!({
         "ok": true,
         "baseline_policy_id": baseline_id,
         "selected_policy_id": selected.get("policy_id").and_then(Value::as_str),
         "baseline_score": baseline_score,
         "selected_score": selected.get("score").and_then(Value::as_f64),
+        "attempt": declared("attempt"),
+        "group_size": declared("group_size"),
+        "stop": declared("stop"),
         "improved": selected.get("policy_id") != baseline.get("policy_id"),
         "beta1": beta1,
         "beta2": beta2,
@@ -1101,6 +1124,14 @@ pub fn replay_round(content: &str) -> Result<Value, String> {
             .ok_or_else(|| "dream-replay-round requires positive integer max_rounds".to_string())?;
         let beta1 = nonneg_f64_field(&body, "beta1")?;
         let beta2 = nonneg_f64_field(&body, "beta2")?;
+        let round_budget = match body.get("round_budget") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_u64()
+                    .ok_or_else(|| "dream-replay-round round_budget must be a non-negative integer".to_string())?,
+            ),
+        };
         let policy_path = session_store_path("policies")?;
         let raw_policies = crate::pkfs::read_to_string(&policy_path)
             .ok_or_else(|| "dream-replay-round has no registered policies".to_string())?;
@@ -1154,6 +1185,7 @@ pub fn replay_round(content: &str) -> Result<Value, String> {
             "max_rounds": max_rounds,
             "beta1": beta1,
             "beta2": beta2,
+            "round_budget": round_budget,
             "revealed": Vec::<String>::new(),
             "rounds_used": 0,
             "quality": Value::Null,
@@ -1222,6 +1254,7 @@ pub fn replay_round(content: &str) -> Result<Value, String> {
         .and_then(Value::as_f64)
         .unwrap_or(f64::NEG_INFINITY);
     let mut cost = state.get("cost").and_then(Value::as_u64).unwrap_or(0);
+    let round_budget = state.get("round_budget").and_then(Value::as_u64);
 
     let eligible = eligible_nodes(&roots, &revealed, &world);
     let requested_batch: Vec<String> = body
@@ -1247,6 +1280,7 @@ pub fn replay_round(content: &str) -> Result<Value, String> {
                 ));
             }
         }
+        let mut round_cost = 0_u64;
         for id in &requested_batch {
             let node = world
                 .nodes
@@ -1262,6 +1296,16 @@ pub fn replay_round(content: &str) -> Result<Value, String> {
                     cost = cost
                         .checked_add(child.cost)
                         .ok_or_else(|| "dream-replay-round cost overflow".to_string())?;
+                    round_cost = round_cost
+                        .checked_add(child.cost)
+                        .ok_or_else(|| "dream-replay-round round cost overflow".to_string())?;
+                    if let Some(budget) = round_budget {
+                        if round_cost > budget {
+                            return Err(format!(
+                                "dream-replay-round {replay_id} round_budget_exceeded: round cost {round_cost} exceeds round_budget {budget}"
+                            ));
+                        }
+                    }
                     newly_revealed
                         .push(json!({ "id": child_id, "score": child.score, "cost": child.cost }));
                 }
@@ -1295,6 +1339,7 @@ pub fn replay_round(content: &str) -> Result<Value, String> {
             "ok": true, "replay_id": replay_id, "closed": true, "rounds_used": rounds_used,
             "revealed_count": revealed.len(), "quality": final_quality, "cost": cost,
             "parallelism_bonus": parallelism_bonus, "replay_score": replay_score,
+            "round_budget": round_budget,
         })
     } else {
         json!({
@@ -1303,6 +1348,7 @@ pub fn replay_round(content: &str) -> Result<Value, String> {
             "eligible_next": eligible_nodes(&roots, &revealed, &world).into_iter().collect::<Vec<_>>(),
             "quality_so_far": if quality.is_finite() { Value::from(quality) } else { Value::Null },
             "cost_so_far": cost,
+            "round_budget": round_budget,
         })
     };
 
@@ -1414,6 +1460,35 @@ pub fn evaluate(content: &str) -> Result<Value, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     evaluate_worlds(baseline_id, policies, worlds, beta1, beta2)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn dream_round(content: &str) -> Result<Value, String> {
+    let mut body: Value = serde_json::from_str(content)
+        .map_err(|error| format!("dream-round requires JSON: {error}"))?;
+    let baseline_id = string_field(&body, "baseline_policy_id")?;
+    let mut policy_ids = vec![Value::String(baseline_id.clone())];
+    for candidate in array_field(&body, "candidate_policy_ids")? {
+        if !policy_ids.contains(candidate) {
+            policy_ids.push(candidate.clone());
+        }
+    }
+    body["policy_ids"] = Value::Array(policy_ids);
+    let mut result = evaluate(&body.to_string())?;
+    let mut rankings = result
+        .get("rankings")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| "dream-round ranking missing".to_string())?;
+    rankings.sort_by(|left, right| {
+        right
+            .get("score")
+            .and_then(Value::as_f64)
+            .partial_cmp(&left.get("score").and_then(Value::as_f64))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    result["rankings"] = Value::Array(rankings);
+    Ok(result)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
