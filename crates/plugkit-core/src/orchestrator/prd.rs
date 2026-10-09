@@ -474,11 +474,16 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
+    let overwrite = item_map
+        .get(&Value::String("overwrite".to_string()))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-add", |mut doc: Value| {
         let mut add_outcome = AddOutcome::Added;
         if let Some(seq) = doc.as_sequence_mut() {
             let mut new_with_id = item_map.clone();
+            new_with_id.remove(&Value::String("overwrite".to_string()));
             new_with_id.insert(Value::String("id".to_string()), Value::String(id.clone()));
             if !new_with_id.contains_key(&Value::String("status".to_string())) {
                 new_with_id.insert(
@@ -495,12 +500,21 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             });
             match existing {
                 Some(slot) => {
-                    add_outcome = if *slot == new_row {
-                        AddOutcome::AlreadyIdentical
+                    if *slot == new_row {
+                        add_outcome = AddOutcome::AlreadyIdentical;
+                    } else if overwrite {
+                        add_outcome = AddOutcome::Rescoped;
+                        *slot = new_row;
                     } else {
-                        AddOutcome::Rescoped
-                    };
-                    *slot = new_row;
+                        return cas::CasOutcome::Abort(
+                            String::new(),
+                            format!(
+                                "prd-add refused: id '{}' already exists. Pass overwrite:true to rescope it, or prd-block {{id, note}} to annotate it.",
+                                id
+                            ),
+                            1,
+                        );
+                    }
                 }
                 None => seq.push(new_row),
             }
@@ -1031,6 +1045,48 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             let outcome_key = if status_kept { "annotated" } else { "resolved" };
             (serde_json::json!({ outcome_key: id_target, "status_kept": status_kept, "commit_comment_attached": commit_comment.is_some(), "witness_dispatch_id_verified": witness_dispatch_id.is_some() }).to_string(), String::new(), 0)
         }
+        Err((out, err, rc)) => (out, err, rc),
+    }
+}
+
+pub fn handle_block(content: &str) -> (String, String, i32) {
+    let body: Value = match serde_json::from_str::<Value>(content.trim()) {
+        Ok(v) => v,
+        Err(_) => return (String::new(), "prd-block body must be JSON {id, note}".to_string(), 1),
+    };
+    let (Some(id), Some(note)) = (
+        body.get("id").and_then(Value::as_str).map(str::to_string),
+        body.get("note").and_then(Value::as_str).map(str::to_string),
+    ) else {
+        return (String::new(), "prd-block requires id and note".to_string(), 1);
+    };
+    let path_s = prd_path().to_string_lossy().to_string();
+    let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
+    let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-block", |mut doc: Value| {
+        let Some(seq) = doc.as_sequence_mut() else {
+            return cas::CasOutcome::Abort(String::new(), "prd.yml is not a sequence".to_string(), 1);
+        };
+        let key = Value::String("id".to_string());
+        let Some(row) = seq
+            .iter_mut()
+            .find(|it| it.as_mapping().and_then(|m| m.get(&key)).and_then(|v| v.as_str()) == Some(id.as_str()))
+        else {
+            return cas::CasOutcome::Abort(String::new(), format!("no PRD row with id {}", id), 1);
+        };
+        let Some(map) = row.as_mapping_mut() else {
+            return cas::CasOutcome::Abort(String::new(), "PRD row is not a mapping".to_string(), 1);
+        };
+        let notes_key = Value::String("blocker_notes".to_string());
+        let mut notes = map
+            .get(&notes_key)
+            .and_then(|v| v.as_sequence().cloned())
+            .unwrap_or_default();
+        notes.push(Value::String(note.clone()));
+        map.insert(notes_key, Value::Sequence(notes));
+        cas::CasOutcome::Write(doc, ())
+    });
+    match outcome {
+        Ok(()) => (serde_json::json!({"ok": true, "blocked_annotated": id}).to_string(), String::new(), 0),
         Err((out, err, rc)) => (out, err, rc),
     }
 }
