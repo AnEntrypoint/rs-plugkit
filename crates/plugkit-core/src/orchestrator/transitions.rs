@@ -292,12 +292,31 @@ fn residual_scan_denial_detail() -> String {
     }
 }
 
+fn fold_last_block_wins(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut folded: Vec<serde_json::Value> = Vec::new();
+    let mut position: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for item in items {
+        match item.get("id").and_then(|v| v.as_str()) {
+            Some(id) => match position.get(id) {
+                Some(&at) => folded[at] = item.clone(),
+                None => {
+                    position.insert(id.to_string(), folded.len());
+                    folded.push(item.clone());
+                }
+            },
+            None => folded.push(item.clone()),
+        }
+    }
+    folded
+}
+
 pub(super) fn prd_open_rows() -> Vec<serde_json::Value> {
     let (body, _err, code) = prd::handle_list_full();
     if code != 0 { return Vec::new(); }
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return Vec::new() };
     let Some(items) = v.get("items").and_then(|v| v.as_array()) else { return Vec::new() };
-    items
+    let folded = fold_last_block_wins(items);
+    folded
         .iter()
         .filter(|it| {
             let status = it
