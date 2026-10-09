@@ -159,9 +159,6 @@ fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         }
         let body = pkfs::read_to_string(&path).unwrap_or_default();
         let identity = heartbeat_identity(&body);
-        if identity.session.is_none() {
-            continue;
-        }
         live.words.extend(
             body.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
                 .filter(|word| !word.is_empty())
