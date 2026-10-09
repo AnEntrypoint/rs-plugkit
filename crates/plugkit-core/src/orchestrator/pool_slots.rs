@@ -5,7 +5,6 @@ use crate::pkfs;
 
 pub const HEARTBEAT_LIVE_MS: u64 = 10 * 60 * 1000;
 const HEARTBEAT_REAP_MS: u64 = 60 * 60 * 1000;
-const CANDIDATE_CAP: usize = 50;
 const CEILING_KEYWORDS: [&str; 3] = ["maximum", "ceiling", "limit"];
 
 #[cfg(target_arch = "wasm32")]
@@ -106,9 +105,7 @@ fn ceiling_from_refusal(text: &str) -> Option<u64> {
 }
 
 fn is_blocker_row(row: &Value) -> bool {
-    row.get("id")
-        .and_then(Value::as_str)
-        .is_some_and(|id| id.contains("-blocker-"))
+    row.get("id").and_then(Value::as_str).is_some_and(super::pool_rank::is_blocker_id)
 }
 
 pub fn slot_state(project_root: &str) -> Value {
@@ -119,14 +116,8 @@ pub fn slot_state(project_root: &str) -> Value {
     let (blockers, work): (Vec<Value>, Vec<Value>) =
         prd_open_rows().into_iter().partition(is_blocker_row);
     let open_rows = work.len();
-    let mut candidates: Vec<String> = work
-        .iter()
-        .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
-        .filter(|id| !live.rows.contains(id))
-        .collect();
-    candidates.sort();
-    candidates.dedup();
-    candidates.truncate(CANDIDATE_CAP);
+    let ranked = super::pool_rank::rank(&work, &blockers, &live.rows);
+    let candidates = ranked["candidates"].clone();
     let action = match (open_rows, free) {
         (0, _) => "none",
         (_, Some(0)) => "hold",
@@ -138,6 +129,7 @@ pub fn slot_state(project_root: &str) -> Value {
         "open_rows": open_rows,
         "blocker_rows": blockers.len(),
         "candidates": candidates,
+        "supply": ranked["supply"].clone(),
         "ceiling": ceiling,
         "free": free,
         "action": action,
