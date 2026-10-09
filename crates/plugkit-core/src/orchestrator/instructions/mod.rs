@@ -228,7 +228,7 @@ pub fn fnv1a64(text: &str) -> u64 {
     hash
 }
 
-pub fn get_instruction(phase: &str) -> String {
+pub fn get_instruction(phase: &str) -> (String, Option<String>) {
     let upper = phase.trim().to_ascii_uppercase();
     let g = super::fsm::graph();
     let pseudo = g
@@ -245,13 +245,18 @@ pub fn get_instruction(phase: &str) -> String {
             .map(|s| s.prose_key.clone())
             .unwrap_or_else(|| "entry".to_string()),
     };
-    let phase_prose = crate::prose::resolve(&key, compiled_default_for_prose_key(&key));
+    let (phase_prose, phase_degraded) =
+        crate::prose::resolve_with_degradation(&key, compiled_default_for_prose_key(&key));
 
     if key == "entry" {
-        return phase_prose;
+        return (phase_prose, phase_degraded);
     }
-    let entry_prose = crate::prose::resolve("entry", entry::TEXT);
-    format!("{}\n\n{}", entry_prose, phase_prose)
+    let (entry_prose, entry_degraded) =
+        crate::prose::resolve_with_degradation("entry", entry::TEXT);
+    (
+        format!("{}\n\n{}", entry_prose, phase_prose),
+        phase_degraded.or(entry_degraded),
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -570,6 +575,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     }
     let trimmed = content.trim();
     let mut session_id_opt: Option<String> = None;
+    let mut lease_sessions_opt: Option<Vec<serde_json::Value>> = None;
     let mut prompt_opt: Option<String> = None;
     let mut asserted_instruction_hash: Option<String> = None;
     let mut asserted_policy_hash: Option<String> = None;
@@ -585,6 +591,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         if let Some(sid) = crate::validation::session_id_from_body(&v) {
             session_id_opt = Some(sid);
         }
+        lease_sessions_opt = v.get("_lease_sessions").and_then(serde_json::Value::as_array).cloned();
         if let Some(p) = v.get("prompt").and_then(|s| s.as_str()) {
             prompt_opt = Some(p.to_string());
         }
@@ -648,8 +655,17 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     }
 
     let prior_session_owner = read_state().session_id;
+    let owner_lease: Option<serde_json::Value> = match (&lease_sessions_opt, &prior_session_owner) {
+        (Some(facts), Some(owner)) => facts
+            .iter()
+            .find(|fact| fact.get("session_id").and_then(serde_json::Value::as_str) == Some(owner.as_str()))
+            .cloned(),
+        _ => None,
+    };
     let session_mismatch = match (&session_id_opt, &prior_session_owner) {
-        (Some(incoming), Some(prior)) => incoming != prior,
+        (Some(incoming), Some(prior)) => {
+            incoming != prior && (lease_sessions_opt.is_none() || owner_lease.is_some())
+        }
         _ => false,
     };
 
@@ -769,8 +785,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         .as_deref()
         .map(|p| p.trim().eq_ignore_ascii_case("entry-extended"))
         .unwrap_or(false);
-    let instruction = if requests_entry_extended {
-        crate::prose::resolve("entry-extended", entry_extended::TEXT)
+    let (instruction, instruction_degraded) = if requests_entry_extended {
+        crate::prose::resolve_with_degradation("entry-extended", entry_extended::TEXT)
     } else {
         get_instruction(&phase)
     };
@@ -1008,10 +1024,13 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "session_id": session_id_opt,
         "session_owner_before_this_dispatch": prior_session_owner,
         "session_mismatch": session_mismatch,
+        "session_owner_lease": owner_lease,
         "sub_phase": if await_result.is_some() { "AWAIT-RESULT" } else { "" },
         "await_result": await_result,
         "instruction": instruction_for_payload,
         "instruction_hash": instruction_hash,
+        "degraded": instruction_degraded.is_some(),
+        "degraded_reason": instruction_degraded,
         "instruction_unchanged": instruction_unchanged,
         "policy_hash": discipline_policies_hash,
         "instruction_suppressible_by_asserting_hash": instruction_suppressible_but_unasserted,
