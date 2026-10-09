@@ -1284,14 +1284,11 @@ pub(super) fn git_commit_failed_for_missing_identity(sout: &str, serr: &str) -> 
     false
 }
 
-pub(super) fn git_last_commit_identity(cwd: Option<&str>) -> Option<(String, String)> {
-    let r = git_call_argv(&["log", "-1", "--format=%an%x00%ae"], cwd);
-    if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) != 0 {
-        return None;
-    }
-    let mut parts = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").split('\0');
-    let name = parts.next().unwrap_or("").trim().to_string();
-    let email = parts.next().unwrap_or("").trim().to_string();
+pub(super) const MISSING_COMMIT_IDENTITY: &str = "git commit needs an author identity: pass author_name and author_email in the body, or set user.name and user.email in this repository. The identity of an earlier commit is never reused.";
+
+pub(super) fn body_commit_identity(body: &Value) -> Option<(String, String)> {
+    let field = |key: &str| body.get(key).and_then(|v| v.as_str()).map(str::trim).unwrap_or("").to_string();
+    let (name, email) = (field("author_name"), field("author_email"));
     if name.is_empty() || email.is_empty() {
         return None;
     }
@@ -1652,9 +1649,10 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             }
         }
         let bundled_message = bundle_prd_commit_comments(cwd, message);
+        let identity = body_commit_identity(body);
         let r = git_step_replayed_by_call_order(
             plan,
-            &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, scoped_paths, None)),
+            &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, scoped_paths, identity.as_ref())),
             cwd,
         )?;
         write_steps.push(r.clone());
@@ -1667,27 +1665,10 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                     with_exclusion_report(json!({ "nothing_to_commit": true, "requested_paths": paths }), cwd, &paths),
                 ));
             }
-            let identity = if git_commit_failed_for_missing_identity(sout, serr) {
-                git_last_commit_identity(cwd)
-            } else {
-                None
-            };
-            let Some(identity) = identity else {
-                return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
-            };
-            let retried = git_step_replayed_by_call_order(
-                plan,
-                &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, scoped_paths, Some(&identity))),
-                cwd,
-            )?;
-            if retried.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
-                let retry_serr = retried.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
-                let retry_sout = retried.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-                if git_commit_found_nothing_staged(retry_sout, retry_serr, cwd) {
-                    return Ok(ok("git_commit", with_exclusion_report(json!({ "nothing_to_commit": true, "requested_paths": paths }), cwd, &paths)));
-                }
-                return Ok(err("git_commit", if retry_serr.is_empty() { retry_sout } else { retry_serr }));
+            if git_commit_failed_for_missing_identity(sout, serr) {
+                return Ok(err("git_commit", MISSING_COMMIT_IDENTITY));
             }
+            return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
         }
         let after_r = git_step_replayed_by_call_order(plan, &["rev-parse", "HEAD"], cwd)?;
         let head_after = after_r
@@ -1987,20 +1968,13 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         }
         let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
         let scoped_paths: &[String] = if scoped { &paths } else { &[] };
-        let mut cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, None)), cwd_ref);
+        let identity = body_commit_identity(body);
+        let cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, identity.as_ref())), cwd_ref);
         if cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
             let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let sout = cr.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let identity = if git_commit_failed_for_missing_identity(&sout, &serr) {
-                git_last_commit_identity(cwd_ref)
-            } else {
-                None
-            };
-            if let Some(identity) = identity {
-                let retried = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, Some(&identity))), cwd_ref);
-                if retried.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) == 0 {
-                    cr = retried;
-                }
+            if git_commit_failed_for_missing_identity(&sout, &serr) {
+                return err("git_finalize", MISSING_COMMIT_IDENTITY);
             }
         }
         let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -4799,16 +4773,10 @@ pub(super) fn with_exclusion_report(mut data: Value, cwd: Option<&str>, paths: &
         .collect();
     let active = excluded_pathspecs(paths, cwd);
     let active_count = active.len();
-    let active: Vec<String> = active.into_iter().take(50).collect();
+    let active: Vec<String> = active.into_iter().take(5).collect();
     if let Some(map) = data.as_object_mut() {
         map.insert("excluded".to_string(), json!(active));
         map.insert("excluded_count".to_string(), json!(active_count));
-        if active_count > 50 {
-            map.insert(
-                "excluded_truncated_count".to_string(),
-                json!(active_count - 50),
-            );
-        }
         if !paths.is_empty() {
             map.insert("requested_paths".to_string(), json!(paths));
         }
