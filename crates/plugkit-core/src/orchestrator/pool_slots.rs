@@ -193,3 +193,46 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     });
     (out.to_string(), String::new(), 0)
 }
+
+const MONITOR_FLOOR: u64 = 12;
+const MONITOR_ALARM_ACTION: &str = "refill from slots.candidates until a spawn refusal names the ceiling; when candidates run out, dispatch a traversal hop to log node-only PRDs; the loop is wait {\"ms\":60000}, then instruction, then launch the free slots";
+const WORKER_BRIEF_PATH: &str = "C:/dev/spoint/.gm/config-source-cache-default/prose/worker.md";
+
+pub fn monitor_block(slots: &Value) -> Value {
+    let live = slots["live"].as_u64().unwrap_or(0);
+    let open_work = slots["open_rows"].as_u64().unwrap_or(0);
+    json!({
+        "live": live,
+        "floor": MONITOR_FLOOR,
+        "open_work": open_work,
+        "alarm": live < MONITOR_FLOOR && open_work > 0,
+        "alarm_action": MONITOR_ALARM_ACTION,
+    })
+}
+
+pub fn handle_brief(content: &str) -> (String, String, i32) {
+    let Ok(body) = serde_json::from_str::<Value>(content) else {
+        return (String::new(), "pool-brief: body must be JSON {row, session, role}".to_string(), 1);
+    };
+    let field = |key: &str| {
+        body.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let (Some(row), Some(session), Some(role)) = (field("row"), field("session"), field("role")) else {
+        return (String::new(), "pool-brief: body requires non-empty row, session and role".to_string(), 1);
+    };
+    if role != "resolver" && role != "traversal" {
+        return (String::new(), format!("pool-brief: role must be resolver or traversal, got {}", role), 1);
+    }
+    let Some(template) = pkfs::read_to_string(WORKER_BRIEF_PATH) else {
+        return (String::new(), format!("pool-brief: worker brief missing at {}", WORKER_BRIEF_PATH), 1);
+    };
+    let brief = template
+        .replace("{row}", &row)
+        .replace("{session}", &session)
+        .replace("{role}", &role);
+    (json!({"ok": true, "verb": "pool-brief", "brief": brief}).to_string(), String::new(), 0)
+}
