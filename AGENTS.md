@@ -41,7 +41,7 @@
 
 - `scan_literal` skips digest, index, embedding, vector and fusion work entirely; routing a workspace literal query through them measured 120-420 s.
 - Its limits, `LITERAL_SCAN_MAX_FILES` and `LITERAL_SCAN_MAX_FILE_BYTES`, are independent of `IndexConfig::digest_max_files` and `max_file_bytes`; reusing the digest bounds undercounted a 2427-file tree.
-- Any coverage-affecting bound or unreadable file clears `exhaustive`. `files_skipped_binary` never does: a non-text file cannot hold a text match.
+- Any coverage-affecting bound, unreadable file or rule exclusion (`excluded_by_rule`) clears `exhaustive`. `files_skipped_binary` never does: a non-text file cannot hold a text match. The reply layer (`finish_scan_reply`) makes that call, not `scan_literal`: the symbol and dual phrase routes read the walk verdict, so an exclusion they cannot recover does not trigger a second definitions scan.
 - `host_read` returns `None` for both I/O failure and non-UTF-8. `host_stat` separates them: stat ok means binary skip; stat failed means an unreadable gap.
 - Request `file_cap + 1` entries from `list_scan_universe` so an exactly full listing is distinguishable from a truncated one.
 - Unicode lowercasing can change byte width (U+0130). `LiteralMatcher::find_all` then falls back to a char-aligned scan, reads match text with `get`, and returns every match per line.
