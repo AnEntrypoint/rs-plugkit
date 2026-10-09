@@ -1,9 +1,12 @@
 use super::fsm::{self, GateDef, HookMode};
 use super::mutables;
 use super::prd;
+#[cfg(target_arch = "wasm32")]
 use super::recall;
 use super::predicate_registry::{PredicateFn, PREDICATE_REGISTRY};
-use super::state::{read_state_with_graph, set_phase_with_session_with_graph, Phase};
+use super::state::Phase;
+#[cfg(target_arch = "wasm32")]
+use super::state::{read_state_with_graph, set_phase_with_session_with_graph};
 
 pub fn next_skill(current: &Phase, g: &fsm::Graph) -> String {
     g.state(current.as_str())
@@ -179,6 +182,7 @@ pub(super) fn pred_lean_net_negative() -> bool {
     false
 }
 
+#[cfg(target_arch = "wasm32")]
 fn advisory_messages(graph: &fsm::Graph, from: &str, to: &str) -> Vec<String> {
     let Some(edge) = graph.transition_edge(from, to) else {
         return Vec::new();
@@ -275,8 +279,6 @@ fn residual_scan_denial_detail() -> String {
         ),
     }
 }
-#[cfg(not(target_arch = "wasm32"))]
-fn residual_scan_denial_detail() -> String { String::new() }
 
 fn prd_has_open_items() -> bool {
     let (body, _err, code) = prd::handle_list_full();
@@ -327,10 +329,6 @@ fn synthetic_test_files_added_in_working_diff() -> Vec<String> {
     found
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn synthetic_test_files_added_in_working_diff() -> Vec<String> {
-    vec![]
-}
 
 #[cfg(target_arch = "wasm32")]
 pub(super) fn pred_no_synthetic_test_files() -> bool {
@@ -389,11 +387,8 @@ fn added_lines_in_diff() -> Vec<(String, usize, String)> {
     }
     out
 }
-#[cfg(not(target_arch = "wasm32"))]
-fn added_lines_in_diff() -> Vec<(String, usize, String)> {
-    vec![]
-}
 
+#[cfg(target_arch = "wasm32")]
 fn is_test_scoped_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     lower.contains(".test.")
@@ -411,6 +406,7 @@ fn is_test_scoped_path(path: &str) -> bool {
 /// function's own scope boundary -- an outer catch cannot lexically reach across it.
 /// Character-level (not line-level) so a same-line `} catch (e) {` pairs its own
 /// `{` to the throw's block without misreading the leading `}` of the closed `try`.
+#[cfg(target_arch = "wasm32")]
 fn js_throw_has_enclosing_catch(full_text: &str, throw_line_no: usize) -> bool {
     let lines: Vec<&str> = full_text.lines().collect();
     if throw_line_no == 0 || throw_line_no > lines.len() {
@@ -464,6 +460,7 @@ fn js_throw_has_enclosing_catch(full_text: &str, throw_line_no: usize) -> bool {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn needle_first_occurrence_sits_inside_quoted_string_literal(text: &str, needle: &str) -> bool {
     let Some(idx) = text.find(needle) else {
         return false;
@@ -818,10 +815,6 @@ fn working_diff_touched_file_count() -> usize {
         .filter(|l| !l.trim().is_empty())
         .count()
 }
-#[cfg(not(target_arch = "wasm32"))]
-fn working_diff_touched_file_count() -> usize {
-    0
-}
 
 #[cfg(target_arch = "wasm32")]
 pub(super) fn split_context_swept() -> bool {
@@ -971,6 +964,7 @@ fn entry_refusal(graph: &fsm::Graph, from: &str, to: &str) -> Option<String> {
     })
 }
 
+#[cfg(target_arch = "wasm32")]
 fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, String, i32)> {
     let Some(edge) = graph.transition_edge(from, to) else {
         let message = entry_refusal(graph, from, to).unwrap_or_else(|| {

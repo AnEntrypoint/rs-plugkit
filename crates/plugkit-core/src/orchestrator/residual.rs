@@ -1,4 +1,6 @@
+#[cfg(target_arch = "wasm32")]
 use super::gm_dir;
+#[cfg(target_arch = "wasm32")]
 use crate::pkfs;
 
 pub const RESIDUAL_PRD_OPEN_DEFAULT: &str =
@@ -12,16 +14,8 @@ fn porcelain_output() -> String {
     crate::wasm_dispatch::git_porcelain()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn porcelain_output() -> String {
-    std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default()
-}
 
+#[cfg(target_arch = "wasm32")]
 fn count_modified_untracked(porcelain: &str) -> (usize, usize) {
     let mut modified = 0usize;
     let mut untracked = 0usize;
@@ -38,6 +32,7 @@ fn count_modified_untracked(porcelain: &str) -> (usize, usize) {
     (modified, untracked)
 }
 
+#[cfg(target_arch = "wasm32")]
 fn status_is_open(s: Option<&str>) -> bool {
     match s {
         Some(v) => super::prd::status_is_open(v),
@@ -45,6 +40,7 @@ fn status_is_open(s: Option<&str>) -> bool {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn prd_empty_or_missing() -> bool {
     let prd = gm_dir().join("prd.yml");
     let ps = prd.to_string_lossy().to_string();
@@ -83,10 +79,12 @@ fn prd_empty_or_missing() -> bool {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn running_tasks_exist() -> bool {
     super::task::any_running()
 }
 
+#[cfg(target_arch = "wasm32")]
 fn deviation_scan_result(
     payload: serde_json::Value,
     severity: super::deviations::Severity,
@@ -211,7 +209,3 @@ fn liqology_stale_memory_finding() -> Option<serde_json::Value> {
     }))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn liqology_stale_memory_finding() -> Option<serde_json::Value> {
-    None
-}

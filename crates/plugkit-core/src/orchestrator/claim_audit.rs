@@ -1,11 +1,13 @@
 use super::gm_dir;
 use crate::pkfs;
 
+#[cfg(target_arch = "wasm32")]
 fn looks_like_commit_hash(token: &str) -> bool {
     let trimmed = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
     (7..=40).contains(&trimmed.len()) && trimmed.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+#[cfg(target_arch = "wasm32")]
 fn extract_commit_hash_tokens(line: &str) -> Vec<String> {
     line.split_whitespace()
         .map(|token| {
@@ -30,6 +32,7 @@ fn line_asserts_shipped_claim_cfg(line: &str, cfg: &crate::ragconfig::ClaimAudit
         .any(|marker| lower.contains(&marker.to_ascii_lowercase()))
 }
 
+#[cfg(target_arch = "wasm32")]
 fn named_submodule_in_line(line: &str) -> Option<String> {
     let lower = line.to_ascii_lowercase();
     super::submodule_drift::submodule_paths()
@@ -59,10 +62,6 @@ fn commit_hash_exists_in_repo_history(hash: &str, submodule: Option<&str>) -> bo
         == 0
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn commit_hash_exists_in_repo_history(_hash: &str, _submodule: Option<&str>) -> bool {
-    true
-}
 
 #[cfg(target_arch = "wasm32")]
 fn scan_text_for_hash_claims(
