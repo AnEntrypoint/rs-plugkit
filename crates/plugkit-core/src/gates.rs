@@ -153,6 +153,11 @@ const LONGGAP_EXEMPT_WORK_VERBS: &[&str] = &[
 ];
 
 fn long_gap_chain_belongs_to_this_session(policy: &crate::orchestrator::fsm::Policy) -> bool {
+    if crate::orchestrator::state::dispatch_session_id()
+        .is_some_and(|caller| caller.contains("-sub"))
+    {
+        return false;
+    }
     let state = crate::orchestrator::state::read_state();
     if state.phase.as_str() == policy.terminal_phase {
         return false;
