@@ -2862,6 +2862,7 @@ fn index_cfg_impl(
             symbol_budget_ms,
             cfg.index.max_file_bytes,
             enumeration_was_complete,
+            None,
         )
     };
     let symbol_ms =

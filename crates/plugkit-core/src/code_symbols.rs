@@ -570,6 +570,23 @@ fn extract_file(
     (file, failed)
 }
 
+const DEFERRED_SET_NAMES_LIMIT: usize = 256;
+const DEFERRED_PARTIAL_REASON: &str = "the symbol refresh deferred this file in this pass, so the outline is its cached row and may be stale; codeinsight_index.deferred_set names the deferred files, and deferred_set_truncated says when that list is cut short";
+const DEFERRED_NEVER_INDEXED_REASON: &str = "the symbol refresh deferred this file before it was ever indexed, so the empty outline is not evidence that the file has no symbols";
+const UNLISTED_PARTIAL_REASON: &str = "the file is not in the current listing, so the outline is its cached row from an earlier pass";
+
+fn record_deferred(
+    deferred_paths: &mut Vec<String>,
+    focus_deferred: &mut bool,
+    focus: Option<&str>,
+    fp: &str,
+) {
+    if focus == Some(fp) {
+        *focus_deferred = true;
+    }
+    deferred_paths.push(fp.to_string());
+}
+
 pub(crate) fn sync_files(
     files: &[String],
     project_path: Option<&str>,
@@ -577,6 +594,7 @@ pub(crate) fn sync_files(
     budget_ms: u64,
     max_file_bytes: usize,
     prune_absent: bool,
+    focus: Option<&str>,
 ) -> Value {
     let db = db_path(project_path);
     if let Err(e) = ensure_schema(&db) {
@@ -614,6 +632,8 @@ pub(crate) fn sync_files(
         mut parse_failures,
     ) = (0u32, 0u32, 0u32, 0usize, 0usize, 0u32);
     let mut seen: HashSet<String> = HashSet::new();
+    let mut deferred_paths: Vec<String> = Vec::new();
+    let mut focus_deferred = false;
     let mut unreadable = 0u32;
     let mut oversized = 0u32;
     let mut store_failures = 0u32;
@@ -633,6 +653,7 @@ pub(crate) fn sync_files(
             if known.contains_key(&fp) {
                 if host_now_ms().saturating_sub(started_ms) > budget_ms {
                     deferred += 1;
+                    record_deferred(&mut deferred_paths, &mut focus_deferred, focus, &fp);
                     continue;
                 }
                 if !write_edges(&fp, &[], project_path) {
@@ -656,6 +677,7 @@ pub(crate) fn sync_files(
         seen.insert(fp.clone());
         if host_now_ms().saturating_sub(started_ms) > budget_ms {
             deferred += 1;
+            record_deferred(&mut deferred_paths, &mut focus_deferred, focus, &fp);
             continue;
         }
         let stat = host_stat(&fp).or_else(|| host_stat(raw));
@@ -727,7 +749,7 @@ pub(crate) fn sync_files(
             }
         }
     }
-    let report = json!({
+    let mut report = json!({
         "ok": true,
         "files_synced": synced,
         "files_unchanged": unchanged,
@@ -743,6 +765,25 @@ pub(crate) fn sync_files(
         "complete": deferred == 0 && parse_failures == 0 && unreadable == 0 && oversized == 0 && store_failures == 0,
         "elapsed_ms": host_now_ms().saturating_sub(started_ms),
     });
+    if !deferred_paths.is_empty() {
+        let listed: Vec<String> = deferred_paths
+            .iter()
+            .take(DEFERRED_SET_NAMES_LIMIT)
+            .cloned()
+            .collect();
+        report["deferred_set"] = json!(listed);
+        report["deferred_set_truncated"] = json!(deferred_paths.len() > DEFERRED_SET_NAMES_LIMIT);
+    }
+    if let Some(path) = focus {
+        let state = if focus_deferred {
+            "deferred"
+        } else if seen.contains(path) {
+            "covered"
+        } else {
+            "unlisted"
+        };
+        report["focus"] = json!({ "path": path, "state": state });
+    }
     if synced > 0 || removed > 0 || deferred > 0 {
         crate::wasm_dispatch::emit_event("codeinsight_symbols_synced", report.clone());
     }
@@ -750,13 +791,14 @@ pub(crate) fn sync_files(
 }
 
 pub(crate) fn sync_tree(cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> Value {
-    sync_tree_with_budget(cfg, project_path, cfg.index.wall_budget_ms)
+    sync_tree_with_budget(cfg, project_path, cfg.index.wall_budget_ms, None)
 }
 
 fn sync_tree_with_budget(
     cfg: &crate::ragconfig::RagConfig,
     project_path: Option<&str>,
     budget_ms: u64,
+    focus: Option<&str>,
 ) -> Value {
     let started = host_now_ms();
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
@@ -789,6 +831,7 @@ fn sync_tree_with_budget(
         budget_ms,
         cfg.index.max_file_bytes,
         listing_complete,
+        focus,
     );
     let empty_listing_with_cached_files = files.is_empty()
         && !rows(
@@ -1757,14 +1800,42 @@ fn status(project_path: Option<&str>) -> Value {
     })
 }
 
-fn outline(db: &str, path: &str) -> Result<Value, String> {
+fn only_deferred_incomplete(refresh: &Value) -> bool {
+    let count = |key: &str| refresh.get(key).and_then(Value::as_u64);
+    let flag = |key: &str| refresh.get(key).and_then(Value::as_bool);
+    count("files_deferred").is_some_and(|n| n > 0)
+        && ["treesitter_failures", "files_unreadable", "files_oversized", "store_failures"]
+            .iter()
+            .all(|&key| count(key) == Some(0))
+        && flag("listing_complete") == Some(true)
+        && flag("empty_listing_with_cached_files") == Some(false)
+}
+
+fn outline(db: &str, path: &str, refresh: &Value) -> Result<Value, String> {
     let normalized = normalized_path(path);
+    let refresh_complete = refresh.get("complete").and_then(Value::as_bool) == Some(true);
+    let focus_state = refresh
+        .pointer("/focus/state")
+        .and_then(Value::as_str)
+        .unwrap_or("covered");
     let file = rows(
         db,
         &format!("SELECT lang, loc, symbols FROM {FILES_TABLE} WHERE path=?1"),
         &[&normalized],
     );
     let Some(file) = file.first() else {
+        if !refresh_complete && focus_state == "deferred" {
+            return Ok(json!({
+                "path": normalized,
+                "lang": Value::Null,
+                "loc": Value::Null,
+                "symbol_count": 0,
+                "outline": Vec::<String>::new(),
+                "partial": true,
+                "current": false,
+                "partial_reason": DEFERRED_NEVER_INDEXED_REASON,
+            }));
+        }
         let like = format!("%{normalized}%");
         let near: Vec<String> = rows(
             db,
@@ -1803,9 +1874,26 @@ fn outline(db: &str, path: &str) -> Result<Value, String> {
             )
         })
         .collect();
-    Ok(
-        json!({ "path": normalized, "lang": string(file, "lang"), "loc": number(file.get("loc")), "symbol_count": symbols.len(), "outline": lines }),
-    )
+    let mut result = json!({
+        "path": normalized,
+        "lang": string(file, "lang"),
+        "loc": number(file.get("loc")),
+        "symbol_count": symbols.len(),
+        "outline": lines,
+    });
+    if !refresh_complete {
+        let reason = match focus_state {
+            "deferred" => Some(DEFERRED_PARTIAL_REASON),
+            "unlisted" => Some(UNLISTED_PARTIAL_REASON),
+            _ => None,
+        };
+        result["partial"] = json!(reason.is_some());
+        result["current"] = json!(reason.is_none());
+        if let Some(reason) = reason {
+            result["partial_reason"] = json!(reason);
+        }
+    }
+    Ok(result)
 }
 
 fn like_escaped(text: &str) -> String {
@@ -2142,12 +2230,19 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     if action == "sync" {
         return Ok(sync_tree(&cfg, project_path));
     }
+    let focus = if action == "outline" {
+        text_field(body, &["path", "file"]).map(normalized_path)
+    } else {
+        None
+    };
     let refresh = sync_tree_with_budget(
         &cfg,
         project_path,
         cfg.index.incremental_topup_wall_budget_ms,
+        focus.as_deref(),
     );
-    if refresh.get("complete").and_then(Value::as_bool) != Some(true) {
+    let refresh_complete = refresh.get("complete").and_then(Value::as_bool) == Some(true);
+    if !refresh_complete && !(action == "outline" && only_deferred_incomplete(&refresh)) {
         return Err(format!("symbol index refresh is incomplete; cached graph is not current evidence. Run action=sync and retry. Refresh: {refresh}"));
     }
     let limit = body
@@ -2164,7 +2259,7 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     let mut output = match action {
         "overview" => Ok(overview(project_path, limit)),
         "status" => Ok(status(project_path)),
-        "outline" => outline(&db, need_path()?),
+        "outline" => outline(&db, need_path()?, &refresh),
         "find" => Ok(find(
             &db,
             need_symbol()?,
