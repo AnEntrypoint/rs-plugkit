@@ -65,6 +65,23 @@ pub fn record(
     dispatch_id
 }
 
+pub fn subagent_dispatches_since(cwd: &str, parent_session: &str, since_ms: u64) -> usize {
+    let prefix = format!("{}-", parent_session);
+    let raw = host_read(&ledger_path(cwd)).unwrap_or_default();
+    serde_json::from_str::<Value>(&raw)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| {
+            e.get("session_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.starts_with(&prefix))
+                && e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) >= since_ms
+        })
+        .count()
+}
+
 pub fn lookup(cwd: &str, dispatch_id: &str) -> Option<Value> {
     let path = ledger_path(cwd);
     let raw = host_read(&path).unwrap_or_default();
