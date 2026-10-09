@@ -2628,7 +2628,8 @@ pub(super) fn git_diff(body: &Value) -> u64 {
             .to_string();
         let truncated = diff.len() > 60000;
         if truncated {
-            diff.truncate(60000);
+            let cut = (0..=60000).rev().find(|&i| diff.is_char_boundary(i)).unwrap_or(0);
+            diff.truncate(cut);
         }
         Ok(ok(
             "git_diff",
@@ -2686,7 +2687,8 @@ pub(super) fn git_show(body: &Value) -> u64 {
         .unwrap_or("")
         .to_string();
     if out.len() > 60000 {
-        out.truncate(60000);
+        let cut = (0..=60000).rev().find(|&i| out.is_char_boundary(i)).unwrap_or(0);
+        out.truncate(cut);
     }
     ok("git_show", json!({ "output": out, "rev": refspec }))
 }
