@@ -1430,39 +1430,48 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         |mut doc: Value| {
             let mut found = false;
             if let Some(seq) = doc.as_sequence_mut() {
-                for item in seq.iter_mut() {
-                    if let Some(map) = item.as_mapping_mut() {
-                        if map
-                            .get(&Value::String("id".to_string()))
+                let last_match = seq
+                    .iter_mut()
+                    .enumerate()
+                    .filter(|(_, item)| {
+                        item.as_mapping()
+                            .and_then(|map| map.get(&Value::String("id".to_string())))
                             .and_then(|v| v.as_str())
                             == Some(&id_target)
-                        {
-                            if !status_kept {
-                                map.insert(
-                                    Value::String("status".to_string()),
-                                    Value::String(resolved_status.clone()),
-                                );
-                            }
-                            if let Some(w) = witness.as_ref() {
-                                map.insert(
-                                    Value::String("witness".to_string()),
-                                    Value::String(w.clone()),
-                                );
-                            }
-                            if let Some(binding) = witness_binding.as_ref() {
-                                map.insert(
-                                    Value::String("witness_binding".to_string()),
-                                    binding.to_yaml(),
-                                );
-                            }
-                            if let Some(c) = commit_comment.as_ref() {
-                                map.insert(
-                                    Value::String("commit_comment".to_string()),
-                                    Value::String(c.clone()),
-                                );
-                            }
-                            found = true;
+                    })
+                    .map(|(index, _)| index)
+                    .last();
+                if let Some(index) = last_match {
+                    if let Some(map) = seq
+                        .iter_mut()
+                        .nth(index)
+                        .and_then(|item| item.as_mapping_mut())
+                    {
+                        if !status_kept {
+                            map.insert(
+                                Value::String("status".to_string()),
+                                Value::String(resolved_status.clone()),
+                            );
                         }
+                        if let Some(w) = witness.as_ref() {
+                            map.insert(
+                                Value::String("witness".to_string()),
+                                Value::String(w.clone()),
+                            );
+                        }
+                        if let Some(binding) = witness_binding.as_ref() {
+                            map.insert(
+                                Value::String("witness_binding".to_string()),
+                                binding.to_yaml(),
+                            );
+                        }
+                        if let Some(c) = commit_comment.as_ref() {
+                            map.insert(
+                                Value::String("commit_comment".to_string()),
+                                Value::String(c.clone()),
+                            );
+                        }
+                        found = true;
                     }
                 }
             }
@@ -1514,8 +1523,8 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 "witness_binding": witness_binding.as_ref().map(VerifiedWitness::to_json),
                 "witness_dispatch_id_verified": dispatch_verified,
                 "witness_dispatch_id_field": "witness_dispatch_id",
-                "witness_dispatch_id_in_evidence": evidence_dispatch_id,
-                "witness_dispatch_id_in_ledger": evidence_in_ledger,
+                "witness_dispatch_id_in_evidence": witness_dispatch_id,
+                "witness_dispatch_id_in_ledger": witness_dispatch_id.as_ref().map(|_| dispatch_verified),
             });
             (reply.to_string(), String::new(), 0)
         }
