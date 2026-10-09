@@ -5458,8 +5458,14 @@ const COMMENT_SLASH_EXTENSIONS: &[&str] = &[
     ".cc", ".hpp", ".hh", ".cxx", ".hxx", ".ino", ".glsl", ".vert", ".frag", ".comp", ".geom",
     ".tesc", ".tese", ".vsh", ".fsh", ".glslv", ".glslf", ".java", ".cs", ".php", ".phtml",
     ".swift", ".kt", ".kts", ".scala", ".sc", ".zig", ".d", ".groovy", ".gradle", ".dsp", ".lib",
-    ".css", ".scss", ".sass", ".less",
+    ".scss", ".sass", ".less",
 ];
+
+const COMMENT_CSS_EXTENSIONS: &[&str] = &[".css"];
+
+const COMMENT_HTML_EXTENSIONS: &[&str] = &[".html", ".htm", ".xhtml"];
+
+const COMMENT_WAT_EXTENSIONS: &[&str] = &[".wat", ".wast"];
 
 const COMMENT_HASH_EXTENSIONS: &[&str] = &[
     ".sh",
@@ -5507,53 +5513,82 @@ const COMMENT_HASH_FILENAMES: &[&str] = &[
     "rakefile",
     "gemfile",
     "procfile",
+    "gitignore",
+    "dockerignore",
+    "npmignore",
+    "eslintignore",
+    "prettierignore",
+    "gitattributes",
+    "gitmodules",
+    "editorconfig",
+    "env",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CommentSyntax {
     Slash,
+    Css,
     Hash,
+    Html,
+    Wat,
 }
 
 impl CommentSyntax {
     fn label(self) -> &'static str {
         match self {
             CommentSyntax::Slash => "slash",
+            CommentSyntax::Css => "css",
             CommentSyntax::Hash => "hash",
+            CommentSyntax::Html => "html",
+            CommentSyntax::Wat => "wat",
         }
     }
 }
 
 fn comment_syntax_for_path(path: &str) -> Option<CommentSyntax> {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    let lowered_name = name.to_lowercase();
-    if COMMENT_HASH_FILENAMES.iter().any(|n| lowered_name == *n)
-        || lowered_name.starts_with("dockerfile")
-        || lowered_name.starts_with("makefile")
-        || lowered_name.starts_with("gnumakefile")
+    let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+    comment_syntax_for_name(&name)
+}
+
+fn comment_syntax_for_name(name: &str) -> Option<CommentSyntax> {
+    if let Some(stem) = name.strip_suffix(".template") {
+        return comment_syntax_for_name(stem);
+    }
+    if COMMENT_HASH_FILENAMES.contains(&name)
+        || name.starts_with("dockerfile")
+        || name.starts_with("makefile")
+        || name.starts_with("gnumakefile")
     {
         return Some(CommentSyntax::Hash);
     }
     let ext = match name.rsplit_once('.') {
-        Some((_, ext)) if !ext.is_empty() => format!(".{ext}").to_lowercase(),
+        Some((_, ext)) if !ext.is_empty() => format!(".{ext}"),
         _ => return None,
     };
-    if COMMENT_SLASH_EXTENSIONS.iter().any(|e| ext == *e) {
-        return Some(CommentSyntax::Slash);
+    let ext = ext.as_str();
+    if COMMENT_CSS_EXTENSIONS.contains(&ext) {
+        Some(CommentSyntax::Css)
+    } else if COMMENT_SLASH_EXTENSIONS.contains(&ext) {
+        Some(CommentSyntax::Slash)
+    } else if COMMENT_HASH_EXTENSIONS.contains(&ext) {
+        Some(CommentSyntax::Hash)
+    } else if COMMENT_HTML_EXTENSIONS.contains(&ext) {
+        Some(CommentSyntax::Html)
+    } else if COMMENT_WAT_EXTENSIONS.contains(&ext) {
+        Some(CommentSyntax::Wat)
+    } else {
+        None
     }
-    if COMMENT_HASH_EXTENSIONS.iter().any(|e| ext == *e) {
-        return Some(CommentSyntax::Hash);
-    }
-    None
 }
 
 const DIRECTIVE_BODY_PREFIXES: &[&str] = &[
     "syntax=",
     "shellcheck",
     "noqa",
-    "type:",
+    "type: ignore",
+    "type:ignore",
     "pylint:",
-    "eslint",
+    "eslint-",
     "prettier-ignore",
     "tslint:",
     "rustfmt:",
@@ -5577,17 +5612,10 @@ const DIRECTIVE_BODY_PREFIXES: &[&str] = &[
     "c8 ",
     "v8 ignore",
     "istanbul ignore",
-    "sourceMappingURL=",
-    "region",
-    "endregion",
-    "pragma",
-    "include",
+    "sourcemappingurl=",
+    "sourceurl=",
+    "pragma:",
     "formatter:",
-    "forbid",
-    "allow",
-    "deny",
-    "warn",
-    "expect",
     "cfg:",
     "tool:",
     "autopep8:",
@@ -5599,49 +5627,135 @@ const DIRECTIVE_BODY_PREFIXES: &[&str] = &[
     "deno-lint-ignore",
 ];
 
-fn comment_body_is_directive(body: &str) -> bool {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if trimmed.starts_with('!') {
-        return true;
-    }
-    let lowered = trimmed.to_lowercase();
-    DIRECTIVE_BODY_PREFIXES
-        .iter()
-        .any(|p| lowered.starts_with(p))
+const SLASH_NO_SPACE_DIRECTIVE_PREFIXES: &[&str] = &["go:", "nolint", "/ <reference"];
+
+const KEYWORDS_BEFORE_EXPRESSION: &[&str] = &[
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do",
+    "else", "yield", "await",
+];
+
+#[derive(Default)]
+struct CommentBuckets {
+    comments: Vec<CommentSpan>,
+    directives: Vec<CommentSpan>,
 }
 
 struct CommentSpan {
     line: usize,
     column: usize,
     kind: &'static str,
+    syntax: CommentSyntax,
     text: String,
     text_truncated: bool,
     inline: bool,
 }
 
-fn push_span(
-    comments: &mut Vec<CommentSpan>,
-    directives: &mut Vec<CommentSpan>,
-    span: CommentSpan,
-) {
-    let body = if span.kind == "block" {
-        span.text
-            .get(2..)
-            .and_then(|s| s.strip_suffix("*/"))
-            .unwrap_or("")
-            .to_string()
-    } else if let Some(rest) = span.text.strip_prefix("//") {
-        rest.to_string()
-    } else {
-        span.text.strip_prefix('#').unwrap_or("").to_string()
+#[derive(Clone, Copy)]
+struct OpenBlock {
+    from: usize,
+    line: usize,
+    column: usize,
+    inline: bool,
+}
+
+fn starts_with_token(text: &str, token: &str) -> bool {
+    let Some(rest) = text.strip_prefix(token) else {
+        return false;
     };
-    if comment_body_is_directive(&body) {
-        directives.push(span)
+    let token_ends_in_word = token.chars().last().map_or(false, |c| c.is_alphanumeric());
+    !token_ends_in_word || !rest.chars().next().map_or(false, |c| c.is_alphanumeric() || c == '_')
+}
+
+fn span_body(span: &CommentSpan) -> &str {
+    let text = span.text.as_str();
+    let (open, close) = match (span.kind, span.syntax) {
+        ("block", CommentSyntax::Html) => (4, "-->"),
+        ("block", CommentSyntax::Wat) => (2, ";)"),
+        ("block", _) => (2, "*/"),
+        (_, CommentSyntax::Hash) => (1, ""),
+        (_, _) => (2, ""),
+    };
+    let rest = text.get(open..).unwrap_or("");
+    if close.is_empty() {
+        rest
     } else {
-        comments.push(span)
+        rest.strip_suffix(close).unwrap_or(rest)
+    }
+}
+
+fn is_region_marker(body: &str, syntax: CommentSyntax) -> bool {
+    let lowered = body.trim_start().to_lowercase();
+    match syntax {
+        CommentSyntax::Hash => {
+            !body.starts_with(char::is_whitespace)
+                && (starts_with_token(&lowered, "region") || starts_with_token(&lowered, "endregion"))
+        }
+        CommentSyntax::Slash | CommentSyntax::Css => {
+            starts_with_token(&lowered, "#region") || starts_with_token(&lowered, "#endregion")
+        }
+        CommentSyntax::Html | CommentSyntax::Wat => false,
+    }
+}
+
+fn comment_body_is_directive(body: &str, syntax: CommentSyntax) -> bool {
+    if body.trim().is_empty() {
+        return false;
+    }
+    if is_region_marker(body, syntax) {
+        return true;
+    }
+    let as_written = body.to_lowercase();
+    if syntax == CommentSyntax::Slash
+        && !body.starts_with(char::is_whitespace)
+        && SLASH_NO_SPACE_DIRECTIVE_PREFIXES
+            .iter()
+            .any(|prefix| starts_with_token(&as_written, *prefix))
+    {
+        return true;
+    }
+    let trimmed = body.trim_start().to_lowercase();
+    let text = trimmed.strip_prefix('#').map_or(trimmed.as_str(), |rest| rest.trim_start());
+    DIRECTIVE_BODY_PREFIXES
+        .iter()
+        .any(|prefix| starts_with_token(text, *prefix))
+}
+
+fn span_is_directive(span: &CommentSpan) -> bool {
+    let body = span_body(span);
+    let shebang = span.kind == "line"
+        && span.line == 1
+        && span.column == 1
+        && span.text.starts_with("#!");
+    let preserved_banner =
+        span.kind == "block" && span.syntax == CommentSyntax::Slash && body.starts_with('!');
+    shebang || preserved_banner || comment_body_is_directive(body, span.syntax)
+}
+
+fn push_span(out: &mut CommentBuckets, span: CommentSpan) {
+    if span_is_directive(&span) {
+        out.directives.push(span);
+    } else {
+        out.comments.push(span);
+    }
+}
+
+fn make_span(
+    content: &str,
+    from: usize,
+    to: usize,
+    kind: &'static str,
+    syntax: CommentSyntax,
+    at: (usize, usize, bool),
+) -> CommentSpan {
+    let (text, text_truncated) = clipped_text(content.get(from..to).unwrap_or(""));
+    CommentSpan {
+        line: at.0,
+        column: at.1,
+        kind,
+        syntax,
+        text,
+        text_truncated,
+        inline: at.2,
     }
 }
 
@@ -5655,6 +5769,13 @@ fn line_has_code_before(content: &str, line_start: usize, upto: usize) -> bool {
         .trim()
         .chars()
         .any(|c| !c.is_whitespace())
+}
+
+fn line_and_line_start(content: &str, at: usize) -> (usize, usize) {
+    let before = &content.as_bytes()[..at.min(content.len())];
+    let line = 1 + before.iter().filter(|&&b| b == b'\n').count();
+    let line_start = before.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
+    (line, line_start)
 }
 
 fn clipped_text(full: &str) -> (String, bool) {
@@ -5675,128 +5796,366 @@ fn hash_opens_comment(bytes: &[u8], at: usize, line_start: usize) -> bool {
         .unwrap_or(false)
 }
 
-fn scan_content_for_comments(
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || byte >= 0x80
+}
+
+fn after_escape(bytes: &[u8], backslash: usize) -> usize {
+    match bytes.get(backslash + 1) {
+        Some(&b'\n') | None => backslash + 1,
+        Some(_) => backslash + 2,
+    }
+}
+
+fn regex_literal_end(bytes: &[u8], open: usize, end: usize) -> Option<usize> {
+    let mut in_class = false;
+    let mut i = open + 1;
+    while i < end {
+        match bytes[i] {
+            b'\n' => return None,
+            b'\\' => {
+                if i + 1 >= end || bytes[i + 1] == b'\n' {
+                    return None;
+                }
+                i += 2;
+            }
+            b'[' => {
+                in_class = true;
+                i += 1;
+            }
+            b']' => {
+                in_class = false;
+                i += 1;
+            }
+            b'/' if !in_class => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn scan_c_like(
     content: &str,
+    start: usize,
+    end: usize,
     syntax: CommentSyntax,
-) -> (Vec<CommentSpan>, Vec<CommentSpan>) {
+    out: &mut CommentBuckets,
+) {
     let bytes = content.as_bytes();
-    let mut comments: Vec<CommentSpan> = Vec::new();
-    let mut directives: Vec<CommentSpan> = Vec::new();
-    let mut i = 0usize;
-    let mut line = 1usize;
-    let mut line_start = 0usize;
-    let mut in_block = false;
-    let mut block_start = 0usize;
-    let mut block_start_line = 0usize;
-    let mut block_start_column = 0usize;
-    let mut block_inline = false;
-    let mut string_delim: Option<u8> = None;
-    while i < bytes.len() {
+    let end = end.min(bytes.len());
+    let byte_at = |at: usize| -> Option<u8> {
+        if at < end {
+            bytes.get(at).copied()
+        } else {
+            None
+        }
+    };
+    let (mut line, mut line_start) = line_and_line_start(content, start);
+    let mut i = start;
+    if syntax == CommentSyntax::Slash && start == 0 && bytes.starts_with(b"#!") {
+        let eol = bytes[..end].iter().position(|&b| b == b'\n').unwrap_or(end);
+        push_span(out, make_span(content, 0, eol, "line", syntax, (1, 1, false)));
+        i = eol;
+    }
+    let has_template = syntax == CommentSyntax::Slash;
+    let mut open_block: Option<OpenBlock> = None;
+    let mut quote: Option<u8> = None;
+    let mut triple: Option<u8> = None;
+    let mut in_template = false;
+    let mut interpolations: Vec<usize> = Vec::new();
+    let mut brace_depth = 0usize;
+    let mut prev_is_value = false;
+    let mut last_code_byte = 0u8;
+    while i < end {
         let byte = bytes[i];
         if byte == b'\n' {
-            string_delim = None;
-            i += 1;
+            quote = None;
             line += 1;
+            i += 1;
             line_start = i;
             continue;
         }
-        if in_block {
-            if byte == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                let end = (i + 2).min(bytes.len());
-                let (text, text_truncated) =
-                    clipped_text(content.get(block_start..end).unwrap_or(""));
-                push_span(
-                    &mut comments,
-                    &mut directives,
-                    CommentSpan {
-                        line: block_start_line,
-                        column: block_start_column,
-                        kind: "block",
-                        text,
-                        text_truncated,
-                        inline: block_inline,
-                    },
+        if let Some(block) = open_block {
+            if byte == b'*' && byte_at(i + 1) == Some(b'/') {
+                let span = make_span(
+                    content,
+                    block.from,
+                    i + 2,
+                    "block",
+                    syntax,
+                    (block.line, block.column, block.inline),
                 );
-                in_block = false;
-                i = end;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if let Some(delim) = string_delim {
-            if byte == b'\\' {
+                push_span(out, span);
+                open_block = None;
+                i += 2;
+            } else {
                 i += 1;
-                if let Some(next) = content.get(i..).and_then(|s| s.chars().next()) {
-                    i += next.len_utf8();
+            }
+            continue;
+        }
+        if let Some(delim) = triple {
+            if byte == b'\\' {
+                i = after_escape(bytes, i);
+            } else if byte == delim && byte_at(i + 1) == Some(delim) && byte_at(i + 2) == Some(delim) {
+                triple = None;
+                prev_is_value = true;
+                last_code_byte = delim;
+                i += 3;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if let Some(delim) = quote {
+            if byte == b'\\' {
+                i = after_escape(bytes, i);
+            } else {
+                if byte == delim {
+                    quote = None;
+                    prev_is_value = true;
+                    last_code_byte = delim;
                 }
-                continue;
+                i += 1;
             }
-            if byte == delim {
-                string_delim = None;
+            continue;
+        }
+        if in_template {
+            if byte == b'\\' {
+                i = after_escape(bytes, i);
+            } else if byte == b'`' {
+                in_template = false;
+                prev_is_value = true;
+                last_code_byte = byte;
+                i += 1;
+            } else if byte == b'$' && byte_at(i + 1) == Some(b'{') {
+                interpolations.push(brace_depth);
+                in_template = false;
+                prev_is_value = false;
+                last_code_byte = b'{';
+                i += 2;
+            } else {
+                i += 1;
             }
+            continue;
+        }
+        if byte.is_ascii_whitespace() {
             i += 1;
             continue;
         }
-        if byte == b'"' || byte == b'\'' || byte == b'`' {
-            string_delim = Some(byte);
+        if is_word_byte(byte) {
+            let mut j = i + 1;
+            while j < end && is_word_byte(bytes[j]) {
+                j += 1;
+            }
+            let word = content.get(i..j).unwrap_or("");
+            prev_is_value = !KEYWORDS_BEFORE_EXPRESSION.contains(&word);
+            last_code_byte = bytes[j - 1];
+            i = j;
+            continue;
+        }
+        if byte == b'"' || byte == b'\'' {
+            if syntax == CommentSyntax::Hash && byte_at(i + 1) == Some(byte) && byte_at(i + 2) == Some(byte) {
+                triple = Some(byte);
+                i += 3;
+            } else {
+                quote = Some(byte);
+                i += 1;
+            }
+            continue;
+        }
+        if has_template && byte == b'`' {
+            in_template = true;
             i += 1;
             continue;
         }
-        let column = i - line_start + 1;
-        let starts_line_comment = match syntax {
-            CommentSyntax::Slash => byte == b'/' && bytes.get(i + 1) == Some(&b'/'),
+        let opens_line_comment = match syntax {
+            CommentSyntax::Slash => byte == b'/' && byte_at(i + 1) == Some(b'/'),
             CommentSyntax::Hash => byte == b'#' && hash_opens_comment(bytes, i, line_start),
+            CommentSyntax::Css | CommentSyntax::Html | CommentSyntax::Wat => false,
         };
-        if starts_line_comment {
-            let eol = content
-                .get(i..)
-                .and_then(|s| s.find('\n'))
-                .map(|d| i + d)
-                .unwrap_or(bytes.len());
-            let (text, text_truncated) = clipped_text(content.get(i..eol).unwrap_or(""));
-            push_span(
-                &mut comments,
-                &mut directives,
-                CommentSpan {
-                    line,
-                    column,
-                    kind: "line",
-                    text,
-                    text_truncated,
-                    inline: line_has_code_before(content, line_start, i),
-                },
-            );
+        if opens_line_comment {
+            let eol = bytes[i..end].iter().position(|&b| b == b'\n').map_or(end, |p| i + p);
+            let column = i - line_start + 1;
+            let inline = line_has_code_before(content, line_start, i);
+            push_span(out, make_span(content, i, eol, "line", syntax, (line, column, inline)));
             i = eol;
             continue;
         }
-        if syntax == CommentSyntax::Slash && byte == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            in_block = true;
-            block_start = i;
-            block_start_line = line;
-            block_start_column = column;
-            block_inline = line_has_code_before(content, line_start, i);
+        if matches!(syntax, CommentSyntax::Slash | CommentSyntax::Css)
+            && byte == b'/'
+            && byte_at(i + 1) == Some(b'*')
+        {
+            open_block = Some(OpenBlock {
+                from: i,
+                line,
+                column: i - line_start + 1,
+                inline: line_has_code_before(content, line_start, i),
+            });
             i += 2;
             continue;
         }
+        if syntax == CommentSyntax::Slash && byte == b'/' && !prev_is_value && last_code_byte != b'<' {
+            if let Some(after) = regex_literal_end(bytes, i, end) {
+                prev_is_value = true;
+                last_code_byte = byte;
+                i = after;
+                continue;
+            }
+        }
+        match byte {
+            b'{' => {
+                brace_depth += 1;
+                prev_is_value = false;
+            }
+            b'}' => {
+                if interpolations.last() == Some(&brace_depth) {
+                    interpolations.pop();
+                    in_template = true;
+                } else {
+                    brace_depth = brace_depth.saturating_sub(1);
+                }
+                prev_is_value = false;
+            }
+            b')' | b']' => prev_is_value = true,
+            _ => prev_is_value = false,
+        }
+        last_code_byte = byte;
         i += 1;
     }
-    if in_block {
-        let (text, text_truncated) = clipped_text(content.get(block_start..).unwrap_or(""));
-        push_span(
-            &mut comments,
-            &mut directives,
-            CommentSpan {
-                line: block_start_line,
-                column: block_start_column,
-                kind: "block",
-                text,
-                text_truncated,
-                inline: block_inline,
-            },
+    if let Some(block) = open_block {
+        let span = make_span(
+            content,
+            block.from,
+            end,
+            "block",
+            syntax,
+            (block.line, block.column, block.inline),
         );
+        push_span(out, span);
     }
-    (comments, directives)
+}
+
+fn script_tag_is_javascript(lowered_tag: &str) -> bool {
+    !lowered_tag.contains("type=")
+        || ["javascript", "ecmascript", "module", "babel", "jsx"]
+            .iter()
+            .any(|kind| lowered_tag.contains(*kind))
+}
+
+fn scan_html(content: &str, out: &mut CommentBuckets) {
+    let lower = content.to_ascii_lowercase();
+    let mut pos = 0usize;
+    loop {
+        let next = [("<!--", 0u8), ("<script", 1u8), ("<style", 2u8)]
+            .iter()
+            .filter_map(|&(needle, kind)| lower[pos..].find(needle).map(|rel| (pos + rel, kind)))
+            .min_by_key(|&(at, _)| at);
+        let Some((at, kind)) = next else {
+            break;
+        };
+        if kind == 0 {
+            let body_from = at + 4;
+            let to = lower[body_from..]
+                .find("-->")
+                .map_or(content.len(), |rel| body_from + rel + 3);
+            let (line, line_start) = line_and_line_start(content, at);
+            let column = at - line_start + 1;
+            let span = make_span(content, at, to, "block", CommentSyntax::Html, (line, column, false));
+            push_span(out, span);
+            pos = to;
+        } else {
+            let Some(tag_end) = lower[at..].find('>').map(|rel| at + rel + 1) else {
+                break;
+            };
+            let tag = &lower[at..tag_end];
+            let close_tag = if kind == 1 { "</script" } else { "</style" };
+            let body_end = lower[tag_end..]
+                .find(close_tag)
+                .map_or(content.len(), |rel| tag_end + rel);
+            if kind == 2 {
+                scan_c_like(content, tag_end, body_end, CommentSyntax::Css, out);
+            } else if script_tag_is_javascript(tag) {
+                scan_c_like(content, tag_end, body_end, CommentSyntax::Slash, out);
+            }
+            pos = body_end;
+        }
+    }
+}
+
+fn scan_wat(content: &str, out: &mut CommentBuckets) {
+    let bytes = content.as_bytes();
+    let mut line = 1usize;
+    let mut line_start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'\n' {
+            line += 1;
+            i += 1;
+            line_start = i;
+        } else if byte == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' && bytes[i] != b'\n' {
+                let escaped = bytes[i] == b'\\' && bytes.get(i + 1).map_or(false, |&next| next != b'\n');
+                i += if escaped { 2 } else { 1 };
+            }
+            if bytes.get(i) == Some(&b'"') {
+                i += 1;
+            }
+        } else if byte == b';' && bytes.get(i + 1) == Some(&b';') {
+            let eol = bytes[i..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |p| i + p);
+            let column = i - line_start + 1;
+            let inline = line_has_code_before(content, line_start, i);
+            push_span(out, make_span(content, i, eol, "line", CommentSyntax::Wat, (line, column, inline)));
+            i = eol;
+        } else if byte == b'(' && bytes.get(i + 1) == Some(&b';') {
+            let (open_line, open_column) = (line, i - line_start + 1);
+            let inline = line_has_code_before(content, line_start, i);
+            let from = i;
+            let mut depth = 0usize;
+            while i < bytes.len() {
+                if bytes[i] == b'\n' {
+                    line += 1;
+                    i += 1;
+                    line_start = i;
+                } else if bytes[i] == b'(' && bytes.get(i + 1) == Some(&b';') {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i] == b';' && bytes.get(i + 1) == Some(&b')') {
+                    depth = depth.saturating_sub(1);
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            let span = make_span(
+                content,
+                from,
+                i.min(bytes.len()),
+                "block",
+                CommentSyntax::Wat,
+                (open_line, open_column, inline),
+            );
+            push_span(out, span);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn scan_content_for_comments(content: &str, syntax: CommentSyntax) -> (Vec<CommentSpan>, Vec<CommentSpan>) {
+    let mut out = CommentBuckets::default();
+    match syntax {
+        CommentSyntax::Html => scan_html(content, &mut out),
+        CommentSyntax::Wat => scan_wat(content, &mut out),
+        CommentSyntax::Slash | CommentSyntax::Css | CommentSyntax::Hash => {
+            scan_c_like(content, 0, content.len(), syntax, &mut out)
+        }
+    }
+    (out.comments, out.directives)
 }
 
 fn comment_span_json(path: &str, syntax: CommentSyntax, span: &CommentSpan, context: usize, file_lines: &[&str]) -> Value {
@@ -5971,9 +6330,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         if exclude_globs.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, path))) { continue; }
         if has_binary_extension(path) { files_skipped_binary_extension += 1; continue; }
         let Some(syntax) = comment_syntax_for_path(path) else {
-            if files_skipped_no_syntax.len() < SKIPPED_SAMPLE_LEN {
-                files_skipped_no_syntax.push(path.clone());
-            }
+            files_skipped_no_syntax.push(path.clone());
             continue;
         };
         let stat = host_stat(path);
@@ -6033,11 +6390,11 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         files_with_comments += 1;
         for span in &file_comments {
             if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
-            comments.push(comment_span_json(path, syntax, span, req.context, &file_lines));
+            comments.push(comment_span_json(path, span.syntax, span, req.context, &file_lines));
         }
         for span in &file_directives {
             if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
-            directives.push(comment_span_json(path, syntax, span, req.context, &file_lines));
+            directives.push(comment_span_json(path, span.syntax, span, req.context, &file_lines));
         }
     }
     let unread_paths: &[String] = &files[entered_paths.min(files.len())..];
@@ -6150,12 +6507,19 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         out.insert("files_unreadable".to_string(), json!(files_unreadable));
     }
     if !files_skipped_no_syntax.is_empty() {
+        out.insert("files_skipped_no_syntax_count".to_string(), json!(files_skipped_no_syntax.len()));
         out.insert(
             "files_skipped_no_syntax".to_string(),
-            json!(files_skipped_no_syntax),
+            json!(files_skipped_no_syntax.iter().take(SKIPPED_SAMPLE_LEN).cloned().collect::<Vec<String>>()),
         );
+        if files_skipped_no_syntax.len() > SKIPPED_SAMPLE_LEN {
+            let listing_name = format!("grep-comments-no-syntax-{started_ms}.txt");
+            if let Some(file) = spill_lines_to_out_file(&listing_name, &files_skipped_no_syntax) {
+                out.insert("files_skipped_no_syntax_file".to_string(), json!(file));
+            }
+        }
         out.insert("files_skipped_no_syntax_note".to_string(), json!(
-            "no comment syntax is mapped for these extensions; narrow the scan with \"glob\" or \"path\" if a language here is missing"
+            "no comment syntax is mapped for these extensions; files_skipped_no_syntax is the first sample, files_skipped_no_syntax_count the total, files_skipped_no_syntax_file (when present) lists every path, one per line; narrow the scan with \"glob\" or \"path\" if a language here is missing"
         ));
     }
     let elapsed_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms);
