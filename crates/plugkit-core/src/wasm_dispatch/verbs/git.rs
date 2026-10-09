@@ -5,6 +5,13 @@ pub(super) const GIT_PENDING_RESULT_OUTBOX_NS: &str = "outbox";
 pub(super) const GIT_COMMIT_DEDUP_NS: &str = "git_commit_dedup";
 pub(super) const GIT_COMMIT_DEDUP_TTL_MS: u64 = 180_000;
 
+// Spawning git with a command line past ~32 KiB fails on Windows with os error 206, which the
+// completeness gate reports as git_status_incomplete and refuses the mutation. One exclude
+// pathspec per dirty path reaches that on a repo with a few hundred dirty paths, so the
+// exclusions get a budget and the rest are simply not withheld: a broader scope is still complete
+// worktree evidence.
+pub(super) const GIT_PATHSPEC_SCOPE_EXCLUDE_BUDGET_CHARS: usize = 8000;
+
 pub(super) fn git_commit_dedup_key(
     cwd: Option<&str>,
     head_before: &str,
@@ -4881,10 +4888,20 @@ pub(super) fn excluded_pathspecs(paths: &[String], cwd: Option<&str>) -> Vec<Str
 
 pub(super) fn git_pathspec_scope(paths: &[String], cwd: Option<&str>) -> Vec<String> {
     let mut scope: Vec<String> = vec![":(top,exclude).agentplug*".to_string()];
+    let mut used: usize = scope[0].len() + 1;
     for (_, path) in withheld_dirty_entries(cwd) {
-        if !path.starts_with(".agentplug") && !caller_pathspec_covers(paths, &path) {
-            scope.push(format!(":(top,exclude,literal){}", path));
+        if path.starts_with(".agentplug") || caller_pathspec_covers(paths, &path) {
+            continue;
         }
+        let spec = format!(":(top,exclude,literal){}", path);
+        if used + spec.len() + 1 > GIT_PATHSPEC_SCOPE_EXCLUDE_BUDGET_CHARS {
+            continue;
+        }
+        if scope.iter().any(|held| held == &spec) {
+            continue;
+        }
+        used += spec.len() + 1;
+        scope.push(spec);
     }
     if paths.is_empty() {
         scope.push(":/".to_string());
