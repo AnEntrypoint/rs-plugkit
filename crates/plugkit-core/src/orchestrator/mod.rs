@@ -85,9 +85,7 @@ fn stateful_cwd_root_once() -> Option<PathBuf> {
         return None;
     }
     #[cfg(target_arch = "wasm32")]
-    let has_gm_state = crate::wasm_dispatch::host_stat(&format!("{root}/.gm"))
-        .and_then(|stat| stat.get("isDirectory").and_then(serde_json::Value::as_bool))
-        .unwrap_or(false);
+    let has_gm_state = crate::wasm_dispatch::host_stat_is_directory(&format!("{root}/.gm")) == Some(true);
     #[cfg(not(target_arch = "wasm32"))]
     let has_gm_state = std::fs::metadata(PathBuf::from(root).join(".gm"))
         .map(|metadata| metadata.is_dir())

@@ -493,6 +493,13 @@ pub fn host_stat(path: &str) -> Option<Value> {
     unpack_to_string(packed).map(|s| serde_json::from_str(&s).unwrap_or(Value::Null))
 }
 
+/// Whether the host reports `path` as a directory; `None` when the stat itself failed.
+pub fn host_stat_is_directory(path: &str) -> Option<bool> {
+    host_stat(path)
+        .filter(|v| !v.is_null())
+        .and_then(|v| v.get("isDirectory").and_then(Value::as_bool))
+}
+
 pub fn host_exists(path: &str) -> bool {
     host_stat(path).map(|v| !v.is_null()).unwrap_or(false)
 }

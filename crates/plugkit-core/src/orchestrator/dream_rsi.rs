@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -292,15 +293,66 @@ pub fn failure_is_gate_drift(result: &Value) -> bool {
     )
 }
 
-/// An observation counts toward the strategy only when the dispatch failed and the failure was
-/// gate drift; a plain failure (bad arguments, a real error from the verb) says nothing about
-/// whether the caller has lost the chain.
-fn observation_is_gate_drift_failure(observation: &Value) -> bool {
-    observation.get("exit_code").and_then(Value::as_i64) != Some(0)
-        && observation
-            .get("gate_drift")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
+/// One recorded dispatch. The recorder writes it and the ranking and replay read it back; every
+/// field is optional on read, so a row missing a field still ranks by the fields it has.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+struct ObservationRecord {
+    dispatch_id: Option<String>,
+    verb: Option<String>,
+    fingerprint: Option<String>,
+    exit_code: Option<i64>,
+    gate_drift: Option<bool>,
+    prd_open_count: Option<u64>,
+    mutable_open_count: Option<u64>,
+    quality: Option<f64>,
+    ts: Option<i64>,
+    reply_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lean_node: Option<String>,
+}
+
+impl ObservationRecord {
+    fn from_value(value: &Value) -> Self {
+        serde_json::from_value(value.clone()).unwrap_or_default()
+    }
+
+    fn succeeded(&self) -> bool {
+        self.exit_code == Some(0)
+    }
+
+    /// An observation counts toward the strategy only when the dispatch failed and the failure was
+    /// gate drift; a plain failure (bad arguments, a real error from the verb) says nothing about
+    /// whether the caller has lost the chain.
+    fn is_gate_drift_failure(&self) -> bool {
+        !self.succeeded() && self.gate_drift.unwrap_or(true)
+    }
+}
+
+/// The recorded strategy as the ranking reads it. A missing `evidence` array ranks nothing.
+struct Strategy {
+    selection: Option<String>,
+    evidence: Option<Vec<ObservationRecord>>,
+}
+
+impl Strategy {
+    fn from_value(value: &Value) -> Self {
+        Strategy {
+            selection: value.get("selection").and_then(Value::as_str).map(str::to_owned),
+            evidence: value
+                .get("evidence")
+                .and_then(Value::as_array)
+                .map(|entries| entries.iter().map(ObservationRecord::from_value).collect()),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_observations(raw: &str) -> Vec<ObservationRecord> {
+    serde_json::from_str::<Vec<Value>>(raw)
+        .unwrap_or_default()
+        .iter()
+        .map(ObservationRecord::from_value)
+        .collect()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -356,7 +408,7 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
     }
     let path = format!(".gm/dream-rsi/{session_id}/observations.json");
     let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
-    let mut observations = serde_json::from_str::<Value>(&raw).ok().and_then(|value| value.as_array().cloned()).unwrap_or_default();
+    let mut observations = read_observations(&raw);
     let prd_open_count = crate::orchestrator::prd::handle_list_full().0
         .parse::<Value>().ok().and_then(|value| value.get("items").and_then(Value::as_array).cloned())
         .map(|items| items.iter().filter(|item| crate::orchestrator::prd::status_is_open(item.get("status").and_then(Value::as_str).unwrap_or("pending"))).count())
@@ -368,33 +420,27 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
         0.0
     };
     let ts = super::state::now_ms() as i64;
-    let mut observation = json!({
-        "dispatch_id": dispatch_id,
-        "verb": verb,
-        "fingerprint": fingerprint,
-        "exit_code": exit_code,
-        "gate_drift": gate_drift,
-        "prd_open_count": prd_open_count,
-        "mutable_open_count": mutable_open_count,
-        "quality": quality,
-        "ts": ts,
-        "reply_sha256": reply_sha256_hex(reply),
+    observations.push(ObservationRecord {
+        dispatch_id: Some(dispatch_id.to_string()),
+        verb: Some(verb.to_string()),
+        fingerprint: Some(fingerprint.to_string()),
+        exit_code: Some(exit_code),
+        gate_drift: Some(gate_drift),
+        prd_open_count: Some(prd_open_count as u64),
+        mutable_open_count: Some(mutable_open_count as u64),
+        quality: Some(quality),
+        ts: Some(ts),
+        reply_sha256: Some(reply_sha256_hex(reply)),
+        lean_node: lean_node.map(str::to_owned),
     });
-    if let Some(node) = lean_node {
-        observation["lean_node"] = json!(node);
-    }
-    observations.push(observation);
     if observations.len() > 256 {
         observations.drain(0..observations.len() - 256);
     }
-    let successes = observations
-        .iter()
-        .filter(|observation| observation.get("exit_code").and_then(Value::as_i64) == Some(0))
-        .count();
+    let successes = observations.iter().filter(|observation| observation.succeeded()).count();
     let failures = observations.len().saturating_sub(successes);
     let gate_drift_failures = observations
         .iter()
-        .filter(|observation| observation_is_gate_drift_failure(observation))
+        .filter(|observation| observation.is_gate_drift_failure())
         .count();
     let active_strategy = json!({
         "observation_count": observations.len(),
@@ -404,7 +450,10 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
         "selection": if gate_drift_failures > 0 { "replay-recorded-successes-first" } else { "continue-current-exploration" },
         "evidence": observations.iter().rev().take(8).cloned().collect::<Vec<_>>(),
     });
-    let _ = crate::pkfs::write(&path, &Value::Array(observations).to_string());
+    let _ = crate::pkfs::write(
+        &path,
+        &serde_json::to_string(&observations).unwrap_or_else(|_| "[]".to_string()),
+    );
     let _ = crate::pkfs::write(
         &format!(".gm/dream-rsi/{session_id}/active-strategy.json"),
         &active_strategy.to_string(),
@@ -455,14 +504,14 @@ impl Admission {
 
 /// The ranking decision, split away from the file reads so it can be exercised without a host.
 /// `marker_ts` is the newest re-orientation stamp this dispatch can be judged against.
-fn veto_reason(verb: &str, strategy: &Value, now_ms: i64, marker_ts: i64) -> Option<String> {
-    if strategy.get("selection").and_then(Value::as_str) != Some("replay-recorded-successes-first") { return None; }
-    let evidence = strategy.get("evidence").and_then(Value::as_array)?;
-    if evidence.iter().any(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb) && entry.get("exit_code").and_then(Value::as_i64) == Some(0)) { return None; }
+fn veto_reason(verb: &str, strategy: &Strategy, now_ms: i64, marker_ts: i64) -> Option<String> {
+    if strategy.selection.as_deref() != Some("replay-recorded-successes-first") { return None; }
+    let evidence = strategy.evidence.as_deref()?;
+    if evidence.iter().any(|entry| entry.verb.as_deref() == Some(verb) && entry.succeeded()) { return None; }
     let last_failure_ts = evidence.iter()
-        .filter(|entry| entry.get("verb").and_then(Value::as_str) == Some(verb))
-        .filter(|entry| observation_is_gate_drift_failure(entry))
-        .filter_map(|entry| entry.get("ts").and_then(Value::as_i64))
+        .filter(|entry| entry.verb.as_deref() == Some(verb))
+        .filter(|entry| entry.is_gate_drift_failure())
+        .filter_map(|entry| entry.ts)
         .max()?;
     if now_ms.saturating_sub(last_failure_ts) > VETO_MAX_AGE_MS { return None; }
     if marker_ts >= last_failure_ts { return None; }
@@ -517,7 +566,7 @@ fn reorientation_ts(session_id: Option<&str>) -> i64 {
 pub fn admit_dispatch(verb: &str) -> Admission {
     if !matches!(verb, "codesearch" | "fetch" | "exec_js") { return Admission::Allow; }
     let Some(session_id) = crate::orchestrator::state::dispatch_session_id() else { return Admission::Allow; };
-    let strategy = active_strategy(Some(&session_id));
+    let strategy = Strategy::from_value(&active_strategy(Some(&session_id)));
     match veto_reason(verb, &strategy, super::state::now_ms() as i64, reorientation_ts(Some(&session_id))) {
         Some(reason) => Admission::Advisory { reason, next_dispatch_hint: "instruction" },
         None => Admission::Allow,
@@ -531,8 +580,8 @@ pub fn admit_dispatch(_verb: &str) -> Admission { Admission::Allow }
 mod tests {
     use super::*;
 
-    fn strategy(selection: &str, evidence: Vec<Value>) -> Value {
-        json!({ "selection": selection, "evidence": evidence })
+    fn strategy(selection: &str, evidence: Vec<Value>) -> Strategy {
+        Strategy::from_value(&json!({ "selection": selection, "evidence": evidence }))
     }
 
     fn observation(verb: &str, exit_code: i64, gate_drift: bool, ts: i64) -> Value {
@@ -584,6 +633,15 @@ mod tests {
     }
 
     #[test]
+    fn missing_fields_read_as_the_untyped_predicate_did() {
+        let no_exit_code = ObservationRecord::from_value(&json!({ "verb": "codesearch", "ts": 1 }));
+        assert!(no_exit_code.is_gate_drift_failure(), "a missing exit_code is a failure, and a missing gate_drift defaults to drift");
+        let plain_failure = ObservationRecord::from_value(&json!({ "verb": "codesearch", "exit_code": 2, "gate_drift": false, "ts": 1 }));
+        assert!(!plain_failure.is_gate_drift_failure(), "a plain failure is not gate drift");
+        assert!(!ObservationRecord::from_value(&json!({ "exit_code": 0, "gate_drift": true })).is_gate_drift_failure(), "a success is never gate drift");
+    }
+
+    #[test]
     fn ranking_is_verb_scoped_and_lapses_on_its_own() {
         let armed = strategy("replay-recorded-successes-first", vec![gate_drift_failure("codesearch", 1_000)]);
         assert_eq!(veto_reason("fetch", &armed, 2_000, 0), None, "another verb's failure does not rank this one");
@@ -591,7 +649,7 @@ mod tests {
 
         let unarmed = strategy("continue-current-exploration", vec![gate_drift_failure("codesearch", 1_000)]);
         assert_eq!(veto_reason("codesearch", &unarmed, 2_000, 0), None, "an unarmed strategy ranks nothing");
-        assert_eq!(veto_reason("codesearch", &Value::Null, 2_000, 0), None, "no recorded strategy ranks nothing");
+        assert_eq!(veto_reason("codesearch", &Strategy::from_value(&Value::Null), 2_000, 0), None, "no recorded strategy ranks nothing");
     }
 
     /// `admit_dispatch` returns `Admission`, never `Result`: a dispatch whose inputs are valid has
@@ -609,23 +667,21 @@ pub fn automatic_replay(session_id: Option<&str>) -> Value {
         return Value::Null;
     };
     let observations_path = format!(".gm/dream-rsi/{session_id}/observations.json");
-    let Some(observations) = crate::pkfs::read_to_string(&observations_path)
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|value| value.as_array().cloned())
-    else {
+    let Some(raw) = crate::pkfs::read_to_string(&observations_path) else {
         return Value::Null;
     };
+    let observations = read_observations(&raw);
     if observations.is_empty() {
         return Value::Null;
     }
     let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let mut replays = Vec::new();
     for observation in observations.iter().rev().take(8) {
-        let is_failure = observation.get("exit_code").and_then(Value::as_i64) != Some(0);
-        if is_failure && !observation_is_gate_drift_failure(observation) {
+        let is_failure = !observation.succeeded();
+        if is_failure && !observation.is_gate_drift_failure() {
             continue;
         }
-        let Some(dispatch_id) = observation.get("dispatch_id").and_then(Value::as_str) else {
+        let Some(dispatch_id) = observation.dispatch_id.as_deref() else {
             continue;
         };
         let Some(dispatch) = crate::dispatch_ledger::lookup(&cwd, dispatch_id) else {
@@ -643,18 +699,9 @@ pub fn automatic_replay(session_id: Option<&str>) -> Value {
         let Some(fingerprint) = dispatch.get("fingerprint").and_then(Value::as_str) else {
             continue;
         };
-        let quality = observation
-            .get("quality")
-            .and_then(Value::as_f64)
-            .unwrap_or(if exit_code == 0 { 1.0 } else { 0.0 });
-        let cost = observation
-            .get("prd_open_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            + observation
-                .get("mutable_open_count")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
+        let quality = observation.quality.unwrap_or(if exit_code == 0 { 1.0 } else { 0.0 });
+        let cost = observation.prd_open_count.unwrap_or(0)
+            + observation.mutable_open_count.unwrap_or(0)
             + 1;
         replays.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "score": quality, "cost": cost }));
     }

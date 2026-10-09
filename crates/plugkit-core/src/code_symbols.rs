@@ -760,9 +760,7 @@ fn sync_tree_with_budget(
 ) -> Value {
     let started = host_now_ms();
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
-    let accessible_directory = crate::wasm_dispatch::host_stat(root)
-        .and_then(|stat| stat.get("isDirectory").and_then(Value::as_bool))
-        == Some(true);
+    let accessible_directory = crate::wasm_dispatch::host_stat_is_directory(root) == Some(true);
     if !accessible_directory && !crate::wasm_dispatch::host_allow_root(root) {
         return json!({
             "ok": false,
