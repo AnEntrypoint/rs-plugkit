@@ -102,6 +102,39 @@ enum TierResult {
     Terminal(Outcome),
 }
 
+const VENDOR_MANIFEST: &str = ".gm/instructions/.vendored.json";
+
+fn snapshot_hash(text: &str) -> String {
+    let normalised = text.replace("\r\n", "\n");
+    format!(
+        "{:016x}",
+        crate::orchestrator::instructions::fnv1a64(normalised.trim())
+    )
+}
+
+fn read_vendor_manifest() -> serde_json::Map<String, serde_json::Value> {
+    pkfs::read_to_string(VENDOR_MANIFEST)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| match value {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+pub fn is_unedited_snapshot(key: &str, text: &str) -> bool {
+    read_vendor_manifest()
+        .get(key)
+        .and_then(|recorded| recorded.as_str())
+        .is_some_and(|recorded| recorded == snapshot_hash(text))
+}
+
+pub fn record_snapshot(key: &str, text: &str) -> bool {
+    let mut manifest = read_vendor_manifest();
+    manifest.insert(key.to_string(), serde_json::Value::String(snapshot_hash(text)));
+    pkfs::write(VENDOR_MANIFEST, &serde_json::Value::Object(manifest).to_string())
+}
+
 fn tier1_project_vendored(key: &str) -> TierResult {
     let local_path = format!("{LOCAL_BASE}/{key}.md");
     if !crate::config_path::path_contained_within(LOCAL_BASE, &local_path) {
@@ -110,8 +143,10 @@ fn tier1_project_vendored(key: &str) -> TierResult {
         });
     }
     match read_clean(&local_path) {
-        Some(text) => TierResult::Answered(text, Outcome::LocalOverride),
-        None => TierResult::FallThrough,
+        Some(text) if !is_unedited_snapshot(key, &text) => {
+            TierResult::Answered(text, Outcome::LocalOverride)
+        }
+        _ => TierResult::FallThrough,
     }
 }
 

@@ -398,7 +398,17 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
         };
         let shadowed =
             crate::prose::config_repo_text(key).filter(|repo_text| repo_text.trim() != text.trim());
-        let (ok, status) = write_if_absent_or_forced(&path, text, force);
+        let stale_snapshot = pkfs::read_to_string(&path).is_some_and(|prev| {
+            crate::prose::is_unedited_snapshot(key, &prev) && prev.trim() != text.trim()
+        });
+        let (ok, status) = if stale_snapshot {
+            (pkfs::write(&path, text), "refreshed-stale-snapshot")
+        } else {
+            write_if_absent_or_forced(&path, text, force)
+        };
+        if ok && status != "skipped-existing" {
+            crate::prose::record_snapshot(key, text);
+        }
         let mut row = json!({ "path": path, "ok": ok, "status": status });
         if let (Some(repo_text), true) = (shadowed, ok) {
             row["shadows_config_repo"] = json!(true);
