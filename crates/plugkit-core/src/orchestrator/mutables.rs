@@ -229,7 +229,13 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                 match seq.iter_mut().find(|it| row_id(it) == Some(id.as_str())) {
                     Some(slot) => {
                         replaced_existing_id = true;
-                        *slot = new_row;
+                        let mut row = new_row;
+                        if !map.contains_key(&Value::String("status".to_string())) {
+                            if let (Value::Mapping(m), Some(prior)) = (&mut row, slot.get("status")) {
+                                m.insert(Value::String("status".to_string()), prior.clone());
+                            }
+                        }
+                        *slot = row;
                     }
                     None => seq.push(new_row),
                 }
