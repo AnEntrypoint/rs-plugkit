@@ -267,13 +267,7 @@ GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
 `sql_smoke`, `task-spawn`/`task-list`/`task-output`/`task-stop`,
 `background-convert`, `kill-port`, `similarity`, `claim-audit`.
 
-`crawl` takes a plain-text body (not JSON). Its first line is `engine=cdp` (the default when the
-line is absent) or `engine=lightpanda`; the rest is the crawl request (URLs and steps). `cdp` is
-HEADFUL: the host drives a visible Chrome over CDP through its `crawl_cdp` entry point. `lightpanda`
-is HEADLESS: the guest calls the `lightpanda` sibling plugin's `crawl` verb with the same body, and
-the host keeps that lightpanda process warm. Both engines return the host's reply object unchanged,
-with `ok`, `engine`, `headless`, `stdout`, `stderr`, `exit_code` and `duration_ms`. Any other engine
-answers `ok: false` with `error_code: unknown_engine`, naming `cdp` and `lightpanda`.
+`crawl` takes a plain-text body (not JSON). Its first line is `engine=lightpanda` (the default when the line is absent) or `engine=cdp`; the rest is the crawl request (URLs and steps). `chrome` is an alias that routes to `crawl engine=cdp`: it drops any engine line and always drives Chrome. `cdp` is HEADFUL: the host drives a visible Chrome over CDP through its `crawl_cdp` entry point. `lightpanda` is HEADLESS: the guest calls the `lightpanda` sibling plugin's `crawl` verb with the same body, and the host keeps that lightpanda process warm. Both engines return the host's reply object unchanged, with `ok`, `engine`, `headless`, `stdout`, `stderr`, `exit_code` and `duration_ms`. Any other engine answers `ok: false` with `error_code: unknown_engine`, naming `cdp` and `lightpanda`.
 
 ```
 engine=lightpanda
@@ -281,7 +275,8 @@ https://example.com/
 ```
 
 The standalone `cdp` verb is removed; `crawl engine=cdp` replaces it. `browser` and `serp` are
-removed too and answer `unknown_verb`.
+removed too and answer `unknown_verb`. `session-list` and `session-close-all` answer
+`ok: false` with `error_code: not_implemented_in_guest`, since the guest holds no browser session state.
 
 When a shell verb returns a `task_id`, use `task-output` with JSON body
 `{"id":"task-…"}` to retrieve it. Use `task-stop` with the same body to stop

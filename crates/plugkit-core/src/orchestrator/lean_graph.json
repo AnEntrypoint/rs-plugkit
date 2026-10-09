@@ -55,6 +55,13 @@
       "key": "G_SURFACE",
       "prose_key": "g_surface",
       "label": "variant did not decrease",
+      "kind": "gate",
+      "phase": null
+    },
+    {
+      "key": "COMPLETE",
+      "prose_key": "complete",
+      "label": "walk complete",
       "kind": "terminal",
       "phase": null
     },
@@ -63,616 +70,704 @@
       "prose_key": "jtbd",
       "label": "Jobs To Be Done - Clayton Christensen",
       "kind": "principle",
-      "phase": "P1"
+      "phase": "P1",
+      "skill": "gm-lean-p1"
     },
     {
       "key": "XYPROB",
       "prose_key": "xyprob",
       "label": "XY Problem",
       "kind": "principle",
-      "phase": "P1"
+      "phase": "P1",
+      "skill": "gm-lean-p1"
     },
     {
       "key": "EARS",
       "prose_key": "ears",
       "label": "EARS Requirements Syntax - Alistair Mavin",
       "kind": "principle",
-      "phase": "P1"
+      "phase": "P1",
+      "skill": "gm-lean-p1"
     },
     {
       "key": "INVEST",
       "prose_key": "invest",
       "label": "INVEST - Bill Wake",
       "kind": "principle",
-      "phase": "P1"
+      "phase": "P1",
+      "skill": "gm-lean-p1"
     },
     {
       "key": "THINSLICE",
       "prose_key": "thinslice",
       "label": "Thin Vertical Slice - Alistair Cockburn",
       "kind": "principle",
-      "phase": "P1"
+      "phase": "P1",
+      "skill": "gm-lean-p1"
     },
     {
       "key": "SPIKE",
       "prose_key": "spike",
       "label": "Spike Solution - Kent Beck",
       "kind": "principle",
-      "phase": "P1"
+      "phase": "P1",
+      "skill": "gm-lean-p1"
     },
     {
       "key": "YAGNI",
       "prose_key": "yagni",
       "label": "YAGNI - Ron Jeffries",
       "kind": "principle",
-      "phase": "P1"
+      "phase": "P1",
+      "skill": "gm-lean-p1"
     },
     {
       "key": "LIVEPLAN",
       "prose_key": "liveplan",
       "label": "Live Plan, Current Task Only",
       "kind": "principle",
-      "phase": "P1"
+      "phase": "P1",
+      "skill": "gm-lean-p1"
     },
     {
       "key": "UBIQ",
       "prose_key": "ubiq",
       "label": "Ubiquitous Language - Eric Evans",
       "kind": "principle",
-      "phase": "P2"
+      "phase": "P2",
+      "skill": "gm-lean-p2"
     },
     {
       "key": "CLEANNAME",
       "prose_key": "cleanname",
       "label": "Intention-Revealing Names - Robert C. Martin",
       "kind": "principle",
-      "phase": "P2"
+      "phase": "P2",
+      "skill": "gm-lean-p2"
     },
     {
       "key": "MILNER",
       "prose_key": "milner",
       "label": "Well-Typed Programs Cannot Go Wrong - Robin Milner",
       "kind": "principle",
-      "phase": "P2"
+      "phase": "P2",
+      "skill": "gm-lean-p2"
     },
     {
       "key": "ILLEGAL",
       "prose_key": "illegal",
       "label": "Make Illegal States Unrepresentable - Yaron Minsky",
       "kind": "principle",
-      "phase": "P2"
+      "phase": "P2",
+      "skill": "gm-lean-p2"
     },
     {
       "key": "PARSEDV",
       "prose_key": "parsedv",
       "label": "Parse, Don't Validate - Alexis King",
       "kind": "principle",
-      "phase": "P2"
+      "phase": "P2",
+      "skill": "gm-lean-p2"
     },
     {
       "key": "WADLER",
       "prose_key": "wadler",
       "label": "Theorems for Free - Philip Wadler",
       "kind": "principle",
-      "phase": "P2"
+      "phase": "P2",
+      "skill": "gm-lean-p2"
     },
     {
       "key": "DBC",
       "prose_key": "dbc",
       "label": "Design by Contract - Bertrand Meyer",
       "kind": "principle",
-      "phase": "P2"
+      "phase": "P2",
+      "skill": "gm-lean-p2"
     },
     {
       "key": "CQS",
       "prose_key": "cqs",
       "label": "Command-Query Separation - Bertrand Meyer",
       "kind": "principle",
-      "phase": "P2"
+      "phase": "P2",
+      "skill": "gm-lean-p2"
     },
     {
       "key": "PARNAS",
       "prose_key": "parnas",
       "label": "Information Hiding - David Parnas",
       "kind": "principle",
-      "phase": "P2"
+      "phase": "P2",
+      "skill": "gm-lean-p2"
     },
     {
       "key": "DEEPMOD",
       "prose_key": "deepmod",
       "label": "Deep Modules - John Ousterhout",
       "kind": "principle",
-      "phase": "P2"
+      "phase": "P2",
+      "skill": "gm-lean-p2"
     },
     {
       "key": "ACCEPTPORT",
       "prose_key": "acceptport",
       "label": "Ports and Adapters - Alistair Cockburn",
       "kind": "principle",
-      "phase": "P2"
+      "phase": "P2",
+      "skill": "gm-lean-p2"
     },
     {
       "key": "COMMENTSMELL",
       "prose_key": "commentsmell",
       "label": "A Comment Is a Deodorant for Bad Smells - Fowler and Beck",
       "kind": "principle",
-      "phase": "P2"
+      "phase": "P2",
+      "skill": "gm-lean-p2"
     },
     {
       "key": "TOTALITY",
       "prose_key": "totality",
       "label": "Total Functional Programming - David Turner",
       "kind": "principle",
-      "phase": "P3"
+      "phase": "P3",
+      "skill": "gm-lean-p3"
     },
     {
       "key": "GUARD",
       "prose_key": "guard",
       "label": "Guard Clause - Martin Fowler",
       "kind": "principle",
-      "phase": "P3"
+      "phase": "P3",
+      "skill": "gm-lean-p3"
     },
     {
       "key": "SLAP",
       "prose_key": "slap",
       "label": "Single Level of Abstraction - Kent Beck",
       "kind": "principle",
-      "phase": "P3"
+      "phase": "P3",
+      "skill": "gm-lean-p3"
     },
     {
       "key": "STRUCTPROG",
       "prose_key": "structprog",
       "label": "Structured Programming - Edsger Dijkstra",
       "kind": "principle",
-      "phase": "P3"
+      "phase": "P3",
+      "skill": "gm-lean-p3"
     },
     {
       "key": "IMMUT",
       "prose_key": "immut",
       "label": "Purely Functional Data Structures - Chris Okasaki",
       "kind": "principle",
-      "phase": "P3"
+      "phase": "P3",
+      "skill": "gm-lean-p3"
     },
     {
       "key": "OWNERSHIP",
       "prose_key": "ownership",
       "label": "Ownership and Borrowing - Matsakis and Klock",
       "kind": "principle",
-      "phase": "P3"
+      "phase": "P3",
+      "skill": "gm-lean-p3"
     },
     {
       "key": "DRY",
       "prose_key": "dry",
       "label": "Don't Repeat Yourself - Hunt and Thomas",
       "kind": "principle",
-      "phase": "P3"
+      "phase": "P3",
+      "skill": "gm-lean-p3"
     },
     {
       "key": "KISS",
       "prose_key": "kiss",
       "label": "KISS - Kelly Johnson",
       "kind": "principle",
-      "phase": "P3"
+      "phase": "P3",
+      "skill": "gm-lean-p3"
     },
     {
       "key": "DIJKSTRATEST",
       "prose_key": "dijkstratest",
       "label": "Testing Shows Presence, Never Absence - Edsger Dijkstra",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "ORACLEBIAS",
       "prose_key": "oraclebias",
       "label": "Implementation-Biased Test Generation - LLM test-generation study",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "INDEPVER",
       "prose_key": "indepver",
       "label": "Independence-Based Verification - Grabowski",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "ADVERSARIAL",
       "prose_key": "adversarial",
       "label": "Adversarial Red-Blue Agent Verification - Thukkaram",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "HUGHES",
       "prose_key": "hughes",
       "label": "QuickCheck Property-Based Testing - Claessen and Hughes",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "PBTAGENT",
       "prose_key": "pbtagent",
       "label": "Agentic Property-Based Testing - Hypothesis agent study",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "INVARIANTRUN",
       "prose_key": "invariantrun",
       "label": "Stateful Invariant Runs over Random Call Sequences - Foundry and Hypothesis",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "METAMORPH",
       "prose_key": "metamorph",
       "label": "Metamorphic Testing - T. Y. Chen",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "FUZZ",
       "prose_key": "fuzz",
       "label": "Coverage-Guided Fuzzing - Michal Zalewski",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "CONTRACTTEST",
       "prose_key": "contracttest",
       "label": "Consumer-Driven Contract Test - Ian Robinson",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "CHARTEST",
       "prose_key": "chartest",
       "label": "Characterization Test, Legacy Only - Michael Feathers",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "AGENTQA",
       "prose_key": "agentqa",
       "label": "Agent-Native QA over MCP",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "LLMJUDGE",
       "prose_key": "llmjudge",
       "label": "LLM as a Judge",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "SANITIZE",
       "prose_key": "sanitize",
       "label": "Sanitizer and Static Analysis Gate",
       "kind": "principle",
-      "phase": "P4"
+      "phase": "P4",
+      "skill": "gm-lean-p4"
     },
     {
       "key": "CONVCOM",
       "prose_key": "convcom",
       "label": "Conventional Commits",
       "kind": "principle",
-      "phase": "P5"
+      "phase": "P5",
+      "skill": "gm-lean-p5"
     },
     {
       "key": "RULE5072",
       "prose_key": "rule5072",
       "label": "50/72 Commit Format - Tim Pope",
       "kind": "principle",
-      "phase": "P5"
+      "phase": "P5",
+      "skill": "gm-lean-p5"
     },
     {
       "key": "WHYNOTWHAT",
       "prose_key": "whynotwhat",
       "label": "The Diff Records What, the Message Records Why",
       "kind": "principle",
-      "phase": "P5"
+      "phase": "P5",
+      "skill": "gm-lean-p5"
     },
     {
       "key": "GITSTATE",
       "prose_key": "gitstate",
       "label": "Git Is the State - stateless runtime, Kapale",
       "kind": "principle",
-      "phase": "P5"
+      "phase": "P5",
+      "skill": "gm-lean-p5"
     },
     {
       "key": "BLAME",
       "prose_key": "blame",
       "label": "git blame as the Index",
       "kind": "principle",
-      "phase": "P5"
+      "phase": "P5",
+      "skill": "gm-lean-p5"
     },
     {
       "key": "BISECT",
       "prose_key": "bisect",
       "label": "git bisect as the Regression Oracle - Linus Torvalds",
       "kind": "principle",
-      "phase": "P5"
+      "phase": "P5",
+      "skill": "gm-lean-p5"
     },
     {
       "key": "SEMVER",
       "prose_key": "semver",
       "label": "Semantic Versioning - Tom Preston-Werner",
       "kind": "principle",
-      "phase": "P5"
+      "phase": "P5",
+      "skill": "gm-lean-p5"
     },
     {
       "key": "ADRN",
       "prose_key": "adrn",
       "label": "ADR, Irreversible Forks Only - Michael Nygard",
       "kind": "principle",
-      "phase": "P5"
+      "phase": "P5",
+      "skill": "gm-lean-p5"
     },
     {
       "key": "NODELETE",
       "prose_key": "nodelete",
       "label": "Agents Avoid Deleting Code - Ebrahimi et al.",
       "kind": "principle",
-      "phase": "P6"
+      "phase": "P6",
+      "skill": "gm-lean-p6"
     },
     {
       "key": "GUARDANDGO",
       "prose_key": "guardandgo",
       "label": "Guard-and-Go Fallback Accumulation - Vector Labs",
       "kind": "principle",
-      "phase": "P6"
+      "phase": "P6",
+      "skill": "gm-lean-p6"
     },
     {
       "key": "TYPE4",
       "prose_key": "type4",
       "label": "Type-4 Semantic Clones in Agent Pull Requests",
       "kind": "principle",
-      "phase": "P6"
+      "phase": "P6",
+      "skill": "gm-lean-p6"
     },
     {
       "key": "CHURN",
       "prose_key": "churn",
       "label": "Rising Churn and Duplication - Harding and Kloster, GitClear",
       "kind": "principle",
-      "phase": "P6"
+      "phase": "P6",
+      "skill": "gm-lean-p6"
     },
     {
       "key": "SLOPDRIFT",
       "prose_key": "slopdrift",
       "label": "Behavioural Drift over Long Trajectories - Orlanski et al.",
       "kind": "principle",
-      "phase": "P6"
+      "phase": "P6",
+      "skill": "gm-lean-p6"
     },
     {
       "key": "DELETIONGATE",
       "prose_key": "deletiongate",
       "label": "Deletion-Completeness Check",
       "kind": "principle",
-      "phase": "P6"
+      "phase": "P6",
+      "skill": "gm-lean-p6"
     },
     {
       "key": "DIFFBUDGET",
       "prose_key": "diffbudget",
       "label": "Net-Negative Diff Target",
       "kind": "principle",
-      "phase": "P6"
+      "phase": "P6",
+      "skill": "gm-lean-p6"
     },
     {
       "key": "REACHABLE",
       "prose_key": "reachable",
       "label": "Reachability Analysis",
       "kind": "principle",
-      "phase": "P6"
+      "phase": "P6",
+      "skill": "gm-lean-p6"
     },
     {
       "key": "TARPIT",
       "prose_key": "tarpit",
       "label": "Out of the Tar Pit - Moseley and Marks",
       "kind": "principle",
-      "phase": "P6"
+      "phase": "P6",
+      "skill": "gm-lean-p6"
     },
     {
       "key": "LEANSW",
       "prose_key": "leansw",
       "label": "A Plea for Lean Software - Niklaus Wirth",
       "kind": "principle",
-      "phase": "P6"
+      "phase": "P6",
+      "skill": "gm-lean-p6"
     },
     {
       "key": "KOLMOGOROV",
       "prose_key": "kolmogorov",
       "label": "Kolmogorov Complexity - Kolmogorov and Chaitin",
       "kind": "principle",
-      "phase": "P6"
+      "phase": "P6",
+      "skill": "gm-lean-p6"
     },
     {
       "key": "SMALLESTSET",
       "prose_key": "smallestset",
       "label": "The Smallest Set of High-Signal Tokens",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "CONTEXTROT",
       "prose_key": "contextrot",
       "label": "Context Rot - Hong et al.",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "REWORK",
       "prose_key": "rework",
       "label": "Rework Loops Dominate Token Spend",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "PROGDISC",
       "prose_key": "progdisc",
       "label": "Progressive Disclosure via SKILL.md",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "HEADERONLY",
       "prose_key": "headeronly",
       "label": "Header Loads, Body Fires on Trigger",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "AGENTSMD",
       "prose_key": "agentsmd",
       "label": "AGENTS.md Hierarchical, Not Encyclopaedic",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "NODUPEDOC",
       "prose_key": "nodupedoc",
       "label": "Reference, Never Restate",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "SUBAGENT",
       "prose_key": "subagent",
       "label": "Subagent Context Isolation",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "COMPACT",
       "prose_key": "compact",
       "label": "Phase-Boundary Compaction",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "OBSCOMPRESS",
       "prose_key": "obscompress",
       "label": "Observational Context Compression",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "MEMTOOL",
       "prose_key": "memtool",
       "label": "Server-Side Memory Across Sessions",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "STABLEPREFIX",
       "prose_key": "stableprefix",
       "label": "Stable Prefix for Cache Hits",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "TOOLBUDGET",
       "prose_key": "toolbudget",
       "label": "Tool and MCP Definition Overhead",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "GREPFIRST",
       "prose_key": "grepfirst",
       "label": "Exact-String Retrieval Before Embedding Retrieval",
       "kind": "principle",
-      "phase": "P7"
+      "phase": "P7",
+      "skill": "gm-lean-p7"
     },
     {
       "key": "OUSTERHOUTC",
       "prose_key": "ousterhoutc",
       "label": "Comments Capture What Code Cannot - John Ousterhout",
       "kind": "tension",
-      "phase": "P8"
+      "phase": "P8",
+      "skill": "gm-lean-p8"
     },
     {
       "key": "NAURTHEORY",
       "prose_key": "naurtheory",
       "label": "Programming as Theory Building - Peter Naur",
       "kind": "tension",
-      "phase": "P8"
+      "phase": "P8",
+      "skill": "gm-lean-p8"
     },
     {
       "key": "TACIT",
       "prose_key": "tacit",
       "label": "Tacit Knowledge Resists Specification",
       "kind": "tension",
-      "phase": "P8"
+      "phase": "P8",
+      "skill": "gm-lean-p8"
     },
     {
       "key": "HYRUM",
       "prose_key": "hyrum",
       "label": "Hyrum's Law - Hyrum Wright",
       "kind": "tension",
-      "phase": "P8"
+      "phase": "P8",
+      "skill": "gm-lean-p8"
     },
     {
       "key": "REGEVIDENCE",
       "prose_key": "regevidence",
       "label": "Regulated Environments Need an Evidence Trail",
       "kind": "tension",
-      "phase": "P8"
+      "phase": "P8",
+      "skill": "gm-lean-p8"
     },
     {
       "key": "MAINTCOST",
       "prose_key": "maintcost",
       "label": "Measured Maintenance Cost of Agent Code",
       "kind": "tension",
-      "phase": "P8"
+      "phase": "P8",
+      "skill": "gm-lean-p8"
     },
     {
       "key": "SPECDRIFT",
       "prose_key": "specdrift",
       "label": "Silent Spec-Code Drift - Grabowski",
       "kind": "tension",
-      "phase": "P8"
+      "phase": "P8",
+      "skill": "gm-lean-p8"
     },
     {
       "key": "CTXEXPLODE",
       "prose_key": "ctxexplode",
       "label": "Context Explosion in Whole-Repo Reasoning - Grabowski",
       "kind": "tension",
-      "phase": "P8"
+      "phase": "P8",
+      "skill": "gm-lean-p8"
     },
     {
       "key": "FIXPOINT",
       "prose_key": "fixpoint",
       "label": "Least Fixed Point - Kleene and Tarski",
       "kind": "principle",
-      "phase": "P9"
+      "phase": "P9",
+      "skill": "gm-lean-p9"
     },
     {
       "key": "MONOTONE",
       "prose_key": "monotone",
       "label": "Monotonic Improvement Only",
       "kind": "principle",
-      "phase": "P9"
+      "phase": "P9",
+      "skill": "gm-lean-p9"
     },
     {
       "key": "REGRESSGUARD",
       "prose_key": "regressguard",
       "label": "No Regression Across Sweeps",
       "kind": "principle",
-      "phase": "P9"
+      "phase": "P9",
+      "skill": "gm-lean-p9"
     },
     {
       "key": "VARIANT",
       "prose_key": "variant",
       "label": "Well-Founded Variant - Robert Floyd",
       "kind": "principle",
-      "phase": "P9"
+      "phase": "P9",
+      "skill": "gm-lean-p9"
     },
     {
       "key": "BOUNDEDRETRY",
       "prose_key": "boundedretry",
       "label": "Bounded Retry, Then Surface",
       "kind": "principle",
-      "phase": "P9"
+      "phase": "P9",
+      "skill": "gm-lean-p9"
     },
     {
       "key": "RICE",
@@ -680,35 +775,40 @@
       "prose_key": "rice",
       "label": "Rice's Theorem - Henry Gordon Rice",
       "kind": "principle",
-      "phase": "P9"
+      "phase": "P9",
+      "skill": "gm-lean-p9"
     },
     {
       "key": "HALTING",
       "prose_key": "halting",
       "label": "Halting Problem - Alan Turing",
       "kind": "principle",
-      "phase": "P9"
+      "phase": "P9",
+      "skill": "gm-lean-p9"
     },
     {
       "key": "LEHMAN",
       "prose_key": "lehman",
       "label": "Lehman's Laws of Software Evolution - Meir Lehman",
       "kind": "principle",
-      "phase": "P9"
+      "phase": "P9",
+      "skill": "gm-lean-p9"
     },
     {
       "key": "KNUTHOPT",
       "prose_key": "knuthopt",
       "label": "Premature Optimization - Donald Knuth",
       "kind": "principle",
-      "phase": "P9"
+      "phase": "P9",
+      "skill": "gm-lean-p9"
     },
     {
       "key": "LOWERBOUND",
       "prose_key": "lowerbound",
       "label": "Lower Bound Reached - information-theoretic argument",
       "kind": "principle",
-      "phase": "P9"
+      "phase": "P9",
+      "skill": "gm-lean-p9"
     }
   ],
   "edges": [
@@ -1360,6 +1460,34 @@
       "gates": []
     },
     {
+      "from": "G_SWEEP",
+      "to": "COMPLETE",
+      "kind": "forward",
+      "label": null,
+      "gates": [
+        "prd-all-closed",
+        "worktree-clean",
+        "residual-scan-fired",
+        "ci-validated-fresh",
+        "claim-audit-clean",
+        "submodules-clean",
+        "no-synthetic-test-files",
+        "no-secrets-in-diff",
+        "no-hedge-language-in-diff",
+        "no-graphical-symbols-in-diff",
+        "no-unchecked-panics-in-diff",
+        "no-admit-deferral-markers",
+        "mutables-all-resolved",
+        "mutables-all-typed",
+        "idempotent-dispatch-replay-safe",
+        "split-context-swept",
+        "state-obligations-ready",
+        "conc-obligations-ready",
+        "sec-obligations-ready",
+        "res-obligations-ready"
+      ]
+    },
+    {
       "from": "FIXPOINT",
       "to": "G_FIXPOINT",
       "kind": "forward",
@@ -1406,20 +1534,6 @@
       "to": "OUSTERHOUTC",
       "kind": "backreference",
       "label": "a tension fired",
-      "gates": []
-    },
-    {
-      "from": "G_FIXPOINT",
-      "to": "LOWERBOUND",
-      "kind": "backreference",
-      "label": "no gate reopened, no counterexample, no growth",
-      "gates": []
-    },
-    {
-      "from": "G_FIXPOINT",
-      "to": "G_SWEEP",
-      "kind": "backreference",
-      "label": "a later sweep reopened a gate",
       "gates": []
     },
     {
@@ -1500,13 +1614,6 @@
       "gates": []
     },
     {
-      "from": "INVEST",
-      "to": "THINSLICE",
-      "kind": "backreference",
-      "label": "the task depends on another task",
-      "gates": []
-    },
-    {
       "from": "THINSLICE",
       "to": "PARNAS",
       "kind": "backreference",
@@ -1563,13 +1670,6 @@
       "gates": []
     },
     {
-      "from": "MILNER",
-      "to": "ILLEGAL",
-      "kind": "backreference",
-      "label": "a stuck state is reachable",
-      "gates": []
-    },
-    {
       "from": "ILLEGAL",
       "to": "DBC",
       "kind": "backreference",
@@ -1605,13 +1705,6 @@
       "gates": []
     },
     {
-      "from": "PARNAS",
-      "to": "DEEPMOD",
-      "kind": "backreference",
-      "label": "a decision is not hidden by any module",
-      "gates": []
-    },
-    {
       "from": "DEEPMOD",
       "to": "OUSTERHOUTC",
       "kind": "backreference",
@@ -1633,13 +1726,6 @@
       "gates": []
     },
     {
-      "from": "GUARD",
-      "to": "SLAP",
-      "kind": "backreference",
-      "label": "the branch structure still needs explanation",
-      "gates": []
-    },
-    {
       "from": "SLAP",
       "to": "DEEPMOD",
       "kind": "backreference",
@@ -1651,13 +1737,6 @@
       "to": "GUARD",
       "kind": "backreference",
       "label": "control flow is untraceable",
-      "gates": []
-    },
-    {
-      "from": "IMMUT",
-      "to": "OWNERSHIP",
-      "kind": "backreference",
-      "label": "shared mutable state crossed a boundary",
       "gates": []
     },
     {
@@ -1700,13 +1779,6 @@
       "to": "G_INDEP",
       "kind": "backreference",
       "label": "the assertion mirrors the code",
-      "gates": []
-    },
-    {
-      "from": "INDEPVER",
-      "to": "ADVERSARIAL",
-      "kind": "backreference",
-      "label": "the two agents shared context",
       "gates": []
     },
     {
@@ -1885,31 +1957,10 @@
       "gates": []
     },
     {
-      "from": "DELETIONGATE",
-      "to": "REACHABLE",
-      "kind": "backreference",
-      "label": "superseded code is still reachable",
-      "gates": []
-    },
-    {
-      "from": "REACHABLE",
-      "to": "DIFFBUDGET",
-      "kind": "backreference",
-      "label": "an entry point has no caller",
-      "gates": []
-    },
-    {
       "from": "TARPIT",
       "to": "ILLEGAL",
       "kind": "backreference",
       "label": "the state is accidental",
-      "gates": []
-    },
-    {
-      "from": "LEANSW",
-      "to": "KOLMOGOROV",
-      "kind": "backreference",
-      "label": "size grew without a reason",
       "gates": []
     },
     {
@@ -1941,27 +1992,6 @@
       "gates": []
     },
     {
-      "from": "PROGDISC",
-      "to": "HEADERONLY",
-      "kind": "backreference",
-      "label": "the body loaded when it was not needed",
-      "gates": []
-    },
-    {
-      "from": "HEADERONLY",
-      "to": "AGENTSMD",
-      "kind": "backreference",
-      "label": "the header does not predict the trigger",
-      "gates": []
-    },
-    {
-      "from": "AGENTSMD",
-      "to": "NODUPEDOC",
-      "kind": "backreference",
-      "label": "the file restates the README",
-      "gates": []
-    },
-    {
       "from": "NODUPEDOC",
       "to": "DRY",
       "kind": "backreference",
@@ -1976,13 +2006,6 @@
       "gates": []
     },
     {
-      "from": "COMPACT",
-      "to": "OBSCOMPRESS",
-      "kind": "backreference",
-      "label": "compaction cut an active subgoal",
-      "gates": []
-    },
-    {
       "from": "OBSCOMPRESS",
       "to": "GREPFIRST",
       "kind": "backreference",
@@ -1994,13 +2017,6 @@
       "to": "COMPACT",
       "kind": "backreference",
       "label": "history is replayed each session",
-      "gates": []
-    },
-    {
-      "from": "STABLEPREFIX",
-      "to": "TOOLBUDGET",
-      "kind": "backreference",
-      "label": "the cache is missing",
       "gates": []
     },
     {
@@ -2081,38 +2097,10 @@
       "gates": []
     },
     {
-      "from": "FIXPOINT",
-      "to": "MONOTONE",
-      "kind": "backreference",
-      "label": "the sweep produced a change",
-      "gates": []
-    },
-    {
-      "from": "MONOTONE",
-      "to": "REGRESSGUARD",
-      "kind": "backreference",
-      "label": "a measure moved the wrong way",
-      "gates": []
-    },
-    {
       "from": "REGRESSGUARD",
       "to": "INVARIANTRUN",
       "kind": "backreference",
       "label": "an earlier sweep's gain was lost",
-      "gates": []
-    },
-    {
-      "from": "VARIANT",
-      "to": "BOUNDEDRETRY",
-      "kind": "backreference",
-      "label": "the open-condition count did not fall",
-      "gates": []
-    },
-    {
-      "from": "BOUNDEDRETRY",
-      "to": "G_SURFACE",
-      "kind": "backreference",
-      "label": "the same condition fired twice with no new information",
       "gates": []
     },
     {
@@ -2154,7 +2142,14 @@
       "from": "G_SURFACE",
       "to": "ADRN",
       "kind": "backreference",
-      "label": "the ambiguity is human-owned",
+      "label": "a stalled variant is a stated assumption, not a stop",
+      "gates": []
+    },
+    {
+      "from": "COMPLETE",
+      "to": "G_FIXPOINT",
+      "kind": "forward",
+      "label": null,
       "gates": []
     }
   ],
@@ -2191,6 +2186,126 @@
       "predicate": "lean-contract-recorded",
       "hook_mode": "predicate-only",
       "message": "transition rejected (blocking, lean gate \"contract satisfied and recorded\"): a .gm/prd.yml row is still open or the worktree is not clean. Close every row and commit the change. The reason text in the commit message is not checked by code."
+    },
+    {
+      "name": "prd-all-closed",
+      "predicate": "prd-all-closed",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"prd-all-closed\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "worktree-clean",
+      "predicate": "worktree-clean",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"worktree-clean\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "residual-scan-fired",
+      "predicate": "residual-scan-fired",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"residual-scan-fired\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "ci-validated-fresh",
+      "predicate": "ci-validated-fresh",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"ci-validated-fresh\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "claim-audit-clean",
+      "predicate": "claim-audit-clean",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"claim-audit-clean\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "submodules-clean",
+      "predicate": "submodules-clean",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"submodules-clean\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "no-synthetic-test-files",
+      "predicate": "no-synthetic-test-files",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"no-synthetic-test-files\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "no-secrets-in-diff",
+      "predicate": "no-secrets-in-diff",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"no-secrets-in-diff\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "no-hedge-language-in-diff",
+      "predicate": "no-hedge-language-in-diff",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"no-hedge-language-in-diff\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "no-graphical-symbols-in-diff",
+      "predicate": "no-graphical-symbols-in-diff",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"no-graphical-symbols-in-diff\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "no-unchecked-panics-in-diff",
+      "predicate": "no-unchecked-panics-in-diff",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"no-unchecked-panics-in-diff\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "no-admit-deferral-markers",
+      "predicate": "no-admit-deferral-markers",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"no-admit-deferral-markers\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "mutables-all-resolved",
+      "predicate": "mutables-all-resolved",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"mutables-all-resolved\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "mutables-all-typed",
+      "predicate": "mutables-all-typed",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"mutables-all-typed\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "idempotent-dispatch-replay-safe",
+      "predicate": "idempotent-dispatch-replay-safe",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"idempotent-dispatch-replay-safe\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "split-context-swept",
+      "predicate": "split-context-swept",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"split-context-swept\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "state-obligations-ready",
+      "predicate": "state-obligations-ready",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"state-obligations-ready\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "conc-obligations-ready",
+      "predicate": "conc-obligations-ready",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"conc-obligations-ready\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "sec-obligations-ready",
+      "predicate": "sec-obligations-ready",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"sec-obligations-ready\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "res-obligations-ready",
+      "predicate": "res-obligations-ready",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"res-obligations-ready\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
     }
   ],
   "policy": {
