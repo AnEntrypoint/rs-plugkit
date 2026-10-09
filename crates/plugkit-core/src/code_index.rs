@@ -3943,7 +3943,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
                 .any(|glob| glob.admits(root, scope, path))
     };
     let file_cap = cfg.index.digest_max_files.max(20000).min(LITERAL_SCAN_MAX_FILES).max(1);
-    let universe = match crate::scan_universe::list_scan_universe(root, &[], file_cap.saturating_add(1), &cfg.index, origin, false, false) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, false, false) {
         Ok(e) => e,
         Err(e) => return json!({ "ok": false, "error": e, "mode": "filename" }),
     };
@@ -4044,9 +4044,9 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
     }
     if !universe.listing_complete {
         out.insert("listing_incomplete".to_string(), json!(true));
-        if let Some(reason) = &universe.walk_reason {
-            out.insert("walk_reason".to_string(), json!(reason));
-        }
+    }
+    if let Some(reason) = &universe.walk_reason {
+        out.insert("walk_reason".to_string(), json!(reason));
     }
     if files_truncated {
         out.insert("files_truncated".to_string(), json!(true));
