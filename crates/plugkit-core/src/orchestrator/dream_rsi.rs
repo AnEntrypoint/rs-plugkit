@@ -59,6 +59,8 @@ fn nonneg_f64_field(value: &Value, field: &str) -> Result<f64, String> {
         .ok_or_else(|| format!("dream-replay requires non-negative finite {field}"))
 }
 
+const STOP_CONDITIONS: &[&str] = &["budget", "converged", "exhausted"];
+
 fn parse_policy(value: &Value) -> Result<Policy, String> {
     let id = string_field(value, "id")?;
     let roots = array_field(value, "roots")?
@@ -81,13 +83,30 @@ fn parse_policy(value: &Value) -> Result<Policy, String> {
         .filter(|value| *value > 0)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(|| format!("dream-replay policy {id} requires positive safe max_nodes"))?;
+    let group_size = match value.get("group_size") {
+        None | Some(Value::Null) => None,
+        Some(raw) => Some(
+            raw.as_u64()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| format!("dream-replay policy {id} field group_size must be a positive integer when present"))?,
+        ),
+    };
+    let stop = match value.get("stop") {
+        None | Some(Value::Null) => None,
+        Some(raw) => Some(
+            raw.as_str()
+                .filter(|value| STOP_CONDITIONS.contains(value))
+                .ok_or_else(|| format!("dream-replay policy {id} field stop must be one of {STOP_CONDITIONS:?} when present"))?
+                .to_owned(),
+        ),
+    };
     Ok(Policy {
         id,
         roots,
         max_nodes,
         attempt: value.get("attempt").and_then(Value::as_u64),
-        group_size: value.get("group_size").and_then(Value::as_u64),
-        stop: value.get("stop").and_then(Value::as_str).map(ToOwned::to_owned),
+        group_size,
+        stop,
     })
 }
 
@@ -204,7 +223,7 @@ fn evaluate_policy(
 
 fn evaluate_worlds(
     baseline_id: String,
-    policies: Vec<Policy>,
+    mut policies: Vec<Policy>,
     worlds: Vec<World>,
     beta1: f64,
     beta2: f64,
@@ -222,6 +241,10 @@ fn evaluate_worlds(
     }
     if worlds.is_empty() {
         return Err("dream-replay requires at least one sealed world".to_string());
+    }
+    if let Some(position) = policies.iter().position(|policy| policy.id == baseline_id) {
+        let incumbent = policies.remove(position);
+        policies.insert(0, incumbent);
     }
     let mut rankings = Vec::new();
     for policy in &policies {
@@ -1124,14 +1147,7 @@ pub fn replay_round(content: &str) -> Result<Value, String> {
             .ok_or_else(|| "dream-replay-round requires positive integer max_rounds".to_string())?;
         let beta1 = nonneg_f64_field(&body, "beta1")?;
         let beta2 = nonneg_f64_field(&body, "beta2")?;
-        let round_budget = match body.get("round_budget") {
-            None | Some(Value::Null) => None,
-            Some(value) => Some(
-                value
-                    .as_u64()
-                    .ok_or_else(|| "dream-replay-round round_budget must be a non-negative integer".to_string())?,
-            ),
-        };
+        let round_budget = body.get("round_budget").and_then(Value::as_u64);
         let policy_path = session_store_path("policies")?;
         let raw_policies = crate::pkfs::read_to_string(&policy_path)
             .ok_or_else(|| "dream-replay-round has no registered policies".to_string())?;
@@ -1299,13 +1315,6 @@ pub fn replay_round(content: &str) -> Result<Value, String> {
                     round_cost = round_cost
                         .checked_add(child.cost)
                         .ok_or_else(|| "dream-replay-round round cost overflow".to_string())?;
-                    if let Some(budget) = round_budget {
-                        if round_cost > budget {
-                            return Err(format!(
-                                "dream-replay-round {replay_id} round_budget_exceeded: round cost {round_cost} exceeds round_budget {budget}"
-                            ));
-                        }
-                    }
                     newly_revealed
                         .push(json!({ "id": child_id, "score": child.score, "cost": child.cost }));
                 }
