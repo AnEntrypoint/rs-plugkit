@@ -293,6 +293,36 @@ fn prd_items_json() -> Vec<serde_json::Value> {
     Vec::new()
 }
 
+pub(crate) fn concurrency_shortfall(
+    running: usize,
+    slices_available: usize,
+) -> Option<serde_json::Value> {
+    let shortfall = slices_available.saturating_sub(running);
+    if shortfall == 0 {
+        return None;
+    }
+    Some(json!({
+        "running": running,
+        "slices_available": slices_available,
+        "shortfall": shortfall,
+    }))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn running_subagents(session: Option<&str>, window_ms: u64) -> usize {
+    let Some(parent) = session.filter(|s| !s.is_empty()) else {
+        return 0;
+    };
+    let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let now = unsafe { crate::wasm_dispatch::host_now_ms() };
+    crate::dispatch_ledger::subagent_running_count(&cwd, parent, now, window_ms)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn running_subagents(_session: Option<&str>, _window_ms: u64) -> usize {
+    0
+}
+
 #[cfg(target_arch = "wasm32")]
 fn prd_pending_count(items: &[serde_json::Value]) -> usize {
     items.iter().filter(|it| item_is_open(it)).count()
@@ -949,7 +979,15 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         graph.policy.longgap_threshold_ms,
     );
 
+    let subagents_running = running_subagents(
+        session_id_opt.as_deref(),
+        graph.policy.concurrency_window_ms,
+    );
+    let concurrency_shortfall_field = concurrency_shortfall(subagents_running, prd_pending);
+
     let mut payload = json!({
+        "subagents_running": subagents_running,
+        "concurrency_shortfall": concurrency_shortfall_field,
         "phase": phase,
         "fsm_graph": {
             "tier": graph_tier.as_str(),
@@ -1040,6 +1078,8 @@ const FIELDS_ALWAYS_RESTATED_IN_A_DELTA_REPLY: &[&str] = &[
     "instruction_unchanged",
     "policy_hash",
     "prd_pending_count",
+    "concurrency_shortfall",
+    "subagents_running",
     "mutables_pending_count",
     "next_phase_hint",
     "sub_phase",
