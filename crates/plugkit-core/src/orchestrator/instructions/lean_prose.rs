@@ -10,6 +10,7 @@ pub const LEAN_PROSE: &[(&str, &str)] = &[
     ("chartest", include_str!("prose/chartest.md")),
     ("churn", include_str!("prose/churn.md")),
     ("cleanname", include_str!("prose/cleanname.md")),
+    ("complete", include_str!("prose/complete.md")),
     ("commentsmell", include_str!("prose/commentsmell.md")),
     ("compact", include_str!("prose/compact.md")),
     ("contextrot", include_str!("prose/contextrot.md")),
