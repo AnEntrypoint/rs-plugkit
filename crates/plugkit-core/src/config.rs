@@ -15,6 +15,7 @@ pub const SOURCE_CACHE_REL: &str = ".gm/config-source-cache";
 pub const DEFAULT_REPO_URL: &str = "https://github.com/AnEntrypoint/gm-config";
 
 pub const DEFAULT_REPO_PINNED_SHA: &str = "5e992d2c71eeac619ef92377550dbba938d59bec";
+pub const DEFAULT_REPO_REFERENCE: &str = "main";
 
 pub const DEFAULT_REPO_CACHE_REL: &str = ".gm/config-source-cache-default";
 
@@ -732,7 +733,7 @@ fn load_implicit_default_repo_tier(project_root: &str, fetcher: &dyn RepoFetcher
     let src = RepoSource {
         repo: crate::config_path::RepoUrl::parse(DEFAULT_REPO_URL)
             .expect("DEFAULT_REPO_URL is a compile-time constant that must name an approved transport"),
-        reference: Some(DEFAULT_REPO_PINNED_SHA.to_string()),
+        reference: Some(DEFAULT_REPO_REFERENCE.to_string()),
         path: String::new(),
         cache_dir: join(project_root, DEFAULT_REPO_CACHE_REL),
         tier_label: Tier::ImplicitDefaultRepo.as_str().to_string(),
