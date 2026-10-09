@@ -1376,6 +1376,18 @@ pub fn handle_replay_round(content: &str) -> (String, String, i32) {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub fn handle_dream_round(content: &str) -> (String, String, i32) {
+    match dream_round(content) {
+        Ok(result) => (result.to_string(), String::new(), 0),
+        Err(error) => (
+            json!({ "ok": false, "error": error }).to_string(),
+            String::new(),
+            1,
+        ),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn evaluate(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content)
         .map_err(|error| format!("dream-replay requires JSON: {error}"))?;
