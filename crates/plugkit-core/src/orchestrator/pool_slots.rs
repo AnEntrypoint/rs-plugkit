@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::transitions::prd_open_rows;
+use super::transitions::prd_open_rows_with_recency;
 use crate::pkfs;
 
 pub const HEARTBEAT_LIVE_MS: u64 = 10 * 60 * 1000;
@@ -127,8 +127,10 @@ pub fn slot_state(project_root: &str) -> Value {
     let live = read_heartbeats(&dir, now_ms());
     let ceiling = read_ceiling(&dir);
     let free = ceiling.map(|c| c.saturating_sub(live.count as u64));
-    let (blockers, work): (Vec<Value>, Vec<Value>) =
-        prd_open_rows().into_iter().partition(super::pool_rank::is_blocker_row);
+    let (blocker_entries, work): (Vec<(Value, usize)>, Vec<(Value, usize)>) = prd_open_rows_with_recency()
+        .into_iter()
+        .partition(|(row, _)| super::pool_rank::is_blocker_row(row));
+    let blockers: Vec<Value> = blocker_entries.into_iter().map(|(row, _)| row).collect();
     let open_rows = work.len();
     let ranked = super::pool_rank::rank(&work, &blockers, &live.rows);
     let candidates = ranked["candidates"].clone();
