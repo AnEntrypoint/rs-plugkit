@@ -108,7 +108,7 @@ pub enum Load {
 
 #[derive(Debug, Clone)]
 pub struct RepoSource {
-    pub repo: String,
+    pub repo: crate::config_path::RepoUrl,
     pub reference: Option<String>,
     pub path: String,
     pub cache_dir: String,
@@ -293,7 +293,7 @@ fn parse_source_entry(
             "{origin}: source spec requires a non-empty `repo` field naming the config repository"
         ));
     }
-    crate::config_path::validate_repo_url(&repo).map_err(|e| format!("{origin}: {e}"))?;
+    let repo = crate::config_path::RepoUrl::parse(&repo).map_err(|e| format!("{origin}: {e}"))?;
     let reference = ["ref", "reference", "branch"]
         .iter()
         .find_map(|k| obj.get(*k).and_then(|x| x.as_str()))
@@ -730,7 +730,8 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
 
 fn load_implicit_default_repo_tier(project_root: &str, fetcher: &dyn RepoFetcher) -> Load {
     let src = RepoSource {
-        repo: DEFAULT_REPO_URL.to_string(),
+        repo: crate::config_path::RepoUrl::parse(DEFAULT_REPO_URL)
+            .expect("DEFAULT_REPO_URL is a compile-time constant that must name an approved transport"),
         reference: Some(DEFAULT_REPO_PINNED_SHA.to_string()),
         path: String::new(),
         cache_dir: join(project_root, DEFAULT_REPO_CACHE_REL),

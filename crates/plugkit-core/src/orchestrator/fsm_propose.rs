@@ -9,6 +9,32 @@ const INSTRUCTIONS_BASE: &str = ".gm/instructions";
 const GRAPH_PATH: &str = ".gm/instructions/fsm/graph.json";
 const CONFIG_PATH: &str = ".gm/gm.config.json";
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OverrideKind {
+    Prose,
+    Graph,
+    Config,
+}
+
+impl OverrideKind {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "prose" => Some(Self::Prose),
+            "graph" => Some(Self::Graph),
+            "config" => Some(Self::Config),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Prose => "prose",
+            Self::Graph => "graph",
+            Self::Config => "config",
+        }
+    }
+}
+
 fn prose_target_path(key: &str) -> Result<String, String> {
     validate_prose_key(key)?;
     let path = format!("{INSTRUCTIONS_BASE}/{key}.md");
@@ -22,7 +48,7 @@ fn prose_target_path(key: &str) -> Result<String, String> {
 
 pub fn handle_propose(content: &str) -> (String, String, i32) {
     let body: Value = serde_json::from_str(content.trim()).unwrap_or(Value::Null);
-    let kind = body
+    let kind_raw = body
         .get("kind")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -52,7 +78,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    if !matches!(kind.as_str(), "prose" | "graph" | "config") {
+    let Some(kind) = OverrideKind::parse(&kind_raw) else {
         return (
             json!({
                 "ok": false,
@@ -61,7 +87,8 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
             String::new(),
             1,
         );
-    }
+    };
+
     if proposed_text.trim().is_empty() {
         return (
             json!({ "ok": false, "error": "fsm-propose-override requires non-empty body.proposed_text" }).to_string(),
@@ -80,8 +107,8 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
         );
     }
 
-    let target_path = match kind.as_str() {
-        "prose" => {
+    let target_path = match kind {
+        OverrideKind::Prose => {
             if key.trim().is_empty() {
                 return (
                     json!({ "ok": false, "error": "kind=prose requires body.key naming the prose key (e.g. \"specify\")" }).to_string(),
@@ -100,17 +127,16 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
                 }
             }
         }
-        "graph" => GRAPH_PATH.to_string(),
-        "config" => CONFIG_PATH.to_string(),
-        _ => unreachable!(),
+        OverrideKind::Graph => GRAPH_PATH.to_string(),
+        OverrideKind::Config => CONFIG_PATH.to_string(),
     };
 
-    let requires_authority = kind == "graph";
+    let requires_authority = kind == OverrideKind::Graph;
     let current_text = pkfs::read_to_string(&target_path);
 
     let mut validation_problems: Vec<String> = Vec::new();
     let mut validation_gates_weaker: Vec<Value> = Vec::new();
-    if kind == "graph" {
+    if kind == OverrideKind::Graph {
         match serde_json::from_str::<fsm::Graph>(&proposed_text) {
             Ok(parsed) => {
                 validation_problems = parsed.validate();
@@ -124,7 +150,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
             )),
         }
     }
-    if kind == "config" {
+    if kind == OverrideKind::Config {
         if let Err(e) = serde_json::from_str::<Value>(&proposed_text) {
             validation_problems.push(format!("proposed config does not parse as valid JSON: {e}"));
         }
@@ -168,7 +194,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
                 "proposed": true,
                 "requires_confirmation": true,
                 "requires_execution_authority": requires_authority,
-                "kind": kind,
+                "kind": kind.label(),
                 "target_path": target_path,
                 "reason": reason,
                 "witness": witness,
@@ -213,7 +239,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
     }
     let write_ok = pkfs::write(&target_path, &proposed_text);
 
-    let post_write_check: Value = if kind == "graph" && write_ok {
+    let post_write_check: Value = if kind == OverrideKind::Graph && write_ok {
         let (graph, tier, source_path) = fsm::graph_detailed();
         json!({
             "active_tier": tier.as_str(),
@@ -221,7 +247,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
             "took_effect": tier == fsm::GraphTier::LocalOverride,
             "problems": graph.validate(),
         })
-    } else if kind == "config" && write_ok {
+    } else if kind == OverrideKind::Config && write_ok {
         let resolution = crate::config::resolve_forced(".");
         json!({
             "active_tier": resolution.tier.as_str(),
@@ -235,7 +261,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
         "ok": write_ok,
         "proposed": false,
         "applied": write_ok,
-        "kind": kind,
+        "kind": kind.label(),
         "target_path": target_path,
         "backed_up_previous": backed_up,
         "reason": reason,

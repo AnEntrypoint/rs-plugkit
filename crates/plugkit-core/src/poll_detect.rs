@@ -52,19 +52,11 @@ fn ci_contains(hay: &str, needle: &str) -> bool {
     if n.len() > h.len() {
         return false;
     }
-    'outer: for i in 0..=(h.len() - n.len()) {
-        for j in 0..n.len() {
-            let a = h[i + j];
-            let b = n[j];
-            let al = if a.is_ascii_uppercase() { a + 32 } else { a };
-            let bl = if b.is_ascii_uppercase() { b + 32 } else { b };
-            if al != bl {
-                continue 'outer;
-            }
-        }
-        return true;
-    }
-    false
+    (0..=h.len() - n.len()).any(|i| ci_eq_at(&h[i..i + n.len()], n))
+}
+
+fn ci_eq_at(window: &[u8], needle: &[u8]) -> bool {
+    window.iter().zip(needle).all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 fn strip_heredocs_and_string_literals(command: &str) -> String {
@@ -204,27 +196,12 @@ fn has_word(hay: &str, word: &str) -> bool {
     if w.is_empty() || w.len() > h.len() {
         return false;
     }
-    'outer: for i in 0..=(h.len() - w.len()) {
-        let before_ok = i == 0 || !is_word_byte(h[i - 1]);
-        if !before_ok {
-            continue;
-        }
-        for j in 0..w.len() {
-            let a = h[i + j];
-            let b = w[j];
-            let al = if a.is_ascii_uppercase() { a + 32 } else { a };
-            let bl = if b.is_ascii_uppercase() { b + 32 } else { b };
-            if al != bl {
-                continue 'outer;
-            }
-        }
+    (0..=h.len() - w.len()).any(|i| {
         let end = i + w.len();
-        let after_ok = end == h.len() || !is_word_byte(h[end]);
-        if after_ok {
-            return true;
-        }
-    }
-    false
+        (i == 0 || !is_word_byte(h[i - 1]))
+            && ci_eq_at(&h[i..end], w)
+            && (end == h.len() || !is_word_byte(h[end]))
+    })
 }
 
 fn is_word_byte(b: u8) -> bool {

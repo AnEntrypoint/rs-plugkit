@@ -25,16 +25,6 @@ impl RealmTable {
         self.by_realm.get(&realm).and_then(|table| table.get(key))
     }
 
-    pub fn set(&mut self, key: &str, value: String) -> bool {
-        let realm = self.realm_of(key);
-        let table = self.by_realm.entry(realm).or_default();
-        if table.contains_key(key) {
-            return false;
-        }
-        table.insert(key.to_string(), value);
-        true
-    }
-
     pub fn isolate(&mut self, key: &str, realm: &str) {
         self.realm_table.insert(key.to_string(), realm.to_string());
     }

@@ -2005,9 +2005,7 @@ fn codeinsight_index(body: &Value) -> u64 {
         .map(crate::pkfs::anchor);
     let root = resolved_root.as_deref();
     if let Some(root) = root {
-        let accessible_directory = crate::wasm_dispatch::host_stat(root)
-            .and_then(|stat| stat.get("isDirectory").and_then(Value::as_bool))
-            == Some(true);
+        let accessible_directory = crate::wasm_dispatch::host_stat_is_directory(root) == Some(true);
         if !accessible_directory && !crate::wasm_dispatch::host_allow_root(root) {
             return err(
                 "codeinsight_index",

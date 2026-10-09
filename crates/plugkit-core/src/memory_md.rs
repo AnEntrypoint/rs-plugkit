@@ -686,6 +686,12 @@ fn drop_file_hash(ns: &str, name: &str) {
     );
 }
 
+enum NamespacePass {
+    Complete,
+    Abandoned,
+    Halted,
+}
+
 pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
     if ensure_meta_table().is_err() || ensure_files_table().is_err() {
         return json!({ "converged": false, "error": "memories md meta/files table ensure failed" });
@@ -697,7 +703,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
     let mut recreated = false;
     let mut converged = true;
     let mut report = Vec::new();
-    'ns: for ns in namespaces {
+    for ns in namespaces {
         if crate::ragconfig::NamespaceConfig::default().is_code(ns) {
             continue;
         }
@@ -801,6 +807,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                 }
             }
         };
+        let mut namespace_pass = NamespacePass::Complete;
         for (name, hash) in &changed {
             let total_elapsed =
                 unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started);
@@ -942,10 +949,12 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                                             report.push(
                                                 json!({ "namespace": ns, "recreated": true }),
                                             );
-                                            continue 'ns;
+                                            namespace_pass = NamespacePass::Abandoned;
+                                            break;
                                         }
                                     }
-                                    break 'ns;
+                                    namespace_pass = NamespacePass::Halted;
+                                    break;
                                 }
                                 _ => {
                                     crate::wasm_dispatch::emit_event(
@@ -957,7 +966,8 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                                         }),
                                     );
                                     report.push(json!({ "namespace": ns, "aborted": true, "shadow_failed": shadow_failed }));
-                                    continue 'ns;
+                                    namespace_pass = NamespacePass::Abandoned;
+                                    break;
                                 }
                             }
                         }
@@ -973,6 +983,11 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                     }
                 }
             }
+        }
+        match namespace_pass {
+            NamespacePass::Complete => {}
+            NamespacePass::Abandoned => continue,
+            NamespacePass::Halted => break,
         }
         if !rekey_new_files.is_empty() || !rekey_pairs.is_empty() {
             let wrote = atomic_write_batch(&rekey_new_files);

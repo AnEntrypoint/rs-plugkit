@@ -1,3 +1,6 @@
+use std::fmt;
+use std::ops::Deref;
+
 const MAX_COMPONENT_LEN: usize = 128;
 
 const MAX_PATH_LEN: usize = 512;
@@ -124,7 +127,34 @@ pub fn path_contained_within(root: &str, candidate: &str) -> bool {
             .all(|(r, c)| r == c)
 }
 
-pub fn validate_repo_url(url: &str) -> Result<(), String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoUrl(String);
+
+impl RepoUrl {
+    pub fn parse(url: &str) -> Result<Self, String> {
+        validate_repo_url_text(url).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Deref for RepoUrl {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RepoUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn validate_repo_url_text(url: &str) -> Result<String, String> {
     let what = "config repo url";
     let u = url.trim();
     if u.is_empty() {
@@ -150,10 +180,10 @@ pub fn validate_repo_url(url: &str) -> Result<(), String> {
     }
     let lower = u.to_ascii_lowercase();
     if ALLOWED_URL_SCHEMES.iter().any(|s| lower.starts_with(s)) {
-        return Ok(());
+        return Ok(u.to_string());
     }
     if is_scp_like(u) {
-        return Ok(());
+        return Ok(u.to_string());
     }
     Err(format!(
             "{what}: {:?} does not use an authenticated transport. Permitted: {} or git's user@host:path form. \
