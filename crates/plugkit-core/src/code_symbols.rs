@@ -533,7 +533,7 @@ fn extract_file(
     size: u64,
     mtime_ms: u64,
 ) -> (FileSymbols, u32) {
-    let analysis = code_index::analyze_source(content, lang);
+    let analysis = code_index::analyze_source(fp, content, lang);
     let file_is_test = is_test_path(fp);
     let mut metrics = analysis.metrics.into_iter();
     let symbols = analysis
