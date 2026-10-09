@@ -1,3 +1,11 @@
+## 2026-10-09 - codesearch exhaustive: a rule exclusion clears `exhaustive` and is named in `excluded_by_rule`
+
+**Changes:** an unscoped literal, regex, filename, comments or grep scan reported `exhaustive: true` while `prune_own_state` had dropped `.gm/` (`.gm/prd.yml` held the witness it was asked for, zero hits). `scan_universe.rs` now reports an own-state exclusion under the child that holds it (`.gm/prd.yml`, `.gm/memories`). `code_index.rs` `insert_excluded_by_rule` puts `excluded_by_rule`, its count and summary into every literal, filename and comments scan that dropped a path, not only verbose ones. `search.rs` `finish_scan_reply` clears `exhaustive` when `excluded_by_rule_count` is non-zero, `scan_partial_reason` names the excluded rules, and `SCAN_TELEMETRY_DROPPED` no longer hides `excluded_by_rule`.
+
+**Not changed:** the unscoped universe still prunes gm's own state (the 2026-10-07 entry's design); scope `path: ".gm"` to search it. The symbol (identifier) route and the dual phrase route still read the scan's walk verdict, so they do not run a second definitions scan for an exclusion that scan cannot recover; their replies do not name `excluded_by_rule` yet.
+
+**Not yet measured:** this change is not built in this environment (builds run on Actions) and the running guest predates it, so the live witness waits on a CI build and a runner reload.
+
 ## 2026-10-09 - prd-list folds and limits; prd-resolve binds non-dispatch witnesses
 
 **Changes:** `prd-list` takes `limit`, folds repeated blocks of an id to the last block before filtering, and replies with `total` (matches), `store_total` (stored blocks), `limit` and `truncated`. `prd-resolve` closes a row only with a verified `witness_dispatch_id` or a complete witness binding (`witness_exit_code` 0, `witness_output_sha256`, `witness_output_path`, `witness_ts`); the runtime re-hashes the output file and names the exact missing or invalid field. A dispatch id outside the ledger is reported as `aged_out` (older than the oldest retained entry) or `not_recorded`, and an id present only in `witness_evidence` is named as `witness_dispatch_id_field` rather than verified. `sha2` moves out of the wasm-only dependency table.
