@@ -1757,6 +1757,29 @@ pub(super) fn body_commit_identity(body: &Value) -> Option<(String, String)> {
     Some((name, email))
 }
 
+pub(super) fn commit_session_id(body: &Value) -> String {
+    ["SESSION_ID", "session_id", "sessionId"]
+        .iter()
+        .find_map(|key| body.get(*key).and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string()
+}
+
+pub(super) fn prd_foreign_rows_for_commit(paths: &[String], body: &Value, cwd: Option<&str>) -> Vec<Value> {
+    if !paths.iter().any(|path| crate::orchestrator::prd::is_prd_yml_pathspec(path)) {
+        return Vec::new();
+    }
+    let head = git_call_argv(&["show", "HEAD:.gm/prd.yml"], cwd);
+    let head_text = if head.get("exit_code").and_then(Value::as_i64) == Some(0) {
+        head.get("stdout").and_then(Value::as_str).unwrap_or("")
+    } else {
+        ""
+    };
+    let worktree_text = crate::pkfs::read_to_string(&crate::orchestrator::prd::prd_path().to_string_lossy())
+        .unwrap_or_default();
+    crate::orchestrator::prd::foreign_prd_rows(head_text, &worktree_text, &commit_session_id(body))
+}
+
 pub(super) fn git_commit_argv(
     message: &str,
     allow_empty: bool,
@@ -1959,6 +1982,21 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             .get("allow_whole_index")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let foreign_prd_rows = prd_foreign_rows_for_commit(&paths, body, cwd);
+        let allow_foreign_prd_rows = body
+            .get("allow_foreign_prd_rows")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !foreign_prd_rows.is_empty() && !allow_foreign_prd_rows {
+            return Ok(err_json(
+                "git_commit",
+                json!({
+                    "error": format!("paths name .gm/prd.yml, which carries {} uncommitted row change(s) owned by other sessions; a path-scoped commit would sweep them in. Commit after their owners commit, or pass allow_foreign_prd_rows: true to include them deliberately", foreign_prd_rows.len()),
+                    "error_code": "prd_foreign_rows",
+                    "foreign_rows": foreign_prd_rows,
+                }),
+            ));
+        }
         let staged_before = if add_all {
             Vec::new()
         } else {
@@ -2802,6 +2840,21 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             );
         }
         dangling_waived = scan.waived;
+        let foreign_prd_rows = prd_foreign_rows_for_commit(&paths, body, cwd_ref);
+        let allow_foreign_prd_rows = body
+            .get("allow_foreign_prd_rows")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !foreign_prd_rows.is_empty() && !allow_foreign_prd_rows {
+            return err_json(
+                "git_finalize",
+                json!({
+                    "error": format!("paths name .gm/prd.yml, which carries {} uncommitted row change(s) owned by other sessions; a path-scoped finalize would sweep them in. Commit after their owners commit, or pass allow_foreign_prd_rows: true to include them deliberately", foreign_prd_rows.len()),
+                    "error_code": "prd_foreign_rows",
+                    "foreign_rows": foreign_prd_rows,
+                }),
+            );
+        }
         let ignored = ignored_requested_paths_now(cwd_ref, &paths);
         let stage_argv = if ignored.is_empty() {
             git_stage_argv(&paths, cwd_ref)
