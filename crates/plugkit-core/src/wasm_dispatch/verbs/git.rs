@@ -5,12 +5,11 @@ pub(super) const GIT_PENDING_RESULT_OUTBOX_NS: &str = "outbox";
 pub(super) const GIT_COMMIT_DEDUP_NS: &str = "git_commit_dedup";
 pub(super) const GIT_COMMIT_DEDUP_TTL_MS: u64 = 180_000;
 
-// Spawning git with a command line past ~32 KiB fails on Windows with os error 206, which the
-// completeness gate reports as git_status_incomplete and refuses the mutation. One exclude
-// pathspec per dirty path reaches that on a repo with a few hundred dirty paths, so the
-// exclusions get a budget and the rest are simply not withheld: a broader scope is still complete
-// worktree evidence.
-pub(super) const GIT_PATHSPEC_SCOPE_EXCLUDE_BUDGET_CHARS: usize = 8000;
+pub(super) const GIT_PATHSPEC_EXCLUDE_ARGV_BUDGET_CHARS: usize = 8000;
+
+fn exclude_spec_within_argv_budget(used_chars: usize, spec: &str) -> bool {
+    used_chars + spec.len() + 1 <= GIT_PATHSPEC_EXCLUDE_ARGV_BUDGET_CHARS
+}
 
 pub(super) fn git_commit_dedup_key(
     cwd: Option<&str>,
@@ -600,8 +599,6 @@ pub(super) fn git_status(body: &Value) -> u64 {
                 }
             }
         }
-        // A path git cannot open (Windows MAX_PATH, or permissions) must degrade
-        // this listing, never abort it: report what was read and name the rest.
         if st.partial {
             let skipped: Vec<String> = st
                 .skipped_paths
@@ -1276,11 +1273,6 @@ pub(super) fn push_disabled_refusal(
     }))
 }
 
-// A push that names no commit publishes whatever the checkout happens to carry, so one lane's
-// git_push ships every other lane's unpushed commit on the shared main. Naming the sha is what
-// makes a publish deliberate: it states which commit the caller means, and the response then
-// reports pushed_commits. allow_foreign_commits:true is the caller's way to say "publish the tip
-// anyway", after reading the delta.
 fn push_rev_names_commit(repo: Option<&str>, source_ref: &str, branch: &str) -> bool {
     let r = source_ref.trim();
     if r.is_empty() || r == "HEAD" || r == "@" || r == branch {
@@ -1565,7 +1557,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
             "next_dispatch": "instruction",
             "next_action_hint": "git_pull {branch} then git_push {rev:\"HEAD\"}",
         });
-        match remote_moved_recovery_eligible(body, repo.as_deref(), &branch, &local_source_before)
+        match remote_moved_recovery_refusal(body, repo.as_deref(), &branch, &local_source_before)
         {
             None => refusal = pull_and_repush_remote_moved(body, &repo, &branch, refusal),
             Some(reason) => {
@@ -2523,11 +2515,6 @@ pub(super) fn pull_past_remote_moved(
     }))
 }
 
-/// `git_push` refuses a `remote_moved` explicit-ref publication rather than mutating the
-/// checkout, which leaves the caller to dispatch `git_pull` and `git_push` by hand. This is the
-/// recovery that does exactly those two dispatches: one pull through `git_pull` (strict
-/// fast-forward first, ordinary merge only if the local branch diverged) and then one push.
-/// The worktree and index must be clean, or it refuses unchanged with the original reason.
 pub(super) enum RemoteMovedRecoveryOpt {
     Explicit(bool),
     Defaulted,
@@ -2551,15 +2538,6 @@ fn push_body_requests_force(body: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// `remote_moved` is a label this verb attaches to every explicit-ref push rejection that is
-/// neither a GitHub auth failure nor a transient 5xx, so on its own it compares nothing at all.
-/// Acting on it by default therefore needs real ancestry evidence: the remote tip resolves,
-/// differs from the pushed sha, is not already contained in it, and the two share a merge base.
-/// Those four are what "the remote moved" means -- the same branch carrying new commits the
-/// pushed ref does not have, whether or not the pushed ref also carries commits of its own. A
-/// missing remote tip, unrelated history and a remote already contained in the pushed ref all
-/// fail it; a pushed ref that is merely BEHIND passes, because pulling onto it fast-forwards and
-/// cannot lose work, and that is the ordinary shape this default exists for.
 pub(super) fn remote_moved_is_same_branch_advance(
     repo: Option<&str>,
     branch: &str,
@@ -2588,8 +2566,7 @@ pub(super) fn remote_moved_is_same_branch_advance(
     !merge_base.is_empty()
 }
 
-/// `None` means recover now. `Some(reason)` means do not touch the checkout, and names why.
-pub(super) fn remote_moved_recovery_eligible(
+pub(super) fn remote_moved_recovery_refusal(
     body: &Value,
     repo: Option<&str>,
     branch: &str,
@@ -2795,6 +2772,17 @@ pub(super) fn hoist_identity_required(refusal: &mut Value) {
     if let Some(error) = pull_resp.get("error") {
         refusal["identity_error"] = error.clone();
     }
+}
+
+fn push_body_naming_published_commit(body: &Value, cwd: Option<&str>) -> Value {
+    let mut named = body.clone();
+    if let Some(fields) = named.as_object_mut() {
+        fields.insert(
+            "rev".to_string(),
+            json!(exec_git_in(cwd, "rev-parse HEAD").trim().to_string()),
+        );
+    }
+    named
 }
 
 pub(super) fn git_finalize(body: &Value) -> u64 {
@@ -3277,20 +3265,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         }
     }
 
-    // Name the commit finalize is publishing: finalize either just created it or is republishing
-    // the tip it found, and in both cases the push has to say which commit it means rather than
-    // defaulting to "whatever HEAD is" -- which is how one lane came to publish another lane's
-    // unpushed commits.
-    let push_body = {
-        let mut b = body.clone();
-        if let Some(m) = b.as_object_mut() {
-            m.insert(
-                "rev".to_string(),
-                json!(exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string()),
-            );
-        }
-        b
-    };
+    let push_body = push_body_naming_published_commit(body, cwd_ref);
     let push_resp_packed = git_push(&push_body);
     let mut push_resp = unpack_to_value(push_resp_packed);
     let mut pushed = push_resp
@@ -6674,7 +6649,7 @@ pub(super) fn git_pathspec_scope(paths: &[String], cwd: Option<&str>) -> Vec<Str
             continue;
         }
         let spec = format!(":(top,exclude,literal){}", path);
-        if used + spec.len() + 1 > GIT_PATHSPEC_SCOPE_EXCLUDE_BUDGET_CHARS {
+        if !exclude_spec_within_argv_budget(used, &spec) {
             continue;
         }
         if scope.iter().any(|held| held == &spec) {

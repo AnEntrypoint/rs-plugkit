@@ -275,7 +275,10 @@ fn string(row: &Value, key: &str) -> String {
 }
 
 fn rows(db: &str, sql: &str, params: &[&str]) -> Vec<Value> {
-    if STORE_BUSY_NOW.try_with(std::cell::Cell::get).unwrap_or(false) {
+    if STORE_BUSY_SKIPS_READS
+        .try_with(std::cell::Cell::get)
+        .unwrap_or(false)
+    {
         return Vec::new();
     }
     libsql_wasm::query_params(db, sql, params)
@@ -606,37 +609,21 @@ fn is_store_busy_error(err: &str) -> bool {
         || err.to_ascii_lowercase().contains("database is locked")
 }
 
-/// Set once a pass has established that a live writer holds the store lock, and read by `rows`.
-/// Every read below reaches libsql through `rows`, and libsql answers a busy store by waiting
-/// `busy_timeout_ms` (20 s) for a lock the holder will not release inside this dispatch, then
-/// returning empty. Skipping the call while the flag is set yields that same empty answer
-/// immediately, so the lock wait is bounded and never lands on a read. Cleared at each entry point,
-/// so one dispatch's busy store never supresses the next one's reads.
 std::thread_local! {
-    static STORE_BUSY_NOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static STORE_BUSY_SKIPS_READS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn mark_store_busy() {
-    let _ = STORE_BUSY_NOW.try_with(|c| c.set(true));
+    let _ = STORE_BUSY_SKIPS_READS.try_with(|c| c.set(true));
 }
 
 fn clear_store_busy() {
-    let _ = STORE_BUSY_NOW.try_with(|c| c.set(false));
+    let _ = STORE_BUSY_SKIPS_READS.try_with(|c| c.set(false));
 }
 
-/// A `<db>.lock` directory is libsql's mutual-exclusion marker under this VFS: the writer removes it
-/// when it finishes, so a process killed mid-write leaves it forever and every later write fails with
-/// no holder to wait on. Every dispatch that writes gm.db records its pid and a heartbeat timestamp
-/// beside it in `<db>.lock.owner` (the daemon's store-owner claim), so that record is the liveness
-/// evidence the directory itself cannot carry: no record means no writer ever claimed it, a dead pid
-/// means the writer is provably gone, and a heartbeat older than STORE_LOCK_STALE_MS means a writer
-/// that stopped heartbeating. A lock whose recorded pid is alive is never touched -- only its owner
-/// may remove it.
-const STORE_LOCK_STALE_MS: u64 = 900_000;
+const STORE_LOCK_OWNER_HEARTBEAT_STALE_MS: u64 = 900_000;
 
-/// Runs on the host because the WASI VFS offers no directory removal: `fs.rmSync` is the only way to
-/// clear a lock directory from here. Prints one JSON object: `state` is clear, reaped or held.
-const STORE_LOCK_SETTLE_JS: &str = r#"(function () {
+const STORE_LOCK_SETTLE_ON_HOST_JS: &str = r#"(function () {
   var fs = require('node:fs');
   var now = Date.now();
   var out = function (o) { process.stdout.write(JSON.stringify(o)); };
@@ -685,8 +672,6 @@ fn store_busy_lock_bail(lock_dir: &str, reason: &str, info: Value) -> Value {
     })
 }
 
-/// Clears a lock directory no live writer owns and returns None, or returns the store-busy bail that
-/// sync_files must answer with. A lock whose recorded owner pid is alive is left alone.
 fn settle_stale_store_lock(db: &str) -> Option<Value> {
     let lock_dir = format!("{db}.lock");
     if crate::wasm_dispatch::host_stat_is_directory(&lock_dir) != Some(true) {
@@ -695,11 +680,11 @@ fn settle_stale_store_lock(db: &str) -> Option<Value> {
     let params = serde_json::to_string(&json!({
         "dir": lock_dir,
         "own": format!("{lock_dir}.owner"),
-        "ttl": STORE_LOCK_STALE_MS,
+        "ttl": STORE_LOCK_OWNER_HEARTBEAT_STALE_MS,
     }))
     .unwrap_or_else(|_| "{}".to_string());
     let timeout = json!({ "timeoutMs": 5000 }).to_string();
-    let code = format!("const P = {params};\n{STORE_LOCK_SETTLE_JS}");
+    let code = format!("const P = {params};\n{STORE_LOCK_SETTLE_ON_HOST_JS}");
     let packed = unsafe {
         crate::wasm_dispatch::host_exec_js(
             code.as_ptr(),
