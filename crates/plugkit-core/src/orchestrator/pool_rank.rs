@@ -43,7 +43,7 @@ fn needs_design(row: &Value) -> bool {
     }
 }
 
-fn arm(row: &Value) -> Option<&'static str> {
+pub(super) fn arm(row: &Value) -> Option<&'static str> {
     if let Some(explicit) = text_field(row, "arm").filter(|a| !a.is_empty()) {
         return match explicit {
             "gpu" => Some("gpu"),
@@ -95,7 +95,7 @@ fn is_refuted_row(row: &Value) -> bool {
     by_id || by_title
 }
 
-fn has_blocker_notes(row: &Value) -> bool {
+pub(super) fn has_blocker_notes(row: &Value) -> bool {
     match row.get("blocker_notes") {
         None | Some(Value::Null) => false,
         Some(Value::Array(notes)) => !notes.is_empty(),
