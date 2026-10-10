@@ -826,7 +826,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         "threshold": traversal_threshold,
         "unscanned_surfaces": unscanned.iter().take(TRAVERSAL_SURFACE_SHOWN).collect::<Vec<&String>>(),
         "unscanned_total": unscanned.len(),
-        "rule": "traversal is needed only while node witness candidates are below 2 x floor and candidate surfaces remain; a candidate is unscanned, unleased, and has a module (up to 3 levels deep, .js/.mjs/.cjs/.ts/.jsx/.tsx) that no scripts/ file names (a scripts/ file name containing <surface>-<module path without extension>); pool-observe advertises the first candidate in launch and leases nothing; a traversal brief for an open row leases the surface that row names when that surface is unscanned, and is refused otherwise; a traversal brief for traversal-node-supply leases the first candidate when it is issued; a surface named in scanned_surfaces is leased for 6 hours; a module whose only witness is a content match counts as unnamed (decision: pool-observe matches scripts/ file names, never file content, so a content-only witness is re-scanned by traversal)",
+        "rule": "traversal is needed only while node witness candidates are below 2 x floor and candidate surfaces remain; a candidate is unscanned, unleased, and has a module (up to 3 levels deep, .js/.mjs/.cjs/.ts/.jsx/.tsx) that no scripts/ file names it by content (the module file stem as a whole word in the text of a scripts/ file); pool-observe advertises the first candidate in launch and leases nothing; a traversal brief for an open row leases the surface that row names when that surface is unscanned, and is refused otherwise; a traversal brief for traversal-node-supply leases the first candidate when it is issued; a surface named in scanned_surfaces is leased for 6 hours",
     });
     let mut monitor = monitor_block(&slots);
     if monitor["alarm"] == json!(false) {
@@ -1072,33 +1072,49 @@ fn surface_modules(dir: &str, prefix: &str, depth: usize, modules: &mut Vec<Stri
     }
 }
 
-fn module_witness_key(surface: &str, module: &str) -> String {
-    let surface_name = surface.rsplit('/').next().unwrap_or(surface);
-    let stem = module.rsplit_once('.').map_or(module, |(stem, _)| stem);
-    format!("{}-{}", surface_name, stem.replace('/', "-")).to_ascii_lowercase()
+fn module_stem(module: &str) -> &str {
+    let name = module.rsplit('/').next().unwrap_or(module);
+    name.split('.').next().unwrap_or(name)
 }
 
-fn scripts_witness_names(project_root: &str) -> Vec<String> {
-    dir_entries(&format!("{}/scripts", project_root))
-        .into_iter()
-        .map(|(name, _)| name.to_ascii_lowercase())
-        .collect()
+fn scripts_witnessed_words(project_root: &str) -> HashSet<String> {
+    let mut words: HashSet<String> = HashSet::new();
+    for (name, is_dir) in dir_entries(&format!("{}/scripts", project_root)) {
+        if is_dir || !MODULE_EXTENSIONS.iter().any(|extension| name.ends_with(*extension)) {
+            continue;
+        }
+        let Some(text) = pkfs::read_to_string(&format!("{}/scripts/{}", project_root, name)) else {
+            continue;
+        };
+        words.extend(
+            text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+                .filter(|word| !word.is_empty())
+                .map(str::to_string),
+        );
+        words.extend(
+            text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '-'))
+                .filter(|word| word.contains('-'))
+                .map(str::to_string),
+        );
+    }
+    words
 }
 
-fn surface_has_unnamed_module(project_root: &str, surface: &str, witness_names: &[String]) -> bool {
+fn surface_has_unwitnessed_module(project_root: &str, surface: &str, words: &HashSet<String>) -> bool {
     let mut modules = Vec::new();
     surface_modules(&format!("{}/{}", project_root, surface), "", TRAVERSAL_MODULE_DEPTH, &mut modules);
-    modules.iter().any(|module| {
-        let key = module_witness_key(surface, module);
-        !witness_names.iter().any(|name| name.contains(key.as_str()))
-    })
+    modules.iter().any(|module| !words.contains(module_stem(module)))
 }
 
 fn traversal_candidates(project_root: &str, state: &std::collections::BTreeMap<String, u64>, now: u64) -> Vec<String> {
-    let witness_names = scripts_witness_names(project_root);
-    unscanned_surfaces(&list_surfaces(project_root), state, now)
+    let unscanned = unscanned_surfaces(&list_surfaces(project_root), state, now);
+    if unscanned.is_empty() {
+        return Vec::new();
+    }
+    let words = scripts_witnessed_words(project_root);
+    unscanned
         .into_iter()
-        .filter(|surface| surface_has_unnamed_module(project_root, surface, &witness_names))
+        .filter(|surface| surface_has_unwitnessed_module(project_root, surface, &words))
         .collect()
 }
 
