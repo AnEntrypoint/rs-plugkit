@@ -594,12 +594,13 @@ fn refresh_locked(
     if have_local.as_deref() == Some(remote.as_str()) {
         st.consecutive_failures = 0;
         st.last_sha = remote.clone();
-        st.degraded_reason = None;
-        st.degraded_sticky = false;
+        if !st.degraded_sticky {
+            st.degraded_reason = None;
+        }
         return Ok(SyncOutcome {
             sha: Some(remote),
             changed: false,
-            degraded_reason: None,
+            degraded_reason: st.degraded_reason.clone(),
             detail: "remote sha unchanged; no fetch needed".to_string(),
         });
     }
@@ -631,11 +632,17 @@ fn refresh_locked(
     st.consecutive_failures = 0;
     let live = local_sha(src);
     st.last_sha = live.clone().unwrap_or_else(|| remote.clone());
-    st.degraded_reason = None;
-    st.degraded_sticky = false;
-    let note = match publish {
-        Publish::Atomic => None,
-        Publish::InPlace { reason } => Some(reason),
+    let degraded_reason = match publish {
+        Publish::Atomic => {
+            st.degraded_reason = None;
+            st.degraded_sticky = false;
+            None
+        }
+        Publish::InPlace { reason } => {
+            st.degraded_reason = Some(reason.clone());
+            st.degraded_sticky = true;
+            Some(reason)
+        }
     };
 
     crate::orchestrator::config_notify::record_change(
@@ -645,14 +652,17 @@ fn refresh_locked(
         &changed_config_paths(src, pre_fetch_config_text.as_deref()),
     );
 
-    let detail = match &note {
+    if let Some(reason) = degraded_reason.as_deref() {
+        emit_degraded(live.clone(), reason, src);
+    }
+    let detail = match &degraded_reason {
         Some(reason) => format!("updated to {remote}; {reason}"),
         None => format!("updated to {remote}"),
     };
     Ok(SyncOutcome {
         sha: live,
         changed: true,
-        degraded_reason: None,
+        degraded_reason,
         detail,
     })
 }
