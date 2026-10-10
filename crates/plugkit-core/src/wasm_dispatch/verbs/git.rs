@@ -1276,6 +1276,41 @@ pub(super) fn push_disabled_refusal(
     }))
 }
 
+// A push that names no commit publishes whatever the checkout happens to carry, so one lane's
+// git_push ships every other lane's unpushed commit on the shared main. Naming the sha is what
+// makes a publish deliberate: it states which commit the caller means, and the response then
+// reports pushed_commits. allow_foreign_commits:true is the caller's way to say "publish the tip
+// anyway", after reading the delta.
+fn push_rev_names_commit(repo: Option<&str>, source_ref: &str, branch: &str) -> bool {
+    let r = source_ref.trim();
+    if r.is_empty() || r == "HEAD" || r == "@" || r == branch {
+        return false;
+    }
+    if r.starts_with("origin/") || r.starts_with("refs/") {
+        return false;
+    }
+    resolve_ref(repo, r).is_some()
+}
+
+fn push_unnamed_commits(
+    repo: Option<&str>,
+    remote_before: Option<&str>,
+    local_source: &str,
+    source_ref: &str,
+    branch: &str,
+) -> Vec<Value> {
+    if push_rev_names_commit(repo, source_ref, branch) {
+        return Vec::new();
+    }
+    match remote_before.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(remote) => commits_between(repo, remote, local_source)
+            .as_array()
+            .cloned()
+            .unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
 pub(super) fn git_push(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let explicit_branch = body
@@ -1382,6 +1417,54 @@ pub(super) fn git_push(body: &Value) -> u64 {
     }
     let mut ssh_fallback: Option<SshHttpsFallback> = None;
     let mut remote_before = git_fetch_and_resolve_remote(repo.as_deref(), &branch, None);
+    let allow_foreign_commits = body
+        .get("allow_foreign_commits")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let unnamed_commits = if allow_foreign_commits {
+        Vec::new()
+    } else {
+        push_unnamed_commits(
+            repo.as_deref(),
+            remote_before.as_deref(),
+            &local_source_before,
+            source_ref,
+            &branch,
+        )
+    };
+    if !unnamed_commits.is_empty() {
+        let shas = unnamed_commits
+            .iter()
+            .filter_map(|c| c.get("sha").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let unnamed_count = unnamed_commits.len();
+        let reason = format!(
+            "this push names no commit: source_ref '{}' is symbolic, so publishing it would ship every unpushed commit on {} -- {} of them, which are not necessarily this lane's work ({}). Name the commit you mean to publish with {{\"rev\":\"<sha>\"}}, or pass allow_foreign_commits:true to publish the tip deliberately.",
+            source_ref, branch, unnamed_count, shas
+        );
+        log_deviation_push("push-unnamed-commits", &branch);
+        return pack(
+            json!({
+                "ok": false,
+                "verb": "git_push",
+                "gate_denied": true,
+                "repo": repo,
+                "branch": branch,
+                "source_ref": source_ref,
+                "source_sha": local_source_before,
+                "remote_before": remote_before,
+                "unnamed_commits": unnamed_commits,
+                "unnamed_commit_count": unnamed_count,
+                "reason": reason,
+                "next_dispatch": "instruction",
+                "next_dispatch_hint": "instruction",
+                "next_action_hint": "Dispatch git_log to read the delta, then git_push {\"rev\":\"<sha>\"} naming the commit this lane means to publish; git_finalize names it for you.",
+                "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
+            })
+            .to_string(),
+        );
+    }
     let (mut push_out, mut push_succeeded) =
         exec_git_push_in(repo.as_deref(), source_ref, &branch, None);
     if !push_succeeded && push_output_is_ssh_auth_failure(&push_out) {
@@ -2583,7 +2666,10 @@ pub(super) fn pull_and_repush_remote_moved(
         } => {
             let mut retry_body = body.clone();
             if let Some(map) = retry_body.as_object_mut() {
-                map.insert("rev".to_string(), json!("HEAD"));
+                map.insert(
+                    "rev".to_string(),
+                    json!(exec_git_in(cwd, "rev-parse HEAD").trim().to_string()),
+                );
                 map.remove("recover_remote_moved");
                 map.remove("pull_first");
             }
@@ -3191,7 +3277,11 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         }
     }
 
-    let push_body = if scoped {
+    // Name the commit finalize is publishing: finalize either just created it or is republishing
+    // the tip it found, and in both cases the push has to say which commit it means rather than
+    // defaulting to "whatever HEAD is" -- which is how one lane came to publish another lane's
+    // unpushed commits.
+    let push_body = {
         let mut b = body.clone();
         if let Some(m) = b.as_object_mut() {
             m.insert(
@@ -3200,8 +3290,6 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             );
         }
         b
-    } else {
-        body.clone()
     };
     let push_resp_packed = git_push(&push_body);
     let mut push_resp = unpack_to_value(push_resp_packed);
@@ -3233,7 +3321,10 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             } => {
                 let mut retry_body = push_body.clone();
                 if let Some(map) = retry_body.as_object_mut() {
-                    map.insert("rev".to_string(), json!("HEAD"));
+                    map.insert(
+                        "rev".to_string(),
+                        json!(exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string()),
+                    );
                 }
                 let retry_resp = unpack_to_value(git_push(&retry_body));
                 let retry_pushed = retry_resp
@@ -3828,7 +3919,7 @@ pub(super) fn ci_status_token() -> Option<String> {
             return Some(s);
         }
     }
-    None
+    ci_status_gh_cli_token()
 }
 
 pub(super) fn parse_github_fixed_width_utc_timestamp_to_epoch_secs(s: &str) -> Option<i64> {
@@ -3887,6 +3978,17 @@ pub(super) fn ci_status_conclusion_to_status(conclusion: &str, gh_status: &str) 
 
 pub(super) const CI_STATUS_GH_TIMEOUT_MS: u64 = 60_000;
 
+pub(super) const CI_STATUS_RATE_LIMIT_MAX_ATTEMPTS: u32 = 3;
+pub(super) const CI_STATUS_RATE_LIMIT_BACKOFF_MS: u64 = 1_500;
+pub(super) const CI_STATUS_RATE_LIMIT_MAX_WAIT_MS: u64 = 5_000;
+
+#[derive(Clone, Default)]
+pub(super) struct CiStatusRateLimit {
+    reset_epoch: Option<i64>,
+    remaining: Option<i64>,
+    retry_after_secs: Option<i64>,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum CiStatusTransport {
     GhCli,
@@ -3906,6 +4008,8 @@ pub(super) struct CiStatusAttemptFailure {
     transport: CiStatusTransport,
     reason: String,
     body: String,
+    attempt: u32,
+    rate_limit: Option<CiStatusRateLimit>,
 }
 
 pub(super) fn ci_status_truncate_for_error(text: &str, max_chars: usize) -> String {
@@ -3972,6 +4076,194 @@ pub(super) fn ci_status_shell_stdout(result: &Value) -> String {
     ci_status_shell_stream(result, "stdout")
 }
 
+pub(super) fn ci_status_gh_cli_token() -> Option<String> {
+    let token = ci_status_shell_stdout(&ci_status_shell_result("gh auth token 2>/dev/null"))
+        .trim()
+        .to_string();
+    let token_shaped = !token.is_empty()
+        && token.len() <= 256
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if token_shaped {
+        Some(token)
+    } else {
+        None
+    }
+}
+
+pub(super) fn ci_status_header_value(resp: &Value, name: &str) -> Option<String> {
+    let wanted = name.to_ascii_lowercase();
+    if let Some(map) = resp.get("headers").and_then(Value::as_object) {
+        for (key, value) in map.iter() {
+            if key.to_ascii_lowercase() != wanted {
+                continue;
+            }
+            if let Some(s) = value.as_str() {
+                return Some(s.trim().to_string());
+            }
+            if let Some(n) = value.as_i64() {
+                return Some(n.to_string());
+            }
+        }
+    }
+    for entry in resp
+        .get("headers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        let Some(pair) = entry.as_array() else {
+            continue;
+        };
+        if pair.len() < 2 {
+            continue;
+        }
+        if pair[0].as_str().map(|k| k.to_ascii_lowercase()) != Some(wanted.clone()) {
+            continue;
+        }
+        if let Some(s) = pair[1].as_str() {
+            return Some(s.trim().to_string());
+        }
+        if let Some(n) = pair[1].as_i64() {
+            return Some(n.to_string());
+        }
+    }
+    None
+}
+
+pub(super) fn ci_status_reply_is_rate_limited(
+    status: i64,
+    rate: &CiStatusRateLimit,
+    body: &str,
+) -> bool {
+    if status != 403 && status != 429 {
+        return false;
+    }
+    if rate.remaining == Some(0) {
+        return true;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("abuse detection")
+        || lower.contains("secondary rate")
+}
+
+pub(super) fn ci_status_rate_limit_from_reply(
+    resp: &Value,
+    status: i64,
+    body: &str,
+) -> Option<CiStatusRateLimit> {
+    let rate = CiStatusRateLimit {
+        reset_epoch: ci_status_header_value(resp, "x-ratelimit-reset")
+            .and_then(|s| s.parse::<i64>().ok()),
+        remaining: ci_status_header_value(resp, "x-ratelimit-remaining")
+            .and_then(|s| s.parse::<i64>().ok()),
+        retry_after_secs: ci_status_header_value(resp, "retry-after")
+            .and_then(|s| s.parse::<i64>().ok()),
+    };
+    if ci_status_reply_is_rate_limited(status, &rate, body) {
+        Some(rate)
+    } else {
+        None
+    }
+}
+
+pub(super) fn ci_status_gh_rate_limit(reason: &str) -> Option<CiStatusRateLimit> {
+    let lower = reason.to_ascii_lowercase();
+    if !(lower.contains("rate limit")
+        || lower.contains("abuse detection")
+        || lower.contains("secondary rate"))
+    {
+        return None;
+    }
+    Some(CiStatusRateLimit {
+        reset_epoch: ci_status_gh_rate_limit_reset_epoch(),
+        remaining: None,
+        retry_after_secs: None,
+    })
+}
+
+pub(super) fn ci_status_gh_rate_limit_reset_epoch() -> Option<i64> {
+    ci_status_gh_api_json("rate_limit")
+        .ok()?
+        .get("resources")
+        .and_then(|r| r.get("core"))
+        .and_then(|c| c.get("reset"))
+        .and_then(Value::as_i64)
+}
+
+pub(super) fn ci_status_rate_limit_wait_ms(rate: &CiStatusRateLimit) -> Option<u64> {
+    let now = unsafe { host_now_ms() } as i64 / 1000;
+    if let Some(secs) = rate.retry_after_secs.filter(|s| *s > 0) {
+        let wait_ms = secs.saturating_mul(1000);
+        if wait_ms <= CI_STATUS_RATE_LIMIT_MAX_WAIT_MS as i64 {
+            return Some(wait_ms as u64);
+        }
+        return None;
+    }
+    match rate.reset_epoch {
+        None => Some(CI_STATUS_RATE_LIMIT_BACKOFF_MS),
+        Some(reset) => {
+            let delta_ms = (reset - now).saturating_mul(1000);
+            if delta_ms <= 0 {
+                Some(CI_STATUS_RATE_LIMIT_BACKOFF_MS)
+            } else if delta_ms <= CI_STATUS_RATE_LIMIT_MAX_WAIT_MS as i64 {
+                Some(delta_ms as u64)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+pub(super) fn ci_status_epoch_to_utc_iso(epoch: i64) -> String {
+    let is_leap = |y: i64| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days_in_month = |y: i64, m: i64| -> i64 {
+        match m {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 => {
+                if is_leap(y) {
+                    29
+                } else {
+                    28
+                }
+            }
+            _ => 0,
+        }
+    };
+    let mut rest = epoch.max(0);
+    let mut year = 1970i64;
+    loop {
+        let year_secs = if is_leap(year) { 366 } else { 365 } * 86400;
+        if rest < year_secs {
+            break;
+        }
+        rest -= year_secs;
+        year += 1;
+    }
+    let mut month = 1i64;
+    loop {
+        let month_secs = days_in_month(year, month) * 86400;
+        if rest < month_secs {
+            break;
+        }
+        rest -= month_secs;
+        month += 1;
+    }
+    let day = rest / 86400 + 1;
+    rest -= (day - 1) * 86400;
+    let hour = rest / 3600;
+    rest -= hour * 3600;
+    let min = rest / 60;
+    let sec = rest - min * 60;
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hour, min, sec
+    )
+}
+
 pub(super) fn ci_status_gh_api_json(path: &str) -> Result<Value, String> {
     let code = format!(
         "gh api -H 'Accept: application/vnd.github+json' {}",
@@ -4003,10 +4295,13 @@ pub(super) fn ci_status_gh_api_json(path: &str) -> Result<Value, String> {
     }
 }
 
-pub(super) fn ci_status_rest_api_json(path: &str, opts: &str) -> Result<Value, (i64, String)> {
+pub(super) fn ci_status_rest_api_json(
+    path: &str,
+    opts: &str,
+) -> Result<Value, (i64, String, Option<CiStatusRateLimit>)> {
     let url = format!("https://api.github.com/{}", path);
     if let Err(reason) = crate::config_path::validate_fetch_url(&url) {
-        return Err((0, reason));
+        return Err((0, reason, None));
     }
     let packed = unsafe {
         host_fetch(
@@ -4018,7 +4313,7 @@ pub(super) fn ci_status_rest_api_json(path: &str, opts: &str) -> Result<Value, (
     };
     let resp = unpack_to_value(packed);
     if resp.is_null() {
-        return Err((0, "host_fetch returned no response".to_string()));
+        return Err((0, "host_fetch returned no response".to_string(), None));
     }
     let body_text = resp
         .get("body")
@@ -4032,12 +4327,14 @@ pub(super) fn ci_status_rest_api_json(path: &str, opts: &str) -> Result<Value, (
         .or_else(|| resp.get("statusCode").and_then(Value::as_i64))
         .unwrap_or(0);
     if status_code != 200 {
-        return Err((status_code, body_text));
+        let rate_limit = ci_status_rate_limit_from_reply(&resp, status_code, &body_text);
+        return Err((status_code, body_text, rate_limit));
     }
     serde_json::from_str::<Value>(&body_text).map_err(|parse_error| {
         (
             status_code,
             format!("{} -- {}", parse_error, body_text),
+            None,
         )
     })
 }
@@ -4046,17 +4343,21 @@ pub(super) fn ci_status_attempt(
     transport: CiStatusTransport,
     path: &str,
     rest_opts: &str,
+    attempt: u32,
 ) -> Result<Value, CiStatusAttemptFailure> {
     match transport {
         CiStatusTransport::GhCli => ci_status_gh_api_json(path).map_err(|reason| {
+            let rate_limit = ci_status_gh_rate_limit(&reason);
             CiStatusAttemptFailure {
                 transport,
                 reason,
                 body: String::new(),
+                attempt,
+                rate_limit,
             }
         }),
         CiStatusTransport::GithubRest => {
-            ci_status_rest_api_json(path, rest_opts).map_err(|(status, body)| {
+            ci_status_rest_api_json(path, rest_opts).map_err(|(status, body, rate_limit)| {
                 let reason = if status > 0 {
                     format!("HTTP {} {}", status, ci_status_truncate_for_error(&body, 300))
                 } else {
@@ -4066,6 +4367,8 @@ pub(super) fn ci_status_attempt(
                     transport,
                     reason,
                     body,
+                    attempt,
+                    rate_limit,
                 }
             })
         }
@@ -4104,29 +4407,100 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     let mut failures: Vec<CiStatusAttemptFailure> = Vec::new();
     match ci_status_gh_unusable_reason() {
         None => ordered_transports.push(CiStatusTransport::GhCli),
-        Some(reason) => failures.push(CiStatusAttemptFailure {
-            transport: CiStatusTransport::GhCli,
-            reason,
-            body: String::new(),
-        }),
+        Some(reason) => {
+            let rate_limit = ci_status_gh_rate_limit(&reason);
+            failures.push(CiStatusAttemptFailure {
+                transport: CiStatusTransport::GhCli,
+                reason,
+                body: String::new(),
+                attempt: 0,
+                rate_limit,
+            })
+        }
     }
     ordered_transports.push(CiStatusTransport::GithubRest);
     for transport in ordered_transports {
-        match ci_status_attempt(transport, &runs_path, &rest_opts) {
-            Ok(parsed) => {
-                let runs = ci_status_runs_from(&parsed);
-                return Ok(ci_status_summarize(
-                    body,
-                    &repo,
-                    &sha,
-                    &runs,
-                    transport,
-                    &tree_path,
-                    &rest_opts,
-                ));
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match ci_status_attempt(transport, &runs_path, &rest_opts, attempt) {
+                Ok(parsed) => {
+                    let runs = ci_status_runs_from(&parsed);
+                    return Ok(ci_status_summarize(
+                        body,
+                        &repo,
+                        &sha,
+                        &runs,
+                        transport,
+                        &tree_path,
+                        &rest_opts,
+                    ));
+                }
+                Err(failure) => {
+                    let wait_ms = failure
+                        .rate_limit
+                        .as_ref()
+                        .and_then(ci_status_rate_limit_wait_ms);
+                    let retryable =
+                        attempt < CI_STATUS_RATE_LIMIT_MAX_ATTEMPTS && wait_ms.is_some();
+                    failures.push(failure);
+                    if !retryable {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        wait_ms.unwrap_or(CI_STATUS_RATE_LIMIT_BACKOFF_MS),
+                    ));
+                }
             }
-            Err(failure) => failures.push(failure),
         }
+    }
+    if let Some(rate) = failures
+        .iter()
+        .rev()
+        .find_map(|f| f.rate_limit.as_ref().cloned())
+    {
+        let reset_epoch = rate
+            .reset_epoch
+            .or_else(ci_status_gh_rate_limit_reset_epoch);
+        let now_secs = unsafe { host_now_ms() } as i64 / 1000;
+        let seconds_until_reset = reset_epoch.map(|r| (r - now_secs).max(0));
+        let reason = match (reset_epoch, seconds_until_reset) {
+            (Some(_), Some(secs)) => format!(
+                "GitHub API rate limit reached for this host; quota resets at {} ({}s from now)",
+                ci_status_epoch_to_utc_iso(reset_epoch.unwrap_or(0)),
+                secs
+            ),
+            _ => "GitHub API rate limit reached for this host; no reset time was published"
+                .to_string(),
+        };
+        let last_transport = failures
+            .last()
+            .map(|f| f.transport.label())
+            .unwrap_or("github_rest");
+        return Ok(json!({
+            "ok": true, "verb": "ci-status",
+            "data": {
+                "status": "unknown",
+                "repo": repo, "sha": sha,
+                "failed_jobs": [],
+                "run_url": Value::Null,
+                "reason": reason,
+                "rate_limited": true,
+                "rate_limit_reset_epoch": reset_epoch,
+                "rate_limit_reset_at": reset_epoch.map(ci_status_epoch_to_utc_iso),
+                "retry_after_secs": rate.retry_after_secs.or(seconds_until_reset),
+                "transport": last_transport,
+                "attempts": failures
+                    .iter()
+                    .map(|f| json!({
+                        "transport": f.transport.label(),
+                        "attempt": f.attempt,
+                        "reason": f.reason,
+                        "rate_limited": f.rate_limit.is_some(),
+                    }))
+                    .collect::<Vec<_>>(),
+            },
+        }));
     }
     Err(json!({
         "ok": false, "verb": "ci-status",
@@ -4158,7 +4532,7 @@ pub(super) fn ci_status_summarize(
 ) -> Value {
     let source = transport.label();
     if runs.is_empty() {
-        let tree_result = ci_status_attempt(transport, tree_path, rest_opts);
+        let tree_result = ci_status_attempt(transport, tree_path, rest_opts, 1);
         let tree = tree_result.as_ref().ok().cloned().unwrap_or(Value::Null);
         let complete_tree = tree.get("truncated").and_then(Value::as_bool) == Some(false);
         if let Some(entries) = tree
@@ -4315,7 +4689,7 @@ pub(super) fn ci_status_collect_run_jobs(
         return;
     };
     let path = format!("repos/{}/actions/runs/{}/jobs?per_page=100", repo, run_id);
-    match ci_status_attempt(transport, &path, rest_opts) {
+    match ci_status_attempt(transport, &path, rest_opts, 1) {
         Ok(parsed) => {
             let total = parsed.get("total_count").and_then(Value::as_u64).unwrap_or(0);
             match parsed.get("jobs").and_then(Value::as_array) {
