@@ -5485,8 +5485,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
 pub struct CommentScan<'a> {
     pub root: Option<&'a str>,
     pub paths: &'a [&'a str],
-    pub path_glob: Option<&'a str>,
+    pub include_globs: Vec<String>,
     pub exclude_globs: Vec<String>,
+    pub omit_hits: bool,
     pub max_matches: usize,
     pub max_files: usize,
     pub context: usize,
@@ -6316,13 +6317,13 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     } else {
         crate::scan_universe::TargetOrigin::ProjectDefault
     };
-    let glob = match req.path_glob.filter(|g| !g.is_empty()) {
-        Some(g) => match crate::path_glob::PathGlob::parse(g) {
-            Ok(parsed) => Some(parsed),
+    let mut includes: Vec<crate::path_glob::PathGlob> = Vec::new();
+    for pattern in &req.include_globs {
+        match crate::path_glob::PathGlob::parse(pattern) {
+            Ok(parsed) => includes.push(parsed),
             Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
-        },
-        None => None,
-    };
+        }
+    }
     let mut exclude_globs: Vec<crate::path_glob::PathGlob> = Vec::new();
     for pattern in &req.exclude_globs {
         match crate::path_glob::PathGlob::parse(pattern) {
@@ -6343,11 +6344,12 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     } else {
         &listed[..]
     };
-    let files_matching_glob = match &glob {
-        Some(g) => files.iter().filter(|p| glob_scopes.iter().any(|s| g.admits(root, *s, p))).count(),
-        None => files.len(),
+    let files_matching_glob = if includes.is_empty() {
+        files.len()
+    } else {
+        files.iter().filter(|p| includes.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, p)))).count()
     };
-    let glob_matched_no_files = glob.is_some() && !files.is_empty() && files_matching_glob == 0;
+    let glob_matched_no_files = !includes.is_empty() && !files.is_empty() && files_matching_glob == 0;
     let mut cache = if req.refresh {
         ScanCache::fresh(root)
     } else {
@@ -6368,9 +6370,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     for path in files {
         if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
         entered_paths += 1;
-        if let Some(g) = &glob {
-            if !glob_scopes.iter().any(|s| g.admits(root, *s, path)) { continue; }
-        }
+        if !includes.is_empty() && !includes.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, path))) { continue; }
         if exclude_globs.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, path))) { continue; }
         if has_binary_extension(path) { files_skipped_binary_extension += 1; continue; }
         let Some(syntax) = comment_syntax_for_path(path) else {
@@ -6460,9 +6460,9 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     out.insert("root".to_string(), json!(root));
     if req.paths.len() > 1 { out.insert("paths".to_string(), json!(req.paths)); }
     else if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
-    if let Some(g) = req.path_glob { out.insert("path_glob".to_string(), json!(g)); }
+    if !req.include_globs.is_empty() { out.insert("path_glob".to_string(), json!(req.include_globs.join(", "))); }
     if !req.exclude_globs.is_empty() { out.insert("exclude_glob".to_string(), json!(req.exclude_globs.join(", "))); }
-    if glob.is_some() { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
+    if !includes.is_empty() { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
     out.insert("file_source".to_string(), json!(universe.source.label()));
     out.insert("file_source_detail".to_string(), json!(universe.source.detail()));
@@ -6510,9 +6510,11 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         seen.into_iter().map(|p| json!(p)).collect()
     };
     out.insert("files".to_string(), Value::Array(comment_paths));
-    out.insert("output".to_string(), Value::Array(
-        grep_content_lines(&comments, req.context, true).into_iter().map(|line| json!(line)).collect(),
-    ));
+    if !req.omit_hits {
+        out.insert("output".to_string(), Value::Array(
+            grep_content_lines(&comments, req.context, true).into_iter().map(|line| json!(line)).collect(),
+        ));
+    }
     if cache_hits + cache_misses > 0 {
         out.insert(
             "scan_cache".to_string(),
@@ -6578,8 +6580,10 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         out.insert("matches_truncated".to_string(), json!(true));
         out.insert("matches_truncated_at".to_string(), json!(max_matches));
     }
-    out.insert("comments".to_string(), Value::Array(comments));
-    out.insert("directives".to_string(), Value::Array(directives));
+    if !req.omit_hits {
+        out.insert("comments".to_string(), Value::Array(comments));
+        out.insert("directives".to_string(), Value::Array(directives));
+    }
     Value::Object(out)
 }
 
