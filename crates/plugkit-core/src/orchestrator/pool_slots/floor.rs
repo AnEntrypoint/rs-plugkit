@@ -23,20 +23,27 @@ pub(super) fn ceiling_from_refusal(text: &str) -> Option<u64> {
         .ok()
 }
 
-pub(super) fn floor_denial_text(verb: &str, live: u64, floor: u64, open_rows: u64, advertised: u64, shortfall: u64) -> String {
-    let launch = if advertised == 0 {
-        format!("No launch is advertised: launch shortfall={shortfall} gm-worker subagents from slots.candidates (node-first, then any open row) now.")
-    } else if advertised < shortfall {
-        format!(
-            "Launch the {advertised} advertised gm-worker subagents from slots.launch now, then launch the other {} from slots.candidates (node-first, then any open row).",
-            shortfall - advertised
-        )
-    } else {
-        format!("Launch shortfall={shortfall} gm-worker subagents from slots.launch of a pool-observe reply now.")
-    };
+pub(super) fn floor_denial_text(verb: &str, live: u64, floor: u64, open_rows: u64, advertised: u64, shortfall: u64, launch: &str) -> String {
     format!(
         "{verb} refused: floor_gate_denied -- live={live} is under the floor of {floor} with open_rows={open_rows}; shortfall={shortfall}, advertised={advertised}. {launch} Then call pool-observe with body.live set to the ListAgents count and retry {verb}."
     )
+}
+
+pub(super) fn launch_instruction(advertised: &[String], shortfall: u64) -> String {
+    let count = advertised.len() as u64;
+    if count == 0 {
+        return format!(
+            "No launch is advertised for shortfall={shortfall}: no row in slots.candidates passes the dirty_target and live_writer gates while open work exists, which is a supply defect to report to gm."
+        );
+    }
+    let names = advertised.join(", ");
+    if count >= shortfall {
+        format!("Launch exactly the {count} advertised ids from slots.launch now ({names}): they cover shortfall={shortfall}, so launching them reaches the floor.")
+    } else {
+        format!(
+            "Launch exactly the {count} advertised ids from slots.launch now ({names}): they cover {count} of shortfall={shortfall}; no further admissible row exists in slots.candidates, which is a supply defect to report to gm."
+        )
+    }
 }
 
 fn open_work_rows(exclude_row: Option<&str>) -> u64 {
@@ -58,7 +65,8 @@ pub fn floor_gate(verb: &str, body_live: Option<u64>, exclude_row: Option<&str>)
         return Ok(json!(live));
     }
     let refill_needed = floor - live;
-    let text = floor_denial_text(verb, live, floor, open_rows, refill_needed, refill_needed);
+    let launch = format!("Launch shortfall={refill_needed} gm-worker subagents from slots.launch of a pool-observe reply now.");
+    let text = floor_denial_text(verb, live, floor, open_rows, refill_needed, refill_needed, &launch);
     Err(json!({
         "ok": false,
         "verb": verb,

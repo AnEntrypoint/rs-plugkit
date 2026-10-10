@@ -1,76 +1,5 @@
 use serde_json::Value;
-use std::collections::{BTreeSet, HashSet};
-
-use super::super::pool_rank;
-use super::{LAUNCH_ID_PREFIX, MODULE_EXTENSIONS};
-use crate::pkfs;
-
-const LAUNCH_ID_EXCLUDED_SEGMENTS: [&str; 3] = ["-blocker-", "-finding-", "-defect-"];
-
-fn module_path_of(row: &Value) -> Option<String> {
-    ["subject", "witness", "why", "title", "acceptance", "acceptance_criteria"]
-        .iter()
-        .filter_map(|key| row.get(*key).and_then(Value::as_str))
-        .flat_map(str::split_whitespace)
-        .map(|token| {
-            token
-                .trim_matches(|c: char| matches!(c, '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']'))
-                .trim_end_matches('.')
-        })
-        .map(|token| token.split(':').next().unwrap_or_default())
-        .find(|token| {
-            token.contains('/')
-                && !token.starts_with('/')
-                && !token.contains("..")
-                && MODULE_EXTENSIONS.iter().any(|extension| token.ends_with(*extension))
-        })
-        .map(str::to_string)
-}
-
-fn node_only_witness(row: &Value) -> bool {
-    ["subject", "witness", "why", "title", "acceptance", "acceptance_criteria", "text"]
-        .iter()
-        .filter_map(|key| row.get(*key).and_then(Value::as_str))
-        .all(|text| !text.to_ascii_lowercase().contains("cargo"))
-}
-
-pub(super) fn witness_gap_refusal(row: &Value, project_root: &str) -> Option<String> {
-    let id = row.get("id").and_then(Value::as_str).unwrap_or_default();
-    if !id.starts_with(LAUNCH_ID_PREFIX) {
-        return Some("not_witness_gap_id".to_string());
-    }
-    if let Some(segment) = LAUNCH_ID_EXCLUDED_SEGMENTS.iter().find(|segment| id.contains(**segment)) {
-        return Some(format!("excluded_segment:{}", segment.trim_matches('-')));
-    }
-    let status = row.get("status").and_then(Value::as_str).unwrap_or("pending");
-    if status != "pending" {
-        return Some(format!("status:{status}"));
-    }
-    if pool_rank::has_blocker_notes(row) {
-        return Some("blocker_notes".to_string());
-    }
-    if !node_only_witness(row) {
-        return Some("cargo_in_witness_text".to_string());
-    }
-    let Some(module) = module_path_of(row) else {
-        return Some("no_module_path".to_string());
-    };
-    let Some(source) = pkfs::read_to_string(&format!("{}/{}", project_root, module)) else {
-        return Some(format!("module_unreadable:{module}"));
-    };
-    pool_rank::browser_or_gpu_global_in(&source).map(|token| format!("browser_gpu_global:{token}"))
-}
-
-pub(super) fn witness_gap_admitted(row: &Value, project_root: &str) -> bool {
-    witness_gap_refusal(row, project_root).is_none()
-}
-
-pub(super) fn node_only_module(row: &Value, project_root: &str) -> bool {
-    module_path_of(row).is_some_and(|module| {
-        pkfs::read_to_string(&format!("{}/{}", project_root, module))
-            .is_some_and(|source| !pool_rank::references_browser_or_gpu_global(&source))
-    })
-}
+use std::collections::BTreeSet;
 
 const TARGET_FIELDS: [&str; 7] = ["subject", "title", "why", "witness", "acceptance", "acceptance_criteria", "text"];
 const TARGET_EXTENSIONS: [&str; 18] = [
@@ -194,6 +123,10 @@ fn named_target_paths(row: &Value) -> Vec<String> {
     paths
 }
 
+pub(super) fn writer_targets_of(row: &Value) -> Vec<String> {
+    named_target_paths(row).into_iter().filter(|path| !path.contains(':')).collect()
+}
+
 pub(super) fn dirty_target_verdict(row: &Value, dirt: &WorktreeDirt) -> Option<(&'static str, &'static str, String)> {
     let targets = named_target_paths(row);
     if dirt.unknown {
@@ -212,17 +145,6 @@ pub(super) fn row_by_id<'a>(work: &'a [(Value, usize)], id: &str) -> Option<&'a 
     work.iter()
         .map(|(row, _)| row)
         .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
-}
-
-pub(super) fn launch_filter_of(work: &[(Value, usize)], id: &str, admitted: &HashSet<String>, project_root: &str) -> &'static str {
-    match row_by_id(work, id) {
-        None => "not_in_work",
-        Some(_) if !id.starts_with(LAUNCH_ID_PREFIX) => "not_witness_gap",
-        Some(_) if !admitted.contains(id) => "not_admitted",
-        Some(row) if pool_rank::node_arm(row, true).is_some() => "arm_lane",
-        Some(row) if !node_only_module(row, project_root) => "not_node_only",
-        Some(_) => "launchable",
-    }
 }
 
 pub fn slots_prose(slots: &Value) -> String {

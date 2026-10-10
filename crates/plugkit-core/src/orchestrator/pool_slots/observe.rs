@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 
 use super::super::pool_rank;
 use super::super::transitions::prd_open_rows_with_recency;
-use super::floor::{ceiling_from_refusal, floor_denial_text, monitor_block};
+use super::floor::{ceiling_from_refusal, floor_denial_text, launch_instruction, monitor_block};
 use super::heartbeats::{count_of_record_live, write_count_of_record, HELD_ROWS_FILE};
 use super::state::{read_ceiling, slot_parts, spawn_ceiling};
 use super::traversal::{
@@ -17,12 +17,12 @@ const DEFAULT_LIST_LIMIT: usize = 12;
 const POOL_RULES: [&str; 8] = [
     "Floor 10: while open_rows > 0 keep live at or above the floor, which is 10 or the recorded spawn ceiling when that is lower; the floor is a gate, not a launch count: refill is measured against the ceiling (rule 3).",
     "Pass the ListAgents count of running subagents as body.live on every call: it is the count of record, kept 5 minutes in .gm/pool/count-of-record.json. prd-resolve and transition use that record when they carry no live field; with no fresh record they do not deny and reply count_of_record: absent. slots.live_heartbeats is only the heartbeat cross-check.",
-    "Spawn ceiling 20, or the N a spawn refusal recorded: while open_rows > 0 fill toward it. free_slots = ceiling - live; refill_needed = min(free_slots, launchable + traversal slot), where launchable = admitted witness-gap node candidates that pass the dirty-target filter and the traversal slot is 1 while traversal.needed; idle_slots = free_slots - refill_needed. shortfall = floor - live is what the floor needs; unfilled_shortfall = shortfall - refill_needed must come from slots.candidates. Launch exactly the ids in slots.launch.",
+    "Spawn ceiling 20, or the N a spawn refusal recorded: while open_rows > 0 fill toward it. free_slots = ceiling - live; refill_needed = min(free_slots, launchable + traversal slot), where launchable = slots.candidates after the dirty_target and live_writer gates (node rows first, then any open row) and the traversal slot is 1 while traversal.needed; idle_slots = free_slots - refill_needed. shortfall = floor - live is what the floor needs; sufficient is true when the advertised launches cover the shortfall. Launch exactly the ids in slots.launch; unfilled_shortfall = shortfall - refill_needed is filled from slots.candidates in order.",
     "A live count under the floor while open_rows > 0 is a gate denial (error_code floor_gate_denied) on pool-observe and transition (never on prd-resolve: a closure adds no launch): launch the advertised gm-worker subagents from slots.launch, then launch unfilled_shortfall more from slots.candidates (node-first, then any open row), then retry. It is also a FAILURE: append `FAILURE: <UTC timestamp> live count fell to <live> with <open_rows> pending rows` to .gm/witness-log.md.",
     "Refill on every completion, in the same turn: launch one replacement per freed slot from launch (node-first candidates). Never launch a row that is in slots.live_rows.",
     "Pass body.held = the row id of every running worker on every call, including a worker whose heartbeat is not written yet. The newest held list is kept for 30 minutes; send held: [] to clear it.",
     "A heartbeat refreshes at least every 5 minutes and counts as live for 10 minutes; one older than 5 minutes is listed in slots.aging_heartbeats, not dropped. On a spawn refusal, call pool-observe with body.refusal set to the refusal text.",
-    "A candidate whose named target file has uncommitted changes in the worktree is removed from slots.candidates and from the launch list; slots.candidates_removed names it with filter dirty_target and its dirty_target path. Target names come only from the row subject, title, why, witness, acceptance, acceptance_criteria and text fields, and only tokens with a source or document extension: a token with a directory matches that path, and a bare file name matches any dirty file of that name outside .gm/; a shared document name (AGENTS.md, README.md, CHANGELOG.md) counts only when the row's surface field names it; a row naming no such token is not filtered. If git status cannot be read, every row with a named path is removed with filter git_status_unknown. slots.launch_filters gives the reason each displayed candidate is not launchable.",
+    "A candidate whose named target file has uncommitted changes in the worktree is removed from slots.candidates and from the launch list; slots.candidates_removed names it with filter dirty_target and its dirty_target path. Target names come only from the row subject, title, why, witness, acceptance, acceptance_criteria and text fields, and only tokens with a source or document extension: a token with a directory matches that path, and a bare file name matches any dirty file of that name outside .gm/; a shared document name (AGENTS.md, README.md, CHANGELOG.md) counts only when the row's surface field names it; a row naming no such token is not filtered. If git status cannot be read, every row with a named path is removed with filter git_status_unknown. A candidate whose repo-relative target file is also named by a live row, or by an earlier advertised row of the same reply, is removed with filter live_writer and writer_target names that path. A candidate that passes both gates but is not advertised in this reply is listed in slots.launch_filters with filter beyond_refill: it waits for a free slot.",
 ];
 
 pub fn handle_observe(content: &str) -> (String, String, i32) {
@@ -69,7 +69,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
             return (String::new(), "pool-observe: could not write .gm/pool/held-rows.json".to_string(), 1);
         }
     }
-    let (mut slots, node_candidates) = slot_parts(".", observed);
+    let (mut slots, advertised) = slot_parts(".", observed);
     let limit = body
         .get("limit")
         .and_then(Value::as_u64)
@@ -101,9 +101,10 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     }
     let surface_state = read_surface_state(&state_dir);
     let unscanned = traversal_candidates(".", &surface_state, now);
-    let launchable = node_candidates.len() as u64;
+    let launchable = slots["launchable"].as_u64().unwrap_or(0);
+    let node_launchable = slots["node_launchable"].as_u64().unwrap_or(0);
     let traversal_threshold = TRAVERSAL_SUPPLY_FACTOR * REFILL_FLOOR;
-    let traversal_needed = launchable < traversal_threshold && !unscanned.is_empty();
+    let traversal_needed = (node_launchable < traversal_threshold || launchable < shortfall) && !unscanned.is_empty();
     let refill_needed = if open_rows > 0 {
         free_slots.min(launchable + u64::from(traversal_needed))
     } else {
@@ -112,21 +113,26 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     let idle_slots = free_slots.saturating_sub(refill_needed);
     let unfilled_shortfall = shortfall.saturating_sub(refill_needed);
     let next_surface = unscanned.first().cloned();
-    let mut launch: Vec<Value> = node_candidates
-        .into_iter()
+    let mut launch: Vec<Value> = advertised
+        .iter()
         .take(refill_needed as usize)
         .map(|id| json!({"id": id, "role": "resolver"}))
         .collect();
     if traversal_needed && (launch.len() as u64) < refill_needed {
         launch.push(json!({"id": TRAVERSAL_LAUNCH_ID, "role": "traversal", "surface": next_surface}));
     }
+    let launch_ids: Vec<String> = launch
+        .iter()
+        .filter_map(|item| item["id"].as_str().map(str::to_string))
+        .collect();
+    let sufficient = open_rows == 0 || shortfall == 0 || (launch_ids.len() as u64) >= shortfall;
     let traversal = json!({
         "needed": traversal_needed,
-        "node_witness_candidates": launchable,
+        "node_witness_candidates": node_launchable,
         "threshold": traversal_threshold,
         "unscanned_surfaces": unscanned.iter().take(TRAVERSAL_SURFACE_SHOWN).collect::<Vec<&String>>(),
         "unscanned_total": unscanned.len(),
-        "rule": "traversal is needed only while node witness candidates are below 2 x floor and candidate surfaces remain; a candidate is unscanned, unleased, and has a module (up to 3 levels deep, .js/.mjs/.cjs/.ts/.jsx/.tsx) that no scripts/ file names it by content (the module file stem as a whole word in the text of a scripts/ file); pool-observe advertises the first candidate in launch and leases nothing; a traversal brief for an open row leases the surface that row names when that surface is unscanned, and is refused otherwise; a traversal brief for traversal-node-supply leases the first candidate when it is issued; a surface named in scanned_surfaces is leased for 6 hours",
+        "rule": "traversal is needed only while node witness candidates are below 2 x floor, or the advertised launches do not cover the shortfall, and candidate surfaces remain; a candidate is unscanned, unleased, and has a module (up to 3 levels deep, .js/.mjs/.cjs/.ts/.jsx/.tsx) that no scripts/ file names it by content (the module file stem as a whole word in the text of a scripts/ file); pool-observe advertises the first candidate in launch and leases nothing; a traversal brief for an open row leases the surface that row names when that surface is unscanned, and is refused otherwise; a traversal brief for traversal-node-supply leases the first candidate when it is issued; a surface named in scanned_surfaces is leased for 6 hours",
     });
     let mut monitor = monitor_block(&slots);
     if monitor["alarm"] == json!(false) {
@@ -155,6 +161,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     });
     out["shortfall"] = json!(shortfall);
     out["unfilled_shortfall"] = json!(unfilled_shortfall);
+    out["sufficient"] = json!(sufficient);
     if body.get("rules").and_then(Value::as_bool) == Some(true) {
         out["rules"] = json!(POOL_RULES);
     } else {
@@ -164,7 +171,8 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         out["blocker_notes"] = blocker_notes_block(limit);
     }
     if observed.is_some() && open_rows > 0 && live < floor {
-        let mut text = floor_denial_text("pool-observe", live, floor, open_rows, refill_needed, shortfall);
+        let launch_text = launch_instruction(&launch_ids, shortfall);
+        let mut text = floor_denial_text("pool-observe", live, floor, open_rows, refill_needed, shortfall, &launch_text);
         if refill_needed == 0 {
             text.push_str(&format!(" Advertised launchable={launchable}, free_slots={free_slots}, traversal_needed={traversal_needed}."));
         }
