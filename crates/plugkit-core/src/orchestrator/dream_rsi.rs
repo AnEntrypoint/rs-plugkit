@@ -743,10 +743,11 @@ fn verify_record(kind: &str, record: &Value) -> Result<Value, String> {
             .get("exit_code")
             .and_then(Value::as_i64)
             .ok_or_else(|| "Dream-RSI evaluator dispatch lacks exit code".to_string())?;
+        let output_bytes = dispatch.get("output_bytes").and_then(Value::as_u64);
         if record.get("target").and_then(Value::as_str)
             != Some(format!("{}:{}", verb, fingerprint).as_str())
             || record.get("evaluator_score").and_then(Value::as_f64)
-                != Some(if exit_code == 0 { 1.0 } else { 0.0 })
+                != Some(evaluator_score(exit_code, output_bytes))
             || record.get("cost").and_then(Value::as_u64) != Some(1)
         {
             return Err("Dream-RSI evaluator metrics do not match dispatch evidence".to_string());
@@ -813,6 +814,38 @@ pub fn register_policy(content: &str) -> Result<Value, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
+const DISPATCH_PAYLOAD_KEYS: [&str; 9] = [
+    "data", "result", "output", "text", "matches", "edges", "chunks", "rows", "stdout",
+];
+
+#[cfg(target_arch = "wasm32")]
+pub fn dispatch_output_bytes(result: &Value) -> u64 {
+    fn payload_text_bytes(value: &Value) -> u64 {
+        match value {
+            Value::String(text) if text.trim().is_empty() => 0,
+            Value::String(text) => text.len() as u64,
+            Value::Array(items) => items.iter().map(payload_text_bytes).sum(),
+            Value::Object(fields) => fields
+                .iter()
+                .filter(|(key, _)| DISPATCH_PAYLOAD_KEYS.contains(&key.as_str()))
+                .map(|(_, child)| payload_text_bytes(child))
+                .sum(),
+            Value::Null | Value::Bool(_) | Value::Number(_) => 0,
+        }
+    }
+    payload_text_bytes(result)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn evaluator_score(exit_code: i64, output_bytes: Option<u64>) -> f64 {
+    match (exit_code, output_bytes) {
+        (0, Some(0)) => 0.5,
+        (0, _) => 1.0,
+        _ => 0.0,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn evaluator_receipt(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content)
         .map_err(|error| format!("dream-evaluator-receipt requires JSON: {error}"))?;
@@ -843,10 +876,11 @@ pub fn evaluator_receipt(content: &str) -> Result<Value, String> {
         .get("exit_code")
         .and_then(Value::as_i64)
         .ok_or_else(|| "dream-evaluator-receipt dispatch lacks exit code".to_string())?;
+    let output_bytes = dispatch.get("output_bytes").and_then(Value::as_u64);
     let target = format!("{}:{}", verb, fingerprint);
     let signed = signed_record(
         "evaluator",
-        json!({ "id": receipt_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": if exit_code == 0 { 1.0 } else { 0.0 }, "cost": 1, "parent_id": parent_id, "owner_session_id": owner_session_id, "metric": "completed-dispatch-success" }),
+        json!({ "id": receipt_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": evaluator_score(exit_code, output_bytes), "cost": 1, "parent_id": parent_id, "owner_session_id": owner_session_id, "metric": "completed-dispatch-success" }),
     )?;
     let path = evaluator_receipt_path()?;
     let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
