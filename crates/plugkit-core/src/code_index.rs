@@ -4768,7 +4768,6 @@ fn insert_excluded_by_rule(
             .unwrap_or(0);
         paths_by_rule.insert(e.rule.to_string(), json!(seen + 1));
     }
-    out.insert("excluded_by_rule".to_string(), json!(shown));
     out.insert(
         "excluded_by_rule_summary".to_string(),
         Value::Object(paths_by_rule),
