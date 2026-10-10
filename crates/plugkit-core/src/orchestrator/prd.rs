@@ -734,7 +734,7 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    let policy = super::fsm::graph().policy;
+    let policy = super::fsm::graph().policy.clone();
     let outcome = cas::cas_retry_write(
         &path_s,
         policy.cas_max_attempts,
@@ -1571,7 +1571,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             );
         }
     }
-    let policy = super::fsm::graph().policy;
+    let policy = super::fsm::graph().policy.clone();
     let annotate_only = keeps_status(trimmed);
     let request_live = request_object(trimmed).get("live").and_then(|v| v.as_u64());
     let count_of_record = match super::pool_slots::floor_gate(

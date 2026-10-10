@@ -190,7 +190,7 @@ pub fn description(kind: &str) -> Option<&'static str> {
 }
 
 pub fn effective_severity(kind: &str) -> Severity {
-    let policy = crate::orchestrator::fsm::graph().policy;
+    let policy = crate::orchestrator::fsm::graph().policy.clone();
     effective_severity_with(kind, &policy.deviation_severity)
 }
 
