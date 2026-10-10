@@ -321,6 +321,7 @@ impl WorktreeDirt {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn porcelain_entry_paths(line: &str) -> Vec<String> {
     let Some(entry) = line.get(3..) else {
         return Vec::new();
@@ -332,6 +333,7 @@ fn porcelain_entry_paths(line: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(target_arch = "wasm32")]
 fn worktree_dirt() -> WorktreeDirt {
     let response = crate::wasm_dispatch::git_call_argv(&["status", "--porcelain", "-uall", "--"], None);
     if crate::wasm_dispatch::host_abi::git_response_is_not_repository(&response) {
@@ -352,6 +354,11 @@ fn worktree_dirt() -> WorktreeDirt {
         dirt.entries.extend(porcelain_entry_paths(line));
     }
     dirt
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn worktree_dirt() -> WorktreeDirt {
+    WorktreeDirt::default()
 }
 
 fn target_path_of(token: &str) -> Option<String> {
