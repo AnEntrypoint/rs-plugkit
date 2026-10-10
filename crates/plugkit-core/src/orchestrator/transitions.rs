@@ -495,14 +495,11 @@ fn is_test_scoped_path(path: &str) -> bool {
         || lower.contains("/__tests__/")
 }
 
-/// Best-effort brace-balance scope walk: starting just before a `throw` statement,
-/// scan the preceding file text backward one enclosing block at a time. A block
-/// whose opening-brace text names a `catch` (`catch (...) {` or `.catch(...) {`)
-/// means the throw is lexically handled. A block that itself opens a function
-/// (`function ...`/`=>`) with no `catch` in its own opener ends the walk at that
-/// function's own scope boundary -- an outer catch cannot lexically reach across it.
-/// Character-level (not line-level) so a same-line `} catch (e) {` pairs its own
-/// `{` to the throw's block without misreading the leading `}` of the closed `try`.
+#[cfg(target_arch = "wasm32")]
+const CATCH_OPENER_LOOKBEHIND_CHARS: usize = 80;
+#[cfg(target_arch = "wasm32")]
+const ENCLOSING_BLOCK_WALK_HOP_LIMIT: usize = 25;
+
 #[cfg(target_arch = "wasm32")]
 fn js_throw_has_enclosing_catch(full_text: &str, throw_line_no: usize) -> bool {
     let lines: Vec<&str> = full_text.lines().collect();
@@ -523,38 +520,58 @@ fn js_throw_has_enclosing_catch(full_text: &str, throw_line_no: usize) -> bool {
     let mut hops = 0;
     loop {
         hops += 1;
-        if hops > 25 {
+        if hops > ENCLOSING_BLOCK_WALK_HOP_LIMIT {
             return false;
         }
-        let mut depth: i32 = 0;
-        let mut open_idx: Option<usize> = None;
-        let mut j = cursor;
-        while j > 0 {
-            j -= 1;
-            match chars[j] {
-                '}' => depth += 1,
-                '{' => {
-                    if depth == 0 {
-                        open_idx = Some(j);
-                        break;
-                    } else {
-                        depth -= 1;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let Some(idx) = open_idx else { return false };
-        let window_start = idx.saturating_sub(80);
-        let window: String = chars[window_start..idx].iter().collect();
-        if window.contains("catch") {
+        let Some(idx) = enclosing_block_open_brace_before(&chars, cursor) else {
+            return false;
+        };
+        let opener = block_opener_text_before(&chars, idx, CATCH_OPENER_LOOKBEHIND_CHARS);
+        if block_opener_declares_catch(&opener) {
             return true;
         }
-        if window.contains("function") || window.contains("=>") {
+        if block_opener_declares_function_scope(&opener) {
             return false;
         }
         cursor = idx;
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn enclosing_block_open_brace_before(chars: &[char], before: usize) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let mut j = before;
+    while j > 0 {
+        j -= 1;
+        match chars[j] {
+            '}' => depth += 1,
+            '{' => {
+                if depth == 0 {
+                    return Some(j);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+fn block_opener_text_before(chars: &[char], open_brace: usize, lookbehind: usize) -> String {
+    chars[open_brace.saturating_sub(lookbehind)..open_brace]
+        .iter()
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn block_opener_declares_catch(opener: &str) -> bool {
+    opener.contains("catch")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn block_opener_declares_function_scope(opener: &str) -> bool {
+    opener.contains("function") || opener.contains("=>")
 }
 
 #[cfg(target_arch = "wasm32")]
