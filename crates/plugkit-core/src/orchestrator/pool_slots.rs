@@ -690,13 +690,19 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     let free_slots = ceiling.saturating_sub(live);
     let now = now_ms();
     let state_dir = pool_dir(".");
-    let mut surface_state = read_surface_state(&state_dir);
-    if let Some(names) = body.get("scanned_surfaces").and_then(Value::as_array) {
-        for name in names.iter().filter_map(Value::as_str) {
-            surface_state.insert(name.to_string(), now);
-        }
+    let scanned: Vec<String> = body
+        .get("scanned_surfaces")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    if !scanned.is_empty() && !record_scanned_surfaces(&state_dir, &scanned, now) {
+        return (String::new(), "pool-observe: could not write .gm/pool/traversal-surfaces.json".to_string(), 1);
     }
-    let unscanned = unscanned_surfaces(&list_surfaces("."), &surface_state, now);
+    let surface_state = read_surface_state(&state_dir);
+    let unscanned = traversal_candidates(".", &surface_state, now);
     let launchable = node_candidates.len() as u64;
     let traversal_threshold = TRAVERSAL_SUPPLY_FACTOR * REFILL_FLOOR;
     let traversal_needed = launchable < traversal_threshold && !unscanned.is_empty();
@@ -713,19 +719,15 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         .map(|id| json!({"id": id, "role": "resolver"}))
         .collect();
     if traversal_needed && (launch.len() as u64) < refill_needed {
-        if let Some(surface) = &next_surface {
-            surface_state.insert(surface.clone(), now);
-        }
         launch.push(json!({"id": TRAVERSAL_LAUNCH_ID, "role": "traversal", "surface": next_surface}));
     }
-    write_surface_state(&state_dir, &surface_state);
     let traversal = json!({
         "needed": traversal_needed,
         "node_witness_candidates": launchable,
         "threshold": traversal_threshold,
         "unscanned_surfaces": unscanned.iter().take(TRAVERSAL_SURFACE_SHOWN).collect::<Vec<&String>>(),
         "unscanned_total": unscanned.len(),
-        "rule": "traversal is needed only while node witness candidates are below 2 x floor and unscanned surfaces remain; a launched traversal hop is assigned the first unscanned surface, and a surface stays scanned for 6 hours",
+        "rule": "traversal is needed only while node witness candidates are below 2 x floor and candidate surfaces remain; a candidate is unscanned, unleased, and has a module (up to 3 levels deep, .js/.mjs/.cjs/.ts/.jsx/.tsx) that no scripts/ file names (a scripts/ file name containing <surface>-<module path without extension>); pool-observe advertises the first candidate in launch and leases nothing; a traversal hop leases the candidate assigned in its pool-brief when that brief is issued; a surface named in scanned_surfaces is leased for 6 hours",
     });
     let mut monitor = monitor_block(&slots);
     if monitor["alarm"] == json!(false) {
@@ -827,6 +829,27 @@ fn write_surface_state(dir: &str, state: &std::collections::BTreeMap<String, u64
     pkfs::write(&format!("{}/{}", dir, TRAVERSAL_SURFACES_FILE), &json!({"scanned": state}).to_string())
 }
 
+fn record_scanned_surfaces(dir: &str, names: &[String], now: u64) -> bool {
+    let mut state = read_surface_state(dir);
+    for name in names {
+        state.insert(name.clone(), now);
+    }
+    write_surface_state(dir, &state)
+}
+
+fn assign_traversal_surface(project_root: &str, now: u64) -> Result<Option<String>, String> {
+    let dir = pool_dir(project_root);
+    let mut state = read_surface_state(&dir);
+    let Some(surface) = traversal_candidates(project_root, &state, now).into_iter().next() else {
+        return Ok(None);
+    };
+    state.insert(surface.clone(), now);
+    if !write_surface_state(&dir, &state) {
+        return Err(format!("pool-brief: could not lease {} in {}/{}", surface, dir, TRAVERSAL_SURFACES_FILE));
+    }
+    Ok(Some(surface))
+}
+
 fn unscanned_surfaces(surfaces: &[String], state: &std::collections::BTreeMap<String, u64>, now: u64) -> Vec<String> {
     surfaces
         .iter()
@@ -835,6 +858,74 @@ fn unscanned_surfaces(surfaces: &[String], state: &std::collections::BTreeMap<St
             None => true,
         })
         .cloned()
+        .collect()
+}
+
+const TRAVERSAL_MODULE_DEPTH: usize = 3;
+
+fn dir_entries(dir: &str) -> Vec<(String, bool)> {
+    let Some(Value::Array(entries)) = pkfs::readdir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let name = match entry.as_str() {
+                Some(bare) => bare.to_string(),
+                None => entry.get("name").and_then(Value::as_str)?.to_string(),
+            };
+            let is_dir = match entry.get("is_file").or_else(|| entry.get("isFile")).and_then(Value::as_bool) {
+                Some(is_file) => !is_file,
+                None => !name.contains('.'),
+            };
+            Some((name, is_dir))
+        })
+        .collect()
+}
+
+fn surface_modules(dir: &str, prefix: &str, depth: usize, modules: &mut Vec<String>) {
+    for (name, is_dir) in dir_entries(dir) {
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        let relative = if prefix.is_empty() { name.clone() } else { format!("{}/{}", prefix, name) };
+        if !is_dir {
+            if MODULE_EXTENSIONS.iter().any(|extension| name.ends_with(*extension)) {
+                modules.push(relative);
+            }
+        } else if depth > 0 {
+            surface_modules(&format!("{}/{}", dir, name), &relative, depth - 1, modules);
+        }
+    }
+}
+
+fn module_witness_key(surface: &str, module: &str) -> String {
+    let surface_name = surface.rsplit('/').next().unwrap_or(surface);
+    let stem = module.rsplit_once('.').map_or(module, |(stem, _)| stem);
+    format!("{}-{}", surface_name, stem.replace('/', "-")).to_ascii_lowercase()
+}
+
+fn scripts_witness_names(project_root: &str) -> Vec<String> {
+    dir_entries(&format!("{}/scripts", project_root))
+        .into_iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect()
+}
+
+fn surface_has_unnamed_module(project_root: &str, surface: &str, witness_names: &[String]) -> bool {
+    let mut modules = Vec::new();
+    surface_modules(&format!("{}/{}", project_root, surface), "", TRAVERSAL_MODULE_DEPTH, &mut modules);
+    modules.iter().any(|module| {
+        let key = module_witness_key(surface, module);
+        !witness_names.iter().any(|name| name.contains(key.as_str()))
+    })
+}
+
+fn traversal_candidates(project_root: &str, state: &std::collections::BTreeMap<String, u64>, now: u64) -> Vec<String> {
+    let witness_names = scripts_witness_names(project_root);
+    unscanned_surfaces(&list_surfaces(project_root), state, now)
+        .into_iter()
+        .filter(|surface| surface_has_unnamed_module(project_root, surface, &witness_names))
         .collect()
 }
 
@@ -982,10 +1073,25 @@ pub fn handle_brief(content: &str) -> (String, String, i32) {
     let Some(template) = pkfs::read_to_string(WORKER_BRIEF_PATH) else {
         return (String::new(), format!("pool-brief: worker brief missing at {}", WORKER_BRIEF_PATH), 1);
     };
-    let brief = template
+    let mut brief = template
         .replace("\r\n", "\n")
         .replace("{row}", &row)
         .replace("{session}", &session)
         .replace("{role}", &role);
-    (json!({"ok": true, "verb": "pool-brief", "brief": brief}).to_string(), String::new(), 0)
+    let mut surface = Value::Null;
+    if role == "traversal" {
+        match assign_traversal_surface(".", now_ms()) {
+            Ok(Some(name)) => {
+                brief.push_str(&format!(
+                    "\nAssigned traversal surface: {name}. This brief leases it to your session. Scan only this surface, whatever surface your spawn prompt names, and list it under surfaces scanned in your receipt.\n"
+                ));
+                surface = json!(name);
+            }
+            Ok(None) => brief.push_str(
+                "\nAssigned traversal surface: none. Every surface is leased or scanned. Log no rows and return a receipt that says so.\n",
+            ),
+            Err(message) => return (String::new(), message, 1),
+        }
+    }
+    (json!({"ok": true, "verb": "pool-brief", "brief": brief, "surface": surface}).to_string(), String::new(), 0)
 }
