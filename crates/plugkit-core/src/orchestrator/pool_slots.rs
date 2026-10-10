@@ -422,7 +422,16 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
             return (String::new(), "pool-observe: could not write .gm/pool/held-rows.json".to_string(), 1);
         }
     }
-    let (slots, node_candidates) = slot_parts(".", observed_live);
+    let (mut slots, node_candidates) = slot_parts(".", observed_live);
+    let limit = body
+        .get("limit")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+        .map_or(DEFAULT_LIST_LIMIT, |n| n as usize);
+    for key in ["candidates", "live_rows", "live_sessions"] {
+        cap_list(&mut slots, key, limit);
+    }
+    let held = slots["live_rows_total"].as_u64().unwrap_or(0);
     let live = slots["live"].as_u64().unwrap_or(0);
     let ceiling = spawn_ceiling(&slots) as u64;
     let open_rows = slots["open_rows"].as_u64().unwrap_or(0);
@@ -445,21 +454,43 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         "threshold": traversal_threshold,
         "rule": "node witness candidates below 2 x floor: launch a traversal hop, which logs node-only PRDs and resolves none",
     });
-    let monitor = monitor_block(&slots);
-    let out = json!({
+    let mut monitor = monitor_block(&slots);
+    if monitor["alarm"] == json!(false) {
+        if let Some(fields) = monitor.as_object_mut() {
+            fields.remove("alarm_action");
+        }
+    }
+    let mut out = json!({
         "ok": true,
         "verb": "pool-observe",
         "refusal_ceiling": refused_ceiling,
         "floor": REFILL_FLOOR,
         "ceiling": ceiling,
+        "held": held,
         "refill_needed": refill_needed,
         "launch": launch,
         "traversal": traversal,
         "monitor": monitor,
-        "rules": POOL_RULES,
         "slots": slots,
     });
+    if body.get("rules").and_then(Value::as_bool) == Some(true) {
+        out["rules"] = json!(POOL_RULES);
+    } else {
+        out["rules_hint"] = json!("pass body.rules=true for the pool rules");
+    }
     (out.to_string(), String::new(), 0)
+}
+
+const DEFAULT_LIST_LIMIT: usize = 12;
+
+fn cap_list(slots: &mut Value, key: &str, limit: usize) {
+    let total = slots[key].as_array().map_or(0, Vec::len);
+    if let Some(items) = slots[key].as_array_mut() {
+        items.truncate(limit);
+    }
+    if let Some(fields) = slots.as_object_mut() {
+        fields.insert(format!("{key}_total"), json!(total));
+    }
 }
 
 const MONITOR_ALARM_ACTION: &str = "refill from launch (node-first candidates) in the same turn, one replacement per freed slot; when candidates run out, traversal is launched; loop: wait {\"ms\":60000}, then pool-observe with body.live (ListAgents count) and body.held, then launch";
