@@ -47,33 +47,24 @@ pub struct RuleExclusion {
 
 pub const OWN_STATE_RULE: &str = "gm_state_dir";
 
-/// Every unscoped scan drops gm's own state, so naming it per path in each reply is noise no caller
-/// can act on: these rules stay in `excluded_by_rule_summary` and never clear `exhaustive`, and they
-/// are the only rules a scan reply does not list. Every other rule drops code.
 pub const GM_STATE_EXCLUSION_RULES: &[&str] = &[OWN_STATE_RULE, "agentplug_kv_cache"];
 
 pub fn is_own_state_name(name: &str) -> bool {
     name == ".gm" || name.starts_with(".agentplug")
 }
 
-/// The entry a pruned own-state file is reported under: the child of the own-state directory that
-/// holds it (`.gm/prd.yml`, `.gm/memories`), so the rule exclusion names the file a caller is
-/// missing, not only the directory around it.
-fn own_state_entry_under_root(root: &str, path: &str) -> Option<String> {
+fn reported_own_state_entry_under_root(root: &str, path: &str) -> Option<String> {
     let prefix = join_under(root, "");
     let rel = path.strip_prefix(prefix.as_str())?;
     let segments: Vec<&str> = rel.split('/').collect();
-    let dir_count = segments.len() - 1;
-    let own_state_at = segments[..dir_count]
+    let parent_segment_count = segments.len() - 1;
+    let own_state_at = segments[..parent_segment_count]
         .iter()
         .position(|segment| is_own_state_name(segment))?;
-    let child_at = (own_state_at + 1).min(dir_count);
-    Some(format!("{prefix}{}", segments[..=child_at].join("/")))
+    let reported_child_at = (own_state_at + 1).min(parent_segment_count);
+    Some(format!("{prefix}{}", segments[..=reported_child_at].join("/")))
 }
 
-/// Files under a `.gm/` directory that git lists are the project's versioned state (`prd.yml`,
-/// `mutables.yml`, memories, disciplines). They are project content, so they stay in scope; the own
-/// state git does not list is named from disk by `report_unlisted_own_state` instead.
 fn is_versioned_gm_state(root: &str, path: &str) -> bool {
     let prefix = join_under(root, "");
     let Some(rel) = path.strip_prefix(prefix.as_str()) else {
@@ -91,7 +82,7 @@ fn prune_own_state(root: &str, files: Vec<String>, keep_versioned_gm: bool) -> (
             kept.push(file);
             continue;
         }
-        match own_state_entry_under_root(root, &file) {
+        match reported_own_state_entry_under_root(root, &file) {
             None => kept.push(file),
             Some(entry) => match pruned.iter_mut().find(|p| p.path == entry) {
                 Some(p) => p.files = Some(p.files.unwrap_or(0) + 1),
@@ -106,8 +97,6 @@ fn prune_own_state(root: &str, files: Vec<String>, keep_versioned_gm: bool) -> (
     (kept, pruned)
 }
 
-/// `git ls-files --others --exclude-standard` never lists an ignored, untracked own-state file, so
-/// `prune_own_state` never sees it. It is named here from disk instead.
 fn report_unlisted_own_state(root: &str, kept: &[String], pruned: &mut Vec<RuleExclusion>) {
     for name in child_names(root).into_iter().filter(|n| is_own_state_name(n)) {
         let state_path = join_under(root, &name);
@@ -187,17 +176,12 @@ fn git_stderr(v: &Value) -> String {
         .to_string()
 }
 
-/// A caller who spells out the whole location still means a place inside the search root, so an
-/// absolute `path` under that root is rewritten to the relative scope the rest of the scan works
-/// with. `None` means the location is not under the root at all.
 pub fn scope_inside_root(root: &str, scope: &str) -> Option<String> {
     let abs_root = absolute_root_for_message(root).replace('\\', "/");
     let abs_root = abs_root.trim_end_matches('/');
     if abs_root.is_empty() {
         return None;
     }
-    // Both folds are byte-length preserving and `scope` already uses '/' separators, so the tail
-    // can be cut out of `scope` by length and keep the case the caller wrote.
     let folded_root = abs_root.to_ascii_lowercase();
     let folded_scope = scope.to_ascii_lowercase();
     let rest = match folded_scope.strip_prefix(&folded_root) {
@@ -207,8 +191,8 @@ pub fn scope_inside_root(root: &str, scope: &str) -> Option<String> {
     if !rest.is_empty() && !rest.starts_with('/') {
         return None;
     }
-    let tail = rest.trim_start_matches('/');
-    Some(scope[scope.len() - tail.len()..].to_string())
+    let separated_root_chars = abs_root.chars().count() + rest.chars().take_while(|c| *c == '/').count();
+    Some(scope.chars().skip(separated_root_chars).collect())
 }
 
 fn relative_scope(root: &str, scope: &str) -> Result<Option<String>, String> {
@@ -325,12 +309,6 @@ fn directory_is_gitignored(dir: &str) -> Result<bool, String> {
     }
 }
 
-/// A tracked submodule is a gitlink, and a gitlink divides the two listings a worktree is built from:
-/// `--cached --recurse-submodules` reaches the files the submodule tracks, while `--others` stops at
-/// the gitlink and never descends into it. Nothing therefore lists a submodule's own untracked files,
-/// and `complete` stayed true across that hole -- a scan could answer `exhaustive: true` over a set
-/// missing files that sit on disk inside a submodule. Mode `160000` in `ls-files --stage` is the
-/// gitlink, so these are the directories `--others` has to be re-run inside.
 fn gitlink_dirs(dir: &str, complete: &mut bool) -> Vec<String> {
     let mut staged = Vec::new();
     match git_list_into(dir, &["--stage"], None, 0, &mut staged) {
@@ -352,9 +330,6 @@ fn gitlink_dirs(dir: &str, complete: &mut bool) -> Vec<String> {
     }
 }
 
-/// The untracked half of one nested repo and of every nested repo inside it, which is exactly what
-/// the parent's `--others` leaves out. Untracked directories are themselves nested repos, and
-/// gitlinks are read again per level, so a submodule of a submodule is covered the same way.
 fn nested_untracked(dir: &str, nesting: usize, no_ignore: bool) -> (Vec<String>, bool) {
     if nesting >= NESTED_REPO_DEPTH_LIMIT {
         return (Vec::new(), false);
@@ -389,9 +364,6 @@ fn nested_untracked(dir: &str, nesting: usize, no_ignore: bool) -> (Vec<String>,
     (files, complete)
 }
 
-/// `--exclude-standard` is the only thing keeping an ignored file out of the untracked listing, so
-/// dropping it is the whole of "no_ignore": tracked, untracked and ignored files all come back. .git
-/// is not a worktree entry, so it stays out either way.
 fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec<String>, bool), String> {
     let mut tracked = Vec::new();
     let mut untracked = Vec::new();
@@ -484,8 +456,6 @@ fn walk_policy(cause: WalkCause, origin: TargetOrigin, no_ignore: bool) -> WalkP
             reason: format!("the named target is not inside a git worktree ({e}); it was walked directly honouring its root's .gitignore, {DEPENDENCY_WALK_SKIPS}"),
         },
     };
-    // "no_ignore" only ever widens a listing, so it is applied after the fact: every reason above
-    // keeps saying why the walk happened, and .gitignore simply stops being consulted.
     if no_ignore && policy.honour_gitignore {
         policy.honour_gitignore = false;
         policy.reason = format!("{}; {NO_IGNORE_WALK_NOTE}", policy.reason);
@@ -557,9 +527,6 @@ impl RuleRecordingWalk<'_> {
     }
 }
 
-/// The root as a directory a caller can recognise: `root` defaults to `.`, which is the dispatch
-/// project, so a reply or an error that prints it verbatim tells the caller nothing about which
-/// project was searched.
 pub fn absolute_root_for_message(root: &str) -> String {
     if crate::pkfs::is_absolute(root) {
         return root.to_string();
@@ -589,10 +556,6 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         Some(s) => relative_scope(root, s)?,
         None => None,
     };
-    // A scope the caller spelled out wins over every exclusion rule below, gm's own state included:
-    // ".gm" is a dot-directory and is gitignored, so a default-walk rule that hides it would also
-    // hide the one tree an agent is most often sent to read. The rules stay in force for the
-    // unscoped universe, where they are what keeps a project-wide scan inside its budget.
     let named_scope = rel.is_some();
     let target = rel.as_deref().map(|r| join_under(root, r)).unwrap_or_else(|| root.to_string());
     let universe = |files, source, listing_complete, excluded, walk_reason| ScanUniverse {
