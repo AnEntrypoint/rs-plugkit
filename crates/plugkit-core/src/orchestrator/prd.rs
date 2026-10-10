@@ -1041,12 +1041,19 @@ fn witness_evidence_kind(value: Option<&serde_json::Value>) -> &'static str {
 }
 
 #[cfg(target_arch = "wasm32")]
-const SPOOL_OUT_LOOKBACK_MS: u64 = 300_000;
+const SPOOL_OUT_COMPLETION_LOOKBACK_MS: u64 = 300_000;
 #[cfg(target_arch = "wasm32")]
-const SPOOL_OUT_LOOKAHEAD_MS: u64 = 10_000;
+const SPOOL_OUT_COMPLETION_LOOKAHEAD_MS: u64 = 60_000;
 #[cfg(target_arch = "wasm32")]
 const SPOOL_OUT_SCAN_MAX_FILES: usize = 400;
 const REVERIFY_LISTED_PATHS: usize = 20;
+
+#[cfg(target_arch = "wasm32")]
+fn spool_out_completed_ms(out_dir: &str, name: &str) -> Option<u64> {
+    let stat = crate::pkfs::stat(&format!("{out_dir}/{name}"))?;
+    let mtime = stat.get("mtime_ms").or_else(|| stat.get("mtimeMs"))?;
+    mtime.as_u64().or_else(|| mtime.as_f64().map(|ms| ms as u64))
+}
 
 #[cfg(target_arch = "wasm32")]
 pub fn dispatch_in_spool_out(cwd: &str, dispatch_id: &str) -> bool {
@@ -1071,11 +1078,14 @@ pub fn dispatch_in_spool_out(cwd: &str, dispatch_id: &str) -> bool {
             let name = entry
                 .as_str()
                 .or_else(|| entry.get("name").and_then(serde_json::Value::as_str))?;
-            let stem = name.strip_suffix(".json")?;
-            let ts = stem.rsplit('-').nth(1)?.parse::<u64>().ok()?;
-            let inside_window = ts <= id_ts.saturating_add(SPOOL_OUT_LOOKAHEAD_MS)
-                && ts.saturating_add(SPOOL_OUT_LOOKBACK_MS) >= id_ts;
-            inside_window.then(|| (ts, name.to_string()))
+            if !name.ends_with(".json") {
+                return None;
+            }
+            let completed_ms = spool_out_completed_ms(&out_dir, name)?;
+            let lookback_start = id_ts.saturating_sub(SPOOL_OUT_COMPLETION_LOOKBACK_MS);
+            let lookahead_end = id_ts.saturating_add(SPOOL_OUT_COMPLETION_LOOKAHEAD_MS);
+            let inside_window = (lookback_start..=lookahead_end).contains(&completed_ms);
+            inside_window.then(|| (completed_ms, name.to_string()))
         })
         .collect();
     candidates.sort_by(|a, b| b.0.cmp(&a.0));
