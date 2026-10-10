@@ -43,7 +43,7 @@ fn needs_design(row: &Value) -> bool {
     }
 }
 
-fn arm(row: &Value) -> Option<&'static str> {
+pub(super) fn arm(row: &Value) -> Option<&'static str> {
     if let Some(explicit) = text_field(row, "arm").filter(|a| !a.is_empty()) {
         return match explicit {
             "gpu" => Some("gpu"),
@@ -71,7 +71,7 @@ pub fn is_blocker_row(row: &Value) -> bool {
             .is_some_and(|s| s.trim_start().to_ascii_uppercase().starts_with("BLOCKER"))
 }
 
-fn blocked_row_of(blocker_id: &str) -> Option<&str> {
+pub(super) fn blocked_row_of(blocker_id: &str) -> Option<&str> {
     blocker_id.split("-blocker-").next().filter(|p| !p.is_empty())
 }
 
@@ -79,20 +79,35 @@ fn has_id_segment(id: &str, segment: &str) -> bool {
     id.split('-').any(|part| part == segment)
 }
 
-fn is_outcome_row(row: &Value) -> bool {
+pub(super) fn is_outcome_row(row: &Value) -> bool {
     let by_id = row_id(row).is_some_and(|id| has_id_segment(id, "outcome") || id.contains("outcome-hop"));
     let by_kind = text_field(row, "kind")
         .is_some_and(|kind| OUTCOME_KINDS.iter().any(|known| kind.trim().eq_ignore_ascii_case(known)));
     by_id || by_kind
 }
 
-fn is_refuted_row(row: &Value) -> bool {
+pub(super) fn is_refuted_row(row: &Value) -> bool {
     let by_id = row_id(row).is_some_and(|id| has_id_segment(id, "refuted"));
     let by_title = ["title", "subject"]
         .iter()
         .filter_map(|key| text_field(row, key))
         .any(|text| text.trim_start().to_ascii_uppercase().starts_with("REFUTED"));
     by_id || by_title
+}
+
+fn is_blank_note(note: &Value) -> bool {
+    match note {
+        Value::Null => true,
+        Value::Bool(flag) => !*flag,
+        Value::Number(number) => number.as_f64() == Some(0.0),
+        Value::String(text) => text.trim().is_empty(),
+        Value::Array(items) => items.iter().all(is_blank_note),
+        Value::Object(fields) => fields.values().all(is_blank_note),
+    }
+}
+
+pub(super) fn has_blocker_notes(row: &Value) -> bool {
+    row.get("blocker_notes").is_some_and(|notes| !is_blank_note(notes))
 }
 
 fn severity_rank(row: &Value) -> u8 {
@@ -161,6 +176,9 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -
         if is_live(id) {
             continue;
         }
+        if is_pending_blocked || has_blocker_notes(row) {
+            continue;
+        }
         ranked.push(Ranked {
             arm_rank: u8::from(row_arm.is_some()),
             pending_blocked: is_pending_blocked,
@@ -173,6 +191,7 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -
     ranked.sort();
     let mut seen: HashSet<String> = HashSet::new();
     let mut candidates: Vec<String> = Vec::new();
+    let mut node_candidates: Vec<String> = Vec::new();
     for entry in ranked {
         match entry.arm {
             Some("gpu") if gpu_offered => continue,
@@ -182,11 +201,15 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -
             _ => {}
         }
         if seen.insert(entry.id.clone()) {
+            if entry.arm.is_none() {
+                node_candidates.push(entry.id.clone());
+            }
             candidates.push(entry.id);
         }
     }
     json!({
         "candidates": candidates,
+        "node_candidates": node_candidates,
         "supply": {
             "open_work": work.len(),
             "pending_blocker_rows": blockers.len(),

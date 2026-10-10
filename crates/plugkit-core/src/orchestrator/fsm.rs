@@ -94,6 +94,10 @@ pub struct Policy {
     pub initial_phase: String,
     #[serde(default = "default_terminal_phase")]
     pub terminal_phase: String,
+    #[serde(default)]
+    pub completion_phase: Option<String>,
+    #[serde(default)]
+    pub completion_source: Option<String>,
     #[serde(default = "default_mutables_default_status")]
     pub mutables_default_status: String,
     #[serde(default = "default_mutables_witness_status")]
@@ -268,6 +272,8 @@ impl Default for Policy {
             long_gap_retry_escalate_after: default_long_gap_retry_bursts_before_escalate(),
             concurrency_window_ms: default_concurrency_window_ms(),
             terminal_phase: default_terminal_phase(),
+            completion_phase: None,
+            completion_source: None,
             mutables_default_status: default_mutables_default_status(),
             mutables_witness_status: default_mutables_witness_status(),
             mutables_require_witness_evidence: default_mutables_require_witness_evidence(),
@@ -361,6 +367,8 @@ impl Graph {
         "reject_duplicate_witness",
         "initial_phase",
         "terminal_phase",
+        "completion_phase",
+        "completion_source",
         "mutables_default_status",
         "mutables_witness_status",
         "mutables_require_witness_evidence",
@@ -636,6 +644,44 @@ impl Graph {
             }
         }
 
+        if let Some(completion) = self.policy.completion_phase.as_deref() {
+            if !self.has_state(completion) {
+                problems.push(format!(
+                    "policy.completion_phase `{completion}` is not a declared state"
+                ));
+            }
+            match self.policy.completion_source.as_deref() {
+                None => problems.push(format!(
+                    "policy.completion_phase `{completion}` names no policy.completion_source, so its inbound edges cannot be checked"
+                )),
+                Some(source) => {
+                    let inbound: Vec<&Edge> = self
+                        .edges
+                        .iter()
+                        .filter(|e| e.to.eq_ignore_ascii_case(completion))
+                        .collect();
+                    if inbound.is_empty() {
+                        problems.push(format!(
+                            "completion state `{completion}` has no inbound edge from `{source}`"
+                        ));
+                    }
+                    for e in inbound {
+                        if !e.from.eq_ignore_ascii_case(source) {
+                            problems.push(format!(
+                                "edge `{} -> {}` enters completion state `{completion}` from a source other than policy.completion_source `{source}`",
+                                e.from, e.to
+                            ));
+                        } else if e.gates.is_empty() {
+                            problems.push(format!(
+                                "edge `{} -> {}` enters completion state `{completion}` with no gates -- completion would be ungated",
+                                e.from, e.to
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         problems
     }
 }
@@ -687,15 +733,35 @@ fn hook_file_exists(hook: &str) -> bool {
 
 const LEAN_GRAPH_JSON: &str = include_str!("lean_graph.json");
 
-fn default_graph() -> Graph {
-    serde_json::from_str::<Graph>(LEAN_GRAPH_JSON).unwrap_or_else(|_| Graph {
-        schema_version: GRAPH_SCHEMA_VERSION,
-        min_plugkit_version: None,
-        states: Vec::new(),
-        edges: Vec::new(),
-        gates: Vec::new(),
-        policy: Policy::default(),
-    })
+#[derive(Debug, Clone)]
+pub struct ValidGraph {
+    graph: Graph,
+}
+
+impl ValidGraph {
+    fn validated(graph: Graph) -> Result<Self, Vec<String>> {
+        let problems = graph.validate();
+        if problems.is_empty() {
+            Ok(Self { graph })
+        } else {
+            Err(problems)
+        }
+    }
+}
+
+impl std::ops::Deref for ValidGraph {
+    type Target = Graph;
+
+    fn deref(&self) -> &Graph {
+        &self.graph
+    }
+}
+
+fn default_graph() -> ValidGraph {
+    let graph = serde_json::from_str::<Graph>(LEAN_GRAPH_JSON)
+        .expect("orchestrator/lean_graph.json must deserialize into Graph");
+    ValidGraph::validated(graph)
+        .expect("orchestrator/lean_graph.json must pass Graph::validate")
 }
 
 const GRAPH_OVERRIDE_PATH: &str = ".gm/instructions/fsm/graph.json";
@@ -754,7 +820,7 @@ fn source_repo_graph_path() -> Option<String> {
     None
 }
 
-pub fn graph() -> Graph {
+pub fn graph() -> ValidGraph {
     graph_detailed().0
 }
 
@@ -762,12 +828,12 @@ struct GraphMemo {
     raw: String,
     tier: GraphTier,
     path: String,
-    resolved: (Graph, GraphTier, String),
+    resolved: (ValidGraph, GraphTier, String),
 }
 
 static GRAPH_MEMO: std::sync::Mutex<Option<GraphMemo>> = std::sync::Mutex::new(None);
 
-fn resolve_graph_memoized(raw: &str, path: &str, tier: GraphTier) -> (Graph, GraphTier, String) {
+fn resolve_graph_memoized(raw: &str, path: &str, tier: GraphTier) -> (ValidGraph, GraphTier, String) {
     if let Ok(memo) = GRAPH_MEMO.lock() {
         if let Some(m) = memo.as_ref() {
             if m.tier == tier && m.path == path && m.raw == raw {
@@ -790,7 +856,7 @@ fn resolve_graph_memoized(raw: &str, path: &str, tier: GraphTier) -> (Graph, Gra
     resolved
 }
 
-pub fn graph_detailed() -> (Graph, GraphTier, String) {
+pub fn graph_detailed() -> (ValidGraph, GraphTier, String) {
     if let Some(raw) = pkfs::read_to_string(GRAPH_OVERRIDE_PATH) {
         return resolve_graph_memoized(&raw, GRAPH_OVERRIDE_PATH, GraphTier::LocalOverride);
     }
@@ -811,7 +877,7 @@ pub fn graph_detailed() -> (Graph, GraphTier, String) {
 
 const COMPILED_PATH: &str = "<compiled default>";
 
-fn load_tier(raw: &str, path: &str, tier: GraphTier) -> Option<Graph> {
+fn load_tier(raw: &str, path: &str, tier: GraphTier) -> Option<ValidGraph> {
     match serde_json::from_str::<Graph>(raw) {
         Ok(mut g) => {
             let unknown = Graph::unknown_policy_keys(raw);
@@ -867,25 +933,27 @@ fn load_tier(raw: &str, path: &str, tier: GraphTier) -> Option<Graph> {
                 );
             }
 
-            let problems = g.validate();
-            if problems.is_empty() {
-                if refused.is_empty() {
-                    clear_graph_rejection();
+            match ValidGraph::validated(g) {
+                Ok(valid) => {
+                    if refused.is_empty() {
+                        clear_graph_rejection();
+                    }
+                    Some(valid)
                 }
-                Some(g)
-            } else {
-                #[cfg(target_arch = "wasm32")]
-                crate::wasm_dispatch::emit_event(
-                    "fsm_graph_override_invalid",
-                    serde_json::json!({
-                        "path": path,
-                        "tier": tier.as_str(),
-                        "problems": problems,
-                        "reason": "graph parsed but failed referential-integrity validation; falling back to the built-in default this dispatch",
-                    }),
-                );
-                record_graph_rejection_at(path, tier, "invalid", &problems.join("; "));
-                None
+                Err(problems) => {
+                    #[cfg(target_arch = "wasm32")]
+                    crate::wasm_dispatch::emit_event(
+                        "fsm_graph_override_invalid",
+                        serde_json::json!({
+                            "path": path,
+                            "tier": tier.as_str(),
+                            "problems": problems,
+                            "reason": "graph parsed but failed referential-integrity validation; falling back to the built-in default this dispatch",
+                        }),
+                    );
+                    record_graph_rejection_at(path, tier, "invalid", &problems.join("; "));
+                    None
+                }
             }
         }
         Err(e) => {
@@ -1153,5 +1221,5 @@ pub fn graph_rejection() -> Option<serde_json::Value> {
 }
 
 pub fn default_graph_json_pretty() -> String {
-    serde_json::to_string_pretty(&default_graph()).unwrap_or_default()
+    serde_json::to_string_pretty(&*default_graph()).unwrap_or_default()
 }
