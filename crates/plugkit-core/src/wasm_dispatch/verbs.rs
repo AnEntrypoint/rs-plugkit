@@ -2378,6 +2378,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
                 &fingerprint,
                 exit_code,
                 dispatch_session_id.as_deref(),
+                Some(crate::orchestrator::dream_rsi::dispatch_output_bytes(&result_value)),
             );
             let gate_drift = exit_code != 0
                 && crate::orchestrator::dream_rsi::failure_is_gate_drift(&result_value);

@@ -4303,6 +4303,10 @@ pub struct LiteralScan<'a> {
     pub term_combination: Option<&'a str>,
     pub budget_ms: Option<u64>,
     pub max_matches_per_file: Option<usize>,
+    /// `true`: the walk covers every file in scope and `max_matches` sizes the reply, so a match-dense
+    /// file early in the walk cannot hide a file later in it. `false`: the walk stops as soon as it has
+    /// `max_matches` rows, which costs less on a large tree but answers only for the files it reached.
+    pub whole_scope: bool,
     pub refresh: bool,
     /// Opt in to scanning files the project's .gitignore/.codesearchignore would otherwise hide.
     /// The scan universe stops consulting those files, so ignored trees -- build output, vendored
@@ -4461,6 +4465,17 @@ impl LiteralMatcher {
 }
 
 const MULTI_TERM_MAX_MATCHES: usize = 200;
+
+/// The floor on what an exhaustive scan collects from one file, and the room it therefore needs to
+/// hold: the rows it returns are shared between the matching files, so a match-dense file cannot
+/// take a file that matched once out of the reply. `hit_cap` bounds what is held and `max_matches`
+/// stays the size of the reply. A cap the caller left effectively unbounded collects everything,
+/// as before.
+const EXHAUSTIVE_PER_FILE_COLLECT: usize = 8;
+
+const EXHAUSTIVE_COLLECT_FLOOR: usize = 256;
+
+const EXHAUSTIVE_COLLECT_CEILING: usize = 4_096;
 
 const MAX_QUERY_TERMS: usize = 12;
 
@@ -4941,8 +4956,23 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         req.max_matches
     };
     let per_file_quota = req.max_matches_per_file.filter(|q| *q > 0);
+    let whole_scope = req.whole_scope && per_file_quota.is_none();
+    let fair_share = whole_scope && !multi && max_matches <= EXHAUSTIVE_COLLECT_CEILING;
+    let collect_quota = if per_file_quota.is_some() {
+        per_file_quota
+    } else if fair_share {
+        // One file may supply the whole reply when it is the only file that matched, so the quota
+        // has to be at least `max_matches`; `hit_cap` is what bounds what is held in memory.
+        Some(max_matches.max(EXHAUSTIVE_PER_FILE_COLLECT))
+    } else {
+        None
+    };
     let hit_cap = if per_file_quota.is_some() {
         max_matches
+    } else if fair_share {
+        max_matches
+            .saturating_mul(EXHAUSTIVE_PER_FILE_COLLECT)
+            .clamp(EXHAUSTIVE_COLLECT_FLOOR, EXHAUSTIVE_COLLECT_CEILING)
     } else if multi {
         max_matches.saturating_mul(6).clamp(200, 2_000)
     } else {
@@ -4951,6 +4981,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
 
     let mut candidates: Vec<(usize, usize, usize, Value)> = Vec::new();
     let mut compact_lines: Vec<String> = Vec::new();
+    let mut compact_line_file: Vec<usize> = Vec::new();
     let mut file_line_counts: Vec<(String, usize)> = Vec::new();
     let mut unreadable_dependency_files = 0usize;
     let mut unreadable_sample: Vec<String> = Vec::new();
@@ -5180,25 +5211,32 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             if matches!(req.output, ScanOutput::Files | ScanOutput::Count) {
                 continue;
             }
-            if let Some(quota) = per_file_quota {
+            if let Some(quota) = collect_quota {
                 if this_file_collected >= quota {
-                    this_file_quota_hit = true;
-                    break;
+                    // A caller-named quota is a bounded sample and may stop reading this file. The
+                    // implied one only stops collecting: the line is still counted, or a dense file
+                    // would understate `lines_with_matches` for the whole scope.
+                    if per_file_quota.is_some() {
+                        this_file_quota_hit = true;
+                        break;
+                    }
+                    continue;
                 }
                 this_file_collected += 1;
             }
             if req.output == ScanOutput::Compact {
-                if emitted_matches >= req.max_matches {
+                if emitted_matches >= hit_cap {
                     matches_truncated = true;
-                    break;
+                    continue;
                 }
                 emitted_matches += 1;
                 compact_lines.push(compact_match_line(path, idx + 1, line));
+                compact_line_file.push(index);
                 continue;
             }
             if candidates.len() >= hit_cap {
                 matches_truncated = true;
-                break;
+                continue;
             }
             let (start, end) = found[0];
             let text_truncated = line.len() > LITERAL_SCAN_MAX_LINE_BYTES;
@@ -5262,9 +5300,17 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             files_quota_truncated += 1;
             matches_truncated = true;
         }
-        if matches_truncated && (req.output != ScanOutput::Matches || candidates.len() >= hit_cap) {
+        if !whole_scope && matches_truncated && (req.output != ScanOutput::Matches || candidates.len() >= hit_cap) {
             break;
         }
+    }
+    if fair_share && compact_lines.len() > max_matches {
+        matches_truncated = true;
+        let kept = fair_share_indices(&compact_line_file, max_matches, |i| i.to_string())
+            .into_iter()
+            .map(|i| compact_lines[i].clone())
+            .collect();
+        compact_lines = kept;
     }
 
     let mut matches: Vec<Value> = if multi {
@@ -5288,17 +5334,41 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             }
         }
         candidates.into_iter().map(|(_, _, _, hit)| hit).collect()
+    } else if fair_share && candidates.len() > max_matches {
+        matches_truncated = true;
+        let keep = fair_share_indices(&candidates, max_matches, |c| {
+            c.3.get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        });
+        candidates = keep.into_iter().map(|i| candidates[i].clone()).collect();
+        candidates.into_iter().map(|(_, _, _, hit)| hit).collect()
     } else {
         candidates.into_iter().map(|(_, _, _, hit)| hit).collect()
     };
+    if !matches!(req.output, ScanOutput::Files | ScanOutput::Count) {
+        let returned_rows = if req.output == ScanOutput::Compact {
+            compact_lines.len()
+        } else {
+            matches.len()
+        };
+        if returned_rows < lines_with_matches {
+            matches_truncated = true;
+        }
+    }
     let cache_hits = cache.hits;
     let cache_misses = cache.misses;
     let cache_entries = cache.entries.len();
     let cache_bytes = cache.bytes;
     scan_cache_put(cache);
 
+    // `exhaustive` is the walk's coverage verdict: every listed file in scope was read, with no
+    // budget, ceiling or unreadable gap in the way. A reply cut down to `max_matches` rows is still
+    // exhaustive -- `matches_truncated` and `lines_with_matches` report that cut, so a complete walk
+    // is never presented as one that did not look.
     let exhaustive = !files_truncated
-        && !matches_truncated
+        && !(matches_truncated && !whole_scope)
         && !budget_exhausted
         && files_skipped_too_large_count == 0
         && files_unreadable == 0
