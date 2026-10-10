@@ -153,7 +153,7 @@ fn is_browser_or_gpu_global(token: &str, called: bool) -> bool {
         || (token == "fetch" && called)
 }
 
-pub(super) fn references_browser_or_gpu_global(source: &str) -> bool {
+pub(super) fn browser_or_gpu_global_in(source: &str) -> Option<String> {
     let code = code_without_literals(source);
     let mut rest = code.as_str();
     while let Some(start) = rest.find(is_ident_char) {
@@ -161,11 +161,15 @@ pub(super) fn references_browser_or_gpu_global(source: &str) -> bool {
         let len = tail.find(|c: char| !is_ident_char(c)).unwrap_or(tail.len());
         let called = tail[len..].trim_start().starts_with('(');
         if is_browser_or_gpu_global(&tail[..len], called) {
-            return true;
+            return Some(tail[..len].to_string());
         }
         rest = &tail[len..];
     }
-    false
+    None
+}
+
+pub(super) fn references_browser_or_gpu_global(source: &str) -> bool {
+    browser_or_gpu_global_in(source).is_some()
 }
 
 pub fn is_blocker_id(id: &str) -> bool {
@@ -178,7 +182,7 @@ pub fn is_blocker_row(row: &Value) -> bool {
             .is_some_and(|s| s.trim_start().to_ascii_uppercase().starts_with("BLOCKER"))
 }
 
-fn blocked_row_of(blocker_id: &str) -> Option<&str> {
+pub(super) fn blocked_row_of(blocker_id: &str) -> Option<&str> {
     blocker_id.split("-blocker-").next().filter(|p| !p.is_empty())
 }
 
@@ -186,14 +190,14 @@ fn has_id_segment(id: &str, segment: &str) -> bool {
     id.split('-').any(|part| part == segment)
 }
 
-fn is_outcome_row(row: &Value) -> bool {
+pub(super) fn is_outcome_row(row: &Value) -> bool {
     let by_id = row_id(row).is_some_and(|id| has_id_segment(id, "outcome") || id.contains("outcome-hop"));
     let by_kind = text_field(row, "kind")
         .is_some_and(|kind| OUTCOME_KINDS.iter().any(|known| kind.trim().eq_ignore_ascii_case(known)));
     by_id || by_kind
 }
 
-fn is_refuted_row(row: &Value) -> bool {
+pub(super) fn is_refuted_row(row: &Value) -> bool {
     let by_id = row_id(row).is_some_and(|id| has_id_segment(id, "refuted"));
     let by_title = ["title", "subject"]
         .iter()
