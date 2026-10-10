@@ -9,6 +9,8 @@ const HEARTBEAT_REAP_MS: u64 = 60 * 60 * 1000;
 const DEFAULT_SPAWN_CEILING: usize = 20;
 const CEILING_KEYWORDS: [&str; 3] = ["maximum", "ceiling", "limit"];
 const REFILL_FLOOR: u64 = 12;
+const LAUNCH_ID_PREFIX: &str = "witness-gap-";
+const LAUNCH_ID_EXCLUDED_SEGMENTS: [&str; 3] = ["-blocker-", "-finding-", "-defect-"];
 
 #[cfg(target_arch = "wasm32")]
 fn now_ms() -> u64 {
@@ -197,6 +199,16 @@ fn ceiling_from_refusal(text: &str) -> Option<u64> {
         .ok()
 }
 
+fn is_launch_row(row: &Value) -> bool {
+    let id = row.get("id").and_then(Value::as_str).unwrap_or_default();
+    let status = row.get("status").and_then(Value::as_str).unwrap_or("pending");
+    id.starts_with(LAUNCH_ID_PREFIX)
+        && !LAUNCH_ID_EXCLUDED_SEGMENTS.iter().any(|segment| id.contains(*segment))
+        && status == "pending"
+        && !super::pool_rank::has_blocker_notes(row)
+        && super::pool_rank::arm(row).is_none()
+}
+
 fn held_rows(live: &LiveHeartbeats, work: &[(Value, usize)]) -> Vec<String> {
     let mut rows = live.rows.clone();
     rows.extend(
@@ -227,11 +239,16 @@ fn slot_parts(project_root: &str) -> (Value, Vec<String>) {
     let live_rows = held_rows(&live, &work);
     let ranked = super::pool_rank::rank(&work, &blockers, &live_rows);
     let candidates = ranked["candidates"].clone();
+    let launchable: BTreeSet<&str> = work
+        .iter()
+        .filter(|(row, _)| is_launch_row(row))
+        .filter_map(|(row, _)| row.get("id").and_then(Value::as_str))
+        .collect();
     let node_candidates: Vec<String> = ranked["node_candidates"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|id| id.as_str().map(str::to_string))
+        .filter_map(|id| id.as_str().filter(|id| launchable.contains(id)).map(str::to_string))
         .collect();
     let action = match (open_rows, free) {
         (0, _) => "none",
@@ -320,18 +337,19 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     (out.to_string(), String::new(), 0)
 }
 
-const MONITOR_FLOOR: u64 = 10;
 const MONITOR_ALARM_ACTION: &str = "refill from slots.candidates until a spawn refusal names the ceiling; when candidates run out, dispatch a traversal hop to log node-only PRDs; the loop is wait {\"ms\":60000}, then instruction, then launch the free slots";
 const WORKER_BRIEF_PATH: &str = "C:/dev/spoint/.gm/config-source-cache-default/prose/worker.md";
 
 pub fn monitor_block(slots: &Value) -> Value {
     let live = slots["live"].as_u64().unwrap_or(0);
     let open_work = slots["open_rows"].as_u64().unwrap_or(0);
+    let shortfall = if open_work > 0 { REFILL_FLOOR.saturating_sub(live) } else { 0 };
     json!({
         "live": live,
-        "floor": MONITOR_FLOOR,
+        "floor": REFILL_FLOOR,
         "open_work": open_work,
-        "alarm": live < MONITOR_FLOOR && open_work > 0,
+        "shortfall": shortfall,
+        "alarm": shortfall > 0,
         "alarm_action": MONITOR_ALARM_ACTION,
     })
 }
