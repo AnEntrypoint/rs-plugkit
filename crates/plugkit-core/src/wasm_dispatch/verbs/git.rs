@@ -1208,6 +1208,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
             "ok": false,
             "verb": "git_push",
             "gate_denied": true,
+            "remote_moved": true,
             "repo": repo,
             "branch": branch,
             "source_ref": source_ref,
@@ -1973,6 +1974,134 @@ pub(super) fn check_ci_status_and_write_validated_marker_if_green(
     }
 }
 
+pub(super) fn untracked_worktree_paths(cwd: Option<&str>) -> Vec<String> {
+    exec_git_in(cwd, "ls-files --others --exclude-standard")
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+pub(super) fn incoming_added_paths(cwd: Option<&str>, branch: &str) -> Vec<String> {
+    exec_git_in(
+        cwd,
+        &format!("diff --diff-filter=A --name-only HEAD...origin/{}", branch),
+    )
+    .lines()
+    .map(|line| line.trim().to_string())
+    .filter(|line| !line.is_empty())
+    .collect()
+}
+
+pub(super) fn commits_between(cwd: Option<&str>, from: &str, to: &str) -> Value {
+    let listed = exec_git_in(
+        cwd,
+        &format!("log --reverse --pretty=format:%H%x09%s {}..{}", from, to),
+    );
+    let rows: Vec<Value> = listed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (sha, summary) = line.split_once('\t').unwrap_or((line, ""));
+            json!({ "sha": sha.trim(), "summary": summary.trim() })
+        })
+        .collect();
+    json!(rows)
+}
+
+pub(super) enum RemoteMovedPull {
+    NotApplicable,
+    Blocked(String),
+    Failed(Value),
+    Landed {
+        ff_only: bool,
+        result: Value,
+        incoming_commits: Value,
+        remote_sha_before: String,
+    },
+}
+
+pub(super) fn pull_past_remote_moved(cwd: Option<&str>, push_resp: &Value) -> RemoteMovedPull {
+    if !push_resp
+        .get("remote_moved")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return RemoteMovedPull::NotApplicable;
+    }
+    if push_resp
+        .get("preserved_dirty_worktree")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+    {
+        return RemoteMovedPull::Blocked(
+            "push preserved a dirty worktree -- refusing to pull over it".to_string(),
+        );
+    }
+    let branch = push_resp
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if branch.is_empty() {
+        return RemoteMovedPull::Blocked("push refusal named no branch to pull".to_string());
+    }
+    let _ = git_call_argv(&["fetch", "origin", branch.as_str()], cwd);
+    let added = incoming_added_paths(cwd, &branch);
+    let untracked = untracked_worktree_paths(cwd);
+    let clash: Vec<String> = untracked
+        .into_iter()
+        .filter(|path| added.iter().any(|added| added == path))
+        .collect();
+    if !clash.is_empty() {
+        return RemoteMovedPull::Blocked(format!(
+            "the incoming commit creates {} which this worktree also has untracked -- pulling would overwrite it",
+            clash.join(", ")
+        ));
+    }
+    let remote_sha_before = resolve_ref(cwd, &format!("origin/{}", branch)).unwrap_or_default();
+    let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    let ff_resp = unpack_to_value(git_pull(&json!({
+        "cwd": cwd,
+        "branch": branch,
+        "ff_only": true,
+    })));
+    if ff_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return RemoteMovedPull::Landed {
+            ff_only: true,
+            result: ff_resp,
+            incoming_commits: commits_between(cwd, &head_before, &remote_sha_before),
+            remote_sha_before,
+        };
+    }
+    let merge_resp = unpack_to_value(git_pull(&json!({ "cwd": cwd, "branch": branch })));
+    let merged = merge_resp
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if merged {
+        return RemoteMovedPull::Landed {
+            ff_only: false,
+            result: merge_resp,
+            incoming_commits: commits_between(cwd, &head_before, &remote_sha_before),
+            remote_sha_before,
+        };
+    }
+    let conflicted = merge_resp
+        .get("conflicted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if conflicted {
+        let _ = git_call_argv(&["merge", "--abort"], cwd);
+    }
+    RemoteMovedPull::Failed(json!({
+        "ff_only": ff_resp,
+        "merge": merge_resp,
+        "merge_aborted": conflicted,
+    }))
+}
+
 pub(super) fn git_finalize(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let cwd = repo.clone();
@@ -2428,13 +2557,66 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         body.clone()
     };
     let push_resp_packed = git_push(&push_body);
-    let push_resp = unpack_to_value(push_resp_packed);
-    let pushed = push_resp
+    let mut push_resp = unpack_to_value(push_resp_packed);
+    let mut pushed = push_resp
         .get("ok")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let mut recovery: Option<Value> = None;
     if !pushed {
-        return pack(json!({
+        match pull_past_remote_moved(cwd_ref, &push_resp) {
+            RemoteMovedPull::NotApplicable => {}
+            RemoteMovedPull::Blocked(reason) => {
+                recovery = Some(json!({
+                    "attempted": false,
+                    "skipped_reason": reason,
+                }));
+            }
+            RemoteMovedPull::Failed(result) => {
+                recovery = Some(json!({
+                    "attempted": true,
+                    "pull_result": result,
+                }));
+            }
+            RemoteMovedPull::Landed {
+                ff_only,
+                result,
+                incoming_commits,
+                remote_sha_before,
+            } => {
+                let mut retry_body = push_body.clone();
+                if let Some(map) = retry_body.as_object_mut() {
+                    map.insert("rev".to_string(), json!("HEAD"));
+                }
+                let retry_resp = unpack_to_value(git_push(&retry_body));
+                let retry_pushed = retry_resp
+                    .get("ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                steps.push(json!({
+                    "step": "auto-recover-remote-moved",
+                    "pull_via": if ff_only { "ff_only" } else { "merge" },
+                    "incoming_commits": incoming_commits.clone(),
+                    "remote_sha_before": remote_sha_before.clone(),
+                    "repushed": retry_pushed,
+                }));
+                recovery = Some(json!({
+                    "attempted": true,
+                    "pull_via": if ff_only { "ff_only" } else { "merge" },
+                    "pull_result": result,
+                    "incoming_commits": incoming_commits,
+                    "remote_sha_before": remote_sha_before,
+                    "repushed": retry_pushed,
+                }));
+                if retry_pushed {
+                    push_resp = retry_resp;
+                    pushed = true;
+                }
+            }
+        }
+    }
+    if !pushed {
+        let mut refusal = json!({
             "ok": false,
             "verb": "git_finalize",
             "committed": committed,
@@ -2444,7 +2626,12 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             "push_result": push_resp,
             "reason": "commit landed (or nothing to commit) but push was refused -- read push_result.reason",
             "next_dispatch": "instruction",
-        }).to_string());
+        });
+        if let Some(recovery) = recovery {
+            refusal["auto_recovery"] = recovery;
+            refusal["auto_recovered"] = json!(false);
+        }
+        return pack(refusal.to_string());
     }
     emit_event("git.push", json!({ "repo": repo, "sha": sha }));
     let push_data = push_resp.get("data");
@@ -2488,6 +2675,16 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         "ci_validated_marker_written": ci_validated_written,
         "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
     });
+    if let Some(recovery) = recovery {
+        finalize_payload["incoming_commits"] = recovery
+            .get("incoming_commits")
+            .cloned()
+            .unwrap_or(Value::Null);
+        finalize_payload["auto_recovery"] = recovery;
+        finalize_payload["auto_recovered"] = json!(true);
+        finalize_payload["final_sha"] =
+            json!(exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string());
+    }
     if !dangling_waived.is_empty() {
         finalize_payload["dangling_waived"] = json!(dangling_waived);
     }
