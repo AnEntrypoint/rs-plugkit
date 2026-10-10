@@ -23,7 +23,7 @@ pub fn pending_commit_comments_for_paths(cwd: Option<&str>, touched: &[String]) 
     if !pkfs::exists(&path_s) {
         return Vec::new();
     }
-    let raw = match pkfs::read_to_string(&path_s) {
+    let raw = match read_prd_text(&path_s) {
         Some(s) => s,
         None => return Vec::new(),
     };
@@ -260,7 +260,7 @@ fn load_rows() -> Result<Vec<serde_json::Value>, (String, i32)> {
     if !pkfs::exists(&path_s) {
         return Ok(Vec::new());
     }
-    let raw = match pkfs::read_to_string(&path_s) {
+    let raw = match read_prd_text(&path_s) {
         Some(s) => s,
         None => return Err(("read failed".to_string(), 1)),
     };
@@ -1487,7 +1487,7 @@ fn rerun_bound_witness(script: &str) -> Result<serde_json::Value, String> {
 
 const PRD_BOM: char = '\u{feff}';
 
-fn read_prd_without_bom(path_s: &str) -> Option<String> {
+pub fn read_prd_text(path_s: &str) -> Option<String> {
     let raw = crate::pkfs::read_to_string(path_s)?;
     Some(raw.strip_prefix(PRD_BOM).unwrap_or(raw.as_str()).to_string())
 }
@@ -1511,7 +1511,7 @@ pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Valu
         return vec![];
     }
     let path_s = prd_path().to_string_lossy().to_string();
-    let Some(text) = read_prd_without_bom(&path_s) else {
+    let Some(text) = read_prd_text(&path_s) else {
         return prd_unreadable_report(&path_s, format!("{path_s} is missing or unreadable"));
     };
     let doc: Value = match serde_yaml::from_str(&text) {
@@ -2109,7 +2109,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         && deviation_refuses("prd-resolve-duplicate-witness")
     {
         if let Some(binding) = witness_binding.as_ref() {
-            if let Some(existing) = pkfs::read_to_string(&path_s) {
+            if let Some(existing) = read_prd_text(&path_s) {
                 if let Ok(doc) = serde_yaml::from_str::<Value>(&existing) {
                     if let Some(seq) = doc.as_sequence() {
                         for item in seq {
@@ -2164,7 +2164,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         if let Some(w) = witness.as_ref() {
             let trimmed_w = w.trim();
             if trimmed_w.len() >= 24 {
-                if let Some(existing) = pkfs::read_to_string(&path_s) {
+                if let Some(existing) = read_prd_text(&path_s) {
                     if let Ok(doc) = serde_yaml::from_str::<Value>(&existing) {
                         if let Some(seq) = doc.as_sequence() {
                             for item in seq {
