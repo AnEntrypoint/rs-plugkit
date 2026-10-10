@@ -790,32 +790,33 @@ pub(crate) fn sync_files(
             .trim_start_matches("./")
             .trim_start_matches('/')
             .to_string();
+        let key = canonical_project_path(&fp, project_path);
         if fp.rfind('.').is_some_and(|dot| {
             NO_SYMBOL_EXTS
                 .iter()
                 .any(|ext| fp[dot..].eq_ignore_ascii_case(ext))
         }) {
-            seen.insert(fp.clone());
+            seen.insert(key.clone());
             unsupported += 1;
-            if known.contains_key(&fp) {
+            if known.contains_key(&key) {
                 if host_now_ms().saturating_sub(started_ms) > budget_ms {
                     deferred += 1;
-                    record_deferred(&mut deferred_paths, &mut focus_deferred, focus, &fp);
+                    record_deferred(&mut deferred_paths, &mut focus_deferred, focus, &key);
                     continue;
                 }
-                if !write_edges(&fp, &[], project_path) {
+                if !write_edges(&key, &[], project_path) {
                     store_failures += 1;
-                    record_focus_failure(&mut focus_failed, focus, &fp);
+                    record_focus_failure(&mut focus_failed, focus, &key);
                     continue;
                 }
-                let path = sql_text(&fp);
+                let path = sql_text(&key);
                 let script = format!("BEGIN; DELETE FROM {SYMBOLS_TABLE} WHERE path={path}; DELETE FROM {IMPORTS_TABLE} WHERE path={path}; DELETE FROM {FILES_TABLE} WHERE path={path}; COMMIT;");
                 if let Err(e) = libsql_wasm::exec(&db, &script) {
                     if is_store_busy_error(&e) {
                         store_busy = true;
                     }
                     store_failures += 1;
-                    record_focus_failure(&mut focus_failed, focus, &fp);
+                    record_focus_failure(&mut focus_failed, focus, &key);
                 }
             }
             continue;
@@ -826,10 +827,10 @@ pub(crate) fn sync_files(
         else {
             continue;
         };
-        seen.insert(fp.clone());
+        seen.insert(key.clone());
         if host_now_ms().saturating_sub(started_ms) > budget_ms {
             deferred += 1;
-            record_deferred(&mut deferred_paths, &mut focus_deferred, focus, &fp);
+            record_deferred(&mut deferred_paths, &mut focus_deferred, focus, &key);
             continue;
         }
         let stat = host_stat(&fp).or_else(|| host_stat(raw));
@@ -843,22 +844,22 @@ pub(crate) fn sync_files(
             .or_else(|| host_read(&format!("/{fp}")))
         else {
             unreadable += 1;
-            record_focus_failure(&mut focus_failed, focus, &fp);
+            record_focus_failure(&mut focus_failed, focus, &key);
             continue;
         };
         if content.len() > size_cap {
             oversized += 1;
-            record_focus_failure(&mut focus_failed, focus, &fp);
+            record_focus_failure(&mut focus_failed, focus, &key);
             continue;
         }
         let source_hash = format!("{:016x}", crate::hash::fnv1a64(content.as_bytes()));
-        if known.get(&fp) == Some(&(size, mtime_ms, SCHEMA_VERSION, 0, source_hash)) {
+        if known.get(&key) == Some(&(size, mtime_ms, SCHEMA_VERSION, 0, source_hash)) {
             unchanged += 1;
             continue;
         }
         let file_started = host_now_ms();
         let (file, failed) = extract_file(
-            &fp,
+            &key,
             lang,
             &content,
             size.max(content.len() as u64),
@@ -876,9 +877,9 @@ pub(crate) fn sync_files(
         }
         parse_failures += failed;
         if failed > 0 {
-            record_focus_failure(&mut focus_failed, focus, &fp);
+            record_focus_failure(&mut focus_failed, focus, &key);
         }
-        match store_file(&db, &fp, &file, project_path) {
+        match store_file(&db, &key, &file, project_path) {
             Ok(()) => {
                 synced += 1;
                 symbols_written += file.symbols.len();
@@ -889,7 +890,7 @@ pub(crate) fn sync_files(
                     store_busy = true;
                 }
                 store_failures += 1;
-                record_focus_failure(&mut focus_failed, focus, &fp);
+                record_focus_failure(&mut focus_failed, focus, &key);
             }
         }
     }
@@ -898,6 +899,31 @@ pub(crate) fn sync_files(
         let gone: Vec<&String> = known.keys().filter(|p| !seen.contains(*p)).collect();
         removed = gone.len() as u32;
         for batch in gone.chunks(200) {
+            let list = batch
+                .iter()
+                .map(|p| sql_text(p))
+                .collect::<Vec<_>>()
+                .join(",");
+            let script = format!("BEGIN; DELETE FROM {SYMBOLS_TABLE} WHERE path IN ({list}); DELETE FROM {IMPORTS_TABLE} WHERE path IN ({list}); DELETE FROM {FILES_TABLE} WHERE path IN ({list}); COMMIT;");
+            if let Err(e) = libsql_wasm::exec(&db, &script) {
+                if is_store_busy_error(&e) {
+                    store_busy = true;
+                }
+                store_failures += 1;
+                continue;
+            }
+            for path in batch {
+                code_index::fv_delete(&edges_namespace(project_path), &edges_key(path));
+            }
+        }
+    }
+    let stale_forms: Vec<&String> = known
+        .keys()
+        .filter(|p| !seen.contains(*p) && seen.contains(&canonical_project_path(p.as_str(), project_path)))
+        .collect();
+    if prune_absent && !stale_forms.is_empty() {
+        removed += stale_forms.len() as u32;
+        for batch in stale_forms.chunks(200) {
             let list = batch
                 .iter()
                 .map(|p| sql_text(p))
@@ -1801,29 +1827,77 @@ fn normalized_path(path: &str) -> String {
         .to_string()
 }
 
-fn imports(db: &str, path: &str) -> Result<Value, String> {
-    let path = normalized_path(path);
-    let known = single_count(
-        db,
-        &format!(
-            "SELECT COUNT(*) AS c FROM {FILES_TABLE} WHERE path='{}'",
-            path.replace('\'', "''")
-        ),
-    );
-    if known == 0 {
-        return Err(format!("path not indexed: {path}"));
+fn path_under_root(path: &str, root: &str) -> Option<String> {
+    let root = root.replace('\\', "/");
+    let root = root.trim_end_matches('/');
+    if root.is_empty() {
+        return None;
     }
-    Ok(json!({ "path": path, "imports": import_lines(db, &path) }))
+    let prefix = format!("{root}/");
+    let head = path.get(..prefix.len())?;
+    if head.eq_ignore_ascii_case(&prefix) {
+        return Some(path[prefix.len()..].to_string());
+    }
+    None
 }
 
-fn importers(db: &str, path: &str, limit: usize) -> Value {
-    let path = normalized_path(path);
+fn canonical_project_path(path: &str, project_path: Option<&str>) -> String {
+    let path = path.replace('\\', "/");
+    let path = normalized_path(&path);
+    let Some(root) = project_path else {
+        return path;
+    };
+    path_under_root(&path, root).unwrap_or(path)
+}
+
+fn indexed_file_row(db: &str, candidates: &[String]) -> Option<(String, Value)> {
+    for candidate in candidates {
+        let found = rows(
+            db,
+            &format!("SELECT lang, loc, symbols FROM {FILES_TABLE} WHERE path=?1"),
+            &[candidate.as_str()],
+        );
+        if let Some(row) = found.into_iter().next() {
+            return Some((candidate.clone(), row));
+        }
+    }
+    None
+}
+
+fn file_row_candidates(path: &str, project_path: Option<&str>) -> Vec<String> {
+    let normalized = canonical_project_path(path, project_path);
+    let mut candidates = vec![normalized];
+    if let Some(root) = project_path {
+        let root = root.replace('\\', "/");
+        let root = root.trim_end_matches('/');
+        if !root.is_empty() {
+            candidates.push(format!("{root}/{}", candidates[0]));
+        }
+    }
+    candidates
+}
+
+fn imports(db: &str, path: &str, project_path: Option<&str>) -> Result<Value, String> {
+    let normalized = canonical_project_path(path, project_path);
+    let Some((key, _)) = indexed_file_row(db, &file_row_candidates(path, project_path)) else {
+        return Err(format!("path not indexed: {normalized}"));
+    };
+    Ok(json!({
+        "path": normalized,
+        "imports": import_lines(db, &key),
+    }))
+}
+
+fn importers(db: &str, path: &str, project_path: Option<&str>, limit: usize) -> Value {
+    let path = canonical_project_path(path, project_path);
     let graph = load_import_graph(db);
-    let found: Vec<&String> = graph
-        .reverse
-        .get(&path)
-        .map(|s| s.iter().collect())
-        .unwrap_or_default();
+    let mut found: Vec<&String> = Vec::new();
+    for candidate in file_row_candidates(&path, project_path) {
+        if let Some(importers) = graph.reverse.get(&candidate) {
+            found = importers.iter().collect();
+            break;
+        }
+    }
     json!({
         "path": path,
         "total": found.len(),
@@ -1982,16 +2056,17 @@ fn outline_partial_reason(focus_state: Option<&str>) -> Option<&'static str> {
     }
 }
 
-fn outline(db: &str, path: &str, refresh: &Value) -> Result<Value, String> {
-    let normalized = normalized_path(path);
+fn outline(
+    db: &str,
+    path: &str,
+    project_path: Option<&str>,
+    refresh: &Value,
+) -> Result<Value, String> {
+    let normalized = canonical_project_path(path, project_path);
     let refresh_complete = refresh.get("complete").and_then(Value::as_bool) == Some(true);
     let focus_state = refresh.pointer("/focus/state").and_then(Value::as_str);
-    let file = rows(
-        db,
-        &format!("SELECT lang, loc, symbols FROM {FILES_TABLE} WHERE path=?1"),
-        &[&normalized],
-    );
-    let Some(file) = file.first() else {
+    let file = indexed_file_row(db, &file_row_candidates(path, project_path));
+    let Some((file_key, file)) = file else {
         if !refresh_complete && matches!(focus_state, Some("deferred") | Some("failed") | None) {
             let reason = if focus_state == Some("deferred") {
                 DEFERRED_NEVER_INDEXED_REASON
@@ -2023,7 +2098,7 @@ fn outline(db: &str, path: &str, refresh: &Value) -> Result<Value, String> {
             near.join(", ")
         ));
     };
-    let symbols = rows(db, &format!("SELECT kind, name, line_start, line_end, signature, cx FROM {SYMBOLS_TABLE} WHERE path=?1 ORDER BY line_start, line_end DESC"), &[&normalized]);
+    let symbols = rows(db, &format!("SELECT kind, name, line_start, line_end, signature, cx FROM {SYMBOLS_TABLE} WHERE path=?1 ORDER BY line_start, line_end DESC"), &[&file_key]);
     let mut stack: Vec<u64> = Vec::new();
     let lines: Vec<String> = symbols
         .iter()
@@ -2049,7 +2124,7 @@ fn outline(db: &str, path: &str, refresh: &Value) -> Result<Value, String> {
         .collect();
     let mut result = json!({
         "path": normalized,
-        "lang": string(file, "lang"),
+        "lang": string(&file, "lang"),
         "loc": number(file.get("loc")),
         "symbol_count": symbols.len(),
         "outline": lines,
@@ -2401,7 +2476,8 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
         return Ok(sync_tree(&cfg, project_path));
     }
     let focus = if action == "outline" {
-        text_field(body, &["path", "file"]).map(normalized_path)
+        text_field(body, &["path", "file"])
+            .map(|path| canonical_project_path(&path, project_path))
     } else {
         None
     };
@@ -2441,7 +2517,7 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     let mut output = match action {
         "overview" => Ok(overview(project_path, limit)),
         "status" => Ok(status(project_path)),
-        "outline" => outline(&db, need_path()?, &refresh),
+        "outline" => outline(&db, need_path()?, project_path, &refresh),
         "find" => Ok(find(
             &db,
             need_symbol()?,
@@ -2494,8 +2570,8 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
             text_field(body, &["language", "lang"]).unwrap_or(""),
             &normalized_path(text_field(body, &["path", "path_prefix"]).unwrap_or("")),
         )),
-        "imports" => imports(&db, need_path()?),
-        "importers" => Ok(importers(&db, need_path()?, limit)),
+        "imports" => imports(&db, need_path()?, project_path),
+        "importers" => Ok(importers(&db, need_path()?, project_path, limit)),
         "cycles" => Ok(cycles(&db, limit)),
         "coupling" => Ok(coupling(
             &db,
