@@ -1867,10 +1867,21 @@ pub(super) fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> 
         Ok(limit) => limit,
         Err(e) => return err("grep", &e),
     };
-    let (_, exclude_globs) = match grep_route_globs(body) {
+    let (include_globs, exclude_globs) = match grep_route_globs(body) {
         Ok(globs) => globs,
         Err(e) => return err("grep", &e),
     };
+    let output_mode = body
+        .get("output_mode")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("outputMode").and_then(|v| v.as_str()))
+        .unwrap_or("content");
+    if !GREP_OUTPUT_MODES.contains(&output_mode) {
+        return err(
+            "grep",
+            &format!("output_mode \"{output_mode}\" is not a grep output mode -- valid modes are \"content\", \"files_with_matches\", \"count\""),
+        );
+    }
     let context = match body.get("context").and_then(|v| v.as_u64()) {
         Some(n) => n as usize,
         None => 0,
@@ -1878,11 +1889,9 @@ pub(super) fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> 
     let scan = crate::code_index::CommentScan {
         root,
         paths: &path_refs,
-        path_glob: body.get("glob").and_then(|v| v.as_str())
-            .or_else(|| body.get("include").and_then(|v| v.as_str()))
-            .or_else(|| body.get("path_glob").and_then(|v| v.as_str()))
-            .filter(|g| !g.is_empty()),
+        include_globs,
         exclude_globs,
+        omit_hits: output_mode != "content",
         max_matches: max_matches as usize,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
