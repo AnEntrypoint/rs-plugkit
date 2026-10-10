@@ -2033,16 +2033,23 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     }
     let evidence_dispatch_id = dispatch_id_in_text(witness.as_deref().unwrap_or(""));
     #[cfg(target_arch = "wasm32")]
-    let (dispatch_verified, evidence_in_ledger, bound_in_ledger, verified_via) = {
+    let (dispatch_verified, evidence_in_ledger, bound_in_project, verified_via) = {
         let cwd = resolve_cwd.as_deref().unwrap_or("");
+        let known_via = |dispatch_id: &str| -> Option<&'static str> {
+            if crate::dispatch_ledger::lookup(cwd, dispatch_id).is_some() {
+                Some("ledger")
+            } else if dispatch_in_spool_out(cwd, dispatch_id) {
+                Some("spool_out")
+            } else {
+                None
+            }
+        };
         let evidence_in_ledger = evidence_dispatch_id
             .as_deref()
-            .map(|id| crate::dispatch_ledger::lookup(cwd, id).is_some());
+            .map(|id| known_via(id).is_some());
         let dispatch_verified = match witness_dispatch_id.as_deref() {
             None => false,
-            Some(dispatch_id) if crate::dispatch_ledger::lookup(cwd, dispatch_id).is_some() || dispatch_in_spool_out(cwd, dispatch_id) => {
-                true
-            }
+            Some(dispatch_id) if known_via(dispatch_id).is_some() => true,
             Some(_) if witness_binding.is_some() => false,
             Some(dispatch_id) => {
                 let id_ts = dispatch_id
@@ -2097,18 +2104,18 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 }
             }
         };
-        let bound_in_ledger = witness_dispatch_id
+        let bound_in_project = witness_dispatch_id
             .as_deref()
-            .map(|id| crate::dispatch_ledger::lookup(cwd, id).is_some());
-        let verified_via = match (dispatch_verified, bound_in_ledger) {
-            (true, Some(true)) => Some("ledger"),
+            .map(|id| known_via(id).is_some());
+        let verified_via = match (dispatch_verified, bound_in_project) {
+            (true, Some(true)) => witness_dispatch_id.as_deref().and_then(known_via),
             (true, _) => Some("spool_out"),
             _ => None,
         };
-        (dispatch_verified, evidence_in_ledger, bound_in_ledger, verified_via)
+        (dispatch_verified, evidence_in_ledger, bound_in_project, verified_via)
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let (dispatch_verified, evidence_in_ledger, bound_in_ledger, verified_via) = (
+    let (dispatch_verified, evidence_in_ledger, bound_in_project, verified_via) = (
         witness_dispatch_id.is_some(),
         None::<bool>,
         None::<bool>,
@@ -2384,7 +2391,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 "witness_dispatch_id_verified_via": verified_via,
                 "witness_dispatch_id_field": "witness_dispatch_id",
                 "witness_dispatch_id_in_evidence": witness_dispatch_id,
-                "witness_dispatch_id_in_ledger": bound_in_ledger,
+                "witness_dispatch_id_in_ledger": bound_in_project,
                 "count_of_record": count_of_record,
             });
             (reply.to_string(), String::new(), 0)
