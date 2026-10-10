@@ -626,28 +626,81 @@ fn paged_lines(content: &str, offset: usize, limit: usize) -> (String, usize, us
     (out, total, start, end.saturating_sub(start))
 }
 
+const FS_READ_RANGE_HINT: &str = "line ranges are 0-based line numbers: \"start\"/\"offset\" is the first line returned, \"end\" is EXCLUSIVE while \"limit\" is a line count";
+
+fn line_range_field(body: &Value, key: &str) -> Result<Option<usize>, String> {
+    match body.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => match v.as_u64() {
+            Some(n) => Ok(Some(n as usize)),
+            None => Err(format!(
+                "\"{key}\" must be a non-negative integer line number, got {v} -- {FS_READ_RANGE_HINT}"
+            )),
+        },
+    }
+}
+
 fn fs_read(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() {
-        return err("fs_read", "path required -- pass {\"path\":\"<relative path>\"}; add \"offset\"/\"limit\" to read a line range and \"max_bytes\" to cap one chunk");
+        return err("fs_read", "path required -- pass {\"path\":\"<relative path>\"}; add \"offset\"/\"limit\" or \"start\"/\"end\" to read a line range and \"max_bytes\" to cap one chunk");
     }
     if let Some(rejection) = read_path_rejection("fs_read", path, body) {
         return rejection;
     }
-    let offset = match body.get("offset").and_then(|v| v.as_u64()) {
-        Some(n) => n as usize,
-        None => 0,
+    let field = |key: &str| line_range_field(body, key);
+    let offset = match field("offset") {
+        Ok(v) => v.unwrap_or(0),
+        Err(m) => return err("fs_read", &m),
     };
-    let limit = match body.get("limit").and_then(|v| v.as_u64()) {
-        Some(n) => n as usize,
-        None => 0,
+    let limit = match field("limit") {
+        Ok(v) => v.unwrap_or(0),
+        Err(m) => return err("fs_read", &m),
     };
+    let start = match field("start") {
+        Ok(v) => v,
+        Err(m) => return err("fs_read", &m),
+    };
+    let end = match field("end") {
+        Ok(v) => v,
+        Err(m) => return err("fs_read", &m),
+    };
+    let offset_given = matches!(body.get("offset"), Some(v) if !v.is_null());
+    let limit_given = matches!(body.get("limit"), Some(v) if !v.is_null());
+    if (start.is_some() || end.is_some()) && (offset_given || limit_given) {
+        return err(
+            "fs_read",
+            "pass either \"start\"/\"end\" or \"offset\"/\"limit\", never both -- they select the same line range and the pair you send wins, silently ignoring the other",
+        );
+    }
     let max_bytes = match body.get("max_bytes").and_then(|v| v.as_u64()) {
         Some(n) if n > 0 => Some(n as usize),
         _ => None,
     };
     match host_read(path) {
         Some(content) => {
+            let file_lines = content.split('\n').count();
+            let (offset, limit) = match (start, end) {
+                (None, None) => (offset, limit),
+                _ => {
+                    let first = start.unwrap_or(0);
+                    if let Some(last) = end {
+                        if last <= first {
+                            return err(
+                                "fs_read",
+                                &format!("invalid range: \"end\" ({last}) must be greater than \"start\" ({first}) -- {FS_READ_RANGE_HINT}"),
+                            );
+                        }
+                    }
+                    if first >= file_lines {
+                        return err(
+                            "fs_read",
+                            &format!("invalid range: \"start\" ({first}) is past the end of {path}, which has {file_lines} lines"),
+                        );
+                    }
+                    (first, end.map_or(0, |last| last - first))
+                }
+            };
             if offset == 0 && limit == 0 && max_bytes.is_none() {
                 return ok("fs_read", Value::String(content));
             }
@@ -1421,11 +1474,60 @@ fn health(body: &Value) -> u64 {
     )
 }
 
+const STATUS_HEARTBEAT_STALE_MS: u64 = 20_000;
+
+fn project_status(body: &Value) -> u64 {
+    let cwd = host_abi::host_cwd_string().unwrap_or_default();
+    let session_id = body
+        .get("session_id")
+        .or_else(|| body.get("sessionId"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let heartbeat = host_read(".gm/exec-spool/.status.json")
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter(|v| v.is_object());
+    let now = unsafe { host_now_ms() };
+    let heartbeat_age_ms = heartbeat
+        .as_ref()
+        .and_then(|h| h.get("ts").and_then(|t| t.as_u64()))
+        .map(|ts| now.saturating_sub(ts));
+    ok(
+        "status",
+        json!({
+            "cwd": cwd,
+            "session_id": session_id,
+            "taskId": Value::Null,
+            "daemon": {
+                "heartbeat": heartbeat,
+                "heartbeat_age_ms": heartbeat_age_ms,
+                "heartbeat_stale_after_ms": STATUS_HEARTBEAT_STALE_MS,
+                "heartbeat_stale": heartbeat_age_ms.map_or(true, |age| age > STATUS_HEARTBEAT_STALE_MS),
+            },
+            "lifecycle": lifecycle_liveness(),
+            "note": "no taskId was passed, so this is daemon/session state for the project at cwd, not task state -- pass {\"taskId\": <n>} for one task's status",
+        }),
+    )
+}
+
 fn status(body: &Value) -> u64 {
-    let task_id = body.get("taskId").and_then(|v| v.as_u64()).unwrap_or(0);
-    if task_id == 0 {
-        return err("status", "taskId required");
-    }
+    let Some(raw_task_id) = body.get("taskId").filter(|v| !v.is_null()) else {
+        return project_status(body);
+    };
+    let task_id = match raw_task_id.as_u64() {
+        Some(n) if n > 0 => n,
+        Some(_) => {
+            return err(
+                "status",
+                "taskId must be greater than 0 -- omit it to get daemon/session state for the project at cwd",
+            )
+        }
+        None => {
+            return err(
+                "status",
+                &format!("taskId must be a non-negative integer, got {raw_task_id} -- omit it to get daemon/session state for the project at cwd"),
+            )
+        }
+    };
     let ns = body
         .get("namespace")
         .and_then(|v| v.as_str())
