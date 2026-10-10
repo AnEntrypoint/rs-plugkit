@@ -96,11 +96,20 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         .filter_map(Value::as_str)
         .map(str::to_string)
         .collect();
-    if !scanned.is_empty() && !record_scanned_surfaces(&state_dir, &scanned, now) {
-        return (String::new(), "pool-observe: could not write .gm/pool/traversal-surfaces.json".to_string(), 1);
+    if !scanned.is_empty() {
+        if let Err(reason) = record_scanned_surfaces(&state_dir, &scanned, now) {
+            return (String::new(), format!("pool-observe: {reason}"), 1);
+        }
     }
-    let surface_state = read_surface_state(&state_dir);
-    let unscanned = traversal_candidates(".", &surface_state, now);
+    let (surface_state, state_error) = match read_surface_state(&state_dir) {
+        Ok(state) => (state, None),
+        Err(reason) => (std::collections::BTreeMap::new(), Some(reason)),
+    };
+    let unscanned = if state_error.is_some() {
+        Vec::new()
+    } else {
+        traversal_candidates(".", &surface_state, now)
+    };
     let launchable = slots["launchable"].as_u64().unwrap_or(0);
     let node_launchable = slots["node_launchable"].as_u64().unwrap_or(0);
     let traversal_threshold = TRAVERSAL_SUPPLY_FACTOR * REFILL_FLOOR;
@@ -128,6 +137,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     let sufficient = open_rows == 0 || shortfall == 0 || (launch_ids.len() as u64) >= shortfall;
     let traversal = json!({
         "needed": traversal_needed,
+        "state_error": state_error,
         "node_witness_candidates": node_launchable,
         "threshold": traversal_threshold,
         "unscanned_surfaces": unscanned.iter().take(TRAVERSAL_SURFACE_SHOWN).collect::<Vec<&String>>(),
