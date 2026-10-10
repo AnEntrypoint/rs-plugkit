@@ -235,16 +235,21 @@ pub(super) fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) 
             map.insert("literal_scan_escalated".to_string(), json!(true));
             note_map(
                 map,
-                format!("dual retrieval returned no row containing \"{term}\" verbatim -- these are exhaustive literal matches"),
+                format!("retrieval returned no ranked row for \"{term}\", so these rows come from an exhaustive literal scan of the corpus: every row below contains it verbatim"),
             );
         }
         return out;
     }
+    let scan_exhaustive = scan
+        .get("exhaustive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if let Some(map) = compact.as_object_mut() {
         map.insert("literal_scan_matches".to_string(), json!(0));
+        map.insert("literal_scan_exhaustive".to_string(), json!(scan_exhaustive));
         note_map(
             map,
-            format!("no file in the scanned corpus contains \"{term}\" verbatim -- the rows above are ranked nearest neighbours, not occurrences"),
+            format!("{} contains \"{term}\" verbatim -- the rows above are ranked nearest neighbours, not occurrences", if scan_exhaustive { "no file in the scanned corpus" } else { "no file in the part of the corpus this scan reached" }),
         );
     }
     compact
@@ -711,6 +716,9 @@ pub(super) const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "combine",
     "term_combination",
     "verbatim",
+    "regex",
+    "literal",
+    "pattern",
 ];
 
 pub(super) const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit", "head_limit"];
@@ -1209,6 +1217,10 @@ codesearch (aliases \"code_search\", \"search\") is the canonical search verb.
                                        \"filename\": matches paths only;
                                        \"comments\": the comment scan instead of a text scan, no \"query\"
                                        needed; {\"comments\":true} and {\"comments_only\":true} route there too
+  {\"regex\":true} / {\"literal\":true}    the exhaustive regex/literal scan without naming \"mode\";
+                                       mode:\"literal\" wins over regex:true, and both flags at once
+                                       is refused rather than served as one of them
+  {\"pattern\":\"<text>\"}                 an alias of \"query\" that also selects the literal scan; pass one, not both
   {\"k\":10}                            result cap for \"dual\"; aliases: max_results, maxResults, limit,
                                        head_limit
   {\"max_matches\":1000}                hit cap for the exhaustive modes
@@ -1979,7 +1991,7 @@ pub(super) fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> 
     answer_scan("grep", out, partial)
 }
 
-pub(super) const CODESEARCH_QUERY_SHAPE: &str = "query required -- pass {\"query\":\"<the text to search for>\"}: a plain STRING of text, never an object, array or path list; \"dual\" (the default) embeds it and ranks BM25+vector hits, \"literal\"/\"regex\" match it verbatim, \"filename\" matches it as a path substring or glob. Optional {\"mode\":\"dual\"|\"literal\"|\"regex\"|\"filename\"}, {\"k\":10} result cap for \"dual\", {\"max_matches\":1000} for the exhaustive modes (it caps the rows returned, never the files scanned -- an exhaustive mode reads every file in scope and is uncapped by default), {\"path\":\"<dir or file>\"}, {\"path_glob\":\"**/*.rs\"}. There is no query-less listing mode, so a body without query is always a caller mistake";
+pub(super) const CODESEARCH_QUERY_SHAPE: &str = "query required -- pass {\"query\":\"<the text to search for>\"} ({\"pattern\":\"<text>\"} is an alias of it): a plain STRING of text, never an object, array or path list; \"dual\" (the default) embeds it and ranks BM25+vector hits, \"literal\"/\"regex\" match it verbatim, \"filename\" matches it as a path substring or glob. Optional {\"mode\":\"dual\"|\"literal\"|\"regex\"|\"filename\"}, {\"k\":10} result cap for \"dual\", {\"max_matches\":1000} for the exhaustive modes (it caps the rows returned, never the files scanned -- an exhaustive mode reads every file in scope and is uncapped by default), {\"path\":\"<dir or file>\"}, {\"path_glob\":\"**/*.rs\"}. There is no query-less listing mode, so a body without query is always a caller mistake";
 
 pub(super) struct IdentifierScan<'a> {
     pattern: &'a str,
@@ -2193,9 +2205,23 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
     if codesearch_comments_requested(body) {
         return grep_comments(body, &cfg);
     }
-    let Some(raw_query) = body.get("query") else {
-        return err_retry_same_verb("codesearch", CODESEARCH_QUERY_SHAPE);
+    let raw_query = match body.get("query").or_else(|| body.get("pattern")) {
+        Some(raw_query) => raw_query,
+        None => return err_retry_same_verb("codesearch", CODESEARCH_QUERY_SHAPE),
     };
+    if let (Some(query_text), Some(pattern_text)) = (
+        body.get("query").and_then(|v| v.as_str()),
+        body.get("pattern").and_then(|v| v.as_str()),
+    ) {
+        if query_text != pattern_text {
+            return err(
+                "codesearch",
+                &format!(
+                    "query \"{query_text}\" and pattern \"{pattern_text}\" disagree -- pass one, not both"
+                ),
+            );
+        }
+    }
     let Some(query) = raw_query.as_str() else {
         let shown: String = raw_query.to_string().chars().take(80).collect();
         return err_retry_same_verb(
@@ -2209,7 +2235,20 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
     if query.is_empty() {
         return err_retry_same_verb("codesearch", CODESEARCH_QUERY_SHAPE);
     }
-    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("dual");
+    let mode_flag = |name: &str| body.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
+    if mode_flag("literal") && mode_flag("regex") {
+        return err(
+            "codesearch",
+            "literal:true and regex:true contradict each other -- pass one, not both",
+        );
+    }
+    let named_mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("dual");
+    let pattern_given = body.get("pattern").is_some();
+    let mode = match named_mode {
+        "dual" if mode_flag("regex") => "regex",
+        "dual" if mode_flag("literal") || pattern_given => "literal",
+        other => other,
+    };
     if !CODESEARCH_MODES.contains(&mode) {
         return err("codesearch", &format!(
             "mode \"{}\" is not a codesearch mode -- valid modes are {}. \
