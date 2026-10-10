@@ -32,7 +32,7 @@ impl FileSource {
 
     pub fn detail(self) -> &'static str {
         match self {
-            FileSource::Git => "git ls-files --cached: tracked files only, so a file created since the last git add is not listed; pass \"refresh\": true to walk the disk instead",
+            FileSource::Git => "git ls-files: tracked files plus untracked files git does not ignore (\"no_ignore\": true adds the ignored ones); pass \"refresh\": true to walk the disk instead",
             FileSource::Walk => "filesystem walk under the target: every file on disk that no exclusion rule dropped",
             FileSource::SingleFile => "one file named by \"path\", read straight from disk",
         }
@@ -51,19 +51,41 @@ pub fn is_own_state_name(name: &str) -> bool {
     name == ".gm" || name.starts_with(".agentplug")
 }
 
+/// The entry a pruned own-state file is reported under: the child of the own-state directory that
+/// holds it (`.gm/prd.yml`, `.gm/memories`), so `excluded_by_rule` names the file a caller is
+/// missing, not only the directory around it.
 fn own_state_entry_under_root(root: &str, path: &str) -> Option<String> {
     let prefix = join_under(root, "");
     let rel = path.strip_prefix(prefix.as_str())?;
-    let mut dirs: Vec<&str> = rel.split('/').collect();
-    dirs.pop();
-    let own_state_at = dirs.iter().position(|segment| is_own_state_name(segment))?;
-    Some(format!("{prefix}{}", dirs[..=own_state_at].join("/")))
+    let segments: Vec<&str> = rel.split('/').collect();
+    let dir_count = segments.len() - 1;
+    let own_state_at = segments[..dir_count]
+        .iter()
+        .position(|segment| is_own_state_name(segment))?;
+    let child_at = (own_state_at + 1).min(dir_count);
+    Some(format!("{prefix}{}", segments[..=child_at].join("/")))
 }
 
-fn prune_own_state(root: &str, files: Vec<String>) -> (Vec<String>, Vec<RuleExclusion>) {
+/// Files under a `.gm/` directory that git lists are the project's versioned state (`prd.yml`,
+/// `mutables.yml`, memories, disciplines). They are project content, so they stay in scope; the own
+/// state git does not list is named from disk by `report_unlisted_own_state` instead.
+fn is_versioned_gm_state(root: &str, path: &str) -> bool {
+    let prefix = join_under(root, "");
+    let Some(rel) = path.strip_prefix(prefix.as_str()) else {
+        return false;
+    };
+    let segments: Vec<&str> = rel.split('/').collect();
+    segments[..segments.len() - 1].iter().any(|segment| *segment == ".gm")
+}
+
+fn prune_own_state(root: &str, files: Vec<String>, keep_versioned_gm: bool) -> (Vec<String>, Vec<RuleExclusion>) {
     let mut kept = Vec::with_capacity(files.len());
     let mut pruned: Vec<RuleExclusion> = Vec::new();
     for file in files {
+        if keep_versioned_gm && is_versioned_gm_state(root, &file) {
+            kept.push(file);
+            continue;
+        }
         match own_state_entry_under_root(root, &file) {
             None => kept.push(file),
             Some(entry) => match pruned.iter_mut().find(|p| p.path == entry) {
@@ -77,6 +99,34 @@ fn prune_own_state(root: &str, files: Vec<String>) -> (Vec<String>, Vec<RuleExcl
         }
     }
     (kept, pruned)
+}
+
+/// `git ls-files --others --exclude-standard` never lists an ignored, untracked own-state file, so
+/// `prune_own_state` never sees it. It is named here from disk instead.
+fn report_unlisted_own_state(root: &str, kept: &[String], pruned: &mut Vec<RuleExclusion>) {
+    for name in child_names(root).into_iter().filter(|n| is_own_state_name(n)) {
+        let state_path = join_under(root, &name);
+        let entries: Vec<String> = if host_stat_is_directory(&state_path) == Some(true) {
+            child_names(&state_path)
+                .into_iter()
+                .map(|child| join_under(&state_path, &child))
+                .collect()
+        } else {
+            vec![state_path]
+        };
+        for path in entries {
+            let prefix = join_under(&path, "");
+            let listed = kept.iter().any(|k| *k == path || k.starts_with(prefix.as_str()));
+            if listed || pruned.iter().any(|p| p.path == path) {
+                continue;
+            }
+            pruned.push(RuleExclusion {
+                path,
+                rule: OWN_STATE_RULE,
+                files: None,
+            });
+        }
+    }
 }
 
 pub struct ScanUniverse {
@@ -135,7 +185,7 @@ fn git_stderr(v: &Value) -> String {
 /// A caller who spells out the whole location still means a place inside the search root, so an
 /// absolute `path` under that root is rewritten to the relative scope the rest of the scan works
 /// with. `None` means the location is not under the root at all.
-fn scope_inside_root(root: &str, scope: &str) -> Option<String> {
+pub fn scope_inside_root(root: &str, scope: &str) -> Option<String> {
     let abs_root = absolute_root_for_message(root).replace('\\', "/");
     let abs_root = abs_root.trim_end_matches('/');
     if abs_root.is_empty() {
@@ -443,10 +493,10 @@ pub fn absolute_root_for_message(root: &str) -> String {
     crate::pkfs::anchor(root).trim_end_matches("/.").to_string()
 }
 
-pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool) -> Result<ScanUniverse, String> {
-    let mut acc = list_scan_scope(root, scopes.first().copied(), max_files, cfg, origin, force_disk, no_ignore)?;
+pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool, keep_versioned_gm: bool) -> Result<ScanUniverse, String> {
+    let mut acc = list_scan_scope(root, scopes.first().copied(), max_files, cfg, origin, force_disk, no_ignore, keep_versioned_gm)?;
     for scope in scopes.iter().skip(1) {
-        let next = list_scan_scope(root, Some(scope), max_files, cfg, origin, force_disk, no_ignore)?;
+        let next = list_scan_scope(root, Some(scope), max_files, cfg, origin, force_disk, no_ignore, keep_versioned_gm)?;
         acc.files.extend(next.files);
         acc.excluded.extend(next.excluded);
         acc.listing_complete &= next.listing_complete;
@@ -460,7 +510,7 @@ pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &I
     Ok(acc)
 }
 
-fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool) -> Result<ScanUniverse, String> {
+fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool, keep_versioned_gm: bool) -> Result<ScanUniverse, String> {
     let rel = match scope {
         Some(s) => relative_scope(root, s)?,
         None => None,
@@ -496,7 +546,13 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         match directory_is_gitignored(&target) {
             Ok(false) => match git_worktree_files(&target, 0, no_ignore) {
                 Ok((files, complete)) => {
-                    let (files, mut pruned) = if named_scope { (files, Vec::new()) } else { prune_own_state(root, files) };
+                    let (files, mut pruned) = if named_scope {
+                        (files, Vec::new())
+                    } else {
+                        let (kept, mut pruned) = prune_own_state(root, files, keep_versioned_gm);
+                        report_unlisted_own_state(root, &kept, &mut pruned);
+                        (kept, pruned)
+                    };
                     let mut kept = Vec::with_capacity(files.len());
                     for path in files {
                         match runtime_artifact_rule(&path) {
@@ -553,7 +609,7 @@ pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> 
     };
     let project_node_modules = join_under(base, "node_modules/");
     let origin = if absolute { TargetOrigin::CallerNamed } else { TargetOrigin::ProjectDefault };
-    match list_scan_universe(base, &scope.into_iter().collect::<Vec<&str>>(), max_files, cfg, origin, false, false) {
+    match list_scan_universe(base, &scope.into_iter().collect::<Vec<&str>>(), max_files, cfg, origin, false, false, false) {
         Ok(u) => u.files.into_iter().filter(|p| !p.starts_with(&project_node_modules)).take(max_files).collect(),
         Err(_) => Vec::new(),
     }

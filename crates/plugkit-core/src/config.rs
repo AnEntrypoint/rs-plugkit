@@ -125,8 +125,23 @@ impl RepoSource {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Freshness {
+    Current,
+    Degraded { reason: String },
+}
+
+impl Freshness {
+    pub fn degraded_reason(&self) -> Option<String> {
+        match self {
+            Freshness::Current => None,
+            Freshness::Degraded { reason } => Some(reason.clone()),
+        }
+    }
+}
+
 pub trait RepoFetcher {
-    fn refresh(&self, src: &RepoSource) -> Result<(), String>;
+    fn refresh(&self, src: &RepoSource) -> Result<Freshness, String>;
 }
 
 pub fn resolve_prose_repo_source(
@@ -135,7 +150,7 @@ pub fn resolve_prose_repo_source(
     cache_root: &str,
     tier_label: &str,
     fetcher: &dyn RepoFetcher,
-) -> Result<RepoSource, String> {
+) -> Result<(RepoSource, Option<String>), String> {
     let cleaned = spec_text.trim_start_matches('\u{feff}');
     let v: Value =
         serde_json::from_str(cleaned).map_err(|e| format!("{spec_path}: not valid JSON: {e}"))?;
@@ -143,19 +158,20 @@ pub fn resolve_prose_repo_source(
         .as_object()
         .ok_or_else(|| format!("{spec_path}: top level must be a JSON object"))?;
     let src = parse_source_entry(obj, spec_path, cache_root, tier_label)?;
-    fetcher.refresh(&src).map_err(|e| {
+    let freshness = fetcher.refresh(&src).map_err(|e| {
         format!(
             "{spec_path}: could not refresh config repo {} ({e})",
             src.repo
         )
     })?;
-    Ok(src)
+    let degraded = freshness.degraded_reason();
+    Ok((src, degraded))
 }
 
 pub struct NoopFetcher;
 
 impl RepoFetcher for NoopFetcher {
-    fn refresh(&self, _src: &RepoSource) -> Result<(), String> {
+    fn refresh(&self, _src: &RepoSource) -> Result<Freshness, String> {
         Err(
             "no RepoFetcher wired: repo-backed config sources require the git fetch implementation"
                 .to_string(),
@@ -170,6 +186,7 @@ pub struct Resolution {
     pub why: String,
     pub rejected: Vec<String>,
     pub cache_dir: Option<String>,
+    pub degraded: Option<String>,
 }
 
 impl Resolution {
@@ -180,6 +197,8 @@ impl Resolution {
             "rejected": self.rejected,
             "version": self.config.version,
             "config": self.config.value,
+            "degraded": self.degraded.is_some(),
+            "degraded_reason": self.degraded,
         })
     }
 }
@@ -473,8 +492,32 @@ fn read_across_publish(path: &str) -> Option<String> {
     None
 }
 
-fn load_one_repo_source(src: &RepoSource, spec_path: &str, fetcher: &dyn RepoFetcher) -> Load {
-    let refresh_err = fetcher.refresh(src).err();
+fn record_degraded(slot: &mut Option<String>, reason: String) {
+    if slot.is_none() {
+        *slot = Some(reason);
+    }
+}
+
+fn load_one_repo_source(
+    src: &RepoSource,
+    spec_path: &str,
+    fetcher: &dyn RepoFetcher,
+    degraded: &mut Option<String>,
+) -> Load {
+    let refresh_err = match fetcher.refresh(src) {
+        Ok(Freshness::Current) => None,
+        Ok(Freshness::Degraded { reason }) => {
+            record_degraded(degraded, reason);
+            None
+        }
+        Err(e) => {
+            record_degraded(
+                degraded,
+                format!("could not refresh config repo {} ({e})", src.repo),
+            );
+            Some(e)
+        }
+    };
     let cfg_path = src.config_path();
     let Some(text) = read_across_publish(&cfg_path) else {
         return match refresh_err {
@@ -505,6 +548,7 @@ fn load_repo_tier(
     cache_root: String,
     fetcher: &dyn RepoFetcher,
     tier_label: &str,
+    degraded: &mut Option<String>,
 ) -> (Load, Option<String>) {
     let Some(raw) = pkfs::read_to_string(spec_path) else {
         return (Load::Absent, None);
@@ -518,7 +562,7 @@ fn load_repo_tier(
     let mut winning_cache_dir: Option<String> = None;
     let mut entry_failures: Vec<String> = Vec::new();
     for src in &sources {
-        match load_one_repo_source(src, spec_path, fetcher) {
+        match load_one_repo_source(src, spec_path, fetcher, degraded) {
             Load::Accepted(cfg) => {
                 winning_cache_dir = Some(src.cache_dir.clone());
                 merged = Some(match merged {
@@ -617,6 +661,7 @@ pub fn resolve_forced(project_root: &str) -> Resolution {
 
 pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution {
     let mut rejected: Vec<String> = Vec::new();
+    let mut degraded: Option<String> = None;
 
     let p1 = join(project_root, PROJECT_CONFIG_REL);
     if let Some(text) = pkfs::read_to_string(&p1) {
@@ -627,6 +672,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
                     join(project_root, SOURCE_CACHE_REL),
                     fetcher,
                     Tier::ProjectRepoSpec.as_str(),
+                    &mut degraded,
                 )
                 .0;
                 if let Some(home) = home_dir() {
@@ -635,16 +681,18 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
                         join(&home, SOURCE_CACHE_REL),
                         fetcher,
                         Tier::UserRepoSpec.as_str(),
+                        &mut degraded,
                     )
                     .0;
                 }
-                let _ = load_implicit_default_repo_tier(project_root, fetcher);
+                let _ = load_implicit_default_repo_tier(project_root, fetcher, &mut degraded);
                 return Resolution {
                     config,
                     tier: Tier::ProjectVendored,
                     why: format!("project-vendored config at {p1}"),
                     rejected,
                     cache_dir: None,
+                    degraded,
                 };
             }
             Load::Rejected { reason } => rejected.push(reason),
@@ -659,6 +707,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
         p2_cache_dir.clone(),
         fetcher,
         Tier::ProjectRepoSpec.as_str(),
+        &mut degraded,
     ) {
         (Load::Accepted(config), winning_cache_dir) => {
             return Resolution {
@@ -667,6 +716,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
                 why: format!("in-project config-repo spec at {p2}"),
                 rejected,
                 cache_dir: winning_cache_dir.or(Some(p2_cache_dir)),
+                degraded,
             }
         }
         (Load::Rejected { reason }, _) => rejected.push(reason),
@@ -681,6 +731,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
             p3_cache_dir.clone(),
             fetcher,
             Tier::UserRepoSpec.as_str(),
+            &mut degraded,
         ) {
             (Load::Accepted(config), winning_cache_dir) => {
                 return Resolution {
@@ -689,6 +740,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
                     why: format!("user-wide config-repo spec at {p3}"),
                     rejected,
                     cache_dir: winning_cache_dir.or(Some(p3_cache_dir)),
+                    degraded,
                 }
             }
             (Load::Rejected { reason }, _) => rejected.push(reason),
@@ -697,7 +749,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
     }
 
     let implicit_cache_dir = join(project_root, DEFAULT_REPO_CACHE_REL);
-    match load_implicit_default_repo_tier(project_root, fetcher) {
+    match load_implicit_default_repo_tier(project_root, fetcher, &mut degraded) {
         Load::Accepted(config) => {
             return Resolution {
                 config,
@@ -705,6 +757,7 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
                 why: format!("gm's own shared default config repo at {DEFAULT_REPO_URL} (no project or user config.source.json configured)"),
                 rejected,
                 cache_dir: Some(implicit_cache_dir),
+                degraded,
             }
         }
         Load::Rejected { reason } => rejected.push(reason),
@@ -725,10 +778,15 @@ pub fn resolve_with(project_root: &str, fetcher: &dyn RepoFetcher) -> Resolution
         why,
         rejected,
         cache_dir: None,
+        degraded,
     }
 }
 
-fn load_implicit_default_repo_tier(project_root: &str, fetcher: &dyn RepoFetcher) -> Load {
+fn load_implicit_default_repo_tier(
+    project_root: &str,
+    fetcher: &dyn RepoFetcher,
+    degraded: &mut Option<String>,
+) -> Load {
     let src = RepoSource {
         repo: crate::config_path::RepoUrl::parse(DEFAULT_REPO_URL)
             .expect("DEFAULT_REPO_URL is a compile-time constant that must name an approved transport"),
@@ -737,7 +795,14 @@ fn load_implicit_default_repo_tier(project_root: &str, fetcher: &dyn RepoFetcher
         cache_dir: join(project_root, DEFAULT_REPO_CACHE_REL),
         tier_label: Tier::ImplicitDefaultRepo.as_str().to_string(),
     };
-    let _ = fetcher.refresh(&src);
+    match fetcher.refresh(&src) {
+        Ok(Freshness::Current) => {}
+        Ok(Freshness::Degraded { reason }) => record_degraded(degraded, reason),
+        Err(e) => record_degraded(
+            degraded,
+            format!("could not refresh config repo {} ({e})", src.repo),
+        ),
+    }
     let cfg_path = src.config_path();
     let Some(text) = read_across_publish(&cfg_path) else {
         return Load::Absent;

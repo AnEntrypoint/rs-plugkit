@@ -261,7 +261,7 @@ verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git
 `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`,
 `git_worktree`, `git_worktree_add`, `git_worktree_list`, `git_worktree_remove`, `git_worktree_prune`,
 `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
-GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
+GitHub Actions workflow-run query with each job's name and conclusion in `jobs`), `prd-add`/`prd-list`/`prd-resolve`/
 `prd-status`, `mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
 `fsm-validate`, `fsm-propose-override`, `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/
 `sql_smoke`, `task-spawn`/`task-list`/`task-output`/`task-stop`,
@@ -324,8 +324,19 @@ sites. Caller and impact replies label this resolution model and definition ambi
 `through_ambiguous` remains an explicit impact traversal opt-in.
 
 Close a completed PRD row with `prd-resolve` and JSON body
-`{"id":"<prd-item-id>","witness_evidence":"<live evidence>"}`. An optional
-`commit_comment` attaches a one-line resolution note to the next GM commit.
+`{"id":"<prd-item-id>","witness_evidence":"<live evidence>"}` plus a witness
+binding: either `witness_dispatch_id` (the `dispatch_id` of a gm dispatch in this
+project's ledger, which keeps the 500 most recent dispatches), or all of
+`witness_exit_code` (must be 0), `witness_output_sha256` (sha256 of the output
+file), `witness_output_path` (that file, relative to the project root) and
+`witness_ts` (RFC 3339). A binding is re-hashed against its file and refused on
+any mismatch, and a row closed by binding records `witness_binding`. A dispatch id
+that appears only inside `witness_evidence` is named in a refusal as
+`witness_dispatch_id_in_evidence` with `witness_dispatch_id_field`; it verifies only
+when passed as `witness_dispatch_id`. A verified reply names the bound id in `witness_dispatch_id_in_evidence` (null when a binding closed the row); `witness_dispatch_id_in_ledger` is true when the bound id is in this project ledger, and `witness_dispatch_id_verified_via` names the store that verified it: `ledger`, or `spool_out` when the dispatch own JSON in `.gm/exec-spool/out` carries its id after the ledger aged it out. An optional `commit_comment` attaches a
+one-line resolution note to the next GM commit. `prd-list` takes `limit`, folds
+repeated blocks of an id to the last block, and replies with `total` (matches) and
+`store_total` (stored blocks).
 
 `git_finalize` bundles add -> commit -> porcelain-gate -> push in one
 dispatch, then runs `ci-status` inline against the pushed commit's SHA: on a
