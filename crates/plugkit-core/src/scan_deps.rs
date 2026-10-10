@@ -578,7 +578,7 @@ pub fn scan_deps(body: &Value) -> Value {
     let (tracked, tracked_complete) = if is_absolute_root(root) {
         (crate::scan_universe::project_source_files(root, cfg.digest_max_files, &cfg), true)
     } else {
-        let enumeration = crate::code_index::collect_files_within(root, cfg.digest_max_files, &cfg);
+        let enumeration = crate::code_index::collect_files_within_wall_budget(root, cfg.digest_max_files, &cfg);
         (enumeration.files, enumeration.complete)
     };
     if !tracked_complete {
