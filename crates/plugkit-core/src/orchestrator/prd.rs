@@ -456,6 +456,22 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             )
         }
     };
+    if item_map.get(&Value::String("help".to_string())).and_then(Value::as_bool) == Some(true) {
+        let usage = serde_json::json!({
+            "ok": true,
+            "verb": "prd-add",
+            "usage": {
+                "required": {"id": "non-empty kebab-case string, unique in .gm/prd.yml; a body with no usable id is rejected"},
+                "optional": ["subject", "description", "notes", "status", "blockedBy", "overwrite"],
+                "statuses": {
+                    "pending": "open; the default when status is omitted",
+                    "completed": "finished; prd-resolve sets it. The finished state is completed, never resolved"
+                },
+                "help": "send {\"help\": true} to read this usage; it writes no row"
+            }
+        });
+        return (usage.to_string(), String::new(), 0);
+    }
     let has_external_block = item_map
         .get(&Value::String("blockedBy".to_string()))
         .and_then(|v| v.as_sequence())
