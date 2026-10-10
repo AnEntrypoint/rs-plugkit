@@ -44,33 +44,95 @@ fn porcelain_entry_paths(line: &str) -> Vec<String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(super) fn worktree_dirt() -> WorktreeDirt {
-    let response = crate::wasm_dispatch::git_call_argv(&["status", "--porcelain", "-uall", "--"], None);
-    if crate::wasm_dispatch::host_abi::git_response_is_not_repository(&response) {
-        return WorktreeDirt::default();
-    }
-    let status = crate::wasm_dispatch::host_abi::porcelain_from(&response);
-    let mut dirt = WorktreeDirt {
-        unknown: status.failed || status.parked || (status.partial && status.skipped_paths.is_empty()),
-        entries: BTreeSet::new(),
-        basenames: BTreeSet::new(),
-    };
-    dirt.entries.extend(
-        status
-            .skipped_paths
-            .iter()
-            .map(|skipped| skipped.trim_end_matches('/').to_string()),
-    );
-    for line in status.porcelain.lines() {
-        dirt.entries.extend(porcelain_entry_paths(line));
-    }
-    dirt.basenames = dirt
-        .entries
+const DIRT_SNAPSHOT_PATH: &str = ".gm/pool/dirt-snapshot.json";
+
+#[cfg(target_arch = "wasm32")]
+const DIRT_SNAPSHOT_MAX_AGE_MS: u64 = 30_000;
+
+#[cfg(target_arch = "wasm32")]
+fn dirt_with_entries(unknown: bool, entries: BTreeSet<String>) -> WorktreeDirt {
+    let basenames: BTreeSet<String> = entries
         .iter()
         .filter(|entry| !entry.starts_with(".gm/"))
         .filter_map(|entry| entry.rsplit('/').next())
         .map(str::to_string)
         .collect();
+    WorktreeDirt { unknown, entries, basenames }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn stat_signature(path: &str) -> Option<String> {
+    let stat = crate::pkfs::stat(path).filter(|value| !value.is_null())?;
+    Some(format!("{}@{}", stat["size"], stat["mtimeMs"]))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn git_state_signature() -> Option<String> {
+    let index = stat_signature(".git/index")?;
+    let head_log = stat_signature(".git/logs/HEAD").unwrap_or_else(|| "none".to_string());
+    Some(format!("{index}|{head_log}"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_dirt_snapshot(signature: &str, now: u64) -> Option<WorktreeDirt> {
+    let snapshot: Value = serde_json::from_str(&crate::pkfs::read_to_string(DIRT_SNAPSHOT_PATH)?).ok()?;
+    if snapshot["signature"].as_str()? != signature {
+        return None;
+    }
+    let taken = snapshot["taken_ms"].as_u64()?;
+    if taken > now || now - taken > DIRT_SNAPSHOT_MAX_AGE_MS {
+        return None;
+    }
+    let entries: BTreeSet<String> = snapshot["entries"]
+        .as_array()?
+        .iter()
+        .filter_map(|entry| entry.as_str().map(str::to_string))
+        .collect();
+    Some(dirt_with_entries(false, entries))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn write_dirt_snapshot(signature: &str, taken: u64, dirt: &WorktreeDirt) {
+    let snapshot = serde_json::json!({
+        "signature": signature,
+        "taken_ms": taken,
+        "entries": dirt.entries.iter().collect::<Vec<&String>>(),
+    });
+    let _ = crate::pkfs::write(DIRT_SNAPSHOT_PATH, &snapshot.to_string());
+}
+
+#[cfg(target_arch = "wasm32")]
+fn status_worktree_dirt() -> WorktreeDirt {
+    let response = crate::wasm_dispatch::git_call_argv(&["status", "--porcelain", "-uall", "--"], None);
+    if crate::wasm_dispatch::host_abi::git_response_is_not_repository(&response) {
+        return WorktreeDirt::default();
+    }
+    let status = crate::wasm_dispatch::host_abi::porcelain_from(&response);
+    let unknown = status.failed || status.parked || (status.partial && status.skipped_paths.is_empty());
+    let mut entries: BTreeSet<String> = status
+        .skipped_paths
+        .iter()
+        .map(|skipped| skipped.trim_end_matches('/').to_string())
+        .collect();
+    for line in status.porcelain.lines() {
+        entries.extend(porcelain_entry_paths(line));
+    }
+    dirt_with_entries(unknown, entries)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn worktree_dirt() -> WorktreeDirt {
+    let now = super::now_ms();
+    let signature = git_state_signature();
+    if let Some(cached) = signature.as_deref().and_then(|signature| read_dirt_snapshot(signature, now)) {
+        return cached;
+    }
+    let dirt = status_worktree_dirt();
+    if let Some(signature) = signature {
+        if !dirt.unknown && git_state_signature().as_deref() == Some(signature.as_str()) {
+            write_dirt_snapshot(&signature, now, &dirt);
+        }
+    }
     dirt
 }
 
