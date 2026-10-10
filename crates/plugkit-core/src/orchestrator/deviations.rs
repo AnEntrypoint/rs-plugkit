@@ -106,6 +106,11 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
         Severity::Deny,
     ),
     (
+        "prd-resolve-witness-binding-nested",
+        "`prd-resolve` supplied the witness binding as a nested `witness_binding` object -- the verb reads a binding only from the flat fields witness_exit_code, witness_output_sha256, witness_output_path and witness_ts, so a nested object binds nothing and the row would close unbound without saying so",
+        Severity::Deny,
+    ),
+    (
         "residual-premature",
         "`residual-scan` was dispatched while .gm/prd.yml still carries open rows -- the scan is a close-out probe and has nothing to report until the PRD is empty",
         Severity::Log,
