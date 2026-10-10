@@ -705,19 +705,35 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
             )
         }
     };
-    let id_target = match v
+    let id_target = v
         .get("id")
         .or_else(|| v.get("prd_id"))
         .or_else(|| v.get("slug"))
         .and_then(|s| s.as_str())
-    {
-        Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => return (String::new(), "missing `id`".to_string(), 1),
-    };
-    let reason = match v.get("reason").or_else(|| v.get("witness_evidence")).and_then(|s| s.as_str()) {
-        Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => return (String::new(), "missing `reason`: name why this row is genuinely out of reach this session and what would resolve it -- bare deferral language is rejected, same as prd-add".to_string(), 1),
-    };
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
+    let reason = v
+        .get("reason")
+        .or_else(|| v.get("witness_evidence"))
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
+    if id_target.is_none() || reason.is_none() {
+        let mut missing: Vec<&str> = Vec::new();
+        if id_target.is_none() {
+            missing.push("id (string: the prd row id; aliases prd_id, slug)");
+        }
+        if reason.is_none() {
+            missing.push("reason (string, non-empty: why this row is genuinely out of reach this session and what session/path would resolve it; alias witness_evidence) -- bare deferral language is rejected, same as prd-add");
+        }
+        return (
+            String::new(),
+            format!("prd-defer rejected: {} required field(s) missing -- every required field and its accepted shape is listed here, so fix all in one pass. Body shape: {{\"id\": \"<prd-item-id>\", \"reason\": \"<why out of reach this session, and what would resolve it>\"}}. Missing: {}", missing.len(), missing.join(" | ")),
+            1,
+        );
+    }
+    let id_target = id_target.expect("id validated non-None above");
+    let reason = reason.expect("reason validated non-None above");
     if let Some(marker) = defer_marker_in_text(&reason) {
         let err = format!(
             "prd-defer refused: deferral language detected ('{}'). Same rule as prd-add's own gate -- name the concrete reason this is genuinely cross-session/out-of-reach (e.g. 'flaky multiplayer repro needs its own dedicated debugging session, unrelated to this session's rendering-pipeline fix'), not bare 'later'/'next session' phrasing with no substance.",
