@@ -275,6 +275,9 @@ fn string(row: &Value, key: &str) -> String {
 }
 
 fn rows(db: &str, sql: &str, params: &[&str]) -> Vec<Value> {
+    if STORE_BUSY_NOW.try_with(std::cell::Cell::get).unwrap_or(false) {
+        return Vec::new();
+    }
     libsql_wasm::query_params(db, sql, params)
         .ok()
         .and_then(|v| v.as_array().cloned())
@@ -603,6 +606,24 @@ fn is_store_busy_error(err: &str) -> bool {
         || err.to_ascii_lowercase().contains("database is locked")
 }
 
+/// Set once a pass has established that a live writer holds the store lock, and read by `rows`.
+/// Every read below reaches libsql through `rows`, and libsql answers a busy store by waiting
+/// `busy_timeout_ms` (20 s) for a lock the holder will not release inside this dispatch, then
+/// returning empty. Skipping the call while the flag is set yields that same empty answer
+/// immediately, so the lock wait is bounded and never lands on a read. Cleared at each entry point,
+/// so one dispatch's busy store never supresses the next one's reads.
+std::thread_local! {
+    static STORE_BUSY_NOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn mark_store_busy() {
+    let _ = STORE_BUSY_NOW.try_with(|c| c.set(true));
+}
+
+fn clear_store_busy() {
+    let _ = STORE_BUSY_NOW.try_with(|c| c.set(false));
+}
+
 /// A `<db>.lock` directory is libsql's mutual-exclusion marker under this VFS: the writer removes it
 /// when it finishes, so a process killed mid-write leaves it forever and every later write fails with
 /// no holder to wait on. Every dispatch that writes gm.db records its pid and a heartbeat timestamp
@@ -650,6 +671,7 @@ const STORE_LOCK_SETTLE_JS: &str = r#"(function () {
 })();"#;
 
 fn store_busy_lock_bail(lock_dir: &str, reason: &str, info: Value) -> Value {
+    mark_store_busy();
     json!({
         "ok": false,
         "complete": false,
@@ -733,6 +755,7 @@ pub(crate) fn sync_files(
     }
     if let Err(e) = ensure_schema(&db) {
         if is_store_busy_error(&e) {
+            mark_store_busy();
             return json!({ "ok": false, "complete": false, "store_busy": true, "error": STORE_BUSY_REFRESH_NOTE });
         }
         return json!({ "ok": false, "error": e });
@@ -953,6 +976,7 @@ pub(crate) fn sync_files(
 }
 
 pub(crate) fn sync_tree(cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> Value {
+    clear_store_busy();
     sync_tree_with_budget(cfg, project_path, cfg.index.wall_budget_ms, None)
 }
 
@@ -2353,6 +2377,7 @@ fn text_field<'a>(body: &'a Value, keys: &[&str]) -> Option<&'a str> {
 }
 
 pub(crate) fn handle(body: &Value) -> Result<Value, String> {
+    clear_store_busy();
     let action = text_field(body, &["action", "mode"]).unwrap_or("overview");
     let project_root = text_field(body, &["root", "projectPath"]).map(crate::pkfs::anchor);
     let project_path = project_root.as_deref();
