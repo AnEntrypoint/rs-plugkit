@@ -12,7 +12,6 @@ use super::recall;
 use super::state::{read_state, Phase};
 #[cfg(target_arch = "wasm32")]
 use crate::pkfs;
-#[cfg(target_arch = "wasm32")]
 use serde_json::json;
 
 #[cfg(target_arch = "wasm32")]
@@ -228,7 +227,7 @@ pub fn fnv1a64(text: &str) -> u64 {
     hash
 }
 
-pub fn get_instruction(phase: &str) -> String {
+pub fn get_instruction(phase: &str) -> (String, Option<String>) {
     let upper = phase.trim().to_ascii_uppercase();
     let g = super::fsm::graph();
     let pseudo = g
@@ -245,13 +244,18 @@ pub fn get_instruction(phase: &str) -> String {
             .map(|s| s.prose_key.clone())
             .unwrap_or_else(|| "entry".to_string()),
     };
-    let phase_prose = crate::prose::resolve(&key, compiled_default_for_prose_key(&key));
+    let (phase_prose, phase_degraded) =
+        crate::prose::resolve_with_degradation(&key, compiled_default_for_prose_key(&key));
 
     if key == "entry" {
-        return phase_prose;
+        return (phase_prose, phase_degraded);
     }
-    let entry_prose = crate::prose::resolve("entry", entry::TEXT);
-    format!("{}\n\n{}", entry_prose, phase_prose)
+    let (entry_prose, entry_degraded) =
+        crate::prose::resolve_with_degradation("entry", entry::TEXT);
+    (
+        format!("{}\n\n{}", entry_prose, phase_prose),
+        phase_degraded.or(entry_degraded),
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -291,6 +295,34 @@ fn prd_items_json() -> Vec<serde_json::Value> {
         ilog(&format!("prd_items_json: read/parse failed twice (torn-read retry exhausted), code={code} err={err} -- treating as UNKNOWN, not empty, this instruction dispatch cannot report a trustworthy PRD count"));
     }
     Vec::new()
+}
+
+const LAUNCH_LIST_MAX: usize = 32;
+
+pub(crate) fn concurrency_shortfall(
+    running: usize,
+    spawn_ceiling: usize,
+    candidates: &[String],
+) -> Option<serde_json::Value> {
+    let shortfall = spawn_ceiling.saturating_sub(running);
+    if shortfall == 0 {
+        return None;
+    }
+    let launch: Vec<&str> = candidates
+        .iter()
+        .take(shortfall.min(LAUNCH_LIST_MAX))
+        .map(String::as_str)
+        .collect();
+    let launch_count = launch.len();
+    Some(json!({
+        "running": running,
+        "spawn_ceiling": spawn_ceiling,
+        "shortfall": shortfall,
+        "launch": launch,
+        "launch_count": launch_count,
+        "unfilled_slots": shortfall.saturating_sub(candidates.len()),
+        "refill_on": "completion_notice",
+    }))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -540,6 +572,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     }
     let trimmed = content.trim();
     let mut session_id_opt: Option<String> = None;
+    let mut lease_sessions_opt: Option<Vec<serde_json::Value>> = None;
     let mut prompt_opt: Option<String> = None;
     let mut asserted_instruction_hash: Option<String> = None;
     let mut asserted_policy_hash: Option<String> = None;
@@ -555,6 +588,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         if let Some(sid) = crate::validation::session_id_from_body(&v) {
             session_id_opt = Some(sid);
         }
+        lease_sessions_opt = v.get("_lease_sessions").and_then(serde_json::Value::as_array).cloned();
         if let Some(p) = v.get("prompt").and_then(|s| s.as_str()) {
             prompt_opt = Some(p.to_string());
         }
@@ -618,8 +652,17 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     }
 
     let prior_session_owner = read_state().session_id;
+    let owner_lease: Option<serde_json::Value> = match (&lease_sessions_opt, &prior_session_owner) {
+        (Some(facts), Some(owner)) => facts
+            .iter()
+            .find(|fact| fact.get("session_id").and_then(serde_json::Value::as_str) == Some(owner.as_str()))
+            .cloned(),
+        _ => None,
+    };
     let session_mismatch = match (&session_id_opt, &prior_session_owner) {
-        (Some(incoming), Some(prior)) => incoming != prior,
+        (Some(incoming), Some(prior)) => {
+            incoming != prior && (lease_sessions_opt.is_none() || owner_lease.is_some())
+        }
         _ => false,
     };
 
@@ -739,8 +782,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         .as_deref()
         .map(|p| p.trim().eq_ignore_ascii_case("entry-extended"))
         .unwrap_or(false);
-    let instruction = if requests_entry_extended {
-        crate::prose::resolve("entry-extended", entry_extended::TEXT)
+    let (instruction, instruction_degraded) = if requests_entry_extended {
+        crate::prose::resolve_with_degradation("entry-extended", entry_extended::TEXT)
     } else {
         get_instruction(&phase)
     };
@@ -949,8 +992,31 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         graph.policy.longgap_threshold_ms,
     );
 
+    let slots = super::pool_slots::slot_state(".");
+    let subagents_running = slots["live"].as_u64().unwrap_or(0) as usize;
+    let launch_candidates: Vec<String> = slots["candidates"]
+        .as_array()
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|id| id.as_str().map(str::to_string))
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+    let concurrency_shortfall_field = concurrency_shortfall(
+        subagents_running,
+        super::pool_slots::spawn_ceiling(&slots),
+        &launch_candidates,
+    );
+
+    let slots_prose = super::pool_slots::slots_prose(&slots);
+    let monitor = super::pool_slots::monitor_block(&slots);
     let mut payload = json!({
+        "subagents_running": subagents_running,
+        "concurrency_shortfall": concurrency_shortfall_field,
         "phase": phase,
+        "slots": slots,
+        "monitor": monitor,
+        "slots_prose": slots_prose,
         "fsm_graph": {
             "tier": graph_tier.as_str(),
             "path": graph_path,
@@ -964,10 +1030,13 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "session_id": session_id_opt,
         "session_owner_before_this_dispatch": prior_session_owner,
         "session_mismatch": session_mismatch,
+        "session_owner_lease": owner_lease,
         "sub_phase": if await_result.is_some() { "AWAIT-RESULT" } else { "" },
         "await_result": await_result,
         "instruction": instruction_for_payload,
         "instruction_hash": instruction_hash,
+        "degraded": instruction_degraded.is_some(),
+        "degraded_reason": instruction_degraded,
         "instruction_unchanged": instruction_unchanged,
         "policy_hash": discipline_policies_hash,
         "instruction_suppressible_by_asserting_hash": instruction_suppressible_but_unasserted,
@@ -1040,6 +1109,8 @@ const FIELDS_ALWAYS_RESTATED_IN_A_DELTA_REPLY: &[&str] = &[
     "instruction_unchanged",
     "policy_hash",
     "prd_pending_count",
+    "concurrency_shortfall",
+    "subagents_running",
     "mutables_pending_count",
     "next_phase_hint",
     "sub_phase",

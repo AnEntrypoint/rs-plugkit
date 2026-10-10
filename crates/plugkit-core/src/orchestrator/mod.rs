@@ -21,6 +21,8 @@ pub mod memory_component;
 pub mod mutables;
 pub mod prd;
 pub mod predicate_registry;
+pub mod pool_rank;
+pub mod pool_slots;
 pub mod recall;
 pub mod residual;
 pub mod state;
@@ -418,9 +420,12 @@ orchestrator_dispatch_table! {
     "component-loader-hmr" => component_loader_dispatch::handle_hmr(content),
     "auto-recall" => recall::handle_auto_recall(content),
     "instruction" => instructions::handle_instruction(content),
+    "pool-brief" => pool_slots::handle_brief(content),
     "prd-add" => prd::handle_add(content),
     "prd-resolve" => prd::handle_resolve(content),
     "prd-list" => prd::handle_list(content),
+    "pool-observe" => pool_slots::handle_observe(content),
+    "prd-block" => prd::handle_block(content),
     "prd-defer" => prd::handle_defer(content),
     "task-spawn" => task::handle_spawn(content),
     "task-list" => task::handle_list(content),

@@ -5,6 +5,13 @@ pub(super) const GIT_PENDING_RESULT_OUTBOX_NS: &str = "outbox";
 pub(super) const GIT_COMMIT_DEDUP_NS: &str = "git_commit_dedup";
 pub(super) const GIT_COMMIT_DEDUP_TTL_MS: u64 = 180_000;
 
+// Spawning git with a command line past ~32 KiB fails on Windows with os error 206, which the
+// completeness gate reports as git_status_incomplete and refuses the mutation. One exclude
+// pathspec per dirty path reaches that on a repo with a few hundred dirty paths, so the
+// exclusions get a budget and the rest are simply not withheld: a broader scope is still complete
+// worktree evidence.
+pub(super) const GIT_PATHSPEC_SCOPE_EXCLUDE_BUDGET_CHARS: usize = 8000;
+
 pub(super) fn git_commit_dedup_key(
     cwd: Option<&str>,
     head_before: &str,
@@ -295,12 +302,67 @@ pub(super) fn split_head_ref_line(line: &str) -> (String, String) {
     (sha, branch)
 }
 pub(super) const GIT_STATUS_SKIPPED_PATHS_MAX: usize = 25;
+pub(super) const GIT_STATUS_SAMPLE_PATHS: usize = 10;
+pub(super) const GIT_STATUS_DIRECTORY_BUCKETS: usize = 10;
+
+fn git_eol_entries(listing: &str) -> Vec<Value> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let (meta, path) = line.split_once('\t')?;
+            let mut tokens = meta.split_whitespace();
+            let index = tokens.next()?.strip_prefix("i/")?.to_string();
+            let worktree = tokens.next()?.strip_prefix("w/")?.to_string();
+            let attr = tokens.collect::<Vec<&str>>().join(" ");
+            let attr = attr.strip_prefix("attr/").unwrap_or(&attr).to_string();
+            Some(json!({ "path": path, "index": index, "worktree": worktree, "attr": attr }))
+        })
+        .collect()
+}
+
+fn git_status_sample(paths: &[String], take: usize) -> Value {
+    Value::Array(paths.iter().take(take).map(|path| json!(path)).collect())
+}
+
+fn git_status_directory_counts(paths: &[String]) -> Value {
+    let mut by_directory: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    for path in paths {
+        let directory = path.rsplit_once('/').map_or(".", |(directory, _)| directory);
+        *by_directory.entry(directory).or_insert(0) += 1;
+    }
+    let directories = by_directory.len();
+    let mut ranked: Vec<(&str, usize)> = by_directory.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let elsewhere: usize = ranked
+        .iter()
+        .skip(GIT_STATUS_DIRECTORY_BUCKETS)
+        .map(|&(_, count)| count)
+        .sum();
+    let top: serde_json::Map<String, Value> = ranked
+        .into_iter()
+        .take(GIT_STATUS_DIRECTORY_BUCKETS)
+        .map(|(directory, count)| (directory.to_string(), json!(count)))
+        .collect();
+    json!({ "directories": directories, "top": top, "elsewhere": elsewhere })
+}
+
+fn git_status_spill_listing(spill_name: &str, lines: &[String]) -> Option<String> {
+    let relative = format!(".gm/exec-spool/out/{spill_name}");
+    let mut body = lines.join("\n");
+    body.push('\n');
+    if crate::pkfs::write(&relative, &body) {
+        Some(crate::pkfs::anchor(&relative))
+    } else {
+        None
+    }
+}
 
 pub(super) fn git_status(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_status",
         body,
-        &["path", "paths", "files", "summary", "limit"],
+        &["path", "paths", "files", "summary", "limit", "eol"],
     ) {
         return refusal;
     }
@@ -354,6 +416,18 @@ pub(super) fn git_status(body: &Value) -> u64 {
         let dirty = !porcelain.trim().is_empty();
         let head_line = git_head_ref_line(plan, cwd)?;
         let (head_sha, head_branch) = split_head_ref_line(&head_line);
+        let eol_run = if body.get("eol").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let mut eol_argv: Vec<&str> = vec!["ls-files", "--eol"];
+            if !paths.is_empty() {
+                eol_argv.push("--");
+                for p in &paths {
+                    eol_argv.push(p.as_str());
+                }
+            }
+            Some(git_step_replayed_by_call_order(plan, &eol_argv, cwd)?)
+        } else {
+            None
+        };
         let mut lists = if summary {
             let first_n = limit.unwrap_or(GIT_STATUS_SUMMARY_DEFAULT_PATHS);
             let entries: Vec<&str> = porcelain.lines().filter(|l| l.len() >= 3).collect();
@@ -379,33 +453,44 @@ pub(super) fn git_status(body: &Value) -> u64 {
                 "scoped_to": paths,
             })
         } else {
+            let sample_n = limit.unwrap_or(GIT_STATUS_SAMPLE_PATHS);
+            let overflow = [&modified, &untracked, &deleted, &staged]
+                .iter()
+                .any(|list| list.len() > sample_n);
             let mut l = json!({
                 "dirty": dirty,
                 "head": head_sha.clone(), "head_sha": head_sha.clone(), "branch": head_branch.clone(),
-                "modified": modified,
-                "untracked": untracked,
-                "deleted": deleted,
-                "staged": staged,
+                "counts": {
+                    "changed_paths": porcelain.lines().filter(|entry| entry.len() >= 3).count(),
+                    "modified": modified.len(),
+                    "untracked": untracked.len(),
+                    "deleted": deleted.len(),
+                    "staged": staged.len(),
+                },
+                "by_directory": {
+                    "modified": git_status_directory_counts(&modified),
+                    "deleted": git_status_directory_counts(&deleted),
+                },
+                "modified": git_status_sample(&modified, sample_n),
+                "untracked": git_status_sample(&untracked, sample_n),
+                "deleted": git_status_sample(&deleted, sample_n),
+                "staged": git_status_sample(&staged, sample_n),
+                "truncated": overflow,
             });
-            if let Some(cap) = limit {
-                let mut truncated = serde_json::Map::new();
-                for key in ["modified", "untracked", "deleted", "staged"] {
-                    let total = l[key].as_array().map(|a| a.len()).unwrap_or(0);
-                    if total > cap {
-                        l[key] = Value::Array(
-                            l[key]
-                                .as_array()
-                                .cloned()
-                                .unwrap_or_default()
-                                .into_iter()
-                                .take(cap)
-                                .collect(),
-                        );
-                        truncated.insert(key.to_string(), json!(total));
-                    }
-                }
-                if !truncated.is_empty() {
-                    l["truncated_totals"] = Value::Object(truncated);
+            if overflow {
+                let lines: Vec<String> = porcelain
+                    .lines()
+                    .filter(|entry| entry.len() >= 3)
+                    .map(str::to_string)
+                    .collect();
+                let spill_name = format!(
+                    "git_status-{}.txt",
+                    super::search::dispatch_task_id()
+                        .unwrap_or_else(|| unsafe { host_now_ms() }.to_string())
+                );
+                match git_status_spill_listing(&spill_name, &lines) {
+                    Some(file) => l["spill_file"] = json!(file),
+                    None => l["spill_write_failed"] = json!(true),
                 }
             }
             if !paths.is_empty() {
@@ -413,6 +498,23 @@ pub(super) fn git_status(body: &Value) -> u64 {
             }
             l
         };
+        if let Some(run) = &eol_run {
+            let code = run.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
+            if code != 0 {
+                return Err(err(
+                    "git_status",
+                    run.get("stderr").and_then(|v| v.as_str()).unwrap_or("git ls-files --eol failed"),
+                ));
+            }
+            let listing = run.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+            let entries = git_eol_entries(listing);
+            let mismatched = entries.iter().filter(|e| e["index"] != e["worktree"]).count();
+            if let Some(map) = lists.as_object_mut() {
+                map.insert("eol_count".to_string(), json!(entries.len()));
+                map.insert("eol_mismatch_count".to_string(), json!(mismatched));
+                map.insert("eol".to_string(), Value::Array(entries));
+            }
+        }
         // A path git cannot open (Windows MAX_PATH, or permissions) must degrade
         // this listing, never abort it: report what was read and name the rest.
         if st.partial {
@@ -837,6 +939,258 @@ pub(super) fn pushed_commits_published(repo: Option<&str>, from: Option<&str>, t
     })
 }
 
+fn bin_drift_check_js(base: &str, repo: &str) -> String {
+    format!(
+        r#"(() => {{
+  const cp = require('child_process');
+  const path = require('path');
+  const repoDir = path.resolve({base}, {repo});
+  const script = path.join(repoDir, 'scripts', 'check-bin-drift.mjs');
+  const r = cp.spawnSync(process.execPath, [script], {{ cwd: repoDir, encoding: 'utf8', windowsHide: true, timeout: 120000 }});
+  process.stdout.write(JSON.stringify({{ exit_code: r.status, output: String(r.stdout || '') + String(r.stderr || ''), error: r.error ? String(r.error.message || r.error) : null }}));
+}})();"#,
+        base = serde_json::to_string(base).unwrap_or_else(|_| "\"\"".to_string()),
+        repo = serde_json::to_string(repo).unwrap_or_else(|_| "\"\"".to_string()),
+    )
+}
+
+fn bin_drift_gate_input(path: &str) -> bool {
+    path.starts_with("bin/")
+        || path.starts_with("src/")
+        || path == "package.json"
+        || path == "scripts/"
+        || path == "scripts/build.mjs"
+        || path == "scripts/check-bin-drift.mjs"
+}
+
+fn bin_drift_tracks_gate(repo: Option<&str>, rev: &str) -> bool {
+    let gate_blob = format!("{}:scripts/check-bin-drift.mjs", rev);
+    git_call_argv(&["cat-file", "-e", gate_blob.as_str()], repo)
+        .get("exit_code")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(1)
+        == 0
+}
+
+fn bin_drift_run(repo: Option<&str>) -> Result<(), String> {
+    let checkout = repo.unwrap_or("the checkout");
+    let base = super::host_abi::host_cwd_string().unwrap_or_default();
+    let code = bin_drift_check_js(&base, repo.unwrap_or(""));
+    let opts = json!({ "timeoutMs": 150000 }).to_string();
+    let packed = unsafe {
+        super::host_abi::host_exec_js(
+            code.as_ptr(),
+            code.len() as u32,
+            opts.as_ptr(),
+            opts.len() as u32,
+        )
+    };
+    let envelope: Value = super::host_abi::unpack_to_string(packed)
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or(Value::Null);
+    let inner: Value = envelope
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap_or(Value::Null);
+    if inner.is_null() {
+        return Err(format!(
+            "the host returned no check result, so check-bin-drift did not run. Run: node scripts/check-bin-drift.mjs in {checkout}. If it reports STALE, run: npm run build, commit bin/gm-mcp-server.js with the src/ change, then retry."
+        ));
+    }
+    if inner.get("exit_code").and_then(|v| v.as_i64()) == Some(0) {
+        return Ok(());
+    }
+    let exit = inner
+        .get("exit_code")
+        .and_then(|v| v.as_i64())
+        .map_or_else(|| "none".to_string(), |c| c.to_string());
+    let output = inner
+        .get("output")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let error = inner.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    let spawn_error = if error.is_empty() {
+        String::new()
+    } else {
+        format!(" spawn error: {error}")
+    };
+    let mut message = format!("check-bin-drift exit {exit}. {output}{spawn_error}");
+    if !output.contains("npm run build") {
+        message.push_str(&format!(
+            "\nRun: node scripts/check-bin-drift.mjs in {checkout} to see the failure. If it reports STALE, run: npm run build, commit bin/gm-mcp-server.js with the src/ change, then retry."
+        ));
+    }
+    Err(message)
+}
+
+fn bin_drift_refusal(
+    repo: Option<&str>,
+    source_sha: &str,
+    gate_inputs_dirty: bool,
+) -> Option<String> {
+    if !bin_drift_tracks_gate(repo, source_sha) {
+        return None;
+    }
+    let head_sha = resolve_ref(repo, "HEAD").unwrap_or_default();
+    if gate_inputs_dirty || source_sha != head_sha.as_str() {
+        return Some(format!(
+            "bin drift gate cannot certify {source_sha}: check-bin-drift reads bin/, src/ and the build inputs from the checkout, so the push must be HEAD ({head_sha}) with no uncommitted changes under those paths. Commit or revert them, then push again. After the commit, run: node scripts/check-bin-drift.mjs; if it reports STALE, run: npm run build, then commit bin/gm-mcp-server.js with the src/ change."
+        ));
+    }
+    bin_drift_run(repo)
+        .err()
+        .map(|detail| format!("bin drift gate refused the push: {detail}"))
+}
+
+fn bin_drift_pathspec_covers(pathspecs: &[String], path: &str) -> bool {
+    pathspecs.iter().any(|spec| {
+        let dir = spec.trim().trim_end_matches('/');
+        dir == "." || path == dir || path.starts_with(format!("{dir}/").as_str())
+    })
+}
+
+fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool) -> Option<String> {
+    let head_sha = resolve_ref(repo, "HEAD")?;
+    if !bin_drift_tracks_gate(repo, &head_sha) {
+        return None;
+    }
+    let index_only = !add_all && paths.is_empty();
+    let porcelain = git_push_porcelain_in(repo);
+    let mut touches_gate = false;
+    let mut outside: Vec<String> = Vec::new();
+    for line in porcelain.lines() {
+        let path = line.get(3..).unwrap_or("").trim().trim_matches('"');
+        if !bin_drift_gate_input(path) {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        let staged = bytes.first().map_or(false, |&x| x != b' ' && x != b'?');
+        let unstaged = bytes.get(1).map_or(false, |&y| y != b' ');
+        let in_commit = if add_all {
+            true
+        } else if index_only {
+            staged
+        } else {
+            bin_drift_pathspec_covers(paths, path)
+        };
+        if in_commit {
+            touches_gate = true;
+        }
+        if !in_commit || (index_only && unstaged) {
+            outside.push(path.to_string());
+        }
+    }
+    if !touches_gate {
+        return None;
+    }
+    if !outside.is_empty() {
+        let listed: Vec<String> = outside.iter().take(12).cloned().collect();
+        return Some(format!(
+            "bin drift gate refused the commit: the commit changes build inputs, but these gate inputs are outside the commit or have unstaged changes: {}. Stage them in this commit or revert them, then commit again. bin/gm-mcp-server.js must match a fresh build of the committed src/: run npm run build and include bin/gm-mcp-server.js in the same commit.",
+            listed.join(", ")
+        ));
+    }
+    bin_drift_run(repo)
+        .err()
+        .map(|detail| format!("bin drift gate refused the commit: {detail}"))
+}
+
+pub(super) fn push_url_is_no_push_sentinel(url: &str) -> bool {
+    let normalized = url.trim().to_ascii_lowercase();
+    let normalized = normalized.trim_end_matches('/');
+    normalized.is_empty()
+        || matches!(
+            normalized,
+            "no-push" | "no_push" | "nopush" | "disable" | "disabled" | "none" | "null"
+        )
+}
+
+pub(super) fn push_url_is_real_target(url: &str, repo: Option<&str>) -> bool {
+    let url = url.trim();
+    if url.is_empty() {
+        return false;
+    }
+    if url.contains("://") {
+        return true;
+    }
+    if let Some((_, host)) = url.split_once('@') {
+        if !host.is_empty() && (host.contains(':') || host.contains('/')) {
+            return true;
+        }
+    }
+    if url.contains('/') || url.contains('\\') || crate::pkfs::is_absolute(url) {
+        return true;
+    }
+    match repo {
+        Some(repo) => {
+            let joined = format!("{}/{}", repo.trim_end_matches(['/', '\\']), url);
+            crate::pkfs::exists(&joined)
+        }
+        None => crate::pkfs::exists(url),
+    }
+}
+
+pub(super) fn configured_push_url(repo: Option<&str>, remote: &str) -> Option<String> {
+    let result = git_call_argv(&["remote", "get-url", "--push", remote], repo);
+    if result.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1) != 0 {
+        return None;
+    }
+    let url = result
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
+pub(super) fn push_disabled_refusal(
+    repo: Option<&str>,
+    branch: &str,
+    source_ref: &str,
+) -> Option<Value> {
+    const REMOTE: &str = "origin";
+    let push_url = configured_push_url(repo, REMOTE)?;
+    if push_url_is_real_target(&push_url, repo) {
+        return None;
+    }
+    let kind = if push_url_is_no_push_sentinel(&push_url) {
+        "a configured no-push sentinel"
+    } else {
+        "not a real push target"
+    };
+    Some(json!({
+        "ok": false,
+        "verb": "git_push",
+        "gate_denied": true,
+        "remote_moved": false,
+        "repo": repo,
+        "branch": branch,
+        "remote": REMOTE,
+        "push_url": push_url,
+        "source_ref": source_ref,
+        "push_disabled_by_config": true,
+        "reason_code": "push_disabled_by_config",
+        "error_code": "push_disabled_by_config",
+        "reason": format!(
+            "remote '{}' of {} has pushurl '{}', which is {} -- no scheme, no user@host and no local path that exists. This repository is deliberately configured not to publish: it is not a broken remote, not a credentials failure and not a remote that moved, so pulling or retrying cannot fix it. Configure a real pushurl to publish -- git config --local remote.{}.pushurl <real push url> -- or drop the override with git config --local --unset remote.{}.pushurl so the fetch url is used.",
+            REMOTE, repo.unwrap_or("cwd"), push_url, kind, REMOTE, REMOTE
+        ),
+        "next_dispatch": "instruction",
+        "next_action_hint": format!(
+            "git config --local remote.{}.pushurl <real push url> then git_push again; recover_remote_moved and pull_first are refused on purpose here.",
+            REMOTE
+        ),
+    }))
+}
+
 pub(super) fn git_push(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let explicit_branch = body
@@ -916,6 +1270,31 @@ pub(super) fn git_push(body: &Value) -> u64 {
             )
         }
     };
+    let gate_inputs_dirty = porcelain.lines().any(|line| {
+        let path = line.get(3..).unwrap_or("").trim().trim_matches('"');
+        bin_drift_gate_input(path)
+    });
+    if let Some(reason) =
+        bin_drift_refusal(repo.as_deref(), &local_source_before, gate_inputs_dirty)
+    {
+        log_deviation_push("push-bin-drift", &branch);
+        return pack(
+            json!({
+                "ok": false,
+                "verb": "git_push",
+                "gate_denied": true,
+                "repo": repo,
+                "branch": branch,
+                "source_ref": source_ref,
+                "source_sha": local_source_before,
+                "reason": reason,
+                "next_dispatch": "instruction",
+                "next_dispatch_hint": "instruction",
+                "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
+            })
+            .to_string(),
+        );
+    }
     let preserved_dirty_worktree = explicit_source_ref.is_some() && !porcelain.trim().is_empty();
     if preserved_dirty_worktree {
         emit_event(
@@ -927,6 +1306,10 @@ pub(super) fn git_push(body: &Value) -> u64 {
                 "branch": branch,
             }),
         );
+    }
+    if let Some(refusal) = push_disabled_refusal(repo.as_deref(), &branch, source_ref) {
+        log_deviation_push("push-disabled-by-config", &branch);
+        return pack(refusal.to_string());
     }
     let mut ssh_fallback: Option<SshHttpsFallback> = None;
     let mut remote_before = git_fetch_and_resolve_remote(repo.as_deref(), &branch, None);
@@ -1013,10 +1396,11 @@ pub(super) fn git_push(body: &Value) -> u64 {
             );
         }
         log_deviation_push("push-explicit-ref-remote-moved", &branch);
-        return pack(json!({
+        let mut refusal = json!({
             "ok": false,
             "verb": "git_push",
             "gate_denied": true,
+            "remote_moved": true,
             "repo": repo,
             "branch": branch,
             "source_ref": source_ref,
@@ -1028,7 +1412,12 @@ pub(super) fn git_push(body: &Value) -> u64 {
             ),
             "next_dispatch": "instruction",
             "next_action_hint": "git_pull {branch} then git_push {rev:\"HEAD\"}",
-        }).to_string());
+        });
+        if remote_moved_recovery_opted_in(body) {
+            refusal = pull_and_repush_remote_moved(body, &repo, &branch, refusal);
+        }
+        hoist_identity_required(&mut refusal);
+        return pack(refusal.to_string());
     }
     while !push_succeeded
         && attempts < 3
@@ -1325,14 +1714,13 @@ pub(super) fn git_commit_argv(
     argv
 }
 
-pub(super) fn bundle_prd_commit_comments(cwd: Option<&str>, message: &str) -> String {
-    let notes = crate::orchestrator::prd::drain_pending_commit_comments(cwd);
+pub(super) fn bundle_prd_commit_comments(message: &str, notes: &[(String, String)]) -> String {
     if notes.is_empty() {
         return message.to_string();
     }
     let mut out = message.to_string();
     out.push_str("\n\nResolved PRD rows:\n");
-    for (id, comment) in &notes {
+    for (id, comment) in notes {
         out.push_str(&format!("- {}: {}\n", id, comment));
     }
     out
@@ -1555,6 +1943,18 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 with_exclusion_report(json!({ "nothing_to_commit": true, "requested_paths": paths }), cwd, &paths),
             ));
         }
+        if let Some(reason) = bin_drift_commit_refusal(cwd, &paths, add_all) {
+            return Ok(err_json(
+                "git_commit",
+                json!({
+                    "error": reason,
+                    "gate_denied": true,
+                    "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
+                    "next_dispatch": "instruction",
+                    "next_dispatch_hint": "instruction",
+                }),
+            ));
+        }
         if !paths.is_empty() {
             let scoped_r = git_step_replayed_by_call_order(
                 plan,
@@ -1648,7 +2048,8 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 })));
             }
         }
-        let bundled_message = bundle_prd_commit_comments(cwd, message);
+        let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd, &staged_paths_now(cwd));
+        let bundled_message = bundle_prd_commit_comments(message, &commit_notes);
         let identity = body_commit_identity(body);
         let r = git_step_replayed_by_call_order(
             plan,
@@ -1680,6 +2081,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         if head_after.is_empty() || head_after == head_before {
             return Ok(err("git_commit", "commit reported success (exit 0) but HEAD did not move -- refusing to claim committed:true without a real new sha"));
         }
+        crate::orchestrator::prd::drain_commit_comments(cwd, &commit_notes);
         let sha = head_after[..head_after.len().min(10)].to_string();
         let summary = message.lines().next().unwrap_or("").to_string();
         git_commit_dedup_record(&dedup_key, &head_after, &sha, &summary);
@@ -1711,6 +2113,10 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         if allow_whole_index && paths.is_empty() {
             payload["blanket_opt_in"] = json!("allow_whole_index");
             payload["swept_paths"] = json!(blanket_stage_would_take(cwd));
+        }
+        let reopened_rows = crate::orchestrator::prd::reopen_rows_for_changed_paths(&files_in_commit(cwd));
+        if !reopened_rows.is_empty() {
+            payload["prd_reopened"] = json!(reopened_rows);
         }
         let step_refs: Vec<&Value> = write_steps.iter().collect();
         Ok(ok(
@@ -1770,6 +2176,342 @@ pub(super) fn check_ci_status_and_write_validated_marker_if_green(
     }
 }
 
+pub(super) fn untracked_worktree_paths(cwd: Option<&str>) -> Vec<String> {
+    exec_git_in(cwd, "ls-files --others --exclude-standard")
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+pub(super) fn incoming_changed_paths(cwd: Option<&str>, branch: &str) -> Vec<String> {
+    exec_git_in(cwd, &format!("diff --name-only HEAD...origin/{}", branch))
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+pub(super) fn local_dirty_paths(cwd: Option<&str>) -> Vec<String> {
+    let mut paths: Vec<String> = exec_git_in(cwd, "diff --name-only HEAD")
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    paths.extend(untracked_worktree_paths(cwd));
+    paths
+}
+
+pub(super) fn commits_between(cwd: Option<&str>, from: &str, to: &str) -> Value {
+    let listed = exec_git_in(
+        cwd,
+        &format!("log --reverse --pretty=format:%H%x09%s {}..{}", from, to),
+    );
+    let rows: Vec<Value> = listed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (sha, summary) = line.split_once('\t').unwrap_or((line, ""));
+            json!({ "sha": sha.trim(), "summary": summary.trim() })
+        })
+        .collect();
+    json!(rows)
+}
+
+pub(super) enum RemoteMovedPull {
+    NotApplicable,
+    Blocked(String),
+    Failed(Value),
+    Landed {
+        ff_only: bool,
+        result: Value,
+        incoming_commits: Value,
+        remote_sha_before: String,
+    },
+}
+
+pub(super) fn pull_body_with_identity(
+    cwd: Option<&str>,
+    branch: &str,
+    ff_only: bool,
+    identity: Option<&(String, String)>,
+) -> Value {
+    let mut body = json!({ "cwd": cwd, "branch": branch, "ff_only": ff_only });
+    if let Some((name, email)) = identity {
+        if let Some(map) = body.as_object_mut() {
+            map.insert("user_name".to_string(), json!(name.clone()));
+            map.insert("user_email".to_string(), json!(email.clone()));
+        }
+    }
+    body
+}
+
+pub(super) fn pull_past_remote_moved(
+    cwd: Option<&str>,
+    push_resp: &Value,
+    identity: Option<&(String, String)>,
+) -> RemoteMovedPull {
+    if !push_resp
+        .get("remote_moved")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return RemoteMovedPull::NotApplicable;
+    }
+    let branch = push_resp
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if branch.is_empty() {
+        return RemoteMovedPull::Blocked("push refusal named no branch to pull".to_string());
+    }
+    let _ = git_call_argv(&["fetch", "origin", branch.as_str()], cwd);
+    let incoming = incoming_changed_paths(cwd, &branch);
+    let local = local_dirty_paths(cwd);
+    let clash: Vec<String> = local
+        .into_iter()
+        .filter(|path| incoming.iter().any(|incoming| incoming == path))
+        .collect();
+    if !clash.is_empty() {
+        return RemoteMovedPull::Blocked(format!(
+            "the incoming commit changes {} which this worktree also has uncommitted -- pulling would overwrite it",
+            clash.join(", ")
+        ));
+    }
+    let remote_sha_before = resolve_ref(cwd, &format!("origin/{}", branch)).unwrap_or_default();
+    let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    let ff_body = pull_body_with_identity(cwd, &branch, true, identity);
+    let ff_resp = unpack_to_value(git_pull(&ff_body));
+    if ff_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return RemoteMovedPull::Landed {
+            ff_only: true,
+            result: ff_resp,
+            incoming_commits: commits_between(cwd, &head_before, &remote_sha_before),
+            remote_sha_before,
+        };
+    }
+    let merge_resp = unpack_to_value(git_pull(&pull_body_with_identity(
+        cwd, &branch, false, identity,
+    )));
+    let merged = merge_resp
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if merged {
+        return RemoteMovedPull::Landed {
+            ff_only: false,
+            result: merge_resp,
+            incoming_commits: commits_between(cwd, &head_before, &remote_sha_before),
+            remote_sha_before,
+        };
+    }
+    let conflicted = merge_resp
+        .get("conflicted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if conflicted {
+        let _ = git_call_argv(&["merge", "--abort"], cwd);
+    }
+    RemoteMovedPull::Failed(json!({
+        "ff_only": ff_resp,
+        "merge": merge_resp,
+        "merge_aborted": conflicted,
+    }))
+}
+
+/// `git_push` refuses a `remote_moved` explicit-ref publication rather than mutating the
+/// checkout, which leaves the caller to dispatch `git_pull` and `git_push` by hand. This is the
+/// opt-in recovery that does exactly those two dispatches: one pull through `git_pull` (strict
+/// fast-forward first, ordinary merge only if the local branch diverged) and then one push.
+/// The worktree and index must be clean, or it refuses unchanged with the original reason.
+pub(super) fn remote_moved_recovery_opted_in(body: &Value) -> bool {
+    body.get("recover_remote_moved")
+        .or_else(|| body.get("pull_first"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+pub(super) fn pull_and_repush_remote_moved(
+    body: &Value,
+    repo: &Option<String>,
+    branch: &str,
+    mut refusal: Value,
+) -> Value {
+    let cwd = repo.as_deref();
+    let dirty = git_push_porcelain_in(cwd);
+    if !dirty.trim().is_empty() {
+        refusal["recovered"] = json!(false);
+        refusal["auto_recovery"] = json!({
+            "attempted": false,
+            "skipped_reason": format!(
+                "worktree or index is not clean, so a pull could clobber uncommitted changes -- refusing exactly as before. Porcelain:\n{}",
+                dirty.lines().take(8).collect::<Vec<_>>().join("\n")
+            ),
+        });
+        return refusal;
+    }
+    let _ = git_call_argv(&["fetch", "origin", branch], cwd);
+    let remote_now = resolve_ref(cwd, &format!("origin/{}", branch));
+    let strict_fast_forward = remote_now
+        .as_deref()
+        .map(|remote| {
+            git_call_argv(&["merge-base", "--is-ancestor", "HEAD", remote], cwd)
+                .get("exit_code")
+                .and_then(|code| code.as_i64())
+                .unwrap_or(1)
+                == 0
+        })
+        .unwrap_or(false);
+    match pull_past_remote_moved(cwd, &refusal, body_pull_identity(body).as_ref()) {
+        RemoteMovedPull::NotApplicable => refusal,
+        RemoteMovedPull::Blocked(reason) => {
+            refusal["recovered"] = json!(false);
+            refusal["auto_recovery"] = json!({ "attempted": false, "skipped_reason": reason });
+            refusal
+        }
+        RemoteMovedPull::Failed(result) => {
+            refusal["recovered"] = json!(false);
+            refusal["auto_recovery"] = json!({ "attempted": true, "pull_result": result });
+            refusal
+        }
+        RemoteMovedPull::Landed {
+            ff_only,
+            result,
+            incoming_commits,
+            remote_sha_before,
+        } => {
+            let mut retry_body = body.clone();
+            if let Some(map) = retry_body.as_object_mut() {
+                map.insert("rev".to_string(), json!("HEAD"));
+                map.remove("recover_remote_moved");
+                map.remove("pull_first");
+            }
+            let mut retry_resp = unpack_to_value(git_push(&retry_body));
+            let repushed = retry_resp
+                .get("ok")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let pulled_to = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+            let pull_via = if ff_only { "ff_only" } else { "merge" };
+            let recovery = json!({
+                "attempted": true,
+                "pull_via": pull_via,
+                "strict_fast_forward": strict_fast_forward,
+                "pull_result": result.clone(),
+                "incoming_commits": incoming_commits,
+                "remote_sha_before": remote_sha_before,
+                "pulled_to": pulled_to.clone(),
+                "repushed": repushed,
+            });
+            if !repushed {
+                refusal["recovered"] = json!(false);
+                refusal["pulled_to"] = json!(pulled_to);
+                refusal["auto_recovery"] = json!({
+                    "attempted": true,
+                    "pull_via": pull_via,
+                    "strict_fast_forward": strict_fast_forward,
+                    "pull_result": result,
+                    "retry_result": retry_resp,
+                    "repushed": false,
+                });
+                return refusal;
+            }
+            log_deviation_push("push-remote-moved-auto-recovered", branch);
+            if let Some(data) = retry_resp.get_mut("data").and_then(|d| d.as_object_mut()) {
+                data.insert("recovered".to_string(), json!(true));
+                data.insert("pulled_to".to_string(), json!(pulled_to.clone()));
+                data.insert("auto_recovery".to_string(), recovery.clone());
+            }
+            if let Some(top) = retry_resp.as_object_mut() {
+                top.insert("recovered".to_string(), json!(true));
+                top.insert("pulled_to".to_string(), json!(pulled_to));
+                top.insert("auto_recovery".to_string(), recovery);
+            }
+            retry_resp
+        }
+    }
+}
+
+pub(super) fn push_refusal_code(push_resp: &Value) -> Option<String> {
+    for candidate in [Some(push_resp), push_resp.get("data")] {
+        if let Some(candidate) = candidate {
+            for key in ["reason_code", "error_code"] {
+                if let Some(code) = candidate.get(key).and_then(|v| v.as_str()) {
+                    return Some(code.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(super) fn apply_push_disabled_reason(refusal: &mut Value, push_resp: &Value) {
+    if push_refusal_code(push_resp).as_deref() != Some("push_disabled_by_config") {
+        return;
+    }
+    let mut text: Option<String> = None;
+    for candidate in [Some(push_resp), push_resp.get("data")] {
+        if let Some(candidate) = candidate {
+            if let Some(reason) = candidate.get("reason").and_then(|v| v.as_str()) {
+                if !reason.trim().is_empty() {
+                    text = Some(reason.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(text) = text {
+        refusal["reason"] = json!(text);
+    }
+    refusal["reason_code"] = json!("push_disabled_by_config");
+    refusal["error_code"] = json!("push_disabled_by_config");
+    refusal["push_disabled_by_config"] = json!(true);
+}
+
+pub(super) fn identity_required_in_pull_result(pull_result: &Value) -> Option<Value> {
+    for key in ["merge", "ff_only"] {
+        if let Some(candidate) = pull_result.get(key) {
+            if candidate.get("error_code").and_then(|v| v.as_str()) == Some("git_identity_required")
+            {
+                return Some(candidate.clone());
+            }
+        }
+    }
+    if pull_result.get("error_code").and_then(|v| v.as_str()) == Some("git_identity_required") {
+        return Some(pull_result.clone());
+    }
+    None
+}
+
+pub(super) fn hoist_identity_required(refusal: &mut Value) {
+    let pull_result = match refusal.get("auto_recovery").and_then(|r| r.get("pull_result")) {
+        Some(pull_result) => pull_result.clone(),
+        None => return,
+    };
+    let pull_resp = match identity_required_in_pull_result(&pull_result) {
+        Some(pull_resp) => pull_resp,
+        None => return,
+    };
+    refusal["reason"] = json!(pull_resp
+        .get("hint")
+        .and_then(|v| v.as_str())
+        .unwrap_or(
+            "Git needs a commit identity for this merge. Set this repository's user.name and user.email, then retry."
+        )
+        .to_string());
+    refusal["reason_code"] = json!("git_identity_required");
+    refusal["error_code"] = json!("git_identity_required");
+    refusal["identity_required"] = json!(true);
+    if let Some(argv) = pull_resp.get("repo_local_config_argv") {
+        refusal["repo_local_config_argv"] = argv.clone();
+    }
+    if let Some(error) = pull_resp.get("error") {
+        refusal["identity_error"] = error.clone();
+    }
+}
+
 pub(super) fn git_finalize(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let cwd = repo.clone();
@@ -1788,19 +2530,18 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if !pushed {
-            return pack(
-                json!({
-                    "ok": false,
-                    "verb": "git_finalize",
-                    "committed": false,
-                    "pushed": false,
-                    "source_ref": source_ref,
-                    "push_result": push_resp,
-                    "reason": "isolated-ref publication was refused -- read push_result.reason",
-                    "next_dispatch": "instruction",
-                })
-                .to_string(),
-            );
+            let mut refusal = json!({
+                "ok": false,
+                "verb": "git_finalize",
+                "committed": false,
+                "pushed": false,
+                "source_ref": source_ref,
+                "push_result": push_resp,
+                "reason": "isolated-ref publication was refused -- read push_result.reason",
+                "next_dispatch": "instruction",
+            });
+            apply_push_disabled_reason(&mut refusal, &push_resp);
+            return pack(refusal.to_string());
         }
         let push_data = push_resp.get("data").cloned().unwrap_or(Value::Null);
         let source_sha = push_data
@@ -1966,7 +2707,8 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                 "requested_paths": paths,
             }));
         }
-        let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
+        let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd_ref, &staged_paths_now(cwd_ref));
+        let bundled_message = bundle_prd_commit_comments(message.as_str(), &commit_notes);
         let scoped_paths: &[String] = if scoped { &paths } else { &[] };
         let identity = body_commit_identity(body);
         let cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, identity.as_ref())), cwd_ref);
@@ -1995,6 +2737,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             if head_after.is_empty() || head_after == head_before_any_commit {
                 return err("git_finalize", "commit reported success (exit 0) but HEAD did not move -- refusing to claim committed:true without a real new sha");
             }
+            crate::orchestrator::prd::drain_commit_comments(cwd_ref, &commit_notes);
             committed = true;
             sha = head_after[..head_after.len().min(10)].to_string();
             summary = message.lines().next().unwrap_or("").to_string();
@@ -2010,14 +2753,14 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             steps.push(commit_step);
         }
     } else if !scoped {
-        let pending_notes = crate::orchestrator::prd::peek_pending_commit_comments(cwd_ref);
-        if !pending_notes.is_empty() {
+        let flush_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd_ref, &[PRD_STATE_PATHSPEC.to_string()]);
+        if !flush_notes.is_empty() {
             let flush_message = if message.is_empty() {
                 "chore: flush resolved PRD notes".to_string()
             } else {
                 message.clone()
             };
-            let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
+            let bundled_message = bundle_prd_commit_comments(flush_message.as_str(), &flush_notes);
             let bundled_summary = bundled_message.lines().next().unwrap_or("").to_string();
             let prd_abs = format!(
                 "{}/{}",
@@ -2066,6 +2809,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
             let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
             if ccode == 0 && !head_after.is_empty() && head_after != head_before_any_commit {
+                crate::orchestrator::prd::drain_commit_comments(cwd_ref, &flush_notes);
                 committed = true;
                 sha = head_after[..head_after.len().min(10)].to_string();
                 summary = bundled_summary;
@@ -2225,13 +2969,67 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         body.clone()
     };
     let push_resp_packed = git_push(&push_body);
-    let push_resp = unpack_to_value(push_resp_packed);
-    let pushed = push_resp
+    let mut push_resp = unpack_to_value(push_resp_packed);
+    let mut pushed = push_resp
         .get("ok")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let mut recovery: Option<Value> = None;
     if !pushed {
-        return pack(json!({
+        match pull_past_remote_moved(cwd_ref, &push_resp, body_pull_identity(body).as_ref()) {
+            RemoteMovedPull::NotApplicable => {}
+            RemoteMovedPull::Blocked(reason) => {
+                recovery = Some(json!({
+                    "attempted": false,
+                    "skipped_reason": reason,
+                }));
+            }
+            RemoteMovedPull::Failed(result) => {
+                recovery = Some(json!({
+                    "attempted": true,
+                    "pull_result": result,
+                }));
+            }
+            RemoteMovedPull::Landed {
+                ff_only,
+                result,
+                incoming_commits,
+                remote_sha_before,
+            } => {
+                let mut retry_body = push_body.clone();
+                if let Some(map) = retry_body.as_object_mut() {
+                    map.insert("rev".to_string(), json!("HEAD"));
+                }
+                let retry_resp = unpack_to_value(git_push(&retry_body));
+                let retry_pushed = retry_resp
+                    .get("ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                steps.push(json!({
+                    "step": "auto-recover-remote-moved",
+                    "pull_via": if ff_only { "ff_only" } else { "merge" },
+                    "incoming_commits": incoming_commits.clone(),
+                    "remote_sha_before": remote_sha_before.clone(),
+                    "repushed": retry_pushed,
+                }));
+                recovery = Some(json!({
+                    "attempted": true,
+                    "pull_via": if ff_only { "ff_only" } else { "merge" },
+                    "pull_result": result,
+                    "worktree_dirty": push_resp.get("preserved_dirty_worktree").cloned().unwrap_or(Value::Null),
+                    "incoming_commits": incoming_commits,
+                    "remote_sha_before": remote_sha_before,
+                    "repushed": retry_pushed,
+                }));
+                if retry_pushed {
+                    push_resp = retry_resp;
+                    pushed = true;
+                }
+            }
+        }
+    }
+    if !pushed {
+        let mut refusal = json!({
             "ok": false,
             "verb": "git_finalize",
             "committed": committed,
@@ -2241,7 +3039,14 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             "push_result": push_resp,
             "reason": "commit landed (or nothing to commit) but push was refused -- read push_result.reason",
             "next_dispatch": "instruction",
-        }).to_string());
+        });
+        if let Some(recovery) = recovery {
+            refusal["auto_recovery"] = recovery;
+            refusal["auto_recovered"] = json!(false);
+        }
+        apply_push_disabled_reason(&mut refusal, &push_resp);
+        hoist_identity_required(&mut refusal);
+        return pack(refusal.to_string());
     }
     emit_event("git.push", json!({ "repo": repo, "sha": sha }));
     let push_data = push_resp.get("data");
@@ -2285,6 +3090,16 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         "ci_validated_marker_written": ci_validated_written,
         "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
     });
+    if let Some(recovery) = recovery {
+        finalize_payload["incoming_commits"] = recovery
+            .get("incoming_commits")
+            .cloned()
+            .unwrap_or(Value::Null);
+        finalize_payload["auto_recovery"] = recovery;
+        finalize_payload["auto_recovered"] = json!(true);
+        finalize_payload["final_sha"] =
+            json!(exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string());
+    }
     if !dangling_waived.is_empty() {
         finalize_payload["dangling_waived"] = json!(dangling_waived);
     }
@@ -2300,6 +3115,12 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
     if allow_whole_index && !scoped {
         finalize_payload["blanket_opt_in"] = json!("allow_whole_index");
         finalize_payload["swept_paths"] = json!(files_in_commit(cwd_ref));
+    }
+    if committed {
+        let reopened_rows = crate::orchestrator::prd::reopen_rows_for_changed_paths(&files_in_commit(cwd_ref));
+        if !reopened_rows.is_empty() {
+            finalize_payload["prd_reopened"] = json!(reopened_rows);
+        }
     }
     let step_refs: Vec<&Value> = write_steps.iter().collect();
     ok(
@@ -2432,7 +3253,8 @@ pub(super) fn git_diff(body: &Value) -> u64 {
             .to_string();
         let truncated = diff.len() > 60000;
         if truncated {
-            diff.truncate(60000);
+            let cut = (0..=60000).rev().find(|&i| diff.is_char_boundary(i)).unwrap_or(0);
+            diff.truncate(cut);
         }
         Ok(ok(
             "git_diff",
@@ -2490,7 +3312,8 @@ pub(super) fn git_show(body: &Value) -> u64 {
         .unwrap_or("")
         .to_string();
     if out.len() > 60000 {
-        out.truncate(60000);
+        let cut = (0..=60000).rev().find(|&i| out.is_char_boundary(i)).unwrap_or(0);
+        out.truncate(cut);
     }
     ok("git_show", json!({ "output": out, "rev": refspec }))
 }
@@ -2533,6 +3356,26 @@ pub(super) fn classify_pull_hang_phase(output: &str) -> &'static str {
     }
 }
 
+pub(super) fn body_pull_identity(body: &Value) -> Option<(String, String)> {
+    let field = |keys: &[&str]| -> String {
+        keys.iter()
+            .find_map(|key| {
+                body.get(*key)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+            })
+            .unwrap_or("")
+            .to_string()
+    };
+    let name = field(&["user_name", "author_name"]);
+    let email = field(&["user_email", "author_email"]);
+    if name.is_empty() || email.is_empty() {
+        return None;
+    }
+    Some((name, email))
+}
+
 pub(super) fn git_pull(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let remote = body
@@ -2550,17 +3393,27 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-    let mut argv = vec!["pull", "--no-edit", "--no-rebase"];
+    let mut argv: Vec<String> = Vec::new();
+    if let Some((name, email)) = body_pull_identity(body) {
+        argv.push("-c".to_string());
+        argv.push(format!("user.name={name}"));
+        argv.push("-c".to_string());
+        argv.push(format!("user.email={email}"));
+    }
+    argv.push("pull".to_string());
+    argv.push("--no-edit".to_string());
+    argv.push("--no-rebase".to_string());
     if ff_only {
-        argv.push("--ff-only");
+        argv.push("--ff-only".to_string());
     }
     if !remote.is_empty() {
-        argv.push(remote);
+        argv.push(remote.to_string());
     }
     if !branch.is_empty() {
-        argv.push(branch);
+        argv.push(branch.to_string());
     }
-    let r = git_call_argv(&argv, cwd);
+    let argv_refs: Vec<&str> = argv.iter().map(|arg| arg.as_str()).collect();
+    let r = git_call_argv(&argv_refs, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let output = format!(
         "{}{}",
@@ -2797,20 +3650,208 @@ pub(super) fn ci_status_conclusion_to_status(conclusion: &str, gh_status: &str) 
     }
 }
 
+pub(super) const CI_STATUS_GH_TIMEOUT_MS: u64 = 60_000;
+
+#[derive(Clone, Copy)]
+pub(super) enum CiStatusTransport {
+    GhCli,
+    GithubRest,
+}
+
+impl CiStatusTransport {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            CiStatusTransport::GhCli => "gh_cli",
+            CiStatusTransport::GithubRest => "github_rest",
+        }
+    }
+}
+
+pub(super) struct CiStatusAttemptFailure {
+    transport: CiStatusTransport,
+    reason: String,
+    body: String,
+}
+
+pub(super) fn ci_status_truncate_for_error(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    let taken: String = trimmed.chars().take(max_chars).collect();
+    if taken.chars().count() < trimmed.chars().count() {
+        format!("{}...", taken)
+    } else {
+        taken
+    }
+}
+
+pub(super) fn ci_status_shell_result(code: &str) -> Value {
+    let opts = json!({ "lang": "bash", "timeoutMs": CI_STATUS_GH_TIMEOUT_MS }).to_string();
+    let packed = unsafe {
+        host_exec_js(
+            code.as_ptr(),
+            code.len() as u32,
+            opts.as_ptr(),
+            opts.len() as u32,
+        )
+    };
+    let raw = unpack_to_string(packed).unwrap_or_default();
+    serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({ "stdout": raw }))
+}
+
+pub(super) fn ci_status_shell_stream(result: &Value, key: &str) -> String {
+    result
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+pub(super) fn ci_status_shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+pub(super) fn ci_status_gh_unusable_reason() -> Option<String> {
+    let probe = "command -v gh >/dev/null 2>&1 || { printf 'gh_not_installed\\n'; exit 0; }\n\
+                 gh auth status >/dev/null 2>&1 && { printf 'gh_ready\\n'; exit 0; }\n\
+                 printf 'gh_unauthenticated\\n'\n\
+                 gh auth status 2>&1 | head -n 6";
+    let result = ci_status_shell_result(probe);
+    let stdout = ci_status_shell_stdout(&result);
+    match stdout.lines().next().unwrap_or("").trim() {
+        "gh_ready" => None,
+        "gh_not_installed" => Some(
+            "gh CLI is not on PATH -- install it and run `gh auth login`, or supply GITHUB_TOKEN/GH_TOKEN"
+                .to_string(),
+        ),
+        "gh_unauthenticated" => Some(format!(
+            "gh CLI is installed but not authenticated -- run `gh auth login`, or supply GITHUB_TOKEN/GH_TOKEN ({})",
+            ci_status_truncate_for_error(&stdout, 300)
+        )),
+        _ => Some(format!(
+            "gh CLI probe returned no usable answer ({})",
+            ci_status_truncate_for_error(&stdout, 300)
+        )),
+    }
+}
+
+pub(super) fn ci_status_shell_stdout(result: &Value) -> String {
+    ci_status_shell_stream(result, "stdout")
+}
+
+pub(super) fn ci_status_gh_api_json(path: &str) -> Result<Value, String> {
+    let code = format!(
+        "gh api -H 'Accept: application/vnd.github+json' {}",
+        ci_status_shell_quote(path)
+    );
+    let result = ci_status_shell_result(&code);
+    if result.get("timed_out").and_then(Value::as_bool) == Some(true) {
+        return Err(format!(
+            "gh api {} timed out after {} ms",
+            path, CI_STATUS_GH_TIMEOUT_MS
+        ));
+    }
+    let stdout = ci_status_shell_stdout(&result);
+    let stderr = ci_status_shell_stream(&result, "stderr");
+    let detail_source = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    let detail = ci_status_truncate_for_error(detail_source, 300);
+    match (
+        result.get("exit_code").and_then(Value::as_i64),
+        serde_json::from_str::<Value>(stdout.trim()).ok(),
+    ) {
+        (Some(0), Some(parsed)) => Ok(parsed),
+        (None, Some(parsed)) => Ok(parsed),
+        (Some(code), _) => Err(format!("gh api {} exited {}: {}", path, code, detail)),
+        (None, None) => Err(format!("gh api {} produced no JSON: {}", path, detail)),
+    }
+}
+
+pub(super) fn ci_status_rest_api_json(path: &str, opts: &str) -> Result<Value, (i64, String)> {
+    let url = format!("https://api.github.com/{}", path);
+    if let Err(reason) = crate::config_path::validate_fetch_url(&url) {
+        return Err((0, reason));
+    }
+    let packed = unsafe {
+        host_fetch(
+            url.as_ptr(),
+            url.len() as u32,
+            opts.as_ptr(),
+            opts.len() as u32,
+        )
+    };
+    let resp = unpack_to_value(packed);
+    if resp.is_null() {
+        return Err((0, "host_fetch returned no response".to_string()));
+    }
+    let body_text = resp
+        .get("body")
+        .and_then(Value::as_str)
+        .or_else(|| resp.get("text").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+    let status_code = resp
+        .get("status")
+        .and_then(Value::as_i64)
+        .or_else(|| resp.get("statusCode").and_then(Value::as_i64))
+        .unwrap_or(0);
+    if status_code != 200 {
+        return Err((status_code, body_text));
+    }
+    serde_json::from_str::<Value>(&body_text).map_err(|parse_error| {
+        (
+            status_code,
+            format!("{} -- {}", parse_error, body_text),
+        )
+    })
+}
+
+pub(super) fn ci_status_attempt(
+    transport: CiStatusTransport,
+    path: &str,
+    rest_opts: &str,
+) -> Result<Value, CiStatusAttemptFailure> {
+    match transport {
+        CiStatusTransport::GhCli => ci_status_gh_api_json(path).map_err(|reason| {
+            CiStatusAttemptFailure {
+                transport,
+                reason,
+                body: String::new(),
+            }
+        }),
+        CiStatusTransport::GithubRest => {
+            ci_status_rest_api_json(path, rest_opts).map_err(|(status, body)| {
+                let reason = if status > 0 {
+                    format!("HTTP {} {}", status, ci_status_truncate_for_error(&body, 300))
+                } else {
+                    ci_status_truncate_for_error(&body, 300)
+                };
+                CiStatusAttemptFailure {
+                    transport,
+                    reason,
+                    body,
+                }
+            })
+        }
+    }
+}
+
+pub(super) fn ci_status_runs_from(parsed: &Value) -> Vec<Value> {
+    parsed
+        .get("workflow_runs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
 pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     let cwd = body_cwd(body);
     let repo = ci_status_resolve_repo_preferring_unambiguous_github_repo_field(body, cwd)
         .map_err(|packed| unpack_to_value(packed))?;
     let sha = ci_status_resolve_sha(body, cwd).map_err(|packed| unpack_to_value(packed))?;
-    let url = format!(
-        "https://api.github.com/repos/{}/actions/runs?head_sha={}&per_page=20",
-        repo, sha
-    );
-    if let Err(reason) = crate::config_path::validate_fetch_url(&url) {
-        return Err(
-            json!({ "ok": false, "verb": "ci-status", "error": reason, "error_code": ERR_CODE_INVALID_ARGS }),
-        );
-    }
+    let runs_path = format!("repos/{}/actions/runs?head_sha={}&per_page=20", repo, sha);
+    let tree_path = format!("repos/{}/git/trees/{}?recursive=1", repo, sha);
     let token = body
         .get("token")
         .and_then(|v| v.as_str())
@@ -2823,69 +3864,68 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     if let Some(t) = &token {
         headers["Authorization"] = json!(format!("Bearer {}", t));
     }
-    let opts = json!({ "timeoutMs": FETCH_DEFAULT_TIMEOUT_MS, "headers": headers }).to_string();
-    let packed = unsafe {
-        host_fetch(
-            url.as_ptr(),
-            url.len() as u32,
-            opts.as_ptr(),
-            opts.len() as u32,
-        )
-    };
-    let resp = unpack_to_value(packed);
-    if resp.is_null() {
-        return Err(json!({ "ok": false, "verb": "ci-status", "error": "host_fetch empty" }));
+    let rest_opts = json!({ "timeoutMs": FETCH_DEFAULT_TIMEOUT_MS, "headers": headers }).to_string();
+    let mut ordered_transports: Vec<CiStatusTransport> = Vec::new();
+    let mut failures: Vec<CiStatusAttemptFailure> = Vec::new();
+    match ci_status_gh_unusable_reason() {
+        None => ordered_transports.push(CiStatusTransport::GhCli),
+        Some(reason) => failures.push(CiStatusAttemptFailure {
+            transport: CiStatusTransport::GhCli,
+            reason,
+            body: String::new(),
+        }),
     }
-    let body_text = resp
-        .get("body")
-        .and_then(|v| v.as_str())
-        .or_else(|| resp.get("text").and_then(|v| v.as_str()))
-        .unwrap_or("");
-    let status_code = resp
-        .get("status")
-        .and_then(|v| v.as_i64())
-        .or_else(|| resp.get("statusCode").and_then(|v| v.as_i64()))
-        .unwrap_or(0);
-    if status_code != 200 {
-        return Err(json!({
-            "ok": false, "verb": "ci-status",
-            "error": format!("GitHub Actions API returned HTTP {}", status_code),
-            "repo": repo, "sha": sha, "response": body_text,
-        }));
+    ordered_transports.push(CiStatusTransport::GithubRest);
+    for transport in ordered_transports {
+        match ci_status_attempt(transport, &runs_path, &rest_opts) {
+            Ok(parsed) => {
+                let runs = ci_status_runs_from(&parsed);
+                return Ok(ci_status_summarize(
+                    body,
+                    &repo,
+                    &sha,
+                    &runs,
+                    transport,
+                    &tree_path,
+                    &rest_opts,
+                ));
+            }
+            Err(failure) => failures.push(failure),
+        }
     }
-    let parsed: Value = serde_json::from_str(body_text).unwrap_or(Value::Null);
-    let runs = parsed
-        .get("workflow_runs")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    Err(json!({
+        "ok": false, "verb": "ci-status",
+        "error": format!(
+            "GitHub Actions state unreadable through every transport: {}",
+            failures
+                .iter()
+                .map(|f| format!("{}: {}", f.transport.label(), f.reason))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        "repo": repo, "sha": sha,
+        "response": failures.last().map(|f| f.body.clone()).unwrap_or_default(),
+        "attempts": failures
+            .iter()
+            .map(|f| json!({ "transport": f.transport.label(), "reason": f.reason }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+pub(super) fn ci_status_summarize(
+    body: &Value,
+    repo: &str,
+    sha: &str,
+    runs: &[Value],
+    transport: CiStatusTransport,
+    tree_path: &str,
+    rest_opts: &str,
+) -> Value {
+    let source = transport.label();
     if runs.is_empty() {
-        let tree_url = format!(
-            "https://api.github.com/repos/{}/git/trees/{}?recursive=1",
-            repo, sha
-        );
-        let tree_packed = unsafe {
-            host_fetch(
-                tree_url.as_ptr(),
-                tree_url.len() as u32,
-                opts.as_ptr(),
-                opts.len() as u32,
-            )
-        };
-        let tree_response = unpack_to_value(tree_packed);
-        let tree_status = tree_response
-            .get("status")
-            .and_then(Value::as_i64)
-            .or_else(|| tree_response.get("statusCode").and_then(Value::as_i64))
-            .unwrap_or(0);
-        let tree_body = tree_response
-            .get("body")
-            .and_then(Value::as_str)
-            .or_else(|| tree_response.get("text").and_then(Value::as_str))
-            .unwrap_or("");
-        let tree: Value = serde_json::from_str(tree_body).unwrap_or(Value::Null);
-        let complete_tree =
-            tree_status == 200 && tree.get("truncated").and_then(Value::as_bool) == Some(false);
+        let tree_result = ci_status_attempt(transport, tree_path, rest_opts);
+        let tree = tree_result.as_ref().ok().cloned().unwrap_or(Value::Null);
+        let complete_tree = tree.get("truncated").and_then(Value::as_bool) == Some(false);
         if let Some(entries) = tree
             .get("tree")
             .and_then(Value::as_array)
@@ -2911,35 +3951,38 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
                     })
                     .collect();
                 if workflow_paths.is_empty() {
-                    return Ok(json!({
+                    return json!({
                         "ok": true, "verb": "ci-status", "data": {
                             "status": "no_applicable_workflow", "repo": repo, "sha": sha,
                             "failed_jobs": [], "run_url": Value::Null,
                             "query": format!("head_sha={}", sha),
                             "reason": "a complete GitHub git tree for this exact sha contains no .github/workflows YAML files",
                             "workflow_configuration": "absent",
-                            "evidence": {"source": "github_git_tree", "requested_sha": sha, "tree_sha": tree.get("sha"), "truncated": false, "entries": entries.len()}
+                            "evidence": {"source": "github_git_tree", "requested_sha": sha, "tree_sha": tree.get("sha"), "truncated": false, "entries": entries.len()},
+                            "transport": source,
                         }
-                    }));
+                    });
                 }
-                return Ok(json!({
+                return json!({
                     "ok": true, "verb": "ci-status", "data": {
                         "status": "unknown", "repo": repo, "sha": sha,
                         "failed_jobs": [], "run_url": Value::Null,
                         "reason": "no workflow runs found for this sha; workflow definitions are present",
-                        "workflow_paths": workflow_paths
+                        "workflow_paths": workflow_paths,
+                        "transport": source,
                     }
-                }));
+                });
             }
         }
-        return Ok(json!({
+        return json!({
             "ok": true, "verb": "ci-status", "data": {
                 "status": "unknown", "repo": repo, "sha": sha,
                 "failed_jobs": [], "run_url": Value::Null,
                 "reason": "no workflow runs found for this sha; absence of workflow definitions could not be proven from a complete GitHub git tree",
-                "workflow_tree_http_status": tree_status
+                "workflow_tree_error": tree_result.err().map(|f| f.reason).unwrap_or_default(),
+                "transport": source,
             }
-        }));
+        });
     }
     const STALE_IN_PROGRESS_RUN_GRACE_SECS: i64 = 900;
     let default_ignored_workflows_orthogonal_to_code_under_test = ["Deploy GH Pages"];
@@ -2964,12 +4007,15 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     let mut any_pending = false;
     let mut any_failure = false;
     let mut counted_runs = 0usize;
-    for run in &runs {
+    let mut jobs: Vec<Value> = vec![];
+    let mut jobs_unavailable: Vec<Value> = vec![];
+    for run in runs {
         let run_name = run.get("name").and_then(|v| v.as_str()).unwrap_or("");
         if ignored_names.iter().any(|n| n == run_name) {
             continue;
         }
         counted_runs += 1;
+        ci_status_collect_run_jobs(transport, repo, run, rest_opts, &mut jobs, &mut jobs_unavailable);
         let gh_status = run.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let conclusion = run.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
         let mut per_run_status = ci_status_conclusion_to_status(conclusion, gh_status);
@@ -3010,12 +4056,77 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     } else if any_pending {
         overall = "pending";
     }
-    Ok(json!({
+    json!({
         "ok": true, "verb": "ci-status", "data": {
             "status": overall, "repo": repo, "sha": sha,
             "failed_jobs": failed_jobs, "run_url": run_url, "run_count": counted_runs,
+            "jobs": jobs, "jobs_unavailable": jobs_unavailable,
+            "transport": source,
         },
-    }))
+    })
+}
+
+pub(super) fn ci_status_collect_run_jobs(
+    transport: CiStatusTransport,
+    repo: &str,
+    run: &Value,
+    rest_opts: &str,
+    jobs: &mut Vec<Value>,
+    jobs_unavailable: &mut Vec<Value>,
+) {
+    let workflow = run.get("name").and_then(Value::as_str).unwrap_or("");
+    let Some(run_id) = run.get("id").and_then(Value::as_u64) else {
+        jobs_unavailable.push(json!({ "workflow": workflow, "reason": "workflow run carries no id" }));
+        return;
+    };
+    let path = format!("repos/{}/actions/runs/{}/jobs?per_page=100", repo, run_id);
+    match ci_status_attempt(transport, &path, rest_opts) {
+        Ok(parsed) => {
+            let total = parsed.get("total_count").and_then(Value::as_u64).unwrap_or(0);
+            match parsed.get("jobs").and_then(Value::as_array) {
+                Some(listed) if total <= listed.len() as u64 => jobs.extend(
+                    listed
+                        .iter()
+                        .map(|job| ci_status_job_entry(workflow, run_id, job)),
+                ),
+                Some(listed) => jobs_unavailable.push(json!({
+                    "workflow": workflow,
+                    "run_id": run_id,
+                    "reason": format!("job list truncated: {} of {} jobs listed", listed.len(), total),
+                })),
+                None => jobs_unavailable.push(json!({
+                    "workflow": workflow,
+                    "run_id": run_id,
+                    "reason": "jobs response carries no jobs array",
+                })),
+            }
+        }
+        Err(failure) => jobs_unavailable.push(json!({
+            "workflow": workflow,
+            "run_id": run_id,
+            "reason": failure.reason,
+        })),
+    }
+}
+
+pub(super) fn ci_status_job_entry(workflow: &str, run_id: u64, job: &Value) -> Value {
+    let status = job.get("status").and_then(Value::as_str).unwrap_or("");
+    let github_conclusion = job.get("conclusion").and_then(Value::as_str);
+    let conclusion = match (status, github_conclusion) {
+        ("completed", Some("success" | "neutral")) => "success",
+        ("completed", Some("skipped")) => "skipped",
+        ("completed", _) => "failure",
+        _ => "pending",
+    };
+    json!({
+        "workflow": workflow,
+        "name": job.get("name").and_then(Value::as_str).unwrap_or(""),
+        "conclusion": conclusion,
+        "github_status": status,
+        "github_conclusion": github_conclusion,
+        "run_id": run_id,
+        "job_url": job.get("html_url").and_then(Value::as_str),
+    })
 }
 
 pub(super) fn ci_status(body: &Value) -> u64 {
@@ -3026,11 +4137,36 @@ pub(super) fn ci_status(body: &Value) -> u64 {
 }
 
 pub(super) fn git_branch(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_branch", body, &["remote", "all"]) {
+        return refusal;
+    }
+    for flag in ["remote", "all"] {
+        match body.get(flag) {
+            None | Some(Value::Null) | Some(Value::Bool(_)) => {}
+            Some(_) => {
+                return err_json(
+                    "git_branch",
+                    json!({
+                        "error": format!("git_branch: {} must be a boolean", flag),
+                        "invalid_fields": [flag],
+                    }),
+                );
+            }
+        }
+    }
+    let requested = |key: &str| body.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+    let listing_args = if requested("all") {
+        "branch --no-color -a"
+    } else if requested("remote") {
+        "branch --no-color -r"
+    } else {
+        "branch --no-color"
+    };
     let cwd = body_cwd(body);
     let current = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD")
         .trim()
         .to_string();
-    let listing = exec_git_in(cwd, "branch --no-color");
+    let listing = exec_git_in(cwd, listing_args);
     let branches: Vec<String> = listing
         .lines()
         .map(|l| l.trim_start_matches('*').trim().to_string())
@@ -3123,7 +4259,7 @@ pub(super) fn git_remote(body: &Value) -> u64 {
     })
 }
 
-pub(super) fn git_checkout_pathspec(raw: &str, top: &str, prefix: &str) -> Result<String, &'static str> {
+pub(super) fn git_checkout_pathspec(raw: &str, top: &str, prefix: &str) -> Result<(String, bool), &'static str> {
     let spec = raw.trim();
     if spec.is_empty() {
         return Err("empty pathspec");
@@ -3168,7 +4304,47 @@ pub(super) fn git_checkout_pathspec(raw: &str, top: &str, prefix: &str) -> Resul
     {
         return Err("the project's own .gm/ and .agentplug* are never restored");
     }
-    Ok(for_git)
+    let restorable = is_restorable_transient_generated_path(&from_top);
+    Ok((for_git, restorable))
+}
+
+fn checkout_diff(source: Option<&str>, scope: &[&str], cwd: Option<&str>) -> Result<Vec<String>, String> {
+    let mut argv: Vec<&str> = vec!["diff", "--name-only"];
+    if let Some(s) = source {
+        argv.push(s);
+    }
+    argv.push("--");
+    argv.extend(scope.iter().copied());
+    let r = git_call_argv(&argv, cwd);
+    let stdout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
+        let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+        return Err(format!("{}{}", stdout, stderr).trim().to_string());
+    }
+    Ok(stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+fn checkout_restore(source_arg: Option<&str>, scope: &[&str], cwd: Option<&str>) -> Result<String, String> {
+    let mut argv: Vec<&str> = vec!["restore"];
+    if let Some(a) = source_arg {
+        argv.push(a);
+    }
+    argv.push("--");
+    argv.extend(scope.iter().copied());
+    let r = git_call_argv(&argv, cwd);
+    let output = format!(
+        "{}{}",
+        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        r.get("stderr").and_then(|x| x.as_str()).unwrap_or("")
+    );
+    if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
+        return Err(output.trim().to_string());
+    }
+    Ok(output.trim().to_string())
 }
 
 pub(super) fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Value) -> u64 {
@@ -3206,13 +4382,15 @@ pub(super) fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Va
     let prefix = exec_git_in(cwd, "rev-parse --show-prefix")
         .trim()
         .replace('\\', "/");
-    let mut specs: Vec<String> = vec![];
+    let mut regular: Vec<String> = vec![];
+    let mut exempt: Vec<String> = vec![];
     for item in items {
         let Some(raw) = item.as_str() else {
             return err("git_checkout", "every entry of paths must be a string");
         };
         match git_checkout_pathspec(raw, &top, &prefix) {
-            Ok(spec) => specs.push(spec),
+            Ok((spec, true)) => exempt.push(spec),
+            Ok((spec, false)) => regular.push(spec),
             Err(reason) => {
                 return err_json(
                     "git_checkout",
@@ -3221,41 +4399,77 @@ pub(super) fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Va
             }
         }
     }
-    let mut scope: Vec<&str> = specs.iter().map(|s| s.as_str()).collect();
-    scope.extend(GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
-    let mut diff_argv: Vec<&str> = vec!["diff", "--name-only"];
-    if let Some(s) = source {
-        diff_argv.push(s);
+    let protected: Vec<&str> = GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec).collect();
+    let regular_scope: Vec<&str> = regular.iter().map(|s| s.as_str()).collect();
+    let exempt_scope: Vec<&str> = exempt.iter().map(|s| s.as_str()).collect();
+    let mut guarded_scope: Vec<&str> = regular_scope.clone();
+    guarded_scope.extend(protected.iter().copied());
+    let (guarded, blocked): (Vec<String>, Vec<String>) = if regular.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let unguarded = match checkout_diff(source, &regular_scope, cwd) {
+            Ok(v) => v,
+            Err(e) => return err("git_checkout", &e),
+        };
+        let guarded = match checkout_diff(source, &guarded_scope, cwd) {
+            Ok(v) => v,
+            Err(e) => return err("git_checkout", &e),
+        };
+        let blocked: Vec<String> = {
+            let kept: std::collections::HashSet<&str> = guarded.iter().map(String::as_str).collect();
+            unguarded
+                .iter()
+                .filter(|p| !kept.contains(p.as_str()))
+                .cloned()
+                .collect()
+        };
+        (guarded, blocked)
+    };
+    if !blocked.is_empty() {
+        let shown: Vec<&str> = blocked.iter().take(20).map(String::as_str).collect();
+        let more = blocked.len() - shown.len();
+        return err(
+            "git_checkout",
+            &format!(
+                "refused by policy: the project's own .gm/ and .agentplug* are never restored; {} named path(s) fall under it: {}{}",
+                blocked.len(),
+                shown.join(", "),
+                if more > 0 { format!(" (and {} more)", more) } else { String::new() }
+            ),
+        );
     }
-    diff_argv.push("--");
-    diff_argv.extend(scope.iter().copied());
-    let differing: Vec<String> = git_call_argv(&diff_argv, cwd)
-        .get("stdout")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
+    let exempt_differing = if exempt_scope.is_empty() {
+        Vec::new()
+    } else {
+        match checkout_diff(source, &exempt_scope, cwd) {
+            Ok(v) => v,
+            Err(e) => return err("git_checkout", &e),
+        }
+    };
     let source_arg = source.map(|s| format!("--source={}", s));
-    let mut argv: Vec<&str> = vec!["restore"];
-    if let Some(a) = &source_arg {
-        argv.push(a.as_str());
+    let mut outputs: Vec<String> = vec![];
+    if !regular.is_empty() {
+        match checkout_restore(source_arg.as_deref(), &guarded_scope, cwd) {
+            Ok(o) => outputs.push(o),
+            Err(e) => return err("git_checkout", &e),
+        }
     }
-    argv.push("--");
-    argv.extend(scope.iter().copied());
-    let r = git_call_argv(&argv, cwd);
-    let output = format!(
-        "{}{}",
-        r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
-        r.get("stderr").and_then(|x| x.as_str()).unwrap_or("")
-    );
-    if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
-        return err("git_checkout", &output);
+    if !exempt_scope.is_empty() {
+        match checkout_restore(source_arg.as_deref(), &exempt_scope, cwd) {
+            Ok(o) => outputs.push(o),
+            Err(e) => return err("git_checkout", &e),
+        }
     }
+    let mut restored = guarded;
+    restored.extend(exempt_differing);
+    let output = outputs
+        .into_iter()
+        .filter(|o| !o.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
     ok(
         "git_checkout",
-        json!({ "restored": differing, "source": source.unwrap_or("index"), "output": output.trim() }),
+        json!({ "restored": restored, "source": source.unwrap_or("index"), "output": output }),
     )
 }
 
@@ -3379,6 +4593,8 @@ pub(super) fn git_worktree(body: &Value) -> u64 {
     )
 }
 
+const BRANCH_CREATE_REFUSED: &str = "BRANCH_CREATE_REFUSED: this project keeps all work on main; creating a branch is refused";
+
 pub(super) fn git_checkout(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_checkout",
@@ -3407,17 +4623,16 @@ pub(super) fn git_checkout(body: &Value) -> u64 {
         .get("create")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let argv: Vec<&str> = if create {
-        vec!["checkout", "-b", refspec]
-    } else {
-        vec!["checkout", refspec]
-    };
+    if create {
+        return err("git_checkout", BRANCH_CREATE_REFUSED);
+    }
+    let argv: Vec<&str> = vec!["checkout", refspec];
     if let Err(e) = run_git_checked(&argv, cwd, "git_checkout", "checkout failed") {
         return e;
     }
     ok(
         "git_checkout",
-        json!({ "checked_out": refspec, "created": create }),
+        json!({ "checked_out": refspec, "created": false }),
     )
 }
 
@@ -3491,19 +4706,228 @@ pub(super) fn git_merge(body: &Value) -> u64 {
     )
 }
 
+pub(super) const MERGE_ABORT_SHELF_MESSAGE: &str = "gm merge-abort shelf";
+
+pub(super) const GIT_MERGE_ABORT_HELP: &str = "\
+git_merge_abort {} restores the pre-merge HEAD: {aborted, merge_in_progress, head}, plus
+{preserved_paths, restored} when a merge was in progress.
+  preserve: false (default true) never shelves anything -- a reset that cannot run is reported
+            instead of worked around.
+  No merge in progress is a clean reply: {aborted:false, merge_in_progress:false, head}, never a
+  raw git error. MERGE_HEAD is repo-wide state, so dispatch it only on a repo you own.
+  `git merge --abort` runs `git reset --merge`, which refuses while the index and the worktree
+  disagree for a path -- typically a file git auto-merged that another session then edited in the
+  worktree. The verb shelves exactly those paths with
+  `git stash push --keep-index -- <paths>`, which leaves the index content in the worktree so the
+  reset can run, aborts, then pops the shelf so the edits land back in the worktree as unstaged
+  edits. Nothing is discarded silently: if the shelf or the pop cannot run, the reply says so and
+  names the stash entry that still holds the edits.
+  Unmerged (conflicted) paths are never shelved -- they are reported in `conflicted` and the verb
+  refuses rather than rewriting a conflict another session is resolving.
+  A refusal names every path blocking the reset in `blocking_paths` and gives `next_dispatch`:
+  git_add {paths:[...]} to accept the worktree version, or git_stash {paths:[...]} then
+  git_merge_abort then git_stash_pop.";
+
+pub(super) fn git_exit_code(result: &Value) -> i64 {
+    result
+        .get("exit_code")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0)
+}
+
+pub(super) fn git_output_text(result: &Value) -> String {
+    format!(
+        "{}{}",
+        result.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+        result.get("stderr").and_then(|x| x.as_str()).unwrap_or("")
+    )
+}
+
+pub(super) fn git_name_only(cwd: Option<&str>, argv: &[&str]) -> Vec<String> {
+    git_call_argv(argv, cwd)
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+pub(super) fn git_merge_in_progress(cwd: Option<&str>) -> bool {
+    git_call_argv(&["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], cwd)
+        .get("exit_code")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(1)
+        == 0
+}
+
 pub(super) fn git_merge_abort(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_merge_abort", body, &["preserve"]) {
+        return refusal;
+    }
     let cwd = body_cwd(body);
-    if let Err(e) = run_git_checked(
-        &["merge", "--abort"],
-        cwd,
-        "git_merge_abort",
-        "merge abort failed",
-    ) {
-        return e;
+    let preserve = body
+        .get("preserve")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let head_now = || exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    if !git_merge_in_progress(cwd) {
+        return ok(
+            "git_merge_abort",
+            json!({ "aborted": false, "merge_in_progress": false, "head": head_now() }),
+        );
+    }
+    let first = git_call_argv(&["merge", "--abort"], cwd);
+    if git_exit_code(&first) == 0 {
+        return ok(
+            "git_merge_abort",
+            json!({
+                "aborted": true,
+                "merge_in_progress": false,
+                "preserved_paths": [],
+                "restored": true,
+                "head": head_now(),
+            }),
+        );
+    }
+    let first_out = git_output_text(&first);
+    let blocking = git_name_only(cwd, &["diff", "--name-only"]);
+    let conflicted = git_name_only(cwd, &["diff", "--name-only", "--diff-filter=U"]);
+    let shelvable: Vec<String> = blocking
+        .iter()
+        .filter(|p| !conflicted.contains(p))
+        .cloned()
+        .collect();
+    let refuse = |error: String, extra: Value| -> u64 {
+        let mut payload = json!({
+            "error": error,
+            "aborted": false,
+            "merge_in_progress": true,
+            "blocking_paths": blocking.clone(),
+            "conflicted": conflicted.clone(),
+            "head": head_now(),
+            "next_dispatch": {
+                "accept_worktree": { "verb": "git_add", "paths": blocking.clone() },
+                "shelf_first": ["git_stash", "git_merge_abort", "git_stash_pop"],
+            },
+        });
+        if let (Some(dst), Some(src)) = (payload.as_object_mut(), extra.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        err_json("git_merge_abort", payload)
+    };
+    let uptodate_class =
+        first_out.contains("not uptodate") || first_out.contains("Could not reset index file");
+    if !preserve || !uptodate_class || shelvable.is_empty() {
+        let reason = if !preserve {
+            "preserve:false -- refusing to shelve worktree edits to make the reset run"
+        } else if shelvable.is_empty() {
+            "no shelvable path explains the reset failure -- nothing was modified"
+        } else {
+            "the reset failure is not the index/worktree mismatch this verb can shelve around"
+        };
+        return refuse(
+            first_out,
+            json!({
+                "reason": reason,
+                "hint": "git_add the blocking paths to accept the worktree version, then git_commit; or git_stash them, git_merge_abort, git_stash_pop",
+            }),
+        );
+    }
+    let mut argv: Vec<&str> = vec![
+        "stash",
+        "push",
+        "--keep-index",
+        "--message",
+        MERGE_ABORT_SHELF_MESSAGE,
+        "--",
+    ];
+    for p in &shelvable {
+        argv.push(p.as_str());
+    }
+    let shelved = git_call_argv(&argv, cwd);
+    if git_exit_code(&shelved) != 0 {
+        return refuse(
+            git_output_text(&shelved),
+            json!({ "reason": "shelving the blocking paths failed -- the merge state and every worktree edit are untouched" }),
+        );
+    }
+    let shelf_created = !git_output_text(&shelved).contains("No local changes to save");
+    let shelf_ref = if shelf_created {
+        exec_git_in(cwd, "stash list -1 --format=%gd").trim().to_string()
+    } else {
+        String::new()
+    };
+    let still_blocking: Vec<String> = git_name_only(cwd, &["diff", "--name-only"])
+        .into_iter()
+        .filter(|p| shelvable.contains(p))
+        .collect();
+    if !still_blocking.is_empty() {
+        if shelf_created {
+            let _ = git_call_argv(&["stash", "pop", shelf_ref.as_str()], cwd);
+        }
+        return refuse(
+            format!(
+                "the shelf left these paths still disagreeing with the index: {}",
+                still_blocking.join(", ")
+            ),
+            json!({
+                "reason": "the shelf did not make the worktree agree with the index, so the reset was not retried; the shelf was popped back",
+                "still_blocking": still_blocking,
+            }),
+        );
+    }
+    let second = git_call_argv(&["merge", "--abort"], cwd);
+    if git_exit_code(&second) != 0 {
+        let restored = if shelf_created {
+            git_exit_code(&git_call_argv(&["stash", "pop", shelf_ref.as_str()], cwd)) == 0
+        } else {
+            true
+        };
+        return refuse(
+            git_output_text(&second),
+            json!({
+                "reason": "the abort still failed after shelving -- the shelf was popped back, so no edit is lost",
+                "shelf_ref": shelf_ref,
+                "restored": restored,
+            }),
+        );
+    }
+    let mut restored = true;
+    let mut restore_out = String::new();
+    if shelf_created {
+        let pop = git_call_argv(&["stash", "pop", shelf_ref.as_str()], cwd);
+        restore_out = git_output_text(&pop);
+        restored = git_exit_code(&pop) == 0;
+    }
+    if !restored {
+        return err_json(
+            "git_merge_abort",
+            json!({
+                "error": restore_out,
+                "aborted": true,
+                "merge_in_progress": false,
+                "preserved_paths": shelvable,
+                "restored": false,
+                "stash": shelf_ref,
+                "head": head_now(),
+                "hint": "the merge is aborted and the edits still sit in that stash entry -- git_stash_pop {ref} once the worktree is quiet, or git_stash_list to see it",
+            }),
+        );
     }
     ok(
         "git_merge_abort",
-        json!({ "aborted": true, "head": exec_git_in(cwd, "rev-parse HEAD").trim() }),
+        json!({
+            "aborted": true,
+            "merge_in_progress": false,
+            "preserved_paths": shelvable,
+            "restored": true,
+            "stash_popped": shelf_ref,
+            "head": head_now(),
+        }),
     )
 }
 
@@ -3597,6 +5021,7 @@ pub(super) const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &[
     "projectPath",
     "git_root_override",
     "_plan",
+    "full_response",
 ];
 pub(crate) const GIT_PROTECTED_PATHSPECS: &[(&str, &str)] = &[
     (".gm", ":(top,exclude).gm"),
@@ -4078,6 +5503,9 @@ pub(super) fn git_branch_delete(body: &Value) -> u64 {
 }
 
 pub(super) fn git_rm(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_rm", body, &["paths", "force", "cached"]) {
+        return refusal;
+    }
     let cwd = body_cwd(body);
     let paths: Vec<String> = body
         .get("paths")
@@ -4095,9 +5523,13 @@ pub(super) fn git_rm(body: &Value) -> u64 {
         .get("cached")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
     let mut argv: Vec<&str> = vec!["rm"];
     if cached {
         argv.push("--cached");
+    }
+    if force {
+        argv.push("-f");
     }
     argv.push("-r");
     for p in &paths {
@@ -4106,7 +5538,10 @@ pub(super) fn git_rm(body: &Value) -> u64 {
     if let Err(e) = run_git_checked(&argv, cwd, "git_rm", "git rm failed") {
         return e;
     }
-    ok("git_rm", json!({ "removed": paths, "cached": cached }))
+    ok(
+        "git_rm",
+        json!({ "removed": paths, "cached": cached, "forced": force }),
+    )
 }
 
 pub(super) fn git_revert(body: &Value) -> u64 {
@@ -4578,10 +6013,20 @@ pub(super) fn excluded_pathspecs(paths: &[String], cwd: Option<&str>) -> Vec<Str
 
 pub(super) fn git_pathspec_scope(paths: &[String], cwd: Option<&str>) -> Vec<String> {
     let mut scope: Vec<String> = vec![":(top,exclude).agentplug*".to_string()];
+    let mut used: usize = scope[0].len() + 1;
     for (_, path) in withheld_dirty_entries(cwd) {
-        if !path.starts_with(".agentplug") && !caller_pathspec_covers(paths, &path) {
-            scope.push(format!(":(top,exclude,literal){}", path));
+        if path.starts_with(".agentplug") || caller_pathspec_covers(paths, &path) {
+            continue;
         }
+        let spec = format!(":(top,exclude,literal){}", path);
+        if used + spec.len() + 1 > GIT_PATHSPEC_SCOPE_EXCLUDE_BUDGET_CHARS {
+            continue;
+        }
+        if scope.iter().any(|held| held == &spec) {
+            continue;
+        }
+        used += spec.len() + 1;
+        scope.push(spec);
     }
     if paths.is_empty() {
         scope.push(":/".to_string());

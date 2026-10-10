@@ -76,6 +76,8 @@ pub struct Policy {
     pub long_gap_same_burst_ms: u64,
     #[serde(default = "default_long_gap_retry_bursts_before_escalate")]
     pub long_gap_retry_escalate_after: u32,
+    #[serde(default = "default_concurrency_window_ms")]
+    pub concurrency_window_ms: u64,
     #[serde(default = "default_hook_timeout_ms")]
     pub hook_timeout_ms: u64,
     #[serde(default = "default_longgap_threshold_ms")]
@@ -224,6 +226,9 @@ fn default_long_gap_same_burst_ms() -> u64 {
 fn default_long_gap_retry_bursts_before_escalate() -> u32 {
     2
 }
+fn default_concurrency_window_ms() -> u64 {
+    900_000
+}
 fn default_terminal_phase() -> String {
     "COMPLETE".to_string()
 }
@@ -265,6 +270,7 @@ impl Default for Policy {
             residual_checks: default_residual_checks_ordered_by_priority(),
             long_gap_same_burst_ms: default_long_gap_same_burst_ms(),
             long_gap_retry_escalate_after: default_long_gap_retry_bursts_before_escalate(),
+            concurrency_window_ms: default_concurrency_window_ms(),
             terminal_phase: default_terminal_phase(),
             completion_phase: None,
             completion_source: None,
@@ -354,6 +360,7 @@ impl Graph {
         "gate_repeat_escalate_threshold",
         "hook_timeout_ms",
         "longgap_threshold_ms",
+        "concurrency_window_ms",
         "require_witness_evidence",
         "prd_closed_statuses",
         "mutables_resolved_statuses",

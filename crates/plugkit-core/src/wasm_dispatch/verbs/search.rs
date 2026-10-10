@@ -485,6 +485,28 @@ pub(super) fn apply_scope_echo(reply: &mut Value, scope: &PathScope, channels: &
     }
 }
 
+fn emit_codeinsight_pass_outcome(reason: &str, root: &str, pass: &Value) {
+    let changed_files_count = pass
+        .get("changed_files_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let event = if changed_files_count > 0 {
+        "codeinsight_rebuild"
+    } else {
+        "codeinsight_resume"
+    };
+    emit_event(
+        event,
+        json!({
+            "reason": reason,
+            "root": root,
+            "pass_ok": pass.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "changed_files_count": changed_files_count,
+            "changed_files": pass.get("changed_files").cloned().unwrap_or_else(|| json!([])),
+        }),
+    );
+}
+
 pub(super) fn codesearch_at_root(
     body: &Value,
     root: &str,
@@ -522,10 +544,6 @@ pub(super) fn codesearch_at_root(
             } else {
                 "digest-mismatch"
             };
-            emit_event(
-                "codeinsight_rebuild",
-                json!({ "reason": reason, "root": root, "stored_then_current": current }),
-            );
             let index_started = unsafe { crate::wasm_dispatch::host_now_ms() };
             let cold_budget_ms = match caller_remaining_ms() {
                 Some(remaining) => COLD_INDEX_PASS_BUDGET_MS.min(remaining.saturating_sub(DUAL_SEARCH_RESERVE_MS)),
@@ -536,6 +554,7 @@ pub(super) fn codesearch_at_root(
             } else {
                 crate::code_index::index_at_topup(root, cfg.index.prune_pass_file_limit_ceiling, root, cfg.index.incremental_topup_wall_budget_ms)
             };
+            emit_codeinsight_pass_outcome(reason, root, &index_result);
             let index_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(index_started);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
@@ -796,6 +815,14 @@ pub(super) fn resolve_scan_target(body: &Value) -> Result<(Option<&str>, Vec<Str
             root = None;
         } else if !crate::wasm_dispatch::host_allow_root(candidate) {
             let scope = candidate.strip_prefix("./").unwrap_or(candidate);
+            if crate::pkfs::is_absolute(scope)
+                && crate::scan_universe::scope_inside_root(".", &scope.replace('\\', "/")).is_none()
+            {
+                let project = crate::scan_universe::absolute_root_for_message(".");
+                return Err(format!(
+                    "root '{candidate}' is not a directory the host will grant access to: it carries no project marker (.git, .gm, package.json, Cargo.toml, go.mod, pyproject.toml) and it lies outside the dispatch project '{project}', so nothing was searched; the named root is refused, not replaced by the cwd"
+                ));
+            }
             let valid_relative_scope = !scope.starts_with('/')
                 && scope
                     .split('/')
@@ -1136,6 +1163,7 @@ mode:\"comments\" -- one pass for every comment in the tree, column-1 and inline
                             \"comments\". \"inline\":true marks a comment with code before it on the same line.
              plus \"comment_count\", \"directive_count\", \"files\", \"output\" (path:line:column: text),
              \"file_source\", \"file_source_detail\" and \"exhaustive\".
+             files and output list comments only; a directive is counted in directive_count and listed in directives alone.
 
 Every scan reports \"file_source\" and \"file_source_detail\": \"git\" means `git ls-files --cached`
 (tracked files only), \"walk\" a filesystem walk and \"file\" a single file read straight from disk.
@@ -1182,9 +1210,16 @@ fs_read returns a file's contents.
 Paged replies add \"total_lines\", \"offset\", \"returned_lines\" and \"has_more_lines\".";
 
 pub(super) const FS_WRITE_HELP: &str = "\
-fs_write writes a file inside the project.
+fs_write writes a file inside the project. There is no append mode: a write replaces the whole file.
   {\"path\":\"<relative path>\"}     required, relative and within the project
-  {\"content\":\"<text>\"}           required; \"data\" is an alias
+  {\"content\":\"<text>\"}           required, as a JSON string with \\n for each newline;
+                                   \"data\" and \"text\" are aliases
+  {\"content\":[\"<line>\", ...]}    an array of lines is accepted too, joined with \\n plus a trailing
+                                   newline, so a caller never has to escape newlines by hand
+  {\"allow_empty\":true}            permit writing \"\" on purpose (truncating the file)
+Raw (non-JSON) body: accepted when the first line is a path= directive, the rest is the contents:
+  path=<relative path>
+  <the file contents>
 Returns {\"bytes\": <written>}. A write outside the root is always refused, allowOutsideRoot included: that
 flag widens the read verbs only.";
 
@@ -1203,6 +1238,39 @@ fs_stat stats one path inside the project. {\"path\":\"<relative path>\"}, requi
                                   refused, and the host sandbox still serves only paths under the user gm root
                                   or a directory carrying a project marker (.git, .gm, package.json,
                                   Cargo.toml, go.mod, pyproject.toml).";
+
+pub(super) const PRD_RESOLVE_HELP: &str = "\
+prd-resolve {id (string), witness_evidence (string), commit_comment (string, optional), keep_status (boolean, optional)}, plus a witness binding.
+  body: {\"id\":\"<row id>\",\"witness_evidence\":\"<string>\",\"witness_dispatch_id\":\"<dispatch_id of your own live run>\"}
+  witness_evidence (string): a file:line, codesearch hit or exec snippet specific to this row. Required
+                    unless keep_status:true (aliases preserve_status, leave_pending), which
+                    annotates the row without completing it and needs no binding.
+  binding, EITHER: witness_dispatch_id, the dispatch_id of a gm dispatch in this project's
+                   dispatch ledger, copied from that dispatch's reply.
+  binding, OR all four of: witness_exit_code (integer, must be 0), witness_output_sha256
+                   (64 lowercase hex sha256 of the witness output file), witness_output_path
+                   (that output file, relative to the project root, no .. segments) and
+                   witness_ts (RFC 3339 timestamp). The file is re-read and re-hashed, and any
+                   mismatch is refused.
+  id aliases: prd_id, mutable_id, item_id, slug, key. commit_comment aliases: commit_message,
+  resolution_note (a one-line note bundled into the next commit).
+  resolution: free text stored on the row as resolution (alias resolution_text). It is not bundled into
+              a commit; a file path it names counts as a reference for bundling the row's commit_comment.
+  commit_sha: a 7 to 40 hex commit sha stored on the row as commit_sha (alias commit); a malformed value
+              is refused. commit_comment_attached is true when the row carries a commit_comment or a commit_sha.
+  status: optional. A resolve sets completed; status_kept is true when status is absent or equals the
+          row's final status, and false when the row ended with a different status.
+  reply: outcome key (resolved or annotated), status_kept, commit_comment_attached, resolution_attached,
+         commit_sha_attached, witness_bound. A help request writes no state.";
+
+pub(super) const PRD_ADD_HELP: &str = "\
+prd-add {id, subject, description, notes, status, blockedBy, overwrite}. body.id is required.
+  id: a non-empty kebab-case string, unique in .gm/prd.yml. A body with no usable id is refused,
+      and so is an id that already exists unless overwrite:true.
+  status: pending (the default when omitted, open) or completed (finished). The finished state is
+          completed, never resolved. prd-resolve sets completed once a witness binds to the row.
+  subject: the row's one-line intent. description and notes are free text.
+  help:true returns this text and writes no row.";
 
 pub(super) fn help_requested(body: &Value) -> bool {
     match body.get("help") {
@@ -1224,6 +1292,9 @@ pub(super) fn verb_help_doc(verb: &str) -> Option<&'static str> {
         "fs_write" => Some(FS_WRITE_HELP),
         "fs_readdir" => Some(FS_READDIR_HELP),
         "fs_stat" => Some(FS_STAT_HELP),
+        "prd-resolve" => Some(PRD_RESOLVE_HELP),
+        "prd-add" => Some(PRD_ADD_HELP),
+        "git_merge_abort" => Some(super::git::GIT_MERGE_ABORT_HELP),
         "git_worktree" => Some("git_worktree {action: list} returns worktrees; {action: add, path, ref?: HEAD, detach?: true} creates a linked checkout; detach false requires an existing local branch name; {action: remove, path} removes a clean unlocked checkout without force. Unknown fields are refused per action. Repository selectors and session fields are accepted."),
         _ => None,
     }
@@ -1267,27 +1338,43 @@ pub(super) fn scan_no_ignore_requested(body: &Value) -> bool {
 
 pub(super) fn scan_scope_hint(scan_cap: u32) -> String {
     format!(
-        "to reach every match, scope the scan and repeat per subtree: pass \"path\":\"<dir-or-file>\" or \"paths\":[\"<one>\",\"<two>\"] and/or \"glob\":\"**/*.rs\" -- a scoped scan's cap is per call, so union the per-scope results; or raise the cap with \"max_results\": <n> (this call used {scan_cap}); \"output_mode\":\"files_with_matches\" or \"count\" covers far more files per call than \"content\""
+        "to reach every match, scope the scan and repeat per subtree: pass \"path\":\"<dir-or-file>\" or \"paths\":[\"<one>\",\"<two>\"] and/or \"glob\":\"**/*.rs\" -- a scoped scan's cap is per call, so union the per-scope results; or raise the cap with \"max_results\": <n> (this call used {scan_cap})"
     )
 }
 
 /// Counters that describe the scan to a human sitting in front of it and nothing else: the cache is
 /// internal, the phase split is profiling, and the listed/unreadable counts are already folded into
-/// `partial_reason` on the scans where they left the answer incomplete. `excluded_by_rule_summary`
-/// stays -- it names which rule hid which subtree, which is the one a caller can act on.
+/// `partial_reason` on the scans where they left the answer incomplete. `excluded_by_rule`, its count
+/// and `excluded_by_rule_summary` stay: they name every path a rule hid, which is what a caller acts on.
 pub(super) const SCAN_TELEMETRY_DROPPED: &[&str] = &[
     "scan_cache",
     "phase_ms",
     "files_listed",
     "files_unreadable",
     "files_with_nul_scanned",
-    "excluded_by_rule",
-    "excluded_by_rule_count",
 ];
 
 /// A bounded scan still answers, so it stays `ok` -- and `ok: true` beside an empty `matches` reads
 /// as "there is nothing there" when it means "this did not look at everything". The bound that fired
 /// rides at the top of the envelope, where a caller meets it before the answer.
+/// gm's own state (`.gm/`, `.agentplug-kv/`) is not code. Its exclusions are named in
+/// `excluded_by_rule_summary` but do not count toward `exhaustive`; every other rule drops code.
+const GM_STATE_EXCLUSION_RULES: &[&str] = &["gm_state_dir", "agentplug_kv_cache"];
+
+/// The rule-excluded paths that are code, the only exclusions that clear `exhaustive`.
+pub(super) fn code_exclusion_count(out: &serde_json::Map<String, Value>) -> u64 {
+    out.get("excluded_by_rule_summary")
+        .and_then(|v| v.as_object())
+        .map(|summary| {
+            summary
+                .iter()
+                .filter(|(rule, _)| !GM_STATE_EXCLUSION_RULES.contains(&rule.as_str()))
+                .map(|(_, n)| n.as_u64().unwrap_or(0))
+                .sum::<u64>()
+        })
+        .unwrap_or(0)
+}
+
 pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Option<String> {
     if out.get("exhaustive").and_then(|v| v.as_bool()) != Some(false) {
         return None;
@@ -1330,6 +1417,33 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
             "{untyped} oversize files with no extension were skipped before reading"
         ));
     }
+    let excluded = code_exclusion_count(out);
+    if excluded > 0 {
+        let rules: Vec<String> = out
+            .get("excluded_by_rule_summary")
+            .and_then(|v| v.as_object())
+            .map(|summary| {
+                summary
+                    .iter()
+                    .filter(|(rule, _)| !GM_STATE_EXCLUSION_RULES.contains(&rule.as_str()))
+                    .map(|(rule, n)| format!("{rule} x{}", n.as_u64().unwrap_or(0)))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+        bounds.push(format!(
+            "{excluded} paths were excluded by rule ({}) and are named in excluded_by_rule",
+            rules.join(", ")
+        ));
+    }
+    let outside = out
+        .get("glob_outside_path")
+        .and_then(|v| v.as_array())
+        .map_or(0, |paths| paths.len());
+    if outside > 0 {
+        bounds.push(format!(
+            "{outside} glob alternatives name a directory outside path and were not scanned"
+        ));
+    }
     let reason = if bounds.is_empty() {
         "the scan did not cover the whole scope".to_string()
     } else {
@@ -1341,6 +1455,11 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
 }
 
 pub(super) fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_cap: u32) -> Option<String> {
+    // A rule that dropped code paths from the scope is a coverage gap, as a bound is: the walk
+    // finished, but not over every code file in the scope. gm's own state is named, never counted.
+    if code_exclusion_count(out) > 0 {
+        out.insert("exhaustive".to_string(), json!(false));
+    }
     let partial = scan_partial_reason(out);
     for key in SCAN_TELEMETRY_DROPPED {
         out.remove(*key);
@@ -1748,10 +1867,21 @@ pub(super) fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> 
         Ok(limit) => limit,
         Err(e) => return err("grep", &e),
     };
-    let (_, exclude_globs) = match grep_route_globs(body) {
+    let (include_globs, exclude_globs) = match grep_route_globs(body) {
         Ok(globs) => globs,
         Err(e) => return err("grep", &e),
     };
+    let output_mode = body
+        .get("output_mode")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("outputMode").and_then(|v| v.as_str()))
+        .unwrap_or("content");
+    if !GREP_OUTPUT_MODES.contains(&output_mode) {
+        return err(
+            "grep",
+            &format!("output_mode \"{output_mode}\" is not a grep output mode -- valid modes are \"content\", \"files_with_matches\", \"count\""),
+        );
+    }
     let context = match body.get("context").and_then(|v| v.as_u64()) {
         Some(n) => n as usize,
         None => 0,
@@ -1759,11 +1889,9 @@ pub(super) fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> 
     let scan = crate::code_index::CommentScan {
         root,
         paths: &path_refs,
-        path_glob: body.get("glob").and_then(|v| v.as_str())
-            .or_else(|| body.get("include").and_then(|v| v.as_str()))
-            .or_else(|| body.get("path_glob").and_then(|v| v.as_str()))
-            .filter(|g| !g.is_empty()),
+        include_globs,
         exclude_globs,
+        omit_hits: output_mode != "content",
         max_matches: max_matches as usize,
         max_files: body.get("max_files").and_then(|v| v.as_u64())
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64) as usize,
@@ -1969,17 +2097,29 @@ pub(super) fn codesearch(body: &Value) -> u64 {
     if !v.is_object() {
         return packed;
     }
-    if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
-        if let Some(obj) = v.as_object_mut() {
-            obj.entry("modes".to_string()).or_insert_with(|| json!({
-                "literal": "exhaustive path:line substring search -- pass mode:\"literal\" when you can name the symbol or string exactly",
-                "regex": "the same, with a regex query",
-                "filename": "path-only match",
-                "dual": "ranked BM25+vector retrieval (the default)"
-            }));
-        }
+    if let (Some(note), Some(map)) = (split_form_not_searched_note(body), v.as_object_mut()) {
+        map.insert("split_form_not_searched".to_string(), json!(note));
     }
     pack(v.to_string())
+}
+
+/// `literal` answers path segments written as separate quoted arguments in `split_form_matches`.
+/// `regex` matches its pattern as written and ranked `dual` never scans for them, so their replies
+/// name that gap instead of reading as a complete answer.
+fn split_form_not_searched_note(body: &Value) -> Option<&'static str> {
+    let query = body.get("query").and_then(|v| v.as_str())?;
+    if !query.contains('/') || query.chars().any(char::is_whitespace) {
+        return None;
+    }
+    match body.get("mode").and_then(|v| v.as_str()).unwrap_or("dual") {
+        "regex" => Some(
+            "mode regex matches the pattern as written, so path segments written as separate quoted arguments, e.g. join(ROOT, 'apps', 'world', 'x.js'), are not matched; mode literal matches them, in split_form_matches",
+        ),
+        "dual" => Some(
+            "mode dual ranks text and does not match path segments written as separate quoted arguments, e.g. join(ROOT, 'apps', 'world', 'x.js'); mode literal matches them, in split_form_matches, and is exhaustive",
+        ),
+        _ => None,
+    }
 }
 
 pub(super) fn codesearch_comments_requested(body: &Value) -> bool {
@@ -2087,14 +2227,20 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             .unwrap_or(false)
     {
         let cleared = crate::code_index::clear_codeinsight_full_cfg(&cfg);
-        emit_event(
-            "codeinsight_rebuild",
-            json!({ "reason": "explicit-rebuild", "keys_cleared": cleared }),
-        );
-        let _ = crate::code_index::index_topup(
+        let pass = crate::code_index::index_topup(
             ".",
             cfg.index.prune_pass_file_limit_ceiling,
             COLD_INDEX_PASS_BUDGET_MS,
+        );
+        emit_event(
+            "codeinsight_rebuild",
+            json!({
+                "reason": "explicit-rebuild",
+                "keys_cleared": cleared,
+                "pass_ok": pass.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                "changed_files_count": pass.get("changed_files_count").cloned().unwrap_or_else(|| json!(0)),
+                "changed_files": pass.get("changed_files").cloned().unwrap_or_else(|| json!([])),
+            }),
         );
         let mut retry = body.clone();
         if let Some(obj) = retry.as_object_mut() {
@@ -2118,23 +2264,20 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             } else {
                 "digest-mismatch"
             };
-            emit_event(
-                "codeinsight_rebuild",
-                json!({ "reason": reason, "stored_then_current": current }),
-            );
-            if cold_start {
-                let _ = crate::code_index::index_topup(
+            let pass = if cold_start {
+                crate::code_index::index_topup(
                     ".",
                     cfg.index.prune_pass_file_limit_ceiling,
                     COLD_INDEX_PASS_BUDGET_MS,
-                );
+                )
             } else {
-                let _ = crate::code_index::index_topup(
+                crate::code_index::index_topup(
                     ".",
                     cfg.index.prune_pass_file_limit_ceiling,
                     cfg.index.incremental_topup_wall_budget_ms,
-                );
-            }
+                )
+            };
+            emit_codeinsight_pass_outcome(reason, ".", &pass);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));

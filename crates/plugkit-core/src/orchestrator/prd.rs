@@ -17,7 +17,7 @@ pub fn prd_path_for(cwd: Option<&str>) -> std::path::PathBuf {
     }
 }
 
-pub fn peek_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)> {
+pub fn pending_commit_comments_for_paths(cwd: Option<&str>, touched: &[String]) -> Vec<(String, String)> {
     let path = prd_path_for(cwd);
     let path_s = path.to_string_lossy().to_string();
     if !pkfs::exists(&path_s) {
@@ -34,59 +34,124 @@ pub fn peek_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)> 
     let mut out = Vec::new();
     if let Some(seq) = doc.as_sequence() {
         for item in seq {
-            if let Some(map) = item.as_mapping() {
-                let status = map
-                    .get(&Value::String("status".to_string()))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let comment = map
-                    .get(&Value::String("commit_comment".to_string()))
-                    .and_then(|v| v.as_str());
-                if !status_is_open(status) {
-                    if let Some(c) = comment {
-                        if !c.trim().is_empty() {
-                            let id = map
-                                .get(&Value::String("id".to_string()))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            out.push((id, c.trim().to_string()));
-                        }
-                    }
-                }
+            let Some(map) = item.as_mapping() else {
+                continue;
+            };
+            let status = map
+                .get(&Value::String("status".to_string()))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if status_is_open(status) {
+                continue;
+            }
+            let Some(comment) = map
+                .get(&Value::String("commit_comment".to_string()))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+            else {
+                continue;
+            };
+            let referenced = row_referenced_paths(map);
+            let touches_referenced = referenced
+                .iter()
+                .any(|r| touched.iter().any(|t| path_reference_matches(r, t)));
+            if !touches_referenced {
+                continue;
+            }
+            let id = map
+                .get(&Value::String("id".to_string()))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            out.push((id, comment.to_string()));
+        }
+    }
+    out
+}
+
+fn row_referenced_paths(map: &serde_yaml::Mapping) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in ["witness_evidence", "witness", "resolution", "commit_comment"] {
+        let text = match map.get(&Value::String(key.to_string())) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Sequence(items)) => items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => continue,
+        };
+        for token in text.split(|c: char| c.is_whitespace() || "\"'`()[]{}<>,;|=*".contains(c)) {
+            if let Some(path) = referenced_path_token(token) {
+                out.push(path);
             }
         }
     }
     out
 }
 
-pub fn drain_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)> {
+fn referenced_path_token(token: &str) -> Option<String> {
+    let mut path = token.replace('\\', "/");
+    while let Some(colon) = path.rfind(':') {
+        let tail = &path[colon + 1..];
+        let is_line_suffix = !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-');
+        if !is_line_suffix {
+            break;
+        }
+        path.truncate(colon);
+    }
+    let path = path
+        .trim_matches(|c: char| matches!(c, '.' | ':' | '!' | '?'))
+        .to_string();
+    if path.is_empty() {
+        return None;
+    }
+    let has_directory = path.contains('/');
+    let has_extension = path.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty()
+            && (1..=8).contains(&ext.len())
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            && ext.chars().any(|c| c.is_ascii_alphabetic())
+    });
+    (has_directory || has_extension).then_some(path)
+}
+
+fn path_reference_matches(reference: &str, touched: &str) -> bool {
+    let reference = reference.replace('\\', "/").to_ascii_lowercase();
+    let touched = touched.replace('\\', "/").to_ascii_lowercase();
+    !touched.is_empty() && (reference == touched || reference.ends_with(&format!("/{}", touched)))
+}
+
+pub fn drain_commit_comments(cwd: Option<&str>, notes: &[(String, String)]) {
+    if notes.is_empty() {
+        return;
+    }
     let path = prd_path_for(cwd);
     let path_s = path.to_string_lossy().to_string();
     if !pkfs::exists(&path_s) {
-        return Vec::new();
+        return;
     }
-    let mut drained: Vec<(String, String)> = Vec::new();
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
     let _ = cas::cas_retry_write(
         &path_s,
         cas_max_attempts,
         "prd-drain-commit-comments",
         |mut doc: Value| {
-            drained.clear();
-            let mut closed_rows_removed = 0usize;
+            let mut drained_any = false;
+            let comment_key = Value::String("commit_comment".to_string());
             if let Some(seq) = doc.as_sequence_mut() {
-                let before = seq.len();
-                seq.retain(|item| {
-                    let Some(map) = item.as_mapping() else {
-                        return true;
+                for item in seq.iter_mut() {
+                    let Some(map) = item.as_mapping_mut() else {
+                        continue;
                     };
                     let status = map
                         .get(&Value::String("status".to_string()))
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if status_is_open(status) {
-                        return true;
+                        .unwrap_or("")
+                        .to_string();
+                    if status_is_open(&status) {
+                        continue;
                     }
                     let id = map
                         .get(&Value::String("id".to_string()))
@@ -94,28 +159,26 @@ pub fn drain_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)>
                         .unwrap_or("")
                         .to_string();
                     let comment = map
-                        .get(&Value::String("commit_comment".to_string()))
+                        .get(&comment_key)
                         .and_then(|v| v.as_str())
                         .map(|c| c.trim().to_string())
-                        .filter(|c| !c.is_empty());
-                    if let Some(c) = comment {
-                        drained.push((id, c));
+                        .unwrap_or_default();
+                    if notes.iter().any(|(nid, ncomment)| nid == &id && ncomment == &comment) {
+                        map.remove(&comment_key);
+                        drained_any = true;
                     }
-                    false
-                });
-                closed_rows_removed = before - seq.len();
+                }
             }
-            if closed_rows_removed == 0 {
+            if !drained_any {
                 return cas::CasOutcome::Abort(
                     String::new(),
-                    "no closed PRD rows to drain".to_string(),
+                    "no queued commit_comment matches the notes bundled into this commit".to_string(),
                     0,
                 );
             }
             cas::CasOutcome::Write(doc, ())
         },
     );
-    drained
 }
 
 pub fn status_is_open(status: &str) -> bool {
@@ -320,16 +383,50 @@ pub fn handle_list_full() -> (String, String, i32) {
     )
 }
 
+fn request_limit(request: &serde_json::Value) -> Result<Option<usize>, String> {
+    match request.get("limit") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+            .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
+            .ok_or_else(|| "prd-list limit must be a non-negative integer".to_string()),
+    }
+}
+
+fn fold_last_blocks(rows: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut last_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let id = row_text(row, &["id"]);
+        if !id.is_empty() {
+            last_index.insert(id, index);
+        }
+    }
+    rows.into_iter()
+        .enumerate()
+        .filter(|(index, row)| {
+            let id = row_text(row, &["id"]);
+            id.is_empty() || last_index.get(&id) == Some(index)
+        })
+        .map(|(_, row)| row)
+        .collect()
+}
+
 pub fn handle_list(content: &str) -> (String, String, i32) {
     let request = request_object(content);
+    let limit = match request_limit(&request) {
+        Ok(limit) => limit,
+        Err(message) => return (String::new(), message, 1),
+    };
     let rows = match load_rows() {
         Ok(rows) => rows,
         Err((message, code)) => return (String::new(), message, code),
     };
-    let total = rows.len();
+    let store_total = rows.len();
     let wanted_ids = request_strings(&request, PRD_ROW_ID_FIELDS);
     let wanted_statuses = request_strings(&request, PRD_ROW_STATUS_FIELDS);
-    let selected: Vec<serde_json::Value> = rows
+    let selected: Vec<serde_json::Value> = fold_last_blocks(rows)
         .into_iter()
         .filter(|row| {
             let id = row_text(row, &["id"]);
@@ -346,27 +443,34 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             format!(
                 "no PRD row with id {} of the {} rows in .gm/prd.yml -- pass no id for the listing",
                 wanted_ids.join(", "),
-                total
+                store_total
             ),
             1,
         );
     }
+    let matched = selected.len();
+    let shown = limit.map_or(matched, |n| n.min(matched));
+    let truncated = shown < matched;
+    let window: Vec<serde_json::Value> = selected.into_iter().take(shown).collect();
     let brief_flag = request_flag(&request, PRD_BRIEF_BODY_FIELDS);
     let full_flag = request_flag(&request, PRD_FULL_BODY_FIELDS);
     let want_full =
         full_flag.unwrap_or_else(|| brief_flag.map(|b| !b).unwrap_or(!wanted_ids.is_empty()));
     let items: Vec<serde_json::Value> = if want_full {
-        selected
+        window
     } else {
-        selected.iter().map(brief_row).collect()
+        window.iter().map(brief_row).collect()
     };
     let reply = serde_json::json!({
         "items": items,
         "count": items.len(),
-        "total": total,
+        "total": matched,
+        "store_total": store_total,
+        "limit": limit,
+        "truncated": truncated,
         "brief": !want_full,
         "full": want_full,
-        "hint": "pass {\"id\":\"<row id>\"} for one full row, {\"status\":\"pending\"} to filter, or {\"full\":true} for every full body",
+        "hint": "pass {\"id\":\"<row id>\"} for one full row (repeated blocks of an id fold to the last one), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), or {\"full\":true} for every full body",
     });
     (reply.to_string(), String::new(), 0)
 }
@@ -477,7 +581,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     let overwrite = item_map
         .get(&Value::String("overwrite".to_string()))
         .and_then(|v| v.as_bool())
-        == Some(true);
+        .unwrap_or(false);
 
     let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-add", |mut doc: Value| {
         let mut add_outcome = AddOutcome::Added;
@@ -500,21 +604,46 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             });
             match existing {
                 Some(slot) => {
-                    add_outcome = if *slot == new_row {
-                        AddOutcome::AlreadyIdentical
+                    if *slot == new_row {
+                        add_outcome = AddOutcome::AlreadyIdentical;
                     } else if overwrite {
-                        AddOutcome::Rescoped
+                        let existing_status = slot
+                            .as_mapping()
+                            .and_then(|m| m.get(&Value::String("status".to_string())))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("pending")
+                            .to_string();
+                        if !status_is_open(&existing_status) {
+                            return cas::CasOutcome::Abort(
+                                String::new(),
+                                format!(
+                                    "prd-add refused: id '{}' is closed (status '{}'). overwrite cannot rescope or reopen a resolved row; log the new work under a new id.",
+                                    id, existing_status
+                                ),
+                                1,
+                            );
+                        }
+                        let mut rescoped = new_row;
+                        if !item_map.contains_key(&Value::String("status".to_string())) {
+                            if let Some(map) = rescoped.as_mapping_mut() {
+                                map.insert(
+                                    Value::String("status".to_string()),
+                                    Value::String(existing_status),
+                                );
+                            }
+                        }
+                        add_outcome = AddOutcome::Rescoped;
+                        *slot = rescoped;
                     } else {
                         return cas::CasOutcome::Abort(
                             String::new(),
                             format!(
-                                "prd-add refused: id '{}' already exists. Pass overwrite:true to rescope it",
+                                "prd-add refused: id '{}' already exists. Pass overwrite:true to rescope it, or prd-block {{id, note}} to annotate it.",
                                 id
                             ),
                             1,
                         );
-                    };
-                    *slot = new_row;
+                    }
                 }
                 None => seq.push(new_row),
             }
@@ -605,7 +734,7 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    let policy = super::fsm::graph().policy.clone();
+    let policy = super::fsm::graph().policy;
     let outcome = cas::cas_retry_write(
         &path_s,
         policy.cas_max_attempts,
@@ -672,6 +801,9 @@ fn parse_resolve_target(
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
 ) {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         let id = v
@@ -702,6 +834,20 @@ fn parse_resolve_target(
             .and_then(|s| s.as_str())
             .map(|s| s.to_string());
         let cwd = v.get("cwd").and_then(|s| s.as_str()).map(|s| s.to_string());
+        let mut resolution = v
+            .get("resolution")
+            .or_else(|| v.get("resolution_text"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let mut commit_sha = v
+            .get("commit_sha")
+            .or_else(|| v.get("commit"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let mut requested_status = v
+            .get("status")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
         let id = if let Ok(inner) = serde_json::from_str::<serde_json::Value>(&id) {
             if let Some(im) = inner.as_object() {
                 let recovered = im
@@ -734,6 +880,26 @@ fn parse_resolve_target(
                         .and_then(|s| s.as_str())
                         .map(|s| s.to_string());
                 }
+                if resolution.is_none() {
+                    resolution = im
+                        .get("resolution")
+                        .or_else(|| im.get("resolution_text"))
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                }
+                if commit_sha.is_none() {
+                    commit_sha = im
+                        .get("commit_sha")
+                        .or_else(|| im.get("commit"))
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                }
+                if requested_status.is_none() {
+                    requested_status = im
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                }
                 recovered.unwrap_or(id)
             } else {
                 id
@@ -741,9 +907,9 @@ fn parse_resolve_target(
         } else {
             id
         };
-        (id, wit, comment, witness_dispatch_id, cwd)
+        (id, wit, comment, witness_dispatch_id, cwd, resolution, commit_sha, requested_status)
     } else if let Some((id, wit)) = recover_truncated_envelope(trimmed) {
-        (id, wit, None, None, None)
+        (id, wit, None, None, None, None, None, None)
     } else {
         let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
         let id = parts
@@ -754,7 +920,7 @@ fn parse_resolve_target(
             .get(1)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        (id, wit, None, None, None)
+        (id, wit, None, None, None, None, None, None)
     }
 }
 
@@ -842,6 +1008,537 @@ fn deviation_refuses(kind: &str) -> bool {
     super::deviations::effective_severity(kind) == super::deviations::Severity::Deny
 }
 
+const WITNESS_BINDING_FIELDS: &[&str] = &[
+    "witness_exit_code",
+    "witness_output_sha256",
+    "witness_output_path",
+    "witness_ts",
+];
+
+const WITNESS_OUTPUT_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+const WITNESS_BINDING_HINT: &str = "bind the witness with witness_dispatch_id (string: the dispatch_id of your own live run in this project), or with all four of witness_exit_code (integer, must be 0), witness_output_sha256 (string: sha256 of the witness output file, 64 lowercase hex), witness_output_path (string: that output file, relative to the project root, no .. segments) and witness_ts (string: RFC 3339 timestamp). prd-resolve re-reads the file, re-hashes it and refuses on any mismatch.";
+
+fn prd_resolve_required_fields() -> serde_json::Value {
+    serde_json::json!({
+        "id": "string: the row id, at top level (aliases prd_id, mutable_id, item_id, slug, key)",
+        "witness_evidence": "string, non-empty: a file:line, codesearch hit or exec output specific to this row",
+        "binding": "witness_dispatch_id (string), OR all four of witness_exit_code (integer 0), witness_output_sha256 (string, 64 lowercase hex), witness_output_path (string) and witness_ts (string, RFC 3339)",
+    })
+}
+
+fn witness_evidence_kind(value: Option<&serde_json::Value>) -> &'static str {
+    match value {
+        None => "absent",
+        Some(serde_json::Value::String(text)) if text.trim().is_empty() => "empty string",
+        Some(serde_json::Value::String(_)) => "string",
+        Some(serde_json::Value::Null) => "null",
+        Some(serde_json::Value::Bool(_)) => "boolean",
+        Some(serde_json::Value::Number(_)) => "number",
+        Some(serde_json::Value::Array(_)) => "array",
+        Some(serde_json::Value::Object(_)) => "object",
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+const SPOOL_OUT_LOOKBACK_MS: u64 = 300_000;
+#[cfg(target_arch = "wasm32")]
+const SPOOL_OUT_LOOKAHEAD_MS: u64 = 10_000;
+#[cfg(target_arch = "wasm32")]
+const SPOOL_OUT_SCAN_MAX_FILES: usize = 400;
+const REVERIFY_LISTED_PATHS: usize = 20;
+
+#[cfg(target_arch = "wasm32")]
+pub fn dispatch_in_spool_out(cwd: &str, dispatch_id: &str) -> bool {
+    let Some(id_ts) = dispatch_id
+        .split('-')
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    let out_dir = if cwd.is_empty() {
+        ".gm/exec-spool/out".to_string()
+    } else {
+        format!("{}/.gm/exec-spool/out", cwd.trim_end_matches(['/', '\\']))
+    };
+    let Some(serde_json::Value::Array(entries)) = crate::pkfs::readdir(&out_dir) else {
+        return false;
+    };
+    let mut candidates: Vec<(u64, String)> = entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry
+                .as_str()
+                .or_else(|| entry.get("name").and_then(serde_json::Value::as_str))?;
+            let stem = name.strip_suffix(".json")?;
+            let ts = stem.rsplit('-').nth(1)?.parse::<u64>().ok()?;
+            let inside_window = ts <= id_ts.saturating_add(SPOOL_OUT_LOOKAHEAD_MS)
+                && ts.saturating_add(SPOOL_OUT_LOOKBACK_MS) >= id_ts;
+            inside_window.then(|| (ts, name.to_string()))
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    let needle = format!("\"dispatch_id\":\"{dispatch_id}\"");
+    candidates
+        .into_iter()
+        .take(SPOOL_OUT_SCAN_MAX_FILES)
+        .any(|(_, name)| {
+            crate::pkfs::read_to_string(&format!("{out_dir}/{name}"))
+                .is_some_and(|text| text.contains(&needle))
+        })
+}
+
+fn path_is_within(path: &str, other: &str) -> bool {
+    path == other || path.ends_with(&format!("/{other}")) || other.ends_with(&format!("/{path}"))
+}
+
+fn stale_completed_rows(doc: &Value, changed: &[String]) -> Vec<(String, Vec<String>)> {
+    use sha2::{Digest, Sha256};
+    let Some(seq) = doc.as_sequence() else {
+        return vec![];
+    };
+    let key = |name: &str| Value::String(name.to_string());
+    seq.iter()
+        .filter_map(|item| {
+            let map = item.as_mapping()?;
+            if map.get(&key("status"))?.as_str()? != "completed" {
+                return None;
+            }
+            let id = map.get(&key("id"))?.as_str()?.to_string();
+            let mut reasons: Vec<String> = Vec::new();
+            if let Some(binding) = map.get(&key("witness_binding")).and_then(Value::as_mapping) {
+                let output_path = binding.get(&key("output_path")).and_then(Value::as_str);
+                let bound_sha = binding.get(&key("output_sha256")).and_then(Value::as_str);
+                if let (Some(output_path), Some(bound_sha)) = (output_path, bound_sha) {
+                    if changed.iter().any(|c| path_is_within(output_path, c)) {
+                        match crate::pkfs::read_to_string(output_path) {
+                            Some(content) => {
+                                let now = format!("{:x}", Sha256::digest(content.as_bytes()));
+                                if now != bound_sha {
+                                    reasons.push(format!(
+                                        "witness output {output_path} changed: sha256 is now {now}, bound {bound_sha}"
+                                    ));
+                                }
+                            }
+                            None => reasons.push(format!(
+                                "witness output {output_path} is missing or unreadable"
+                            )),
+                        }
+                    }
+                }
+            }
+            for referenced in row_referenced_paths(map) {
+                if let Some(module) = changed.iter().find(|c| path_is_within(&referenced, c)) {
+                    reasons.push(format!("module {module} changed after this row was witnessed"));
+                }
+            }
+            reasons.sort();
+            reasons.dedup();
+            (!reasons.is_empty()).then_some((id, reasons))
+        })
+        .collect()
+}
+
+fn reopen_stale_rows(doc: &mut Value, stale: &[(String, Vec<String>)], changed: &[String]) {
+    let Some(seq) = doc.as_sequence_mut() else {
+        return;
+    };
+    let key = |name: &str| Value::String(name.to_string());
+    let listed: Vec<Value> = changed
+        .iter()
+        .take(REVERIFY_LISTED_PATHS)
+        .cloned()
+        .map(Value::String)
+        .collect();
+    for item in seq.iter_mut() {
+        let Some(map) = item.as_mapping_mut() else {
+            continue;
+        };
+        let Some(id) = map
+            .get(&key("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some((_, reasons)) = stale.iter().find(|(stale_id, _)| *stale_id == id) else {
+            continue;
+        };
+        map.insert(key("status"), Value::String("pending".to_string()));
+        if let Some(binding) = map.remove(&key("witness_binding")) {
+            map.insert(key("previous_witness_binding"), binding);
+        }
+        map.insert(
+            key("reverify_reasons"),
+            Value::Sequence(reasons.iter().cloned().map(Value::String).collect()),
+        );
+        map.insert(key("reverify_changed_paths"), Value::Sequence(listed.clone()));
+    }
+}
+
+const HEARTBEAT_FRESH_MS: u64 = 600_000;
+
+fn now_ms() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        unsafe { crate::wasm_dispatch::host_now_ms() }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0
+    }
+}
+
+fn iso_utc_ms(text: &str) -> Option<u64> {
+    let (date, time) = text.trim().trim_end_matches('Z').split_once('T')?;
+    let mut date_parts = date.split('-').map(|part| part.parse::<i64>().ok());
+    let year = date_parts.next()??;
+    let month = date_parts.next()??;
+    let day = date_parts.next()??;
+    let mut time_parts = time
+        .split('.')
+        .next()?
+        .split(':')
+        .map(|part| part.parse::<i64>().ok());
+    let hour = time_parts.next()??;
+    let minute = time_parts.next()??;
+    let second = time_parts.next()??;
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    if seconds < 0 {
+        None
+    } else {
+        Some(seconds as u64 * 1_000)
+    }
+}
+
+fn held_row_ids(at_ms: u64) -> std::collections::HashSet<String> {
+    let mut held = std::collections::HashSet::new();
+    let Some(serde_json::Value::Array(entries)) = crate::pkfs::readdir(".gm/pool") else {
+        return held;
+    };
+    for entry in &entries {
+        let Some(name) = entry
+            .as_str()
+            .or_else(|| entry.get("name").and_then(serde_json::Value::as_str))
+        else {
+            continue;
+        };
+        if !name.ends_with(".live") {
+            continue;
+        }
+        let Some(text) = crate::pkfs::read_to_string(&format!(".gm/pool/{name}")) else {
+            continue;
+        };
+        let field = |key: &str| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(key))
+                .map(str::trim)
+        };
+        let fresh = field("start:").and_then(iso_utc_ms).is_some_and(|start| {
+            at_ms
+                .checked_sub(start)
+                .is_some_and(|age| age < HEARTBEAT_FRESH_MS)
+        });
+        if !fresh {
+            continue;
+        }
+        if let Some(rows) = field("row:") {
+            for token in rows.split(|c: char| c == ',' || c == '(' || c == ')' || c.is_whitespace()) {
+                if !token.is_empty() {
+                    held.insert(token.to_string());
+                }
+            }
+        }
+    }
+    held
+}
+
+pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Value> {
+    let changed: Vec<String> = changed
+        .iter()
+        .map(|path| path.trim().replace('\\', "/").trim_start_matches("./").to_string())
+        .filter(|path| !path.is_empty())
+        .collect();
+    if changed.is_empty() {
+        return vec![];
+    }
+    let path_s = prd_path().to_string_lossy().to_string();
+    let Some(text) = crate::pkfs::read_to_string(&path_s) else {
+        return vec![];
+    };
+    let Ok(doc) = serde_yaml::from_str::<Value>(&text) else {
+        return vec![];
+    };
+    let stale = stale_completed_rows(&doc, &changed);
+    if stale.is_empty() {
+        return vec![];
+    }
+    let held = held_row_ids(now_ms());
+    let (to_reopen, deferred): (Vec<_>, Vec<_>) =
+        stale.into_iter().partition(|(id, _)| !held.contains(id));
+    let mut report: Vec<serde_json::Value> = to_reopen
+        .iter()
+        .map(|(id, reasons)| {
+            serde_json::json!({ "id": id, "state": "reopened", "reasons": reasons })
+        })
+        .collect();
+    report.extend(deferred.iter().map(|(id, reasons)| {
+        serde_json::json!({ "id": id, "state": "deferred_held", "reasons": reasons })
+    }));
+    if to_reopen.is_empty() {
+        return report;
+    }
+    let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
+    let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-reverify", |mut doc: Value| {
+        let reopen: Vec<(String, Vec<String>)> = stale_completed_rows(&doc, &changed)
+            .into_iter()
+            .filter(|(id, _)| !held.contains(id))
+            .collect();
+        if reopen.is_empty() {
+            return cas::CasOutcome::Abort(String::new(), String::new(), 0);
+        }
+        reopen_stale_rows(&mut doc, &reopen, &changed);
+        cas::CasOutcome::Write(doc, ())
+    });
+    if outcome.is_err() {
+        for row in report.iter_mut() {
+            if row["state"] == "reopened" {
+                row["state"] = serde_json::json!("reopen_failed");
+            }
+        }
+    }
+    report
+}
+
+struct VerifiedWitness {
+    exit_code: i64,
+    output_sha256: String,
+    output_path: String,
+    ts: String,
+}
+
+impl VerifiedWitness {
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "exit_code": self.exit_code,
+            "output_sha256": self.output_sha256,
+            "output_path": self.output_path,
+            "ts": self.ts,
+        })
+    }
+
+    fn to_yaml(&self) -> Value {
+        let mut map = serde_yaml::Mapping::new();
+        map.insert(
+            Value::String("exit_code".to_string()),
+            serde_yaml::to_value(self.exit_code).unwrap_or(Value::Null),
+        );
+        map.insert(
+            Value::String("output_sha256".to_string()),
+            Value::String(self.output_sha256.clone()),
+        );
+        map.insert(
+            Value::String("output_path".to_string()),
+            Value::String(self.output_path.clone()),
+        );
+        map.insert(
+            Value::String("ts".to_string()),
+            Value::String(self.ts.clone()),
+        );
+        Value::Mapping(map)
+    }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_relative_project_path(path: &str) -> bool {
+    !path.is_empty()
+        && !pkfs::is_absolute(path)
+        && !path.contains(':')
+        && path.split(['/', '\\']).all(|segment| segment != "..")
+}
+
+fn is_rfc3339_timestamp(ts: &str) -> bool {
+    let bytes = ts.as_bytes();
+    let digits = |from: usize, len: usize| -> Option<u32> {
+        let end = from.checked_add(len)?;
+        let part = bytes.get(from..end)?;
+        if !part.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        std::str::from_utf8(part).ok()?.parse().ok()
+    };
+    let at = |index: usize, want: u8| bytes.get(index).copied() == Some(want);
+    let (Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        digits(5, 2),
+        digits(8, 2),
+        digits(11, 2),
+        digits(14, 2),
+        digits(17, 2),
+    ) else {
+        return false;
+    };
+    if digits(0, 4).is_none()
+        || !at(4, b'-')
+        || !at(7, b'-')
+        || !(at(10, b'T') || at(10, b't'))
+        || !at(13, b':')
+        || !at(16, b':')
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return false;
+    }
+    let mut index = 19;
+    if at(index, b'.') {
+        index += 1;
+        let fraction_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == fraction_start {
+            return false;
+        }
+    }
+    match bytes.get(index).copied() {
+        Some(b'Z') | Some(b'z') => index + 1 == bytes.len(),
+        Some(b'+') | Some(b'-') => {
+            digits(index + 1, 2).is_some_and(|h| h <= 23)
+                && at(index + 3, b':')
+                && digits(index + 4, 2).is_some_and(|m| m <= 59)
+                && index + 6 == bytes.len()
+        }
+        _ => false,
+    }
+}
+
+fn verify_witness_binding(
+    request: &serde_json::Value,
+) -> Result<VerifiedWitness, (&'static str, String)> {
+    use sha2::{Digest, Sha256};
+    let exit_code = match request.get("witness_exit_code").and_then(|v| v.as_i64()) {
+        Some(0) => 0,
+        Some(code) => {
+            return Err((
+                "witness_exit_code",
+                format!(
+                    "exit code {} is not 0 -- a witness closes a row only with exit code 0",
+                    code
+                ),
+            ))
+        }
+        None => {
+            return Err((
+                "witness_exit_code",
+                "must be an integer exit code".to_string(),
+            ))
+        }
+    };
+    let output_sha256 = request
+        .get("witness_output_sha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !is_sha256_hex(&output_sha256) {
+        return Err((
+            "witness_output_sha256",
+            "must be 64 lowercase hex characters, the sha256 of the witness output file"
+                .to_string(),
+        ));
+    }
+    let output_path = request
+        .get("witness_output_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !is_relative_project_path(&output_path) {
+        return Err((
+            "witness_output_path",
+            "must be a relative path inside the project root with no .. segments".to_string(),
+        ));
+    }
+    let ts = request
+        .get("witness_ts")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !is_rfc3339_timestamp(&ts) {
+        return Err((
+            "witness_ts",
+            "must be an RFC 3339 timestamp such as 2026-10-09T13:44:57Z".to_string(),
+        ));
+    }
+    let content = pkfs::read_to_string(&output_path).ok_or_else(|| {
+        (
+            "witness_output_path",
+            format!(
+                "output file {} is not readable under the project root",
+                output_path
+            ),
+        )
+    })?;
+    if content.len() > WITNESS_OUTPUT_MAX_BYTES {
+        return Err((
+            "witness_output_path",
+            format!(
+                "output file {} is larger than {} bytes",
+                output_path, WITNESS_OUTPUT_MAX_BYTES
+            ),
+        ));
+    }
+    let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+    if digest != output_sha256 {
+        return Err((
+            "witness_output_sha256",
+            format!(
+                "sha256 of {} is {}, not the claimed {}",
+                output_path, digest, output_sha256
+            ),
+        ));
+    }
+    Ok(VerifiedWitness {
+        exit_code,
+        output_sha256,
+        output_path,
+        ts,
+    })
+}
+
+fn dispatch_id_in_text(text: &str) -> Option<String> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .find(|token| {
+            let mut parts = token.split('-');
+            match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                (Some(ts), Some(seq), Some(hash), None) => {
+                    ts.len() >= 10
+                        && ts.bytes().all(|b| b.is_ascii_digit())
+                        && !seq.is_empty()
+                        && seq.bytes().all(|b| b.is_ascii_digit())
+                        && (1..=16).contains(&hash.len())
+                        && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                }
+                _ => false,
+            }
+        })
+        .map(str::to_string)
+}
+
 pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -852,27 +1549,64 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         (parsed.0, parsed.1, parsed.2, parsed.3);
 #[cfg(target_arch = "wasm32")]
     let resolve_cwd = parsed.4;
-    #[cfg(target_arch = "wasm32")]
-    let resolver_session = serde_json::from_str::<serde_json::Value>(trimmed)
-        .ok()
-        .and_then(|v| v.get("session_id").and_then(|s| s.as_str()).map(|s| s.to_string()));
-    let policy = super::fsm::graph().policy.clone();
-    let status_kept = keeps_status(trimmed);
+    let resolution = parsed.5.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+    let commit_sha = parsed.6.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let requested_status = parsed.7.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(sha) = commit_sha.as_deref() {
+        if !(7..=40).contains(&sha.len()) || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            let body = serde_json::json!({
+                "error": format!(
+                    "prd-resolve refused: commit_sha for {} must be 7 to 40 hex characters",
+                    id_target
+                ),
+                "prd_id": id_target,
+                "field": "commit_sha",
+                "accepted_fields": ["commit_sha", "commit"],
+            })
+            .to_string();
+            return (
+                body,
+                format!("prd-resolve refused: invalid commit_sha for {}", id_target),
+                1,
+            );
+        }
+    }
+    let policy = super::fsm::graph().policy;
+    let annotate_only = keeps_status(trimmed);
+    let request_live = request_object(trimmed).get("live").and_then(|v| v.as_u64());
+    let count_of_record = match super::pool_slots::floor_gate(
+        "prd-resolve",
+        request_live,
+        Some(id_target.as_str()),
+    ) {
+        Ok(record) => record,
+        Err(denial) if !annotate_only => {
+            let message = denial["error"].as_str().unwrap_or_default().to_string();
+            return (denial.to_string(), message, 1);
+        }
+        Err(denial) => denial["count_of_record"].clone(),
+    };
     let has_witness = witness
         .as_ref()
         .map(|w| !w.trim().is_empty())
         .unwrap_or(false);
-    if !status_kept
+    if !annotate_only
         && policy.require_witness_evidence
         && !has_witness
         && deviation_refuses("prd-resolve-no-witness")
     {
+        let received = witness_evidence_kind(request_object(trimmed).get("witness_evidence"));
         let body = serde_json::json!({
-            "error": format!("prd-resolve refused: no witness_evidence for {}", id_target),
+            "error": format!(
+                "prd-resolve refused: no witness_evidence for {} -- witness_evidence must be a non-empty string (received {})",
+                id_target, received
+            ),
             "deviation_kind": "prd-resolve-no-witness",
             "deviation_severity": "deny",
             "prd_id": id_target,
-            "hint": "resolve requires non-empty witness_evidence (file:line | codesearch hit | exec snippet). A row cannot be marked completed without evidence the work is real - this gate exists because an agent under closure-pressure marked undone tasks completed with an absent witness. Body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\", \"commit_comment\": \"<optional one-line resolution note, bundled into the next commit message>\"}. Do the work, capture its witness, then resolve.",
+            "required_fields": prd_resolve_required_fields(),
+            "witness_evidence_received": received,
+            "hint": "resolve requires a non-empty string witness_evidence (file:line | codesearch hit | exec snippet) and a binding: witness_dispatch_id, or all four of witness_exit_code, witness_output_sha256, witness_output_path and witness_ts. A row cannot be marked completed without evidence the work is real - this gate exists because an agent under closure-pressure marked undone tasks completed with an absent witness. Body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\", \"witness_dispatch_id\": \"<dispatch_id of your own live run>\", \"commit_comment\": \"<optional one-line resolution note, bundled into the next commit message>\"}. Do the work, capture its witness, then resolve.",
         }).to_string();
         return (
             body,
@@ -880,74 +1614,173 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    #[cfg(target_arch = "wasm32")]
-    let mut witness_session: Option<String> = None;
-    #[cfg(target_arch = "wasm32")]
-    if let Some(dispatch_id) = witness_dispatch_id.as_ref() {
-        let cwd = resolve_cwd.as_deref().unwrap_or("");
-        let witnessed = crate::dispatch_ledger::lookup(cwd, dispatch_id).is_some_and(|entry| {
-            entry.get("exit_code").and_then(|v| v.as_i64()) == Some(0)
-                && entry
-                    .get("verb")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|verb| {
-                        matches!(
-                            verb,
-                            "exec_js" | "codesearch" | "code_search" | "search" | "grep" | "rg"
-                        )
-                    })
-        });
-        if !witnessed {
+    let binding_request = request_object(trimmed);
+    let binding_present: Vec<&str> = WITNESS_BINDING_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| binding_request.get(*field).is_some_and(|v| !v.is_null()))
+        .collect();
+    let binding_missing: Vec<&str> = WITNESS_BINDING_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| !binding_present.contains(field))
+        .collect();
+    let mut witness_binding: Option<VerifiedWitness> = None;
+    if !binding_present.is_empty() {
+        if !binding_missing.is_empty() {
             let body = serde_json::json!({
-                "error": format!("prd-resolve refused: witness_dispatch_id {} not found, exited nonzero, or not a witness verb (exec_js, codesearch, grep) in this guest's dispatch ledger", dispatch_id),
-                "deviation_kind": "prd-resolve-fabricated-dispatch",
+                "error": format!(
+                    "prd-resolve refused: witness binding for {} is incomplete, missing {}",
+                    id_target,
+                    binding_missing.join(", ")
+                ),
+                "deviation_kind": "prd-resolve-unbound-witness",
                 "deviation_severity": "deny",
                 "prd_id": id_target,
-                "witness_dispatch_id": dispatch_id,
-                "hint": "witness_dispatch_id must be the `dispatch_id` field returned in a PRIOR spool response (every verb's response now carries one). This id was not found in .gm/exec-spool/.dispatch-ledger.json with exit_code 0, so it does not correspond to a real dispatch that actually succeeded -- either it was invented, it failed, or it belongs to a different cwd/project. Resolve again either omitting witness_dispatch_id, or with the exact dispatch_id copied from the response of the dispatch that produced this row's evidence.",
-            }).to_string();
+                "missing_fields": binding_missing,
+                "hint": WITNESS_BINDING_HINT,
+            })
+            .to_string();
             return (
                 body,
                 format!(
-                    "prd-resolve refused: unknown witness_dispatch_id for {}",
+                    "prd-resolve refused: incomplete witness binding for {}",
                     id_target
                 ),
                 1,
             );
         }
-        witness_session = crate::dispatch_ledger::lookup(cwd, dispatch_id).and_then(|entry| {
-            entry
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        });
-        if resolver_session.is_some() && witness_session == resolver_session {
-            let body = serde_json::json!({
-                "error": format!("prd-resolve refused: witness_dispatch_id {} was dispatched by the resolving session for {}", dispatch_id, id_target),
-                "deviation_kind": "prd-resolve-self-witness",
-                "deviation_severity": "deny",
-                "prd_id": id_target,
-                "witness_dispatch_id": dispatch_id,
-                "hint": "The witness and the resolve share one session_id, so the executor verified its own work. Resolve from a session other than the one that dispatched the witness; the executor reports BLOCKED until an independent session closes the row.",
-            }).to_string();
-            return (
-                body,
-                format!(
-                    "prd-resolve refused: witness dispatched by the resolving session for {}",
-                    id_target
-                ),
-                1,
-            );
+        match verify_witness_binding(&binding_request) {
+            Ok(verified) => witness_binding = Some(verified),
+            Err((field, reason)) => {
+                let body = serde_json::json!({
+                    "error": format!("prd-resolve refused: {} is invalid for {}: {}", field, id_target, reason),
+                    "deviation_kind": "prd-resolve-witness-binding-invalid",
+                    "deviation_severity": "deny",
+                    "prd_id": id_target,
+                    "field": field,
+                    "reason": reason,
+                    "hint": WITNESS_BINDING_HINT,
+                })
+                .to_string();
+                return (
+                    body,
+                    format!("prd-resolve refused: invalid {} for {}", field, id_target),
+                    1,
+                );
+            }
         }
     }
+    let evidence_dispatch_id = dispatch_id_in_text(witness.as_deref().unwrap_or(""));
     #[cfg(target_arch = "wasm32")]
-    let witness_verified = resolver_session.is_some()
-        && witness_session.is_some()
-        && witness_session != resolver_session;
+    let (dispatch_verified, evidence_in_ledger, bound_in_ledger, verified_via) = {
+        let cwd = resolve_cwd.as_deref().unwrap_or("");
+        let evidence_in_ledger = evidence_dispatch_id
+            .as_deref()
+            .map(|id| crate::dispatch_ledger::lookup(cwd, id).is_some());
+        let dispatch_verified = match witness_dispatch_id.as_deref() {
+            None => false,
+            Some(dispatch_id) if crate::dispatch_ledger::lookup(cwd, dispatch_id).is_some() || dispatch_in_spool_out(cwd, dispatch_id) => {
+                true
+            }
+            Some(_) if witness_binding.is_some() => false,
+            Some(dispatch_id) => {
+                let id_ts = dispatch_id
+                    .split('-')
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok());
+                let window = crate::dispatch_ledger::window(cwd);
+                let aged_out = matches!(
+                    window,
+                    Some((len, oldest))
+                        if len >= crate::dispatch_ledger::RETAINED_ENTRIES
+                            && id_ts.is_some_and(|t| t < oldest)
+                );
+                let kind = if aged_out {
+                    "prd-resolve-unbound-witness"
+                } else {
+                    "prd-resolve-fabricated-dispatch"
+                };
+                if aged_out && !deviation_refuses(kind) {
+                    false
+                } else {
+                    let (reason, hint) = if aged_out {
+                        ("aged_out", "the ledger keeps only the most recent ledger_retained_entries dispatches of a project; this id is older than its oldest retained entry, so the dispatch ran but aged out of the window. Bind the witness instead: witness_exit_code 0, witness_output_sha256, witness_output_path and witness_ts do not depend on the ledger.")
+                    } else {
+                        ("not_recorded", "no dispatch with this id is in this project's .gm/exec-spool/.dispatch-ledger.json and the id is not older than the ledger's oldest entry, so the cwd may be another project or the id may be invented. Pass the dispatch_id copied from the response of the dispatch that produced the evidence, or bind the witness with witness_exit_code, witness_output_sha256, witness_output_path and witness_ts.")
+                    };
+                    let body = serde_json::json!({
+                        "error": format!(
+                            "prd-resolve refused: witness_dispatch_id {} is not in this project's dispatch ledger ({})",
+                            dispatch_id, reason
+                        ),
+                        "deviation_kind": kind,
+                        "deviation_severity": "deny",
+                        "prd_id": id_target,
+                        "witness_dispatch_id": dispatch_id,
+                        "witness_dispatch_id_field": "witness_dispatch_id",
+                        "reason": reason,
+                        "ledger_retained_entries": crate::dispatch_ledger::RETAINED_ENTRIES,
+                        "ledger_entries": window.map(|(len, _)| len),
+                        "ledger_oldest_ts": window.map(|(_, oldest)| oldest),
+                        "hint": hint,
+                    })
+                    .to_string();
+                    return (
+                        body,
+                        format!(
+                            "prd-resolve refused: witness_dispatch_id {} not in the dispatch ledger for {}",
+                            dispatch_id, id_target
+                        ),
+                        1,
+                    );
+                }
+            }
+        };
+        let bound_in_ledger = witness_dispatch_id
+            .as_deref()
+            .map(|id| crate::dispatch_ledger::lookup(cwd, id).is_some());
+        let verified_via = match (dispatch_verified, bound_in_ledger) {
+            (true, Some(true)) => Some("ledger"),
+            (true, _) => Some("spool_out"),
+            _ => None,
+        };
+        (dispatch_verified, evidence_in_ledger, bound_in_ledger, verified_via)
+    };
     #[cfg(not(target_arch = "wasm32"))]
-    let witness_verified = false;
-    #[cfg(not(target_arch = "wasm32"))]
-    let witness_session: Option<String> = None;
+    let (dispatch_verified, evidence_in_ledger, bound_in_ledger, verified_via) = (
+        witness_dispatch_id.is_some(),
+        None::<bool>,
+        None::<bool>,
+        None::<&'static str>,
+    );
+    if !annotate_only
+        && witness_binding.is_none()
+        && witness_dispatch_id.is_none()
+        && deviation_refuses("prd-resolve-unbound-witness")
+    {
+        let body = serde_json::json!({
+            "error": format!(
+                "prd-resolve refused: witness for {} is unbound -- pass witness_dispatch_id, or all of witness_exit_code, witness_output_sha256, witness_output_path and witness_ts",
+                id_target
+            ),
+            "deviation_kind": "prd-resolve-unbound-witness",
+            "deviation_severity": "deny",
+            "prd_id": id_target,
+            "missing_fields": ["witness_dispatch_id", "witness_exit_code", "witness_output_sha256", "witness_output_path", "witness_ts"],
+            "required_fields": prd_resolve_required_fields(),
+            "witness_dispatch_id_field": "witness_dispatch_id",
+            "witness_dispatch_id_in_evidence": evidence_dispatch_id,
+            "witness_dispatch_id_in_ledger": evidence_in_ledger,
+            "hint": WITNESS_BINDING_HINT,
+        })
+        .to_string();
+        return (
+            body,
+            format!("prd-resolve refused: unbound witness for {}", id_target),
+            1,
+        );
+    }
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
     if !pkfs::exists(&path_s) {
@@ -958,7 +1791,60 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         );
     }
 
-    if !status_kept
+    if !annotate_only
+        && policy.reject_duplicate_witness
+        && deviation_refuses("prd-resolve-duplicate-witness")
+    {
+        if let Some(binding) = witness_binding.as_ref() {
+            if let Some(existing) = pkfs::read_to_string(&path_s) {
+                if let Ok(doc) = serde_yaml::from_str::<Value>(&existing) {
+                    if let Some(seq) = doc.as_sequence() {
+                        for item in seq {
+                            let Some(map) = item.as_mapping() else {
+                                continue;
+                            };
+                            let other_id = map
+                                .get(&Value::String("id".to_string()))
+                                .and_then(|v| v.as_str());
+                            if other_id == Some(id_target.as_str()) {
+                                continue;
+                            }
+                            let other_sha = map
+                                .get(&Value::String("witness_binding".to_string()))
+                                .and_then(|b| b.as_mapping())
+                                .and_then(|b| b.get(&Value::String("output_sha256".to_string())))
+                                .and_then(|v| v.as_str());
+                            if other_sha == Some(binding.output_sha256.as_str()) {
+                                let body = serde_json::json!({
+                                    "error": format!(
+                                        "prd-resolve refused: witness binding for {} reuses output_sha256 {}, already bound to {}. Each witness output closes one row: make the witness print a run identity (its dispatch id or a run timestamp) into its output, re-run it, and bind the new output file",
+                                        id_target,
+                                        binding.output_sha256,
+                                        other_id.unwrap_or("?")
+                                    ),
+                                    "deviation_kind": "prd-resolve-duplicate-witness",
+                                    "deviation_severity": "deny",
+                                    "prd_id": id_target,
+                                    "duplicate_of": other_id,
+                                    "hint": "One witness output closes one row. A witness that prints no run identity writes the same bytes on every run, so a second row cannot bind a distinct output: make the witness print its dispatch id or a run timestamp into the output file, re-run it, and bind the new file by its witness_output_sha256. A row that really shares a witness with another row should be re-scoped with prd-add, not closed with the same output file.",
+                                })
+                                .to_string();
+                                return (
+                                    body,
+                                    format!(
+                                        "prd-resolve refused: duplicate witness binding for {}",
+                                        id_target
+                                    ),
+                                    1,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !annotate_only
         && policy.reject_duplicate_witness
         && deviation_refuses("prd-resolve-duplicate-witness")
     {
@@ -1022,34 +1908,67 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         "prd-resolve",
         |mut doc: Value| {
             let mut found = false;
+            let mut status_matches = true;
             if let Some(seq) = doc.as_sequence_mut() {
-                for item in seq.iter_mut() {
-                    if let Some(map) = item.as_mapping_mut() {
-                        if map
-                            .get(&Value::String("id".to_string()))
+                let last_match = seq
+                    .iter_mut()
+                    .enumerate()
+                    .filter(|(_, item)| {
+                        item.as_mapping()
+                            .and_then(|map| map.get(&Value::String("id".to_string())))
                             .and_then(|v| v.as_str())
                             == Some(&id_target)
-                        {
-                            if !status_kept {
-                                map.insert(
-                                    Value::String("status".to_string()),
-                                    Value::String(resolved_status.clone()),
-                                );
-                            }
-                            if let Some(w) = witness.as_ref() {
-                                map.insert(
-                                    Value::String("witness".to_string()),
-                                    Value::String(w.clone()),
-                                );
-                            }
-                            if let Some(c) = commit_comment.as_ref() {
-                                map.insert(
-                                    Value::String("commit_comment".to_string()),
-                                    Value::String(c.clone()),
-                                );
-                            }
-                            found = true;
+                    })
+                    .map(|(index, _)| index)
+                    .last();
+                if let Some(index) = last_match {
+                    if let Some(map) = seq
+                        .iter_mut()
+                        .nth(index)
+                        .and_then(|item| item.as_mapping_mut())
+                    {
+                        if !annotate_only {
+                            map.insert(
+                                Value::String("status".to_string()),
+                                Value::String(resolved_status.clone()),
+                            );
                         }
+                        if let Some(w) = witness.as_ref() {
+                            map.insert(
+                                Value::String("witness".to_string()),
+                                Value::String(w.clone()),
+                            );
+                        }
+                        if let Some(binding) = witness_binding.as_ref() {
+                            map.insert(
+                                Value::String("witness_binding".to_string()),
+                                binding.to_yaml(),
+                            );
+                        }
+                        if let Some(c) = commit_comment.as_ref() {
+                            map.insert(
+                                Value::String("commit_comment".to_string()),
+                                Value::String(c.clone()),
+                            );
+                        }
+                        if let Some(r) = resolution.as_ref() {
+                            map.insert(
+                                Value::String("resolution".to_string()),
+                                Value::String(r.clone()),
+                            );
+                        }
+                        if let Some(sha) = commit_sha.as_ref() {
+                            map.insert(
+                                Value::String("commit_sha".to_string()),
+                                Value::String(sha.clone()),
+                            );
+                        }
+                        status_matches = requested_status.as_ref().map_or(true, |want| {
+                            map.get(&Value::String("status".to_string()))
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|have| have.eq_ignore_ascii_case(want.as_str()))
+                        });
+                        found = true;
                     }
                 }
             }
@@ -1078,23 +1997,80 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             }).to_string();
                 return cas::CasOutcome::Abort(body, format!("prd id not found: {}", id_target), 1);
             }
-            cas::CasOutcome::Write(doc, ())
+            cas::CasOutcome::Write(doc, status_matches)
         },
     );
     match outcome {
-        Ok(()) => {
+        Ok(status_matches) => {
             #[cfg(target_arch = "wasm32")]
             crate::wasm_dispatch::emit_event(
-                if status_kept {
+                if annotate_only {
                     "prd.annotated"
                 } else {
                     "prd.resolved"
                 },
                 serde_json::json!({ "id": id_target }),
             );
-            let outcome_key = if status_kept { "annotated" } else { "resolved" };
-            (serde_json::json!({ outcome_key: id_target, "status_kept": status_kept, "commit_comment_attached": commit_comment.is_some(), "witness_session": witness_session, "witness_dispatch_id_verified": witness_verified }).to_string(), String::new(), 0)
+            let outcome_key = if annotate_only { "annotated" } else { "resolved" };
+            let reply = serde_json::json!({
+                outcome_key: id_target,
+                "status_kept": status_matches,
+                "commit_comment_attached": commit_comment.is_some() || commit_sha.is_some(),
+                "resolution_attached": resolution.is_some(),
+                "commit_sha_attached": commit_sha.is_some(),
+                "witness_bound": witness_binding.is_some(),
+                "witness_binding": witness_binding.as_ref().map(VerifiedWitness::to_json),
+                "witness_dispatch_id_verified": dispatch_verified,
+                "witness_dispatch_id_verified_via": verified_via,
+                "witness_dispatch_id_field": "witness_dispatch_id",
+                "witness_dispatch_id_in_evidence": witness_dispatch_id,
+                "witness_dispatch_id_in_ledger": bound_in_ledger,
+                "count_of_record": count_of_record,
+            });
+            (reply.to_string(), String::new(), 0)
         }
+        Err((out, err, rc)) => (out, err, rc),
+    }
+}
+
+pub fn handle_block(content: &str) -> (String, String, i32) {
+    let body: Value = match serde_json::from_str::<Value>(content.trim()) {
+        Ok(v) => v,
+        Err(_) => return (String::new(), "prd-block body must be JSON {id, note}".to_string(), 1),
+    };
+    let (Some(id), Some(note)) = (
+        body.get("id").and_then(Value::as_str).map(str::to_string),
+        body.get("note").and_then(Value::as_str).map(str::to_string),
+    ) else {
+        return (String::new(), "prd-block requires id and note".to_string(), 1);
+    };
+    let path_s = prd_path().to_string_lossy().to_string();
+    let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
+    let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-block", |mut doc: Value| {
+        let Some(seq) = doc.as_sequence_mut() else {
+            return cas::CasOutcome::Abort(String::new(), "prd.yml is not a sequence".to_string(), 1);
+        };
+        let key = Value::String("id".to_string());
+        let Some(row) = seq
+            .iter_mut()
+            .find(|it| it.as_mapping().and_then(|m| m.get(&key)).and_then(|v| v.as_str()) == Some(id.as_str()))
+        else {
+            return cas::CasOutcome::Abort(String::new(), format!("no PRD row with id {}", id), 1);
+        };
+        let Some(map) = row.as_mapping_mut() else {
+            return cas::CasOutcome::Abort(String::new(), "PRD row is not a mapping".to_string(), 1);
+        };
+        let notes_key = Value::String("blocker_notes".to_string());
+        let mut notes = map
+            .get(&notes_key)
+            .and_then(|v| v.as_sequence().cloned())
+            .unwrap_or_default();
+        notes.push(Value::String(note.clone()));
+        map.insert(notes_key, Value::Sequence(notes));
+        cas::CasOutcome::Write(doc, ())
+    });
+    match outcome {
+        Ok(()) => (serde_json::json!({"ok": true, "blocked_annotated": id}).to_string(), String::new(), 0),
         Err((out, err, rc)) => (out, err, rc),
     }
 }
