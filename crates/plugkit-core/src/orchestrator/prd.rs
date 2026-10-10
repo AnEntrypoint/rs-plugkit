@@ -588,14 +588,21 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         if let Some(seq) = doc.as_sequence_mut() {
             let mut new_with_id = item_map.clone();
             new_with_id.remove(&Value::String("overwrite".to_string()));
-            new_with_id.insert(Value::String("id".to_string()), Value::String(id.clone()));
-            if !new_with_id.contains_key(&Value::String("status".to_string())) {
-                new_with_id.insert(
+            let mut id_first = serde_yaml::Mapping::new();
+            id_first.insert(Value::String("id".to_string()), Value::String(id.clone()));
+            for (key, value) in new_with_id.into_iter() {
+                if key.as_str() == Some("id") {
+                    continue;
+                }
+                id_first.insert(key, value);
+            }
+            if !id_first.contains_key(&Value::String("status".to_string())) {
+                id_first.insert(
                     Value::String("status".to_string()),
                     Value::String("pending".to_string()),
                 );
             }
-            let new_row = Value::Mapping(new_with_id);
+            let new_row = Value::Mapping(id_first);
             let existing = seq.iter_mut().find(|it| {
                 it.as_mapping()
                     .and_then(|m| m.get(&Value::String("id".to_string())))
