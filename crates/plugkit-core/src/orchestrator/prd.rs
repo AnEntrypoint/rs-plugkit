@@ -1103,11 +1103,71 @@ fn path_is_within(path: &str, other: &str) -> bool {
     path == other || path.ends_with(&format!("/{other}")) || other.ends_with(&format!("/{path}"))
 }
 
-fn is_log_or_receipt_path(path: &str) -> bool {
+fn is_runtime_state_path(path: &str) -> bool {
     let anchored = format!("/{path}");
     anchored.ends_with("/.gm/witness-log.md")
+        || anchored.ends_with("/.gm/prd.yml")
+        || anchored.ends_with("/.gm/mutables.yml")
         || anchored.contains("/.gm/pool/")
         || anchored.contains("/.gm/witness-out/")
+}
+
+pub fn is_prd_yml_pathspec(path: &str) -> bool {
+    path.trim().replace('\\', "/").trim_start_matches("./") == ".gm/prd.yml"
+}
+
+fn prd_row_blocks(text: &str) -> Vec<&str> {
+    let mut starts: Vec<usize> = vec![0];
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        if offset > 0 && line.starts_with("- ") {
+            starts.push(offset);
+        }
+        offset += line.len();
+    }
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, &start)| {
+            let end = starts.get(index + 1).copied().unwrap_or(text.len());
+            &text[start..end]
+        })
+        .filter(|block| !block.trim().is_empty())
+        .collect()
+}
+
+fn prd_block_field(block: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    block.lines().find_map(|line| {
+        let unindented = line.strip_prefix("- ").or_else(|| line.strip_prefix("  "))?;
+        let value = unindented.strip_prefix(prefix.as_str())?;
+        Some(value.trim().trim_matches(|c: char| c == '\'' || c == '"').to_string())
+    })
+}
+
+pub fn foreign_prd_rows(head_text: &str, worktree_text: &str, session_id: &str) -> Vec<serde_json::Value> {
+    let head_blocks = prd_row_blocks(head_text);
+    let worktree_blocks = prd_row_blocks(worktree_text);
+    let changed = worktree_blocks
+        .iter()
+        .filter(|block| !head_blocks.contains(*block))
+        .chain(head_blocks.iter().filter(|block| !worktree_blocks.contains(*block)));
+    let mut seen: Vec<(String, Option<String>)> = Vec::new();
+    let mut foreign: Vec<serde_json::Value> = Vec::new();
+    for block in changed {
+        let owner = prd_block_field(block, "session_id");
+        if owner.as_deref() == Some(session_id) {
+            continue;
+        }
+        let id = prd_block_field(block, "id").unwrap_or_default();
+        let key = (id.clone(), owner.clone());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        foreign.push(serde_json::json!({ "id": id, "session_id": owner }));
+    }
+    foreign
 }
 
 fn stale_completed_rows(doc: &Value, changed: &[String]) -> Vec<(String, Vec<String>)> {
@@ -1429,7 +1489,7 @@ pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Valu
     let changed: Vec<String> = changed
         .iter()
         .map(|path| path.trim().replace('\\', "/").trim_start_matches("./").to_string())
-        .filter(|path| !path.is_empty() && !is_log_or_receipt_path(path))
+        .filter(|path| !path.is_empty() && !is_runtime_state_path(path))
         .collect();
     if changed.is_empty() {
         return vec![];
