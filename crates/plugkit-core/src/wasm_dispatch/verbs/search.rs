@@ -677,6 +677,8 @@ pub(super) const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "query",
     "mode",
     "path",
+    "paths",
+    "files",
     "glob",
     "path_glob",
     "exclude",
@@ -1204,24 +1206,49 @@ codesearch (aliases \"code_search\", \"search\") is the canonical search verb.
   {\"query\":\"<text>\"}                 required
   {\"mode\":\"dual\"}                    \"dual\" (default): ranked BM25+vector retrieval;
                                        \"literal\"/\"regex\": exhaustive, every match with path:line, no ranking;
-                                       \"filename\": matches paths only
-  {\"k\":10}                            result cap for \"dual\"; aliases: max_results, maxResults, limit
+                                       \"filename\": matches paths only;
+                                       \"comments\": the comment scan instead of a text scan, no \"query\"
+                                       needed; {\"comments\":true} and {\"comments_only\":true} route there too
+  {\"k\":10}                            result cap for \"dual\"; aliases: max_results, maxResults, limit,
+                                       head_limit
   {\"max_matches\":1000}                hit cap for the exhaustive modes
   {\"max_files\":50000}                 file cap
   {\"path\":\"<dir or file>\"}           narrow the scan; may be absolute when it is inside the search root
+  {\"paths\":[\"src/a.rs\",\"src/b/\"]}   narrow it to exactly those files and directories; \"files\" is an
+                                       alias. Paths resolve under the project root, or under
+                                       \"root\"/\"projectPath\" when one is given
   {\"root\":\"<project dir>\"}           search another project; \"path\" is then relative to it
   {\"projectPath\":\"<project dir>\"}    alias of \"root\"
   {\"cwd\":\"<project dir>\"}            alias of \"root\", lowest precedence of the three
-  {\"path_glob\":\"**/*.rs\"}            narrow by glob; \"glob\" is an alias
+  {\"path_glob\":\"**/*.rs\"}            narrow by glob; \"glob\" is an alias, and a \"!\"-prefixed entry
+                                       excludes instead: [\"**/*.rs\",\"!vendor/**\"]
+  {\"exclude\":[\"vendor/**\"]}          drop paths from the scan: one glob or a list of globs, matched like
+                                       \"glob\", so name a whole tree as \"vendor/**\". \"exclude_glob\"
+                                       and \"exclude_globs\" are aliases
   {\"combine\":\"phrase\"}               \"phrase\" (default for a multi-word query), \"and\" (every term on one line),
-                                       \"or\" (ranked union of any term)
+                                       \"or\" (ranked union of any term); \"term_combination\" is an alias and
+                                       {\"verbatim\":true} means \"phrase\"
   {\"case_insensitive\":true, \"whole_word\":true}
+  {\"output\":\"matches\"}               reply shape: \"matches\" (default, one object per match), \"compact\"
+                                       (path:line: trimmed text), \"files\" (matching paths only),
+                                       \"count\" (totals and the busiest files)
+  {\"max_chars\":24000}                 cap the reply in characters
+  {\"timeout_ms\":25000}                bound the scan's wall clock in milliseconds
+  {\"docs\":false}                      in the exhaustive modes, exclude docs (*.md, *.mdx, *.rst, *.adoc
+                                       and docs/ trees); they are scanned by default
+  {\"verbose\":false}                   trim telemetry from the reply
   {\"refresh\":true}                    re-read from disk for the exhaustive modes: walk instead of
-                                       `git ls-files --cached` and bypass the content cache
+                                       `git ls-files --cached` and bypass the content cache;
+                                       \"no_cache\":true and \"force_disk\":true are aliases
   {\"no_ignore\":true}                  include files .gitignore would hide, in every mode: build output,
                                        vendored trees and scratch scripts the project never committed
                                        are listed and scanned like any other file. \"include_ignored\"
-                                       is an alias. .git is never listed either way.";
+                                       is an alias and {\"exhaustive\":true} implies it. .git is never
+                                       listed either way.
+In a REPLY \"exhaustive\" reports coverage, it does not widen the scan: \"exhaustive\":false means the
+scan stopped early and the reply carries \"partial\": true and a \"partial_reason\" naming the bound.
+In \"literal\", \"regex\" and \"filename\" a field outside this list is REFUSED and the reply names
+\"accepted_fields\"; in \"dual\" an unrecognised field is ignored.";
 
 pub(super) const FS_READ_HELP: &str = "\
 fs_read returns a file's contents.
@@ -1308,9 +1335,11 @@ prd-resolve {id (string), witness_evidence (string), commit_comment (string, opt
          commit_sha_attached, witness_bound. A help request writes no state.";
 
 pub(super) const PRD_ADD_HELP: &str = "\
-prd-add {id, subject, description, notes, status, blockedBy, overwrite}. body.id is required.
-  id: a non-empty kebab-case string, unique in .gm/prd.yml. A body with no usable id is refused,
-      and so is an id that already exists unless overwrite:true.
+prd-add {id, subject, description, notes, status, blockedBy, overwrite}.
+  id: a non-empty kebab-case string, unique in .gm/prd.yml. It is derived, not required: omit it and
+      send a non-empty subject (or title, name, task, goal, description, notes -- the first of those
+      that carries text) and the id is slugified from that text. A body with no id and no such text is
+      refused, and so is an id that already exists unless overwrite:true.
   status: pending (the default when omitted, open) or completed (finished). The finished state is
           completed, never resolved. prd-resolve sets completed once a witness binds to the row.
   subject: the row's one-line intent. description and notes are free text.
