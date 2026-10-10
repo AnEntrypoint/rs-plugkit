@@ -340,8 +340,6 @@ pub fn failure_is_gate_drift(result: &Value) -> bool {
     )
 }
 
-/// One recorded dispatch. The recorder writes it and the ranking and replay read it back; every
-/// field is optional on read, so a row missing a field still ranks by the fields it has.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg(target_arch = "wasm32")]
 struct ObservationRecord {
@@ -369,15 +367,11 @@ impl ObservationRecord {
         self.exit_code == Some(0)
     }
 
-    /// An observation counts toward the strategy only when the dispatch failed and the failure was
-    /// gate drift; a plain failure (bad arguments, a real error from the verb) says nothing about
-    /// whether the caller has lost the chain.
     fn is_gate_drift_failure(&self) -> bool {
         !self.succeeded() && self.gate_drift.unwrap_or(true)
     }
 }
 
-/// The recorded strategy as the ranking reads it. A missing `evidence` array ranks nothing.
 #[cfg(target_arch = "wasm32")]
 struct Strategy {
     selection: Option<String>,
@@ -521,16 +515,9 @@ pub fn active_strategy(session_id: Option<&str>) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// A gate-drift failure older than this stops ranking above a fresh, valid dispatch, so a stale
-/// one cannot strand a verb for a whole session.
 #[cfg(target_arch = "wasm32")]
 const VETO_MAX_AGE_MS: i64 = 600_000;
 
-/// The per-session re-orientation marker cannot be the only one: the MCP `gm_instruction` tool
-/// dispatches under a server-local session id of its own, so the `instruction` a caller uses to
-/// clear a veto armed under its own session id stamps a directory nobody reads. This project-wide
-/// marker is what makes the documented remedy reachable; the per-session one stays so a session
-/// can still be judged on its own history.
 pub const PROJECT_WIDE_MARKER_SESSION: &str = "_any-session";
 
 #[cfg(target_arch = "wasm32")]
@@ -538,14 +525,9 @@ fn reorientation_ts_path(session_id: &str) -> String {
     format!(".gm/dream-rsi/{session_id}/reorientation-ts")
 }
 
-/// What `admit_dispatch` decides about a dispatch. The recorded strategy ranks and annotates; it
-/// never refuses.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Admission {
     Allow,
-    /// `replay-recorded-successes-first` would rather see an `instruction` before this verb.
-    /// Refusing is what turned the ranking into a livelock: a refused dispatch was never recorded,
-    /// so the verb could never produce the success that clears the ranking.
     Advisory { reason: String, next_dispatch_hint: &'static str },
 }
 
@@ -555,10 +537,8 @@ impl Admission {
     }
 }
 
-/// The ranking decision, split away from the file reads so it can be exercised without a host.
-/// `marker_ts` is the newest re-orientation stamp this dispatch can be judged against.
 #[cfg(target_arch = "wasm32")]
-fn veto_reason(verb: &str, strategy: &Strategy, now_ms: i64, marker_ts: i64) -> Option<String> {
+fn veto_reason(verb: &str, strategy: &Strategy, now_ms: i64, newest_reorientation_ts: i64) -> Option<String> {
     if strategy.selection.as_deref() != Some("replay-recorded-successes-first") { return None; }
     let evidence = strategy.evidence.as_deref()?;
     if evidence.iter().any(|entry| entry.verb.as_deref() == Some(verb) && entry.succeeded()) { return None; }
@@ -568,7 +548,7 @@ fn veto_reason(verb: &str, strategy: &Strategy, now_ms: i64, marker_ts: i64) -> 
         .filter_map(|entry| entry.ts)
         .max()?;
     if now_ms.saturating_sub(last_failure_ts) > VETO_MAX_AGE_MS { return None; }
-    if marker_ts >= last_failure_ts { return None; }
+    if newest_reorientation_ts >= last_failure_ts { return None; }
     Some(format!(
         "Dream-RSI recorded a gate-drift failure for {verb} and no later `instruction` re-orientation, so replay-recorded-successes-first ranks `instruction` above it; this dispatch ran anyway because its inputs are valid -- refusing is what strands the verb, since a refused dispatch is never recorded and so can never be the success that clears the ranking"
     ))
@@ -593,27 +573,30 @@ fn read_ts(path: &str) -> i64 {
     crate::pkfs::read_to_string(path).and_then(|raw| raw.trim().parse::<i64>().ok()).unwrap_or(0)
 }
 
-/// The stamp a dispatch is judged against: this session's own marker, the project-wide one any
-/// session's `instruction` stamps, and the long-gap `instruction` stamp.
 #[cfg(target_arch = "wasm32")]
-fn newest_marker(per_session_ts: i64, project_wide_ts: i64, long_gap_instruction_ts: i64) -> i64 {
-    per_session_ts.max(project_wide_ts).max(long_gap_instruction_ts)
+fn newest_reorientation_marker(
+    per_session_marker_ts: i64,
+    project_wide_marker_ts: i64,
+    long_gap_instruction_marker_ts: i64,
+) -> i64 {
+    per_session_marker_ts
+        .max(project_wide_marker_ts)
+        .max(long_gap_instruction_marker_ts)
 }
 
-/// Newest re-orientation marker this dispatch can be judged against. The long-gap
-/// `.gm/last-instruction-ts` is one of them, even though
-/// `gates::dispatch_serves_no_phase_prose` withholds it from `instruction` in
-/// `investigate_readonly` mode: any other `instruction` still stamps it.
+#[cfg(target_arch = "wasm32")]
+const LONG_GAP_INSTRUCTION_TS_PATH: &str = ".gm/last-instruction-ts";
+
 #[cfg(target_arch = "wasm32")]
 fn reorientation_ts(session_id: Option<&str>) -> i64 {
     let per_session = match session_id.filter(|id| !id.trim().is_empty()) {
         Some(id) => read_ts(&reorientation_ts_path(id)),
         None => 0,
     };
-    newest_marker(
+    newest_reorientation_marker(
         per_session,
         read_ts(&reorientation_ts_path(PROJECT_WIDE_MARKER_SESSION)),
-        read_ts(".gm/last-instruction-ts"),
+        read_ts(LONG_GAP_INSTRUCTION_TS_PATH),
     )
 }
 
