@@ -13,3 +13,9 @@ Cargo.lock
 .cycle-state.json
 # engine diagnostic rewritten on every gate denial; runtime state
 .gm/fsm-graph-rejected.json
+
+# Regenerated runtime state, never source: .gm/next-step.md is rewritten on every
+# dispatch, and each Dream-RSI cycle rebuilds its .gm/dream-rsi/ scratch tree from
+# scratch -- same transient class as .agentplug-kv/ above.
+.gm/next-step.md
+.gm/dream-rsi/
