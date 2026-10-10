@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::fsm::{self, GateDef, HookMode};
 use super::mutables;
 use super::prd;
@@ -361,6 +363,23 @@ pub(super) fn prd_open_rows_with_recency() -> Vec<(serde_json::Value, usize)> {
                 .unwrap_or(false);
             prd::status_is_open(status) && !blocked_external
         })
+        .collect()
+}
+
+pub(super) fn prd_row_ids() -> BTreeSet<String> {
+    let (body, _err, code) = prd::handle_list_full();
+    if code != 0 {
+        return BTreeSet::new();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return BTreeSet::new();
+    };
+    value
+        .get("items")
+        .and_then(|items| items.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("id").and_then(|id| id.as_str()).map(str::to_string))
         .collect()
 }
 
