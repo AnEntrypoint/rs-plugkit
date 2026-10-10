@@ -1,3 +1,27 @@
+## 2026-10-10 - git_status: the default reply is bounded
+
+**Changes:** `wasm_dispatch/verbs/git.rs` default `git_status` replies with `counts` (changed entries and each category), `by_directory` for `modified` and `deleted` (the ten busiest directories with their counts, the rest summed as `elsewhere`), a `truncated` flag and at most ten sample paths per list. `limit` sets the sample size and replaces `truncated_totals`. When a list exceeds its sample, the full porcelain listing is written through `code_index`'s spill helper to `.gm/exec-spool/out/git_status-<dispatch>.txt` and named in `spill_file`; a failed write sets `spill_write_failed` instead.
+
+**Not changed:** `summary` mode and the `eol` option keep their replies.
+
+## 2026-10-10 - codesearch: gm-state exclusions keep `exhaustive`, compact exclusion list, counts on spill, glob alternatives outside `path`, no `modes` legend in replies
+
+**Changes:** `search.rs` `code_exclusion_count` counts only the rule exclusions that clear `exhaustive`: every rule except `gm_state_dir` and `agentplug_kv_cache`, which stay named in `excluded_by_rule_summary`. `code_index.rs` `insert_excluded_by_rule` names the first five excluded paths instead of up to 200. A spilled `matches`, `compact` or `files` reply carries `counts_by_file` inline (`N path` rows, busiest first). `path_glob.rs` `alternatives_outside_scopes` names each include-glob brace alternative whose literal directory lies outside `path` in `glob_outside_path`, which clears `exhaustive`. The `modes` legend is gone from codesearch replies; `{"help": true}` returns the verb help, which lists the modes.
+
+## 2026-10-09 - codesearch exhaustive: a rule exclusion clears `exhaustive` and is named in `excluded_by_rule`
+
+**Changes:** an unscoped literal, regex, filename, comments or grep scan reported `exhaustive: true` while `prune_own_state` had dropped `.gm/` (`.gm/prd.yml` held the witness it was asked for, zero hits). `scan_universe.rs` now reports an own-state exclusion under the child that holds it (`.gm/prd.yml`, `.gm/memories`). `code_index.rs` `insert_excluded_by_rule` puts `excluded_by_rule`, its count and summary into every literal, filename and comments scan that dropped a path, not only verbose ones. `search.rs` `finish_scan_reply` clears `exhaustive` when `excluded_by_rule_count` is non-zero, `scan_partial_reason` names the excluded rules, and `SCAN_TELEMETRY_DROPPED` no longer hides `excluded_by_rule`.
+
+**Not changed:** the unscoped universe still prunes gm's own state (the 2026-10-07 entry's design); scope `path: ".gm"` to search it. The symbol (identifier) route and the dual phrase route still read the scan's walk verdict, so they do not run a second definitions scan for an exclusion that scan cannot recover; their replies do not name `excluded_by_rule` yet.
+
+**Not yet measured:** this change is not built in this environment (builds run on Actions) and the running guest predates it, so the live witness waits on a CI build and a runner reload.
+
+## 2026-10-09 - prd-list folds and limits; prd-resolve binds non-dispatch witnesses
+
+**Changes:** `prd-list` takes `limit`, folds repeated blocks of an id to the last block before filtering, and replies with `total` (matches), `store_total` (stored blocks), `limit` and `truncated`. `prd-resolve` closes a row only with a verified `witness_dispatch_id` or a complete witness binding (`witness_exit_code` 0, `witness_output_sha256`, `witness_output_path`, `witness_ts`); the runtime re-hashes the output file and names the exact missing or invalid field. A dispatch id outside the ledger is reported as `aged_out` (older than the oldest retained entry) or `not_recorded`, and an id present only in `witness_evidence` is named as `witness_dispatch_id_field` rather than verified. `sha2` moves out of the wasm-only dependency table.
+
+**Not changed:** the dispatch ledger keeps 500 entries per project, so a dispatch id older than that cannot be verified; binding by output hash does not depend on the window.
+
 ## 2026-10-08 - sideloaded builds are traceable to origin/main
 
 **Changes:** `health` reports `source_sha` (the commit `build.rs` embedded), and `gm/scripts/triage/sideload-plugkit.sh` builds only from a tree that contains `origin/main`, recording the built commit and wasm hash in `~/.agentplug/plugins/gm.build.json`.

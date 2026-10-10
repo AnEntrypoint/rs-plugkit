@@ -16,7 +16,19 @@ pub fn cas_retry_write<T>(
     loop {
         attempt += 1;
         let before_raw = if pkfs::exists(path_s) {
-            pkfs::read_to_string(path_s).unwrap_or_default()
+            match pkfs::read_to_string(path_s) {
+                Some(raw) => raw,
+                None => {
+                    return Err((
+                        String::new(),
+                        format!(
+                            "{} refused: {} exists but could not be read; building the update from an empty read would overwrite its rows",
+                            verb_label, path_s
+                        ),
+                        1,
+                    ));
+                }
+            }
         } else {
             String::new()
         };
@@ -38,7 +50,19 @@ pub fn cas_retry_write<T>(
             CasOutcome::Abort(out, err, rc) => return Err((out, err, rc)),
         };
 
-        let new_raw = serde_yaml::to_string(&new_doc).unwrap_or_default();
+        let new_raw = match serde_yaml::to_string(&new_doc) {
+            Ok(raw) => raw,
+            Err(e) => {
+                return Err((
+                    String::new(),
+                    format!(
+                        "{} refused: the updated document for {} did not serialize ({}); writing empty content would discard the store",
+                        verb_label, path_s, e
+                    ),
+                    1,
+                ));
+            }
+        };
 
         match pkfs::cas_write(path_s, &before_raw, &new_raw) {
             pkfs::CasWriteOutcome::Swapped => return Ok(result),

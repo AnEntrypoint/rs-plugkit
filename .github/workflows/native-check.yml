@@ -1,0 +1,28 @@
+name: native-check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  native-check:
+    name: native-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7
+        with:
+          key: native-check
+      - name: cargo check native host target, default features
+        run: cargo check -p rs-plugkit
+      - name: cargo check native host target, slim feature set that the wasm release ships
+        run: cargo check -p rs-plugkit --features slim

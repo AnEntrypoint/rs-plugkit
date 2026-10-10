@@ -280,7 +280,6 @@ const SKIP_DIRS: &[&str] = &[
     "vendor",
     ".gradle",
     ".mvn",
-    "bin",
     "obj",
     ".bundle",
     "Pods",
@@ -918,16 +917,16 @@ fn walk_posix(
 }
 
 pub fn extract_chunks(
-    _path: &str,
+    path: &str,
     source: &str,
     lang_name: &str,
 ) -> Vec<(String, String, usize, usize, String)> {
-    extract_chunks_reporting_plugin_failure(_path, source, lang_name).0
+    extract_chunks_reporting_plugin_failure(path, source, lang_name).0
 }
 
 type ChunkTuple = (String, String, usize, usize, String);
 
-fn parse_nodes(source: &str, lang_name: &str) -> Option<Vec<Value>> {
+fn parse_nodes(path: &str, source: &str, lang_name: &str) -> Option<Vec<Value>> {
     let resp = plugin_call(
         "treesitter",
         "parse",
@@ -937,6 +936,7 @@ fn parse_nodes(source: &str, lang_name: &str) -> Option<Vec<Value>> {
         crate::wasm_dispatch::emit_event(
             "code_index_treesitter_failed",
             json!({
+                "path": path,
                 "lang": lang_name,
                 "plugin_failure": plugin_failure_code(&resp),
                 "source_len": source.len(),
@@ -950,6 +950,7 @@ fn parse_nodes(source: &str, lang_name: &str) -> Option<Vec<Value>> {
             crate::wasm_dispatch::emit_event(
                 "code_index_treesitter_failed",
                 json!({
+                    "path": path,
                     "lang": lang_name,
                     "plugin_failure": crate::wasm_dispatch::PLUGIN_FAIL_MALFORMED,
                     "source_len": source.len(),
@@ -1001,11 +1002,11 @@ fn chunks_from_nodes(source: &str, nodes: &[Value]) -> Vec<ChunkTuple> {
 }
 
 pub fn extract_chunks_reporting_plugin_failure(
-    _path: &str,
+    path: &str,
     source: &str,
     lang_name: &str,
 ) -> (Vec<ChunkTuple>, bool) {
-    match parse_nodes(source, lang_name) {
+    match parse_nodes(path, source, lang_name) {
         Some(nodes) => (chunks_from_nodes(source, &nodes), false),
         None => (Vec::new(), true),
     }
@@ -1331,8 +1332,8 @@ fn imports_from_nodes(source: &str, lang_name: &str, sorted_nodes: &[RawNode]) -
     out
 }
 
-pub(crate) fn analyze_source(source: &str, lang_name: &str) -> SourceAnalysis {
-    let Some(nodes) = parse_nodes(source, lang_name) else {
+pub(crate) fn analyze_source(path: &str, source: &str, lang_name: &str) -> SourceAnalysis {
+    let Some(nodes) = parse_nodes(path, source, lang_name) else {
         return SourceAnalysis {
             chunks: Vec::new(),
             metrics: Vec::new(),
@@ -2390,6 +2391,7 @@ fn index_cfg_impl(
     let walk_share_ms = index_wall_budget_ms.saturating_sub(embed_budget_ms);
     let mut measured_embed_ms_per_chunk = pessimistic_ms_per_chunk;
     let mut treesitter_failures = 0u32;
+    let mut changed_files: Vec<String> = Vec::new();
     let mut langs = std::collections::BTreeMap::<String, u32>::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut digest_entries: Vec<(String, u32)> = Vec::with_capacity(files.len());
@@ -2636,6 +2638,7 @@ fn index_cfg_impl(
             fresh_files_this_pass += 1;
         }
 
+        changed_files.push(fp.clone());
         if let Some(m) = prior.get(fp) {
             delete_chunk_keys(&m.chunks, project_path);
         }
@@ -2858,6 +2861,7 @@ fn index_cfg_impl(
             symbol_budget_ms,
             cfg.index.max_file_bytes,
             enumeration_was_complete,
+            None,
         )
     };
     let symbol_ms =
@@ -2875,6 +2879,7 @@ fn index_cfg_impl(
             fv_delete(&manifest_ns_for(project_path), fp);
             fusion_corpus_cache_invalidate(project_path);
             removed_files += 1;
+            changed_files.push(fp.clone());
         }
     }
     if libsql_ok && enumeration_was_complete {
@@ -2943,6 +2948,12 @@ fn index_cfg_impl(
     }
     let silently_empty_due_to_plugin_failure =
         indexed > 0 && chunked == 0 && treesitter_failures >= indexed as u32;
+    let changed_files_count = changed_files.len();
+    let changed_files_report: Vec<String> = changed_files
+        .iter()
+        .take(CHANGED_FILES_REPORT_LIMIT)
+        .cloned()
+        .collect();
     json!({
         "ok": !silently_empty_due_to_plugin_failure,
         "files_scanned": files.len(),
@@ -2952,6 +2963,8 @@ fn index_cfg_impl(
         "reused": reused,
         "reused_files": reused_files,
         "removed_files": removed_files,
+        "changed_files": changed_files_report,
+        "changed_files_count": changed_files_count,
         "skipped_no_embed": skipped_no_embed,
         "embed_requests": embed_requests,
         "embed_failed": embed_failed,
@@ -3313,7 +3326,8 @@ fn digest_path_for(project_path: Option<&str>) -> String {
 }
 
 const PARTIAL_TOPUP_TS_PATH: &str = ".gm/exec-spool/.codeinsight-topup-ts";
-const PARTIAL_TOPUP_MIN_INTERVAL_MS: u64 = 300_000;
+const PARTIAL_TOPUP_MIN_INTERVAL_MS: u64 = 600_000;
+const CHANGED_FILES_REPORT_LIMIT: usize = 64;
 
 fn partial_topup_ts_path_for(project_path: Option<&str>) -> String {
     match project_path {
@@ -3885,39 +3899,30 @@ pub fn git_commit_rank_at(root: &str, query: &str, k: usize) -> Vec<Value> {
     ranked
 }
 
-fn glob_match_simple(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    let (mut pi, mut ti, mut star, mut match_i) = (0usize, 0usize, None::<usize>, 0usize);
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some(pi);
-            match_i = ti;
-            pi += 1;
-        } else if let Some(sp) = star {
-            pi = sp + 1;
-            match_i += 1;
-            ti = match_i;
-        } else {
-            return false;
-        }
-    }
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == p.len()
+fn fold_name_key(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '-' | '_') && !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
-    let needle = if req.case_insensitive {
-        req.pattern.to_lowercase()
-    } else {
-        req.pattern.to_owned()
+    let needle = {
+        let folded = fold_name_key(req.pattern);
+        if folded.is_empty() {
+            req.pattern.to_lowercase()
+        } else {
+            folded
+        }
     };
-    let is_glob = needle.contains('*') || needle.contains('?');
+    let name_glob = if crate::path_glob::looks_like_glob(req.pattern) {
+        match crate::path_glob::PathGlob::parse_with_case(req.pattern, req.case_insensitive) {
+            Ok(parsed) => Some(parsed),
+            Err(error) => return json!({ "ok": false, "error": error, "mode": "filename" }),
+        }
+    } else {
+        None
+    };
     let root = req.root.filter(|p| !p.is_empty()).unwrap_or(".");
     let scope = req.paths.first().copied().filter(|p| !p.is_empty());
     let origin = if req.root.filter(|p| !p.is_empty()).is_some() {
@@ -3943,7 +3948,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
                 .any(|glob| glob.admits(root, scope, path))
     };
     let file_cap = cfg.index.digest_max_files.max(20000).min(LITERAL_SCAN_MAX_FILES).max(1);
-    let universe = match crate::scan_universe::list_scan_universe(root, &[], file_cap.saturating_add(1), &cfg.index, origin, false, false) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, false, false, false) {
         Ok(e) => e,
         Err(e) => return json!({ "ok": false, "error": e, "mode": "filename" }),
     };
@@ -3957,18 +3962,9 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
     let mut paths: Vec<String> = full_files
         .iter()
         .filter(|path| admitted(path))
-        .filter(|p| {
-            let lp = if req.case_insensitive {
-                p.to_lowercase()
-            } else {
-                (*p).clone()
-            };
-            if is_glob {
-                glob_match_simple(&needle, &lp)
-                    || glob_match_simple(&needle, lp.rsplit('/').next().unwrap_or(&lp))
-            } else {
-                lp.contains(&needle)
-            }
+        .filter(|p| match &name_glob {
+            Some(glob) => glob.admits(root, scope, p),
+            None => fold_name_key(p.as_str()).contains(&needle),
         })
         .cloned()
         .collect();
@@ -4021,6 +4017,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
     out.insert("scanned".to_string(), json!(full_files.len()));
     out.insert("file_source".to_string(), json!(universe.source.label()));
     out.insert("exhaustive".to_string(), json!(exhaustive));
+    insert_excluded_by_rule(&mut out, &universe.excluded);
     if matches_truncated {
         out.insert("matches_truncated".to_string(), json!(true));
         out.insert("matches_truncated_at".to_string(), json!(limit));
@@ -4044,9 +4041,9 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
     }
     if !universe.listing_complete {
         out.insert("listing_incomplete".to_string(), json!(true));
-        if let Some(reason) = &universe.walk_reason {
-            out.insert("walk_reason".to_string(), json!(reason));
-        }
+    }
+    if let Some(reason) = &universe.walk_reason {
+        out.insert("walk_reason".to_string(), json!(reason));
     }
     if files_truncated {
         out.insert("files_truncated".to_string(), json!(true));
@@ -4589,6 +4586,157 @@ where
     out
 }
 
+/// Counts every path a scan-universe rule dropped and names the first few. The summary holds the
+/// count per rule; `finish_scan_reply` decides which rules clear `exhaustive`.
+fn insert_excluded_by_rule(
+    out: &mut serde_json::Map<String, Value>,
+    excluded: &[crate::scan_universe::RuleExclusion],
+) {
+    if excluded.is_empty() {
+        return;
+    }
+    let cap = 5usize;
+    let shown: Vec<Value> = excluded
+        .iter()
+        .take(cap)
+        .map(|e| match e.files {
+            Some(files) => json!({ "path": e.path, "rule": e.rule, "files": files }),
+            None => json!({ "path": e.path, "rule": e.rule }),
+        })
+        .collect();
+    let mut paths_by_rule = serde_json::Map::new();
+    for e in excluded {
+        let seen = paths_by_rule
+            .get(e.rule)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        paths_by_rule.insert(e.rule.to_string(), json!(seen + 1));
+    }
+    out.insert("excluded_by_rule".to_string(), json!(shown));
+    out.insert(
+        "excluded_by_rule_summary".to_string(),
+        Value::Object(paths_by_rule),
+    );
+    out.insert(
+        "excluded_by_rule_count".to_string(),
+        json!(excluded.len()),
+    );
+}
+
+/// Split-form hits carried inline in one reply. Past it the reply sets `split_form_truncated` and
+/// clears `exhaustive`, so a capped list never reads as a complete answer.
+const SPLIT_FORM_MAX_MATCHES: usize = 50;
+
+/// A quoted string literal on one line: `start` is the opening quote, `end` is one past the closing
+/// quote and `content` is the text between them.
+struct QuotedToken<'a> {
+    start: usize,
+    end: usize,
+    content: &'a str,
+}
+
+fn quoted_tokens(line: &str) -> Vec<QuotedToken<'_>> {
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let quote = bytes[i];
+        if quote != b'\'' && quote != b'"' && quote != b'`' {
+            i += 1;
+            continue;
+        }
+        let Some(rel) = bytes[i + 1..].iter().position(|&b| b == quote) else {
+            break;
+        };
+        let close = i + 1 + rel;
+        out.push(QuotedToken {
+            start: i,
+            end: close + 1,
+            content: &line[i + 1..close],
+        });
+        i = close + 1;
+    }
+    out
+}
+
+/// Only a comma (with optional bare arguments such as `...` or an identifier) may sit between two
+/// quoted arguments of one call; any other text ends the run.
+fn is_split_separator(text: &str) -> bool {
+    text.contains(',')
+        && text.chars().all(|c| {
+            c == ',' || c == '.' || c == '_' || c == '$' || c.is_whitespace() || c.is_ascii_alphanumeric()
+        })
+}
+
+fn token_matches_segment(content: &str, segment: &str, last: bool, case_insensitive: bool) -> bool {
+    let lowered;
+    let key: &str = if case_insensitive {
+        lowered = content.to_lowercase();
+        lowered.as_str()
+    } else {
+        content
+    };
+    if key == segment {
+        return true;
+    }
+    last && key
+        .strip_prefix(segment)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .is_some_and(|extension| !extension.is_empty())
+}
+
+/// The path segments of a single-term literal query shaped like `apps/<surface>/<file>`. `None`
+/// for a regex, a multi-word query, a query without a separator, or a segment holding a quote.
+fn split_form_segments(pattern: &str, regex: bool, case_insensitive: bool) -> Option<Vec<String>> {
+    if regex || !pattern.contains('/') || pattern.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let segments: Vec<String> = pattern
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .map(|segment| if case_insensitive { segment.to_lowercase() } else { segment.to_string() })
+        .collect();
+    let quoted = segments.iter().any(|segment| segment.contains(['\'', '"', '`']));
+    (segments.len() >= 2 && !quoted).then_some(segments)
+}
+
+/// Runs of quoted arguments on one line that spell `segments` in order, as in
+/// `join(ROOT, 'apps', 'world', '_fixtures', 'e2e-ci-arena.js')`. Each hit is
+/// `(start, end, joined)`: the byte span from the first opening quote to the last closing quote,
+/// and the spelled path. The last segment also matches with a file extension.
+fn split_form_hits_in_line(
+    line: &str,
+    segments: &[String],
+    case_insensitive: bool,
+) -> Vec<(usize, usize, String)> {
+    let mut out = Vec::new();
+    let width = segments.len();
+    if width < 2 || (!case_insensitive && !line.contains(segments[0].as_str())) {
+        return out;
+    }
+    let tokens = quoted_tokens(line);
+    if tokens.len() < width {
+        return out;
+    }
+    for first in 0..=tokens.len() - width {
+        let run = &tokens[first..first + width];
+        let spells_path = run.iter().enumerate().all(|(k, token)| {
+            token_matches_segment(token.content, segments[k].as_str(), k + 1 == width, case_insensitive)
+        });
+        if !spells_path {
+            continue;
+        }
+        let separated = run
+            .windows(2)
+            .all(|pair| is_split_separator(&line[pair[0].end..pair[1].start]));
+        if separated {
+            let joined = run.iter().map(|token| token.content).collect::<Vec<_>>().join("/");
+            out.push((run[0].start, run[width - 1].end, joined));
+        }
+    }
+    out
+}
+
 pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
     if req.pattern.is_empty() {
         return json!({ "ok": false, "error": "pattern required -- an exhaustive scan needs something to match" });
@@ -4627,7 +4775,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let listing_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore, true) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
     };
@@ -4640,6 +4788,8 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
     let files_matching_glob = files.iter().filter(|p| admitted(p)).count();
     let glob_matched_no_files = has_glob_filter && !files.is_empty() && files_matching_glob == 0;
+    let glob_outside_path =
+        crate::path_glob::alternatives_outside_scopes(&req.include_globs, req.paths);
 
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let listing_ms = started_ms.saturating_sub(listing_started_ms);
@@ -4668,6 +4818,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         }
     }
     let multi = !term_matchers.is_empty();
+    let split_segments = split_form_segments(req.pattern, req.regex, req.case_insensitive);
+    let mut split_form_count = 0usize;
+    let mut split_form_files = 0usize;
+    let mut split_form_truncated = false;
+    let mut split_form_matches: Vec<Value> = Vec::new();
     let combination = if want_phrase {
         TermCombination::Phrase
     } else if !multi {
@@ -4698,6 +4853,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut unreadable_sample: Vec<String> = Vec::new();
     let mut emitted_matches = 0usize;
     let mut files_scanned = 0usize;
+    let mut lines_scanned = 0usize;
     let mut files_with_matches = 0usize;
     let mut files_quota_truncated = 0usize;
     let mut files_skipped_too_large: Vec<String> = Vec::new();
@@ -4817,6 +4973,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             files_with_nul_scanned += 1;
         }
         files_scanned += 1;
+        lines_scanned += content.lines().count();
         let comment_spans = if req.comments_only {
             match crate::comment_spans::comment_spans(path, &content) {
                 Some(spans) => Some(spans),
@@ -4829,6 +4986,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             None
         };
         let mut this_file_matched = false;
+        let mut this_file_split_matched = false;
         let mut this_file_quota_hit = false;
         let mut this_file_collected = 0usize;
         let mut this_file_lines = 0usize;
@@ -4843,6 +5001,31 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             let line = raw_line.trim_end_matches(['\n', '\r']);
             let line_offset = line_start_offset;
             line_start_offset += raw_line.len();
+            if let Some(segments) = split_segments.as_deref() {
+                let mut hits = split_form_hits_in_line(line, segments, req.case_insensitive);
+                if let Some(spans) = &comment_spans {
+                    hits.retain(|(start, _, _)| {
+                        crate::comment_spans::span_contains(spans, line_offset + *start)
+                    });
+                }
+                for (start, end, joined) in hits {
+                    split_form_count += 1;
+                    this_file_split_matched = true;
+                    if split_form_matches.len() >= SPLIT_FORM_MAX_MATCHES {
+                        split_form_truncated = true;
+                        continue;
+                    }
+                    let shown: String = line.chars().take(LITERAL_SCAN_MAX_LINE_BYTES).collect();
+                    split_form_matches.push(json!({
+                        "path": path,
+                        "line": idx + 1,
+                        "column": start + 1,
+                        "match": line.get(start..end).unwrap_or(""),
+                        "joined": joined,
+                        "text": shown.trim_end()
+                    }));
+                }
+            }
             let (found, distinct) = if !multi {
                 let mut found = matcher.find_all(line);
                 if let Some(spans) = &comment_spans {
@@ -4965,6 +5148,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 term_files[ti] += 1;
             }
         }
+        if this_file_split_matched {
+            split_form_files += 1;
+        }
         if this_file_matched {
             files_with_matches += 1;
             file_line_counts.push((path.clone(), this_file_lines));
@@ -5014,7 +5200,14 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         && files_skipped_too_large_count == 0
         && files_unreadable == 0
         && universe.listing_complete
-        && !glob_matched_no_files;
+        && !glob_matched_no_files
+        && glob_outside_path.is_empty()
+        && !split_form_truncated;
+    let unsearched_gm_state = universe
+        .excluded
+        .iter()
+        .filter(|e| e.rule == crate::scan_universe::OWN_STATE_RULE)
+        .count();
 
     let match_count = match req.output {
         ScanOutput::Matches => matches.len(),
@@ -5030,6 +5223,14 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), json!(true));
     out.insert("mode".to_string(), json!(if req.regex { "regex" } else { "literal" }));
+    if req.regex {
+        out.insert("pattern_compiled".to_string(), json!(true));
+    } else if req.pattern.contains('|') {
+        out.insert("pipe_matched_literally".to_string(), json!(true));
+        out.insert("pipe_note".to_string(), json!(
+            "mode literal matched every character of the query, the | included, as plain text: it does not alternate. For alternation pass mode regex; a zero here means that exact text is absent"
+        ));
+    }
     if req.verbose || zero_hits {
         if req.output != ScanOutput::Matches { out.insert("output".to_string(), json!(req.output.label())); }
         out.insert("pattern".to_string(), json!(req.pattern));
@@ -5085,46 +5286,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             out.insert("walk_reason".to_string(), json!(reason));
         }
     }
-    let pruned_by_foreign_rule = universe
-        .excluded
-        .iter()
-        .filter(|e| e.rule != crate::scan_universe::OWN_STATE_RULE)
-        .count();
-    if !req.verbose && pruned_by_foreign_rule > 0 {
-        out.insert(
-            "excluded_by_rule_count".to_string(),
-            json!(pruned_by_foreign_rule),
-        );
-    }
-    if req.verbose && !universe.excluded.is_empty() {
-        let cap = 200usize;
-        let shown: Vec<Value> = universe
-            .excluded
-            .iter()
-            .take(cap)
-            .map(|e| match e.files {
-                Some(files) => json!({ "path": e.path, "rule": e.rule, "files": files }),
-                None => json!({ "path": e.path, "rule": e.rule }),
-            })
-            .collect();
-        let mut paths_by_rule = serde_json::Map::new();
-        for e in &universe.excluded {
-            let seen = paths_by_rule
-                .get(e.rule)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            paths_by_rule.insert(e.rule.to_string(), json!(seen + 1));
-        }
-        out.insert("excluded_by_rule".to_string(), json!(shown));
-        out.insert(
-            "excluded_by_rule_summary".to_string(),
-            Value::Object(paths_by_rule),
-        );
-        out.insert(
-            "excluded_by_rule_count".to_string(),
-            json!(universe.excluded.len()),
-        );
-    }
+    insert_excluded_by_rule(&mut out, &universe.excluded);
     out.insert("term_combination".to_string(), json!(combination.label()));
     if let Some(quota) = per_file_quota {
         out.insert("max_matches_per_file".to_string(), json!(quota));
@@ -5209,18 +5371,36 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 "no line matched the query as ONE phrase: \"{}\" was matched verbatim, spaces included; split it into terms and pass combine:\"or\", or combine:\"and\" to require all of them on one line",
                 req.pattern
             )
+        } else if req.pattern.contains('|') {
+            format!(
+                "no line matched \"{}\" in {} files scanned ({lines_scanned} lines read): mode literal matched the | as a plain character, so this zero means that exact text is absent from the searched files -- for alternation pass mode regex",
+                req.pattern, files_scanned
+            )
         } else {
             format!(
-                "no line matched \"{}\" in {} files scanned: the pattern was matched verbatim as a substring, every character of it, punctuation included -- it was never tokenized, so this zero means the text is absent from those files",
+                "no line matched \"{}\" in {} files scanned ({lines_scanned} lines read): the pattern was matched verbatim as a substring, every character of it, punctuation included -- it was never tokenized, so this zero means the text is absent from the searched files",
                 req.pattern, files_scanned
             )
         };
+        if split_form_count > 0 {
+            hint = format!(
+                "no line holds \"{}\" as one string; {split_form_count} split-form matches (its segments as separate quoted arguments) are listed in split_form_matches",
+                req.pattern
+            );
+        }
         let mut hint_end = hint.len().min(HINT_MAX_CHARS);
         while !hint.is_char_boundary(hint_end) {
             hint_end -= 1;
         }
         hint.truncate(hint_end);
         out.insert("hint".to_string(), json!(hint));
+        if unsearched_gm_state > 0 {
+            out.insert("unsearched_gm_state".to_string(), json!({
+                "count": unsearched_gm_state,
+                "rule": crate::scan_universe::OWN_STATE_RULE,
+                "note": "untracked gm runtime state named in excluded_by_rule was not searched, so the absence above does not cover it; tracked .gm state is searched; pass path .gm to search the runtime state"
+            }));
+        }
     }
     if cache_hits + cache_misses > 0 {
         out.insert(
@@ -5254,7 +5434,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         );
     } else {
         out.insert("count".to_string(), json!(format!(
-            "{lines_with_matches} lines, {occurrence_count} occurrences, {files_with_matches} files of {files_scanned} scanned"
+            "{lines_with_matches} lines, {occurrence_count} occurrences, {files_with_matches} files of {files_scanned} scanned ({lines_scanned} lines read)"
         )));
         if zero_hits {
             out.insert("files_scanned".to_string(), json!(files_scanned));
@@ -5264,6 +5444,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         }
     }
     out.insert("exhaustive".to_string(), json!(exhaustive));
+    out.insert("lines_scanned".to_string(), json!(lines_scanned));
+    if !glob_outside_path.is_empty() {
+        out.insert("glob_outside_path".to_string(), json!(glob_outside_path));
+    }
     if files_truncated {
         out.insert("files_truncated".to_string(), json!(true));
         out.insert("files_truncated_at".to_string(), json!(file_cap));
@@ -5348,6 +5532,20 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             "at least one bound fired -- this is NOT every match in the tree; the files_truncated/matches_truncated/budget_exhausted/files_skipped_* fields above name which"
         ));
     }
+    if split_segments.is_some() {
+        out.insert("split_form_count".to_string(), json!(split_form_count));
+        out.insert("split_form_files".to_string(), json!(split_form_files));
+        out.insert("split_form_note".to_string(), json!(
+            "path segments written as separate quoted arguments, e.g. join(ROOT, 'apps', 'world', 'x.js'), are matched within one line and listed in split_form_matches; they are not in matches, count or occurrence_count, and a join split across lines is not matched"
+        ));
+        if !split_form_matches.is_empty() {
+            out.insert("split_form_matches".to_string(), Value::Array(split_form_matches));
+        }
+        if split_form_truncated {
+            out.insert("split_form_truncated".to_string(), json!(true));
+            out.insert("split_form_truncated_at".to_string(), json!(SPLIT_FORM_MAX_MATCHES));
+        }
+    }
     if matches.len() > INLINE_CODESEARCH_MATCH_LIMIT {
         match publish_codesearch_artifact(&out, &matches) {
             Ok(artifact) => {
@@ -5426,6 +5624,14 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("reply_truncated".to_string(), json!(true));
         out.insert("max_chars".to_string(), json!(req.max_chars));
         out.insert("spilled_count".to_string(), json!(spilled_count));
+        let mut busiest = file_line_counts.clone();
+        busiest.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let count_rows: Vec<String> = busiest.into_iter().map(|(p, n)| format!("{n} {p}")).collect();
+        let (counts_shown, counts_rest) = split_lines_at_budget(count_rows, REPLY_METADATA_RESERVE_CHARS);
+        out.insert("counts_by_file".to_string(), json!(counts_shown));
+        if !counts_rest.is_empty() {
+            out.insert("counts_by_file_omitted".to_string(), json!(counts_rest.len()));
+        }
         match spill_lines_to_out_file(&req.spill_name, &spilled) {
             Some(file) => {
                 out.insert("spill_file".to_string(), json!(file));
@@ -5448,8 +5654,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
 pub struct CommentScan<'a> {
     pub root: Option<&'a str>,
     pub paths: &'a [&'a str],
-    pub path_glob: Option<&'a str>,
+    pub include_globs: Vec<String>,
     pub exclude_globs: Vec<String>,
+    pub omit_hits: bool,
     pub max_matches: usize,
     pub max_files: usize,
     pub context: usize,
@@ -5465,8 +5672,14 @@ const COMMENT_SLASH_EXTENSIONS: &[&str] = &[
     ".cc", ".hpp", ".hh", ".cxx", ".hxx", ".ino", ".glsl", ".vert", ".frag", ".comp", ".geom",
     ".tesc", ".tese", ".vsh", ".fsh", ".glslv", ".glslf", ".java", ".cs", ".php", ".phtml",
     ".swift", ".kt", ".kts", ".scala", ".sc", ".zig", ".d", ".groovy", ".gradle", ".dsp", ".lib",
-    ".css", ".scss", ".sass", ".less",
+    ".scss", ".sass", ".less",
 ];
+
+const COMMENT_CSS_EXTENSIONS: &[&str] = &[".css"];
+
+const COMMENT_HTML_EXTENSIONS: &[&str] = &[".html", ".htm", ".xhtml"];
+
+const COMMENT_WAT_EXTENSIONS: &[&str] = &[".wat", ".wast"];
 
 const COMMENT_HASH_EXTENSIONS: &[&str] = &[
     ".sh",
@@ -5514,53 +5727,82 @@ const COMMENT_HASH_FILENAMES: &[&str] = &[
     "rakefile",
     "gemfile",
     "procfile",
+    "gitignore",
+    "dockerignore",
+    "npmignore",
+    "eslintignore",
+    "prettierignore",
+    "gitattributes",
+    "gitmodules",
+    "editorconfig",
+    "env",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CommentSyntax {
     Slash,
+    Css,
     Hash,
+    Html,
+    Wat,
 }
 
 impl CommentSyntax {
     fn label(self) -> &'static str {
         match self {
             CommentSyntax::Slash => "slash",
+            CommentSyntax::Css => "css",
             CommentSyntax::Hash => "hash",
+            CommentSyntax::Html => "html",
+            CommentSyntax::Wat => "wat",
         }
     }
 }
 
 fn comment_syntax_for_path(path: &str) -> Option<CommentSyntax> {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    let lowered_name = name.to_lowercase();
-    if COMMENT_HASH_FILENAMES.iter().any(|n| lowered_name == *n)
-        || lowered_name.starts_with("dockerfile")
-        || lowered_name.starts_with("makefile")
-        || lowered_name.starts_with("gnumakefile")
+    let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+    comment_syntax_for_name(&name)
+}
+
+fn comment_syntax_for_name(name: &str) -> Option<CommentSyntax> {
+    if let Some(stem) = name.strip_suffix(".template") {
+        return comment_syntax_for_name(stem);
+    }
+    if COMMENT_HASH_FILENAMES.contains(&name)
+        || name.starts_with("dockerfile")
+        || name.starts_with("makefile")
+        || name.starts_with("gnumakefile")
     {
         return Some(CommentSyntax::Hash);
     }
     let ext = match name.rsplit_once('.') {
-        Some((_, ext)) if !ext.is_empty() => format!(".{ext}").to_lowercase(),
+        Some((_, ext)) if !ext.is_empty() => format!(".{ext}"),
         _ => return None,
     };
-    if COMMENT_SLASH_EXTENSIONS.iter().any(|e| ext == *e) {
-        return Some(CommentSyntax::Slash);
+    let ext = ext.as_str();
+    if COMMENT_CSS_EXTENSIONS.contains(&ext) {
+        Some(CommentSyntax::Css)
+    } else if COMMENT_SLASH_EXTENSIONS.contains(&ext) {
+        Some(CommentSyntax::Slash)
+    } else if COMMENT_HASH_EXTENSIONS.contains(&ext) {
+        Some(CommentSyntax::Hash)
+    } else if COMMENT_HTML_EXTENSIONS.contains(&ext) {
+        Some(CommentSyntax::Html)
+    } else if COMMENT_WAT_EXTENSIONS.contains(&ext) {
+        Some(CommentSyntax::Wat)
+    } else {
+        None
     }
-    if COMMENT_HASH_EXTENSIONS.iter().any(|e| ext == *e) {
-        return Some(CommentSyntax::Hash);
-    }
-    None
 }
 
 const DIRECTIVE_BODY_PREFIXES: &[&str] = &[
     "syntax=",
     "shellcheck",
     "noqa",
-    "type:",
+    "type: ignore",
+    "type:ignore",
     "pylint:",
-    "eslint",
+    "eslint-",
     "prettier-ignore",
     "tslint:",
     "rustfmt:",
@@ -5584,17 +5826,10 @@ const DIRECTIVE_BODY_PREFIXES: &[&str] = &[
     "c8 ",
     "v8 ignore",
     "istanbul ignore",
-    "sourceMappingURL=",
-    "region",
-    "endregion",
-    "pragma",
-    "include",
+    "sourcemappingurl=",
+    "sourceurl=",
+    "pragma:",
     "formatter:",
-    "forbid",
-    "allow",
-    "deny",
-    "warn",
-    "expect",
     "cfg:",
     "tool:",
     "autopep8:",
@@ -5606,49 +5841,135 @@ const DIRECTIVE_BODY_PREFIXES: &[&str] = &[
     "deno-lint-ignore",
 ];
 
-fn comment_body_is_directive(body: &str) -> bool {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if trimmed.starts_with('!') {
-        return true;
-    }
-    let lowered = trimmed.to_lowercase();
-    DIRECTIVE_BODY_PREFIXES
-        .iter()
-        .any(|p| lowered.starts_with(p))
+const SLASH_NO_SPACE_DIRECTIVE_PREFIXES: &[&str] = &["go:", "nolint", "/ <reference"];
+
+const KEYWORDS_BEFORE_EXPRESSION: &[&str] = &[
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do",
+    "else", "yield", "await",
+];
+
+#[derive(Default)]
+struct CommentBuckets {
+    comments: Vec<CommentSpan>,
+    directives: Vec<CommentSpan>,
 }
 
 struct CommentSpan {
     line: usize,
     column: usize,
     kind: &'static str,
+    syntax: CommentSyntax,
     text: String,
     text_truncated: bool,
     inline: bool,
 }
 
-fn push_span(
-    comments: &mut Vec<CommentSpan>,
-    directives: &mut Vec<CommentSpan>,
-    span: CommentSpan,
-) {
-    let body = if span.kind == "block" {
-        span.text
-            .get(2..)
-            .and_then(|s| s.strip_suffix("*/"))
-            .unwrap_or("")
-            .to_string()
-    } else if let Some(rest) = span.text.strip_prefix("//") {
-        rest.to_string()
-    } else {
-        span.text.strip_prefix('#').unwrap_or("").to_string()
+#[derive(Clone, Copy)]
+struct OpenBlock {
+    from: usize,
+    line: usize,
+    column: usize,
+    inline: bool,
+}
+
+fn starts_with_token(text: &str, token: &str) -> bool {
+    let Some(rest) = text.strip_prefix(token) else {
+        return false;
     };
-    if comment_body_is_directive(&body) {
-        directives.push(span)
+    let token_ends_in_word = token.chars().last().map_or(false, |c| c.is_alphanumeric());
+    !token_ends_in_word || !rest.chars().next().map_or(false, |c| c.is_alphanumeric() || c == '_')
+}
+
+fn span_body(span: &CommentSpan) -> &str {
+    let text = span.text.as_str();
+    let (open, close) = match (span.kind, span.syntax) {
+        ("block", CommentSyntax::Html) => (4, "-->"),
+        ("block", CommentSyntax::Wat) => (2, ";)"),
+        ("block", _) => (2, "*/"),
+        (_, CommentSyntax::Hash) => (1, ""),
+        (_, _) => (2, ""),
+    };
+    let rest = text.get(open..).unwrap_or("");
+    if close.is_empty() {
+        rest
     } else {
-        comments.push(span)
+        rest.strip_suffix(close).unwrap_or(rest)
+    }
+}
+
+fn is_region_marker(body: &str, syntax: CommentSyntax) -> bool {
+    let lowered = body.trim_start().to_lowercase();
+    match syntax {
+        CommentSyntax::Hash => {
+            !body.starts_with(char::is_whitespace)
+                && (starts_with_token(&lowered, "region") || starts_with_token(&lowered, "endregion"))
+        }
+        CommentSyntax::Slash | CommentSyntax::Css => {
+            starts_with_token(&lowered, "#region") || starts_with_token(&lowered, "#endregion")
+        }
+        CommentSyntax::Html | CommentSyntax::Wat => false,
+    }
+}
+
+fn comment_body_is_directive(body: &str, syntax: CommentSyntax) -> bool {
+    if body.trim().is_empty() {
+        return false;
+    }
+    if is_region_marker(body, syntax) {
+        return true;
+    }
+    let as_written = body.to_lowercase();
+    if syntax == CommentSyntax::Slash
+        && !body.starts_with(char::is_whitespace)
+        && SLASH_NO_SPACE_DIRECTIVE_PREFIXES
+            .iter()
+            .any(|prefix| starts_with_token(&as_written, *prefix))
+    {
+        return true;
+    }
+    let trimmed = body.trim_start().to_lowercase();
+    let text = trimmed.strip_prefix('#').map_or(trimmed.as_str(), |rest| rest.trim_start());
+    DIRECTIVE_BODY_PREFIXES
+        .iter()
+        .any(|prefix| starts_with_token(text, *prefix))
+}
+
+fn span_is_directive(span: &CommentSpan) -> bool {
+    let body = span_body(span);
+    let shebang = span.kind == "line"
+        && span.line == 1
+        && span.column == 1
+        && span.text.starts_with("#!");
+    let preserved_banner =
+        span.kind == "block" && span.syntax == CommentSyntax::Slash && body.starts_with('!');
+    shebang || preserved_banner || comment_body_is_directive(body, span.syntax)
+}
+
+fn push_span(out: &mut CommentBuckets, span: CommentSpan) {
+    if span_is_directive(&span) {
+        out.directives.push(span);
+    } else {
+        out.comments.push(span);
+    }
+}
+
+fn make_span(
+    content: &str,
+    from: usize,
+    to: usize,
+    kind: &'static str,
+    syntax: CommentSyntax,
+    at: (usize, usize, bool),
+) -> CommentSpan {
+    let (text, text_truncated) = clipped_text(content.get(from..to).unwrap_or(""));
+    CommentSpan {
+        line: at.0,
+        column: at.1,
+        kind,
+        syntax,
+        text,
+        text_truncated,
+        inline: at.2,
     }
 }
 
@@ -5662,6 +5983,13 @@ fn line_has_code_before(content: &str, line_start: usize, upto: usize) -> bool {
         .trim()
         .chars()
         .any(|c| !c.is_whitespace())
+}
+
+fn line_and_line_start(content: &str, at: usize) -> (usize, usize) {
+    let before = &content.as_bytes()[..at.min(content.len())];
+    let line = 1 + before.iter().filter(|&&b| b == b'\n').count();
+    let line_start = before.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
+    (line, line_start)
 }
 
 fn clipped_text(full: &str) -> (String, bool) {
@@ -5682,128 +6010,366 @@ fn hash_opens_comment(bytes: &[u8], at: usize, line_start: usize) -> bool {
         .unwrap_or(false)
 }
 
-fn scan_content_for_comments(
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || byte >= 0x80
+}
+
+fn after_escape(bytes: &[u8], backslash: usize) -> usize {
+    match bytes.get(backslash + 1) {
+        Some(&b'\n') | None => backslash + 1,
+        Some(_) => backslash + 2,
+    }
+}
+
+fn regex_literal_end(bytes: &[u8], open: usize, end: usize) -> Option<usize> {
+    let mut in_class = false;
+    let mut i = open + 1;
+    while i < end {
+        match bytes[i] {
+            b'\n' => return None,
+            b'\\' => {
+                if i + 1 >= end || bytes[i + 1] == b'\n' {
+                    return None;
+                }
+                i += 2;
+            }
+            b'[' => {
+                in_class = true;
+                i += 1;
+            }
+            b']' => {
+                in_class = false;
+                i += 1;
+            }
+            b'/' if !in_class => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn scan_c_like(
     content: &str,
+    start: usize,
+    end: usize,
     syntax: CommentSyntax,
-) -> (Vec<CommentSpan>, Vec<CommentSpan>) {
+    out: &mut CommentBuckets,
+) {
     let bytes = content.as_bytes();
-    let mut comments: Vec<CommentSpan> = Vec::new();
-    let mut directives: Vec<CommentSpan> = Vec::new();
-    let mut i = 0usize;
-    let mut line = 1usize;
-    let mut line_start = 0usize;
-    let mut in_block = false;
-    let mut block_start = 0usize;
-    let mut block_start_line = 0usize;
-    let mut block_start_column = 0usize;
-    let mut block_inline = false;
-    let mut string_delim: Option<u8> = None;
-    while i < bytes.len() {
+    let end = end.min(bytes.len());
+    let byte_at = |at: usize| -> Option<u8> {
+        if at < end {
+            bytes.get(at).copied()
+        } else {
+            None
+        }
+    };
+    let (mut line, mut line_start) = line_and_line_start(content, start);
+    let mut i = start;
+    if syntax == CommentSyntax::Slash && start == 0 && bytes.starts_with(b"#!") {
+        let eol = bytes[..end].iter().position(|&b| b == b'\n').unwrap_or(end);
+        push_span(out, make_span(content, 0, eol, "line", syntax, (1, 1, false)));
+        i = eol;
+    }
+    let has_template = syntax == CommentSyntax::Slash;
+    let mut open_block: Option<OpenBlock> = None;
+    let mut quote: Option<u8> = None;
+    let mut triple: Option<u8> = None;
+    let mut in_template = false;
+    let mut interpolations: Vec<usize> = Vec::new();
+    let mut brace_depth = 0usize;
+    let mut prev_is_value = false;
+    let mut last_code_byte = 0u8;
+    while i < end {
         let byte = bytes[i];
         if byte == b'\n' {
-            string_delim = None;
-            i += 1;
+            quote = None;
             line += 1;
+            i += 1;
             line_start = i;
             continue;
         }
-        if in_block {
-            if byte == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                let end = (i + 2).min(bytes.len());
-                let (text, text_truncated) =
-                    clipped_text(content.get(block_start..end).unwrap_or(""));
-                push_span(
-                    &mut comments,
-                    &mut directives,
-                    CommentSpan {
-                        line: block_start_line,
-                        column: block_start_column,
-                        kind: "block",
-                        text,
-                        text_truncated,
-                        inline: block_inline,
-                    },
+        if let Some(block) = open_block {
+            if byte == b'*' && byte_at(i + 1) == Some(b'/') {
+                let span = make_span(
+                    content,
+                    block.from,
+                    i + 2,
+                    "block",
+                    syntax,
+                    (block.line, block.column, block.inline),
                 );
-                in_block = false;
-                i = end;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if let Some(delim) = string_delim {
-            if byte == b'\\' {
+                push_span(out, span);
+                open_block = None;
+                i += 2;
+            } else {
                 i += 1;
-                if let Some(next) = content.get(i..).and_then(|s| s.chars().next()) {
-                    i += next.len_utf8();
+            }
+            continue;
+        }
+        if let Some(delim) = triple {
+            if byte == b'\\' {
+                i = after_escape(bytes, i);
+            } else if byte == delim && byte_at(i + 1) == Some(delim) && byte_at(i + 2) == Some(delim) {
+                triple = None;
+                prev_is_value = true;
+                last_code_byte = delim;
+                i += 3;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if let Some(delim) = quote {
+            if byte == b'\\' {
+                i = after_escape(bytes, i);
+            } else {
+                if byte == delim {
+                    quote = None;
+                    prev_is_value = true;
+                    last_code_byte = delim;
                 }
-                continue;
+                i += 1;
             }
-            if byte == delim {
-                string_delim = None;
+            continue;
+        }
+        if in_template {
+            if byte == b'\\' {
+                i = after_escape(bytes, i);
+            } else if byte == b'`' {
+                in_template = false;
+                prev_is_value = true;
+                last_code_byte = byte;
+                i += 1;
+            } else if byte == b'$' && byte_at(i + 1) == Some(b'{') {
+                interpolations.push(brace_depth);
+                in_template = false;
+                prev_is_value = false;
+                last_code_byte = b'{';
+                i += 2;
+            } else {
+                i += 1;
             }
+            continue;
+        }
+        if byte.is_ascii_whitespace() {
             i += 1;
             continue;
         }
-        if byte == b'"' || byte == b'\'' || byte == b'`' {
-            string_delim = Some(byte);
+        if is_word_byte(byte) {
+            let mut j = i + 1;
+            while j < end && is_word_byte(bytes[j]) {
+                j += 1;
+            }
+            let word = content.get(i..j).unwrap_or("");
+            prev_is_value = !KEYWORDS_BEFORE_EXPRESSION.contains(&word);
+            last_code_byte = bytes[j - 1];
+            i = j;
+            continue;
+        }
+        if byte == b'"' || byte == b'\'' {
+            if syntax == CommentSyntax::Hash && byte_at(i + 1) == Some(byte) && byte_at(i + 2) == Some(byte) {
+                triple = Some(byte);
+                i += 3;
+            } else {
+                quote = Some(byte);
+                i += 1;
+            }
+            continue;
+        }
+        if has_template && byte == b'`' {
+            in_template = true;
             i += 1;
             continue;
         }
-        let column = i - line_start + 1;
-        let starts_line_comment = match syntax {
-            CommentSyntax::Slash => byte == b'/' && bytes.get(i + 1) == Some(&b'/'),
+        let opens_line_comment = match syntax {
+            CommentSyntax::Slash => byte == b'/' && byte_at(i + 1) == Some(b'/'),
             CommentSyntax::Hash => byte == b'#' && hash_opens_comment(bytes, i, line_start),
+            CommentSyntax::Css | CommentSyntax::Html | CommentSyntax::Wat => false,
         };
-        if starts_line_comment {
-            let eol = content
-                .get(i..)
-                .and_then(|s| s.find('\n'))
-                .map(|d| i + d)
-                .unwrap_or(bytes.len());
-            let (text, text_truncated) = clipped_text(content.get(i..eol).unwrap_or(""));
-            push_span(
-                &mut comments,
-                &mut directives,
-                CommentSpan {
-                    line,
-                    column,
-                    kind: "line",
-                    text,
-                    text_truncated,
-                    inline: line_has_code_before(content, line_start, i),
-                },
-            );
+        if opens_line_comment {
+            let eol = bytes[i..end].iter().position(|&b| b == b'\n').map_or(end, |p| i + p);
+            let column = i - line_start + 1;
+            let inline = line_has_code_before(content, line_start, i);
+            push_span(out, make_span(content, i, eol, "line", syntax, (line, column, inline)));
             i = eol;
             continue;
         }
-        if syntax == CommentSyntax::Slash && byte == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            in_block = true;
-            block_start = i;
-            block_start_line = line;
-            block_start_column = column;
-            block_inline = line_has_code_before(content, line_start, i);
+        if matches!(syntax, CommentSyntax::Slash | CommentSyntax::Css)
+            && byte == b'/'
+            && byte_at(i + 1) == Some(b'*')
+        {
+            open_block = Some(OpenBlock {
+                from: i,
+                line,
+                column: i - line_start + 1,
+                inline: line_has_code_before(content, line_start, i),
+            });
             i += 2;
             continue;
         }
+        if syntax == CommentSyntax::Slash && byte == b'/' && !prev_is_value && last_code_byte != b'<' {
+            if let Some(after) = regex_literal_end(bytes, i, end) {
+                prev_is_value = true;
+                last_code_byte = byte;
+                i = after;
+                continue;
+            }
+        }
+        match byte {
+            b'{' => {
+                brace_depth += 1;
+                prev_is_value = false;
+            }
+            b'}' => {
+                if interpolations.last() == Some(&brace_depth) {
+                    interpolations.pop();
+                    in_template = true;
+                } else {
+                    brace_depth = brace_depth.saturating_sub(1);
+                }
+                prev_is_value = false;
+            }
+            b')' | b']' => prev_is_value = true,
+            _ => prev_is_value = false,
+        }
+        last_code_byte = byte;
         i += 1;
     }
-    if in_block {
-        let (text, text_truncated) = clipped_text(content.get(block_start..).unwrap_or(""));
-        push_span(
-            &mut comments,
-            &mut directives,
-            CommentSpan {
-                line: block_start_line,
-                column: block_start_column,
-                kind: "block",
-                text,
-                text_truncated,
-                inline: block_inline,
-            },
+    if let Some(block) = open_block {
+        let span = make_span(
+            content,
+            block.from,
+            end,
+            "block",
+            syntax,
+            (block.line, block.column, block.inline),
         );
+        push_span(out, span);
     }
-    (comments, directives)
+}
+
+fn script_tag_is_javascript(lowered_tag: &str) -> bool {
+    !lowered_tag.contains("type=")
+        || ["javascript", "ecmascript", "module", "babel", "jsx"]
+            .iter()
+            .any(|kind| lowered_tag.contains(*kind))
+}
+
+fn scan_html(content: &str, out: &mut CommentBuckets) {
+    let lower = content.to_ascii_lowercase();
+    let mut pos = 0usize;
+    loop {
+        let next = [("<!--", 0u8), ("<script", 1u8), ("<style", 2u8)]
+            .iter()
+            .filter_map(|&(needle, kind)| lower[pos..].find(needle).map(|rel| (pos + rel, kind)))
+            .min_by_key(|&(at, _)| at);
+        let Some((at, kind)) = next else {
+            break;
+        };
+        if kind == 0 {
+            let body_from = at + 4;
+            let to = lower[body_from..]
+                .find("-->")
+                .map_or(content.len(), |rel| body_from + rel + 3);
+            let (line, line_start) = line_and_line_start(content, at);
+            let column = at - line_start + 1;
+            let span = make_span(content, at, to, "block", CommentSyntax::Html, (line, column, false));
+            push_span(out, span);
+            pos = to;
+        } else {
+            let Some(tag_end) = lower[at..].find('>').map(|rel| at + rel + 1) else {
+                break;
+            };
+            let tag = &lower[at..tag_end];
+            let close_tag = if kind == 1 { "</script" } else { "</style" };
+            let body_end = lower[tag_end..]
+                .find(close_tag)
+                .map_or(content.len(), |rel| tag_end + rel);
+            if kind == 2 {
+                scan_c_like(content, tag_end, body_end, CommentSyntax::Css, out);
+            } else if script_tag_is_javascript(tag) {
+                scan_c_like(content, tag_end, body_end, CommentSyntax::Slash, out);
+            }
+            pos = body_end;
+        }
+    }
+}
+
+fn scan_wat(content: &str, out: &mut CommentBuckets) {
+    let bytes = content.as_bytes();
+    let mut line = 1usize;
+    let mut line_start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'\n' {
+            line += 1;
+            i += 1;
+            line_start = i;
+        } else if byte == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' && bytes[i] != b'\n' {
+                let escaped = bytes[i] == b'\\' && bytes.get(i + 1).map_or(false, |&next| next != b'\n');
+                i += if escaped { 2 } else { 1 };
+            }
+            if bytes.get(i) == Some(&b'"') {
+                i += 1;
+            }
+        } else if byte == b';' && bytes.get(i + 1) == Some(&b';') {
+            let eol = bytes[i..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |p| i + p);
+            let column = i - line_start + 1;
+            let inline = line_has_code_before(content, line_start, i);
+            push_span(out, make_span(content, i, eol, "line", CommentSyntax::Wat, (line, column, inline)));
+            i = eol;
+        } else if byte == b'(' && bytes.get(i + 1) == Some(&b';') {
+            let (open_line, open_column) = (line, i - line_start + 1);
+            let inline = line_has_code_before(content, line_start, i);
+            let from = i;
+            let mut depth = 0usize;
+            while i < bytes.len() {
+                if bytes[i] == b'\n' {
+                    line += 1;
+                    i += 1;
+                    line_start = i;
+                } else if bytes[i] == b'(' && bytes.get(i + 1) == Some(&b';') {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i] == b';' && bytes.get(i + 1) == Some(&b')') {
+                    depth = depth.saturating_sub(1);
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            let span = make_span(
+                content,
+                from,
+                i.min(bytes.len()),
+                "block",
+                CommentSyntax::Wat,
+                (open_line, open_column, inline),
+            );
+            push_span(out, span);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn scan_content_for_comments(content: &str, syntax: CommentSyntax) -> (Vec<CommentSpan>, Vec<CommentSpan>) {
+    let mut out = CommentBuckets::default();
+    match syntax {
+        CommentSyntax::Html => scan_html(content, &mut out),
+        CommentSyntax::Wat => scan_wat(content, &mut out),
+        CommentSyntax::Slash | CommentSyntax::Css | CommentSyntax::Hash => {
+            scan_c_like(content, 0, content.len(), syntax, &mut out)
+        }
+    }
+    (out.comments, out.directives)
 }
 
 fn comment_span_json(path: &str, syntax: CommentSyntax, span: &CommentSpan, context: usize, file_lines: &[&str]) -> Value {
@@ -5920,13 +6486,13 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     } else {
         crate::scan_universe::TargetOrigin::ProjectDefault
     };
-    let glob = match req.path_glob.filter(|g| !g.is_empty()) {
-        Some(g) => match crate::path_glob::PathGlob::parse(g) {
-            Ok(parsed) => Some(parsed),
+    let mut includes: Vec<crate::path_glob::PathGlob> = Vec::new();
+    for pattern in &req.include_globs {
+        match crate::path_glob::PathGlob::parse(pattern) {
+            Ok(parsed) => includes.push(parsed),
             Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
-        },
-        None => None,
-    };
+        }
+    }
     let mut exclude_globs: Vec<crate::path_glob::PathGlob> = Vec::new();
     for pattern in &req.exclude_globs {
         match crate::path_glob::PathGlob::parse(pattern) {
@@ -5936,7 +6502,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     }
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore, false) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
     };
@@ -5947,11 +6513,12 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     } else {
         &listed[..]
     };
-    let files_matching_glob = match &glob {
-        Some(g) => files.iter().filter(|p| glob_scopes.iter().any(|s| g.admits(root, *s, p))).count(),
-        None => files.len(),
+    let files_matching_glob = if includes.is_empty() {
+        files.len()
+    } else {
+        files.iter().filter(|p| includes.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, p)))).count()
     };
-    let glob_matched_no_files = glob.is_some() && !files.is_empty() && files_matching_glob == 0;
+    let glob_matched_no_files = !includes.is_empty() && !files.is_empty() && files_matching_glob == 0;
     let mut cache = if req.refresh {
         ScanCache::fresh(root)
     } else {
@@ -5972,15 +6539,11 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     for path in files {
         if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
         entered_paths += 1;
-        if let Some(g) = &glob {
-            if !glob_scopes.iter().any(|s| g.admits(root, *s, path)) { continue; }
-        }
+        if !includes.is_empty() && !includes.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, path))) { continue; }
         if exclude_globs.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, path))) { continue; }
         if has_binary_extension(path) { files_skipped_binary_extension += 1; continue; }
         let Some(syntax) = comment_syntax_for_path(path) else {
-            if files_skipped_no_syntax.len() < SKIPPED_SAMPLE_LEN {
-                files_skipped_no_syntax.push(path.clone());
-            }
+            files_skipped_no_syntax.push(path.clone());
             continue;
         };
         let stat = host_stat(path);
@@ -6037,14 +6600,14 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         let (file_comments, file_directives) = scan_content_for_comments(&content, syntax);
         let file_lines: Vec<&str> = if req.context > 0 { content.lines().collect() } else { Vec::new() };
         if file_comments.is_empty() && file_directives.is_empty() { continue; }
-        files_with_comments += 1;
+        if !file_comments.is_empty() { files_with_comments += 1; }
         for span in &file_comments {
             if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
-            comments.push(comment_span_json(path, syntax, span, req.context, &file_lines));
+            comments.push(comment_span_json(path, span.syntax, span, req.context, &file_lines));
         }
         for span in &file_directives {
             if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
-            directives.push(comment_span_json(path, syntax, span, req.context, &file_lines));
+            directives.push(comment_span_json(path, span.syntax, span, req.context, &file_lines));
         }
     }
     let unread_paths: &[String] = &files[entered_paths.min(files.len())..];
@@ -6066,9 +6629,9 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     out.insert("root".to_string(), json!(root));
     if req.paths.len() > 1 { out.insert("paths".to_string(), json!(req.paths)); }
     else if let Some(p) = scope { out.insert("path".to_string(), json!(p)); }
-    if let Some(g) = req.path_glob { out.insert("path_glob".to_string(), json!(g)); }
+    if !req.include_globs.is_empty() { out.insert("path_glob".to_string(), json!(req.include_globs.join(", "))); }
     if !req.exclude_globs.is_empty() { out.insert("exclude_glob".to_string(), json!(req.exclude_globs.join(", "))); }
-    if glob.is_some() { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
+    if !includes.is_empty() { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
     out.insert("file_source".to_string(), json!(universe.source.label()));
     out.insert("file_source_detail".to_string(), json!(universe.source.detail()));
@@ -6103,7 +6666,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     out.insert("files_listed".to_string(), json!(files.len()));
     let comment_paths: Vec<Value> = {
         let mut seen: Vec<String> = Vec::new();
-        for hit in comments.iter().chain(directives.iter()) {
+        for hit in comments.iter() {
             let p = hit
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -6116,10 +6679,11 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         seen.into_iter().map(|p| json!(p)).collect()
     };
     out.insert("files".to_string(), Value::Array(comment_paths));
-    let ordered_hits: Vec<Value> = comments.iter().chain(directives.iter()).cloned().collect();
-    out.insert("output".to_string(), Value::Array(
-        grep_content_lines(&ordered_hits, req.context, true).into_iter().map(|line| json!(line)).collect(),
-    ));
+    if !req.omit_hits {
+        out.insert("output".to_string(), Value::Array(
+            grep_content_lines(&comments, req.context, true).into_iter().map(|line| json!(line)).collect(),
+        ));
+    }
     if cache_hits + cache_misses > 0 {
         out.insert(
             "scan_cache".to_string(),
@@ -6157,18 +6721,26 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         out.insert("files_unreadable".to_string(), json!(files_unreadable));
     }
     if !files_skipped_no_syntax.is_empty() {
+        out.insert("files_skipped_no_syntax_count".to_string(), json!(files_skipped_no_syntax.len()));
         out.insert(
             "files_skipped_no_syntax".to_string(),
-            json!(files_skipped_no_syntax),
+            json!(files_skipped_no_syntax.iter().take(SKIPPED_SAMPLE_LEN).cloned().collect::<Vec<String>>()),
         );
+        if files_skipped_no_syntax.len() > SKIPPED_SAMPLE_LEN {
+            let listing_name = format!("grep-comments-no-syntax-{started_ms}.txt");
+            if let Some(file) = spill_lines_to_out_file(&listing_name, &files_skipped_no_syntax) {
+                out.insert("files_skipped_no_syntax_file".to_string(), json!(file));
+            }
+        }
         out.insert("files_skipped_no_syntax_note".to_string(), json!(
-            "no comment syntax is mapped for these extensions; narrow the scan with \"glob\" or \"path\" if a language here is missing"
+            "no comment syntax is mapped for these extensions; files_skipped_no_syntax is the first sample, files_skipped_no_syntax_count the total, files_skipped_no_syntax_file (when present) lists every path, one per line; narrow the scan with \"glob\" or \"path\" if a language here is missing"
         ));
     }
     let elapsed_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms);
     out.insert("elapsed_ms".to_string(), json!(elapsed_ms));
     out.insert("max_matches".to_string(), json!(max_matches));
     out.insert("exhaustive".to_string(), json!(exhaustive));
+    insert_excluded_by_rule(&mut out, &universe.excluded);
     if files_truncated {
         out.insert("files_truncated".to_string(), json!(true));
         out.insert("files_truncated_at".to_string(), json!(file_cap));
@@ -6177,8 +6749,10 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         out.insert("matches_truncated".to_string(), json!(true));
         out.insert("matches_truncated_at".to_string(), json!(max_matches));
     }
-    out.insert("comments".to_string(), Value::Array(comments));
-    out.insert("directives".to_string(), Value::Array(directives));
+    if !req.omit_hits {
+        out.insert("comments".to_string(), Value::Array(comments));
+        out.insert("directives".to_string(), Value::Array(directives));
+    }
     Value::Object(out)
 }
 

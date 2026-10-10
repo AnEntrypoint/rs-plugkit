@@ -96,6 +96,8 @@ pub mod config;
 pub mod config_path;
 #[cfg(target_arch = "wasm32")]
 pub mod config_sync;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod config_sync_native;
 pub mod dataflow;
 #[cfg(target_arch = "wasm32")]
 pub mod dataflow_exec;

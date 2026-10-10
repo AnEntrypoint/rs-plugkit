@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 
 const MAX_ENTRIES: usize = 500;
 
+pub const RETAINED_ENTRIES: usize = MAX_ENTRIES;
+
 fn ledger_path(cwd: &str) -> String {
     if cwd.is_empty() {
         ".gm/exec-spool/.dispatch-ledger.json".to_string()
@@ -65,6 +67,29 @@ pub fn record(
     dispatch_id
 }
 
+pub fn subagent_running_count(
+    cwd: &str,
+    parent_session: &str,
+    now_ms: u64,
+    window_ms: u64,
+) -> usize {
+    let prefix = format!("{}-", parent_session);
+    let since_ms = now_ms.saturating_sub(window_ms);
+    let raw = host_read(&ledger_path(cwd)).unwrap_or_default();
+    serde_json::from_str::<Value>(&raw)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| {
+            e.get("session_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.starts_with(&prefix) && s.contains("-sub"))
+                && e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) >= since_ms
+        })
+        .count()
+}
+
 pub fn subagent_dispatches_since(cwd: &str, parent_session: &str, since_ms: u64) -> usize {
     let prefix = format!("{}-", parent_session);
     let raw = host_read(&ledger_path(cwd)).unwrap_or_default();
@@ -94,4 +119,17 @@ pub fn lookup(cwd: &str, dispatch_id: &str) -> Option<Value> {
     };
     list.into_iter()
         .find(|e| e.get("dispatch_id").and_then(|v| v.as_str()) == Some(dispatch_id))
+}
+
+pub fn window(cwd: &str) -> Option<(usize, u64)> {
+    let raw = host_read(&ledger_path(cwd))?;
+    let list = match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Array(a)) => a,
+        _ => return None,
+    };
+    let oldest = list
+        .iter()
+        .filter_map(|e| e.get("ts").and_then(|v| v.as_u64()))
+        .min()?;
+    Some((list.len(), oldest))
 }

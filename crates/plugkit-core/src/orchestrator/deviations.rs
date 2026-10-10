@@ -96,6 +96,16 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
         Severity::Deny,
     ),
     (
+        "prd-resolve-unbound-witness",
+        "`prd-resolve` closed a row with witness text but neither a verified witness_dispatch_id nor a complete witness binding (witness_exit_code, witness_output_sha256, witness_output_path, witness_ts) -- the evidence cannot be traced to a run",
+        Severity::Deny,
+    ),
+    (
+        "prd-resolve-witness-binding-invalid",
+        "`prd-resolve` supplied a witness binding that fails validation: a non-zero exit code, a malformed hash or timestamp, an unreadable output file, or an output whose sha256 differs from the claimed value",
+        Severity::Deny,
+    ),
+    (
         "residual-premature",
         "`residual-scan` was dispatched while .gm/prd.yml still carries open rows -- the scan is a close-out probe and has nothing to report until the PRD is empty",
         Severity::Log,
