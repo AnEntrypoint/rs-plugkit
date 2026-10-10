@@ -1278,6 +1278,153 @@ fn held_row_ids(at_ms: u64) -> std::collections::HashSet<String> {
     held
 }
 
+const BROWSER_OR_GPU_WITNESS_MARKERS: &[&str] = &[
+    "gpulock",
+    "chromium",
+    "chrome-launcher",
+    "puppeteer",
+    "playwright",
+    "lightpanda",
+    "remote-debugging",
+    "requestadapter",
+    "webgl",
+    "webgpu",
+    "headless",
+    "crawl_cdp",
+    "cdp-browser",
+];
+
+const REVERIFY_MAX_RERUNS_PER_COMMIT: usize = 8;
+
+fn is_node_script_path(path: &str) -> bool {
+    path.starts_with("scripts/")
+        && [".mjs", ".js", ".cjs"].iter().any(|ext| path.ends_with(ext))
+        && !pkfs::is_absolute(path)
+        && !path.split('/').any(|segment| segment == "..")
+}
+
+fn bound_witness_script(map: &serde_yaml::Mapping) -> Option<String> {
+    let text = match map.get(&Value::String("witness".to_string())) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Sequence(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    text.split(|c: char| c.is_whitespace() || "\"'`()[]{}<>,;|=*".contains(c))
+        .filter_map(referenced_path_token)
+        .find(|path| is_node_script_path(path) && pkfs::exists(path))
+}
+
+fn witness_source_is_node_only(source: &str) -> bool {
+    let lowered = source.to_ascii_lowercase();
+    !BROWSER_OR_GPU_WITNESS_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(*marker))
+}
+
+fn last_row_with_id<'a>(doc: &'a Value, id: &str) -> Option<&'a serde_yaml::Mapping> {
+    doc.as_sequence()?
+        .iter()
+        .filter_map(|item| item.as_mapping())
+        .filter(|map| map.get(&Value::String("id".to_string())).and_then(Value::as_str) == Some(id))
+        .last()
+}
+
+fn row_status_is_completed(doc: &Value, id: &str) -> bool {
+    last_row_with_id(doc, id)
+        .and_then(|map| map.get(&Value::String("status".to_string())))
+        .and_then(Value::as_str)
+        == Some("completed")
+}
+
+fn rerun_bound_witness(script: &str) -> Result<serde_json::Value, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use sha2::{Digest, Sha256};
+        const TIMEOUT_MS: u64 = 60_000;
+        let project_dir = crate::wasm_dispatch::host_cwd_string()
+            .ok_or_else(|| "project directory unavailable".to_string())?;
+        let code = format!(
+            "const cp=require('child_process');const r=cp.spawnSync(process.execPath,[{script}],{{cwd:{cwd},encoding:'utf8',timeout:{timeout},windowsHide:true,maxBuffer:8388608}});process.stdout.write(JSON.stringify({{status:r.status,timed_out:!!(r.error&&r.error.code==='ETIMEDOUT'),stdout:r.stdout||''}}));",
+            script = serde_json::to_string(script).unwrap_or_default(),
+            cwd = serde_json::to_string(&project_dir).unwrap_or_default(),
+            timeout = TIMEOUT_MS,
+        );
+        let options = serde_json::json!({ "timeoutMs": TIMEOUT_MS + 5_000 }).to_string();
+        let packed = unsafe {
+            crate::wasm_dispatch::host_exec_js(
+                code.as_ptr(),
+                code.len() as u32,
+                options.as_ptr(),
+                options.len() as u32,
+            )
+        };
+        let envelope = crate::wasm_dispatch::unpack_to_string_pub(packed)
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .ok_or_else(|| "host exec returned no envelope".to_string())?;
+        if envelope.get("exit_code").and_then(serde_json::Value::as_i64) != Some(0) {
+            return Err("host exec did not exit cleanly".to_string());
+        }
+        let inner = envelope
+            .get("stdout")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .ok_or_else(|| "re-run output unreadable".to_string())?;
+        let timed_out = inner
+            .get("timed_out")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let status = inner.get("status").and_then(serde_json::Value::as_i64);
+        let witness_stdout = inner
+            .get("stdout")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let result_lines: Vec<&str> = witness_stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("RESULT:"))
+            .collect();
+        let passed = !timed_out
+            && status == Some(0)
+            && result_lines
+                .last()
+                .is_some_and(|line| line.starts_with("RESULT: PASS"));
+        let detail = if timed_out {
+            format!("timed out after {}s", TIMEOUT_MS / 1000)
+        } else {
+            let exit = status.map_or_else(
+                || "killed by signal".to_string(),
+                |code| format!("exit {code}"),
+            );
+            match result_lines.last() {
+                Some(line) => format!("{exit}, {}", line.chars().take(160).collect::<String>()),
+                None => format!("{exit}, no RESULT line"),
+            }
+        };
+        let fingerprint = format!("{:x}", Sha256::digest(script.as_bytes()));
+        let dispatch_id = crate::dispatch_ledger::record(
+            "",
+            "witness-rerun",
+            &fingerprint,
+            status.unwrap_or(-1),
+            None,
+        );
+        Ok(serde_json::json!({
+            "dispatch_id": dispatch_id,
+            "passed": passed,
+            "detail": detail,
+        }))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = script;
+        Err("witness re-run needs the wasm host".to_string())
+    }
+}
+
 pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Value> {
     let changed: Vec<String> = changed
         .iter()
@@ -1299,30 +1446,100 @@ pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Valu
         return vec![];
     }
     let held = held_row_ids(now_ms());
-    let (to_reopen, deferred): (Vec<_>, Vec<_>) =
-        stale.into_iter().partition(|(id, _)| !held.contains(id));
-    let mut report: Vec<serde_json::Value> = to_reopen
-        .iter()
-        .map(|(id, reasons)| {
-            serde_json::json!({ "id": id, "state": "reopened", "reasons": reasons })
-        })
-        .collect();
-    report.extend(deferred.iter().map(|(id, reasons)| {
-        serde_json::json!({ "id": id, "state": "deferred_held", "reasons": reasons })
-    }));
-    if to_reopen.is_empty() {
+    let mut report: Vec<serde_json::Value> = Vec::new();
+    let mut failed: Vec<(String, Vec<String>)> = Vec::new();
+    let mut reruns = 0usize;
+    for (id, reasons) in stale {
+        if held.contains(&id) {
+            report.push(serde_json::json!({ "id": id, "state": "deferred_held", "reasons": reasons }));
+            continue;
+        }
+        let Some(map) = last_row_with_id(&doc, &id) else {
+            continue;
+        };
+        let Some(script) = bound_witness_script(map) else {
+            report.push(serde_json::json!({
+                "id": id,
+                "state": "not_rerunnable",
+                "reason": "witness cites no existing scripts/*.mjs, .js or .cjs",
+                "reasons": reasons,
+            }));
+            continue;
+        };
+        let node_only = crate::pkfs::read_to_string(&script)
+            .as_deref()
+            .map(witness_source_is_node_only);
+        if node_only != Some(true) {
+            report.push(serde_json::json!({
+                "id": id,
+                "state": "rerun_deferred",
+                "script": script,
+                "reason": "bound witness drives a browser or GPU arm, or its source is unreadable",
+                "reasons": reasons,
+            }));
+            continue;
+        }
+        if reruns >= REVERIFY_MAX_RERUNS_PER_COMMIT {
+            report.push(serde_json::json!({
+                "id": id,
+                "state": "rerun_deferred",
+                "script": script,
+                "reason": "re-run budget per commit reached",
+                "reasons": reasons,
+            }));
+            continue;
+        }
+        reruns += 1;
+        match rerun_bound_witness(&script) {
+            Ok(run) => {
+                let dispatch_id = run["dispatch_id"].as_str().unwrap_or_default().to_string();
+                if run["passed"].as_bool() == Some(true) {
+                    report.push(serde_json::json!({
+                        "id": id,
+                        "state": "rerun_pass",
+                        "script": script,
+                        "dispatch_id": dispatch_id,
+                        "reasons": reasons,
+                    }));
+                } else {
+                    let detail = run["detail"].as_str().unwrap_or_default();
+                    let mut reopen_reasons = reasons.clone();
+                    reopen_reasons.push(format!(
+                        "bound witness {script} re-run dispatch {dispatch_id} FAIL: {detail}"
+                    ));
+                    report.push(serde_json::json!({
+                        "id": id,
+                        "state": "reopened",
+                        "script": script,
+                        "dispatch_id": dispatch_id,
+                        "reasons": reopen_reasons,
+                    }));
+                    failed.push((id, reopen_reasons));
+                }
+            }
+            Err(reason) => report.push(serde_json::json!({
+                "id": id,
+                "state": "rerun_unavailable",
+                "script": script,
+                "reason": reason,
+                "reasons": reasons,
+            })),
+        }
+    }
+    if failed.is_empty() {
         return report;
     }
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
     let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-reverify", |mut doc: Value| {
-        let reopen: Vec<(String, Vec<String>)> = stale_completed_rows(&doc, &changed)
-            .into_iter()
-            .filter(|(id, _)| !held.contains(id))
+        let still_completed: Vec<(String, Vec<String>)> = failed
+            .iter()
+            .filter(|(id, _)| row_status_is_completed(&doc, id))
+            .cloned()
             .collect();
-        if reopen.is_empty() {
+        if still_completed.is_empty() {
             return cas::CasOutcome::Abort(String::new(), String::new(), 0);
         }
-        reopen_stale_rows(&mut doc, &reopen, &changed);
+        reopen_stale_rows(&mut doc, &still_completed, &changed);
         cas::CasOutcome::Write(doc, ())
     });
     if outcome.is_err() {
