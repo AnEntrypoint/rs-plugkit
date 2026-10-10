@@ -388,12 +388,28 @@ fn target_path_of(token: &str) -> Option<String> {
     admissible.then(|| path.to_string())
 }
 
+const SHARED_DOCUMENTS: [&str; 3] = ["AGENTS.md", "README.md", "CHANGELOG.md"];
+
+fn is_shared_document(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    SHARED_DOCUMENTS.contains(&name)
+}
+
 fn named_target_paths(row: &Value) -> Vec<String> {
+    let own_surface: Vec<String> = row
+        .get("surface")
+        .and_then(Value::as_str)
+        .into_iter()
+        .flat_map(str::split_whitespace)
+        .filter_map(target_path_of)
+        .collect();
     let mut paths: Vec<String> = TARGET_FIELDS
         .iter()
         .filter_map(|key| row.get(*key).and_then(Value::as_str))
         .flat_map(str::split_whitespace)
         .filter_map(target_path_of)
+        .filter(|path| !is_shared_document(path))
+        .chain(own_surface.into_iter().filter(|path| is_shared_document(path)))
         .collect();
     paths.sort();
     paths.dedup();
@@ -1023,7 +1039,7 @@ const POOL_RULES: [&str; 8] = [
     "Refill on every completion, in the same turn: launch one replacement per freed slot from launch (node-first candidates). Never launch a row that is in slots.live_rows.",
     "Pass body.held = the row id of every running worker on every call, including a worker whose heartbeat is not written yet. The newest held list is kept for 30 minutes; send held: [] to clear it.",
     "A heartbeat refreshes at least every 5 minutes and counts as live for 10 minutes; one older than 5 minutes is listed in slots.aging_heartbeats, not dropped. On a spawn refusal, call pool-observe with body.refusal set to the refusal text.",
-    "A candidate whose named target file has uncommitted changes in the worktree is removed from slots.candidates and from the launch list; slots.candidates_removed names it with filter dirty_target and its dirty_target path. Target names come only from the row subject, title, why, witness, acceptance, acceptance_criteria and text fields, and only tokens with a source or document extension: a token with a directory matches that path, and a bare file name matches any dirty file of that name; a row naming no such token is not filtered. If git status cannot be read, every row with a named path is removed with filter git_status_unknown. slots.launch_filters gives the reason each displayed candidate is not launchable.",
+    "A candidate whose named target file has uncommitted changes in the worktree is removed from slots.candidates and from the launch list; slots.candidates_removed names it with filter dirty_target and its dirty_target path. Target names come only from the row subject, title, why, witness, acceptance, acceptance_criteria and text fields, and only tokens with a source or document extension: a token with a directory matches that path, and a bare file name matches any dirty file of that name; a shared document name (AGENTS.md, README.md, CHANGELOG.md) counts only when the row's surface field names it; a row naming no such token is not filtered. If git status cannot be read, every row with a named path is removed with filter git_status_unknown. slots.launch_filters gives the reason each displayed candidate is not launchable.",
 ];
 const WORKER_BRIEF_PATH: &str = "C:/dev/spoint/.gm/config-source-cache-default/prose/worker.md";
 
