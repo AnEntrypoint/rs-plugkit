@@ -363,7 +363,7 @@ fn check_fanout_missed(to: &str, body: &Value) {
 }
 
 fn concurrency_refusal_at_complete(body: &Value, open_rows: usize) -> Option<String> {
-    let policy = crate::orchestrator::fsm::graph().policy;
+    let policy = crate::orchestrator::fsm::graph().policy.clone();
     let parent = body
         .get("session_id")
         .and_then(|v| v.as_str())
