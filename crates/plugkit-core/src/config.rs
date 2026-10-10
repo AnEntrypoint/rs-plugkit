@@ -423,6 +423,35 @@ fn join(base: &str, rel: &str) -> String {
     }
 }
 
+/// Cut a root back to the project that owns it when the root sits inside a config-source cache.
+///
+/// Both cache layouts live at `<project>/.gm/config-source-cache*`: `SOURCE_CACHE_REL` holds the
+/// repo-spec tiers, `DEFAULT_REPO_CACHE_REL` the implicit default repo. A dispatch whose cwd is a
+/// cache checkout otherwise treats the checkout as its own project and clones a second copy of the
+/// config repo into `<cache>/.gm/config-source-cache-default`.
+pub fn normalize_project_root(root: &str) -> String {
+    const CACHE_PARENT: &str = ".gm";
+    const CACHE_PREFIX: &str = "config-source-cache";
+    let normalized = root.replace('\\', "/");
+    let absolute = normalized.starts_with('/');
+    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+    for i in 0..segments.len().saturating_sub(1) {
+        if segments[i] == CACHE_PARENT && segments[i + 1].starts_with(CACHE_PREFIX) {
+            let kept = &segments[..i];
+            if kept.is_empty() {
+                return if absolute { "/".to_string() } else { normalized };
+            }
+            let joined = kept.join("/");
+            return if absolute {
+                format!("/{joined}")
+            } else {
+                joined
+            };
+        }
+    }
+    normalized
+}
+
 fn env_var(key: &str) -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -610,7 +639,7 @@ static RESOLVE_CACHE: std::sync::Mutex<
 
 #[cfg(target_arch = "wasm32")]
 pub fn resolve() -> Resolution {
-    let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let root = normalize_project_root(&crate::wasm_dispatch::host_cwd_string().unwrap_or_default());
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() } as u64;
     if let Ok(cache) = RESOLVE_CACHE.lock() {
         if let Some(entry) = cache.as_ref().and_then(|m| m.get(&root)) {
@@ -649,11 +678,12 @@ pub fn resolve() -> Resolution {
 
 #[cfg(target_arch = "wasm32")]
 pub fn resolve_forced(project_root: &str) -> Resolution {
+    let project_root = normalize_project_root(project_root);
     let forced_fetcher = crate::config_sync::GitRepoFetcher::with_debounce_ms(0);
-    let resolution = resolve_with(project_root, &forced_fetcher);
+    let resolution = resolve_with(&project_root, &forced_fetcher);
     if let Ok(mut cache) = RESOLVE_CACHE.lock() {
         if let Some(map) = cache.as_mut() {
-            map.remove(project_root);
+            map.remove(&project_root);
         }
     }
     resolution
