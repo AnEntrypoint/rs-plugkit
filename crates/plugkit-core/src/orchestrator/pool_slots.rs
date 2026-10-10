@@ -77,6 +77,25 @@ fn json_heartbeat_identity(body: &str) -> Option<HeartbeatIdentity> {
     Some(identity)
 }
 
+fn normalised_key(key: &str) -> String {
+    key.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+fn absorb_identity_field(identity: &mut HeartbeatIdentity, key: &str, value: &str) {
+    match normalised_key(key).as_str() {
+        "session" | "sessionid" => {
+            if identity.session.is_none() {
+                identity.session = non_empty(value);
+            }
+        }
+        "row" | "rows" | "rowid" | "rowids" => identity.rows.extend(row_names(value)),
+        _ => {}
+    }
+}
+
 fn heartbeat_identity(body: &str) -> HeartbeatIdentity {
     if let Some(identity) = json_heartbeat_identity(body) {
         return identity;
@@ -94,17 +113,12 @@ fn heartbeat_identity(body: &str) -> HeartbeatIdentity {
         .and_then(non_empty);
     let bare_format = lead_token.is_some();
     for line in &lines {
-        if let Some(name) = line.strip_prefix("session:").and_then(non_empty) {
-            identity.session = identity.session.or(Some(name));
-        }
-        if let Some(value) = line.strip_prefix("row:") {
-            identity.rows.extend(row_names(value));
+        if let Some((key, value)) = line.split_once(':') {
+            absorb_identity_field(&mut identity, key, value);
         }
         for token in line.split_whitespace() {
-            if let Some(value) = token.strip_prefix("session=") {
-                identity.session = identity.session.or_else(|| non_empty(value));
-            } else if let Some(value) = token.strip_prefix("row=") {
-                identity.rows.extend(row_names(value));
+            if let Some((key, value)) = token.split_once('=') {
+                absorb_identity_field(&mut identity, key, value);
             }
         }
     }
