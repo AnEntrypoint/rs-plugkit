@@ -22,7 +22,7 @@ const POOL_RULES: [&str; 8] = [
     "Refill on every completion, in the same turn: launch one replacement per freed slot from launch (node-first candidates). Never launch a row that is in slots.live_rows.",
     "Pass body.held = the row id of every running worker on every call, including a worker whose heartbeat is not written yet. The newest held list is kept for 30 minutes; send held: [] to clear it.",
     "A heartbeat refreshes at least every 5 minutes and counts as live for 10 minutes; one older than 5 minutes is listed in slots.aging_heartbeats, not dropped. On a spawn refusal, call pool-observe with body.refusal set to the refusal text.",
-    "A candidate whose named target file has uncommitted changes in the worktree is removed from slots.candidates and from the launch list; slots.candidates_removed names it with filter dirty_target and its dirty_target path. Target names come only from the row subject, title, why, witness, acceptance, acceptance_criteria and text fields, and only tokens with a source or document extension: a token with a directory matches that path, and a bare file name matches any dirty file of that name outside .gm/; a shared document name (AGENTS.md, README.md, CHANGELOG.md) counts only when the row's surface field names it; a row naming no such token is not filtered. If git status cannot be read, every row with a named path is removed with filter git_status_unknown. A candidate whose repo-relative target file is also named by a live row, or by an earlier advertised row of the same reply, is removed with filter live_writer and writer_target names that path. A candidate that passes both gates but is not advertised in this reply is listed in slots.launch_filters with filter beyond_refill: it waits for a free slot.",
+    "A candidate whose named target file has uncommitted changes in the worktree is removed from slots.candidates and from the launch list; slots.candidates_removed names it with filter dirty_target and its dirty_target path. Target names come only from the row subject, title, why, witness, acceptance, acceptance_criteria and text fields, and only tokens with a source or document extension: a token with a directory matches that path, and a bare file name matches any dirty file of that name outside .gm/; a shared document name (AGENTS.md, README.md, CHANGELOG.md) counts only when the row's surface field names it; a row naming no such token is not filtered. If git status cannot be read, every row with a named path is removed with filter git_status_unknown. A candidate whose repo-relative target file is also named by a live row, or by an earlier advertised row of the same reply, is removed with filter live_writer and writer_target names that path. A candidate that passes both gates but is not advertised in this reply is listed in slots.launch_filters with filter beyond_refill: it waits for a free slot. Every launch item, slots.launch_filters entry and slots.candidate_reasons value carries a reason string, and slots.candidate_reasons maps each displayed candidate to its reason.",
 ];
 
 pub fn handle_observe(content: &str) -> (String, String, i32) {
@@ -122,13 +122,15 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     let idle_slots = free_slots.saturating_sub(refill_needed);
     let unfilled_shortfall = shortfall.saturating_sub(refill_needed);
     let next_surface = unscanned.first().cloned();
+    attach_reasons(&mut slots, &advertised, refill_needed, free_slots);
     let mut launch: Vec<Value> = advertised
         .iter()
         .take(refill_needed as usize)
-        .map(|id| json!({"id": id, "role": "resolver"}))
+        .enumerate()
+        .map(|(index, id)| json!({"id": id, "role": "resolver", "reason": advertised_reason(index + 1, refill_needed)}))
         .collect();
     if traversal_needed && (launch.len() as u64) < refill_needed {
-        launch.push(json!({"id": TRAVERSAL_LAUNCH_ID, "role": "traversal", "surface": next_surface}));
+        launch.push(json!({"id": TRAVERSAL_LAUNCH_ID, "role": "traversal", "surface": next_surface, "reason": "traversal: fills a free slot after every advertised row, scanning the next unscanned surface"}));
     }
     let launch_ids: Vec<String> = launch
         .iter()
@@ -274,4 +276,30 @@ fn cap_list(slots: &mut Value, key: &str, limit: usize) {
     if let Some(fields) = slots.as_object_mut() {
         fields.insert(format!("{key}_total"), json!(total));
     }
+}
+
+fn advertised_reason(position: usize, refill_needed: u64) -> String {
+    format!("advertised: launch slot {position} of {refill_needed}")
+}
+
+fn beyond_refill_reason(free_slots: u64) -> String {
+    format!("beyond_refill: {free_slots} free slot(s) all go to higher-ranked rows; waits for a free slot")
+}
+
+fn attach_reasons(slots: &mut Value, advertised: &[String], refill_needed: u64, free_slots: u64) {
+    let beyond = beyond_refill_reason(free_slots);
+    let mut reasons = serde_json::Map::new();
+    for id in slots["candidates"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        let reason = match advertised.iter().position(|launched| launched.as_str() == id) {
+            Some(index) => advertised_reason(index + 1, refill_needed),
+            None => beyond.clone(),
+        };
+        reasons.insert(id.to_string(), json!(reason));
+    }
+    if let Some(items) = slots["launch_filters"].as_array_mut() {
+        for item in items.iter_mut() {
+            item["reason"] = json!(beyond);
+        }
+    }
+    slots["candidate_reasons"] = Value::Object(reasons);
 }
