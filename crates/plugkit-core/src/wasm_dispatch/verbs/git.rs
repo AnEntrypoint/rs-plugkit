@@ -1397,8 +1397,12 @@ pub(super) fn git_push(body: &Value) -> u64 {
             "next_dispatch": "instruction",
             "next_action_hint": "git_pull {branch} then git_push {rev:\"HEAD\"}",
         });
-        if remote_moved_recovery_opted_in(body) {
-            refusal = pull_and_repush_remote_moved(body, &repo, &branch, refusal);
+        match remote_moved_recovery_eligible(body, repo.as_deref(), &branch, &local_source_before)
+        {
+            None => refusal = pull_and_repush_remote_moved(body, &repo, &branch, refusal),
+            Some(reason) => {
+                refusal["auto_recovery"] = json!({ "attempted": false, "skipped_reason": reason });
+            }
         }
         hoist_identity_required(&mut refusal);
         return pack(refusal.to_string());
@@ -2307,14 +2311,94 @@ pub(super) fn pull_past_remote_moved(
 
 /// `git_push` refuses a `remote_moved` explicit-ref publication rather than mutating the
 /// checkout, which leaves the caller to dispatch `git_pull` and `git_push` by hand. This is the
-/// opt-in recovery that does exactly those two dispatches: one pull through `git_pull` (strict
+/// recovery that does exactly those two dispatches: one pull through `git_pull` (strict
 /// fast-forward first, ordinary merge only if the local branch diverged) and then one push.
 /// The worktree and index must be clean, or it refuses unchanged with the original reason.
-pub(super) fn remote_moved_recovery_opted_in(body: &Value) -> bool {
-    body.get("recover_remote_moved")
+pub(super) enum RemoteMovedRecoveryOpt {
+    Explicit(bool),
+    Defaulted,
+}
+
+pub(super) fn remote_moved_recovery_opt(body: &Value) -> RemoteMovedRecoveryOpt {
+    match body
+        .get("recover_remote_moved")
         .or_else(|| body.get("pull_first"))
         .and_then(|v| v.as_bool())
+    {
+        Some(want) => RemoteMovedRecoveryOpt::Explicit(want),
+        None => RemoteMovedRecoveryOpt::Defaulted,
+    }
+}
+
+fn push_body_requests_force(body: &Value) -> bool {
+    body.get("force")
+        .or_else(|| body.get("force_with_lease"))
+        .and_then(|v| v.as_bool())
         .unwrap_or(false)
+}
+
+/// `remote_moved` is a label this verb attaches to every explicit-ref push rejection that is
+/// neither a GitHub auth failure nor a transient 5xx, so on its own it compares nothing at all.
+/// Acting on it by default therefore needs real ancestry evidence: the remote tip resolves,
+/// differs from the pushed sha, is not already contained in it, and the two share a merge base.
+/// Those four are what "the remote moved" means -- the same branch carrying new commits the
+/// pushed ref does not have, whether or not the pushed ref also carries commits of its own. A
+/// missing remote tip, unrelated history and a remote already contained in the pushed ref all
+/// fail it; a pushed ref that is merely BEHIND passes, because pulling onto it fast-forwards and
+/// cannot lose work, and that is the ordinary shape this default exists for.
+pub(super) fn remote_moved_is_same_branch_advance(
+    repo: Option<&str>,
+    branch: &str,
+    local_sha: &str,
+) -> bool {
+    let remote_sha = match resolve_ref(repo, &format!("origin/{}", branch)) {
+        Some(sha) => sha,
+        None => return false,
+    };
+    if remote_sha == local_sha {
+        return false;
+    }
+    let is_ancestor = |ancestor: &str, descendant: &str| {
+        git_call_argv(&["merge-base", "--is-ancestor", ancestor, descendant], repo)
+            .get("exit_code")
+            .and_then(|code| code.as_i64())
+            .unwrap_or(1)
+            == 0
+    };
+    if is_ancestor(remote_sha.as_str(), local_sha) {
+        return false;
+    }
+    let merge_base = exec_git_in(repo, &format!("merge-base {} {}", remote_sha, local_sha))
+        .trim()
+        .to_string();
+    !merge_base.is_empty()
+}
+
+/// `None` means recover now. `Some(reason)` means do not touch the checkout, and names why.
+pub(super) fn remote_moved_recovery_eligible(
+    body: &Value,
+    repo: Option<&str>,
+    branch: &str,
+    local_sha: &str,
+) -> Option<&'static str> {
+    match remote_moved_recovery_opt(body) {
+        RemoteMovedRecoveryOpt::Explicit(true) => None,
+        RemoteMovedRecoveryOpt::Explicit(false) => {
+            Some("caller declined recovery with recover_remote_moved:false (or pull_first:false); the checkout is left exactly as it is.")
+        }
+        RemoteMovedRecoveryOpt::Defaulted => {
+            if push_body_requests_force(body) {
+                return Some("a forced push is never recovered automatically; pass recover_remote_moved:true if pulling onto it is genuinely intended.");
+            }
+            if resolve_ref(repo, "HEAD").as_deref() != Some(local_sha) {
+                return Some("the pushed ref is not this checkout's HEAD, so it was named with intent; automatic recovery is limited to publishing the checkout itself. Pass recover_remote_moved:true to recover this ref.");
+            }
+            if !remote_moved_is_same_branch_advance(repo, branch, local_sha) {
+                return Some("this rejection is not the same branch carrying new commits the pushed ref lacks (remote tip missing, unrelated history, or remote already contained in the pushed ref), so recovery stays opt-in.");
+            }
+            None
+        }
+    }
 }
 
 pub(super) fn pull_and_repush_remote_moved(
