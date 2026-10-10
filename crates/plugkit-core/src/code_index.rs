@@ -494,6 +494,34 @@ pub(crate) fn is_skipped_dir_segment(seg: &str, cfg: &crate::ragconfig::IndexCon
     cfg.skips_dir_segment(seg, SKIP_DIRS)
 }
 
+const BUILD_OUTPUT_DIR_SEGMENTS: &[&str] = &[
+    "static", "public", "site", "output", "artifacts", "compiled", "generated", "gen",
+];
+
+const SOURCE_DIR_SEGMENTS: &[&str] = &[
+    "src", "source", "sources", "lib", "libs", "app", "apps", "package", "packages", "pkg",
+    "crate", "crates", "module", "modules", "include", "internal", "client", "server", "engine",
+    "core", "cmd",
+];
+
+pub(crate) fn is_skipped_dir_path(path: &str, cfg: &crate::ragconfig::IndexConfig) -> bool {
+    let segments: Vec<&str> = path.split('/').collect();
+    for (i, seg) in segments.iter().enumerate() {
+        if !is_skipped_dir_segment(seg, cfg) {
+            continue;
+        }
+        let build_output_by_convention = BUILD_OUTPUT_DIR_SEGMENTS.iter().any(|d| seg == d);
+        let under_source_dir = segments[..i]
+            .iter()
+            .any(|ancestor| SOURCE_DIR_SEGMENTS.iter().any(|s| ancestor == s));
+        if build_output_by_convention && under_source_dir {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
 pub(crate) fn is_dependency_noise_dir_segment(
     seg: &str,
     cfg: &crate::ragconfig::IndexConfig,
@@ -864,7 +892,7 @@ fn collect_files_impl(
                 if p.split('/').any(is_hidden_segment) {
                     return false;
                 }
-                if p.split('/').any(|seg| is_skipped_dir_segment(seg, cfg)) {
+                if is_skipped_dir_path(p, cfg) {
                     return false;
                 }
                 let name = p.rsplit('/').next().unwrap_or(p.as_str());
@@ -949,7 +977,7 @@ fn walk_posix(
         return Ok(());
     }
     let root_force_included = cfg.is_force_included(root);
-    if !root_force_included && root.split('/').any(|seg| is_skipped_dir_segment(seg, cfg)) {
+    if !root_force_included && is_skipped_dir_path(root, cfg) {
         return Ok(());
     }
     let entries = if checked {
