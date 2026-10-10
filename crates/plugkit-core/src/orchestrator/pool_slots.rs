@@ -286,7 +286,14 @@ fn witness_gap_admitted(row: &Value, project_root: &str) -> bool {
         && status == "pending"
         && !super::pool_rank::has_blocker_notes(row)
         && node_only_witness(row)
-        && module_path_of(row).is_some_and(|module| pkfs::exists(&format!("{}/{}", project_root, module)))
+        && node_only_module(row, project_root)
+}
+
+fn node_only_module(row: &Value, project_root: &str) -> bool {
+    module_path_of(row).is_some_and(|module| {
+        pkfs::read_to_string(&format!("{}/{}", project_root, module))
+            .is_some_and(|source| !super::pool_rank::references_browser_or_gpu_global(&source))
+    })
 }
 
 fn declared_holds(dir: &str, now: u64) -> Vec<String> {
@@ -357,7 +364,17 @@ fn slot_parts(project_root: &str, observed_live: Option<u64>) -> (Value, Vec<Str
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|id| id.as_str().filter(|id| admitted.contains(*id)).map(str::to_string))
+        .filter_map(|id| id.as_str())
+        .filter(|id| {
+            work.iter()
+                .find(|(row, _)| row.get("id").and_then(Value::as_str) == Some(*id))
+                .is_some_and(|(row, _)| {
+                    admitted.contains(*id)
+                        && super::pool_rank::node_arm(row, true).is_none()
+                        && node_only_module(row, project_root)
+                })
+        })
+        .map(str::to_string)
         .collect();
     let action = match (open_rows, free) {
         (0, _) => "none",

@@ -62,6 +62,112 @@ pub(super) fn arm(row: &Value) -> Option<&'static str> {
     }
 }
 
+const BROWSER_GPU_GLOBALS: [&str; 13] = [
+    "window",
+    "document",
+    "navigator",
+    "WebSocket",
+    "Worker",
+    "SharedWorker",
+    "localStorage",
+    "sessionStorage",
+    "requestAnimationFrame",
+    "HTMLCanvasElement",
+    "OffscreenCanvas",
+    "requestAdapter",
+    "requestDevice",
+];
+
+fn declared_arm(row: &Value) -> Option<&'static str> {
+    match text_field(row, "arm") {
+        Some("gpu") => Some("gpu"),
+        Some("browser") => Some("browser"),
+        _ => None,
+    }
+}
+
+pub(super) fn node_arm(row: &Value, admitted: bool) -> Option<&'static str> {
+    if admitted {
+        declared_arm(row)
+    } else {
+        arm(row)
+    }
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '$'
+}
+
+fn code_without_literals(source: &str) -> String {
+    let mut code = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek().copied()) {
+            ('/', Some('/')) => {
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        code.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut prev = '\0';
+                for next in chars.by_ref() {
+                    if prev == '*' && next == '/' {
+                        break;
+                    }
+                    if next == '\n' {
+                        code.push('\n');
+                    }
+                    prev = next;
+                }
+                code.push(' ');
+            }
+            ('\'' | '"' | '`', _) => {
+                let quote = c;
+                let mut escaped = false;
+                for next in chars.by_ref() {
+                    if escaped {
+                        escaped = false;
+                    } else if next == '\\' {
+                        escaped = true;
+                    } else if next == quote || (next == '\n' && quote != '`') {
+                        break;
+                    }
+                }
+                code.push(' ');
+            }
+            _ => code.push(c),
+        }
+    }
+    code
+}
+
+fn is_browser_or_gpu_global(token: &str, called: bool) -> bool {
+    BROWSER_GPU_GLOBALS.contains(&token)
+        || token.starts_with("WebGL")
+        || token.starts_with("WebGPU")
+        || (token.len() > 3 && token.starts_with("GPU") && token.as_bytes()[3].is_ascii_uppercase())
+        || (token == "fetch" && called)
+}
+
+pub(super) fn references_browser_or_gpu_global(source: &str) -> bool {
+    let code = code_without_literals(source);
+    let mut rest = code.as_str();
+    while let Some(start) = rest.find(is_ident_char) {
+        let tail = &rest[start..];
+        let len = tail.find(|c: char| !is_ident_char(c)).unwrap_or(tail.len());
+        let called = tail[len..].trim_start().starts_with('(');
+        if is_browser_or_gpu_global(&tail[..len], called) {
+            return true;
+        }
+        rest = &tail[len..];
+    }
+    false
+}
+
 pub fn is_blocker_id(id: &str) -> bool {
     id.to_ascii_lowercase().contains("blocker")
 }
@@ -157,7 +263,7 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String], a
         if id.starts_with(WITNESS_GAP_PREFIX) && !admitted_row {
             continue;
         }
-        let row_arm = if admitted_row { None } else { arm(row) };
+        let row_arm = node_arm(row, admitted_row);
         match row_arm {
             Some("gpu") => gpu += 1,
             Some("browser") => browser += 1,
