@@ -1017,7 +1017,306 @@ const WITNESS_BINDING_FIELDS: &[&str] = &[
 
 const WITNESS_OUTPUT_MAX_BYTES: usize = 16 * 1024 * 1024;
 
-const WITNESS_BINDING_HINT: &str = "bind the witness with witness_exit_code (integer, must be 0), witness_output_sha256 (sha256 of the witness output file, 64 lowercase hex), witness_output_path (that output file, relative to the project root, no .. segments) and witness_ts (RFC 3339 timestamp). prd-resolve re-reads the file, re-hashes it and refuses on any mismatch.";
+const WITNESS_BINDING_HINT: &str = "bind the witness with witness_dispatch_id (string: the dispatch_id of your own live run in this project), or with all four of witness_exit_code (integer, must be 0), witness_output_sha256 (string: sha256 of the witness output file, 64 lowercase hex), witness_output_path (string: that output file, relative to the project root, no .. segments) and witness_ts (string: RFC 3339 timestamp). prd-resolve re-reads the file, re-hashes it and refuses on any mismatch.";
+
+fn prd_resolve_required_fields() -> serde_json::Value {
+    serde_json::json!({
+        "id": "string: the row id, at top level (aliases prd_id, mutable_id, item_id, slug, key)",
+        "witness_evidence": "string, non-empty: a file:line, codesearch hit or exec output specific to this row",
+        "binding": "witness_dispatch_id (string), OR all four of witness_exit_code (integer 0), witness_output_sha256 (string, 64 lowercase hex), witness_output_path (string) and witness_ts (string, RFC 3339)",
+    })
+}
+
+fn witness_evidence_kind(value: Option<&serde_json::Value>) -> &'static str {
+    match value {
+        None => "absent",
+        Some(serde_json::Value::String(text)) if text.trim().is_empty() => "empty string",
+        Some(serde_json::Value::String(_)) => "string",
+        Some(serde_json::Value::Null) => "null",
+        Some(serde_json::Value::Bool(_)) => "boolean",
+        Some(serde_json::Value::Number(_)) => "number",
+        Some(serde_json::Value::Array(_)) => "array",
+        Some(serde_json::Value::Object(_)) => "object",
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+const SPOOL_OUT_LOOKBACK_MS: u64 = 300_000;
+#[cfg(target_arch = "wasm32")]
+const SPOOL_OUT_LOOKAHEAD_MS: u64 = 10_000;
+#[cfg(target_arch = "wasm32")]
+const SPOOL_OUT_SCAN_MAX_FILES: usize = 400;
+const REVERIFY_LISTED_PATHS: usize = 20;
+
+#[cfg(target_arch = "wasm32")]
+pub fn dispatch_in_spool_out(cwd: &str, dispatch_id: &str) -> bool {
+    let Some(id_ts) = dispatch_id
+        .split('-')
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    let out_dir = if cwd.is_empty() {
+        ".gm/exec-spool/out".to_string()
+    } else {
+        format!("{}/.gm/exec-spool/out", cwd.trim_end_matches(['/', '\\']))
+    };
+    let Some(serde_json::Value::Array(entries)) = crate::pkfs::readdir(&out_dir) else {
+        return false;
+    };
+    let mut candidates: Vec<(u64, String)> = entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry
+                .as_str()
+                .or_else(|| entry.get("name").and_then(serde_json::Value::as_str))?;
+            let stem = name.strip_suffix(".json")?;
+            let ts = stem.rsplit('-').nth(1)?.parse::<u64>().ok()?;
+            let inside_window = ts <= id_ts.saturating_add(SPOOL_OUT_LOOKAHEAD_MS)
+                && ts.saturating_add(SPOOL_OUT_LOOKBACK_MS) >= id_ts;
+            inside_window.then(|| (ts, name.to_string()))
+        })
+        .collect();
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    let needle = format!("\"dispatch_id\":\"{dispatch_id}\"");
+    candidates
+        .into_iter()
+        .take(SPOOL_OUT_SCAN_MAX_FILES)
+        .any(|(_, name)| {
+            crate::pkfs::read_to_string(&format!("{out_dir}/{name}"))
+                .is_some_and(|text| text.contains(&needle))
+        })
+}
+
+fn path_is_within(path: &str, other: &str) -> bool {
+    path == other || path.ends_with(&format!("/{other}")) || other.ends_with(&format!("/{path}"))
+}
+
+fn stale_completed_rows(doc: &Value, changed: &[String]) -> Vec<(String, Vec<String>)> {
+    use sha2::{Digest, Sha256};
+    let Some(seq) = doc.as_sequence() else {
+        return vec![];
+    };
+    let key = |name: &str| Value::String(name.to_string());
+    seq.iter()
+        .filter_map(|item| {
+            let map = item.as_mapping()?;
+            if map.get(&key("status"))?.as_str()? != "completed" {
+                return None;
+            }
+            let id = map.get(&key("id"))?.as_str()?.to_string();
+            let mut reasons: Vec<String> = Vec::new();
+            if let Some(binding) = map.get(&key("witness_binding")).and_then(Value::as_mapping) {
+                let output_path = binding.get(&key("output_path")).and_then(Value::as_str);
+                let bound_sha = binding.get(&key("output_sha256")).and_then(Value::as_str);
+                if let (Some(output_path), Some(bound_sha)) = (output_path, bound_sha) {
+                    if changed.iter().any(|c| path_is_within(output_path, c)) {
+                        match crate::pkfs::read_to_string(output_path) {
+                            Some(content) => {
+                                let now = format!("{:x}", Sha256::digest(content.as_bytes()));
+                                if now != bound_sha {
+                                    reasons.push(format!(
+                                        "witness output {output_path} changed: sha256 is now {now}, bound {bound_sha}"
+                                    ));
+                                }
+                            }
+                            None => reasons.push(format!(
+                                "witness output {output_path} is missing or unreadable"
+                            )),
+                        }
+                    }
+                }
+            }
+            for referenced in row_referenced_paths(map) {
+                if let Some(module) = changed.iter().find(|c| path_is_within(&referenced, c)) {
+                    reasons.push(format!("module {module} changed after this row was witnessed"));
+                }
+            }
+            reasons.sort();
+            reasons.dedup();
+            (!reasons.is_empty()).then_some((id, reasons))
+        })
+        .collect()
+}
+
+fn reopen_stale_rows(doc: &mut Value, stale: &[(String, Vec<String>)], changed: &[String]) {
+    let Some(seq) = doc.as_sequence_mut() else {
+        return;
+    };
+    let key = |name: &str| Value::String(name.to_string());
+    let listed: Vec<Value> = changed
+        .iter()
+        .take(REVERIFY_LISTED_PATHS)
+        .cloned()
+        .map(Value::String)
+        .collect();
+    for item in seq.iter_mut() {
+        let Some(map) = item.as_mapping_mut() else {
+            continue;
+        };
+        let Some(id) = map
+            .get(&key("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some((_, reasons)) = stale.iter().find(|(stale_id, _)| *stale_id == id) else {
+            continue;
+        };
+        map.insert(key("status"), Value::String("pending".to_string()));
+        if let Some(binding) = map.remove(&key("witness_binding")) {
+            map.insert(key("previous_witness_binding"), binding);
+        }
+        map.insert(
+            key("reverify_reasons"),
+            Value::Sequence(reasons.iter().cloned().map(Value::String).collect()),
+        );
+        map.insert(key("reverify_changed_paths"), Value::Sequence(listed.clone()));
+    }
+}
+
+const HEARTBEAT_FRESH_MS: u64 = 600_000;
+
+fn now_ms() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        unsafe { crate::wasm_dispatch::host_now_ms() }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0
+    }
+}
+
+fn iso_utc_ms(text: &str) -> Option<u64> {
+    let (date, time) = text.trim().trim_end_matches('Z').split_once('T')?;
+    let mut date_parts = date.split('-').map(|part| part.parse::<i64>().ok());
+    let year = date_parts.next()??;
+    let month = date_parts.next()??;
+    let day = date_parts.next()??;
+    let mut time_parts = time
+        .split('.')
+        .next()?
+        .split(':')
+        .map(|part| part.parse::<i64>().ok());
+    let hour = time_parts.next()??;
+    let minute = time_parts.next()??;
+    let second = time_parts.next()??;
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    if seconds < 0 {
+        None
+    } else {
+        Some(seconds as u64 * 1_000)
+    }
+}
+
+fn held_row_ids(at_ms: u64) -> std::collections::HashSet<String> {
+    let mut held = std::collections::HashSet::new();
+    let Some(serde_json::Value::Array(entries)) = crate::pkfs::readdir(".gm/pool") else {
+        return held;
+    };
+    for entry in &entries {
+        let Some(name) = entry
+            .as_str()
+            .or_else(|| entry.get("name").and_then(serde_json::Value::as_str))
+        else {
+            continue;
+        };
+        if !name.ends_with(".live") {
+            continue;
+        }
+        let Some(text) = crate::pkfs::read_to_string(&format!(".gm/pool/{name}")) else {
+            continue;
+        };
+        let field = |key: &str| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(key))
+                .map(str::trim)
+        };
+        let fresh = field("start:").and_then(iso_utc_ms).is_some_and(|start| {
+            at_ms
+                .checked_sub(start)
+                .is_some_and(|age| age < HEARTBEAT_FRESH_MS)
+        });
+        if !fresh {
+            continue;
+        }
+        if let Some(rows) = field("row:") {
+            for token in rows.split(|c: char| c == ',' || c == '(' || c == ')' || c.is_whitespace()) {
+                if !token.is_empty() {
+                    held.insert(token.to_string());
+                }
+            }
+        }
+    }
+    held
+}
+
+pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Value> {
+    let changed: Vec<String> = changed
+        .iter()
+        .map(|path| path.trim().replace('\\', "/").trim_start_matches("./").to_string())
+        .filter(|path| !path.is_empty())
+        .collect();
+    if changed.is_empty() {
+        return vec![];
+    }
+    let path_s = prd_path().to_string_lossy().to_string();
+    let Some(text) = crate::pkfs::read_to_string(&path_s) else {
+        return vec![];
+    };
+    let Ok(doc) = serde_yaml::from_str::<Value>(&text) else {
+        return vec![];
+    };
+    let stale = stale_completed_rows(&doc, &changed);
+    if stale.is_empty() {
+        return vec![];
+    }
+    let held = held_row_ids(now_ms());
+    let (to_reopen, deferred): (Vec<_>, Vec<_>) =
+        stale.into_iter().partition(|(id, _)| !held.contains(id));
+    let mut report: Vec<serde_json::Value> = to_reopen
+        .iter()
+        .map(|(id, reasons)| {
+            serde_json::json!({ "id": id, "state": "reopened", "reasons": reasons })
+        })
+        .collect();
+    report.extend(deferred.iter().map(|(id, reasons)| {
+        serde_json::json!({ "id": id, "state": "deferred_held", "reasons": reasons })
+    }));
+    if to_reopen.is_empty() {
+        return report;
+    }
+    let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
+    let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-reverify", |mut doc: Value| {
+        let reopen: Vec<(String, Vec<String>)> = stale_completed_rows(&doc, &changed)
+            .into_iter()
+            .filter(|(id, _)| !held.contains(id))
+            .collect();
+        if reopen.is_empty() {
+            return cas::CasOutcome::Abort(String::new(), String::new(), 0);
+        }
+        reopen_stale_rows(&mut doc, &reopen, &changed);
+        cas::CasOutcome::Write(doc, ())
+    });
+    if outcome.is_err() {
+        for row in report.iter_mut() {
+            if row["state"] == "reopened" {
+                row["state"] = serde_json::json!("reopen_failed");
+            }
+        }
+    }
+    report
+}
 
 struct VerifiedWitness {
     exit_code: i64,
@@ -1296,12 +1595,18 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         && !has_witness
         && deviation_refuses("prd-resolve-no-witness")
     {
+        let received = witness_evidence_kind(request_object(trimmed).get("witness_evidence"));
         let body = serde_json::json!({
-            "error": format!("prd-resolve refused: no witness_evidence for {}", id_target),
+            "error": format!(
+                "prd-resolve refused: no witness_evidence for {} -- witness_evidence must be a non-empty string (received {})",
+                id_target, received
+            ),
             "deviation_kind": "prd-resolve-no-witness",
             "deviation_severity": "deny",
             "prd_id": id_target,
-            "hint": "resolve requires non-empty witness_evidence (file:line | codesearch hit | exec snippet). A row cannot be marked completed without evidence the work is real - this gate exists because an agent under closure-pressure marked undone tasks completed with an absent witness. Body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\", \"commit_comment\": \"<optional one-line resolution note, bundled into the next commit message>\"}. Do the work, capture its witness, then resolve.",
+            "required_fields": prd_resolve_required_fields(),
+            "witness_evidence_received": received,
+            "hint": "resolve requires a non-empty string witness_evidence (file:line | codesearch hit | exec snippet) and a binding: witness_dispatch_id, or all four of witness_exit_code, witness_output_sha256, witness_output_path and witness_ts. A row cannot be marked completed without evidence the work is real - this gate exists because an agent under closure-pressure marked undone tasks completed with an absent witness. Body shape: {\"id\": \"<prd-item-id>\", \"witness_evidence\": \"<file:line or codesearch hit>\", \"witness_dispatch_id\": \"<dispatch_id of your own live run>\", \"commit_comment\": \"<optional one-line resolution note, bundled into the next commit message>\"}. Do the work, capture its witness, then resolve.",
         }).to_string();
         return (
             body,
@@ -1375,7 +1680,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             .map(|id| crate::dispatch_ledger::lookup(cwd, id).is_some());
         let dispatch_verified = match witness_dispatch_id.as_deref() {
             None => false,
-            Some(dispatch_id) if crate::dispatch_ledger::lookup(cwd, dispatch_id).is_some() => {
+            Some(dispatch_id) if crate::dispatch_ledger::lookup(cwd, dispatch_id).is_some() || dispatch_in_spool_out(cwd, dispatch_id) => {
                 true
             }
             Some(_) if witness_binding.is_some() => false,
@@ -1450,6 +1755,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             "deviation_severity": "deny",
             "prd_id": id_target,
             "missing_fields": ["witness_dispatch_id", "witness_exit_code", "witness_output_sha256", "witness_output_path", "witness_ts"],
+            "required_fields": prd_resolve_required_fields(),
             "witness_dispatch_id_field": "witness_dispatch_id",
             "witness_dispatch_id_in_evidence": evidence_dispatch_id,
             "witness_dispatch_id_in_ledger": evidence_in_ledger,
@@ -1498,7 +1804,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                             if other_sha == Some(binding.output_sha256.as_str()) {
                                 let body = serde_json::json!({
                                     "error": format!(
-                                        "prd-resolve refused: witness binding for {} reuses output_sha256 {}, already bound to {}",
+                                        "prd-resolve refused: witness binding for {} reuses output_sha256 {}, already bound to {}. Each witness output closes one row: make the witness print a run identity (its dispatch id or a run timestamp) into its output, re-run it, and bind the new output file",
                                         id_target,
                                         binding.output_sha256,
                                         other_id.unwrap_or("?")
@@ -1507,7 +1813,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                                     "deviation_severity": "deny",
                                     "prd_id": id_target,
                                     "duplicate_of": other_id,
-                                    "hint": "One witness output closes one row. A row that really shares a witness with another row should be re-scoped with prd-add, not closed with the same output file.",
+                                    "hint": "One witness output closes one row. A witness that prints no run identity writes the same bytes on every run, so a second row cannot bind a distinct output: make the witness print its dispatch id or a run timestamp into the output file, re-run it, and bind the new file by its witness_output_sha256. A row that really shares a witness with another row should be re-scoped with prd-add, not closed with the same output file.",
                                 })
                                 .to_string();
                                 return (
