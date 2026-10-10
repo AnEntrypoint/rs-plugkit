@@ -1009,7 +1009,7 @@ fn sync_tree_with_budget(
             "error": format!("root '{root}' is not an existing project directory the host will grant access to"),
         });
     }
-    let enumeration = match code_index::collect_files_checked_within(
+    let enumeration = match code_index::collect_files_checked_within_wall_budget(
         root,
         cfg.index.digest_max_files.saturating_add(1),
         &cfg.index,

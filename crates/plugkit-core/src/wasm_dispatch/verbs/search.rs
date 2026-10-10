@@ -25,7 +25,7 @@ pub(super) fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::rag
         exclude_globs: Vec::new(),
         max_matches: DUAL_PHRASE_SCAN_COLLECT_MATCHES,
         max_matches_per_file: Some(DUAL_PHRASE_SCAN_PER_FILE_MATCHES),
-        whole_scope: false,
+        walk_every_file_in_scope: false,
         max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
         context: 0,
         term_combination: Some("phrase"),
@@ -183,7 +183,7 @@ pub(super) fn literal_fallback_scan(body: &Value, term: &str, k: usize) -> Optio
         term_combination: Some("phrase"),
         budget_ms: None,
         max_matches_per_file: None,
-        whole_scope: false,
+        walk_every_file_in_scope: false,
         context: 0,
         refresh: false,
         verbose: false,
@@ -213,7 +213,7 @@ pub(super) fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) 
         return compact;
     }
     let term = query.trim();
-    if term.len() < LITERAL_FALLBACK_MIN_TERM_LEN || term.contains(char::is_whitespace) {
+    if term.len() < LITERAL_FALLBACK_MIN_TERM_LEN {
         return compact;
     }
     let Some(scan) = literal_fallback_scan(body, term, k as usize) else {
@@ -1083,7 +1083,7 @@ pub(super) fn codesearch_exhaustive(
         term_combination: combine,
         budget_ms,
         max_matches_per_file: None,
-        whole_scope: true,
+        walk_every_file_in_scope: true,
         context: 0,
         refresh: scan_refresh_requested(body),
         no_ignore: scan_no_ignore_requested(body),
@@ -1226,16 +1226,25 @@ codesearch (aliases \"code_search\", \"search\") is the canonical search verb.
 pub(super) const FS_READ_HELP: &str = "\
 fs_read returns a file's contents.
   {\"path\":\"<relative path>\"}     required, relative and within the project
-  {\"offset\":0, \"limit\":200}      read a line range; both clamp to the file's real line count, so an
-                                  offset past the end returns \"\" with \"returned_lines\":0 instead of failing.
-                                  Omit both for the whole file (the pre-existing behaviour).
+  {\"startLine\":1040,\"endLine\":1100}
+                                  read a line range: 1-based and inclusive on both ends, so line 1040
+                                  and line 1100 are both returned. Every pair below is an alias of
+                                  this one and the first pair present wins, in this order:
+                                    startLine/endLine, start/end, from/to, offset/limit, line/lines
+                                  \"start\"/\"count\" is accepted too: \"count\" is a number of lines, as
+                                  \"limit\" and \"lines\" are, never an end line.
+                                  An end past the file's last line is clamped to it and reported as
+                                  \"clamped_to_total_lines\" with \"end_line_requested\"; a start past
+                                  it is an error naming the file's line count. Omit every range key
+                                  for the whole file (the pre-existing behaviour).
   {\"max_bytes\":65536}            cap the returned chunk; \"truncated_at_bytes\" reports whether it fired.
   {\"allowOutsideRoot\":true}      opt in to an absolute path outside the project root; required per call.
                                   \"allow_outside_root\" is an alias. A path holding a \"..\" segment is still
                                   refused, and the host sandbox still serves only paths under the user gm root
                                   or a directory carrying a project marker (.git, .gm, package.json,
                                   Cargo.toml, go.mod, pyproject.toml).
-Paged replies add \"total_lines\", \"offset\", \"returned_lines\" and \"has_more_lines\".";
+Ranged replies add \"total_lines\", \"start_line\", \"end_line\", \"returned_lines\", \"has_more_lines\",
+\"next_start_line\" and \"offset\" (the 0-based first line, kept for compatibility).";
 
 pub(super) const FS_WRITE_HELP: &str = "\
 fs_write writes a file inside the project. There is no append mode: a write replaces the whole file.
@@ -1778,7 +1787,7 @@ pub(super) fn grep(body: &Value) -> u64 {
         term_combination: Some("phrase"),
         budget_ms: None,
         max_matches_per_file: None,
-        whole_scope: false,
+        walk_every_file_in_scope: false,
         refresh: scan_refresh_requested(body),
         no_ignore: scan_no_ignore_requested(body),
         output: crate::code_index::ScanOutput::Matches,
@@ -1960,7 +1969,7 @@ pub(super) fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: O
         term_combination: None,
         budget_ms: None,
         max_matches_per_file: None,
-        whole_scope: false,
+        walk_every_file_in_scope: false,
         context: 0,
         refresh: scan_refresh_requested(body),
         no_ignore: false,
