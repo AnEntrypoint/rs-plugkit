@@ -41,6 +41,7 @@ pub(super) fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::rag
         exclude_globs: Vec::new(),
         max_matches: DUAL_PHRASE_SCAN_COLLECT_MATCHES,
         max_matches_per_file: Some(DUAL_PHRASE_SCAN_PER_FILE_MATCHES),
+        whole_scope: false,
         max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
         context: 0,
         term_combination: Some("phrase"),
@@ -210,6 +211,7 @@ pub(super) fn literal_fallback_scan(body: &Value, term: &str, k: usize) -> Optio
         term_combination: Some("phrase"),
         budget_ms: None,
         max_matches_per_file: None,
+        whole_scope: false,
         context: 0,
         refresh: false,
         verbose: false,
@@ -1056,6 +1058,7 @@ pub(super) fn codesearch_exhaustive(
         term_combination: combine,
         budget_ms,
         max_matches_per_file: None,
+        whole_scope: true,
         context: 0,
         refresh: scan_refresh_requested(body),
         no_ignore: scan_no_ignore_requested(body),
@@ -1393,7 +1396,10 @@ pub(super) fn code_exclusion_count(out: &serde_json::Map<String, Value>) -> u64 
 }
 
 pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Option<String> {
-    if out.get("exhaustive").and_then(|v| v.as_bool()) != Some(false) {
+    // A whole-scope walk that returned fewer rows than it found is complete in coverage and cut in
+    // reply: it still owes the caller the warning, so the hit cap speaks here too.
+    let list_truncated = out.get("matches_truncated").and_then(|v| v.as_bool()) == Some(true);
+    if out.get("exhaustive").and_then(|v| v.as_bool()) != Some(false) && !list_truncated {
         return None;
     }
     let num = |key: &str| out.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1773,6 +1779,7 @@ pub(super) fn grep(body: &Value) -> u64 {
         term_combination: Some("phrase"),
         budget_ms: None,
         max_matches_per_file: None,
+        whole_scope: false,
         refresh: scan_refresh_requested(body),
         no_ignore: scan_no_ignore_requested(body),
         output: crate::code_index::ScanOutput::Matches,
@@ -1931,7 +1938,7 @@ pub(super) fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> 
     answer_scan("grep", out, partial)
 }
 
-pub(super) const CODESEARCH_QUERY_SHAPE: &str = "query required -- pass {\"query\":\"<the text to search for>\"}: a plain STRING of text, never an object, array or path list; \"dual\" (the default) embeds it and ranks BM25+vector hits, \"literal\"/\"regex\" match it verbatim, \"filename\" matches it as a path substring or glob. Optional {\"mode\":\"dual\"|\"literal\"|\"regex\"|\"filename\"}, {\"k\":10} result cap for \"dual\", {\"max_matches\":1000} for the exhaustive modes, {\"path\":\"<dir or file>\"}, {\"path_glob\":\"**/*.rs\"}. There is no query-less listing mode, so a body without query is always a caller mistake";
+pub(super) const CODESEARCH_QUERY_SHAPE: &str = "query required -- pass {\"query\":\"<the text to search for>\"}: a plain STRING of text, never an object, array or path list; \"dual\" (the default) embeds it and ranks BM25+vector hits, \"literal\"/\"regex\" match it verbatim, \"filename\" matches it as a path substring or glob. Optional {\"mode\":\"dual\"|\"literal\"|\"regex\"|\"filename\"}, {\"k\":10} result cap for \"dual\", {\"max_matches\":1000} for the exhaustive modes (it caps the rows returned, never the files scanned -- an exhaustive mode reads every file in scope and is uncapped by default), {\"path\":\"<dir or file>\"}, {\"path_glob\":\"**/*.rs\"}. There is no query-less listing mode, so a body without query is always a caller mistake";
 
 pub(super) struct IdentifierScan<'a> {
     pattern: &'a str,
@@ -1957,6 +1964,7 @@ pub(super) fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: O
         term_combination: None,
         budget_ms: None,
         max_matches_per_file: None,
+        whole_scope: false,
         context: 0,
         refresh: scan_refresh_requested(body),
         no_ignore: false,
