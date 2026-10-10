@@ -3632,16 +3632,62 @@ pub(super) fn git_show(body: &Value) -> u64 {
         }
     }
     let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let host_ok = r.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
+    if !host_ok || code != 0 {
+        let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
+        let repo = git_show_repo_name(cwd);
+        let detail = if stderr.is_empty() {
+            format!("git show exited {code} with no message")
+        } else {
+            stderr.to_string()
+        };
+        let error_code = if path.is_some() {
+            "git_show_path_unresolved"
+        } else {
+            "git_show_rev_unresolved"
+        };
+        return err_json(
+            "git_show",
+            json!({
+                "error_code": error_code,
+                "error": format!("rev {} does not resolve in {}: {}", refspec, repo, detail),
+                "rev": refspec,
+                "repo": repo,
+                "hint": "A git_show reply carrying no object is never a delivered commit; name a rev that resolves in this repo.",
+            }),
+        );
+    }
     let mut out = r
         .get("stdout")
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .to_string();
+    let mut truncated = r
+        .get("stdout_truncated")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     if out.len() > 60000 {
         let cut = (0..=60000).rev().find(|&i| out.is_char_boundary(i)).unwrap_or(0);
         out.truncate(cut);
+        truncated = true;
     }
-    ok("git_show", json!({ "output": out, "rev": refspec }))
+    ok("git_show", json!({ "output": out, "rev": refspec, "truncated": truncated }))
+}
+
+fn git_show_repo_name(cwd: Option<&str>) -> String {
+    if let Some(dir) = cwd {
+        if !dir.trim().is_empty() {
+            return dir.to_string();
+        }
+    }
+    let top = git_call_argv(&["rev-parse", "--show-toplevel"], cwd);
+    let text = top.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim();
+    if text.is_empty() {
+        "(unknown repo)".to_string()
+    } else {
+        text.to_string()
+    }
 }
 
 pub(super) fn git_fetch(body: &Value) -> u64 {
