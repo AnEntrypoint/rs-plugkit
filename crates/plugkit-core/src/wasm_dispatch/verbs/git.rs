@@ -1204,7 +1204,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
             );
         }
         log_deviation_push("push-explicit-ref-remote-moved", &branch);
-        return pack(json!({
+        let mut refusal = json!({
             "ok": false,
             "verb": "git_push",
             "gate_denied": true,
@@ -1220,7 +1220,11 @@ pub(super) fn git_push(body: &Value) -> u64 {
             ),
             "next_dispatch": "instruction",
             "next_action_hint": "git_pull {branch} then git_push {rev:\"HEAD\"}",
-        }).to_string());
+        });
+        if remote_moved_recovery_opted_in(body) {
+            refusal = pull_and_repush_remote_moved(body, &repo, &branch, refusal);
+        }
+        return pack(refusal.to_string());
     }
     while !push_succeeded
         && attempts < 3
@@ -1916,6 +1920,10 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         if allow_whole_index && paths.is_empty() {
             payload["blanket_opt_in"] = json!("allow_whole_index");
             payload["swept_paths"] = json!(blanket_stage_would_take(cwd));
+        }
+        let reopened_rows = crate::orchestrator::prd::reopen_rows_for_changed_paths(&files_in_commit(cwd));
+        if !reopened_rows.is_empty() {
+            payload["prd_reopened"] = json!(reopened_rows);
         }
         let step_refs: Vec<&Value> = write_steps.iter().collect();
         Ok(ok(
@@ -2703,6 +2711,12 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
     if allow_whole_index && !scoped {
         finalize_payload["blanket_opt_in"] = json!("allow_whole_index");
         finalize_payload["swept_paths"] = json!(files_in_commit(cwd_ref));
+    }
+    if committed {
+        let reopened_rows = crate::orchestrator::prd::reopen_rows_for_changed_paths(&files_in_commit(cwd_ref));
+        if !reopened_rows.is_empty() {
+            finalize_payload["prd_reopened"] = json!(reopened_rows);
+        }
     }
     let step_refs: Vec<&Value> = write_steps.iter().collect();
     ok(
@@ -3559,12 +3573,15 @@ pub(super) fn ci_status_summarize(
     let mut any_pending = false;
     let mut any_failure = false;
     let mut counted_runs = 0usize;
+    let mut jobs: Vec<Value> = vec![];
+    let mut jobs_unavailable: Vec<Value> = vec![];
     for run in runs {
         let run_name = run.get("name").and_then(|v| v.as_str()).unwrap_or("");
         if ignored_names.iter().any(|n| n == run_name) {
             continue;
         }
         counted_runs += 1;
+        ci_status_collect_run_jobs(transport, repo, run, rest_opts, &mut jobs, &mut jobs_unavailable);
         let gh_status = run.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let conclusion = run.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
         let mut per_run_status = ci_status_conclusion_to_status(conclusion, gh_status);
@@ -3609,8 +3626,72 @@ pub(super) fn ci_status_summarize(
         "ok": true, "verb": "ci-status", "data": {
             "status": overall, "repo": repo, "sha": sha,
             "failed_jobs": failed_jobs, "run_url": run_url, "run_count": counted_runs,
+            "jobs": jobs, "jobs_unavailable": jobs_unavailable,
             "transport": source,
         },
+    })
+}
+
+pub(super) fn ci_status_collect_run_jobs(
+    transport: CiStatusTransport,
+    repo: &str,
+    run: &Value,
+    rest_opts: &str,
+    jobs: &mut Vec<Value>,
+    jobs_unavailable: &mut Vec<Value>,
+) {
+    let workflow = run.get("name").and_then(Value::as_str).unwrap_or("");
+    let Some(run_id) = run.get("id").and_then(Value::as_u64) else {
+        jobs_unavailable.push(json!({ "workflow": workflow, "reason": "workflow run carries no id" }));
+        return;
+    };
+    let path = format!("repos/{}/actions/runs/{}/jobs?per_page=100", repo, run_id);
+    match ci_status_attempt(transport, &path, rest_opts) {
+        Ok(parsed) => {
+            let total = parsed.get("total_count").and_then(Value::as_u64).unwrap_or(0);
+            match parsed.get("jobs").and_then(Value::as_array) {
+                Some(listed) if total <= listed.len() as u64 => jobs.extend(
+                    listed
+                        .iter()
+                        .map(|job| ci_status_job_entry(workflow, run_id, job)),
+                ),
+                Some(listed) => jobs_unavailable.push(json!({
+                    "workflow": workflow,
+                    "run_id": run_id,
+                    "reason": format!("job list truncated: {} of {} jobs listed", listed.len(), total),
+                })),
+                None => jobs_unavailable.push(json!({
+                    "workflow": workflow,
+                    "run_id": run_id,
+                    "reason": "jobs response carries no jobs array",
+                })),
+            }
+        }
+        Err(failure) => jobs_unavailable.push(json!({
+            "workflow": workflow,
+            "run_id": run_id,
+            "reason": failure.reason,
+        })),
+    }
+}
+
+pub(super) fn ci_status_job_entry(workflow: &str, run_id: u64, job: &Value) -> Value {
+    let status = job.get("status").and_then(Value::as_str).unwrap_or("");
+    let github_conclusion = job.get("conclusion").and_then(Value::as_str);
+    let conclusion = match (status, github_conclusion) {
+        ("completed", Some("success" | "neutral")) => "success",
+        ("completed", Some("skipped")) => "skipped",
+        ("completed", _) => "failure",
+        _ => "pending",
+    };
+    json!({
+        "workflow": workflow,
+        "name": job.get("name").and_then(Value::as_str).unwrap_or(""),
+        "conclusion": conclusion,
+        "github_status": status,
+        "github_conclusion": github_conclusion,
+        "run_id": run_id,
+        "job_url": job.get("html_url").and_then(Value::as_str),
     })
 }
 

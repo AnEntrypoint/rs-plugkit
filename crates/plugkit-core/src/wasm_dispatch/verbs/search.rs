@@ -1240,8 +1240,9 @@ fs_stat stats one path inside the project. {\"path\":\"<relative path>\"}, requi
                                   Cargo.toml, go.mod, pyproject.toml).";
 
 pub(super) const PRD_RESOLVE_HELP: &str = "\
-prd-resolve {id, witness_evidence, commit_comment, keep_status}, plus a witness binding.
-  witness_evidence: a file:line, codesearch hit or exec snippet specific to this row. Required
+prd-resolve {id (string), witness_evidence (string), commit_comment (string, optional), keep_status (boolean, optional)}, plus a witness binding.
+  body: {\"id\":\"<row id>\",\"witness_evidence\":\"<string>\",\"witness_dispatch_id\":\"<dispatch_id of your own live run>\"}
+  witness_evidence (string): a file:line, codesearch hit or exec snippet specific to this row. Required
                     unless keep_status:true (aliases preserve_status, leave_pending), which
                     annotates the row without completing it and needs no binding.
   binding, EITHER: witness_dispatch_id, the dispatch_id of a gm dispatch in this project's
