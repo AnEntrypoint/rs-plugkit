@@ -1,4 +1,5 @@
 use super::*;
+use crate::scan_universe::GM_STATE_EXCLUSION_RULES;
 
 pub(super) const UNINDEXED_CANDIDATE_MAX: usize = 500;
 
@@ -1433,7 +1434,8 @@ pub(super) fn scan_scope_hint(scan_cap: u32) -> String {
 /// Counters that describe the scan to a human sitting in front of it and nothing else: the cache is
 /// internal, the phase split is profiling, and the listed/unreadable counts are already folded into
 /// `partial_reason` on the scans where they left the answer incomplete. `excluded_by_rule`, its count
-/// and `excluded_by_rule_summary` stay: they name every path a rule hid, which is what a caller acts on.
+/// and `excluded_by_rule_summary` stay: they name every path a code rule hid, which is what a caller
+/// acts on. gm's own state rides in the summary only -- see `GM_STATE_EXCLUSION_RULES`.
 pub(super) const SCAN_TELEMETRY_DROPPED: &[&str] = &[
     "scan_cache",
     "phase_ms",
@@ -1442,14 +1444,12 @@ pub(super) const SCAN_TELEMETRY_DROPPED: &[&str] = &[
     "files_with_nul_scanned",
 ];
 
+/// The rule-excluded paths that are code, the only exclusions that clear `exhaustive`.
 /// A bounded scan still answers, so it stays `ok` -- and `ok: true` beside an empty `matches` reads
 /// as "there is nothing there" when it means "this did not look at everything". The bound that fired
-/// rides at the top of the envelope, where a caller meets it before the answer.
-/// gm's own state (`.gm/`, `.agentplug-kv/`) is not code. Its exclusions are named in
-/// `excluded_by_rule_summary` but do not count toward `exhaustive`; every other rule drops code.
-const GM_STATE_EXCLUSION_RULES: &[&str] = &["gm_state_dir", "agentplug_kv_cache"];
-
-/// The rule-excluded paths that are code, the only exclusions that clear `exhaustive`.
+/// rides at the top of the envelope, where a caller meets it before the answer. gm's own state
+/// (`scan_universe::GM_STATE_EXCLUSION_RULES`, `.gm/` and `.agentplug-kv/`) is not code: its
+/// exclusions are named in `excluded_by_rule_summary` and never counted here.
 pub(super) fn code_exclusion_count(out: &serde_json::Map<String, Value>) -> u64 {
     out.get("excluded_by_rule_summary")
         .and_then(|v| v.as_object())
