@@ -1193,6 +1193,86 @@ pub fn foreign_prd_rows(head_text: &str, worktree_text: &str, session_id: &str) 
     foreign
 }
 
+pub fn own_prd_rows(head_text: &str, worktree_text: &str, session_id: &str) -> Vec<serde_json::Value> {
+    let head_blocks = prd_row_blocks(head_text);
+    let worktree_blocks = prd_row_blocks(worktree_text);
+    let changed = worktree_blocks
+        .iter()
+        .filter(|block| !head_blocks.contains(*block))
+        .chain(head_blocks.iter().filter(|block| !worktree_blocks.contains(*block)));
+    let mut seen: Vec<(String, Option<String>)> = Vec::new();
+    let mut own: Vec<serde_json::Value> = Vec::new();
+    for block in changed {
+        let owner = prd_block_field(block, "session_id");
+        if owner.as_deref() != Some(session_id) {
+            continue;
+        }
+        let id = prd_block_field(block, "id").unwrap_or_default();
+        let key = (id.clone(), owner.clone());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        own.push(serde_json::json!({ "id": id, "session_id": owner }));
+    }
+    own
+}
+
+pub fn prd_text_without_foreign_changes(
+    head_text: &str,
+    worktree_text: &str,
+    session_id: &str,
+) -> String {
+    let head_blocks = prd_row_blocks(head_text);
+    let worktree_blocks = prd_row_blocks(worktree_text);
+    let id_of = |block: &str| prd_block_field(block, "id").unwrap_or_default();
+    let mut out = String::new();
+    let mut emitted: Vec<String> = Vec::new();
+    for index in 0..worktree_blocks.len() {
+        let block = worktree_blocks[index];
+        let unchanged = head_blocks.iter().any(|hb| *hb == block);
+        let owner = prd_block_field(block, "session_id");
+        if !unchanged && owner.as_deref() != Some(session_id) {
+            let id = id_of(block);
+            if !emitted.contains(&id) {
+                if let Some(position) = head_blocks.iter().position(|hb| id_of(hb) == id) {
+                    out.push_str(head_blocks[position]);
+                }
+                emitted.push(id);
+            }
+            continue;
+        }
+        emitted.push(id_of(block));
+        out.push_str(block);
+    }
+    for index in 0..head_blocks.len() {
+        let head_block = head_blocks[index];
+        let id = id_of(head_block);
+        if emitted.contains(&id) {
+            continue;
+        }
+        if prd_block_field(head_block, "session_id").as_deref() == Some(session_id) {
+            continue;
+        }
+        emitted.push(id);
+        out.push_str(head_block);
+    }
+    out
+}
+
+pub fn prd_text_with_missing_blocks_appended(base: &str, extra: &str) -> String {
+    let base_blocks = prd_row_blocks(base);
+    let mut out = base.to_string();
+    let extra_blocks = prd_row_blocks(extra);
+    for index in 0..extra_blocks.len() {
+        let block = extra_blocks[index];
+        if !base_blocks.iter().any(|bb| *bb == block) {
+            out.push_str(block);
+        }
+    }
+    out
+}
+
 fn stale_completed_rows(doc: &Value, changed: &[String]) -> Vec<(String, Vec<String>)> {
     use sha2::{Digest, Sha256};
     let Some(seq) = doc.as_sequence() else {

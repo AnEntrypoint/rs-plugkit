@@ -1850,9 +1850,150 @@ pub(super) fn prd_foreign_rows_for_commit(paths: &[String], body: &Value, cwd: O
     } else {
         ""
     };
-    let worktree_text = crate::orchestrator::prd::read_prd_text(&crate::orchestrator::prd::prd_path().to_string_lossy())
-        .unwrap_or_default();
+    let worktree_text = crate::orchestrator::prd::read_prd_text(
+        &crate::orchestrator::prd::prd_path_for(cwd).to_string_lossy(),
+    )
+    .unwrap_or_default();
     crate::orchestrator::prd::foreign_prd_rows(head_text, &worktree_text, &commit_session_id(body))
+}
+
+pub(super) fn body_allow_foreign_prd_rows(body: &Value) -> bool {
+    ["allow_foreign_rows", "allow_foreign_prd_rows"]
+        .iter()
+        .any(|key| body.get(*key).and_then(Value::as_bool).unwrap_or(false))
+}
+
+pub(super) fn prd_foreign_owner_sessions(foreign: &[Value]) -> Vec<String> {
+    let mut owners: Vec<String> = Vec::new();
+    for row in foreign {
+        let owner = row
+            .get("session_id")
+            .and_then(Value::as_str)
+            .unwrap_or("(unknown)")
+            .to_string();
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
+    owners
+}
+
+pub(super) fn prd_foreign_owner_summary(foreign: &[Value]) -> String {
+    let owners = prd_foreign_owner_sessions(foreign);
+    if owners.is_empty() {
+        return "(unknown)".to_string();
+    }
+    let shown: Vec<String> = owners.iter().take(4).cloned().collect();
+    let mut text = shown.join(", ");
+    if owners.len() > shown.len() {
+        text.push_str(&format!(
+            " and {} more session(s)",
+            owners.len() - shown.len()
+        ));
+    }
+    text
+}
+
+pub(super) struct PrdOwnRowsFilter {
+    path: String,
+    original: String,
+    filtered: String,
+    own_rows: Vec<Value>,
+    applied: bool,
+}
+
+impl PrdOwnRowsFilter {
+    fn apply(&mut self) -> bool {
+        self.applied = crate::pkfs::write(&self.path, &self.filtered);
+        self.applied
+    }
+
+    fn restore(&mut self) -> bool {
+        let current = crate::orchestrator::prd::read_prd_text(&self.path).unwrap_or_default();
+        let merged = if current == self.filtered {
+            self.original.clone()
+        } else {
+            crate::orchestrator::prd::prd_text_with_missing_blocks_appended(
+                &current,
+                &self.original,
+            )
+        };
+        self.applied = false;
+        crate::pkfs::write(&self.path, &merged)
+    }
+}
+
+impl Drop for PrdOwnRowsFilter {
+    fn drop(&mut self) {
+        if !self.applied {
+            return;
+        }
+        let _ = self.restore();
+    }
+}
+
+pub(super) fn prd_own_rows_filter(
+    paths: &[String],
+    body: &Value,
+    cwd: Option<&str>,
+) -> Option<PrdOwnRowsFilter> {
+    if !paths
+        .iter()
+        .any(|path| crate::orchestrator::prd::is_prd_yml_pathspec(path))
+    {
+        return None;
+    }
+    if body_allow_foreign_prd_rows(body) {
+        return None;
+    }
+    let head = git_call_argv(&["show", "HEAD:.gm/prd.yml"], cwd);
+    let head_text = if head.get("exit_code").and_then(Value::as_i64) == Some(0) {
+        head.get("stdout").and_then(Value::as_str).unwrap_or("")
+    } else {
+        ""
+    };
+    let path = crate::orchestrator::prd::prd_path_for(cwd).to_string_lossy().to_string();
+    let worktree_text = crate::orchestrator::prd::read_prd_text(&path)?;
+    let session_id = commit_session_id(body);
+    let own_rows = crate::orchestrator::prd::own_prd_rows(head_text, &worktree_text, &session_id);
+    if own_rows.is_empty() {
+        return None;
+    }
+    let filtered =
+        crate::orchestrator::prd::prd_text_without_foreign_changes(head_text, &worktree_text, &session_id);
+    if filtered == worktree_text {
+        return None;
+    }
+    Some(PrdOwnRowsFilter {
+        path,
+        original: worktree_text,
+        filtered,
+        own_rows,
+        applied: false,
+    })
+}
+
+pub(super) fn porcelain_without_path(porcelain: &str, drop: &str) -> String {
+    let target = drop
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .to_string();
+    let mut out = String::new();
+    for line in porcelain.lines() {
+        let path = line
+            .get(3..)
+            .unwrap_or("")
+            .trim()
+            .trim_matches('"')
+            .replace('\\', "/");
+        let path = path.trim_start_matches("./").to_string();
+        if path == target {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 pub(super) fn git_commit_argv(
@@ -2066,17 +2207,16 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let foreign_prd_rows = prd_foreign_rows_for_commit(&paths, body, cwd);
-        let allow_foreign_prd_rows = body
-            .get("allow_foreign_prd_rows")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if !foreign_prd_rows.is_empty() && !allow_foreign_prd_rows {
+        let allow_foreign_prd_rows = body_allow_foreign_prd_rows(body);
+        let mut own_rows_filter = prd_own_rows_filter(&paths, body, cwd);
+        if !foreign_prd_rows.is_empty() && !allow_foreign_prd_rows && own_rows_filter.is_none() {
             return Ok(err_json(
                 "git_commit",
                 json!({
-                    "error": format!("paths name .gm/prd.yml, which carries {} uncommitted row change(s) owned by other sessions; a path-scoped commit would sweep them in. Commit after their owners commit, or pass allow_foreign_prd_rows: true to include them deliberately", foreign_prd_rows.len()),
+                    "error": format!("paths name .gm/prd.yml, which carries {} uncommitted row change(s) owned by other sessions ({}); this session owns no row change there, so a path-scoped commit has nothing of yours to ship. Pass allow_foreign_rows: true to include their rows deliberately, or commit after their owners commit", foreign_prd_rows.len(), prd_foreign_owner_summary(&foreign_prd_rows)),
                     "error_code": "prd_foreign_rows",
                     "foreign_rows": foreign_prd_rows,
+                    "foreign_owner_sessions": prd_foreign_owner_sessions(&foreign_prd_rows),
                 }),
             ));
         }
@@ -2198,6 +2338,11 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         let mut stage_stderr = String::new();
         let mut force_added_ignored_paths: Vec<String> = Vec::new();
         let mut write_steps: Vec<Value> = Vec::new();
+        if let Some(filter) = own_rows_filter.as_mut() {
+            if !filter.apply() {
+                return Ok(err("git_commit", "refusing to commit .gm/prd.yml: rewriting the worktree copy down to this session's own rows failed, so a commit could not be scoped"));
+            }
+        }
         if add_all || !paths.is_empty() {
             let staged_paths: &[String] = if add_all { &[] } else { &paths };
             let ignored = ignored_requested_paths(plan, cwd, staged_paths)?;
@@ -2211,6 +2356,9 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             if !add_all && !paths.is_empty() {
                 let extra = staged_outside_requested(cwd, &staged_before, &paths);
                 if !extra.is_empty() {
+                    if let Some(filter) = own_rows_filter.as_mut() {
+                        filter.restore();
+                    }
                     return Ok(err_json(
                         "git_commit",
                         unrequested_stage_refusal("git_commit", &paths, &extra),
@@ -2232,6 +2380,9 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             let r = git_step_replayed_by_call_order(plan, &as_argv(&check), cwd)?;
             if r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().is_empty() {
                 let unmatched = pathspecs_matching_nothing(cwd, scoped_paths);
+                if let Some(filter) = own_rows_filter.as_mut() {
+                    filter.restore();
+                }
                 if !unmatched.is_empty() {
                     return Ok(err_json("git_commit", pathspec_matches_nothing_refusal("git_commit", scoped_paths, &unmatched)));
                 }
@@ -2251,6 +2402,10 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             cwd,
         )?;
         write_steps.push(r.clone());
+        let prd_own_rows = own_rows_filter.as_ref().map(|f| f.own_rows.clone());
+        if let Some(filter) = own_rows_filter.as_mut() {
+            filter.restore();
+        }
         if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
             let serr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
             let sout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
@@ -2285,6 +2440,16 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         );
         record_commit_in_liqology(&summary, &head_after);
         let mut payload = json!({ "committed": true, "sha": sha, "summary": summary });
+        if let Some(rows) = prd_own_rows.as_ref() {
+            payload["prd_own_rows_only"] = json!(true);
+            payload["prd_own_rows"] = json!(rows);
+            payload["prd_foreign_rows_left_uncommitted"] = json!(foreign_prd_rows.len());
+            payload["prd_note"] = json!(format!(
+                ".gm/prd.yml was committed with only this session's {} own row change(s); {} row change(s) owned by other sessions were restored to the worktree and left uncommitted",
+                rows.len(),
+                foreign_prd_rows.len()
+            ));
+        }
         if amend {
             payload["amended"] = json!(true);
             payload["replaced_sha_full"] = json!(head_before);
@@ -2469,10 +2634,19 @@ pub(super) fn pull_past_remote_moved(
         .filter(|path| incoming.iter().any(|incoming| incoming == path))
         .collect();
     if !clash.is_empty() {
-        return RemoteMovedPull::Blocked(format!(
-            "the incoming commit changes {} which this worktree also has uncommitted -- pulling would overwrite it",
-            clash.join(", ")
-        ));
+        let clash_split = split_dirty_submodules(cwd, &clash);
+        return RemoteMovedPull::Blocked(if clash_split.submodule_only() {
+            format!(
+                "the incoming commit moves submodule pointer(s) {} which this worktree also holds at a different commit, so a pull would move a gitlink the checkout has dirty: dispatch git_status {{\"paths\":[\"{}\"]}} to read the pointer, commit it in the lane named by live_lane_markers, then re-dispatch git_push.",
+                list_or_none(&clash_split.submodule_pointers),
+                clash_split.submodule_pointers.join("\",\"")
+            )
+        } else {
+            format!(
+                "the incoming commit changes {} which this worktree also has uncommitted -- pulling would overwrite it",
+                clash.join(", ")
+            )
+        });
     }
     let remote_sha_before = resolve_ref(cwd, &format!("origin/{}", branch)).unwrap_or_default();
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
@@ -2600,15 +2774,24 @@ pub(super) fn pull_and_repush_remote_moved(
 ) -> Value {
     let cwd = repo.as_deref();
     let dirty = git_push_porcelain_in(cwd);
-    if !dirty.trim().is_empty() {
+    let dirty_split = split_dirty_submodules(cwd, &porcelain_dirty_paths(&dirty));
+    if !dirty.trim().is_empty() && !dirty_split.submodule_only() {
         refusal["recovered"] = json!(false);
         refusal["auto_recovery"] = json!({
             "attempted": false,
             "skipped_reason": format!(
-                "worktree or index is not clean, so a pull could clobber uncommitted changes -- refusing exactly as before. Porcelain:\n{}",
+                "worktree or index is not clean, so a pull could clobber uncommitted changes -- refusing exactly as before. Dirty tracked files: {}. Dirty submodule pointers (these alone never block a pull): {}. Live lane markers: {}. Porcelain:\n{}",
+                list_or_none(&dirty_split.tracked_files),
+                list_or_none(&dirty_split.submodule_pointers),
+                lane_marker_summary(&live_lane_markers()),
                 dirty.lines().take(8).collect::<Vec<_>>().join("\n")
             ),
         });
+        stamp_dirty_split(&mut refusal, &dirty_split);
+        refusal["next_dispatch"] = json!("git_status");
+        refusal["next_action_hint"] = json!(
+            "Dispatch git_status {\"paths\":[...]} over dirty_tracked_files, commit or revert each in the lane named by live_lane_markers, then re-dispatch git_push with the same rev."
+        );
         return refusal;
     }
     let _ = git_call_argv(&["fetch", "origin", branch], cwd);
@@ -2628,11 +2811,21 @@ pub(super) fn pull_and_repush_remote_moved(
         RemoteMovedPull::Blocked(reason) => {
             refusal["recovered"] = json!(false);
             refusal["auto_recovery"] = json!({ "attempted": false, "skipped_reason": reason });
+            stamp_dirty_split(&mut refusal, &dirty_split);
+            refusal["next_dispatch"] = json!("git_status");
+            refusal["next_action_hint"] = json!(
+                "The pull cannot proceed; dispatch git_status to read the paths named in auto_recovery.skipped_reason, resolve them in the lane named by live_lane_markers, then re-dispatch git_push. Do not re-dispatch git_push unchanged: it repeats this same refusal."
+            );
             refusal
         }
         RemoteMovedPull::Failed(result) => {
             refusal["recovered"] = json!(false);
             refusal["auto_recovery"] = json!({ "attempted": true, "pull_result": result });
+            stamp_dirty_split(&mut refusal, &dirty_split);
+            refusal["next_dispatch"] = json!("git_status");
+            refusal["next_action_hint"] = json!(
+                "Dispatch git_status to read the conflicted paths, resolve them in the lane named by live_lane_markers, then re-dispatch git_push with the resulting HEAD rev."
+            );
             refusal
         }
         RemoteMovedPull::Landed {
@@ -2876,6 +3069,8 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
     let mut committed = false;
     let mut sha = String::new();
     let mut summary = String::new();
+    let mut prd_own_rows: Option<Vec<Value>> = None;
+    let mut prd_foreign_row_count: usize = 0;
     let head_before_any_commit = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
 
     let allow_whole_index = body
@@ -2923,19 +3118,24 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         }
         dangling_waived = scan.waived;
         let foreign_prd_rows = prd_foreign_rows_for_commit(&paths, body, cwd_ref);
-        let allow_foreign_prd_rows = body
-            .get("allow_foreign_prd_rows")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if !foreign_prd_rows.is_empty() && !allow_foreign_prd_rows {
+        let allow_foreign_prd_rows = body_allow_foreign_prd_rows(body);
+        let mut own_rows_filter = prd_own_rows_filter(&paths, body, cwd_ref);
+        if !foreign_prd_rows.is_empty() && !allow_foreign_prd_rows && own_rows_filter.is_none() {
             return err_json(
                 "git_finalize",
                 json!({
-                    "error": format!("paths name .gm/prd.yml, which carries {} uncommitted row change(s) owned by other sessions; a path-scoped finalize would sweep them in. Commit after their owners commit, or pass allow_foreign_prd_rows: true to include them deliberately", foreign_prd_rows.len()),
+                    "error": format!("paths name .gm/prd.yml, which carries {} uncommitted row change(s) owned by other sessions ({}); this session owns no row change there, so a path-scoped finalize has nothing of yours to ship. Pass allow_foreign_rows: true to include their rows deliberately, or commit after their owners commit", foreign_prd_rows.len(), prd_foreign_owner_summary(&foreign_prd_rows)),
                     "error_code": "prd_foreign_rows",
                     "foreign_rows": foreign_prd_rows,
+                    "foreign_owner_sessions": prd_foreign_owner_sessions(&foreign_prd_rows),
+                    "next_dispatch": "git_finalize",
                 }),
             );
+        }
+        if let Some(filter) = own_rows_filter.as_mut() {
+            if !filter.apply() {
+                return err("git_finalize", "refusing to finalize .gm/prd.yml: rewriting the worktree copy down to this session's own rows failed, so a path-scoped commit could not be scoped");
+            }
         }
         let ignored = ignored_requested_paths_now(cwd_ref, &paths);
         let stage_argv = if ignored.is_empty() {
@@ -2961,6 +3161,9 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         if scoped {
             let extra = staged_outside_requested(cwd_ref, &staged_before, &paths);
             if !extra.is_empty() {
+                if let Some(filter) = own_rows_filter.as_mut() {
+                    filter.restore();
+                }
                 return err_json(
                     "git_finalize",
                     unrequested_stage_refusal("git_finalize", &paths, &extra),
@@ -2968,6 +3171,9 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             }
         }
         if stage_code != 0 {
+            if let Some(filter) = own_rows_filter.as_mut() {
+                filter.restore();
+            }
             return err_json(
                 "git_finalize",
                 json!({
@@ -2982,6 +3188,9 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             );
         }
         if scoped && paths_staged_nothing(cwd_ref, &paths) {
+            if let Some(filter) = own_rows_filter.as_mut() {
+                filter.restore();
+            }
             let unmatched = pathspecs_matching_nothing(cwd_ref, &paths);
             if !unmatched.is_empty() {
                 return err_json("git_finalize", pathspec_matches_nothing_refusal("git_finalize", &paths, &unmatched));
@@ -3000,6 +3209,11 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         let bundled_message = bundle_prd_commit_comments(message.as_str(), &commit_notes);
         let identity = body_commit_identity(body);
         let cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, identity.as_ref())), cwd_ref);
+        prd_own_rows = own_rows_filter.as_ref().map(|f| f.own_rows.clone());
+        prd_foreign_row_count = foreign_prd_rows.len();
+        if let Some(filter) = own_rows_filter.as_mut() {
+            filter.restore();
+        }
         if cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
             let serr = cr.get("stderr").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let sout = cr.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -3201,6 +3415,9 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         Ok(porcelain) => porcelain,
         Err(refusal) => return refusal,
     };
+    if prd_own_rows.is_some() {
+        leftover = porcelain_without_path(&leftover, ".gm/prd.yml");
+    }
     let dirty_only_from_concurrent_writer_on_just_committed_files = committed
         && !leftover.trim().is_empty()
         && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref));
@@ -3209,6 +3426,9 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             Ok(porcelain) => porcelain,
             Err(refusal) => return refusal,
         };
+        if prd_own_rows.is_some() {
+            leftover = porcelain_without_path(&leftover, ".gm/prd.yml");
+        }
         if !leftover.trim().is_empty()
             && porcelain_dirty_paths_all_within_committed_set(&leftover, &files_in_commit(cwd_ref))
         {
@@ -3238,6 +3458,9 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                 Ok(porcelain) => porcelain,
                 Err(refusal) => return refusal,
             };
+            if prd_own_rows.is_some() {
+                leftover = porcelain_without_path(&leftover, ".gm/prd.yml");
+            }
         }
     }
     if !leftover.trim().is_empty() {
@@ -3376,6 +3599,15 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         check_ci_status_and_write_validated_marker_if_green(repo.as_deref(), &head_sha);
     steps.push(json!({ "step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written }));
 
+    if let Some(rows) = prd_own_rows.as_ref() {
+        steps.push(json!({
+            "step": "prd_own_rows_only",
+            "shipped_rows": rows.len(),
+            "left_uncommitted_rows": prd_foreign_row_count,
+            "note": ".gm/prd.yml was committed with only this session's own row change(s); other sessions' uncommitted rows were restored to the worktree untouched",
+        }));
+    }
+
     let mut finalize_payload = json!({
         "committed": committed,
         "pushed": true,
@@ -3422,6 +3654,16 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         if !reopened_rows.is_empty() {
             finalize_payload["prd_reopened"] = json!(reopened_rows);
         }
+    }
+    if let Some(rows) = prd_own_rows.as_ref() {
+        finalize_payload["prd_own_rows_only"] = json!(true);
+        finalize_payload["prd_own_rows"] = json!(rows);
+        finalize_payload["prd_foreign_rows_left_uncommitted"] = json!(prd_foreign_row_count);
+        finalize_payload["prd_note"] = json!(format!(
+            ".gm/prd.yml was committed with only this session's {} own row change(s); {} row change(s) owned by other sessions were restored to the worktree and left uncommitted",
+            rows.len(),
+            prd_foreign_row_count
+        ));
     }
     let step_refs: Vec<&Value> = write_steps.iter().collect();
     ok(
@@ -6919,6 +7161,166 @@ pub(super) fn porcelain_dirty_paths(porcelain: &str) -> Vec<String> {
     out
 }
 
+pub(super) fn list_or_none(items: &[String]) -> String {
+    if items.is_empty() {
+        "(none)".to_string()
+    } else {
+        items.join(", ")
+    }
+}
+
+pub(super) fn submodule_gitlink_paths(cwd: Option<&str>) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let configured = git_call_argv(
+        &[
+            "config",
+            "--file",
+            ".gitmodules",
+            "--get-regexp",
+            "^submodule\\..*\\.path$",
+        ],
+        cwd,
+    );
+    let Some(stdout) = configured.get("stdout").and_then(|v| v.as_str()) else {
+        return out;
+    };
+    for line in stdout.lines() {
+        let Some((_key, value)) = line.split_once(' ') else {
+            continue;
+        };
+        let value = value.trim().replace('\\', "/").trim_matches('/').to_string();
+        if !value.is_empty() {
+            out.insert(value);
+        }
+    }
+    out
+}
+
+pub(super) fn path_is_submodule_gitlink(cwd: Option<&str>, path: &str) -> bool {
+    let index = git_call_argv(&["ls-files", "--stage", "--", path], cwd);
+    index
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .map(|stdout| {
+            stdout.lines().any(|entry| {
+                entry.starts_with("160000 ")
+                    && entry
+                        .split_once('\t')
+                        .map(|(_, indexed)| indexed.trim().replace('\\', "/") == path)
+                        .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+pub(super) struct DirtySplit {
+    pub submodule_pointers: Vec<String>,
+    pub tracked_files: Vec<String>,
+}
+
+impl DirtySplit {
+    pub fn submodule_only(&self) -> bool {
+        !self.submodule_pointers.is_empty() && self.tracked_files.is_empty()
+    }
+}
+
+pub(super) fn split_dirty_submodules(cwd: Option<&str>, dirty: &[String]) -> DirtySplit {
+    let declared = submodule_gitlink_paths(cwd);
+    let mut submodule_pointers: Vec<String> = Vec::new();
+    let mut tracked_files: Vec<String> = Vec::new();
+    for path in dirty {
+        if declared.contains(path.as_str()) || path_is_submodule_gitlink(cwd, path.as_str()) {
+            submodule_pointers.push(path.clone());
+        } else {
+            tracked_files.push(path.clone());
+        }
+    }
+    DirtySplit {
+        submodule_pointers,
+        tracked_files,
+    }
+}
+
+pub(super) fn live_lane_markers() -> Vec<Value> {
+    let Some(Value::Array(entries)) = crate::pkfs::readdir(".gm/pool") else {
+        return Vec::new();
+    };
+    let mut out: Vec<Value> = Vec::new();
+    for entry in &entries {
+        let Some(name) = entry
+            .as_str()
+            .or_else(|| entry.get("name").and_then(Value::as_str))
+        else {
+            continue;
+        };
+        if !name.ends_with(".live") {
+            continue;
+        }
+        let Some(text) = crate::pkfs::read_to_string(&format!(".gm/pool/{name}")) else {
+            continue;
+        };
+        let session = text
+            .split_whitespace()
+            .next()
+            .unwrap_or(name.trim_end_matches(".live"))
+            .to_string();
+        let row = text
+            .split_whitespace()
+            .find_map(|token| {
+                token
+                    .strip_prefix("row=")
+                    .or_else(|| token.strip_prefix("row:"))
+            })
+            .unwrap_or("")
+            .to_string();
+        out.push(json!({
+            "session": session,
+            "row": row,
+            "marker": format!(".gm/pool/{}", name),
+        }));
+    }
+    out
+}
+
+pub(super) fn lane_marker_summary(markers: &[Value]) -> String {
+    if markers.is_empty() {
+        return "(none)".to_string();
+    }
+    markers
+        .iter()
+        .map(|marker| {
+            format!(
+                "{} [{}]",
+                marker.get("session").and_then(|v| v.as_str()).unwrap_or("?"),
+                marker.get("row").and_then(|v| v.as_str()).unwrap_or("?")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub(super) fn stamp_dirty_split(refusal: &mut Value, split: &DirtySplit) {
+    let Some(map) = refusal.as_object_mut() else {
+        return;
+    };
+    map.insert(
+        "dirty_submodule_only".to_string(),
+        json!(split.submodule_only()),
+    );
+    map.insert(
+        "dirty_submodule_pointers".to_string(),
+        json!(split.submodule_pointers.clone()),
+    );
+    map.insert(
+        "dirty_tracked_files".to_string(),
+        json!(split.tracked_files.clone()),
+    );
+    map.insert(
+        "live_lane_markers".to_string(),
+        json!(live_lane_markers()),
+    );
+}
+
 pub(super) fn resolve_commit(cwd: Option<&str>, refspec: &str) -> Option<String> {
     let peeled = format!("{}^{{commit}}", refspec);
     let response = git_call_argv(&["rev-parse", "--verify", "--quiet", peeled.as_str()], cwd);
@@ -6968,6 +7370,9 @@ pub(super) struct PushDirtyScope {
     pub delta_known: bool,
     pub fast_forward: bool,
     pub overlapping: Vec<String>,
+    pub submodule_only: bool,
+    pub dirty_submodule_pointers: Vec<String>,
+    pub dirty_tracked_files: Vec<String>,
 }
 
 impl PushDirtyScope {
@@ -6984,47 +7389,58 @@ pub(super) fn push_dirty_scope(
     porcelain: &str,
 ) -> PushDirtyScope {
     let dirty_paths = porcelain_dirty_paths(porcelain);
+    let split = split_dirty_submodules(cwd, &dirty_paths);
     if dirty_paths.is_empty() {
         return PushDirtyScope {
             dirty_count: 0,
             delta_known: true,
             fast_forward: true,
             overlapping: Vec::new(),
+            submodule_only: false,
+            dirty_submodule_pointers: Vec::new(),
+            dirty_tracked_files: Vec::new(),
         };
     }
-    let remote_ref = format!("refs/remotes/origin/{}", branch);
-    let remote_sha = match resolve_commit(cwd, remote_ref.as_str()) {
-        Some(sha) => sha,
-        None => {
-            return PushDirtyScope {
-                dirty_count: dirty_paths.len(),
-                delta_known: false,
-                fast_forward: false,
-                overlapping: Vec::new(),
-            }
-        }
-    };
-    let delta = match delta_paths_between(cwd, remote_sha.as_str(), source_sha) {
-        Some(paths) => paths,
-        None => {
-            return PushDirtyScope {
-                dirty_count: dirty_paths.len(),
-                delta_known: false,
-                fast_forward: false,
-                overlapping: Vec::new(),
-            }
-        }
-    };
     let dirty_count = dirty_paths.len();
-    let overlapping: Vec<String> = dirty_paths
-        .into_iter()
-        .filter(|path| delta.iter().any(|changed| changed == path))
+    let submodule_only = split.submodule_only();
+    let dirty_submodule_pointers = split.submodule_pointers.clone();
+    let dirty_tracked_files = split.tracked_files.clone();
+    let remote_ref = format!("refs/remotes/origin/{}", branch);
+    let Some(remote_sha) = resolve_commit(cwd, remote_ref.as_str()) else {
+        return PushDirtyScope {
+            dirty_count,
+            delta_known: false,
+            fast_forward: false,
+            overlapping: Vec::new(),
+            submodule_only,
+            dirty_submodule_pointers,
+            dirty_tracked_files,
+        };
+    };
+    let Some(delta) = delta_paths_between(cwd, remote_sha.as_str(), source_sha) else {
+        return PushDirtyScope {
+            dirty_count,
+            delta_known: false,
+            fast_forward: false,
+            overlapping: Vec::new(),
+            submodule_only,
+            dirty_submodule_pointers,
+            dirty_tracked_files,
+        };
+    };
+    let overlapping: Vec<String> = dirty_tracked_files
+        .iter()
+        .filter(|path| delta.iter().any(|changed| changed == *path))
+        .cloned()
         .collect();
     PushDirtyScope {
         dirty_count,
         delta_known: true,
         fast_forward: ref_is_ancestor(cwd, &remote_sha, source_sha),
         overlapping,
+        submodule_only,
+        dirty_submodule_pointers,
+        dirty_tracked_files,
     }
 }
 
@@ -7043,8 +7459,18 @@ pub(super) fn push_dirty_refusal(
     };
     let reason = if !scope.delta_known {
         format!(
-            "worktree dirty in {} and the delta of branch {} cannot be bounded: refs/remotes/origin/{} does not resolve, so no path can be shown to sit outside what the push would carry. Commit or revert before pushing; an unpushed delta that cannot be separated from a dirty tree is an unwitnessed slice. Porcelain:\n{}{}",
-            cwd.unwrap_or("cwd"), branch, branch, preview, more
+            "worktree dirty in {} and the delta of branch {} cannot be bounded: refs/remotes/origin/{} does not resolve, so no path can be shown to sit outside what the push would carry. Dirty submodule pointers (not part of any push): {}. Commit or revert the tracked files before pushing; an unpushed delta that cannot be separated from a dirty tree is an unwitnessed slice. Porcelain:\n{}{}",
+            cwd.unwrap_or("cwd"), branch, branch, list_or_none(&scope.dirty_submodule_pointers), preview, more
+        )
+    } else if scope.submodule_only && !scope.fast_forward {
+        format!(
+            "worktree dirty only in submodule pointer(s) {}, which a push never carries; the blocker is that branch {} is not a fast-forward of refs/remotes/origin/{}, so dispatch git_pull {{\"branch\":\"{}\"}} to advance this checkout, then re-dispatch git_push -- the dirty pointer is not what refuses this push. Porcelain:\n{}{}",
+            list_or_none(&scope.dirty_submodule_pointers),
+            branch,
+            branch,
+            branch,
+            preview,
+            more
         )
     } else if !scope.fast_forward {
         format!(
@@ -7075,11 +7501,27 @@ pub(super) fn push_dirty_refusal(
         "dirty_overlapping_delta": scope.overlapping,
         "push_delta_scoped": scope.delta_known,
         "fast_forward": scope.fast_forward,
+        "dirty_submodule_only": scope.submodule_only,
+        "dirty_submodule_pointers": scope.dirty_submodule_pointers,
+        "dirty_tracked_files": scope.dirty_tracked_files,
+        "live_lane_markers": live_lane_markers(),
         "reason": reason,
-        "next_dispatch": "instruction",
-        "next_dispatch_hint": "instruction",
+        "next_dispatch": if scope.delta_known && scope.submodule_only && !scope.fast_forward {
+            "git_pull"
+        } else {
+            "git_status"
+        },
+        "next_dispatch_hint": if scope.delta_known && scope.submodule_only && !scope.fast_forward {
+            format!("git_pull {{\"branch\":\"{}\"}}", branch)
+        } else {
+            "git_status".to_string()
+        },
         "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
-        "next_action_hint": "Dirty paths the pushed commits do not touch are not part of the delta and no longer block this push; only dirty_overlapping_delta does. Commit or revert those, dispatch git_status to confirm, then re-dispatch git_push.",
+        "next_action_hint": if scope.delta_known && scope.submodule_only && !scope.fast_forward {
+            format!("Dispatch git_pull {{\"branch\":\"{}\"}} once, then re-dispatch git_push: the dirty submodule pointer is not part of this push and re-dispatching git_push without the pull repeats this same refusal.", branch)
+        } else {
+            "Dirty paths the pushed commits do not touch are not part of the delta and no longer block this push; only dirty_overlapping_delta does. Commit or revert those, dispatch git_status to confirm, then re-dispatch git_push.".to_string()
+        },
     })
 }
 
