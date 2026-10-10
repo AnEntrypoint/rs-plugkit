@@ -183,6 +183,8 @@
 - `dream-replay-cycle` is observation-only maintenance, separate from policy replay. It uses the canonical owner `session_id`, verifies ledger evidence through `automatic_replay`, and defers when no new verified dispatch exists. It never refreshes phase clocks or records its own maintenance as an observation.
 - `admit_dispatch` ranks and never refuses: it returns `Admission::Allow` or `Admission::Advisory`, and the advisory attaches to a dispatch that ran (`dream_rsi_advisory`). Refusing was a livelock, since a refused dispatch is never observed. Safety refusals run earlier, in `gates::check_dispatch`.
 - A successful `instruction` clears the ranking by stamping `.gm/dream-rsi/<sid>/reorientation-ts` and the project-wide `.gm/dream-rsi/_any-session/reorientation-ts` (`PROJECT_WIDE_MARKER_SESSION`). The MCP `gm_instruction` tool dispatches under a server-local id, so a per-session marker alone could not clear it. The ranking lapses after `VETO_MAX_AGE_MS` (600000).
+- The veto counts only gate-drift failures: a non-zero exit with `gate_drift` false, or any success for the verb, leaves the ranking silent.
+- `.gm/last-instruction-ts` is a third re-orientation marker, but `gates` stamps it only for a prose-serving dispatch, so an `instruction` in `investigate_readonly` mode never refreshes it.
 
 ## Lean graph and compiled prose
 
