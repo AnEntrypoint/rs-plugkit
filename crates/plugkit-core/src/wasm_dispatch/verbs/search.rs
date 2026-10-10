@@ -520,7 +520,7 @@ pub(super) fn codesearch_at_root(
         return err(
             "codesearch",
             &format!(
-                "root '{root}' is not a real, existing directory the host will grant access to"
+                "root '{root}' is not a directory the host will grant access to and no ancestor of it carries a project marker (.git, .gm, package.json, Cargo.toml, go.mod, pyproject.toml) either, so nothing was searched; name such a directory as root and the rest as path"
             ),
         );
     }
@@ -809,35 +809,103 @@ pub(super) fn scan_target_paths(body: &Value) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
-pub(super) fn resolve_scan_target(body: &Value) -> Result<(Option<&str>, Vec<String>), String> {
-    let mut root = scan_root(body);
+/// The nearest ancestor of `candidate` the host grants as a scan root, together with the part of
+/// `candidate` that sits below it. A subdirectory of a marked project carries no marker of its
+/// own, so the host refuses it as a root; searching the marked ancestor scoped to the remainder
+/// searches exactly the directory the caller named.
+pub(super) fn marked_ancestor_for_root(candidate: &str) -> Option<(String, String)> {
+    let slashed = candidate.replace('\\', "/");
+    let trimmed = slashed.trim_end_matches('/');
+    let named_end = trimmed.len();
+    let mut end = named_end;
+    loop {
+        let split = trimmed[..end].rfind('/')?;
+        if split == 0 {
+            return None;
+        }
+        let ancestor = &trimmed[..split];
+        if ancestor.ends_with(':') {
+            return None;
+        }
+        if crate::wasm_dispatch::host_allow_root(ancestor) {
+            let remainder = &trimmed[split + 1..named_end];
+            if remainder.is_empty() {
+                return None;
+            }
+            return Some((ancestor.to_string(), remainder.to_string()));
+        }
+        end = split;
+    }
+}
+
+/// A `root` the host refuses, rewritten as the marked ancestor that owns it plus the scope below
+/// that ancestor, so the caller's directory is searched rather than refused. The rewritten body
+/// carries the ancestor as `root` and the scope as `path`, which is the spelling every scan reads.
+pub(super) fn scope_under_marked_ancestor(body: &Value, root: &str) -> Option<(String, Value)> {
+    let (ancestor, remainder) = marked_ancestor_for_root(root)?;
+    let mut rewritten = body.clone();
+    if let Some(map) = rewritten.as_object_mut() {
+        let named = scan_target_paths(body).unwrap_or_default();
+        let scope: Vec<Value> = if named.is_empty() {
+            vec![Value::String(remainder.clone())]
+        } else {
+            named
+                .iter()
+                .map(|p| Value::String(format!("{remainder}/{p}")))
+                .collect()
+        };
+        map.insert("root".to_string(), Value::String(ancestor.clone()));
+        map.insert("path".to_string(), Value::Array(scope));
+        map.remove("paths");
+        map.remove("files");
+    }
+    Some((ancestor, rewritten))
+}
+
+pub(super) fn resolve_scan_target(body: &Value) -> Result<(Option<String>, Vec<String>), String> {
+    let mut root = scan_root(body).map(str::to_string);
     let mut paths = scan_target_paths(body)?;
-    if let Some(candidate) = root {
+    if let Some(candidate) = root.take() {
         if candidate == "." || candidate == "./" {
             root = None;
-        } else if !crate::wasm_dispatch::host_allow_root(candidate) {
-            let scope = candidate.strip_prefix("./").unwrap_or(candidate);
+        } else if crate::wasm_dispatch::host_allow_root(&candidate) {
+            root = Some(candidate);
+        } else {
+            let scope = candidate.strip_prefix("./").unwrap_or(&candidate);
             if crate::pkfs::is_absolute(scope)
                 && crate::scan_universe::scope_inside_root(".", &scope.replace('\\', "/")).is_none()
             {
-                let project = crate::scan_universe::absolute_root_for_message(".");
-                return Err(format!(
-                    "root '{candidate}' is not a directory the host will grant access to: it carries no project marker (.git, .gm, package.json, Cargo.toml, go.mod, pyproject.toml) and it lies outside the dispatch project '{project}', so nothing was searched; the named root is refused, not replaced by the cwd"
+                match marked_ancestor_for_root(scope) {
+                    Some((ancestor, remainder)) => {
+                        root = Some(ancestor);
+                        if paths.is_empty() {
+                            paths.push(remainder);
+                        } else {
+                            for path in &mut paths { *path = format!("{remainder}/{path}"); }
+                        }
+                    }
+                    None => {
+                        let project = crate::scan_universe::absolute_root_for_message(".");
+                        return Err(format!(
+                    "root '{candidate}' is not a directory the host will grant access to: it carries no project marker (.git, .gm, package.json, Cargo.toml, go.mod, pyproject.toml) and no ancestor of it does either, and it lies outside the dispatch project '{project}', so nothing was searched; the named root is refused, not replaced by the cwd"
                 ));
-            }
-            let valid_relative_scope = !scope.starts_with('/')
-                && scope
-                    .split('/')
-                    .all(|part| !part.is_empty() && part != "." && part != "..");
-            if valid_relative_scope {
-                if paths.is_empty() {
-                    paths.push(scope.to_owned());
-                } else {
-                    for path in &mut paths { *path = format!("{scope}/{path}"); }
+                    }
                 }
-                root = None;
             } else {
-                return Err(format!("root '{candidate}' is not a real, existing directory the host will grant access to"));
+                let valid_relative_scope = !scope.starts_with('/')
+                    && scope
+                        .split('/')
+                        .all(|part| !part.is_empty() && part != "." && part != "..");
+                if valid_relative_scope {
+                    if paths.is_empty() {
+                        paths.push(scope.to_owned());
+                    } else {
+                        for path in &mut paths { *path = format!("{scope}/{path}"); }
+                    }
+                    root = None;
+                } else {
+                    return Err(format!("root '{candidate}' is not a real, existing directory the host will grant access to"));
+                }
             }
         }
     }
@@ -1032,7 +1100,7 @@ pub(super) fn codesearch_exhaustive(
     );
     let scan = crate::code_index::LiteralScan {
         pattern: query,
-        root,
+        root: root.as_deref(),
         paths: &path_refs,
         regex,
         case_insensitive: body
@@ -1754,7 +1822,7 @@ pub(super) fn grep(body: &Value) -> u64 {
     };
     let scan = crate::code_index::LiteralScan {
         pattern,
-        root,
+        root: root.as_deref(),
         paths: &path_refs,
         regex: use_regex,
         case_insensitive: body
@@ -1908,7 +1976,7 @@ pub(super) fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> 
         None => 0,
     };
     let scan = crate::code_index::CommentScan {
-        root,
+        root: root.as_deref(),
         paths: &path_refs,
         include_globs,
         exclude_globs,
@@ -2196,8 +2264,20 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         let explicit = if limit_was_explicit { Some(k) } else { None };
         return codesearch_exhaustive(body, query, mode == "regex", &cfg, explicit);
     }
-    let root = scan_root(body);
-    let rank_opts = crate::codesearch_rank::RankOptions::from_body(body, k as usize, root);
+    let rewritten_body;
+    let (root, body): (Option<String>, &Value) = match scan_root(body) {
+        Some(named) if !crate::wasm_dispatch::host_allow_root(named) => {
+            match scope_under_marked_ancestor(body, named) {
+                Some((ancestor, rewritten)) => {
+                    rewritten_body = rewritten;
+                    (Some(ancestor), &rewritten_body)
+                }
+                None => (Some(named.to_string()), body),
+            }
+        }
+        other => (other.map(str::to_string), body),
+    };
+    let rank_opts = crate::codesearch_rank::RankOptions::from_body(body, k as usize, root.as_deref());
     let identifier = query.trim();
     let flag = |name: &str| body.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
     let dataflow_override_active = crate::dataflow::document_detailed().1
@@ -2210,14 +2290,14 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         && !dataflow_override_active
         && crate::codesearch_rank::is_identifier(identifier);
     if identifier_route {
-        match codesearch_identifier(body, identifier, root, &cfg, &rank_opts) {
+        match codesearch_identifier(body, identifier, root.as_deref(), &cfg, &rank_opts) {
             Some(Ok(report)) => return ok("codesearch", report),
             Some(Err(e)) => return err("codesearch", &e),
             None => {}
         }
     }
     if let Some(root) = root {
-        return codesearch_at_root(body, root, query, k, &cfg);
+        return codesearch_at_root(body, &root, query, k, &cfg);
     }
     let (_dataflow_doc, dataflow_tier, dataflow_path) = crate::dataflow::document_detailed();
     if dataflow_tier != crate::dataflow::DataflowTier::CompiledDefault {
