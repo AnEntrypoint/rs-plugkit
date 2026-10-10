@@ -3198,20 +3198,208 @@ pub(super) fn ci_status_conclusion_to_status(conclusion: &str, gh_status: &str) 
     }
 }
 
+pub(super) const CI_STATUS_GH_TIMEOUT_MS: u64 = 60_000;
+
+#[derive(Clone, Copy)]
+pub(super) enum CiStatusTransport {
+    GhCli,
+    GithubRest,
+}
+
+impl CiStatusTransport {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            CiStatusTransport::GhCli => "gh_cli",
+            CiStatusTransport::GithubRest => "github_rest",
+        }
+    }
+}
+
+pub(super) struct CiStatusAttemptFailure {
+    transport: CiStatusTransport,
+    reason: String,
+    body: String,
+}
+
+pub(super) fn ci_status_truncate_for_error(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    let taken: String = trimmed.chars().take(max_chars).collect();
+    if taken.chars().count() < trimmed.chars().count() {
+        format!("{}...", taken)
+    } else {
+        taken
+    }
+}
+
+pub(super) fn ci_status_shell_result(code: &str) -> Value {
+    let opts = json!({ "lang": "bash", "timeoutMs": CI_STATUS_GH_TIMEOUT_MS }).to_string();
+    let packed = unsafe {
+        host_exec_js(
+            code.as_ptr(),
+            code.len() as u32,
+            opts.as_ptr(),
+            opts.len() as u32,
+        )
+    };
+    let raw = unpack_to_string(packed).unwrap_or_default();
+    serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({ "stdout": raw }))
+}
+
+pub(super) fn ci_status_shell_stream(result: &Value, key: &str) -> String {
+    result
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+pub(super) fn ci_status_shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+pub(super) fn ci_status_gh_unusable_reason() -> Option<String> {
+    let probe = "command -v gh >/dev/null 2>&1 || { printf 'gh_not_installed\\n'; exit 0; }\n\
+                 gh auth status >/dev/null 2>&1 && { printf 'gh_ready\\n'; exit 0; }\n\
+                 printf 'gh_unauthenticated\\n'\n\
+                 gh auth status 2>&1 | head -n 6";
+    let result = ci_status_shell_result(probe);
+    let stdout = ci_status_shell_stdout(&result);
+    match stdout.lines().next().unwrap_or("").trim() {
+        "gh_ready" => None,
+        "gh_not_installed" => Some(
+            "gh CLI is not on PATH -- install it and run `gh auth login`, or supply GITHUB_TOKEN/GH_TOKEN"
+                .to_string(),
+        ),
+        "gh_unauthenticated" => Some(format!(
+            "gh CLI is installed but not authenticated -- run `gh auth login`, or supply GITHUB_TOKEN/GH_TOKEN ({})",
+            ci_status_truncate_for_error(&stdout, 300)
+        )),
+        _ => Some(format!(
+            "gh CLI probe returned no usable answer ({})",
+            ci_status_truncate_for_error(&stdout, 300)
+        )),
+    }
+}
+
+pub(super) fn ci_status_shell_stdout(result: &Value) -> String {
+    ci_status_shell_stream(result, "stdout")
+}
+
+pub(super) fn ci_status_gh_api_json(path: &str) -> Result<Value, String> {
+    let code = format!(
+        "gh api -H 'Accept: application/vnd.github+json' {}",
+        ci_status_shell_quote(path)
+    );
+    let result = ci_status_shell_result(&code);
+    if result.get("timed_out").and_then(Value::as_bool) == Some(true) {
+        return Err(format!(
+            "gh api {} timed out after {} ms",
+            path, CI_STATUS_GH_TIMEOUT_MS
+        ));
+    }
+    let stdout = ci_status_shell_stdout(&result);
+    let stderr = ci_status_shell_stream(&result, "stderr");
+    let detail_source = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    let detail = ci_status_truncate_for_error(detail_source, 300);
+    match (
+        result.get("exit_code").and_then(Value::as_i64),
+        serde_json::from_str::<Value>(stdout.trim()).ok(),
+    ) {
+        (Some(0), Some(parsed)) => Ok(parsed),
+        (None, Some(parsed)) => Ok(parsed),
+        (Some(code), _) => Err(format!("gh api {} exited {}: {}", path, code, detail)),
+        (None, None) => Err(format!("gh api {} produced no JSON: {}", path, detail)),
+    }
+}
+
+pub(super) fn ci_status_rest_api_json(path: &str, opts: &str) -> Result<Value, (i64, String)> {
+    let url = format!("https://api.github.com/{}", path);
+    if let Err(reason) = crate::config_path::validate_fetch_url(&url) {
+        return Err((0, reason));
+    }
+    let packed = unsafe {
+        host_fetch(
+            url.as_ptr(),
+            url.len() as u32,
+            opts.as_ptr(),
+            opts.len() as u32,
+        )
+    };
+    let resp = unpack_to_value(packed);
+    if resp.is_null() {
+        return Err((0, "host_fetch returned no response".to_string()));
+    }
+    let body_text = resp
+        .get("body")
+        .and_then(Value::as_str)
+        .or_else(|| resp.get("text").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+    let status_code = resp
+        .get("status")
+        .and_then(Value::as_i64)
+        .or_else(|| resp.get("statusCode").and_then(Value::as_i64))
+        .unwrap_or(0);
+    if status_code != 200 {
+        return Err((status_code, body_text));
+    }
+    serde_json::from_str::<Value>(&body_text).map_err(|parse_error| {
+        (
+            status_code,
+            format!("{} -- {}", parse_error, body_text),
+        )
+    })
+}
+
+pub(super) fn ci_status_attempt(
+    transport: CiStatusTransport,
+    path: &str,
+    rest_opts: &str,
+) -> Result<Value, CiStatusAttemptFailure> {
+    match transport {
+        CiStatusTransport::GhCli => ci_status_gh_api_json(path).map_err(|reason| {
+            CiStatusAttemptFailure {
+                transport,
+                reason,
+                body: String::new(),
+            }
+        }),
+        CiStatusTransport::GithubRest => {
+            ci_status_rest_api_json(path, rest_opts).map_err(|(status, body)| {
+                let reason = if status > 0 {
+                    format!("HTTP {} {}", status, ci_status_truncate_for_error(&body, 300))
+                } else {
+                    ci_status_truncate_for_error(&body, 300)
+                };
+                CiStatusAttemptFailure {
+                    transport,
+                    reason,
+                    body,
+                }
+            })
+        }
+    }
+}
+
+pub(super) fn ci_status_runs_from(parsed: &Value) -> Vec<Value> {
+    parsed
+        .get("workflow_runs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
 pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     let cwd = body_cwd(body);
     let repo = ci_status_resolve_repo_preferring_unambiguous_github_repo_field(body, cwd)
         .map_err(|packed| unpack_to_value(packed))?;
     let sha = ci_status_resolve_sha(body, cwd).map_err(|packed| unpack_to_value(packed))?;
-    let url = format!(
-        "https://api.github.com/repos/{}/actions/runs?head_sha={}&per_page=20",
-        repo, sha
-    );
-    if let Err(reason) = crate::config_path::validate_fetch_url(&url) {
-        return Err(
-            json!({ "ok": false, "verb": "ci-status", "error": reason, "error_code": ERR_CODE_INVALID_ARGS }),
-        );
-    }
+    let runs_path = format!("repos/{}/actions/runs?head_sha={}&per_page=20", repo, sha);
+    let tree_path = format!("repos/{}/git/trees/{}?recursive=1", repo, sha);
     let token = body
         .get("token")
         .and_then(|v| v.as_str())
@@ -3224,69 +3412,68 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     if let Some(t) = &token {
         headers["Authorization"] = json!(format!("Bearer {}", t));
     }
-    let opts = json!({ "timeoutMs": FETCH_DEFAULT_TIMEOUT_MS, "headers": headers }).to_string();
-    let packed = unsafe {
-        host_fetch(
-            url.as_ptr(),
-            url.len() as u32,
-            opts.as_ptr(),
-            opts.len() as u32,
-        )
-    };
-    let resp = unpack_to_value(packed);
-    if resp.is_null() {
-        return Err(json!({ "ok": false, "verb": "ci-status", "error": "host_fetch empty" }));
+    let rest_opts = json!({ "timeoutMs": FETCH_DEFAULT_TIMEOUT_MS, "headers": headers }).to_string();
+    let mut ordered_transports: Vec<CiStatusTransport> = Vec::new();
+    let mut failures: Vec<CiStatusAttemptFailure> = Vec::new();
+    match ci_status_gh_unusable_reason() {
+        None => ordered_transports.push(CiStatusTransport::GhCli),
+        Some(reason) => failures.push(CiStatusAttemptFailure {
+            transport: CiStatusTransport::GhCli,
+            reason,
+            body: String::new(),
+        }),
     }
-    let body_text = resp
-        .get("body")
-        .and_then(|v| v.as_str())
-        .or_else(|| resp.get("text").and_then(|v| v.as_str()))
-        .unwrap_or("");
-    let status_code = resp
-        .get("status")
-        .and_then(|v| v.as_i64())
-        .or_else(|| resp.get("statusCode").and_then(|v| v.as_i64()))
-        .unwrap_or(0);
-    if status_code != 200 {
-        return Err(json!({
-            "ok": false, "verb": "ci-status",
-            "error": format!("GitHub Actions API returned HTTP {}", status_code),
-            "repo": repo, "sha": sha, "response": body_text,
-        }));
+    ordered_transports.push(CiStatusTransport::GithubRest);
+    for transport in ordered_transports {
+        match ci_status_attempt(transport, &runs_path, &rest_opts) {
+            Ok(parsed) => {
+                let runs = ci_status_runs_from(&parsed);
+                return Ok(ci_status_summarize(
+                    body,
+                    &repo,
+                    &sha,
+                    &runs,
+                    transport,
+                    &tree_path,
+                    &rest_opts,
+                ));
+            }
+            Err(failure) => failures.push(failure),
+        }
     }
-    let parsed: Value = serde_json::from_str(body_text).unwrap_or(Value::Null);
-    let runs = parsed
-        .get("workflow_runs")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    Err(json!({
+        "ok": false, "verb": "ci-status",
+        "error": format!(
+            "GitHub Actions state unreadable through every transport: {}",
+            failures
+                .iter()
+                .map(|f| format!("{}: {}", f.transport.label(), f.reason))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        "repo": repo, "sha": sha,
+        "response": failures.last().map(|f| f.body.clone()).unwrap_or_default(),
+        "attempts": failures
+            .iter()
+            .map(|f| json!({ "transport": f.transport.label(), "reason": f.reason }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+pub(super) fn ci_status_summarize(
+    body: &Value,
+    repo: &str,
+    sha: &str,
+    runs: &[Value],
+    transport: CiStatusTransport,
+    tree_path: &str,
+    rest_opts: &str,
+) -> Value {
+    let source = transport.label();
     if runs.is_empty() {
-        let tree_url = format!(
-            "https://api.github.com/repos/{}/git/trees/{}?recursive=1",
-            repo, sha
-        );
-        let tree_packed = unsafe {
-            host_fetch(
-                tree_url.as_ptr(),
-                tree_url.len() as u32,
-                opts.as_ptr(),
-                opts.len() as u32,
-            )
-        };
-        let tree_response = unpack_to_value(tree_packed);
-        let tree_status = tree_response
-            .get("status")
-            .and_then(Value::as_i64)
-            .or_else(|| tree_response.get("statusCode").and_then(Value::as_i64))
-            .unwrap_or(0);
-        let tree_body = tree_response
-            .get("body")
-            .and_then(Value::as_str)
-            .or_else(|| tree_response.get("text").and_then(Value::as_str))
-            .unwrap_or("");
-        let tree: Value = serde_json::from_str(tree_body).unwrap_or(Value::Null);
-        let complete_tree =
-            tree_status == 200 && tree.get("truncated").and_then(Value::as_bool) == Some(false);
+        let tree_result = ci_status_attempt(transport, tree_path, rest_opts);
+        let tree = tree_result.as_ref().ok().cloned().unwrap_or(Value::Null);
+        let complete_tree = tree.get("truncated").and_then(Value::as_bool) == Some(false);
         if let Some(entries) = tree
             .get("tree")
             .and_then(Value::as_array)
@@ -3312,35 +3499,38 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
                     })
                     .collect();
                 if workflow_paths.is_empty() {
-                    return Ok(json!({
+                    return json!({
                         "ok": true, "verb": "ci-status", "data": {
                             "status": "no_applicable_workflow", "repo": repo, "sha": sha,
                             "failed_jobs": [], "run_url": Value::Null,
                             "query": format!("head_sha={}", sha),
                             "reason": "a complete GitHub git tree for this exact sha contains no .github/workflows YAML files",
                             "workflow_configuration": "absent",
-                            "evidence": {"source": "github_git_tree", "requested_sha": sha, "tree_sha": tree.get("sha"), "truncated": false, "entries": entries.len()}
+                            "evidence": {"source": "github_git_tree", "requested_sha": sha, "tree_sha": tree.get("sha"), "truncated": false, "entries": entries.len()},
+                            "transport": source,
                         }
-                    }));
+                    });
                 }
-                return Ok(json!({
+                return json!({
                     "ok": true, "verb": "ci-status", "data": {
                         "status": "unknown", "repo": repo, "sha": sha,
                         "failed_jobs": [], "run_url": Value::Null,
                         "reason": "no workflow runs found for this sha; workflow definitions are present",
-                        "workflow_paths": workflow_paths
+                        "workflow_paths": workflow_paths,
+                        "transport": source,
                     }
-                }));
+                });
             }
         }
-        return Ok(json!({
+        return json!({
             "ok": true, "verb": "ci-status", "data": {
                 "status": "unknown", "repo": repo, "sha": sha,
                 "failed_jobs": [], "run_url": Value::Null,
                 "reason": "no workflow runs found for this sha; absence of workflow definitions could not be proven from a complete GitHub git tree",
-                "workflow_tree_http_status": tree_status
+                "workflow_tree_error": tree_result.err().map(|f| f.reason).unwrap_or_default(),
+                "transport": source,
             }
-        }));
+        });
     }
     const STALE_IN_PROGRESS_RUN_GRACE_SECS: i64 = 900;
     let default_ignored_workflows_orthogonal_to_code_under_test = ["Deploy GH Pages"];
@@ -3365,7 +3555,7 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     let mut any_pending = false;
     let mut any_failure = false;
     let mut counted_runs = 0usize;
-    for run in &runs {
+    for run in runs {
         let run_name = run.get("name").and_then(|v| v.as_str()).unwrap_or("");
         if ignored_names.iter().any(|n| n == run_name) {
             continue;
@@ -3411,12 +3601,13 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     } else if any_pending {
         overall = "pending";
     }
-    Ok(json!({
+    json!({
         "ok": true, "verb": "ci-status", "data": {
             "status": overall, "repo": repo, "sha": sha,
             "failed_jobs": failed_jobs, "run_url": run_url, "run_count": counted_runs,
+            "transport": source,
         },
-    }))
+    })
 }
 
 pub(super) fn ci_status(body: &Value) -> u64 {
