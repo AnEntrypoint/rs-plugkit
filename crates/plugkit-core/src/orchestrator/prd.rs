@@ -776,6 +776,9 @@ fn parse_resolve_target(
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
 ) {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         let id = v
@@ -806,6 +809,20 @@ fn parse_resolve_target(
             .and_then(|s| s.as_str())
             .map(|s| s.to_string());
         let cwd = v.get("cwd").and_then(|s| s.as_str()).map(|s| s.to_string());
+        let mut resolution = v
+            .get("resolution")
+            .or_else(|| v.get("resolution_text"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let mut commit_sha = v
+            .get("commit_sha")
+            .or_else(|| v.get("commit"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let mut requested_status = v
+            .get("status")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
         let id = if let Ok(inner) = serde_json::from_str::<serde_json::Value>(&id) {
             if let Some(im) = inner.as_object() {
                 let recovered = im
@@ -838,6 +855,26 @@ fn parse_resolve_target(
                         .and_then(|s| s.as_str())
                         .map(|s| s.to_string());
                 }
+                if resolution.is_none() {
+                    resolution = im
+                        .get("resolution")
+                        .or_else(|| im.get("resolution_text"))
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                }
+                if commit_sha.is_none() {
+                    commit_sha = im
+                        .get("commit_sha")
+                        .or_else(|| im.get("commit"))
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                }
+                if requested_status.is_none() {
+                    requested_status = im
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
+                }
                 recovered.unwrap_or(id)
             } else {
                 id
@@ -845,9 +882,9 @@ fn parse_resolve_target(
         } else {
             id
         };
-        (id, wit, comment, witness_dispatch_id, cwd)
+        (id, wit, comment, witness_dispatch_id, cwd, resolution, commit_sha, requested_status)
     } else if let Some((id, wit)) = recover_truncated_envelope(trimmed) {
-        (id, wit, None, None, None)
+        (id, wit, None, None, None, None, None, None)
     } else {
         let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
         let id = parts
@@ -858,7 +895,7 @@ fn parse_resolve_target(
             .get(1)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        (id, wit, None, None, None)
+        (id, wit, None, None, None, None, None, None)
     }
 }
 
@@ -1188,13 +1225,35 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         (parsed.0, parsed.1, parsed.2, parsed.3);
 #[cfg(target_arch = "wasm32")]
     let resolve_cwd = parsed.4;
+    let resolution = parsed.5.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+    let commit_sha = parsed.6.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let requested_status = parsed.7.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(sha) = commit_sha.as_deref() {
+        if !(7..=40).contains(&sha.len()) || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            let body = serde_json::json!({
+                "error": format!(
+                    "prd-resolve refused: commit_sha for {} must be 7 to 40 hex characters",
+                    id_target
+                ),
+                "prd_id": id_target,
+                "field": "commit_sha",
+                "accepted_fields": ["commit_sha", "commit"],
+            })
+            .to_string();
+            return (
+                body,
+                format!("prd-resolve refused: invalid commit_sha for {}", id_target),
+                1,
+            );
+        }
+    }
     let policy = super::fsm::graph().policy;
-    let status_kept = keeps_status(trimmed);
+    let annotate_only = keeps_status(trimmed);
     let has_witness = witness
         .as_ref()
         .map(|w| !w.trim().is_empty())
         .unwrap_or(false);
-    if !status_kept
+    if !annotate_only
         && policy.require_witness_evidence
         && !has_witness
         && deviation_refuses("prd-resolve-no-witness")
@@ -1339,7 +1398,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     };
     #[cfg(not(target_arch = "wasm32"))]
     let (dispatch_verified, evidence_in_ledger) = (witness_dispatch_id.is_some(), None::<bool>);
-    if !status_kept
+    if !annotate_only
         && witness_binding.is_none()
         && witness_dispatch_id.is_none()
         && deviation_refuses("prd-resolve-unbound-witness")
@@ -1375,7 +1434,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         );
     }
 
-    if !status_kept
+    if !annotate_only
         && policy.reject_duplicate_witness
         && deviation_refuses("prd-resolve-duplicate-witness")
     {
@@ -1428,7 +1487,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             }
         }
     }
-    if !status_kept
+    if !annotate_only
         && policy.reject_duplicate_witness
         && deviation_refuses("prd-resolve-duplicate-witness")
     {
@@ -1492,6 +1551,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         "prd-resolve",
         |mut doc: Value| {
             let mut found = false;
+            let mut status_matches = true;
             if let Some(seq) = doc.as_sequence_mut() {
                 let last_match = seq
                     .iter_mut()
@@ -1510,7 +1570,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                         .nth(index)
                         .and_then(|item| item.as_mapping_mut())
                     {
-                        if !status_kept {
+                        if !annotate_only {
                             map.insert(
                                 Value::String("status".to_string()),
                                 Value::String(resolved_status.clone()),
@@ -1534,6 +1594,23 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                                 Value::String(c.clone()),
                             );
                         }
+                        if let Some(r) = resolution.as_ref() {
+                            map.insert(
+                                Value::String("resolution".to_string()),
+                                Value::String(r.clone()),
+                            );
+                        }
+                        if let Some(sha) = commit_sha.as_ref() {
+                            map.insert(
+                                Value::String("commit_sha".to_string()),
+                                Value::String(sha.clone()),
+                            );
+                        }
+                        status_matches = requested_status.as_ref().map_or(true, |want| {
+                            map.get(&Value::String("status".to_string()))
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|have| have.eq_ignore_ascii_case(want.as_str()))
+                        });
                         found = true;
                     }
                 }
@@ -1563,25 +1640,27 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             }).to_string();
                 return cas::CasOutcome::Abort(body, format!("prd id not found: {}", id_target), 1);
             }
-            cas::CasOutcome::Write(doc, ())
+            cas::CasOutcome::Write(doc, status_matches)
         },
     );
     match outcome {
-        Ok(()) => {
+        Ok(status_matches) => {
             #[cfg(target_arch = "wasm32")]
             crate::wasm_dispatch::emit_event(
-                if status_kept {
+                if annotate_only {
                     "prd.annotated"
                 } else {
                     "prd.resolved"
                 },
                 serde_json::json!({ "id": id_target }),
             );
-            let outcome_key = if status_kept { "annotated" } else { "resolved" };
+            let outcome_key = if annotate_only { "annotated" } else { "resolved" };
             let reply = serde_json::json!({
                 outcome_key: id_target,
-                "status_kept": status_kept,
-                "commit_comment_attached": commit_comment.is_some(),
+                "status_kept": status_matches,
+                "commit_comment_attached": commit_comment.is_some() || commit_sha.is_some(),
+                "resolution_attached": resolution.is_some(),
+                "commit_sha_attached": commit_sha.is_some(),
                 "witness_bound": witness_binding.is_some(),
                 "witness_binding": witness_binding.as_ref().map(VerifiedWitness::to_json),
                 "witness_dispatch_id_verified": dispatch_verified,
