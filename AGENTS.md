@@ -104,6 +104,8 @@
 
 ### config.rs, config_sync.rs, prose.rs
 
+  - `update_checkout_in_place` is the fallback when the live checkout cannot be renamed aside: a pack file held read-shared inside it makes Windows refuse the directory rename. It rewrites files one at a time, so a reader can briefly see a mix of old and new prose.
+
 - `resolve_with`: a `ProjectVendored` win still runs lower repository tiers' `load_repo_tier` for its side effect, so `config_notify::record_change` keeps upstream drift visible.
 - `RESOLVE_CACHE` is keyed by the per-call `host_cwd_string()` with a 2 s TTL. Pass a dispatch's resolved FSM graph through `read_state_with_graph` and `set_phase_with_session_with_graph`; separate resolutions can see different tiers.
 - `RepoSource.repo` is a `config_path::RepoUrl`, parsed once in `parse_source_entry`; `config_sync` never revalidates it. Config repositories come only through approved remote transports; fetch is HTTP(S) with a nonempty authority.
