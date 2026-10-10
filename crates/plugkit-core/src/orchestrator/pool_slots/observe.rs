@@ -333,7 +333,7 @@ fn cap_acceptance(slots: &mut Value) {
         .as_object()
         .into_iter()
         .flatten()
-        .filter(|(id, _)| kept.contains(id))
+        .filter(|(id, _)| kept.contains(id.as_str()))
         .map(|(id, text)| (id.clone(), text.clone()))
         .collect();
     if let Some(fields) = slots.as_object_mut() {
