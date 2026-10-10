@@ -141,6 +141,57 @@ pub(super) fn worktree_dirt() -> WorktreeDirt {
     WorktreeDirt::default()
 }
 
+#[cfg(target_arch = "wasm32")]
+const FIXED_ON_HEAD_WINDOW: usize = 500;
+
+#[cfg(target_arch = "wasm32")]
+const SUBJECT_SEPARATOR: char = '\u{1f}';
+
+#[cfg(target_arch = "wasm32")]
+fn is_row_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_witness_record(subject: &str) -> bool {
+    subject.trim_start().to_ascii_lowercase().starts_with("witness")
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn fixed_on_head_shas(open_ids: &BTreeSet<&str>) -> std::collections::BTreeMap<String, String> {
+    let mut shas = std::collections::BTreeMap::new();
+    if open_ids.is_empty() {
+        return shas;
+    }
+    let window = FIXED_ON_HEAD_WINDOW.to_string();
+    let log = crate::wasm_dispatch::host_abi::porcelain_from(&crate::wasm_dispatch::git_call_argv(
+        &["log", "--format=%H%x1f%s", "-n", window.as_str(), "HEAD", "--"],
+        None,
+    ));
+    if log.failed || log.parked {
+        return shas;
+    }
+    for line in log.porcelain.lines() {
+        let Some((sha, subject)) = line.split_once(SUBJECT_SEPARATOR) else {
+            continue;
+        };
+        if is_witness_record(subject) {
+            continue;
+        }
+        for token in subject.split(|c: char| !is_row_id_char(c)) {
+            if open_ids.contains(token) && !shas.contains_key(token) {
+                shas.insert(token.to_string(), sha.to_string());
+            }
+        }
+    }
+    shas
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn fixed_on_head_shas(_open_ids: &BTreeSet<&str>) -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::new()
+}
+
 fn target_path_of(token: &str) -> Option<String> {
     let unquoted = token.trim_matches(|c: char| {
         matches!(c, '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>')

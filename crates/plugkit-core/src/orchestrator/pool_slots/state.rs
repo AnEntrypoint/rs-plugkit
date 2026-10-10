@@ -47,7 +47,15 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
         .flat_map(|(row, _)| writer_targets_of(row))
         .collect();
     let budget = ceiling.unwrap_or(DEFAULT_SPAWN_CEILING as u64).saturating_sub(live_count);
+    let ranked_ids: std::collections::BTreeSet<&str> = ranked["candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let fixed = super::admission::fixed_on_head_shas(&ranked_ids);
     let mut candidates_removed: Vec<Value> = Vec::new();
+    let mut already_fixed: Vec<Value> = Vec::new();
     let mut candidates: Vec<String> = Vec::new();
     let mut advertised: Vec<String> = Vec::new();
     for id in ranked["candidates"].as_array().into_iter().flatten().filter_map(|value| value.as_str()) {
@@ -58,6 +66,11 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
             let mut entry = json!({"id": id, "filter": filter});
             entry[field] = json!(file);
             candidates_removed.push(entry);
+            continue;
+        }
+        if let Some(sha) = fixed.get(id) {
+            already_fixed.push(json!({"id": id, "sha": sha}));
+            candidates_removed.push(json!({"id": id, "filter": "already_fixed_on_head", "sha": sha}));
             continue;
         }
         let targets = writer_targets_of(row);
@@ -101,6 +114,7 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
         "node_launchable": node_launchable,
         "advertised": advertised.clone(),
         "candidates_removed": candidates_removed,
+        "already_fixed_on_head": already_fixed,
         "launch_filters": launch_filters,
         "dirty_check": {"source": "git status --porcelain -uall", "unknown": dirt.unknown, "entries": dirt.entries.len()},
         "supply": ranked["supply"].clone(),
