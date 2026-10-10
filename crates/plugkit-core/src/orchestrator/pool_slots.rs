@@ -277,15 +277,35 @@ fn node_only_witness(row: &Value) -> bool {
         .all(|text| !text.to_ascii_lowercase().contains("cargo"))
 }
 
-fn witness_gap_admitted(row: &Value, project_root: &str) -> bool {
+fn witness_gap_refusal(row: &Value, project_root: &str) -> Option<String> {
     let id = row.get("id").and_then(Value::as_str).unwrap_or_default();
+    if !id.starts_with(LAUNCH_ID_PREFIX) {
+        return Some("not_witness_gap_id".to_string());
+    }
+    if let Some(segment) = LAUNCH_ID_EXCLUDED_SEGMENTS.iter().find(|segment| id.contains(**segment)) {
+        return Some(format!("excluded_segment:{}", segment.trim_matches('-')));
+    }
     let status = row.get("status").and_then(Value::as_str).unwrap_or("pending");
-    id.starts_with(LAUNCH_ID_PREFIX)
-        && !LAUNCH_ID_EXCLUDED_SEGMENTS.iter().any(|segment| id.contains(*segment))
-        && status == "pending"
-        && !super::pool_rank::has_blocker_notes(row)
-        && node_only_witness(row)
-        && node_only_module(row, project_root)
+    if status != "pending" {
+        return Some(format!("status:{status}"));
+    }
+    if super::pool_rank::has_blocker_notes(row) {
+        return Some("blocker_notes".to_string());
+    }
+    if !node_only_witness(row) {
+        return Some("cargo_in_witness_text".to_string());
+    }
+    let Some(module) = module_path_of(row) else {
+        return Some("no_module_path".to_string());
+    };
+    let Some(source) = pkfs::read_to_string(&format!("{}/{}", project_root, module)) else {
+        return Some(format!("module_unreadable:{module}"));
+    };
+    super::pool_rank::browser_or_gpu_global_in(&source).map(|token| format!("browser_gpu_global:{token}"))
+}
+
+fn witness_gap_admitted(row: &Value, project_root: &str) -> bool {
+    witness_gap_refusal(row, project_root).is_none()
 }
 
 fn node_only_module(row: &Value, project_root: &str) -> bool {
@@ -361,6 +381,7 @@ fn worktree_dirt() -> WorktreeDirt {
     dirt.basenames = dirt
         .entries
         .iter()
+        .filter(|entry| !entry.starts_with(".gm/"))
         .filter_map(|entry| entry.rsplit('/').next())
         .map(str::to_string)
         .collect();
@@ -439,6 +460,7 @@ fn row_by_id<'a>(work: &'a [(Value, usize)], id: &str) -> Option<&'a Value> {
 fn launch_filter_of(work: &[(Value, usize)], id: &str, admitted: &HashSet<String>, project_root: &str) -> &'static str {
     match row_by_id(work, id) {
         None => "not_in_work",
+        Some(_) if !id.starts_with(LAUNCH_ID_PREFIX) => "not_witness_gap",
         Some(_) if !admitted.contains(id) => "not_admitted",
         Some(row) if super::pool_rank::node_arm(row, true).is_some() => "arm_lane",
         Some(row) if !node_only_module(row, project_root) => "not_node_only",
@@ -562,6 +584,7 @@ fn slot_parts(project_root: &str, observed: Option<(u64, &'static str)>) -> (Val
         (_, Some(0)) => "hold",
         _ => "launch",
     };
+    let witness_gap = witness_gap_verdicts(&work, &blockers, &live_rows, &dirt, project_root);
     let slots = json!({
         "live": live_count,
         "live_source": live_source,
@@ -571,6 +594,7 @@ fn slot_parts(project_root: &str, observed: Option<(u64, &'static str)>) -> (Val
         "live_sessions": live.sessions,
         "open_rows": open_rows,
         "witness_gap_open": witness_gap_open,
+        "witness_gap": witness_gap,
         "blocker_rows": blockers.len(),
         "candidates": candidates,
         "launchable": node_candidates.len(),
@@ -584,6 +608,53 @@ fn slot_parts(project_root: &str, observed: Option<(u64, &'static str)>) -> (Val
         "reaped_heartbeats": live.reaped,
     });
     (slots, node_candidates)
+}
+
+const WITNESS_GAP_ROWS_SHOWN: usize = 60;
+
+fn witness_gap_verdicts(
+    work: &[(Value, usize)],
+    blockers: &[Value],
+    live_rows: &[String],
+    dirt: &WorktreeDirt,
+    project_root: &str,
+) -> Value {
+    let pending_blocked: HashSet<&str> = blockers
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str))
+        .filter_map(super::pool_rank::blocked_row_of)
+        .collect();
+    let mut counts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut launchable = 0u64;
+    let mut rows: Vec<Value> = Vec::new();
+    for (row, _) in work {
+        let Some(id) = row.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if !id.starts_with(LAUNCH_ID_PREFIX) {
+            continue;
+        }
+        let verdict = if let Some(reason) = witness_gap_refusal(row, project_root) {
+            reason
+        } else if super::pool_rank::is_outcome_row(row) || super::pool_rank::is_refuted_row(row) {
+            "excluded_outcome_or_refuted".to_string()
+        } else if live_rows.iter().any(|live| live == id) {
+            "held_by_live_heartbeat".to_string()
+        } else if pending_blocked.contains(id) {
+            "pending_blocker".to_string()
+        } else if let Some((_, _, target)) = dirty_target_verdict(row, dirt) {
+            format!("dirty_target:{target}")
+        } else {
+            launchable += 1;
+            "launchable".to_string()
+        };
+        let bucket = verdict.split(':').next().unwrap_or_default().to_string();
+        *counts.entry(bucket).or_insert(0) += 1;
+        rows.push(json!({"id": id, "reason": verdict}));
+    }
+    let open = rows.len();
+    rows.truncate(WITNESS_GAP_ROWS_SHOWN);
+    json!({"open": open, "launchable": launchable, "counts": counts, "rows": rows})
 }
 
 pub fn spawn_ceiling(slots: &Value) -> usize {
@@ -604,9 +675,19 @@ pub fn slots_prose(slots: &Value) -> String {
     }
 }
 
-fn floor_denial_text(verb: &str, live: u64, floor: u64, open_rows: u64, refill_needed: u64) -> String {
+fn floor_denial_text(verb: &str, live: u64, floor: u64, open_rows: u64, advertised: u64, shortfall: u64) -> String {
+    let launch = if advertised == 0 {
+        format!("No launch is advertised: launch shortfall={shortfall} gm-worker subagents from slots.candidates (node-first, then any open row) now.")
+    } else if advertised < shortfall {
+        format!(
+            "Launch the {advertised} advertised gm-worker subagents from slots.launch now, then launch the other {} from slots.candidates (node-first, then any open row).",
+            shortfall - advertised
+        )
+    } else {
+        format!("Launch shortfall={shortfall} gm-worker subagents from slots.launch of a pool-observe reply now.")
+    };
     format!(
-        "{verb} refused: floor_gate_denied -- live={live} is under the floor of {floor} with open_rows={open_rows}; refill_needed={refill_needed}. Launch refill_needed gm-worker subagents now from slots.launch of a pool-observe reply (node-first candidates, then any open row). Then call pool-observe with body.live set to the ListAgents count and retry {verb}."
+        "{verb} refused: floor_gate_denied -- live={live} is under the floor of {floor} with open_rows={open_rows}; shortfall={shortfall}, advertised={advertised}. {launch} Then call pool-observe with body.live set to the ListAgents count and retry {verb}."
     )
 }
 
@@ -629,7 +710,7 @@ pub fn floor_gate(verb: &str, body_live: Option<u64>, exclude_row: Option<&str>)
         return Ok(json!(live));
     }
     let refill_needed = floor - live;
-    let text = floor_denial_text(verb, live, floor, open_rows, refill_needed);
+    let text = floor_denial_text(verb, live, floor, open_rows, refill_needed, refill_needed);
     Err(json!({
         "ok": false,
         "verb": verb,
@@ -703,6 +784,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     let ceiling = spawn_ceiling(&slots) as u64;
     let floor = REFILL_FLOOR.min(ceiling);
     let open_rows = slots["open_rows"].as_u64().unwrap_or(0);
+    let shortfall = if open_rows > 0 { floor.saturating_sub(live) } else { 0 };
     let free_slots = ceiling.saturating_sub(live);
     let now = now_ms();
     let state_dir = pool_dir(".");
@@ -728,6 +810,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         0
     };
     let idle_slots = free_slots.saturating_sub(refill_needed);
+    let unfilled_shortfall = shortfall.saturating_sub(refill_needed);
     let next_surface = unscanned.first().cloned();
     let mut launch: Vec<Value> = node_candidates
         .into_iter()
@@ -743,7 +826,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         "threshold": traversal_threshold,
         "unscanned_surfaces": unscanned.iter().take(TRAVERSAL_SURFACE_SHOWN).collect::<Vec<&String>>(),
         "unscanned_total": unscanned.len(),
-        "rule": "traversal is needed only while node witness candidates are below 2 x floor and candidate surfaces remain; a candidate is unscanned, unleased, and has a module (up to 3 levels deep, .js/.mjs/.cjs/.ts/.jsx/.tsx) that no scripts/ file names (a scripts/ file name containing <surface>-<module path without extension>); pool-observe advertises the first candidate in launch and leases nothing; a traversal brief for an open row leases the surface that row names when that surface is unscanned, and is refused otherwise; a traversal brief for traversal-node-supply leases the first candidate when it is issued; a surface named in scanned_surfaces is leased for 6 hours",
+        "rule": "traversal is needed only while node witness candidates are below 2 x floor and candidate surfaces remain; a candidate is unscanned, unleased, and has a module (up to 3 levels deep, .js/.mjs/.cjs/.ts/.jsx/.tsx) that no scripts/ file names (a scripts/ file name containing <surface>-<module path without extension>); pool-observe advertises the first candidate in launch and leases nothing; a traversal brief for an open row leases the surface that row names when that surface is unscanned, and is refused otherwise; a traversal brief for traversal-node-supply leases the first candidate when it is issued; a surface named in scanned_surfaces is leased for 6 hours; a module whose only witness is a content match counts as unnamed (decision: pool-observe matches scripts/ file names, never file content, so a content-only witness is re-scanned by traversal)",
     });
     let mut monitor = monitor_block(&slots);
     if monitor["alarm"] == json!(false) {
@@ -770,6 +853,8 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         "monitor": monitor,
         "slots": slots,
     });
+    out["shortfall"] = json!(shortfall);
+    out["unfilled_shortfall"] = json!(unfilled_shortfall);
     if body.get("rules").and_then(Value::as_bool) == Some(true) {
         out["rules"] = json!(POOL_RULES);
     } else {
@@ -779,9 +864,9 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         out["blocker_notes"] = blocker_notes_block(limit);
     }
     if observed.is_some() && open_rows > 0 && live < floor {
-        let mut text = floor_denial_text("pool-observe", live, floor, open_rows, refill_needed);
+        let mut text = floor_denial_text("pool-observe", live, floor, open_rows, refill_needed, shortfall);
         if refill_needed == 0 {
-            text.push_str(&format!(" Nothing is advertised to launch: launchable={launchable}, free_slots={free_slots}, traversal_needed={traversal_needed}; nominate or unblock a row, then retry."));
+            text.push_str(&format!(" Advertised launchable={launchable}, free_slots={free_slots}, traversal_needed={traversal_needed}."));
         }
         out["ok"] = json!(false);
         out["error_code"] = json!("floor_gate_denied");
@@ -1106,12 +1191,12 @@ const MONITOR_ALARM_ACTION: &str = "refill from launch (node-first candidates) i
 const POOL_RULES: [&str; 8] = [
     "Floor 10: while open_rows > 0 keep live at or above the floor, which is 10 or the recorded spawn ceiling when that is lower; the floor is a gate, not a launch count: refill is measured against the ceiling (rule 3).",
     "Pass the ListAgents count of running subagents as body.live on every call: it is the count of record, kept 5 minutes in .gm/pool/count-of-record.json. prd-resolve and transition use that record when they carry no live field; with no fresh record they do not deny and reply count_of_record: absent. slots.live_heartbeats is only the heartbeat cross-check.",
-    "Spawn ceiling 20, or the N a spawn refusal recorded: while open_rows > 0 fill toward it. free_slots = ceiling - live; refill_needed = min(free_slots, launchable + traversal slot), where launchable = admitted witness-gap node candidates that pass the dirty-target filter and the traversal slot is 1 while traversal.needed; idle_slots = free_slots - refill_needed. Launch exactly the ids in slots.launch.",
-    "A live count under the floor while open_rows > 0 is a gate denial (error_code floor_gate_denied) on pool-observe, prd-resolve and transition: launch refill_needed gm-worker subagents from slots.launch, then retry. It is also a FAILURE: append `FAILURE: <UTC timestamp> live count fell to <live> with <open_rows> pending rows` to .gm/witness-log.md.",
+    "Spawn ceiling 20, or the N a spawn refusal recorded: while open_rows > 0 fill toward it. free_slots = ceiling - live; refill_needed = min(free_slots, launchable + traversal slot), where launchable = admitted witness-gap node candidates that pass the dirty-target filter and the traversal slot is 1 while traversal.needed; idle_slots = free_slots - refill_needed. shortfall = floor - live is what the floor needs; unfilled_shortfall = shortfall - refill_needed must come from slots.candidates. Launch exactly the ids in slots.launch.",
+    "A live count under the floor while open_rows > 0 is a gate denial (error_code floor_gate_denied) on pool-observe, prd-resolve and transition: launch the advertised gm-worker subagents from slots.launch, then launch unfilled_shortfall more from slots.candidates (node-first, then any open row), then retry. It is also a FAILURE: append `FAILURE: <UTC timestamp> live count fell to <live> with <open_rows> pending rows` to .gm/witness-log.md.",
     "Refill on every completion, in the same turn: launch one replacement per freed slot from launch (node-first candidates). Never launch a row that is in slots.live_rows.",
     "Pass body.held = the row id of every running worker on every call, including a worker whose heartbeat is not written yet. The newest held list is kept for 30 minutes; send held: [] to clear it.",
     "A heartbeat refreshes at least every 5 minutes and counts as live for 10 minutes; one older than 5 minutes is listed in slots.aging_heartbeats, not dropped. On a spawn refusal, call pool-observe with body.refusal set to the refusal text.",
-    "A candidate whose named target file has uncommitted changes in the worktree is removed from slots.candidates and from the launch list; slots.candidates_removed names it with filter dirty_target and its dirty_target path. Target names come only from the row subject, title, why, witness, acceptance, acceptance_criteria and text fields, and only tokens with a source or document extension: a token with a directory matches that path, and a bare file name matches any dirty file of that name; a shared document name (AGENTS.md, README.md, CHANGELOG.md) counts only when the row's surface field names it; a row naming no such token is not filtered. If git status cannot be read, every row with a named path is removed with filter git_status_unknown. slots.launch_filters gives the reason each displayed candidate is not launchable.",
+    "A candidate whose named target file has uncommitted changes in the worktree is removed from slots.candidates and from the launch list; slots.candidates_removed names it with filter dirty_target and its dirty_target path. Target names come only from the row subject, title, why, witness, acceptance, acceptance_criteria and text fields, and only tokens with a source or document extension: a token with a directory matches that path, and a bare file name matches any dirty file of that name outside .gm/; a shared document name (AGENTS.md, README.md, CHANGELOG.md) counts only when the row's surface field names it; a row naming no such token is not filtered. If git status cannot be read, every row with a named path is removed with filter git_status_unknown. slots.launch_filters gives the reason each displayed candidate is not launchable.",
 ];
 const WORKER_BRIEF_PATH: &str = "C:/dev/spoint/.gm/config-source-cache-default/prose/worker.md";
 
