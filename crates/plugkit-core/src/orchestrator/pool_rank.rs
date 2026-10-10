@@ -6,6 +6,7 @@ const BROWSER_WORDS: [&str; 6] = ["cdp", "browser", "chrome", "headful", "live p
 const GPU_WORDS: [&str; 9] = ["gpu", "webgpu", "amd", "nvidia", "accelerated", "gpulock", "frame-time", "p50", "dpr"];
 const DESIGN_WORDS: [&str; 4] = ["design decision", "cluster-enabled", "circumnavigat", "planet wrap"];
 const OUTCOME_KINDS: [&str; 2] = ["outcome", "witness-outcome"];
+const WITNESS_GAP_PREFIX: &str = "witness-gap-";
 
 fn text_field<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
     row.get(key).and_then(Value::as_str)
@@ -153,6 +154,9 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String], a
             blocked += 1;
         }
         let admitted_row = admitted.contains(id);
+        if id.starts_with(WITNESS_GAP_PREFIX) && !admitted_row {
+            continue;
+        }
         let row_arm = if admitted_row { None } else { arm(row) };
         match row_arm {
             Some("gpu") => gpu += 1,
