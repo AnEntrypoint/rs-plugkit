@@ -423,12 +423,6 @@ fn join(base: &str, rel: &str) -> String {
     }
 }
 
-/// Cut a root back to the project that owns it when the root sits inside a config-source cache.
-///
-/// Both cache layouts live at `<project>/.gm/config-source-cache*`: `SOURCE_CACHE_REL` holds the
-/// repo-spec tiers, `DEFAULT_REPO_CACHE_REL` the implicit default repo. A dispatch whose cwd is a
-/// cache checkout otherwise treats the checkout as its own project and clones a second copy of the
-/// config repo into `<cache>/.gm/config-source-cache-default`.
 pub fn normalize_project_root(root: &str) -> String {
     const CACHE_PARENT: &str = ".gm";
     const CACHE_PREFIX: &str = "config-source-cache";

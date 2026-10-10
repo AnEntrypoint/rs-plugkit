@@ -47,6 +47,9 @@
 - Request `file_cap + 1` entries from `list_scan_universe` so an exactly full listing is distinguishable from a truncated one.
 - Unicode lowercasing can change byte width (U+0130). `LiteralMatcher::find_all` then falls back to a char-aligned scan, reads match text with `get`, and returns every match per line.
 - A caller-named scope (`path`, `paths`, `root`) beats every exclusion rule: `named_scope` short-circuits `exclusion_rule` and skips `prune_own_state`. The rules still govern the unscoped universe. `path` is always a literal path or glob, never a regex.
+- An own-state exclusion names the `.gm/<child>` entry holding the pruned file (`reported_own_state_entry_under_root`), not only the directory, so the reply names the file a caller is missing. An ignored, untracked own-state file never reaches `prune_own_state` (`--others --exclude-standard` omits it), so `report_unlisted_own_state` names those from disk; a `.gm/` file git lists is project content and stays in scope (`is_versioned_gm_state`).
+- A gitlink (mode `160000` in `ls-files --stage`) splits the two listings the worktree is built from: `--cached --recurse-submodules` reaches a submodule's tracked files while `--others` stops at the gitlink, so a submodule's own untracked files went missing while `complete` stayed true. `gitlink_dirs` names those directories and `nested_untracked` re-runs `--others` inside each, recursing per level up to `NESTED_REPO_DEPTH_LIMIT`.
+- `no_ignore` is `--others` without `--exclude-standard`, the only flag keeping ignored files out, so it returns tracked, untracked and ignored files together; `.git` is not a worktree entry either way. It only ever widens a listing, so it is applied after the walk policy is chosen and every `walk_reason` still says why the walk happened.
 
 ### Code symbols (`code_symbols.rs`)
 
