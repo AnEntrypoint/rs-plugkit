@@ -197,12 +197,18 @@ fn try_lock(src: &RepoSource) -> LockProbe {
              function acquire(){{\
                const token=process.pid+'-'+Date.now()+'-'+Math.random().toString(36).slice(2);\
                try{{fs.mkdirSync(p);}}catch(e){{return e.code==='EEXIST'?'busy':'failed:mkdir:'+e.code;}}\
-               try{{fs.writeFileSync(p+'/owner',token,{{flag:'wx'}});return 'acquired:'+token;}}\
+               try{{fs.writeFileSync(p+'/owner',token,{{flag:'wx'}});fs.writeFileSync(p+'/owner-pid',String(process.ppid),{{flag:'wx'}});return 'acquired:'+token;}}\
                catch(e){{try{{fs.rmSync(p,{{recursive:true,force:true}});}}catch(e2){{}}return 'failed:owner:'+e.code;}}\
+             }}\
+             function ownerAlive(){{\
+               let raw=null;try{{raw=fs.readFileSync(p+'/owner-pid','utf8');}}catch(e){{return null;}}\
+               const pid=parseInt(raw,10);\
+               if(!(pid>0)){{return null;}}\
+               try{{process.kill(pid,0);return true;}}catch(e){{return e.code==='EPERM';}}\
              }}\
              let first=acquire();if(first!=='busy'){{return first;}}\
              let st=null;try{{st=fs.statSync(p);}}catch(e2){{return e2.code==='ENOENT'?'busy':'failed:stat:'+e2.code;}}\
-             if(Date.now()-st.mtimeMs<=staleMs){{return 'busy';}}\
+             if(ownerAlive()!==false&&Date.now()-st.mtimeMs<=staleMs){{return 'busy';}}\
              const aside=p+'.stale-'+process.pid+'-'+Date.now();\
              try{{fs.renameSync(p,aside);}}catch(e3){{return 'failed:stale-rename:'+e3.code;}}\
              try{{fs.rmSync(aside,{{recursive:true,force:true}});}}catch(e4){{}}\
@@ -593,13 +599,12 @@ fn refresh_locked(
     if have_local.as_deref() == Some(remote.as_str()) {
         st.consecutive_failures = 0;
         st.last_sha = remote.clone();
-        if !st.degraded_sticky {
-            st.degraded_reason = None;
-        }
+        st.degraded_reason = None;
+        st.degraded_sticky = false;
         return Ok(SyncOutcome {
             sha: Some(remote),
             changed: false,
-            degraded_reason: st.degraded_reason.clone(),
+            degraded_reason: None,
             detail: "remote sha unchanged; no fetch needed".to_string(),
         });
     }
@@ -631,17 +636,11 @@ fn refresh_locked(
     st.consecutive_failures = 0;
     let live = local_sha(src);
     st.last_sha = live.clone().unwrap_or_else(|| remote.clone());
-    let degraded_reason = match publish {
-        Publish::Atomic => {
-            st.degraded_reason = None;
-            st.degraded_sticky = false;
-            None
-        }
-        Publish::InPlace { reason } => {
-            st.degraded_reason = Some(reason.clone());
-            st.degraded_sticky = true;
-            Some(reason)
-        }
+    st.degraded_reason = None;
+    st.degraded_sticky = false;
+    let note = match publish {
+        Publish::Atomic => None,
+        Publish::InPlace { reason } => Some(reason),
     };
 
     crate::orchestrator::config_notify::record_change(
@@ -651,17 +650,14 @@ fn refresh_locked(
         &changed_config_paths(src, pre_fetch_config_text.as_deref()),
     );
 
-    if let Some(reason) = degraded_reason.as_deref() {
-        emit_degraded(live.clone(), reason, src);
-    }
-    let detail = match &degraded_reason {
+    let detail = match &note {
         Some(reason) => format!("updated to {remote}; {reason}"),
         None => format!("updated to {remote}"),
     };
     Ok(SyncOutcome {
         sha: live,
         changed: true,
-        degraded_reason,
+        degraded_reason: None,
         detail,
     })
 }
