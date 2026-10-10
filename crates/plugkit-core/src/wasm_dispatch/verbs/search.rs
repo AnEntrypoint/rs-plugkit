@@ -1254,6 +1254,15 @@ prd-resolve {id, witness_evidence, commit_comment, keep_status}, plus a witness 
   id aliases: prd_id, mutable_id, item_id, slug, key. commit_comment aliases: commit_message,
   resolution_note (a one-line note bundled into the next commit). A help request writes no state.";
 
+pub(super) const PRD_ADD_HELP: &str = "\
+prd-add {id, subject, description, notes, status, blockedBy, overwrite}. body.id is required.
+  id: a non-empty kebab-case string, unique in .gm/prd.yml. A body with no usable id is refused,
+      and so is an id that already exists unless overwrite:true.
+  status: pending (the default when omitted, open) or completed (finished). The finished state is
+          completed, never resolved. prd-resolve sets completed once a witness binds to the row.
+  subject: the row's one-line intent. description and notes are free text.
+  help:true returns this text and writes no row.";
+
 pub(super) fn help_requested(body: &Value) -> bool {
     match body.get("help") {
         Some(Value::Bool(b)) => *b,
@@ -1275,6 +1284,7 @@ pub(super) fn verb_help_doc(verb: &str) -> Option<&'static str> {
         "fs_readdir" => Some(FS_READDIR_HELP),
         "fs_stat" => Some(FS_STAT_HELP),
         "prd-resolve" => Some(PRD_RESOLVE_HELP),
+        "prd-add" => Some(PRD_ADD_HELP),
         "git_merge_abort" => Some(super::git::GIT_MERGE_ABORT_HELP),
         "git_worktree" => Some("git_worktree {action: list} returns worktrees; {action: add, path, ref?: HEAD, detach?: true} creates a linked checkout; detach false requires an existing local branch name; {action: remove, path} removes a clean unlocked checkout without force. Unknown fields are refused per action. Repository selectors and session fields are accepted."),
         _ => None,
