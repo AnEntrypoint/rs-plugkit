@@ -767,6 +767,9 @@ fn fs_write(body: &Value) -> u64 {
     }
 }
 
+const FS_READDIR_DEFAULT_LIMIT: usize = 200;
+const FS_READDIR_MAX_LIMIT: usize = 1000;
+
 fn fs_readdir(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     if let Some(rejection) = read_path_rejection("fs_readdir", path, body) {
@@ -777,7 +780,35 @@ fn fs_readdir(body: &Value) -> u64 {
     if v.is_null() {
         return err("fs_readdir", "empty");
     }
-    ok("fs_readdir", v)
+    let entries = match v {
+        Value::Array(entries) => entries,
+        other => return ok("fs_readdir", other),
+    };
+    let limit = body
+        .get("limit")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+        .map_or(FS_READDIR_DEFAULT_LIMIT, |n| (n as usize).min(FS_READDIR_MAX_LIMIT));
+    let offset = body.get("offset").and_then(Value::as_u64).map_or(0, |n| n as usize);
+    let total = entries.len();
+    let page: Vec<Value> = entries.into_iter().skip(offset).take(limit).collect();
+    let next = offset.saturating_add(page.len());
+    let has_more = next < total;
+    let mut reply = json!({
+        "ok": true,
+        "verb": "fs_readdir",
+        "data": page,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": has_more,
+        "next_offset": if has_more { json!(next) } else { Value::Null },
+    });
+    if has_more {
+        reply["partial"] = json!(true);
+        reply["partial_reason"] = json!("listing_paged");
+    }
+    pack(reply.to_string())
 }
 
 fn fs_stat(body: &Value) -> u64 {
