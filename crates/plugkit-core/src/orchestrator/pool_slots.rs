@@ -45,17 +45,11 @@ fn non_empty(value: &str) -> Option<String> {
 }
 
 fn row_names(value: &str) -> Vec<String> {
-    value.split(',').filter_map(non_empty).collect()
-}
-
-fn is_positional_row(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    let dated = bytes.len() >= 10
-        && bytes[..10]
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| if index == 4 || index == 7 { *byte == b'-' } else { byte.is_ascii_digit() });
-    !line.contains(char::is_whitespace) && !line.contains([':', '=']) && !dated
+    value
+        .split(',')
+        .filter_map(non_empty)
+        .filter(|name| !name.contains(char::is_whitespace))
+        .collect()
 }
 
 fn json_heartbeat_identity(body: &str) -> Option<HeartbeatIdentity> {
@@ -65,7 +59,7 @@ fn json_heartbeat_identity(body: &str) -> Option<HeartbeatIdentity> {
     identity.session = ["session_id", "session", "sessionId"]
         .iter()
         .find_map(|key| fields.get(*key).and_then(Value::as_str).and_then(non_empty));
-    for key in ["row", "row_id", "rows", "row_ids"] {
+    for key in ["row", "row_id"] {
         match fields.get(key) {
             Some(Value::String(text)) => identity.rows.extend(row_names(text)),
             Some(Value::Array(items)) => identity
@@ -91,7 +85,7 @@ fn absorb_identity_field(identity: &mut HeartbeatIdentity, key: &str, value: &st
                 identity.session = non_empty(value);
             }
         }
-        "row" | "rows" | "rowid" | "rowids" => identity.rows.extend(row_names(value)),
+        "row" => identity.rows.extend(row_names(value)),
         _ => {}
     }
 }
@@ -111,7 +105,6 @@ fn heartbeat_identity(body: &str) -> HeartbeatIdentity {
         .and_then(|line| line.split_whitespace().next())
         .filter(|token| !token.contains([':', '=']))
         .and_then(non_empty);
-    let bare_format = lead_token.is_some();
     for line in &lines {
         if let Some((key, value)) = line.split_once(':') {
             absorb_identity_field(&mut identity, key, value);
@@ -122,18 +115,7 @@ fn heartbeat_identity(body: &str) -> HeartbeatIdentity {
             }
         }
     }
-    let words: Vec<&str> = lines.iter().copied().flat_map(|line| line.split_whitespace()).collect();
-    for pair in words.windows(2) {
-        if pair[0] == "row" && is_positional_row(pair[1]) {
-            identity.rows.extend(row_names(pair[1]));
-        }
-    }
     identity.session = identity.session.or(lead_token);
-    if identity.rows.is_empty() && bare_format {
-        if let Some(second) = lines.get(1).copied().filter(|line| is_positional_row(line)) {
-            identity.rows = row_names(second);
-        }
-    }
     identity
 }
 
@@ -349,6 +331,10 @@ fn slot_parts(project_root: &str, observed_live: Option<u64>) -> (Value, Vec<Str
         .partition(|(row, _)| super::pool_rank::is_blocker_row(row));
     let blockers: Vec<Value> = blocker_entries.into_iter().map(|(row, _)| row).collect();
     let open_rows = work.len();
+    let witness_gap_open = work
+        .iter()
+        .filter(|(row, _)| row.get("id").and_then(Value::as_str).is_some_and(|id| id.starts_with(LAUNCH_ID_PREFIX)))
+        .count();
     let mut live_rows = held_rows(&live, &work);
     live_rows.extend(declared_holds(&dir, now_ms()));
     live_rows.sort();
@@ -389,6 +375,7 @@ fn slot_parts(project_root: &str, observed_live: Option<u64>) -> (Value, Vec<Str
         "live_rows": live_rows,
         "live_sessions": live.sessions,
         "open_rows": open_rows,
+        "witness_gap_open": witness_gap_open,
         "blocker_rows": blockers.len(),
         "candidates": candidates,
         "supply": ranked["supply"].clone(),
@@ -459,7 +446,8 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         .and_then(Value::as_u64)
         .filter(|n| *n > 0)
         .map_or(DEFAULT_LIST_LIMIT, |n| n as usize);
-    for key in ["candidates", "live_rows", "live_sessions"] {
+    cap_candidates(&mut slots, limit);
+    for key in ["live_rows", "live_sessions"] {
         cap_list(&mut slots, key, limit);
     }
     let held = slots["live_rows_total"].as_u64().unwrap_or(0);
@@ -468,22 +456,38 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     let open_rows = slots["open_rows"].as_u64().unwrap_or(0);
     let refill_needed = if open_rows > 0 { REFILL_FLOOR.saturating_sub(live) } else { 0 };
     let launch_cap = refill_needed.min(ceiling.saturating_sub(live)) as usize;
+    let now = now_ms();
+    let state_dir = pool_dir(".");
+    let mut surface_state = read_surface_state(&state_dir);
+    if let Some(names) = body.get("scanned_surfaces").and_then(Value::as_array) {
+        for name in names.iter().filter_map(Value::as_str) {
+            surface_state.insert(name.to_string(), now);
+        }
+    }
+    let unscanned = unscanned_surfaces(&list_surfaces("."), &surface_state, now);
     let node_supply = node_candidates.len() as u64;
     let traversal_threshold = TRAVERSAL_SUPPLY_FACTOR * REFILL_FLOOR;
-    let traversal_needed = node_supply < traversal_threshold;
+    let traversal_needed = node_supply < traversal_threshold && !unscanned.is_empty();
+    let next_surface = unscanned.first().cloned();
     let mut launch: Vec<Value> = node_candidates
         .into_iter()
         .take(launch_cap)
         .map(|id| json!({"id": id, "role": "resolver"}))
         .collect();
     if traversal_needed && launch.len() < launch_cap {
-        launch.push(json!({"id": TRAVERSAL_LAUNCH_ID, "role": "traversal"}));
+        if let Some(surface) = &next_surface {
+            surface_state.insert(surface.clone(), now);
+        }
+        launch.push(json!({"id": TRAVERSAL_LAUNCH_ID, "role": "traversal", "surface": next_surface}));
     }
+    write_surface_state(&state_dir, &surface_state);
     let traversal = json!({
         "needed": traversal_needed,
         "node_witness_candidates": node_supply,
         "threshold": traversal_threshold,
-        "rule": "node witness candidates below 2 x floor: launch a traversal hop, which logs node-only PRDs and resolves none",
+        "unscanned_surfaces": unscanned.iter().take(TRAVERSAL_SURFACE_SHOWN).collect::<Vec<&String>>(),
+        "unscanned_total": unscanned.len(),
+        "rule": "traversal is needed only while node witness candidates are below 2 x floor and unscanned surfaces remain; a launched traversal hop is assigned the first unscanned surface, and a surface stays scanned for 6 hours",
     });
     let mut monitor = monitor_block(&slots);
     if monitor["alarm"] == json!(false) {
@@ -509,10 +513,150 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     } else {
         out["rules_hint"] = json!("pass body.rules=true for the pool rules");
     }
+    if body.get("blocker_notes").and_then(Value::as_bool) == Some(true) {
+        out["blocker_notes"] = blocker_notes_block(limit);
+    }
     (out.to_string(), String::new(), 0)
 }
 
+const TRAVERSAL_SURFACE_ROOTS: [&str; 3] = ["src", "apps", "client"];
+const TRAVERSAL_SURFACE_TTL_MS: u64 = 6 * 60 * 60 * 1000;
+const TRAVERSAL_SURFACE_SHOWN: usize = 8;
+const TRAVERSAL_SURFACES_FILE: &str = "traversal-surfaces.json";
+
+fn list_surfaces(project_root: &str) -> Vec<String> {
+    let mut surfaces = Vec::new();
+    for root in TRAVERSAL_SURFACE_ROOTS {
+        let Some(Value::Array(entries)) = pkfs::readdir(&format!("{}/{}", project_root, root)) else {
+            continue;
+        };
+        for entry in entries {
+            let name = match entry.as_str() {
+                Some(bare) => bare.to_string(),
+                None => match entry.get("name").and_then(Value::as_str) {
+                    Some(obj_name) => obj_name.to_string(),
+                    None => continue,
+                },
+            };
+            let is_dir = match entry.get("is_file").or_else(|| entry.get("isFile")).and_then(Value::as_bool) {
+                Some(is_file) => !is_file,
+                None => !name.contains('.'),
+            };
+            if is_dir {
+                surfaces.push(format!("{}/{}", root, name));
+            }
+        }
+    }
+    surfaces.sort();
+    surfaces
+}
+
+fn read_surface_state(dir: &str) -> std::collections::BTreeMap<String, u64> {
+    let mut state = std::collections::BTreeMap::new();
+    let Some(text) = pkfs::read_to_string(&format!("{}/{}", dir, TRAVERSAL_SURFACES_FILE)) else {
+        return state;
+    };
+    let Ok(record) = serde_json::from_str::<Value>(&text) else {
+        return state;
+    };
+    if let Some(scanned) = record.get("scanned").and_then(Value::as_object) {
+        for (name, ts) in scanned {
+            if let Some(ts) = ts.as_u64() {
+                state.insert(name.clone(), ts);
+            }
+        }
+    }
+    state
+}
+
+fn write_surface_state(dir: &str, state: &std::collections::BTreeMap<String, u64>) -> bool {
+    pkfs::write(&format!("{}/{}", dir, TRAVERSAL_SURFACES_FILE), &json!({"scanned": state}).to_string())
+}
+
+fn unscanned_surfaces(surfaces: &[String], state: &std::collections::BTreeMap<String, u64>, now: u64) -> Vec<String> {
+    surfaces
+        .iter()
+        .filter(|surface| match state.get(*surface) {
+            Some(ts) => now.saturating_sub(*ts) > TRAVERSAL_SURFACE_TTL_MS,
+            None => true,
+        })
+        .cloned()
+        .collect()
+}
+
 const DEFAULT_LIST_LIMIT: usize = 12;
+
+fn blocker_notes_block(limit: usize) -> Value {
+    let rows: Vec<Value> = prd_open_rows_with_recency()
+        .into_iter()
+        .map(|(row, _)| row)
+        .filter(|row| super::pool_rank::has_blocker_notes(row))
+        .map(|row| {
+            json!({
+                "id": row.get("id").cloned().unwrap_or(Value::Null),
+                "status": row.get("status").cloned().unwrap_or(Value::Null),
+                "blocker_notes": row.get("blocker_notes").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    let total = rows.len();
+    json!({"total": total, "rows": rows.into_iter().take(limit).collect::<Vec<Value>>()})
+}
+
+fn is_witness_gap_id(value: &Value) -> bool {
+    value.as_str().is_some_and(|id| id.starts_with(LAUNCH_ID_PREFIX))
+}
+
+fn cap_candidates(slots: &mut Value, limit: usize) {
+    let all: Vec<Value> = slots["candidates"].as_array().cloned().unwrap_or_default();
+    let total = all.len();
+    let open = slots["open_rows"].as_u64().unwrap_or(0) as usize;
+    let gap_open = slots["witness_gap_open"].as_u64().unwrap_or(0) as usize;
+    let gap_total = all.iter().filter(|value| is_witness_gap_id(value)).count();
+    let gap_quota = if open == 0 || gap_open == 0 {
+        0
+    } else {
+        ((limit * gap_open + open / 2) / open).max(1).min(gap_total)
+    };
+    let other_quota = limit.saturating_sub(gap_quota);
+    let mut chosen = vec![false; total];
+    let (mut gap_taken, mut other_taken) = (0usize, 0usize);
+    for (index, value) in all.iter().enumerate() {
+        if is_witness_gap_id(value) {
+            if gap_taken < gap_quota {
+                chosen[index] = true;
+                gap_taken += 1;
+            }
+        } else if other_taken < other_quota {
+            chosen[index] = true;
+            other_taken += 1;
+        }
+    }
+    let want = limit.min(total);
+    let mut shown = chosen.iter().filter(|flag| **flag).count();
+    for flag in chosen.iter_mut() {
+        if shown >= want {
+            break;
+        }
+        if !*flag {
+            *flag = true;
+            shown += 1;
+        }
+    }
+    let kept: Vec<Value> = all
+        .into_iter()
+        .zip(chosen)
+        .filter(|(_, flag)| *flag)
+        .map(|(value, _)| value)
+        .collect();
+    let gap_shown = kept.iter().filter(|value| is_witness_gap_id(value)).count();
+    if let Some(fields) = slots.as_object_mut() {
+        fields.insert("candidates".to_string(), Value::Array(kept));
+        fields.insert("candidates_total".to_string(), json!(total));
+        fields.insert("candidates_witness_gap_total".to_string(), json!(gap_total));
+        fields.insert("candidates_witness_gap_shown".to_string(), json!(gap_shown));
+    }
+}
 
 fn cap_list(slots: &mut Value, key: &str, limit: usize) {
     let total = slots[key].as_array().map_or(0, Vec::len);
