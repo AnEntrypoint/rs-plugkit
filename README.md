@@ -320,14 +320,16 @@ sites. Caller and impact replies label this resolution model and definition ambi
 Close a completed PRD row with `prd-resolve` and JSON body
 `{"id":"<prd-item-id>","witness_evidence":"<live evidence>"}` plus a witness
 binding: either `witness_dispatch_id` (the `dispatch_id` of a gm dispatch in this
-project's ledger, which keeps the 500 most recent dispatches), or all of
+project's ledger, which keeps the 500 most recent dispatches, or of a dispatch
+that aged out of that ledger while its own JSON in `.gm/exec-spool/out` still
+carries the id), or all of
 `witness_exit_code` (must be 0), `witness_output_sha256` (sha256 of the output
 file), `witness_output_path` (that file, relative to the project root) and
 `witness_ts` (RFC 3339). A binding is re-hashed against its file and refused on
 any mismatch, and a row closed by binding records `witness_binding`. A dispatch id
 that appears only inside `witness_evidence` is named in a refusal as
 `witness_dispatch_id_in_evidence` with `witness_dispatch_id_field`; it verifies only
-when passed as `witness_dispatch_id`. A verified reply names the bound id in `witness_dispatch_id_in_evidence` (null when a binding closed the row); `witness_dispatch_id_in_ledger` is true when the bound id is in this project ledger, and `witness_dispatch_id_verified_via` names the store that verified it: `ledger`, or `spool_out` when the dispatch own JSON in `.gm/exec-spool/out` carries its id after the ledger aged it out. An optional `commit_comment` attaches a
+when passed as `witness_dispatch_id`. A verified reply names the bound id in `witness_dispatch_id_in_evidence` (null when a binding closed the row); `witness_dispatch_id_in_ledger` is true when the bound id is in this project's dispatch record: its `.gm/exec-spool/.dispatch-ledger.json`, or, once the ledger aged it out, the dispatch's own JSON in `.gm/exec-spool/out` that carries its id; `witness_dispatch_id_verified_via` names which of the two found it: `ledger` or `spool_out`. An optional `commit_comment` attaches a
 one-line resolution note to the next GM commit. `prd-list` takes `limit`, folds
 repeated blocks of an id to the last block, and replies with `total` (matches) and
 `store_total` (stored blocks).
