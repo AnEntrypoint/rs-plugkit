@@ -104,6 +104,7 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
         "live_source": live_source,
         "live_heartbeats": heartbeat_live,
         "aging_heartbeats": live.aging,
+        "malformed_heartbeats": live.malformed,
         "live_rows": live_rows,
         "live_rows_unmatched": live_rows_unmatched,
         "live_sessions": live.sessions,

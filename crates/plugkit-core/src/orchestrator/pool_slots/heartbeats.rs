@@ -69,6 +69,57 @@ fn absorb_identity_field(identity: &mut HeartbeatIdentity, key: &str, value: &st
     }
 }
 
+fn required_key(key: &str) -> Option<&'static str> {
+    match normalised_key(key).as_str() {
+        "session" | "sessionid" => Some("session"),
+        "row" => Some("row"),
+        "start" => Some("start"),
+        _ => None,
+    }
+}
+
+pub(super) const HEARTBEAT_REQUIRED_LINES: [&str; 3] = ["session", "row", "start"];
+
+fn heartbeat_missing_lines(body: &str) -> Vec<&'static str> {
+    let mut present: BTreeSet<&'static str> = BTreeSet::new();
+    if let Ok(record) = serde_json::from_str::<Value>(body.trim_start_matches('\u{feff}').trim()) {
+        if let Some(fields) = record.as_object() {
+            if ["session_id", "session", "sessionId"]
+                .iter()
+                .any(|key| fields.get(*key).and_then(Value::as_str).map_or(false, |v| !v.trim().is_empty()))
+            {
+                present.insert("session");
+            }
+            if ["row", "row_id"].iter().any(|key| fields.get(*key).map_or(false, |value| !value.is_null())) {
+                present.insert("row");
+            }
+            if fields.get("start").and_then(Value::as_str).map_or(false, |v| !v.trim().is_empty()) {
+                present.insert("start");
+            }
+        }
+    }
+    for line in body.lines() {
+        let line = line.trim().trim_start_matches('\u{feff}').trim();
+        let mut keys: Vec<(&str, &str)> = Vec::new();
+        if let Some((key, value)) = line.split_once(':') {
+            keys.push((key, value));
+        }
+        for token in line.split_whitespace() {
+            if let Some((key, value)) = token.split_once('=') {
+                keys.push((key, value));
+            }
+        }
+        for (key, value) in keys {
+            if value.trim().is_empty() {
+                continue;
+            }
+            if let Some(required) = required_key(key) {
+                present.insert(required);
+            }
+        }
+    }
+    HEARTBEAT_REQUIRED_LINES.iter().filter(|line| !present.contains(*line)).copied().collect()
+}
 fn heartbeat_identity(body: &str) -> HeartbeatIdentity {
     if let Some(identity) = json_heartbeat_identity(body) {
         return identity;
@@ -115,6 +166,7 @@ pub(super) struct LiveHeartbeats {
     pub(super) words: BTreeSet<String>,
     pub(super) reaped: Vec<String>,
     pub(super) aging: Vec<Value>,
+    pub(super) malformed: Vec<Value>,
 }
 
 pub(super) fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
@@ -125,6 +177,7 @@ pub(super) fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         words: BTreeSet::new(),
         reaped: Vec::new(),
         aging: Vec::new(),
+        malformed: Vec::new(),
     };
     let Some(Value::Array(entries)) = pkfs::readdir(dir) else {
         return live;
@@ -166,6 +219,15 @@ pub(super) fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         }
         let body = pkfs::read_to_string(&path).unwrap_or_default();
         let identity = heartbeat_identity(&body);
+        let missing = heartbeat_missing_lines(&body);
+        if !missing.is_empty() {
+            live.malformed.push(json!({
+                "file": name.clone(),
+                "session": identity.session.clone(),
+                "missing": missing,
+                "fix": "the heartbeat is exactly three lines: session: <session> / row: <row id> / start: <ISO-8601 UTC>"
+            }));
+        }
         if age_ms > HEARTBEAT_REFRESH_MS {
             live.aging.push(json!({
                 "file": name.clone(),
