@@ -6303,10 +6303,10 @@ pub(super) fn git_worktree_add(body: &Value) -> u64 {
     if create {
         argv.push("-b".to_string());
         argv.push(reference.unwrap_or_default().to_string());
-        argv.push(path.clone());
-    } else {
+    }
+    argv.push(path.clone());
+    if !create {
         if let Some(s) = reference { argv.push(s.to_string()); }
-        argv.push(path.clone());
     }
     let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
     let r = git_call_argv(&argv_refs, cwd);
