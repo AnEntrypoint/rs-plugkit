@@ -347,15 +347,69 @@ fn git_status_directory_counts(paths: &[String]) -> Value {
     json!({ "directories": directories, "top": top, "elsewhere": elsewhere })
 }
 
+const GIT_STATUS_SPILL_DIR: &str = ".gm/exec-spool/out";
+const GIT_STATUS_SPILL_PREFIX: &str = "git_status-";
+pub(super) const GIT_STATUS_SPILL_KEEP: usize = 20;
+
+fn git_status_spill_retention_note() -> String {
+    format!(
+        "newest {GIT_STATUS_SPILL_KEEP} git_status spill files are kept in {GIT_STATUS_SPILL_DIR}; the git_status call that writes a spill deletes older ones"
+    )
+}
+
 fn git_status_spill_listing(spill_name: &str, lines: &[String]) -> Option<String> {
-    let relative = format!(".gm/exec-spool/out/{spill_name}");
+    let relative = format!("{GIT_STATUS_SPILL_DIR}/{spill_name}");
     let mut body = lines.join("\n");
     body.push('\n');
     if crate::pkfs::write(&relative, &body) {
+        git_status_prune_spills();
         Some(crate::pkfs::anchor(&relative))
     } else {
         None
     }
+}
+
+fn git_status_prune_spills() {
+    let Some(Value::Array(entries)) = crate::pkfs::readdir(GIT_STATUS_SPILL_DIR) else {
+        return;
+    };
+    let mut spills: Vec<(f64, String)> = entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry
+                .as_str()
+                .or_else(|| entry.get("name").and_then(Value::as_str))?;
+            let is_file = entry
+                .get("is_file")
+                .or_else(|| entry.get("isFile"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            if !is_file || !name.starts_with(GIT_STATUS_SPILL_PREFIX) || !name.ends_with(".txt") {
+                return None;
+            }
+            let mtime_ms = crate::pkfs::stat(&format!("{GIT_STATUS_SPILL_DIR}/{name}"))
+                .and_then(|s| s.get("mtime_ms").or_else(|| s.get("mtimeMs")).and_then(Value::as_f64))
+                .unwrap_or(0.0);
+            Some((mtime_ms, name.to_string()))
+        })
+        .collect();
+    if spills.len() <= GIT_STATUS_SPILL_KEEP {
+        return;
+    }
+    spills.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (_, name) in spills.into_iter().skip(GIT_STATUS_SPILL_KEEP) {
+        git_status_remove_spill(&crate::pkfs::anchor(&format!("{GIT_STATUS_SPILL_DIR}/{name}")));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn git_status_remove_spill(path: &str) -> bool {
+    super::host_abi::host_remove_file_never_directory(path)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn git_status_remove_spill(_path: &str) -> bool {
+    false
 }
 
 pub(super) fn git_status(body: &Value) -> u64 {
@@ -489,7 +543,10 @@ pub(super) fn git_status(body: &Value) -> u64 {
                         .unwrap_or_else(|| unsafe { host_now_ms() }.to_string())
                 );
                 match git_status_spill_listing(&spill_name, &lines) {
-                    Some(file) => l["spill_file"] = json!(file),
+                    Some(file) => {
+                        l["spill_file"] = json!(file);
+                        l["spill_retention"] = json!(git_status_spill_retention_note());
+                    }
                     None => l["spill_write_failed"] = json!(true),
                 }
             }
@@ -507,12 +564,40 @@ pub(super) fn git_status(body: &Value) -> u64 {
                 ));
             }
             let listing = run.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
-            let entries = git_eol_entries(listing);
+            let mut entries = git_eol_entries(listing);
             let mismatched = entries.iter().filter(|e| e["index"] != e["worktree"]).count();
+            let eol_count = entries.len();
+            let eol_cap = limit.unwrap_or(GIT_STATUS_SAMPLE_PATHS);
+            let eol_truncated = eol_count > eol_cap;
+            let eol_spill_file = eol_truncated.then(|| {
+                let lines: Vec<String> = listing.lines().map(str::to_string).collect();
+                let spill_name = format!(
+                    "git_status-eol-{}.txt",
+                    super::search::dispatch_task_id()
+                        .unwrap_or_else(|| unsafe { host_now_ms() }.to_string())
+                );
+                git_status_spill_listing(&spill_name, &lines)
+            });
+            entries.truncate(eol_cap);
             if let Some(map) = lists.as_object_mut() {
-                map.insert("eol_count".to_string(), json!(entries.len()));
+                map.insert("eol_count".to_string(), json!(eol_count));
                 map.insert("eol_mismatch_count".to_string(), json!(mismatched));
                 map.insert("eol".to_string(), Value::Array(entries));
+                map.insert("eol_truncated".to_string(), json!(eol_truncated));
+                if eol_truncated {
+                    match eol_spill_file.flatten() {
+                        Some(file) => {
+                            map.insert("eol_spill_file".to_string(), json!(file));
+                            map.insert(
+                                "spill_retention".to_string(),
+                                json!(git_status_spill_retention_note()),
+                            );
+                        }
+                        None => {
+                            map.insert("eol_spill_write_failed".to_string(), json!(true));
+                        }
+                    }
+                }
             }
         }
         // A path git cannot open (Windows MAX_PATH, or permissions) must degrade
