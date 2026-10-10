@@ -561,6 +561,114 @@ once findings are reported.\n"
 }
 
 #[cfg(target_arch = "wasm32")]
+const READONLY_LIST_CAP: usize = 8;
+
+#[cfg(target_arch = "wasm32")]
+const READONLY_REPLY_BYTE_BUDGET: usize = 3800;
+
+#[cfg(target_arch = "wasm32")]
+fn readonly_node_candidates(slots: &serde_json::Value) -> Vec<String> {
+    let filtered: std::collections::HashSet<&str> = slots["launch_filters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    slots["candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str())
+        .filter(|id| !filtered.contains(id))
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn investigate_readonly_reply(
+    session_id: Option<String>,
+    instruction: &str,
+    instruction_hash: &str,
+    slots: &serde_json::Value,
+) -> String {
+    let node_candidates = readonly_node_candidates(slots);
+    let mut cap = READONLY_LIST_CAP;
+    loop {
+        let reply = investigate_readonly_payload(&session_id, instruction, instruction_hash, slots, &node_candidates, cap).to_string();
+        if reply.len() <= READONLY_REPLY_BYTE_BUDGET || cap == 0 {
+            return reply;
+        }
+        cap -= 1;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn investigate_readonly_payload(
+    session_id: &Option<String>,
+    instruction: &str,
+    instruction_hash: &str,
+    slots: &serde_json::Value,
+    node_candidates: &[String],
+    cap: usize,
+) -> serde_json::Value {
+    let live = slots["live"].as_u64().unwrap_or(0) as usize;
+    let ceiling = super::pool_slots::spawn_ceiling(slots);
+    let open_rows = slots["open_rows"].as_u64().unwrap_or(0) as usize;
+    let candidates: Vec<String> = slots["candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str().map(str::to_string))
+        .collect();
+    let refill_needed = if open_rows > 0 {
+        ceiling.saturating_sub(live).min(node_candidates.len())
+    } else {
+        0
+    };
+    let launch: Vec<&str> = node_candidates
+        .iter()
+        .take(refill_needed.min(cap))
+        .map(String::as_str)
+        .collect();
+    let shortfall = concurrency_shortfall(live, ceiling, &candidates).map(|mut value| {
+        if let Some(list) = value.get_mut("launch").and_then(serde_json::Value::as_array_mut) {
+            list.truncate(cap);
+        }
+        let launched = value.get("launch").and_then(serde_json::Value::as_array).map_or(0, Vec::len);
+        value["launch_count"] = json!(launched);
+        value
+    });
+    let slots_view = json!({
+        "live": live,
+        "live_source": slots["live_source"],
+        "open_rows": open_rows,
+        "blocker_rows": slots["blocker_rows"],
+        "ceiling": slots["ceiling"],
+        "free": slots["free"],
+        "action": slots["action"],
+        "launchable": node_candidates.len(),
+        "candidates_total": candidates.len(),
+        "candidates": candidates.iter().take(cap).collect::<Vec<_>>(),
+        "launch_total": refill_needed,
+        "launch": launch,
+    });
+    json!({
+        "mode": "investigate_readonly",
+        "session_id": session_id,
+        "instruction": instruction,
+        "instruction_hash": instruction_hash,
+        "note": "lightweight read-only dispatch: no phase, mutables or PRD row was written; slots are read from the pool and the PRD, lists hold at most list_cap ids (candidates_total and launch_total give the full counts), and the reply is trimmed to stay under 4 KB; dispatch `instruction` again with no `mode` (or a fresh prompt) to re-enter the normal phase-managed flow",
+        "read_only": true,
+        "list_cap": cap,
+        "subagents_running": live,
+        "concurrency_shortfall": shortfall,
+        "launchable": node_candidates.len(),
+        "slots_prose": super::pool_slots::slots_prose(&slots_view),
+        "slots": slots_view,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn handle_instruction(content: &str) -> (String, String, i32) {
     ilog(&format!(
         "instruction::handle start body_len={}",
@@ -632,17 +740,11 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
 
     if let Some(mode) = mode_opt.as_deref() {
         if is_investigate_readonly_mode(mode) {
-            ilog("instruction::handle mode=investigate_readonly -- bypassing phase/PRD orchestration, no state touched");
+            ilog("instruction::handle mode=investigate_readonly -- bypassing phase/PRD orchestration, no phase or PRD state written");
             let instruction = investigate_readonly_instruction().to_string();
             let instruction_hash = format!("{:016x}", fnv1a64(&instruction));
-            let payload = json!({
-                "mode": "investigate_readonly",
-                "session_id": session_id_opt,
-                "instruction": instruction,
-                "instruction_hash": instruction_hash,
-                "note": "lightweight read-only dispatch: no phase/PRD/mutables state was read or written for this call; this bypasses the SPECIFY->...->COMPLETE trajectory entirely and is not resumable via instruction_hash/phase machinery -- dispatch `instruction` again with no `mode` (or a fresh prompt) to re-enter the normal phase-managed flow",
-            });
-            let s = payload.to_string();
+            let slots = super::pool_slots::slot_state(".");
+            let s = investigate_readonly_reply(session_id_opt, &instruction, &instruction_hash, &slots);
             ilog(&format!(
                 "instruction::handle investigate_readonly done out_len={}",
                 s.len()
