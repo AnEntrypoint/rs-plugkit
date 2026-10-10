@@ -56,6 +56,8 @@
 - Resolved `index.max_file_bytes` has a 2 MiB minimum after typed overlay. `index.max_chunks_per_file_per_pass` bounds vector work only; `0` keeps BM25 text and manifests.
 - Import specs resolve at query time; only resolved indexed targets form edges. Edges are unqualified callee names, not definition-bound: callers, callees, impact and tests reject scopes they cannot represent, and `impact` does not expand same-name ambiguity unless `through_ambiguous` is explicit.
 - `find` escapes `%`, `_` and `\` with `ESCAPE '\'`; stripping them breaks snake_case queries.
+- A busy store is answered by skipping reads, never by waiting: libsql blocks for `busy_timeout_ms` 20000 (`wasm_dispatch/verbs.rs:213`) and the holder only releases outside this dispatch, so every read goes through `rows`, which returns empty at once while the flag is set. `clear_store_busy` runs at both entry points (`sync_tree`, `handle`).
+- `<db>.lock` is libsql's exclusion marker: the writer removes it when it finishes, so a writer killed mid-write leaves the directory behind with no holder to wait on. The daemon records pid + heartbeat beside it in `<db>.lock.owner` (agentplug `claim_dispatch.rs`); this crate only reads that record and settles the lock through host JS (`fs.rmSync`), because the WASI VFS has no directory removal. A lock whose recorded pid is alive is never removed.
 
 ### Search dispatch and retention (`ragconfig.rs`, `codesearch`)
 
@@ -109,7 +111,7 @@
   - `update_checkout_in_place` is the fallback when the live checkout cannot be renamed aside: a pack file held read-shared inside it makes Windows refuse the directory rename. It rewrites files one at a time, so a reader can briefly see a mix of old and new prose.
 
 - `resolve_with`: a `ProjectVendored` win still runs lower repository tiers' `load_repo_tier` for its side effect, so `config_notify::record_change` keeps upstream drift visible.
-- `RESOLVE_CACHE` is keyed by the per-call `host_cwd_string()` with a 2 s TTL. Pass a dispatch's resolved FSM graph through `read_state_with_graph` and `set_phase_with_session_with_graph`; separate resolutions can see different tiers.
+- `RESOLVE_CACHE` is keyed by `normalize_project_root(host_cwd_string())` with a 2 s TTL. `normalize_project_root` cuts a root that sits inside `<project>/.gm/config-source-cache*` back to `<project>`, so a dispatch whose cwd is a cache checkout resolves against the owning project instead of cloning a second copy into `<cache>/.gm/config-source-cache-default`; it leaves every other root untouched. Pass a dispatch's resolved FSM graph through `read_state_with_graph` and `set_phase_with_session_with_graph`; separate resolutions can see different tiers.
 - `RepoSource.repo` is a `config_path::RepoUrl`, parsed once in `parse_source_entry`; `config_sync` never revalidates it. Config repositories come only through approved remote transports; fetch is HTTP(S) with a nonempty authority.
 - Prose keys and source paths are untrusted relative paths: accept only safe components. An unsafe prose key is terminal, since later tiers embed it in paths.
 - `ensure_current` debounces on the last probe time whether or not a checkout exists, recording it in memory as well as on disk; a failed `.sync.json` write under load would otherwise re-run `git ls-remote` on every dispatch.
