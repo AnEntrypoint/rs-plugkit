@@ -302,12 +302,67 @@ pub(super) fn split_head_ref_line(line: &str) -> (String, String) {
     (sha, branch)
 }
 pub(super) const GIT_STATUS_SKIPPED_PATHS_MAX: usize = 25;
+pub(super) const GIT_STATUS_SAMPLE_PATHS: usize = 10;
+pub(super) const GIT_STATUS_DIRECTORY_BUCKETS: usize = 10;
+
+fn git_eol_entries(listing: &str) -> Vec<Value> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let (meta, path) = line.split_once('\t')?;
+            let mut tokens = meta.split_whitespace();
+            let index = tokens.next()?.strip_prefix("i/")?.to_string();
+            let worktree = tokens.next()?.strip_prefix("w/")?.to_string();
+            let attr = tokens.collect::<Vec<&str>>().join(" ");
+            let attr = attr.strip_prefix("attr/").unwrap_or(&attr).to_string();
+            Some(json!({ "path": path, "index": index, "worktree": worktree, "attr": attr }))
+        })
+        .collect()
+}
+
+fn git_status_sample(paths: &[String], take: usize) -> Value {
+    Value::Array(paths.iter().take(take).map(|path| json!(path)).collect())
+}
+
+fn git_status_directory_counts(paths: &[String]) -> Value {
+    let mut by_directory: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    for path in paths {
+        let directory = path.rsplit_once('/').map_or(".", |(directory, _)| directory);
+        *by_directory.entry(directory).or_insert(0) += 1;
+    }
+    let directories = by_directory.len();
+    let mut ranked: Vec<(&str, usize)> = by_directory.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let elsewhere: usize = ranked
+        .iter()
+        .skip(GIT_STATUS_DIRECTORY_BUCKETS)
+        .map(|&(_, count)| count)
+        .sum();
+    let top: serde_json::Map<String, Value> = ranked
+        .into_iter()
+        .take(GIT_STATUS_DIRECTORY_BUCKETS)
+        .map(|(directory, count)| (directory.to_string(), json!(count)))
+        .collect();
+    json!({ "directories": directories, "top": top, "elsewhere": elsewhere })
+}
+
+fn git_status_spill_listing(spill_name: &str, lines: &[String]) -> Option<String> {
+    let relative = format!(".gm/exec-spool/out/{spill_name}");
+    let mut body = lines.join("\n");
+    body.push('\n');
+    if crate::pkfs::write(&relative, &body) {
+        Some(crate::pkfs::anchor(&relative))
+    } else {
+        None
+    }
+}
 
 pub(super) fn git_status(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_status",
         body,
-        &["path", "paths", "files", "summary", "limit"],
+        &["path", "paths", "files", "summary", "limit", "eol"],
     ) {
         return refusal;
     }
@@ -361,6 +416,18 @@ pub(super) fn git_status(body: &Value) -> u64 {
         let dirty = !porcelain.trim().is_empty();
         let head_line = git_head_ref_line(plan, cwd)?;
         let (head_sha, head_branch) = split_head_ref_line(&head_line);
+        let eol_run = if body.get("eol").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let mut eol_argv: Vec<&str> = vec!["ls-files", "--eol"];
+            if !paths.is_empty() {
+                eol_argv.push("--");
+                for p in &paths {
+                    eol_argv.push(p.as_str());
+                }
+            }
+            Some(git_step_replayed_by_call_order(plan, &eol_argv, cwd)?)
+        } else {
+            None
+        };
         let mut lists = if summary {
             let first_n = limit.unwrap_or(GIT_STATUS_SUMMARY_DEFAULT_PATHS);
             let entries: Vec<&str> = porcelain.lines().filter(|l| l.len() >= 3).collect();
@@ -386,33 +453,44 @@ pub(super) fn git_status(body: &Value) -> u64 {
                 "scoped_to": paths,
             })
         } else {
+            let sample_n = limit.unwrap_or(GIT_STATUS_SAMPLE_PATHS);
+            let overflow = [&modified, &untracked, &deleted, &staged]
+                .iter()
+                .any(|list| list.len() > sample_n);
             let mut l = json!({
                 "dirty": dirty,
                 "head": head_sha.clone(), "head_sha": head_sha.clone(), "branch": head_branch.clone(),
-                "modified": modified,
-                "untracked": untracked,
-                "deleted": deleted,
-                "staged": staged,
+                "counts": {
+                    "changed_paths": porcelain.lines().filter(|entry| entry.len() >= 3).count(),
+                    "modified": modified.len(),
+                    "untracked": untracked.len(),
+                    "deleted": deleted.len(),
+                    "staged": staged.len(),
+                },
+                "by_directory": {
+                    "modified": git_status_directory_counts(&modified),
+                    "deleted": git_status_directory_counts(&deleted),
+                },
+                "modified": git_status_sample(&modified, sample_n),
+                "untracked": git_status_sample(&untracked, sample_n),
+                "deleted": git_status_sample(&deleted, sample_n),
+                "staged": git_status_sample(&staged, sample_n),
+                "truncated": overflow,
             });
-            if let Some(cap) = limit {
-                let mut truncated = serde_json::Map::new();
-                for key in ["modified", "untracked", "deleted", "staged"] {
-                    let total = l[key].as_array().map(|a| a.len()).unwrap_or(0);
-                    if total > cap {
-                        l[key] = Value::Array(
-                            l[key]
-                                .as_array()
-                                .cloned()
-                                .unwrap_or_default()
-                                .into_iter()
-                                .take(cap)
-                                .collect(),
-                        );
-                        truncated.insert(key.to_string(), json!(total));
-                    }
-                }
-                if !truncated.is_empty() {
-                    l["truncated_totals"] = Value::Object(truncated);
+            if overflow {
+                let lines: Vec<String> = porcelain
+                    .lines()
+                    .filter(|entry| entry.len() >= 3)
+                    .map(str::to_string)
+                    .collect();
+                let spill_name = format!(
+                    "git_status-{}.txt",
+                    super::search::dispatch_task_id()
+                        .unwrap_or_else(|| unsafe { host_now_ms() }.to_string())
+                );
+                match git_status_spill_listing(&spill_name, &lines) {
+                    Some(file) => l["spill_file"] = json!(file),
+                    None => l["spill_write_failed"] = json!(true),
                 }
             }
             if !paths.is_empty() {
@@ -420,6 +498,23 @@ pub(super) fn git_status(body: &Value) -> u64 {
             }
             l
         };
+        if let Some(run) = &eol_run {
+            let code = run.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
+            if code != 0 {
+                return Err(err(
+                    "git_status",
+                    run.get("stderr").and_then(|v| v.as_str()).unwrap_or("git ls-files --eol failed"),
+                ));
+            }
+            let listing = run.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+            let entries = git_eol_entries(listing);
+            let mismatched = entries.iter().filter(|e| e["index"] != e["worktree"]).count();
+            if let Some(map) = lists.as_object_mut() {
+                map.insert("eol_count".to_string(), json!(entries.len()));
+                map.insert("eol_mismatch_count".to_string(), json!(mismatched));
+                map.insert("eol".to_string(), Value::Array(entries));
+            }
+        }
         // A path git cannot open (Windows MAX_PATH, or permissions) must degrade
         // this listing, never abort it: report what was read and name the rest.
         if st.partial {
