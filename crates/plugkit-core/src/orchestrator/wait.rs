@@ -1,6 +1,11 @@
 use serde_json::{json, Value};
 
-const MAX_WAIT_MS: u64 = 60_000;
+const EXEC_JS_TIMEOUT_HARD_CEILING_MS: u64 = 900_000;
+const WAIT_HOST_TIMEOUT_GRACE_MS: u64 = 1_000;
+const MAX_WAIT_MS: u64 = 600_000;
+
+const _: () =
+    assert!(MAX_WAIT_MS.saturating_add(WAIT_HOST_TIMEOUT_GRACE_MS) <= EXEC_JS_TIMEOUT_HARD_CEILING_MS);
 
 fn reject(error: &str, received: Option<&Value>) -> (String, String, i32) {
     let mut body = json!({
@@ -30,7 +35,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
         }
     };
     let code = format!("await new Promise(resolve => setTimeout(resolve, {ms}));");
-    let opts = json!({ "timeoutMs": ms.saturating_add(1_000) }).to_string();
+    let opts = json!({ "timeoutMs": ms.saturating_add(WAIT_HOST_TIMEOUT_GRACE_MS) }).to_string();
     let packed = unsafe {
         crate::wasm_dispatch::host_exec_js(
             code.as_ptr(),
