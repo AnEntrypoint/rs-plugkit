@@ -709,7 +709,7 @@ fn fs_read_line_range(
     path: &str,
 ) -> Result<Option<FsReadLineRange>, String> {
     let present = |key: &str| fs_read_key_present(body, key);
-    let Some(&(start_key, end_key, end_key_is_count)) = FS_READ_RANGE_PAIRS
+    let Some((start_key, end_key, end_key_is_count)) = FS_READ_RANGE_PAIRS
         .iter()
         .copied()
         .find(|(first, second, _)| present(*first) || present(*second))
