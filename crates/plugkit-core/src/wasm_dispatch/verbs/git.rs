@@ -1775,7 +1775,7 @@ pub(super) fn prd_foreign_rows_for_commit(paths: &[String], body: &Value, cwd: O
     } else {
         ""
     };
-    let worktree_text = crate::pkfs::read_to_string(&crate::orchestrator::prd::prd_path().to_string_lossy())
+    let worktree_text = crate::orchestrator::prd::read_prd_text(&crate::orchestrator::prd::prd_path().to_string_lossy())
         .unwrap_or_default();
     crate::orchestrator::prd::foreign_prd_rows(head_text, &worktree_text, &commit_session_id(body))
 }
