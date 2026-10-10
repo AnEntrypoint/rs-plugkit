@@ -1945,6 +1945,29 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         );
     }
     let binding_request = request_object(trimmed);
+    if let Some(nested) = binding_request.get("witness_binding").filter(|value| !value.is_null()) {
+        let received = witness_evidence_kind(Some(nested));
+        let body = serde_json::json!({
+            "error": format!(
+                "prd-resolve refused: witness_binding for {} is nested (received {}) -- pass the binding flat: witness_exit_code, witness_output_sha256, witness_output_path and witness_ts, or witness_dispatch_id",
+                id_target, received
+            ),
+            "deviation_kind": "prd-resolve-witness-binding-nested",
+            "deviation_severity": "deny",
+            "prd_id": id_target,
+            "field": "witness_binding",
+            "received": received,
+            "accepted_fields": ["witness_dispatch_id", "witness_exit_code", "witness_output_sha256", "witness_output_path", "witness_ts"],
+            "flat_binding_fields": WITNESS_BINDING_FIELDS,
+            "hint": WITNESS_BINDING_HINT,
+        })
+        .to_string();
+        return (
+            body,
+            format!("prd-resolve refused: nested witness_binding for {}", id_target),
+            1,
+        );
+    }
     let binding_present: Vec<&str> = WITNESS_BINDING_FIELDS
         .iter()
         .copied()
