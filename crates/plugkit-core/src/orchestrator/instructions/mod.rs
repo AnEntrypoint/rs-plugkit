@@ -12,7 +12,6 @@ use super::recall;
 use super::state::{read_state, Phase};
 #[cfg(target_arch = "wasm32")]
 use crate::pkfs;
-#[cfg(target_arch = "wasm32")]
 use serde_json::json;
 
 #[cfg(target_arch = "wasm32")]
