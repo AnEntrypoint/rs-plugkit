@@ -304,11 +304,15 @@ const TARGET_EXTENSIONS: [&str; 18] = [
 struct WorktreeDirt {
     unknown: bool,
     entries: BTreeSet<String>,
+    basenames: BTreeSet<String>,
 }
 
 impl WorktreeDirt {
-    fn covers(&self, path: &str) -> bool {
-        let mut candidate = path;
+    fn covers(&self, target: &str) -> bool {
+        if !target.contains('/') {
+            return self.basenames.contains(target);
+        }
+        let mut candidate = target;
         loop {
             if self.entries.contains(candidate) {
                 return true;
@@ -353,6 +357,12 @@ fn worktree_dirt() -> WorktreeDirt {
     for line in status.porcelain.lines() {
         dirt.entries.extend(porcelain_entry_paths(line));
     }
+    dirt.basenames = dirt
+        .entries
+        .iter()
+        .filter_map(|entry| entry.rsplit('/').next())
+        .map(str::to_string)
+        .collect();
     dirt
 }
 
@@ -367,12 +377,13 @@ fn target_path_of(token: &str) -> Option<String> {
     });
     let located = unquoted.split(|c: char| c == ':' || c == '#').next().unwrap_or_default();
     let path = located.trim_end_matches('.');
-    let admissible = path.contains('/')
-        && !path.starts_with('/')
+    let admissible = !path.starts_with('/')
         && !path.contains("..")
         && !path.starts_with(".gm/")
         && !path.chars().any(|c| c == '*' || c == '?')
-        && TARGET_EXTENSIONS.iter().any(|extension| path.ends_with(*extension));
+        && TARGET_EXTENSIONS
+            .iter()
+            .any(|extension| path.len() > extension.len() && path.ends_with(*extension));
     admissible.then(|| path.to_string())
 }
 
@@ -920,7 +931,7 @@ const POOL_RULES: [&str; 8] = [
     "Refill on every completion, in the same turn: launch one replacement per freed slot from launch (node-first candidates). Never launch a row that is in slots.live_rows.",
     "Pass body.held = the row id of every running worker on every call, including a worker whose heartbeat is not written yet. The newest held list is kept for 30 minutes; send held: [] to clear it.",
     "A heartbeat refreshes at least every 5 minutes and counts as live for 10 minutes; one older than 5 minutes is listed in slots.aging_heartbeats, not dropped. On a spawn refusal, call pool-observe with body.refusal set to the refusal text.",
-    "A candidate whose named target file has uncommitted changes in the worktree is removed from slots.candidates and from the launch list; slots.candidates_removed names it with filter dirty_target and its dirty_target path. Target paths come only from the row subject, title, why, witness, acceptance, acceptance_criteria and text fields, and only paths with a directory and a source or document extension; a row naming no such path is not filtered. If git status cannot be read, every row with a named path is removed with filter git_status_unknown. slots.launch_filters gives the reason each displayed candidate is not launchable.",
+    "A candidate whose named target file has uncommitted changes in the worktree is removed from slots.candidates and from the launch list; slots.candidates_removed names it with filter dirty_target and its dirty_target path. Target names come only from the row subject, title, why, witness, acceptance, acceptance_criteria and text fields, and only tokens with a source or document extension: a token with a directory matches that path, and a bare file name matches any dirty file of that name; a row naming no such token is not filtered. If git status cannot be read, every row with a named path is removed with filter git_status_unknown. slots.launch_filters gives the reason each displayed candidate is not launchable.",
 ];
 const WORKER_BRIEF_PATH: &str = "C:/dev/spoint/.gm/config-source-cache-default/prose/worker.md";
 
