@@ -368,6 +368,7 @@ pub fn handle_brief(content: &str) -> (String, String, i32) {
         return (String::new(), format!("pool-brief: worker brief missing at {}", WORKER_BRIEF_PATH), 1);
     };
     let brief = template
+        .replace("\r\n", "\n")
         .replace("{row}", &row)
         .replace("{session}", &session)
         .replace("{role}", &role);
