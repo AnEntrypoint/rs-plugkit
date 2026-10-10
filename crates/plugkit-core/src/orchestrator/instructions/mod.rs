@@ -1186,6 +1186,18 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "should_residual_scan": should_scan,
         "route_hint": route_hint,
     });
+    if session_mismatch {
+        if let Some(fields) = payload.as_object_mut() {
+            fields.insert(
+                "next_dispatch_hint".to_string(),
+                json!({
+                    "verb": "instruction",
+                    "body": { "SESSION_ID": session_id_opt },
+                    "reason": "session_mismatch",
+                }),
+            );
+        }
+    }
     if !discipline_policies_unchanged {
         if let Some(fields) = payload.as_object_mut() {
             fields.insert("discipline_policies".to_string(), discipline_policies);
