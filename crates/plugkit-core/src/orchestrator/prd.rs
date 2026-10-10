@@ -1485,6 +1485,22 @@ fn rerun_bound_witness(script: &str) -> Result<serde_json::Value, String> {
     }
 }
 
+const PRD_BOM: char = '\u{feff}';
+
+fn read_prd_without_bom(path_s: &str) -> Option<String> {
+    let raw = crate::pkfs::read_to_string(path_s)?;
+    Some(raw.strip_prefix(PRD_BOM).unwrap_or(raw.as_str()).to_string())
+}
+
+fn prd_unreadable_report(path_s: &str, reason: String) -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "state": "prd_unreadable",
+        "path": path_s,
+        "reason": reason,
+        "reopened": 0,
+    })]
+}
+
 pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Value> {
     let changed: Vec<String> = changed
         .iter()
@@ -1495,11 +1511,14 @@ pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Valu
         return vec![];
     }
     let path_s = prd_path().to_string_lossy().to_string();
-    let Some(text) = crate::pkfs::read_to_string(&path_s) else {
-        return vec![];
+    let Some(text) = read_prd_without_bom(&path_s) else {
+        return prd_unreadable_report(&path_s, format!("{path_s} is missing or unreadable"));
     };
-    let Ok(doc) = serde_yaml::from_str::<Value>(&text) else {
-        return vec![];
+    let doc: Value = match serde_yaml::from_str(&text) {
+        Ok(doc) => doc,
+        Err(e) => {
+            return prd_unreadable_report(&path_s, format!("{path_s} does not parse as YAML: {e}"))
+        }
     };
     let stale = stale_completed_rows(&doc, &changed);
     if stale.is_empty() {

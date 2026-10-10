@@ -32,10 +32,13 @@ pub fn cas_retry_write<T>(
         } else {
             String::new()
         };
-        let doc: Value = if before_raw.trim().is_empty() {
+        let parse_source = before_raw
+            .strip_prefix('\u{feff}')
+            .unwrap_or(before_raw.as_str());
+        let doc: Value = if parse_source.trim().is_empty() {
             Value::Sequence(vec![])
         } else {
-            match serde_yaml::from_str(&before_raw) {
+            match serde_yaml::from_str(parse_source) {
                 Ok(v) => v,
                 Err(e) => return Err((
                     String::new(),
