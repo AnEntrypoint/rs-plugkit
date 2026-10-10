@@ -3899,11 +3899,21 @@ pub fn git_commit_rank_at(root: &str, query: &str, k: usize) -> Vec<Value> {
     ranked
 }
 
+fn fold_name_key(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '-' | '_') && !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
-    let needle = if req.case_insensitive {
-        req.pattern.to_lowercase()
-    } else {
-        req.pattern.to_owned()
+    let needle = {
+        let folded = fold_name_key(req.pattern);
+        if folded.is_empty() {
+            req.pattern.to_lowercase()
+        } else {
+            folded
+        }
     };
     let name_glob = if crate::path_glob::looks_like_glob(req.pattern) {
         match crate::path_glob::PathGlob::parse_with_case(req.pattern, req.case_insensitive) {
@@ -3954,14 +3964,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
         .filter(|path| admitted(path))
         .filter(|p| match &name_glob {
             Some(glob) => glob.admits(root, scope, p),
-            None => {
-                let lp = if req.case_insensitive {
-                    p.to_lowercase()
-                } else {
-                    (*p).clone()
-                };
-                lp.contains(&needle)
-            }
+            None => fold_name_key(p.as_str()).contains(&needle),
         })
         .cloned()
         .collect();
