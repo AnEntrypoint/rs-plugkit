@@ -539,25 +539,11 @@ pub(crate) fn body_requests_investigate_readonly(body: &serde_json::Value) -> bo
 
 #[cfg(target_arch = "wasm32")]
 fn investigate_readonly_instruction() -> &'static str {
-    "# READ-ONLY INVESTIGATION (lightweight mode)\n\n\
-This dispatch was marked `mode: \"investigate_readonly\"`, so it bypassed the \
-SPECIFY -> PROVE -> EMIT -> STATE -> CONC -> SEC -> RES -> DECIDE -> COMPLETE \
-orchestrator trajectory entirely: no phase was read or changed, no PRD row was \
-required or opened, no mutables/state file was touched.\n\n\
-Do the investigation/scan/search the prompt asked for using whatever verbs fit \
-(exec_js/bash/python for shell + grep-equivalents, fs_read/fs_readdir, codesearch, \
-callers/callees/impact, git_log/git_diff/git_show, recall, etc.) and report findings \
-directly in your final response.\n\n\
-Constraints: make NO code changes, NO commits, NO PRD rows, NO mutable writes -- this \
-mode exists for read-only forensic/audit/investigate asks where a PRD and a phase walk \
-would be pure ceremony over a result. If mid-investigation you discover the task actually \
-needs a code change, stop and re-dispatch `instruction` without `mode` (or with a fresh \
-prompt) to enter the normal phase-managed flow for that change -- do not make the edit \
-under this mode's cover.\n\n\
-This mode is exempt from the continuation invariant that would otherwise demand a final \
-`gm-continue` dispatch: it never entered the phase machine and leaves no open PRD/phase \
-state behind, so a plain final response (no further tool call) is a valid end to this turn \
-once findings are reported.\n"
+    "# READ-ONLY INVESTIGATION\n\n\
+This mode skipped the phase trajectory: no phase read or changed, no PRD row or mutable written. \
+Investigate with any verbs and report findings in your final response. Make no code change, \
+commit, PRD row or mutable write; if the task needs one, re-dispatch instruction without mode. \
+A plain final response with no tool call ends this turn; no gm-continue is needed."
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -657,7 +643,7 @@ fn investigate_readonly_payload(
         "session_id": session_id,
         "instruction": instruction,
         "instruction_hash": instruction_hash,
-        "note": "lightweight read-only dispatch: no phase, mutables or PRD row was written; slots are read from the pool and the PRD, lists hold at most list_cap ids (candidates_total and launch_total give the full counts), and the reply is trimmed to stay under 4 KB; dispatch `instruction` again with no `mode` (or a fresh prompt) to re-enter the normal phase-managed flow",
+        "note": "read-only: no phase, mutable or PRD row written; lists hold list_cap ids, and candidates_total and launch_total give the full counts; the reply is capped at 4 KB",
         "read_only": true,
         "list_cap": cap,
         "subagents_running": live,
