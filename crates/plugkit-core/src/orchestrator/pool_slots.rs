@@ -4,7 +4,8 @@ use std::collections::{BTreeSet, HashSet};
 use super::transitions::prd_open_rows_with_recency;
 use crate::pkfs;
 
-pub const HEARTBEAT_LIVE_MS: u64 = 5 * 60 * 1000;
+pub const HEARTBEAT_REFRESH_MS: u64 = 5 * 60 * 1000;
+pub const HEARTBEAT_LIVE_MS: u64 = 10 * 60 * 1000;
 const HEARTBEAT_REAP_MS: u64 = 60 * 60 * 1000;
 const DEFAULT_SPAWN_CEILING: usize = 20;
 const CEILING_KEYWORDS: [&str; 3] = ["maximum", "ceiling", "limit"];
@@ -138,6 +139,7 @@ struct LiveHeartbeats {
     rows: Vec<String>,
     words: BTreeSet<String>,
     reaped: Vec<String>,
+    aging: Vec<Value>,
 }
 
 fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
@@ -147,6 +149,7 @@ fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         rows: Vec::new(),
         words: BTreeSet::new(),
         reaped: Vec::new(),
+        aging: Vec::new(),
     };
     let Some(Value::Array(entries)) = pkfs::readdir(dir) else {
         return live;
@@ -188,6 +191,13 @@ fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         }
         let body = pkfs::read_to_string(&path).unwrap_or_default();
         let identity = heartbeat_identity(&body);
+        if age_ms > HEARTBEAT_REFRESH_MS {
+            live.aging.push(json!({
+                "file": name.clone(),
+                "session": identity.session.clone(),
+                "age_s": age_ms / 1000
+            }));
+        }
         live.words.extend(
             body.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
                 .filter(|word| !word.is_empty())
@@ -302,14 +312,17 @@ fn held_rows(live: &LiveHeartbeats, work: &[(Value, usize)]) -> Vec<String> {
 }
 
 pub fn slot_state(project_root: &str) -> Value {
-    slot_parts(project_root).0
+    slot_parts(project_root, None).0
 }
 
-fn slot_parts(project_root: &str) -> (Value, Vec<String>) {
+fn slot_parts(project_root: &str, observed_live: Option<u64>) -> (Value, Vec<String>) {
     let dir = pool_dir(project_root);
     let live = read_heartbeats(&dir, now_ms());
+    let heartbeat_live = live.count as u64;
+    let live_count = observed_live.unwrap_or(heartbeat_live);
+    let live_source = if observed_live.is_some() { "listagents" } else { "heartbeats" };
     let ceiling = read_ceiling(&dir);
-    let free = ceiling.map(|c| c.saturating_sub(live.count as u64));
+    let free = ceiling.map(|c| c.saturating_sub(live_count));
     let (blocker_entries, work): (Vec<(Value, usize)>, Vec<(Value, usize)>) = prd_open_rows_with_recency()
         .into_iter()
         .partition(|(row, _)| super::pool_rank::is_blocker_row(row));
@@ -338,7 +351,10 @@ fn slot_parts(project_root: &str) -> (Value, Vec<String>) {
         _ => "launch",
     };
     let slots = json!({
-        "live": live.count,
+        "live": live_count,
+        "live_source": live_source,
+        "live_heartbeats": heartbeat_live,
+        "aging_heartbeats": live.aging,
         "live_rows": live_rows,
         "live_sessions": live.sessions,
         "open_rows": open_rows,
@@ -406,10 +422,11 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
             return (String::new(), "pool-observe: could not write .gm/pool/held-rows.json".to_string(), 1);
         }
     }
-    let (slots, node_candidates) = slot_parts(".");
+    let (slots, node_candidates) = slot_parts(".", observed_live);
     let live = slots["live"].as_u64().unwrap_or(0);
     let ceiling = spawn_ceiling(&slots) as u64;
-    let refill_needed = REFILL_FLOOR.saturating_sub(live);
+    let open_rows = slots["open_rows"].as_u64().unwrap_or(0);
+    let refill_needed = if open_rows > 0 { REFILL_FLOOR.saturating_sub(live) } else { 0 };
     let launch_cap = refill_needed.min(ceiling.saturating_sub(live)) as usize;
     let node_supply = node_candidates.len() as u64;
     let traversal_threshold = TRAVERSAL_SUPPLY_FACTOR * REFILL_FLOOR;
@@ -428,6 +445,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         "threshold": traversal_threshold,
         "rule": "node witness candidates below 2 x floor: launch a traversal hop, which logs node-only PRDs and resolves none",
     });
+    let monitor = monitor_block(&slots);
     let out = json!({
         "ok": true,
         "verb": "pool-observe",
@@ -437,12 +455,23 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         "refill_needed": refill_needed,
         "launch": launch,
         "traversal": traversal,
+        "monitor": monitor,
+        "rules": POOL_RULES,
         "slots": slots,
     });
     (out.to_string(), String::new(), 0)
 }
 
-const MONITOR_ALARM_ACTION: &str = "refill from slots.candidates until a spawn refusal names the ceiling; when candidates run out, dispatch a traversal hop to log node-only PRDs; the loop is wait {\"ms\":60000}, then instruction, then launch the free slots";
+const MONITOR_ALARM_ACTION: &str = "refill from launch (node-first candidates) in the same turn, one replacement per freed slot; when candidates run out, traversal is launched; loop: wait {\"ms\":60000}, then pool-observe with body.live (ListAgents count) and body.held, then launch";
+
+const POOL_RULES: [&str; 6] = [
+    "Floor 12: while open_rows > 0 keep live at or above 12; refill_needed = 12 - live.",
+    "Pass the ListAgents count of running subagents as body.live on every call: that count is the count of record. slots.live_heartbeats is only the heartbeat cross-check.",
+    "A live count under 12 while open_rows > 0 is a FAILURE: append `FAILURE: <UTC timestamp> live count fell to <live> with <open_rows> pending rows` to .gm/witness-log.md, then refill in the same turn.",
+    "Refill on every completion, in the same turn: launch one replacement per freed slot from launch (node-first candidates). Never launch a row that is in slots.live_rows.",
+    "Pass body.held = the row id of every running worker on every call, including a worker whose heartbeat is not written yet. The newest held list is kept for 30 minutes; send held: [] to clear it.",
+    "A heartbeat refreshes at least every 5 minutes and counts as live for 10 minutes; one older than 5 minutes is listed in slots.aging_heartbeats, not dropped. On a spawn refusal, call pool-observe with body.refusal set to the refusal text.",
+];
 const WORKER_BRIEF_PATH: &str = "C:/dev/spoint/.gm/config-source-cache-default/prose/worker.md";
 
 pub fn monitor_block(slots: &Value) -> Value {
