@@ -1252,7 +1252,15 @@ prd-resolve {id, witness_evidence, commit_comment, keep_status}, plus a witness 
                    witness_ts (RFC 3339 timestamp). The file is re-read and re-hashed, and any
                    mismatch is refused.
   id aliases: prd_id, mutable_id, item_id, slug, key. commit_comment aliases: commit_message,
-  resolution_note (a one-line note bundled into the next commit). A help request writes no state.";
+  resolution_note (a one-line note bundled into the next commit).
+  resolution: free text stored on the row as resolution (alias resolution_text). It is not bundled into
+              a commit; a file path it names counts as a reference for bundling the row's commit_comment.
+  commit_sha: a 7 to 40 hex commit sha stored on the row as commit_sha (alias commit); a malformed value
+              is refused. commit_comment_attached is true when the row carries a commit_comment or a commit_sha.
+  status: optional. A resolve sets completed; status_kept is true when status is absent or equals the
+          row's final status, and false when the row ended with a different status.
+  reply: outcome key (resolved or annotated), status_kept, commit_comment_attached, resolution_attached,
+         commit_sha_attached, witness_bound. A help request writes no state.";
 
 pub(super) const PRD_ADD_HELP: &str = "\
 prd-add {id, subject, description, notes, status, blockedBy, overwrite}. body.id is required.
