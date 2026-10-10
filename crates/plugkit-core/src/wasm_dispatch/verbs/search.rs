@@ -2093,11 +2093,33 @@ pub(super) fn codesearch_identifier(
 
 pub(super) fn codesearch(body: &Value) -> u64 {
     let packed = codesearch_dispatch(body);
-    let v = unpack_to_value(packed);
+    let mut v = unpack_to_value(packed);
     if !v.is_object() {
         return packed;
     }
+    if let (Some(note), Some(map)) = (split_form_not_searched_note(body), v.as_object_mut()) {
+        map.insert("split_form_not_searched".to_string(), json!(note));
+    }
     pack(v.to_string())
+}
+
+/// `literal` answers path segments written as separate quoted arguments in `split_form_matches`.
+/// `regex` matches its pattern as written and ranked `dual` never scans for them, so their replies
+/// name that gap instead of reading as a complete answer.
+fn split_form_not_searched_note(body: &Value) -> Option<&'static str> {
+    let query = body.get("query").and_then(|v| v.as_str())?;
+    if !query.contains('/') || query.chars().any(char::is_whitespace) {
+        return None;
+    }
+    match body.get("mode").and_then(|v| v.as_str()).unwrap_or("dual") {
+        "regex" => Some(
+            "mode regex matches the pattern as written, so path segments written as separate quoted arguments, e.g. join(ROOT, 'apps', 'world', 'x.js'), are not matched; mode literal matches them, in split_form_matches",
+        ),
+        "dual" => Some(
+            "mode dual ranks text and does not match path segments written as separate quoted arguments, e.g. join(ROOT, 'apps', 'world', 'x.js'); mode literal matches them, in split_form_matches, and is exhaustive",
+        ),
+        _ => None,
+    }
 }
 
 pub(super) fn codesearch_comments_requested(body: &Value) -> bool {
