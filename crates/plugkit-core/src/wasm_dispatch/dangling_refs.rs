@@ -99,8 +99,6 @@ pub fn scan_commit(cwd: Option<&str>, paths: &[String], add_all: bool, body: &Va
     DanglingScan { offenders, waived, unreadable, scanned_files }
 }
 
-/// A file the scan could not read is not a clean scan: its references were never extracted, so a
-/// dangling one inside it would pass the check that exists to stop it.
 pub fn scan_unreadable(scan: &DanglingScan) -> bool {
     !scan.unreadable.is_empty()
 }

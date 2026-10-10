@@ -124,9 +124,6 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
     (slots, advertised)
 }
 
-/// Keeps only the live-row ids that exist as a row id in the prd store, so a
-/// scan of the prd text finds every id `slots.live_rows` lists. Ids dropped here
-/// are named in `slots.live_rows_unmatched` rather than silently discarded.
 fn reconcile_live_rows(rows: Vec<String>, work: &[(Value, usize)], dir: &str) -> (Vec<String>, Vec<String>) {
     let mut rows = rows;
     rows.extend(declared_holds(dir, now_ms()));
@@ -140,16 +137,16 @@ fn reconcile_live_rows(rows: Vec<String>, work: &[(Value, usize)], dir: &str) ->
         return (rows, Vec::new());
     }
     let prd_ids = prd_row_ids();
-    let mut kept = Vec::with_capacity(rows.len());
-    let mut unmatched = Vec::new();
+    let mut rows_matching_an_open_or_prd_id = Vec::with_capacity(rows.len());
+    let mut rows_matching_no_open_or_prd_id = Vec::new();
     for id in rows {
         if open_ids.contains(id.as_str()) || prd_ids.contains(&id) {
-            kept.push(id);
+            rows_matching_an_open_or_prd_id.push(id);
         } else {
-            unmatched.push(id);
+            rows_matching_no_open_or_prd_id.push(id);
         }
     }
-    (kept, unmatched)
+    (rows_matching_an_open_or_prd_id, rows_matching_no_open_or_prd_id)
 }
 
 pub fn spawn_ceiling(slots: &Value) -> usize {

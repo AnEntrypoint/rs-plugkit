@@ -407,11 +407,6 @@ fn publish_staged(src: &RepoSource, staging: &str, lock: &RefreshLock) -> Result
     Ok(Publish::Atomic)
 }
 
-/// Used when the live checkout cannot be renamed aside: a pack file held
-/// read-shared inside it makes Windows refuse the directory rename. Updating
-/// in place needs no rename, and git only writes new pack files and rewrites
-/// working-tree files. Files are rewritten one at a time, so a concurrent
-/// reader can briefly see a mix of old and new prose.
 fn update_checkout_in_place(src: &RepoSource) -> Result<(), String> {
     let cache = src.cache_dir.as_str();
     let reference = src
