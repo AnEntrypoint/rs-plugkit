@@ -12,6 +12,7 @@ pub enum Outcome {
     LocalOverride,
     SourceRepo,
     CompiledDefault,
+    SourceRepoDegraded { reason: String },
     Degraded { reason: String },
     ConfigRepoUnreachable { reason: String },
 }
@@ -22,6 +23,7 @@ impl Outcome {
             Outcome::LocalOverride => "local_override",
             Outcome::SourceRepo => "source_repo",
             Outcome::CompiledDefault => "compiled_default",
+            Outcome::SourceRepoDegraded { .. } => "source_repo_degraded",
             Outcome::Degraded { .. } => "degraded",
             Outcome::ConfigRepoUnreachable { .. } => "config_repo_unreachable",
         }
@@ -30,7 +32,9 @@ impl Outcome {
     pub fn is_degraded(&self) -> bool {
         matches!(
             self,
-            Outcome::Degraded { .. } | Outcome::ConfigRepoUnreachable { .. }
+            Outcome::SourceRepoDegraded { .. }
+                | Outcome::Degraded { .. }
+                | Outcome::ConfigRepoUnreachable { .. }
         )
     }
 }
@@ -95,6 +99,18 @@ pub fn resolve(key: &str, default: &str) -> String {
     text
 }
 
+pub fn resolve_with_degradation(key: &str, default: &str) -> (String, Option<String>) {
+    let (text, outcome) = resolve_detailed(key, default);
+    report(key, &outcome);
+    let degraded = match &outcome {
+        Outcome::SourceRepoDegraded { reason }
+        | Outcome::Degraded { reason }
+        | Outcome::ConfigRepoUnreachable { reason } => Some(reason.clone()),
+        Outcome::LocalOverride | Outcome::SourceRepo | Outcome::CompiledDefault => None,
+    };
+    (text, degraded)
+}
+
 enum TierResult {
     Answered(String, Outcome),
     FallThrough,
@@ -153,6 +169,9 @@ fn tier1_project_vendored(key: &str) -> TierResult {
 fn tier2_in_project_repo(key: &str) -> TierResult {
     match read_from_source_repo(key) {
         SourceRead::Hit(text) => TierResult::Answered(text, Outcome::SourceRepo),
+        SourceRead::DegradedHit(text, reason) => {
+            TierResult::Answered(text, Outcome::SourceRepoDegraded { reason })
+        }
         SourceRead::NotConfigured => TierResult::FallThrough,
         SourceRead::Miss => TierResult::FallThrough,
         SourceRead::Broken(reason) => TierResult::FallThroughDegraded(Outcome::Degraded { reason }),
@@ -207,6 +226,17 @@ fn report(key: &str, outcome: &Outcome) {
                     "key": key,
                     "served": "entry_prose_via_fallthrough",
                     "detail": "this prose key has no vendored .gm/instructions/<key>.md and no compiled default, so ENTRY prose was served under its name. The phase is running on the wrong text -- vendor the file or add a compiled default.",
+                }),
+            );
+        }
+        Outcome::SourceRepoDegraded { reason } => {
+            crate::wasm_dispatch::emit_event(
+                "prose_source_degraded",
+                serde_json::json!({
+                    "key": key,
+                    "reason": reason,
+                    "served": "source_repo",
+                    "detail": "prose was served from a config checkout whose last refresh did not complete cleanly; the text may be stale, or mixed across files while an in-place update was in progress.",
                 }),
             );
         }
@@ -270,6 +300,7 @@ fn read_clean(path: &str) -> Option<String> {
 
 enum SourceRead {
     Hit(String),
+    DegradedHit(String, String),
     NotConfigured,
     Miss,
     Broken(String),
@@ -287,7 +318,13 @@ pub fn config_repo_text(key: &str) -> Option<String> {
 fn read_from_config_repo(key: &str) -> SourceRead {
     let resolved = crate::config::resolve();
     match resolved.cache_dir {
-        Some(cache_dir) => read_from_cache_root(&cache_dir, key),
+        Some(cache_dir) => match read_from_cache_root(&cache_dir, key) {
+            SourceRead::Hit(text) => match resolved.degraded {
+                Some(reason) => SourceRead::DegradedHit(text, reason),
+                None => SourceRead::Hit(text),
+            },
+            other => other,
+        },
         None => SourceRead::ConfigRepoUnreachable(format!(
             "gm-config (the mandatory default prose source) did not resolve: {}",
             resolved.why
@@ -298,8 +335,11 @@ fn read_from_config_repo(key: &str) -> SourceRead {
 #[cfg(not(target_arch = "wasm32"))]
 fn read_from_config_repo(key: &str) -> SourceRead {
     match crate::config_sync_native::ensure_default_cache() {
-        Ok(cache) => match crate::config_sync_native::read_cache_prose(&cache, key) {
-            Some(text) => SourceRead::Hit(text),
+        Ok((cache, degraded)) => match crate::config_sync_native::read_cache_prose(&cache, key) {
+            Some(text) => match degraded {
+                Some(reason) => SourceRead::DegradedHit(text, reason),
+                None => SourceRead::Hit(text),
+            },
             None => SourceRead::Miss,
         },
         Err(reason) => SourceRead::ConfigRepoUnreachable(format!(
@@ -437,14 +477,14 @@ fn read_from_source_repo(key: &str) -> SourceRead {
 #[cfg(target_arch = "wasm32")]
 fn read_from_repo_spec_schema(key: &str, cfg_raw: &str) -> SourceRead {
     let fetcher = crate::config_sync::GitRepoFetcher::default();
-    let src = match crate::config::resolve_prose_repo_source(
+    let (src, degraded) = match crate::config::resolve_prose_repo_source(
         cfg_raw,
         SOURCE_SPEC_PATH,
         SOURCE_CACHE_BASE,
         "prose_source_repo",
         &fetcher,
     ) {
-        Ok(src) => src,
+        Ok(pair) => pair,
         Err(reason) => return SourceRead::Broken(reason),
     };
     let full = format!("{}/{key}.md", src.cache_dir);
@@ -455,7 +495,10 @@ fn read_from_repo_spec_schema(key: &str, cfg_raw: &str) -> SourceRead {
         ));
     }
     match read_clean(&full) {
-        Some(text) => SourceRead::Hit(text),
+        Some(text) => match degraded {
+            Some(reason) => SourceRead::DegradedHit(text, reason),
+            None => SourceRead::Hit(text),
+        },
         None => SourceRead::Miss,
     }
 }

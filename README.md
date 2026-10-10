@@ -6,10 +6,9 @@ weights, used whenever a real embed answerer exists out-of-wasm). Both ship
 from `AnEntrypoint/plugkit-bin` and are consumed exclusively by
 `agentplug-runner` (repo `AnEntrypoint/agentplug`), the sole host that loads
 this guest. There is no standalone `plugkit.exe` CLI anymore, no private
-self-update path, and no direct-loader fallback — the retired `gm-runner`
+self-update path, and no direct-loader fallback: the retired `gm-runner`
 native host and the retired JS wasm-host (`plugkit-wasm-wrapper.js`) both
-routed through code paths this crate no longer ships. (The `rs-exec` crate
-is also retired and archived; this crate has never depended on it.)
+route through code paths this crate does not ship. This crate depends on no retired or archived crate.
 
 ## Architecture
 
@@ -261,7 +260,7 @@ verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git
 `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`,
 `git_worktree`, `git_worktree_add`, `git_worktree_list`, `git_worktree_remove`, `git_worktree_prune`,
 `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
-GitHub Actions workflow-run query), `prd-add`/`prd-list`/`prd-resolve`/
+GitHub Actions workflow-run query with each job's name and conclusion in `jobs`), `prd-add`/`prd-list`/`prd-resolve`/
 `prd-status`, `mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
 `fsm-validate`, `fsm-propose-override`, `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/
 `sql_smoke`, `task-spawn`/`task-list`/`task-output`/`task-stop`,
@@ -279,7 +278,7 @@ removed too and answer `unknown_verb`. `session-list` and `session-close-all` an
 `ok: false` with `error_code: not_implemented_in_guest`, since the guest holds no browser session state.
 
 When a shell verb returns a `task_id`, use `task-output` with JSON body
-`{"id":"task-…"}` to retrieve it. Use `task-stop` with the same body to stop
+`{"id":"task-<id>"}` to retrieve it. Use `task-stop` with the same body to stop
 it. These are GM verb dispatches, not shell commands.
 
 `task-list {}` reports status without persisting results. The explicit
@@ -326,9 +325,9 @@ project's ledger, which keeps the 500 most recent dispatches), or all of
 file), `witness_output_path` (that file, relative to the project root) and
 `witness_ts` (RFC 3339). A binding is re-hashed against its file and refused on
 any mismatch, and a row closed by binding records `witness_binding`. A dispatch id
-that appears only inside `witness_evidence` is named in the reply as
+that appears only inside `witness_evidence` is named in a refusal as
 `witness_dispatch_id_in_evidence` with `witness_dispatch_id_field`; it verifies only
-when passed as `witness_dispatch_id`. An optional `commit_comment` attaches a
+when passed as `witness_dispatch_id`. A verified reply names the bound id in `witness_dispatch_id_in_evidence` (null when a binding closed the row); `witness_dispatch_id_in_ledger` is true when the bound id is in this project ledger, and `witness_dispatch_id_verified_via` names the store that verified it: `ledger`, or `spool_out` when the dispatch own JSON in `.gm/exec-spool/out` carries its id after the ledger aged it out. An optional `commit_comment` attaches a
 one-line resolution note to the next GM commit. `prd-list` takes `limit`, folds
 repeated blocks of an id to the last block, and replies with `total` (matches) and
 `store_total` (stored blocks).
@@ -444,7 +443,7 @@ behavior change.
 ## FSM graph
 
 The phase graph (SPECIFY -> PROVE -> EMIT -> STATE -> CONC -> SEC -> RES ->
-DECIDE -> COMPLETE by default) is data, not hardcoded control flow — a
+DECIDE -> COMPLETE by default) is data, not hardcoded control flow: a
 project's `.gm/instructions/fsm/graph.json` (written by `fsm-vendor`) can
 define a different phase set or gate shape. The COMPLETE gate's
 `ci-validated-fresh` check compares `.ci-validated`'s `head_sha` against the
@@ -459,7 +458,7 @@ vendored override) -> a configured source repo synced into
 `.gm/instructions-source-cache/` -> the compiled-in default under
 `crates/plugkit-core/src/orchestrator/instructions/prose/*.md`
 (`include_str!`'d at build). Editing the compiled default requires a push
-to this repo and a cascade rebuild — it is never read live from this
+to this repo and a cascade rebuild: it is never read live from this
 checkout.
 
 ## Build
@@ -492,7 +491,7 @@ A push to `AnEntrypoint/{rs-codeinsight, rs-search, rs-plugkit}` triggers
 `cascade.yml`, which lands here and builds the single `plugkit.wasm` +
 `plugkit-slim.wasm` pair via `release.yml`. `agentplug` consumes that
 release artifact as a separate downstream pipeline, decoupled at the
-`plugkit-bin` release boundary — it is not itself a stage in this cascade.
+`plugkit-bin` release boundary: it is not itself a stage in this cascade.
 
 ## Observability
 

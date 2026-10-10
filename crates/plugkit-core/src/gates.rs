@@ -207,7 +207,7 @@ fn dispatch_submitted_at_ms() -> Option<u64> {
 }
 
 pub fn restamp_last_dispatch_to_completion(verb: &str) {
-    let policy = crate::orchestrator::fsm::graph().policy;
+    let policy = crate::orchestrator::fsm::graph().policy.clone();
     if is_longgap_activity_exempt(verb, &policy) {
         return;
     }
@@ -363,7 +363,7 @@ fn check_fanout_missed(to: &str, body: &Value) {
 }
 
 fn concurrency_refusal_at_complete(body: &Value, open_rows: usize) -> Option<String> {
-    let policy = crate::orchestrator::fsm::graph().policy;
+    let policy = crate::orchestrator::fsm::graph().policy.clone();
     let parent = body
         .get("session_id")
         .and_then(|v| v.as_str())
@@ -464,7 +464,7 @@ fn extract_substitution_bodies(cmd: &str) -> Vec<String> {
 }
 
 pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
-    let policy = crate::orchestrator::fsm::graph().policy;
+    let policy = crate::orchestrator::fsm::graph().policy.clone();
     if let Some(step_id) = read_pending_step() {
         if !policy.await_allowed_verbs.iter().any(|v| v == verb) {
             log_deviation(
