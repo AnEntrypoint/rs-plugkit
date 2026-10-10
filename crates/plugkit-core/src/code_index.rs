@@ -280,7 +280,6 @@ const SKIP_DIRS: &[&str] = &[
     "vendor",
     ".gradle",
     ".mvn",
-    "bin",
     "obj",
     ".bundle",
     "Pods",
