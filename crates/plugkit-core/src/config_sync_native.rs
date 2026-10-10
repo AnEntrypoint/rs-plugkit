@@ -39,6 +39,12 @@ enum Materialized {
     InPlace { reason: String },
 }
 
+enum LockOutcome {
+    Acquired,
+    Held,
+    Failed(String),
+}
+
 pub fn ensure_default_cache() -> Result<(String, Option<String>), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?;
     let root = crate::config::normalize_project_root(&cwd.to_string_lossy().replace('\\', "/"));
@@ -87,19 +93,34 @@ pub fn ensure_current(
 
     let have = local_sha(cache);
     let lock_path = format!("{cache}.native.lock");
-    if !acquire(&lock_path) {
-        return match have {
-            Some(sha) => Ok(NativeSync {
-                sha: Some(sha),
-                changed: false,
-                degraded_reason: prior.degraded_reason.clone(),
-                degraded_sticky: prior.degraded_sticky,
-                detail: "another refresh in progress; serving current checkout".to_string(),
-            }),
-            None => Err(format!(
-                "another process is cloning {repo} and no local checkout exists yet"
-            )),
-        };
+    match acquire(&lock_path) {
+        LockOutcome::Acquired => {}
+        LockOutcome::Held => {
+            return match have {
+                Some(sha) => Ok(NativeSync {
+                    sha: Some(sha),
+                    changed: false,
+                    degraded_reason: prior.degraded_reason.clone(),
+                    degraded_sticky: prior.degraded_sticky,
+                    detail: "another refresh in progress; serving current checkout".to_string(),
+                }),
+                None => Err(format!(
+                    "another process is cloning {repo} and no local checkout exists yet"
+                )),
+            }
+        }
+        LockOutcome::Failed(reason) => {
+            return match have {
+                Some(sha) => Ok(NativeSync {
+                    sha: Some(sha),
+                    changed: false,
+                    degraded_reason: Some(reason.clone()),
+                    degraded_sticky: prior.degraded_sticky,
+                    detail: format!("{reason}; serving current checkout"),
+                }),
+                None => Err(format!("{reason}; no local checkout to fall back to")),
+            }
+        }
     }
     let result = refresh(repo, reference, cache, have, &prior);
     let _ = std::fs::remove_dir(&lock_path);
@@ -236,16 +257,29 @@ fn update_in_place(reference: &str, cache: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn acquire(lock_path: &str) -> bool {
-    if std::fs::create_dir(lock_path).is_ok() {
-        return true;
+fn acquire(lock_path: &str) -> LockOutcome {
+    match std::fs::create_dir(lock_path) {
+        Ok(()) => LockOutcome::Acquired,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let stale = std::fs::metadata(lock_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| SystemTime::now().duration_since(t).ok())
+                .is_some_and(|age| age > Duration::from_secs(LOCK_STALE_SECS));
+            if !stale {
+                return LockOutcome::Held;
+            }
+            match std::fs::remove_dir(lock_path).and_then(|()| std::fs::create_dir(lock_path)) {
+                Ok(()) => LockOutcome::Acquired,
+                Err(e) => LockOutcome::Failed(format!(
+                    "could not reclaim the stale refresh lock {lock_path} ({e})"
+                )),
+            }
+        }
+        Err(e) => LockOutcome::Failed(format!(
+            "could not take the refresh lock {lock_path} ({e})"
+        )),
     }
-    let stale = std::fs::metadata(lock_path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| SystemTime::now().duration_since(t).ok())
-        .is_some_and(|age| age > Duration::from_secs(LOCK_STALE_SECS));
-    stale && std::fs::remove_dir(lock_path).is_ok() && std::fs::create_dir(lock_path).is_ok()
 }
 
 fn wipe(path: &str) {
