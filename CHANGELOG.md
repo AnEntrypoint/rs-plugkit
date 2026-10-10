@@ -1,3 +1,9 @@
+## 2026-10-10 - codesearch: a subdirectory root resolves to the marked project that owns it
+
+**Changes:** `search.rs` `marked_ancestor_for_root` walks a refused absolute `root` up to the nearest ancestor the host grants (a directory carrying `.git`, `.gm`, `package.json`, `Cargo.toml`, `go.mod` or `pyproject.toml`) and returns that ancestor with the part of the root below it. `resolve_scan_target` searches the ancestor scoped to the remainder, so `root: "C:/dev/gm/rs-plugkit/crates/plugkit-core/src/orchestrator"` searches that directory instead of being refused, for `codesearch` literal/regex/filename, `grep` and `grep` comments. `scope_under_marked_ancestor` rewrites the body the same way for the dual route, which resolves `root` before `codesearch_identifier` and `codesearch_at_root` see it. `resolve_scan_target` now returns an owned root.
+
+**Not changed:** a root with no marked ancestor anywhere above it is still refused, and a relative root is still scoped against the dispatch project. The refusal now names the ancestor search it made.
+
 ## 2026-10-10 - .agentplug-kv cache entries are untracked, not deleted
 
 **Decision:** the codeinsight cache under `.agentplug-kv/` (`codeinsight`, `codeinsight-edges`, `codeinsight-edges-by-file`, `codeinsight-manifest`, `codeinsight-manifest__root<hash>`, `embed-query-spill`, `git_commit_dedup`) is derived local state and is no longer in the index: 5,083 tracked entries were removed with `git rm -r --cached .agentplug-kv` and stay on disk. `/.agentplug-kv/` in `.gitignore` keeps them out of `untracked`, so a codeinsight sync that prunes or rewrites a cache file can no longer surface as a deletion in `git_status`.
