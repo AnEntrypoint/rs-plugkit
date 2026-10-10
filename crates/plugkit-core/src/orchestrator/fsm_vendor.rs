@@ -434,7 +434,7 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
         let mut lines = vec![
             "# Compiled FSM gate predicates".to_string(),
             String::new(),
-            "Reference for `gates.predicate` in .gm/instructions/fsm/graph.json's `gates` array -- generated from the SAME registry transitions.rs's predicate_result() dispatches on, so this can never silently drift out of sync with what actually exists. A predicate name here is the ONLY thing a graph's gates array can reference directly; a genuinely new condition needs a jit hook instead (see hooks/example.js) or a Rust change to add a new compiled predicate.".to_string(),
+            "Reference for `gates.predicate` in .gm/instructions/fsm/graph.json's `gates` array -- generated from the SAME registry transitions.rs's predicate_result() dispatches on, so this can never silently drift out of sync with what actually exists. A predicate name here is the ONLY thing a graph's gates array can reference directly; a genuinely new condition needs a jit hook instead or a Rust change to add a new compiled predicate.".to_string(),
             String::new(),
         ];
         for (name, desc) in transitions::known_predicates() {
