@@ -204,6 +204,14 @@ pub const ERR_CODE_PANIC: &str = "panic";
 pub const ERR_CODE_GATE_DENIED: &str = "gate_denied";
 pub const ERR_CODE_DANGLING_REFERENCE: &str = "dangling_reference";
 pub const ERR_CODE_DANGLING_SCAN_UNREADABLE: &str = "dangling_scan_unreadable";
+pub const ERR_CODE_APPEND_ONLY_SHRINK: &str = "append_only_shrink_refused";
+pub const ERR_CODE_APPEND_ONLY_REWRITE: &str = "append_only_rewrite_refused";
+
+/// Files no lane may shorten: the witness log is the (id, hash, ts) audit primitive, so a run adds
+/// one line and never rewrites the file. Measured 2026-10-10 by session orch-main-r86-witness-1:
+/// a concurrent whole-file write took `.gm/witness-log.md` from 4675 lines to 3. `prd.yml` and
+/// `mutables.yml` are absent on purpose: their verbs reconcile per row and must keep rewriting.
+const APPEND_ONLY_PATH_SUFFIXES: &[&str] = &["/.gm/witness-log.md"];
 
 fn shared_store_contract() -> Value {
     json!({
@@ -607,71 +615,251 @@ fn read_path_rejection(verb: &str, path: &str, body: &Value) -> Option<u64> {
     project_path_rejection(verb, path, caller_opted_outside_root(body))
 }
 
-fn paged_lines(content: &str, offset: usize, limit: usize) -> (String, usize, usize, usize) {
-    let lines: Vec<&str> = content.split('\n').collect();
-    let total = lines.len();
-    let start = offset.min(total);
-    let end = match limit {
-        0 => total,
-        n => (start + n).min(total),
-    };
-    let selected = &lines[start..end];
-    let mut out = String::new();
-    for (i, line) in selected.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        out.push_str(line);
+fn fs_read_lines(content: &str) -> Vec<&str> {
+    if content.is_empty() {
+        return Vec::new();
     }
-    (out, total, start, end.saturating_sub(start))
+    let trimmed = content.strip_suffix('\n').unwrap_or(content);
+    trimmed.split('\n').collect()
 }
 
-const FS_READ_RANGE_HINT: &str = "line ranges are 0-based line numbers: \"start\"/\"offset\" is the first line returned, \"end\" is EXCLUSIVE while \"limit\" is a line count";
+const FS_READ_RANGE_KEYS: &[&str] = &[
+    "startLine", "endLine", "start", "end", "count", "from", "to", "offset", "limit", "line",
+    "lines",
+];
+
+const FS_READ_RANGE_PAIRS: &[(&str, &str, bool)] = &[
+    ("startLine", "endLine", false),
+    ("start", "end", false),
+    ("from", "to", false),
+    ("offset", "limit", true),
+    ("line", "lines", true),
+];
+
+const FS_READ_COUNT_KEYS: &[&str] = &["count", "limit", "lines"];
+
+const FS_READ_END_KEYS: &[&str] = &["endLine", "end", "to"];
+
+const FS_READ_RANGE_LOOKING_TOKENS: &[&str] =
+    &["start", "end", "line", "offset", "limit", "count"];
+
+const FS_READ_RANGE_HINT: &str = "every range alias is 1-based and inclusive on both ends: the start alias names the first line returned, \"endLine\"/\"end\"/\"to\" the last line returned, and \"limit\"/\"count\"/\"lines\" a number of lines";
+
+fn fs_read_key_present(body: &Value, key: &str) -> bool {
+    matches!(body.get(key), Some(v) if !v.is_null())
+}
 
 fn line_range_field(body: &Value, key: &str) -> Result<Option<usize>, String> {
-    match body.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(v) => match v.as_u64() {
-            Some(n) => Ok(Some(n as usize)),
-            None => Err(format!(
-                "\"{key}\" must be a non-negative integer line number, got {v} -- {FS_READ_RANGE_HINT}"
-            )),
-        },
+    let Some(value) = body.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
     }
+    let parsed = match value {
+        Value::Number(number) => number.as_u64().map(|n| n as usize),
+        Value::String(text) => text.trim().parse::<usize>().ok(),
+        _ => None,
+    };
+    match parsed {
+        Some(n) => Ok(Some(n)),
+        None => Err(format!(
+            "\"{key}\" must be a non-negative integer line number, got {value} -- {FS_READ_RANGE_HINT}"
+        )),
+    }
+}
+
+fn fs_read_range_looking_keys(body: &Value) -> Vec<String> {
+    let Some(map) = body.as_object() else {
+        return Vec::new();
+    };
+    let mut found: Vec<String> = Vec::new();
+    for key in map.keys() {
+        if FS_READ_RANGE_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        let normalized: String = key
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .flat_map(|c| c.to_lowercase())
+            .collect();
+        let looks_like_range = FS_READ_RANGE_LOOKING_TOKENS
+            .iter()
+            .any(|token| normalized.contains(token))
+            || normalized == "from"
+            || normalized == "to";
+        if looks_like_range {
+            found.push(key.clone());
+        }
+    }
+    found.sort();
+    found
+}
+
+struct FsReadLineRange {
+    start: usize,
+    end: usize,
+    requested_end: Option<usize>,
+    clamped: bool,
+}
+
+fn fs_read_line_range(
+    body: &Value,
+    total_lines: usize,
+    path: &str,
+) -> Result<Option<FsReadLineRange>, String> {
+    let present = |key: &str| fs_read_key_present(body, key);
+    let Some(&(start_key, end_key, end_key_is_count)) = FS_READ_RANGE_PAIRS
+        .iter()
+        .copied()
+        .find(|(first, second, _)| present(*first) || present(*second))
+    else {
+        return Ok(None);
+    };
+    let start = line_range_field(body, start_key)?.unwrap_or(1);
+    let mut end: Option<usize> = None;
+    let mut count: Option<usize> = None;
+    if present(end_key) {
+        let value = line_range_field(body, end_key)?.unwrap_or(0);
+        if end_key_is_count {
+            count = Some(value);
+        } else {
+            end = Some(value);
+        }
+    }
+    if end.is_none() && count.is_none() {
+        for key in FS_READ_COUNT_KEYS {
+            if *key != end_key && present(*key) {
+                count = Some(line_range_field(body, key)?.unwrap_or(0));
+                break;
+            }
+        }
+    }
+    if end.is_none() && count.is_none() {
+        for key in FS_READ_END_KEYS {
+            if *key != end_key && present(*key) {
+                end = Some(line_range_field(body, key)?.unwrap_or(0));
+                break;
+            }
+        }
+    }
+    if start == 0 {
+        return Err(format!(
+            "invalid range: \"{start_key}\" ({start}) must be at least 1 -- {FS_READ_RANGE_HINT}"
+        ));
+    }
+    if total_lines == 0 {
+        return Err(format!(
+            "invalid range: {path} has 0 lines, so no line range can be read from it"
+        ));
+    }
+    if start > total_lines {
+        return Err(format!(
+            "invalid range: \"{start_key}\" ({start}) is past the end of {path}, which has {total_lines} lines, so 1-{total_lines} is the whole readable range"
+        ));
+    }
+    let requested_end = end;
+    let mut end = match (end, count) {
+        (Some(last), _) => {
+            if last < start {
+                return Err(format!(
+                    "invalid range: the last line requested ({last}) is before the first line requested ({start}) -- {FS_READ_RANGE_HINT}"
+                ));
+            }
+            last
+        }
+        (None, Some(0)) => total_lines,
+        (None, Some(n)) => start.saturating_add(n).saturating_sub(1),
+        (None, None) => total_lines,
+    };
+    let clamped = end > total_lines;
+    if clamped {
+        end = total_lines;
+    }
+    Ok(Some(FsReadLineRange {
+        start,
+        end,
+        requested_end,
+        clamped,
+    }))
+}
+
+fn fs_read_reply(
+    path: &str,
+    mut text: String,
+    total_lines: usize,
+    start: usize,
+    end: usize,
+    requested_end: Option<usize>,
+    clamped: bool,
+    max_bytes: Option<usize>,
+) -> u64 {
+    let mut truncated_at_bytes = false;
+    if let Some(cap) = max_bytes {
+        if text.len() > cap {
+            let mut cut = cap;
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text = text[..cut].to_string();
+            truncated_at_bytes = true;
+        }
+    }
+    let returned_lines = if text.is_empty() {
+        0
+    } else {
+        text.split('\n').count()
+    };
+    let mut data = json!({
+        "path": path,
+        "content": text,
+        "total_lines": total_lines,
+        "range_basis": "1-based, inclusive on both ends",
+        "start_line": start,
+        "end_line": end,
+        "returned_lines": returned_lines,
+        "has_more_lines": end < total_lines,
+        "truncated_at_bytes": truncated_at_bytes,
+        "offset": start.saturating_sub(1),
+    });
+    if clamped {
+        if let Some(requested) = requested_end {
+            data["end_line_requested"] = json!(requested);
+        }
+        data["clamped_to_total_lines"] = json!(true);
+    }
+    if end < total_lines {
+        data["next_start_line"] = json!(end + 1);
+    }
+    ok("fs_read", data)
 }
 
 fn fs_read(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() {
-        return err("fs_read", "path required -- pass {\"path\":\"<relative path>\"}; add \"offset\"/\"limit\" or \"start\"/\"end\" to read a line range and \"max_bytes\" to cap one chunk");
+        return err("fs_read", "path required -- pass {\"path\":\"<relative path>\"}; add \"startLine\"/\"endLine\" (or \"start\"/\"end\", \"from\"/\"to\", \"offset\"/\"limit\", \"line\"/\"lines\", \"start\"/\"count\") to read a line range and \"max_bytes\" to cap one chunk");
     }
     if let Some(rejection) = read_path_rejection("fs_read", path, body) {
         return rejection;
     }
-    let field = |key: &str| line_range_field(body, key);
-    let offset = match field("offset") {
-        Ok(v) => v.unwrap_or(0),
-        Err(m) => return err("fs_read", &m),
-    };
-    let limit = match field("limit") {
-        Ok(v) => v.unwrap_or(0),
-        Err(m) => return err("fs_read", &m),
-    };
-    let start = match field("start") {
-        Ok(v) => v,
-        Err(m) => return err("fs_read", &m),
-    };
-    let end = match field("end") {
-        Ok(v) => v,
-        Err(m) => return err("fs_read", &m),
-    };
-    let offset_given = matches!(body.get("offset"), Some(v) if !v.is_null());
-    let limit_given = matches!(body.get("limit"), Some(v) if !v.is_null());
-    if (start.is_some() || end.is_some()) && (offset_given || limit_given) {
-        return err(
+    let range_looking = fs_read_range_looking_keys(body);
+    if !range_looking.is_empty() {
+        return err_json(
             "fs_read",
-            "pass either \"start\"/\"end\" or \"offset\"/\"limit\", never both -- they select the same line range and the pair you send wins, silently ignoring the other",
+            json!({
+                "error": format!("{} is not an fs_read line-range key, so it was ignored instead of slicing the file", range_looking.join(", ")),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "unknown_range_keys": range_looking,
+                "accepted_range_keys": FS_READ_RANGE_KEYS,
+                "range_basis": "1-based, inclusive on both ends; limit/count/lines is a number of lines",
+                "next_dispatch": "fs_read",
+            }),
         );
+    }
+    for key in FS_READ_RANGE_KEYS {
+        if let Err(message) = line_range_field(body, *key) {
+            return err("fs_read", &message);
+        }
     }
     let max_bytes = match body.get("max_bytes").and_then(|v| v.as_u64()) {
         Some(n) if n > 0 => Some(n as usize),
@@ -679,56 +867,42 @@ fn fs_read(body: &Value) -> u64 {
     };
     match host_read(path) {
         Some(content) => {
-            let file_lines = content.split('\n').count();
-            let (offset, limit) = match (start, end) {
-                (None, None) => (offset, limit),
-                _ => {
-                    let first = start.unwrap_or(0);
-                    if let Some(last) = end {
-                        if last <= first {
-                            return err(
-                                "fs_read",
-                                &format!("invalid range: \"end\" ({last}) must be greater than \"start\" ({first}) -- {FS_READ_RANGE_HINT}"),
-                            );
-                        }
-                    }
-                    if first >= file_lines {
-                        return err(
-                            "fs_read",
-                            &format!("invalid range: \"start\" ({first}) is past the end of {path}, which has {file_lines} lines"),
-                        );
-                    }
-                    (first, end.map_or(0, |last| last - first))
-                }
+            let total_lines = fs_read_lines(&content).len();
+            let range = match fs_read_line_range(body, total_lines, path) {
+                Ok(range) => range,
+                Err(message) => return err("fs_read", &message),
             };
-            if offset == 0 && limit == 0 && max_bytes.is_none() {
-                return ok("fs_read", Value::String(content));
-            }
-            let (mut text, total_lines, from_line, returned_lines) =
-                paged_lines(&content, offset, limit);
-            let mut truncated_at_bytes = false;
-            if let Some(cap) = max_bytes {
-                if text.len() > cap {
-                    let mut end = cap;
-                    while end > 0 && !text.is_char_boundary(end) {
-                        end -= 1;
+            match range {
+                None => {
+                    if max_bytes.is_none() || total_lines == 0 {
+                        return ok("fs_read", Value::String(content));
                     }
-                    text = text[..end].to_string();
-                    truncated_at_bytes = true;
+                    fs_read_reply(
+                        path,
+                        content,
+                        total_lines,
+                        1,
+                        total_lines,
+                        None,
+                        false,
+                        max_bytes,
+                    )
+                }
+                Some(range) => {
+                    let lines = fs_read_lines(&content);
+                    let text = lines[range.start - 1..range.end].join("\n");
+                    fs_read_reply(
+                        path,
+                        text,
+                        total_lines,
+                        range.start,
+                        range.end,
+                        range.requested_end,
+                        range.clamped,
+                        max_bytes,
+                    )
                 }
             }
-            ok(
-                "fs_read",
-                json!({
-                    "path": path,
-                    "content": text,
-                    "total_lines": total_lines,
-                    "offset": from_line,
-                    "returned_lines": returned_lines,
-                    "has_more_lines": from_line + returned_lines < total_lines,
-                    "truncated_at_bytes": truncated_at_bytes,
-                }),
-            )
         }
         None => err("fs_read", "file read failed"),
     }
@@ -763,6 +937,7 @@ fn fs_write(body: &Value) -> u64 {
         .get("allow_empty")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let append = body.get("append").and_then(|v| v.as_bool()).unwrap_or(false);
     if path.is_empty() {
         return err("fs_write", "path required");
     }
@@ -809,10 +984,113 @@ fn fs_write(body: &Value) -> u64 {
             }),
         );
     }
+    if append {
+        return fs_append(path, &content);
+    }
+    if is_append_only_path(path) {
+        let bytes_on_disk = append_only_bytes_on_disk(path);
+        let bytes_offered = content.len() as u64;
+        let shrinks = bytes_offered < bytes_on_disk;
+        return err_json(
+            "fs_write",
+            json!({
+                "error": format!(
+                    "{path} is append-only (the witness log is the (id, hash, ts) audit primitive): this write would {} it, {} bytes on disk against {} offered. A whole-file write here is never served, because a concurrent read-modify-write took .gm/witness-log.md from 4675 lines to 3 on 2026-10-10.",
+                    if shrinks { "shrink" } else { "rewrite" },
+                    bytes_on_disk,
+                    bytes_offered
+                ),
+                "error_code": if shrinks { ERR_CODE_APPEND_ONLY_SHRINK } else { ERR_CODE_APPEND_ONLY_REWRITE },
+                "path": path,
+                "bytes_on_disk": bytes_on_disk,
+                "bytes_offered": bytes_offered,
+                "shrinks": shrinks,
+                "next_dispatch": "fs_write",
+                "accepted_shape": {
+                    "path": path,
+                    "append": true,
+                    "content": "<one line ending in \\n>"
+                },
+            }),
+        );
+    }
     if super::host_abi::host_write(path, &content) {
         ok("fs_write", json!({ "bytes": content.len(), "path": path }))
     } else {
         err("fs_write", "write failed")
+    }
+}
+
+fn is_append_only_path(path: &str) -> bool {
+    let normalized = path.trim().replace('\\', "/");
+    let normalized = normalized.trim_start_matches("./");
+    let anchored = format!("/{normalized}");
+    APPEND_ONLY_PATH_SUFFIXES
+        .iter()
+        .any(|suffix| anchored.ends_with(suffix))
+}
+
+fn append_only_bytes_on_disk(path: &str) -> u64 {
+    super::host_abi::host_stat(path)
+        .as_ref()
+        .and_then(|stat| stat.get("size"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+/// Open for append, write, close. The host ABI has no append import, so this runs through
+/// `host_exec_js` exactly as `config_sync.rs` does for `fs.renameSync`: the file is opened in
+/// append mode, written and closed in one call, so three concurrent appenders cannot interleave
+/// into a lost update and no read of the file is ever involved.
+fn fs_append(path: &str, content: &str) -> u64 {
+    let Ok(target) = serde_json::to_string(&crate::pkfs::anchor(path)) else {
+        return err("fs_write", "append failed: the path is not encodable");
+    };
+    let Ok(payload) = serde_json::to_string(content) else {
+        return err("fs_write", "append failed: the content is not encodable");
+    };
+    let code = r#"const fs=require('fs');const P=require('path');const f=__TARGET__;
+try{fs.mkdirSync(P.dirname(f),{recursive:true});fs.appendFileSync(f,__PAYLOAD__);process.stdout.write(JSON.stringify({ok:true,size:fs.statSync(f).size}));}
+catch(e){process.stdout.write(JSON.stringify({ok:false,error:String((e&&e.code)||e)}));}"#
+        .replace("__TARGET__", &target)
+        .replace("__PAYLOAD__", &payload);
+    let options = json!({ "timeoutMs": 15_000 }).to_string();
+    let packed = unsafe {
+        super::host_abi::host_exec_js(
+            code.as_ptr(),
+            code.len() as u32,
+            options.as_ptr(),
+            options.len() as u32,
+        )
+    };
+    let outcome = unpack_to_string(packed)
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|envelope| envelope.get("stdout").and_then(Value::as_str).map(str::to_string))
+        .and_then(|stdout| serde_json::from_str::<Value>(&stdout).ok());
+    match outcome {
+        Some(result) if result.get("ok").and_then(Value::as_bool) == Some(true) => ok(
+            "fs_write",
+            json!({
+                "bytes": content.len(),
+                "path": path,
+                "append": true,
+                "size": result.get("size").and_then(Value::as_u64).unwrap_or(0),
+            }),
+        ),
+        Some(result) => err_json(
+            "fs_write",
+            json!({
+                "error": format!(
+                    "append failed for {}: {}",
+                    path,
+                    result.get("error").and_then(Value::as_str).unwrap_or("unknown")
+                ),
+                "error_code": ERR_CODE_FAILED,
+                "path": path,
+                "next_dispatch": "fs_write",
+            }),
+        ),
+        None => err("fs_write", "append failed: host_exec_js returned no stdout"),
     }
 }
 
