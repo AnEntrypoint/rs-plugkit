@@ -81,7 +81,14 @@ pub fn cas_retry_write<T>(
             }
             pkfs::CasWriteOutcome::IoError => {
                 if attempt >= max_attempts {
-                    return Err((String::new(), "write failed".to_string(), 1));
+                    return Err((
+                        String::new(),
+                        format!(
+                            "{} write failed after {} attempts: {}",
+                            verb_label, max_attempts, path_s
+                        ),
+                        1,
+                    ));
                 }
                 continue;
             }

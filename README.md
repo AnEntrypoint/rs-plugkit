@@ -6,10 +6,9 @@ weights, used whenever a real embed answerer exists out-of-wasm). Both ship
 from `AnEntrypoint/plugkit-bin` and are consumed exclusively by
 `agentplug-runner` (repo `AnEntrypoint/agentplug`), the sole host that loads
 this guest. There is no standalone `plugkit.exe` CLI anymore, no private
-self-update path, and no direct-loader fallback — the retired `gm-runner`
+self-update path, and no direct-loader fallback: the retired `gm-runner`
 native host and the retired JS wasm-host (`plugkit-wasm-wrapper.js`) both
-routed through code paths this crate no longer ships. (The `rs-exec` crate
-is also retired and archived; this crate has never depended on it.)
+route through code paths this crate does not ship. This crate depends on no retired or archived crate.
 
 ## Architecture
 
@@ -284,7 +283,7 @@ The standalone `cdp` verb is removed; `crawl engine=cdp` replaces it. `browser` 
 removed too and answer `unknown_verb`.
 
 When a shell verb returns a `task_id`, use `task-output` with JSON body
-`{"id":"task-…"}` to retrieve it. Use `task-stop` with the same body to stop
+`{"id":"task-<id>"}` to retrieve it. Use `task-stop` with the same body to stop
 it. These are GM verb dispatches, not shell commands.
 
 `task-list {}` reports status without persisting results. The explicit
@@ -449,7 +448,7 @@ behavior change.
 ## FSM graph
 
 The phase graph (SPECIFY -> PROVE -> EMIT -> STATE -> CONC -> SEC -> RES ->
-DECIDE -> COMPLETE by default) is data, not hardcoded control flow — a
+DECIDE -> COMPLETE by default) is data, not hardcoded control flow: a
 project's `.gm/instructions/fsm/graph.json` (written by `fsm-vendor`) can
 define a different phase set or gate shape. The COMPLETE gate's
 `ci-validated-fresh` check compares `.ci-validated`'s `head_sha` against the
@@ -464,7 +463,7 @@ vendored override) -> a configured source repo synced into
 `.gm/instructions-source-cache/` -> the compiled-in default under
 `crates/plugkit-core/src/orchestrator/instructions/prose/*.md`
 (`include_str!`'d at build). Editing the compiled default requires a push
-to this repo and a cascade rebuild — it is never read live from this
+to this repo and a cascade rebuild: it is never read live from this
 checkout.
 
 ## Build
@@ -497,7 +496,7 @@ A push to `AnEntrypoint/{rs-codeinsight, rs-search, rs-plugkit}` triggers
 `cascade.yml`, which lands here and builds the single `plugkit.wasm` +
 `plugkit-slim.wasm` pair via `release.yml`. `agentplug` consumes that
 release artifact as a separate downstream pipeline, decoupled at the
-`plugkit-bin` release boundary — it is not itself a stage in this cascade.
+`plugkit-bin` release boundary: it is not itself a stage in this cascade.
 
 ## Observability
 
