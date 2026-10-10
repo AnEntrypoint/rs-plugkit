@@ -4992,6 +4992,9 @@ pub(super) fn git_branch_delete(body: &Value) -> u64 {
 }
 
 pub(super) fn git_rm(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_rm", body, &["paths", "force", "cached"]) {
+        return refusal;
+    }
     let cwd = body_cwd(body);
     let paths: Vec<String> = body
         .get("paths")
@@ -5009,9 +5012,13 @@ pub(super) fn git_rm(body: &Value) -> u64 {
         .get("cached")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
     let mut argv: Vec<&str> = vec!["rm"];
     if cached {
         argv.push("--cached");
+    }
+    if force {
+        argv.push("-f");
     }
     argv.push("-r");
     for p in &paths {
@@ -5020,7 +5027,10 @@ pub(super) fn git_rm(body: &Value) -> u64 {
     if let Err(e) = run_git_checked(&argv, cwd, "git_rm", "git rm failed") {
         return e;
     }
-    ok("git_rm", json!({ "removed": paths, "cached": cached }))
+    ok(
+        "git_rm",
+        json!({ "removed": paths, "cached": cached, "forced": force }),
+    )
 }
 
 pub(super) fn git_revert(body: &Value) -> u64 {
