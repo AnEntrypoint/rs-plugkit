@@ -589,6 +589,30 @@ fn investigate_readonly_reply(
 }
 
 #[cfg(target_arch = "wasm32")]
+const READONLY_ACCEPTANCE_CHARS: usize = 160;
+
+#[cfg(target_arch = "wasm32")]
+fn readonly_acceptance(slots: &serde_json::Value, candidates: &[String], cap: usize) -> serde_json::Value {
+    let source = slots["candidate_acceptance"].as_object();
+    let mut map = serde_json::Map::new();
+    for id in candidates.iter().take(cap) {
+        let Some(text) = source.and_then(|fields| fields.get(id)).and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let clipped = if flat.chars().count() <= READONLY_ACCEPTANCE_CHARS {
+            flat
+        } else {
+            let mut head: String = flat.chars().take(READONLY_ACCEPTANCE_CHARS).collect();
+            head.push_str(" ...");
+            head
+        };
+        map.insert(id.clone(), json!(clipped));
+    }
+    serde_json::Value::Object(map)
+}
+
+#[cfg(target_arch = "wasm32")]
 fn investigate_readonly_payload(
     session_id: &Option<String>,
     instruction: &str,
@@ -624,6 +648,7 @@ fn investigate_readonly_payload(
         value["launch_count"] = json!(launched);
         value
     });
+    let acceptance = readonly_acceptance(slots, &candidates, cap);
     let slots_view = json!({
         "live": live,
         "live_source": slots["live_source"],
@@ -635,6 +660,8 @@ fn investigate_readonly_payload(
         "launchable": node_candidates.len(),
         "candidates_total": candidates.len(),
         "candidates": candidates.iter().take(cap).collect::<Vec<_>>(),
+        "candidate_acceptance": acceptance,
+        "candidates_route": slots["candidates_route"].clone(),
         "launch_total": refill_needed,
         "launch": launch,
     });
@@ -643,12 +670,13 @@ fn investigate_readonly_payload(
         "session_id": session_id,
         "instruction": instruction,
         "instruction_hash": instruction_hash,
-        "note": "read-only: no phase, mutable or PRD row written; lists hold list_cap ids, and candidates_total and launch_total give the full counts; the reply is capped at 4 KB",
+        "note": "read-only: no phase, mutable or PRD row written; lists hold list_cap ids, and candidates_total and launch_total give the full counts; slots.candidate_acceptance holds the acceptance text of each shown candidate, clipped; route names what to do when slots.candidates is empty; the reply is capped at 4 KB",
         "read_only": true,
         "list_cap": cap,
         "subagents_running": live,
         "concurrency_shortfall": shortfall,
         "launchable": node_candidates.len(),
+        "route": slots["candidates_route"]["route"].clone(),
         "slots_prose": super::pool_slots::slots_prose(&slots_view),
         "slots": slots_view,
     })
