@@ -603,9 +603,119 @@ fn is_store_busy_error(err: &str) -> bool {
         || err.to_ascii_lowercase().contains("database is locked")
 }
 
-fn store_lock_directory_held(db: &str) -> Option<String> {
+/// A `<db>.lock` directory is libsql's mutual-exclusion marker under this VFS: the writer removes it
+/// when it finishes, so a process killed mid-write leaves it forever and every later write fails with
+/// no holder to wait on. Every dispatch that writes gm.db records its pid and a heartbeat timestamp
+/// beside it in `<db>.lock.owner` (the daemon's store-owner claim), so that record is the liveness
+/// evidence the directory itself cannot carry: no record means no writer ever claimed it, a dead pid
+/// means the writer is provably gone, and a heartbeat older than STORE_LOCK_STALE_MS means a writer
+/// that stopped heartbeating. A lock whose recorded pid is alive is never touched -- only its owner
+/// may remove it.
+const STORE_LOCK_STALE_MS: u64 = 900_000;
+
+/// Runs on the host because the WASI VFS offers no directory removal: `fs.rmSync` is the only way to
+/// clear a lock directory from here. Prints one JSON object: `state` is clear, reaped or held.
+const STORE_LOCK_SETTLE_JS: &str = r#"(function () {
+  var fs = require('node:fs');
+  var now = Date.now();
+  var out = function (o) { process.stdout.write(JSON.stringify(o)); };
+  if (!fs.existsSync(P.dir)) { out({ state: 'clear' }); return; }
+  var pid = null, ts = 0;
+  try {
+    var lines = fs.readFileSync(P.own, 'utf8').split('\n');
+    pid = parseInt(lines[0], 10);
+    ts = parseInt(lines[1], 10) || 0;
+  } catch (e) { pid = null; ts = 0; }
+  var hasPid = typeof pid === 'number' && isFinite(pid) && pid > 0;
+  var alive = false;
+  if (hasPid) {
+    if (pid === process.pid) { alive = true; }
+    else { try { process.kill(pid, 0); alive = true; } catch (e) { alive = !!(e && e.code === 'EPERM'); } }
+  }
+  var ownerAge = ts > 0 ? now - ts : 0;
+  var stale = !hasPid || !alive || (ts > 0 && ownerAge >= P.ttl);
+  var shape = function (state, extra) {
+    var o = { state: state, owner_pid: hasPid ? pid : null, owner_alive: alive, owner_age_ms: ts > 0 ? ownerAge : null };
+    for (var k in extra) { o[k] = extra[k]; }
+    return o;
+  };
+  if (!stale) { out(shape('held', {})); return; }
+  try {
+    fs.rmSync(P.dir, { recursive: true, force: true });
+    fs.rmSync(P.own, { force: true });
+    out(shape('reaped', { stale_reason: !hasPid ? 'no owner record' : (!alive ? 'owner pid is not alive' : 'owner heartbeat is older than ' + P.ttl + ' ms') }));
+  } catch (e) {
+    out(shape('held', { reap_error: String((e && e.message) || e) }));
+  }
+})();"#;
+
+fn store_busy_lock_bail(lock_dir: &str, reason: &str, info: Value) -> Value {
+    json!({
+        "ok": false,
+        "complete": false,
+        "store_busy": true,
+        "lock_dir": lock_dir,
+        "lock_settle": info,
+        "error": format!(
+            "{} The refresh returned without waiting: the lock directory {} is present and {}.",
+            STORE_BUSY_REFRESH_NOTE, lock_dir, reason
+        )
+    })
+}
+
+/// Clears a lock directory no live writer owns and returns None, or returns the store-busy bail that
+/// sync_files must answer with. A lock whose recorded owner pid is alive is left alone.
+fn settle_stale_store_lock(db: &str) -> Option<Value> {
     let lock_dir = format!("{db}.lock");
-    (crate::wasm_dispatch::host_stat_is_directory(&lock_dir) == Some(true)).then_some(lock_dir)
+    if crate::wasm_dispatch::host_stat_is_directory(&lock_dir) != Some(true) {
+        return None;
+    }
+    let params = serde_json::to_string(&json!({
+        "dir": lock_dir,
+        "own": format!("{lock_dir}.owner"),
+        "ttl": STORE_LOCK_STALE_MS,
+    }))
+    .unwrap_or_else(|_| "{}".to_string());
+    let timeout = json!({ "timeoutMs": 5000 }).to_string();
+    let code = format!("const P = {params};\n{STORE_LOCK_SETTLE_JS}");
+    let packed = unsafe {
+        crate::wasm_dispatch::host_exec_js(
+            code.as_ptr(),
+            code.len() as u32,
+            timeout.as_ptr(),
+            timeout.len() as u32,
+        )
+    };
+    let result = crate::wasm_dispatch::unpack_to_value_pub(packed);
+    if result.get("timed_out").and_then(Value::as_bool) == Some(true)
+        || result.get("exit_code").and_then(Value::as_i64) != Some(0)
+    {
+        return Some(store_busy_lock_bail(
+            &lock_dir,
+            "its owner could not be checked, so it was left in place",
+            result,
+        ));
+    }
+    let settle: Value = result
+        .get("stdout")
+        .and_then(Value::as_str)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(Value::Null);
+    match settle.get("state").and_then(Value::as_str) {
+        Some("clear") | Some("reaped") => None,
+        Some("held") => {
+            let reason = match settle.get("reap_error").and_then(Value::as_str) {
+                Some(_) => "it is stale but could not be removed",
+                None => "a live writer still owns it",
+            };
+            Some(store_busy_lock_bail(&lock_dir, reason, settle))
+        }
+        _ => Some(store_busy_lock_bail(
+            &lock_dir,
+            "its owner could not be determined, so it was left in place",
+            settle,
+        )),
+    }
 }
 
 pub(crate) fn sync_files(
@@ -618,17 +728,8 @@ pub(crate) fn sync_files(
     focus: Option<&str>,
 ) -> Value {
     let db = db_path(project_path);
-    if let Some(lock_dir) = store_lock_directory_held(&db) {
-        return json!({
-            "ok": false,
-            "complete": false,
-            "store_busy": true,
-            "lock_dir": lock_dir,
-            "error": format!(
-                "{} The refresh returned without waiting: the lock directory {} is present, and the WASI VFS records no owner in it, so a directory left by an unclean exit blocks every write until it is removed.",
-                STORE_BUSY_REFRESH_NOTE, lock_dir
-            )
-        });
+    if let Some(busy) = settle_stale_store_lock(&db) {
+        return busy;
     }
     if let Err(e) = ensure_schema(&db) {
         if is_store_busy_error(&e) {

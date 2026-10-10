@@ -1272,6 +1272,22 @@ prd-add {id, subject, description, notes, status, blockedBy, overwrite}. body.id
   subject: the row's one-line intent. description and notes are free text.
   help:true returns this text and writes no row.";
 
+pub(super) const CODEINSIGHT_HELP: &str = "\
+codeinsight {action, mode, symbol, name, path, file, limit, k, verbosity, refresh}.
+  action: overview (the default when neither action nor mode is given), status, outline, find,
+          callers, callees, impact, hotspots, orphans, imports, importers, cycles, coupling,
+          complexity, duplicates, tests, sync. An unknown value gets an error naming the accepted set.
+  mode: an alias for action, used only when action is absent. {mode:\"callers\"} returns call edges;
+        a body with neither action nor mode returns the project overview, so a caller asking for edges
+        must name one.
+  symbol: the symbol to look up; name is accepted as an alias. callers, callees, impact, find and
+          outline are the actions that need one (outline takes path or file instead) and they refuse
+          a body without it.
+  limit (alias k): caps the rows an action returns.
+  The dedicated verbs callers, callees and impact are this same handler pinned to one action, so
+  gm {verb:\"callers\", body:{name:\"<symbol>\"}} and codeinsight {mode:\"callers\"} answer alike.
+  help:true returns this text and writes no state.";
+
 pub(super) fn help_requested(body: &Value) -> bool {
     match body.get("help") {
         Some(Value::Bool(b)) => *b,
@@ -1294,6 +1310,7 @@ pub(super) fn verb_help_doc(verb: &str) -> Option<&'static str> {
         "fs_stat" => Some(FS_STAT_HELP),
         "prd-resolve" => Some(PRD_RESOLVE_HELP),
         "prd-add" => Some(PRD_ADD_HELP),
+        "codeinsight" | "code_insight" => Some(CODEINSIGHT_HELP),
         "git_merge_abort" => Some(super::git::GIT_MERGE_ABORT_HELP),
         "git_worktree" => Some("git_worktree {action: list} returns worktrees; {action: add, path, ref?: HEAD, detach?: true} creates a linked checkout; detach false requires an existing local branch name; {action: remove, path} removes a clean unlocked checkout without force. Unknown fields are refused per action. Repository selectors and session fields are accepted."),
         _ => None,
