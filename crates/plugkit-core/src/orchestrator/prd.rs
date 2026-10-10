@@ -17,7 +17,7 @@ pub fn prd_path_for(cwd: Option<&str>) -> std::path::PathBuf {
     }
 }
 
-pub fn peek_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)> {
+pub fn pending_commit_comments_for_paths(cwd: Option<&str>, touched: &[String]) -> Vec<(String, String)> {
     let path = prd_path_for(cwd);
     let path_s = path.to_string_lossy().to_string();
     if !pkfs::exists(&path_s) {
@@ -34,46 +34,111 @@ pub fn peek_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)> 
     let mut out = Vec::new();
     if let Some(seq) = doc.as_sequence() {
         for item in seq {
-            if let Some(map) = item.as_mapping() {
-                let status = map
-                    .get(&Value::String("status".to_string()))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let comment = map
-                    .get(&Value::String("commit_comment".to_string()))
-                    .and_then(|v| v.as_str());
-                if !status_is_open(status) {
-                    if let Some(c) = comment {
-                        if !c.trim().is_empty() {
-                            let id = map
-                                .get(&Value::String("id".to_string()))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            out.push((id, c.trim().to_string()));
-                        }
-                    }
-                }
+            let Some(map) = item.as_mapping() else {
+                continue;
+            };
+            let status = map
+                .get(&Value::String("status".to_string()))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if status_is_open(status) {
+                continue;
+            }
+            let Some(comment) = map
+                .get(&Value::String("commit_comment".to_string()))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+            else {
+                continue;
+            };
+            let referenced = row_referenced_paths(map);
+            let touches_referenced = referenced
+                .iter()
+                .any(|r| touched.iter().any(|t| path_reference_matches(r, t)));
+            if !touches_referenced {
+                continue;
+            }
+            let id = map
+                .get(&Value::String("id".to_string()))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            out.push((id, comment.to_string()));
+        }
+    }
+    out
+}
+
+fn row_referenced_paths(map: &serde_yaml::Mapping) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in ["witness_evidence", "witness", "resolution", "commit_comment"] {
+        let text = match map.get(&Value::String(key.to_string())) {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Sequence(items)) => items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => continue,
+        };
+        for token in text.split(|c: char| c.is_whitespace() || "\"'`()[]{}<>,;|=*".contains(c)) {
+            if let Some(path) = referenced_path_token(token) {
+                out.push(path);
             }
         }
     }
     out
 }
 
-pub fn drain_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)> {
+fn referenced_path_token(token: &str) -> Option<String> {
+    let mut path = token.replace('\\', "/");
+    while let Some(colon) = path.rfind(':') {
+        let tail = &path[colon + 1..];
+        let is_line_suffix = !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-');
+        if !is_line_suffix {
+            break;
+        }
+        path.truncate(colon);
+    }
+    let path = path
+        .trim_matches(|c: char| matches!(c, '.' | ':' | '!' | '?'))
+        .to_string();
+    if path.is_empty() {
+        return None;
+    }
+    let has_directory = path.contains('/');
+    let has_extension = path.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty()
+            && (1..=8).contains(&ext.len())
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            && ext.chars().any(|c| c.is_ascii_alphabetic())
+    });
+    (has_directory || has_extension).then_some(path)
+}
+
+fn path_reference_matches(reference: &str, touched: &str) -> bool {
+    let reference = reference.replace('\\', "/").to_ascii_lowercase();
+    let touched = touched.replace('\\', "/").to_ascii_lowercase();
+    !touched.is_empty() && (reference == touched || reference.ends_with(&format!("/{}", touched)))
+}
+
+pub fn drain_commit_comments(cwd: Option<&str>, notes: &[(String, String)]) {
+    if notes.is_empty() {
+        return;
+    }
     let path = prd_path_for(cwd);
     let path_s = path.to_string_lossy().to_string();
     if !pkfs::exists(&path_s) {
-        return Vec::new();
+        return;
     }
-    let mut drained: Vec<(String, String)> = Vec::new();
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
     let _ = cas::cas_retry_write(
         &path_s,
         cas_max_attempts,
         "prd-drain-commit-comments",
         |mut doc: Value| {
-            drained.clear();
+            let mut drained_any = false;
             let comment_key = Value::String("commit_comment".to_string());
             if let Some(seq) = doc.as_sequence_mut() {
                 for item in seq.iter_mut() {
@@ -83,38 +148,37 @@ pub fn drain_pending_commit_comments(cwd: Option<&str>) -> Vec<(String, String)>
                     let status = map
                         .get(&Value::String("status".to_string()))
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if status_is_open(status) {
+                        .unwrap_or("")
+                        .to_string();
+                    if status_is_open(&status) {
                         continue;
                     }
-                    let comment = map
-                        .get(&comment_key)
-                        .and_then(|v| v.as_str())
-                        .map(|c| c.trim().to_string())
-                        .filter(|c| !c.is_empty());
-                    let Some(comment) = comment else {
-                        continue;
-                    };
                     let id = map
                         .get(&Value::String("id".to_string()))
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    drained.push((id, comment));
-                    map.remove(&comment_key);
+                    let comment = map
+                        .get(&comment_key)
+                        .and_then(|v| v.as_str())
+                        .map(|c| c.trim().to_string())
+                        .unwrap_or_default();
+                    if notes.iter().any(|(nid, ncomment)| nid == &id && ncomment == &comment) {
+                        map.remove(&comment_key);
+                        drained_any = true;
+                    }
                 }
             }
-            if drained.is_empty() {
+            if !drained_any {
                 return cas::CasOutcome::Abort(
                     String::new(),
-                    "no closed PRD row carries a commit_comment".to_string(),
+                    "no queued commit_comment matches the notes bundled into this commit".to_string(),
                     0,
                 );
             }
             cas::CasOutcome::Write(doc, ())
         },
     );
-    drained
 }
 
 pub fn status_is_open(status: &str) -> bool {
