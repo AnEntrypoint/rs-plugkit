@@ -607,8 +607,33 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                     if *slot == new_row {
                         add_outcome = AddOutcome::AlreadyIdentical;
                     } else if overwrite {
+                        let existing_status = slot
+                            .as_mapping()
+                            .and_then(|m| m.get(&Value::String("status".to_string())))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("pending")
+                            .to_string();
+                        if !status_is_open(&existing_status) {
+                            return cas::CasOutcome::Abort(
+                                String::new(),
+                                format!(
+                                    "prd-add refused: id '{}' is closed (status '{}'). overwrite cannot rescope or reopen a resolved row; log the new work under a new id.",
+                                    id, existing_status
+                                ),
+                                1,
+                            );
+                        }
+                        let mut rescoped = new_row;
+                        if !item_map.contains_key(&Value::String("status".to_string())) {
+                            if let Some(map) = rescoped.as_mapping_mut() {
+                                map.insert(
+                                    Value::String("status".to_string()),
+                                    Value::String(existing_status),
+                                );
+                            }
+                        }
                         add_outcome = AddOutcome::Rescoped;
-                        *slot = new_row;
+                        *slot = rescoped;
                     } else {
                         return cas::CasOutcome::Abort(
                             String::new(),
