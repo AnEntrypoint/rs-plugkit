@@ -1,3 +1,9 @@
+## 2026-10-10 - .agentplug-kv cache entries are untracked, not deleted
+
+**Decision:** the codeinsight cache under `.agentplug-kv/` (`codeinsight`, `codeinsight-edges`, `codeinsight-edges-by-file`, `codeinsight-manifest`, `codeinsight-manifest__root<hash>`, `embed-query-spill`, `git_commit_dedup`) is derived local state and is no longer in the index: 5,083 tracked entries were removed with `git rm -r --cached .agentplug-kv` and stay on disk. `/.agentplug-kv/` in `.gitignore` keeps them out of `untracked`, so a codeinsight sync that prunes or rewrites a cache file can no longer surface as a deletion in `git_status`.
+
+**Not changed:** the cache writer itself. The files are still written and read at the same paths.
+
 ## 2026-10-10 - git_status: the default reply is bounded
 
 **Changes:** `wasm_dispatch/verbs/git.rs` default `git_status` replies with `counts` (changed entries and each category), `by_directory` for `modified` and `deleted` (the ten busiest directories with their counts, the rest summed as `elsewhere`), a `truncated` flag and at most ten sample paths per list. `limit` sets the sample size and replaces `truncated_totals`. When a list exceeds its sample, the full porcelain listing is written through `code_index`'s spill helper to `.gm/exec-spool/out/git_status-<dispatch>.txt` and named in `spill_file`; a failed write sets `spill_write_failed` instead.
