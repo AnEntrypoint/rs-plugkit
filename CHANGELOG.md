@@ -1,3 +1,9 @@
+## 2026-10-10 - git_status: the default reply is bounded
+
+**Changes:** `wasm_dispatch/verbs/git.rs` default `git_status` replies with `counts` (changed entries and each category), `by_directory` for `modified` and `deleted` (the ten busiest directories with their counts, the rest summed as `elsewhere`), a `truncated` flag and at most ten sample paths per list. `limit` sets the sample size and replaces `truncated_totals`. When a list exceeds its sample, the full porcelain listing is written through `code_index`'s spill helper to `.gm/exec-spool/out/git_status-<dispatch>.txt` and named in `spill_file`; a failed write sets `spill_write_failed` instead.
+
+**Not changed:** `summary` mode and the `eol` option keep their replies.
+
 ## 2026-10-10 - codesearch: gm-state exclusions keep `exhaustive`, compact exclusion list, counts on spill, glob alternatives outside `path`, no `modes` legend in replies
 
 **Changes:** `search.rs` `code_exclusion_count` counts only the rule exclusions that clear `exhaustive`: every rule except `gm_state_dir` and `agentplug_kv_cache`, which stay named in `excluded_by_rule_summary`. `code_index.rs` `insert_excluded_by_rule` names the first five excluded paths instead of up to 200. A spilled `matches`, `compact` or `files` reply carries `counts_by_file` inline (`N path` rows, busiest first). `path_glob.rs` `alternatives_outside_scopes` names each include-glob brace alternative whose literal directory lies outside `path` in `glob_outside_path`, which clears `exhaustive`. The `modes` legend is gone from codesearch replies; `{"help": true}` returns the verb help, which lists the modes.
