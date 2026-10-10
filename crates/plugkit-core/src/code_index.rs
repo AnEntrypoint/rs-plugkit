@@ -4623,6 +4623,120 @@ fn insert_excluded_by_rule(
     );
 }
 
+/// Split-form hits carried inline in one reply. Past it the reply sets `split_form_truncated` and
+/// clears `exhaustive`, so a capped list never reads as a complete answer.
+const SPLIT_FORM_MAX_MATCHES: usize = 50;
+
+/// A quoted string literal on one line: `start` is the opening quote, `end` is one past the closing
+/// quote and `content` is the text between them.
+struct QuotedToken<'a> {
+    start: usize,
+    end: usize,
+    content: &'a str,
+}
+
+fn quoted_tokens(line: &str) -> Vec<QuotedToken<'_>> {
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let quote = bytes[i];
+        if quote != b'\'' && quote != b'"' && quote != b'`' {
+            i += 1;
+            continue;
+        }
+        let Some(rel) = bytes[i + 1..].iter().position(|&b| b == quote) else {
+            break;
+        };
+        let close = i + 1 + rel;
+        out.push(QuotedToken {
+            start: i,
+            end: close + 1,
+            content: &line[i + 1..close],
+        });
+        i = close + 1;
+    }
+    out
+}
+
+/// Only a comma (with optional bare arguments such as `...` or an identifier) may sit between two
+/// quoted arguments of one call; any other text ends the run.
+fn is_split_separator(text: &str) -> bool {
+    text.contains(',')
+        && text.chars().all(|c| {
+            c == ',' || c == '.' || c == '_' || c == '$' || c.is_whitespace() || c.is_ascii_alphanumeric()
+        })
+}
+
+fn token_matches_segment(content: &str, segment: &str, last: bool, case_insensitive: bool) -> bool {
+    let lowered;
+    let key: &str = if case_insensitive {
+        lowered = content.to_lowercase();
+        lowered.as_str()
+    } else {
+        content
+    };
+    if key == segment {
+        return true;
+    }
+    last && key
+        .strip_prefix(segment)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .is_some_and(|extension| !extension.is_empty())
+}
+
+/// The path segments of a single-term literal query shaped like `apps/<surface>/<file>`. `None`
+/// for a regex, a multi-word query, a query without a separator, or a segment holding a quote.
+fn split_form_segments(pattern: &str, regex: bool, case_insensitive: bool) -> Option<Vec<String>> {
+    if regex || !pattern.contains('/') || pattern.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let segments: Vec<String> = pattern
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .map(|segment| if case_insensitive { segment.to_lowercase() } else { segment.to_string() })
+        .collect();
+    let quoted = segments.iter().any(|segment| segment.contains(['\'', '"', '`']));
+    (segments.len() >= 2 && !quoted).then_some(segments)
+}
+
+/// Runs of quoted arguments on one line that spell `segments` in order, as in
+/// `join(ROOT, 'apps', 'world', '_fixtures', 'e2e-ci-arena.js')`. Each hit is
+/// `(start, end, joined)`: the byte span from the first opening quote to the last closing quote,
+/// and the spelled path. The last segment also matches with a file extension.
+fn split_form_hits_in_line(
+    line: &str,
+    segments: &[String],
+    case_insensitive: bool,
+) -> Vec<(usize, usize, String)> {
+    let mut out = Vec::new();
+    let width = segments.len();
+    if width < 2 || (!case_insensitive && !line.contains(segments[0].as_str())) {
+        return out;
+    }
+    let tokens = quoted_tokens(line);
+    if tokens.len() < width {
+        return out;
+    }
+    for first in 0..=tokens.len() - width {
+        let run = &tokens[first..first + width];
+        let spells_path = run.iter().enumerate().all(|(k, token)| {
+            token_matches_segment(token.content, segments[k].as_str(), k + 1 == width, case_insensitive)
+        });
+        if !spells_path {
+            continue;
+        }
+        let separated = run
+            .windows(2)
+            .all(|pair| is_split_separator(&line[pair[0].end..pair[1].start]));
+        if separated {
+            let joined = run.iter().map(|token| token.content).collect::<Vec<_>>().join("/");
+            out.push((run[0].start, run[width - 1].end, joined));
+        }
+    }
+    out
+}
+
 pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
     if req.pattern.is_empty() {
         return json!({ "ok": false, "error": "pattern required -- an exhaustive scan needs something to match" });
@@ -4704,6 +4818,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         }
     }
     let multi = !term_matchers.is_empty();
+    let split_segments = split_form_segments(req.pattern, req.regex, req.case_insensitive);
+    let mut split_form_count = 0usize;
+    let mut split_form_files = 0usize;
+    let mut split_form_truncated = false;
+    let mut split_form_matches: Vec<Value> = Vec::new();
     let combination = if want_phrase {
         TermCombination::Phrase
     } else if !multi {
@@ -4867,6 +4986,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             None
         };
         let mut this_file_matched = false;
+        let mut this_file_split_matched = false;
         let mut this_file_quota_hit = false;
         let mut this_file_collected = 0usize;
         let mut this_file_lines = 0usize;
@@ -4881,6 +5001,31 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             let line = raw_line.trim_end_matches(['\n', '\r']);
             let line_offset = line_start_offset;
             line_start_offset += raw_line.len();
+            if let Some(segments) = split_segments.as_deref() {
+                let mut hits = split_form_hits_in_line(line, segments, req.case_insensitive);
+                if let Some(spans) = &comment_spans {
+                    hits.retain(|(start, _, _)| {
+                        crate::comment_spans::span_contains(spans, line_offset + *start)
+                    });
+                }
+                for (start, end, joined) in hits {
+                    split_form_count += 1;
+                    this_file_split_matched = true;
+                    if split_form_matches.len() >= SPLIT_FORM_MAX_MATCHES {
+                        split_form_truncated = true;
+                        continue;
+                    }
+                    let shown: String = line.chars().take(LITERAL_SCAN_MAX_LINE_BYTES).collect();
+                    split_form_matches.push(json!({
+                        "path": path,
+                        "line": idx + 1,
+                        "column": start + 1,
+                        "match": line.get(start..end).unwrap_or(""),
+                        "joined": joined,
+                        "text": shown.trim_end()
+                    }));
+                }
+            }
             let (found, distinct) = if !multi {
                 let mut found = matcher.find_all(line);
                 if let Some(spans) = &comment_spans {
@@ -5003,6 +5148,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 term_files[ti] += 1;
             }
         }
+        if this_file_split_matched {
+            split_form_files += 1;
+        }
         if this_file_matched {
             files_with_matches += 1;
             file_line_counts.push((path.clone(), this_file_lines));
@@ -5053,7 +5201,8 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         && files_unreadable == 0
         && universe.listing_complete
         && !glob_matched_no_files
-        && glob_outside_path.is_empty();
+        && glob_outside_path.is_empty()
+        && !split_form_truncated;
     let unsearched_gm_state = universe
         .excluded
         .iter()
@@ -5233,6 +5382,12 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 req.pattern, files_scanned
             )
         };
+        if split_form_count > 0 {
+            hint = format!(
+                "no line holds \"{}\" as one string; {split_form_count} split-form matches (its segments as separate quoted arguments) are listed in split_form_matches",
+                req.pattern
+            );
+        }
         let mut hint_end = hint.len().min(HINT_MAX_CHARS);
         while !hint.is_char_boundary(hint_end) {
             hint_end -= 1;
@@ -5376,6 +5531,20 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("exhaustive_note".to_string(), json!(
             "at least one bound fired -- this is NOT every match in the tree; the files_truncated/matches_truncated/budget_exhausted/files_skipped_* fields above name which"
         ));
+    }
+    if split_segments.is_some() {
+        out.insert("split_form_count".to_string(), json!(split_form_count));
+        out.insert("split_form_files".to_string(), json!(split_form_files));
+        out.insert("split_form_note".to_string(), json!(
+            "path segments written as separate quoted arguments, e.g. join(ROOT, 'apps', 'world', 'x.js'), are matched within one line and listed in split_form_matches; they are not in matches, count or occurrence_count, and a join split across lines is not matched"
+        ));
+        if !split_form_matches.is_empty() {
+            out.insert("split_form_matches".to_string(), Value::Array(split_form_matches));
+        }
+        if split_form_truncated {
+            out.insert("split_form_truncated".to_string(), json!(true));
+            out.insert("split_form_truncated_at".to_string(), json!(SPLIT_FORM_MAX_MATCHES));
+        }
     }
     if matches.len() > INLINE_CODESEARCH_MATCH_LIMIT {
         match publish_codesearch_artifact(&out, &matches) {
