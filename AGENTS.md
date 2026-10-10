@@ -59,6 +59,8 @@
 
 ### Search dispatch and retention (`ragconfig.rs`, `codesearch`)
 
+  - A search that could not see every file still answers `ok: true`: completeness rides in `partial`/`partial_reason` beside `ok`, never in `ok` itself.
+
 - `digest_max_files` and `prune_enumeration_file_cap` bound visibility as well as work. Insufficient limits leave stale chunks while reporting convergence.
 - Git-history sync has an elapsed hard ceiling independent of its embed floor. Cheap `--shortstat` chooses subject-only embedding above `git_commit_full_diff_max_changed_lines` or `_max_files`.
 - `RetentionConfig` reclaims only already-tombstoned data; pruning live rows is an explicit agent decision.
@@ -172,6 +174,8 @@
 - Signatures live in `.gm/exec-spool/.scan-deps-stamp.json`; the legacy `.gm/scan-deps-stamp.json` is read-only.
 
 ## Dream-RSI replay
+
+  - A dispatch the ranking only advised against still ran, so the ledger records its outcome: that record is what clears the ranking it was advised under.
 
 - Replay is frozen-world evidence, not execution or deployment authority. Records stay bound to their completed dispatch and owner session; normal authorization and phase paths govern deployment.
 - Score each world as best attained quality minus `beta1 * summed cost` plus `beta2 * parallelism_bonus`; a policy scores the mean over its worlds. A challenger wins only with a strict improvement over the incumbent on the same worlds. Betas are explicit finite nonnegative inputs, never defaults.

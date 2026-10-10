@@ -506,10 +506,6 @@ fn ok(verb: &str, data: Value) -> u64 {
     pack(json!({ "ok": true, "verb": verb, "data": data }).to_string())
 }
 
-/// A scan that did not see every file still answers, so it stays `ok` -- a caller who read
-/// `ok: true` as "the whole tree was searched" would take a partial answer for a complete one.
-/// The bound that fired rides beside `ok` instead of inside `data`, where it used to sit behind
-/// a page of counters.
 fn ok_partial(verb: &str, data: Value, partial_reason: &str) -> u64 {
     pack(json!({ "ok": true, "verb": verb, "partial": true, "partial_reason": partial_reason, "data": data }).to_string())
 }
@@ -2367,8 +2363,6 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         } else {
             1
         };
-        // A dispatch the strategy only advised against still ran, so it is still evidence: that is
-        // what lets a verb record the success that clears the ranking it was advised under.
         if !root_resolved {
             None
         } else {
@@ -2429,9 +2423,6 @@ fn codeinsight_action(verb: &str, action: &str, body: &Value) -> u64 {
     }
 }
 
-/// `mode` is an alias for `action`. A body that names one gets that action, so
-/// `{mode:"callers"}` returns call edges instead of silently falling back to the
-/// overview every prior dispatch got; a body that names neither keeps the overview.
 fn codeinsight(body: &Value) -> u64 {
     let explicit_action = body
         .get("action")
@@ -2519,13 +2510,10 @@ fn attach_dream_rsi_advisory(
     pack(value.to_string())
 }
 
-/// The Dream-RSI ranking is advice attached to a dispatch that runs, never a refusal: it is
-/// consulted before the dispatch so it reads the state that produced it, and attached after so
-/// every arm of `dispatch_verb_unranked` carries it.
 fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
-    let admission = crate::orchestrator::dream_rsi::admit_dispatch(verb);
+    let admission_read_before_dispatch = crate::orchestrator::dream_rsi::admit_dispatch(verb);
     let packed = dispatch_verb_unranked(verb, body, body_s);
-    match admission {
+    match admission_read_before_dispatch {
         crate::orchestrator::dream_rsi::Admission::Allow => packed,
         crate::orchestrator::dream_rsi::Admission::Advisory {
             reason,
