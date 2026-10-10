@@ -1093,6 +1093,13 @@ fn path_is_within(path: &str, other: &str) -> bool {
     path == other || path.ends_with(&format!("/{other}")) || other.ends_with(&format!("/{path}"))
 }
 
+fn is_log_or_receipt_path(path: &str) -> bool {
+    let anchored = format!("/{path}");
+    anchored.ends_with("/.gm/witness-log.md")
+        || anchored.contains("/.gm/pool/")
+        || anchored.contains("/.gm/witness-out/")
+}
+
 fn stale_completed_rows(doc: &Value, changed: &[String]) -> Vec<(String, Vec<String>)> {
     use sha2::{Digest, Sha256};
     let Some(seq) = doc.as_sequence() else {
@@ -1265,7 +1272,7 @@ pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Valu
     let changed: Vec<String> = changed
         .iter()
         .map(|path| path.trim().replace('\\', "/").trim_start_matches("./").to_string())
-        .filter(|path| !path.is_empty())
+        .filter(|path| !path.is_empty() && !is_log_or_receipt_path(path))
         .collect();
     if changed.is_empty() {
         return vec![];
