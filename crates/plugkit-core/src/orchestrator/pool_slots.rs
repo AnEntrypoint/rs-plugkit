@@ -295,6 +295,122 @@ fn node_only_module(row: &Value, project_root: &str) -> bool {
     })
 }
 
+const TARGET_FIELDS: [&str; 7] = ["subject", "title", "why", "witness", "acceptance", "acceptance_criteria", "text"];
+const TARGET_EXTENSIONS: [&str; 18] = [
+    ".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx", ".json", ".md", ".html", ".css", ".glsl", ".wgsl", ".rs", ".toml", ".yml", ".yaml", ".sh", ".hf",
+];
+
+#[derive(Default)]
+struct WorktreeDirt {
+    unknown: bool,
+    entries: BTreeSet<String>,
+}
+
+impl WorktreeDirt {
+    fn covers(&self, path: &str) -> bool {
+        let mut candidate = path;
+        loop {
+            if self.entries.contains(candidate) {
+                return true;
+            }
+            match candidate.rfind('/') {
+                Some(at) => candidate = &candidate[..at],
+                None => return false,
+            }
+        }
+    }
+}
+
+fn porcelain_entry_paths(line: &str) -> Vec<String> {
+    let Some(entry) = line.get(3..) else {
+        return Vec::new();
+    };
+    entry
+        .split(" -> ")
+        .map(|side| side.trim().trim_matches('"').trim_end_matches('/').to_string())
+        .filter(|path| !path.is_empty())
+        .collect()
+}
+
+fn worktree_dirt() -> WorktreeDirt {
+    let response = crate::wasm_dispatch::git_call_argv(&["status", "--porcelain", "-uall", "--"], None);
+    if crate::wasm_dispatch::host_abi::git_response_is_not_repository(&response) {
+        return WorktreeDirt::default();
+    }
+    let status = crate::wasm_dispatch::host_abi::porcelain_from(&response);
+    let mut dirt = WorktreeDirt {
+        unknown: status.failed || status.parked || (status.partial && status.skipped_paths.is_empty()),
+        entries: BTreeSet::new(),
+    };
+    dirt.entries.extend(
+        status
+            .skipped_paths
+            .iter()
+            .map(|skipped| skipped.trim_end_matches('/').to_string()),
+    );
+    for line in status.porcelain.lines() {
+        dirt.entries.extend(porcelain_entry_paths(line));
+    }
+    dirt
+}
+
+fn target_path_of(token: &str) -> Option<String> {
+    let unquoted = token.trim_matches(|c: char| {
+        matches!(c, '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>')
+    });
+    let located = unquoted.split(|c: char| c == ':' || c == '#').next().unwrap_or_default();
+    let path = located.trim_end_matches('.');
+    let admissible = path.contains('/')
+        && !path.starts_with('/')
+        && !path.contains("..")
+        && !path.starts_with(".gm/")
+        && !path.chars().any(|c| c == '*' || c == '?')
+        && TARGET_EXTENSIONS.iter().any(|extension| path.ends_with(*extension));
+    admissible.then(|| path.to_string())
+}
+
+fn named_target_paths(row: &Value) -> Vec<String> {
+    let mut paths: Vec<String> = TARGET_FIELDS
+        .iter()
+        .filter_map(|key| row.get(*key).and_then(Value::as_str))
+        .flat_map(str::split_whitespace)
+        .filter_map(target_path_of)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn dirty_target_verdict(row: &Value, dirt: &WorktreeDirt) -> Option<(&'static str, &'static str, String)> {
+    let targets = named_target_paths(row);
+    if dirt.unknown {
+        return targets
+            .into_iter()
+            .next()
+            .map(|target| ("git_status_unknown", "target", target));
+    }
+    targets
+        .into_iter()
+        .find(|target| dirt.covers(target))
+        .map(|target| ("dirty_target", "dirty_target", target))
+}
+
+fn row_by_id<'a>(work: &'a [(Value, usize)], id: &str) -> Option<&'a Value> {
+    work.iter()
+        .map(|(row, _)| row)
+        .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
+}
+
+fn launch_filter_of(work: &[(Value, usize)], id: &str, admitted: &HashSet<String>, project_root: &str) -> &'static str {
+    match row_by_id(work, id) {
+        None => "not_in_work",
+        Some(_) if !admitted.contains(id) => "not_admitted",
+        Some(row) if super::pool_rank::node_arm(row, true).is_some() => "arm_lane",
+        Some(row) if !node_only_module(row, project_root) => "not_node_only",
+        Some(_) => "launchable",
+    }
+}
+
 fn declared_holds(dir: &str, now: u64) -> Vec<String> {
     let Some(text) = pkfs::read_to_string(&format!("{}/{}", dir, HELD_ROWS_FILE)) else {
         return Vec::new();
@@ -363,22 +479,48 @@ fn slot_parts(project_root: &str, observed: Option<(u64, &'static str)>) -> (Val
         .filter_map(|(row, _)| row.get("id").and_then(Value::as_str).map(str::to_string))
         .collect();
     let ranked = super::pool_rank::rank(&work, &blockers, &live_rows, &admitted);
-    let candidates = ranked["candidates"].clone();
+    let dirt = worktree_dirt();
+    let mut candidates_removed: Vec<Value> = Vec::new();
+    let candidates: Vec<Value> = ranked["candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|value| {
+            let Some(id) = value.as_str() else {
+                return true;
+            };
+            match row_by_id(&work, id).and_then(|row| dirty_target_verdict(row, &dirt)) {
+                Some((filter, field, file)) => {
+                    let mut entry = json!({"id": id, "filter": filter});
+                    entry[field] = json!(file);
+                    candidates_removed.push(entry);
+                    false
+                }
+                None => true,
+            }
+        })
+        .cloned()
+        .collect();
     let node_candidates: Vec<String> = ranked["node_candidates"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|id| id.as_str())
         .filter(|id| {
-            work.iter()
-                .find(|(row, _)| row.get("id").and_then(Value::as_str) == Some(*id))
-                .is_some_and(|(row, _)| {
-                    admitted.contains(*id)
-                        && super::pool_rank::node_arm(row, true).is_none()
-                        && node_only_module(row, project_root)
-                })
+            row_by_id(&work, id).is_some_and(|row| {
+                admitted.contains(*id)
+                    && super::pool_rank::node_arm(row, true).is_none()
+                    && node_only_module(row, project_root)
+                    && dirty_target_verdict(row, &dirt).is_none()
+            })
         })
         .map(str::to_string)
+        .collect();
+    let launch_filters: Vec<Value> = candidates
+        .iter()
+        .filter_map(|value| value.as_str())
+        .filter(|id| !node_candidates.iter().any(|node| node.as_str() == *id))
+        .map(|id| json!({"id": id, "filter": launch_filter_of(&work, id, &admitted, project_root)}))
         .collect();
     let action = match (open_rows, free) {
         (0, _) => "none",
@@ -396,6 +538,10 @@ fn slot_parts(project_root: &str, observed: Option<(u64, &'static str)>) -> (Val
         "witness_gap_open": witness_gap_open,
         "blocker_rows": blockers.len(),
         "candidates": candidates,
+        "launchable": node_candidates.len(),
+        "candidates_removed": candidates_removed,
+        "launch_filters": launch_filters,
+        "dirty_check": {"source": "git status --porcelain -uall", "unknown": dirt.unknown, "entries": dirt.entries.len()},
         "supply": ranked["supply"].clone(),
         "ceiling": ceiling,
         "free": free,
@@ -415,8 +561,8 @@ pub fn slots_prose(slots: &Value) -> String {
         Some("hold") => "All slots are full: wait for a completion and relaunch its replacement in the same turn.".to_string(),
         _ => match slots["free"].as_u64() {
             Some(free) => {
-                let launch = free.min(slots["candidates"].as_array().map_or(0, |c| c.len() as u64));
-                format!("Free slots known: launch min(free, candidates.length) = {} gm-worker subagents now.", launch)
+                let launch = free.min(slots["launchable"].as_u64().unwrap_or(0));
+                format!("Free slots known: launch min(free, launchable) = {} gm-worker subagents now; pool-observe adds one traversal hop when traversal.needed is true.", launch)
             }
             None => "Ceiling unknown: launch until a spawn refusal, then call pool-observe with that refusal text.".to_string(),
         },
@@ -514,7 +660,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         .filter(|n| *n > 0)
         .map_or(DEFAULT_LIST_LIMIT, |n| n as usize);
     cap_candidates(&mut slots, limit);
-    for key in ["live_rows", "live_sessions"] {
+    for key in ["live_rows", "live_sessions", "candidates_removed", "launch_filters"] {
         cap_list(&mut slots, key, limit);
     }
     let held = slots["live_rows_total"].as_u64().unwrap_or(0);
@@ -522,8 +668,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     let ceiling = spawn_ceiling(&slots) as u64;
     let floor = REFILL_FLOOR.min(ceiling);
     let open_rows = slots["open_rows"].as_u64().unwrap_or(0);
-    let refill_needed = if open_rows > 0 { floor.saturating_sub(live) } else { 0 };
-    let launch_cap = refill_needed.min(ceiling.saturating_sub(live)) as usize;
+    let free_slots = ceiling.saturating_sub(live);
     let now = now_ms();
     let state_dir = pool_dir(".");
     let mut surface_state = read_surface_state(&state_dir);
@@ -533,16 +678,22 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         }
     }
     let unscanned = unscanned_surfaces(&list_surfaces("."), &surface_state, now);
-    let node_supply = node_candidates.len() as u64;
+    let launchable = node_candidates.len() as u64;
     let traversal_threshold = TRAVERSAL_SUPPLY_FACTOR * REFILL_FLOOR;
-    let traversal_needed = node_supply < traversal_threshold && !unscanned.is_empty();
+    let traversal_needed = launchable < traversal_threshold && !unscanned.is_empty();
+    let refill_needed = if open_rows > 0 {
+        free_slots.min(launchable + u64::from(traversal_needed))
+    } else {
+        0
+    };
+    let idle_slots = free_slots.saturating_sub(refill_needed);
     let next_surface = unscanned.first().cloned();
     let mut launch: Vec<Value> = node_candidates
         .into_iter()
-        .take(launch_cap)
+        .take(refill_needed as usize)
         .map(|id| json!({"id": id, "role": "resolver"}))
         .collect();
-    if traversal_needed && launch.len() < launch_cap {
+    if traversal_needed && (launch.len() as u64) < refill_needed {
         if let Some(surface) = &next_surface {
             surface_state.insert(surface.clone(), now);
         }
@@ -551,7 +702,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     write_surface_state(&state_dir, &surface_state);
     let traversal = json!({
         "needed": traversal_needed,
-        "node_witness_candidates": node_supply,
+        "node_witness_candidates": launchable,
         "threshold": traversal_threshold,
         "unscanned_surfaces": unscanned.iter().take(TRAVERSAL_SURFACE_SHOWN).collect::<Vec<&String>>(),
         "unscanned_total": unscanned.len(),
@@ -574,6 +725,9 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         "held": held,
         "count_of_record": count_of_record,
         "refill_needed": refill_needed,
+        "launchable": launchable,
+        "free_slots": free_slots,
+        "idle_slots": idle_slots,
         "launch": launch,
         "traversal": traversal,
         "monitor": monitor,
@@ -588,7 +742,10 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         out["blocker_notes"] = blocker_notes_block(limit);
     }
     if observed.is_some() && open_rows > 0 && live < floor {
-        let text = floor_denial_text("pool-observe", live, floor, open_rows, refill_needed);
+        let mut text = floor_denial_text("pool-observe", live, floor, open_rows, refill_needed);
+        if refill_needed == 0 {
+            text.push_str(&format!(" Nothing is advertised to launch: launchable={launchable}, free_slots={free_slots}, traversal_needed={traversal_needed}; nominate or unblock a row, then retry."));
+        }
         out["ok"] = json!(false);
         out["error_code"] = json!("floor_gate_denied");
         out["error"] = json!(text.as_str());
@@ -748,14 +905,15 @@ fn cap_list(slots: &mut Value, key: &str, limit: usize) {
 
 const MONITOR_ALARM_ACTION: &str = "refill from launch (node-first candidates) in the same turn, one replacement per freed slot; when candidates run out, traversal is launched; loop: wait {\"ms\":60000}, then pool-observe with body.live (ListAgents count) and body.held, then launch";
 
-const POOL_RULES: [&str; 7] = [
-    "Floor 10: while open_rows > 0 keep live at or above the floor, which is 10 or the recorded spawn ceiling when that is lower; refill_needed = floor - live.",
+const POOL_RULES: [&str; 8] = [
+    "Floor 10: while open_rows > 0 keep live at or above the floor, which is 10 or the recorded spawn ceiling when that is lower; the floor is a gate, not a launch count: refill is measured against the ceiling (rule 3).",
     "Pass the ListAgents count of running subagents as body.live on every call: it is the count of record, kept 5 minutes in .gm/pool/count-of-record.json. prd-resolve and transition use that record when they carry no live field; with no fresh record they do not deny and reply count_of_record: absent. slots.live_heartbeats is only the heartbeat cross-check.",
-    "Spawn ceiling 20, or the N a spawn refusal recorded: while open_rows > 0 fill toward it; launch = min(refill_needed, ceiling - live) ids from slots.launch.",
+    "Spawn ceiling 20, or the N a spawn refusal recorded: while open_rows > 0 fill toward it. free_slots = ceiling - live; refill_needed = min(free_slots, launchable + traversal slot), where launchable = admitted witness-gap node candidates that pass the dirty-target filter and the traversal slot is 1 while traversal.needed; idle_slots = free_slots - refill_needed. Launch exactly the ids in slots.launch.",
     "A live count under the floor while open_rows > 0 is a gate denial (error_code floor_gate_denied) on pool-observe, prd-resolve and transition: launch refill_needed gm-worker subagents from slots.launch, then retry. It is also a FAILURE: append `FAILURE: <UTC timestamp> live count fell to <live> with <open_rows> pending rows` to .gm/witness-log.md.",
     "Refill on every completion, in the same turn: launch one replacement per freed slot from launch (node-first candidates). Never launch a row that is in slots.live_rows.",
     "Pass body.held = the row id of every running worker on every call, including a worker whose heartbeat is not written yet. The newest held list is kept for 30 minutes; send held: [] to clear it.",
     "A heartbeat refreshes at least every 5 minutes and counts as live for 10 minutes; one older than 5 minutes is listed in slots.aging_heartbeats, not dropped. On a spawn refusal, call pool-observe with body.refusal set to the refusal text.",
+    "A candidate whose named target file has uncommitted changes in the worktree is removed from slots.candidates and from the launch list; slots.candidates_removed names it with filter dirty_target and its dirty_target path. Target paths come only from the row subject, title, why, witness, acceptance, acceptance_criteria and text fields, and only paths with a directory and a source or document extension; a row naming no such path is not filtered. If git status cannot be read, every row with a named path is removed with filter git_status_unknown. slots.launch_filters gives the reason each displayed candidate is not launchable.",
 ];
 const WORKER_BRIEF_PATH: &str = "C:/dev/spoint/.gm/config-source-cache-default/prose/worker.md";
 
