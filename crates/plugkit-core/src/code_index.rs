@@ -751,9 +751,6 @@ pub(crate) fn is_hidden_segment(seg: &str) -> bool {
     seg.starts_with('.') && seg != "." && seg != ".."
 }
 
-/// DOS device names Win32 refuses to stat or open in any directory, with or without an
-/// extension. `readdir` still lists them, so a walk that trusts the listing hits an entry
-/// that exists by name and does not exist by stat.
 const WINDOWS_RESERVED_DEVICE_NAMES: [&str; 22] = [
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
@@ -776,9 +773,6 @@ pub(crate) fn is_windows_reserved_device_name(name: &str) -> bool {
         .any(|reserved| stem.eq_ignore_ascii_case(reserved))
 }
 
-/// Cached once per process: the reserved-name pre-filter is only sound where Win32 path rules
-/// apply. Applying it on a POSIX host would silently drop legitimate sources named `aux.rs`
-/// or a `con/` directory.
 fn host_paths_use_windows_syntax() -> bool {
     const UNKNOWN: u8 = 0;
     const POSIX: u8 = 1;
@@ -837,9 +831,7 @@ fn collect_files_checked_until(
     collect_files_impl(root, max_files, cfg, true, Some(deadline_ms))
 }
 
-// A walk that outlives the configured wall budget keeps what it listed and reports
-// `complete: false`; callers treat that as partial coverage, never as a full listing.
-pub(crate) fn collect_files_within(
+pub(crate) fn collect_files_within_wall_budget(
     root: &str,
     max_files: usize,
     cfg: &crate::ragconfig::IndexConfig,
@@ -852,7 +844,7 @@ pub(crate) fn collect_files_within(
     })
 }
 
-pub(crate) fn collect_files_checked_within(
+pub(crate) fn collect_files_checked_within_wall_budget(
     root: &str,
     max_files: usize,
     cfg: &crate::ragconfig::IndexConfig,
@@ -1010,10 +1002,6 @@ fn walk_posix(
         let is_dir = crate::wasm_dispatch::host_stat_is_directory(&next);
         let is_dir_entry = match is_dir {
             Some(value) => value,
-            // An entry the host lists but cannot stat is skipped, never fatal. Aborting here
-            // used to cost one project its entire symbol index: a single `nul` entry made
-            // every enumeration return complete:false, so every `codeinsight` call answered
-            // "symbol index refresh is incomplete" forever.
             None if is_windows_reserved_device_name(&entry) => {
                 record_unstattable(skipped_unstattable, &next);
                 continue;
@@ -2733,7 +2721,7 @@ fn index_cfg_impl(
                 ((embed_remaining / measured_embed_ms_per_chunk) as usize)
                     .clamp(1, max_chunks_per_file_per_pass)
             };
-        let cap = max_chunks_per_file_per_pass.min(embed_allowance);
+        let mut cap = max_chunks_per_file_per_pass.min(embed_allowance);
 
         let chunk_content_hashes: Vec<u32> = chunks
             .iter()
@@ -2748,7 +2736,7 @@ fn index_cfg_impl(
                     .and_then(|c| c.emb.clone())
             })
             .collect();
-        let chunk_plan = plan_chunk_embeds(&reused_embs, cap);
+        let mut chunk_plan = plan_chunk_embeds(&reused_embs, cap);
         let fresh_needed = chunk_plan
             .iter()
             .filter(|p| **p != ChunkEmbedPlan::Reuse)
@@ -2758,14 +2746,16 @@ fn index_cfg_impl(
             let fresh_file_allowance_spent = fresh_files_this_pass >= limit;
             let under_floor = embed_remaining < measured_embed_ms_per_chunk;
             if fresh_file_allowance_spent || (under_floor && floor_grace_used_this_pass) {
-                deferred_files += 1;
-                first_deferred.get_or_insert_with(|| fp.clone());
-                continue;
+                if cap > 0 {
+                    cap = 0;
+                    chunk_plan = plan_chunk_embeds(&reused_embs, cap);
+                }
+            } else {
+                if under_floor {
+                    floor_grace_used_this_pass = true;
+                }
+                fresh_files_this_pass += 1;
             }
-            if under_floor {
-                floor_grace_used_this_pass = true;
-            }
-            fresh_files_this_pass += 1;
         }
 
         changed_files.push(fp.clone());
@@ -3381,7 +3371,7 @@ pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Op
         }
     }
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
-    let enumeration = collect_files_within(root, cfg.index.digest_max_files, &cfg.index);
+    let enumeration = collect_files_within_wall_budget(root, cfg.index.digest_max_files, &cfg.index);
     let listing_complete = enumeration.complete;
     let files = enumeration.files;
     let cache_path = file_digest_cache_path_for(project_path);
@@ -3481,8 +3471,28 @@ fn partial_topup_due_at(project_path: Option<&str>) -> bool {
 }
 
 pub fn topup_allowed(stored: &Option<String>, project_path: Option<&str>) -> bool {
-    let prior_partial = stored.as_ref().is_some_and(|digest| digest.contains(":partial="));
-    !prior_partial || partial_topup_due_at(project_path)
+    let Some(stored) = stored else {
+        return true;
+    };
+    if !stored.contains(":partial=") {
+        return true;
+    }
+    if content_moved_on_since(stored, project_path) {
+        return true;
+    }
+    partial_topup_due_at(project_path)
+}
+
+fn digest_without_partial_suffix(digest: &str) -> &str {
+    match digest.split_once(":partial=") {
+        Some((base, _)) => base,
+        None => digest,
+    }
+}
+
+fn content_moved_on_since(stored: &str, project_path: Option<&str>) -> bool {
+    let current = current_digest_cfg_at(&crate::ragconfig::RagConfig::resolved(), project_path);
+    digest_without_partial_suffix(stored) != digest_without_partial_suffix(&current)
 }
 
 pub fn stored_digest() -> Option<String> {
@@ -3778,7 +3788,7 @@ impl FusionCorpus {
         let index = self.file_index(&path)?;
         let body = index.slice(ls, le);
         let body_trunc = {
-            let mut e = body.len().min(8192);
+            let mut e = body.len().min(BM25_TF_BODY_CAP_BYTES);
             while e > 0 && !body.is_char_boundary(e) {
                 e -= 1;
             }
@@ -3801,13 +3811,10 @@ impl FusionCorpus {
         let b = scoring.bm25_b_document_length_normalization;
         let q_tokens = rs_search::tokenize::tokenize(query);
         if q_tokens.is_empty() || self.metas.is_empty() { return Vec::new(); }
-        // A chunk's term frequencies are only ever read back for the terms in the query, so the
-        // pass counts those and discards the rest. Keeping every term per chunk held ~5.3M
-        // entries (~300MB of wasm heap) to answer counts for at most q_tokens.len() of them.
         let qn = q_tokens.len();
         let q_index: std::collections::HashMap<&str, usize> =
             q_tokens.iter().enumerate().map(|(i, t)| (t.as_str(), i)).collect();
-        let mut scratch: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut reused_token_scratch: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut doc_tfs: Vec<(usize, f64, Vec<u32>)> = Vec::with_capacity(self.metas.len());
         for i in 0..self.metas.len() {
             let text = match doc_text_capped(self, i) { Some(t) => t, None => continue };
@@ -3815,11 +3822,9 @@ impl FusionCorpus {
             let mut total = 0u32;
             for word in text.split(|c: char| c.is_whitespace() || "(){}[]<>,;:\"'`=+*&|!?/\\#".contains(c)) {
                 if word.is_empty() { continue; }
-                // Drained rather than dropped so the one set's allocation serves every word:
-                // a fresh set per word was one allocation per word across the whole corpus.
-                scratch.clear();
-                rs_search::tokenize::add_word_tokens(word, &mut scratch);
-                for t in scratch.drain() {
+                reused_token_scratch.clear();
+                rs_search::tokenize::add_word_tokens(word, &mut reused_token_scratch);
+                for t in reused_token_scratch.drain() {
                     if let Some(&ti) = q_index.get(t.as_str()) { counts[ti] += 1; }
                     total += 1;
                 }
@@ -3880,9 +3885,6 @@ impl FusionCorpus {
     }
 }
 
-// A chunk of a minified or vendored file runs to 300KB against ~1KB for a normal one, so an
-// uncapped span let one file decide both the tokenizing cost and the length normalization;
-// 8192 is the cap `text_for_key` already applies to what a caller sees.
 const BM25_TF_BODY_CAP_BYTES: usize = 8192;
 
 fn doc_text_capped(corpus: &mut FusionCorpus, i: usize) -> Option<String> {
@@ -4331,15 +4333,8 @@ pub struct LiteralScan<'a> {
     pub term_combination: Option<&'a str>,
     pub budget_ms: Option<u64>,
     pub max_matches_per_file: Option<usize>,
-    /// `true`: the walk covers every file in scope and `max_matches` sizes the reply, so a match-dense
-    /// file early in the walk cannot hide a file later in it. `false`: the walk stops as soon as it has
-    /// `max_matches` rows, which costs less on a large tree but answers only for the files it reached.
-    pub whole_scope: bool,
+    pub walk_every_file_in_scope: bool,
     pub refresh: bool,
-    /// Opt in to scanning files the project's .gitignore/.codesearchignore would otherwise hide.
-    /// The scan universe stops consulting those files, so ignored trees -- build output, vendored
-    /// dependencies, scratch scripts the project never committed -- are listed and scanned like any
-    /// other file. .git is never a worktree entry, so it stays out either way.
     pub no_ignore: bool,
     pub output: ScanOutput,
     pub list_limit: Option<usize>,
@@ -4494,18 +4489,17 @@ impl LiteralMatcher {
 
 const MULTI_TERM_MAX_MATCHES: usize = 200;
 
-/// The floor on what an exhaustive scan collects from one file, and the room it therefore needs to
-/// hold: the rows it returns are shared between the matching files, so a match-dense file cannot
-/// take a file that matched once out of the reply. `hit_cap` bounds what is held and `max_matches`
-/// stays the size of the reply. A cap the caller left effectively unbounded collects everything,
-/// as before.
-const EXHAUSTIVE_PER_FILE_COLLECT: usize = 8;
+const EXHAUSTIVE_SCAN_MIN_ROWS_PER_FILE: usize = 8;
 
 const EXHAUSTIVE_COLLECT_FLOOR: usize = 256;
 
 const EXHAUSTIVE_COLLECT_CEILING: usize = 4_096;
 
 const MAX_QUERY_TERMS: usize = 12;
+
+const MIN_QUERY_TERM_CHARS: usize = 2;
+
+const MIN_TERMS_FOR_SEPARATE_MATCHERS: usize = 2;
 
 const TERM_SPLIT_METACHARACTERS: &[char] = &[
     '|', '(', ')', '[', ']', '{', '}', '*', '+', '?', '^', '$', '\\', '.',
@@ -4519,33 +4513,34 @@ fn carries_regex_metacharacter(pattern: &str) -> bool {
     pattern.chars().any(|c| TERM_SPLIT_METACHARACTERS.contains(&c))
 }
 
-/// Split a whitespace-separated query into its terms.
-///
-/// Returns an empty vec when the query should stay one matcher: a single term, more than
-/// MAX_QUERY_TERMS terms, or a regex carrying a metacharacter (so `yama|ptrace_scope` keeps
-/// working as one alternation instead of being chopped into `yama|ptrace_scope` fragments).
-///
-/// The second element names the pieces that never became terms because they are shorter than two
-/// characters. It is populated only when the split really happened, because a query that stays one
-/// matcher is matched verbatim and loses nothing. A caller who typed `-> :: ?` otherwise gets a
-/// confident answer about `->` and `::` with no way to see that `?` was never searched for, which
-/// is the same unfalsifiable zero as a dropped term.
-fn query_terms(pattern: &str, regex: bool) -> (Vec<String>, Vec<String>) {
+struct QueryTermSplit {
+    terms: Vec<String>,
+    dropped_as_shorter_than_min_chars: Vec<String>,
+}
+
+fn query_terms_worth_matching_separately(pattern: &str, regex: bool) -> Option<QueryTermSplit> {
     if regex && carries_regex_metacharacter(pattern) {
-        return (Vec::new(), Vec::new());
+        return None;
     }
-    let mut out: Vec<String> = Vec::new();
-    let mut ignored: Vec<String> = Vec::new();
+    let mut terms: Vec<String> = Vec::new();
+    let mut dropped_as_shorter_than_min_chars: Vec<String> = Vec::new();
     for raw in pattern.split_whitespace() {
         let term = raw.trim_matches(|c| TERM_TRIM_CHARS.contains(&c));
-        if term.chars().count() < 2 {
-            if !term.is_empty() && !ignored.iter().any(|t| t == term) { ignored.push(term.to_string()); }
+        if term.chars().count() < MIN_QUERY_TERM_CHARS {
+            if !term.is_empty()
+                && !dropped_as_shorter_than_min_chars.iter().any(|t| t == term)
+            {
+                dropped_as_shorter_than_min_chars.push(term.to_string());
+            }
             continue;
         }
-        if !out.iter().any(|t| t == term) { out.push(term.to_string()); }
-        if out.len() > MAX_QUERY_TERMS { return (Vec::new(), Vec::new()); }
+        if !terms.iter().any(|t| t == term) { terms.push(term.to_string()); }
+        if terms.len() > MAX_QUERY_TERMS { return None; }
     }
-    if out.len() < 2 { (Vec::new(), Vec::new()) } else { (out, ignored) }
+    (terms.len() >= MIN_TERMS_FOR_SEPARATE_MATCHERS).then_some(QueryTermSplit {
+        terms,
+        dropped_as_shorter_than_min_chars,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4732,11 +4727,6 @@ where
     out
 }
 
-/// Counts every path a scan-universe rule dropped. The per-path listing rides only on a scan where
-/// it changed the answer: gm's own state is dropped by every unscoped scan and never clears
-/// `exhaustive`, so naming it in each reply is noise no caller can act on. The rule summary and the
-/// count ride always -- they are the one place the dropped state is named, and the count is what
-/// `finish_scan_reply` reads to decide `exhaustive`, so the rules it counts are the ones listed.
 fn insert_excluded_by_rule(
     out: &mut serde_json::Map<String, Value>,
     excluded: &[crate::scan_universe::RuleExclusion],
@@ -4778,15 +4768,11 @@ fn insert_excluded_by_rule(
     );
 }
 
-/// Split-form hits carried inline in one reply. Past it the reply sets `split_form_truncated` and
-/// clears `exhaustive`, so a capped list never reads as a complete answer.
-const SPLIT_FORM_MAX_MATCHES: usize = 50;
+const SPLIT_FORM_HITS_INLINED_PER_REPLY: usize = 50;
 
-/// A quoted string literal on one line: `start` is the opening quote, `end` is one past the closing
-/// quote and `content` is the text between them.
 struct QuotedToken<'a> {
-    start: usize,
-    end: usize,
+    opening_quote_offset: usize,
+    one_past_closing_quote_offset: usize,
     content: &'a str,
 }
 
@@ -4805,8 +4791,8 @@ fn quoted_tokens(line: &str) -> Vec<QuotedToken<'_>> {
         };
         let close = i + 1 + rel;
         out.push(QuotedToken {
-            start: i,
-            end: close + 1,
+            opening_quote_offset: i,
+            one_past_closing_quote_offset: close + 1,
             content: &line[i + 1..close],
         });
         i = close + 1;
@@ -4814,9 +4800,7 @@ fn quoted_tokens(line: &str) -> Vec<QuotedToken<'_>> {
     out
 }
 
-/// Only a comma (with optional bare arguments such as `...` or an identifier) may sit between two
-/// quoted arguments of one call; any other text ends the run.
-fn is_split_separator(text: &str) -> bool {
+fn is_comma_separated_argument_gap(text: &str) -> bool {
     text.contains(',')
         && text.chars().all(|c| {
             c == ',' || c == '.' || c == '_' || c == '$' || c.is_whitespace() || c.is_ascii_alphanumeric()
@@ -4840,9 +4824,11 @@ fn token_matches_segment(content: &str, segment: &str, last: bool, case_insensit
         .is_some_and(|extension| !extension.is_empty())
 }
 
-/// The path segments of a single-term literal query shaped like `apps/<surface>/<file>`. `None`
-/// for a regex, a multi-word query, a query without a separator, or a segment holding a quote.
-fn split_form_segments(pattern: &str, regex: bool, case_insensitive: bool) -> Option<Vec<String>> {
+fn literal_query_path_segments(
+    pattern: &str,
+    regex: bool,
+    case_insensitive: bool,
+) -> Option<Vec<String>> {
     if regex || !pattern.contains('/') || pattern.chars().any(char::is_whitespace) {
         return None;
     }
@@ -4851,15 +4837,11 @@ fn split_form_segments(pattern: &str, regex: bool, case_insensitive: bool) -> Op
         .filter(|segment| !segment.is_empty() && *segment != ".")
         .map(|segment| if case_insensitive { segment.to_lowercase() } else { segment.to_string() })
         .collect();
-    let quoted = segments.iter().any(|segment| segment.contains(['\'', '"', '`']));
-    (segments.len() >= 2 && !quoted).then_some(segments)
+    let a_segment_holds_a_quote = segments.iter().any(|segment| segment.contains(['\'', '"', '`']));
+    (segments.len() >= 2 && !a_segment_holds_a_quote).then_some(segments)
 }
 
-/// Runs of quoted arguments on one line that spell `segments` in order, as in
-/// `join(ROOT, 'apps', 'world', '_fixtures', 'e2e-ci-arena.js')`. Each hit is
-/// `(start, end, joined)`: the byte span from the first opening quote to the last closing quote,
-/// and the spelled path. The last segment also matches with a file extension.
-fn split_form_hits_in_line(
+fn quoted_argument_runs_spelling_path_segments(
     line: &str,
     segments: &[String],
     case_insensitive: bool,
@@ -4881,12 +4863,12 @@ fn split_form_hits_in_line(
         if !spells_path {
             continue;
         }
-        let separated = run
+        let arguments_are_comma_separated = run
             .windows(2)
-            .all(|pair| is_split_separator(&line[pair[0].end..pair[1].start]));
-        if separated {
+            .all(|pair| is_comma_separated_argument_gap(&line[pair[0].one_past_closing_quote_offset..pair[1].opening_quote_offset]));
+        if arguments_are_comma_separated {
             let joined = run.iter().map(|token| token.content).collect::<Vec<_>>().join("/");
-            out.push((run[0].start, run[width - 1].end, joined));
+            out.push((run[0].opening_quote_offset, run[width - 1].one_past_closing_quote_offset, joined));
         }
     }
     out
@@ -4953,7 +4935,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut read_ms = 0u64;
     let mut prewarm_ms = 0u64;
 
-    let (terms, terms_ignored) = query_terms(req.pattern, req.regex);
+    let (terms, terms_ignored) =
+        match query_terms_worth_matching_separately(req.pattern, req.regex) {
+            Some(split) => (split.terms, split.dropped_as_shorter_than_min_chars),
+            None => (Vec::new(), Vec::new()),
+        };
     let want_and = req.term_combination == Some("and");
     let want_phrase = match req.term_combination {
         Some("phrase") => true,
@@ -4973,7 +4959,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         }
     }
     let multi = !term_matchers.is_empty();
-    let split_segments = split_form_segments(req.pattern, req.regex, req.case_insensitive);
+    let split_segments = literal_query_path_segments(req.pattern, req.regex, req.case_insensitive);
     let mut split_form_count = 0usize;
     let mut split_form_files = 0usize;
     let mut split_form_truncated = false;
@@ -4992,23 +4978,22 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     } else {
         req.max_matches
     };
-    let per_file_quota = req.max_matches_per_file.filter(|q| *q > 0);
-    let whole_scope = req.whole_scope && per_file_quota.is_none();
-    let fair_share = whole_scope && !multi && max_matches <= EXHAUSTIVE_COLLECT_CEILING;
-    let collect_quota = if per_file_quota.is_some() {
-        per_file_quota
+    let caller_named_per_file_quota = req.max_matches_per_file.filter(|q| *q > 0);
+    let walk_every_file_in_scope =
+        req.walk_every_file_in_scope && caller_named_per_file_quota.is_none();
+    let fair_share = walk_every_file_in_scope && !multi && max_matches <= EXHAUSTIVE_COLLECT_CEILING;
+    let rows_collected_per_file_quota = if caller_named_per_file_quota.is_some() {
+        caller_named_per_file_quota
     } else if fair_share {
-        // One file may supply the whole reply when it is the only file that matched, so the quota
-        // has to be at least `max_matches`; `hit_cap` is what bounds what is held in memory.
-        Some(max_matches.max(EXHAUSTIVE_PER_FILE_COLLECT))
+        Some(max_matches.max(EXHAUSTIVE_SCAN_MIN_ROWS_PER_FILE))
     } else {
         None
     };
-    let hit_cap = if per_file_quota.is_some() {
+    let hit_cap = if caller_named_per_file_quota.is_some() {
         max_matches
     } else if fair_share {
         max_matches
-            .saturating_mul(EXHAUSTIVE_PER_FILE_COLLECT)
+            .saturating_mul(EXHAUSTIVE_SCAN_MIN_ROWS_PER_FILE)
             .clamp(EXHAUSTIVE_COLLECT_FLOOR, EXHAUSTIVE_COLLECT_CEILING)
     } else if multi {
         max_matches.saturating_mul(6).clamp(200, 2_000)
@@ -5173,7 +5158,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             let line_offset = line_start_offset;
             line_start_offset += raw_line.len();
             if let Some(segments) = split_segments.as_deref() {
-                let mut hits = split_form_hits_in_line(line, segments, req.case_insensitive);
+                let mut hits = quoted_argument_runs_spelling_path_segments(line, segments, req.case_insensitive);
                 if let Some(spans) = &comment_spans {
                     hits.retain(|(start, _, _)| {
                         crate::comment_spans::span_contains(spans, line_offset + *start)
@@ -5182,7 +5167,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 for (start, end, joined) in hits {
                     split_form_count += 1;
                     this_file_split_matched = true;
-                    if split_form_matches.len() >= SPLIT_FORM_MAX_MATCHES {
+                    if split_form_matches.len() >= SPLIT_FORM_HITS_INLINED_PER_REPLY {
                         split_form_truncated = true;
                         continue;
                     }
@@ -5248,12 +5233,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             if matches!(req.output, ScanOutput::Files | ScanOutput::Count) {
                 continue;
             }
-            if let Some(quota) = collect_quota {
+            if let Some(quota) = rows_collected_per_file_quota {
                 if this_file_collected >= quota {
-                    // A caller-named quota is a bounded sample and may stop reading this file. The
-                    // implied one only stops collecting: the line is still counted, or a dense file
-                    // would understate `lines_with_matches` for the whole scope.
-                    if per_file_quota.is_some() {
+                    if caller_named_per_file_quota.is_some() {
                         this_file_quota_hit = true;
                         break;
                     }
@@ -5337,7 +5319,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             files_quota_truncated += 1;
             matches_truncated = true;
         }
-        if !whole_scope && matches_truncated && (req.output != ScanOutput::Matches || candidates.len() >= hit_cap) {
+        if !walk_every_file_in_scope && matches_truncated && (req.output != ScanOutput::Matches || candidates.len() >= hit_cap) {
             break;
         }
     }
@@ -5358,7 +5340,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         });
         if candidates.len() > max_matches {
             matches_truncated = true;
-            if per_file_quota.is_some() {
+            if caller_named_per_file_quota.is_some() {
                 let keep = fair_share_indices(&candidates, max_matches, |c| {
                     c.3.get("path")
                         .and_then(|v| v.as_str())
@@ -5400,12 +5382,8 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let cache_bytes = cache.bytes;
     scan_cache_put(cache);
 
-    // `exhaustive` is the walk's coverage verdict: every listed file in scope was read, with no
-    // budget, ceiling or unreadable gap in the way. A reply cut down to `max_matches` rows is still
-    // exhaustive -- `matches_truncated` and `lines_with_matches` report that cut, so a complete walk
-    // is never presented as one that did not look.
-    let exhaustive = !files_truncated
-        && !(matches_truncated && !whole_scope)
+    let listed_files_all_read_within_scope = !files_truncated
+        && !(matches_truncated && !walk_every_file_in_scope)
         && !budget_exhausted
         && files_skipped_too_large_count == 0
         && files_unreadable == 0
@@ -5424,11 +5402,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         ScanOutput::Compact => compact_lines.len(),
         ScanOutput::Files | ScanOutput::Count => lines_with_matches,
     };
-    // A zero is only trustworthy if the caller can see what was searched for and how much was
-    // actually read, so a zero carries the coverage fields whether or not verbose was asked for.
-    // Without them an `exhaustive: true` with no matches is unfalsifiable: "the text really is
-    // absent" and "the term was never looked for" render identically.
-    let zero_hits = match_count == 0;
+    let matched_nothing_needs_coverage_fields = match_count == 0;
 
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), json!(true));
@@ -5441,7 +5415,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             "mode literal matched every character of the query, the | included, as plain text: it does not alternate. For alternation pass mode regex; a zero here means that exact text is absent"
         ));
     }
-    if req.verbose || zero_hits {
+    if req.verbose || matched_nothing_needs_coverage_fields {
         if req.output != ScanOutput::Matches { out.insert("output".to_string(), json!(req.output.label())); }
         out.insert("pattern".to_string(), json!(req.pattern));
         out.insert("root".to_string(), json!(crate::scan_universe::absolute_root_for_message(root)));
@@ -5470,10 +5444,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             );
         }
     }
-    if has_glob_filter && (req.verbose || zero_hits || glob_matched_no_files) { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
+    if has_glob_filter && (req.verbose || matched_nothing_needs_coverage_fields || glob_matched_no_files) { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
     let file_source = universe.source.label();
-    if req.verbose || zero_hits || file_source != "git" || req.no_ignore {
+    if req.verbose || matched_nothing_needs_coverage_fields || file_source != "git" || req.no_ignore {
         out.insert("file_source".to_string(), json!(file_source));
         out.insert(
             "file_source_detail".to_string(),
@@ -5498,7 +5472,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     }
     insert_excluded_by_rule(&mut out, &universe.excluded);
     out.insert("term_combination".to_string(), json!(combination.label()));
-    if let Some(quota) = per_file_quota {
+    if let Some(quota) = caller_named_per_file_quota {
         out.insert("max_matches_per_file".to_string(), json!(quota));
         out.insert(
             "files_quota_truncated".to_string(),
@@ -5646,14 +5620,14 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("count".to_string(), json!(format!(
             "{lines_with_matches} lines, {occurrence_count} occurrences, {files_with_matches} files of {files_scanned} scanned ({lines_scanned} lines read)"
         )));
-        if zero_hits {
+        if matched_nothing_needs_coverage_fields {
             out.insert("files_scanned".to_string(), json!(files_scanned));
             out.insert("files_listed".to_string(), json!(files.len()));
             out.insert("files_with_matches".to_string(), json!(files_with_matches));
             out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
         }
     }
-    out.insert("exhaustive".to_string(), json!(exhaustive));
+    out.insert("exhaustive".to_string(), json!(listed_files_all_read_within_scope));
     out.insert("lines_scanned".to_string(), json!(lines_scanned));
     if !glob_outside_path.is_empty() {
         out.insert("glob_outside_path".to_string(), json!(glob_outside_path));
@@ -5721,7 +5695,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             json!(files_with_nul_scanned),
         );
     }
-    if (req.verbose || zero_hits) && files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
+    if (req.verbose || matched_nothing_needs_coverage_fields) && files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
     if files_skipped_binary > 0 { out.insert("files_skipped_binary".to_string(), json!(files_skipped_binary)); }
     if files_with_nul_scanned > 0 { out.insert("files_with_nul_scanned".to_string(), json!(files_with_nul_scanned)); }
     if files_unreadable > 0 {
@@ -5737,7 +5711,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             json!(unreadable_dependency_files),
         );
     }
-    if !exhaustive {
+    if !listed_files_all_read_within_scope {
         out.insert("exhaustive_note".to_string(), json!(
             "at least one bound fired -- this is NOT every match in the tree; the files_truncated/matches_truncated/budget_exhausted/files_skipped_* fields above name which"
         ));
@@ -5753,7 +5727,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         }
         if split_form_truncated {
             out.insert("split_form_truncated".to_string(), json!(true));
-            out.insert("split_form_truncated_at".to_string(), json!(SPLIT_FORM_MAX_MATCHES));
+            out.insert("split_form_truncated_at".to_string(), json!(SPLIT_FORM_HITS_INLINED_PER_REPLY));
         }
     }
     if matches.len() > INLINE_CODESEARCH_MATCH_LIMIT {
@@ -5871,7 +5845,6 @@ pub struct CommentScan<'a> {
     pub max_files: usize,
     pub context: usize,
     pub refresh: bool,
-    /// Opt in to scanning gitignored files; see `LiteralScan::no_ignore`.
     pub no_ignore: bool,
 }
 
