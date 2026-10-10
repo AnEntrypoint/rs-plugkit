@@ -8,8 +8,7 @@ from `AnEntrypoint/plugkit-bin` and are consumed exclusively by
 this guest. There is no standalone `plugkit.exe` CLI anymore, no private
 self-update path, and no direct-loader fallback: the retired `gm-runner`
 native host and the retired JS wasm-host (`plugkit-wasm-wrapper.js`) both
-route through code paths this crate does not ship. The `rs-exec` crate
-is retired and archived, and this crate does not depend on it.
+route through code paths this crate does not ship. This crate depends on no retired or archived crate.
 
 ## Architecture
 
