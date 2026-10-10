@@ -66,10 +66,26 @@ fn own_state_entry_under_root(root: &str, path: &str) -> Option<String> {
     Some(format!("{prefix}{}", segments[..=child_at].join("/")))
 }
 
-fn prune_own_state(root: &str, files: Vec<String>) -> (Vec<String>, Vec<RuleExclusion>) {
+/// Files under a `.gm/` directory that git lists are the project's versioned state (`prd.yml`,
+/// `mutables.yml`, memories, disciplines). They are project content, so they stay in scope; the own
+/// state git does not list is named from disk by `report_unlisted_own_state` instead.
+fn is_versioned_gm_state(root: &str, path: &str) -> bool {
+    let prefix = join_under(root, "");
+    let Some(rel) = path.strip_prefix(prefix.as_str()) else {
+        return false;
+    };
+    let segments: Vec<&str> = rel.split('/').collect();
+    segments[..segments.len() - 1].iter().any(|segment| *segment == ".gm")
+}
+
+fn prune_own_state(root: &str, files: Vec<String>, keep_versioned_gm: bool) -> (Vec<String>, Vec<RuleExclusion>) {
     let mut kept = Vec::with_capacity(files.len());
     let mut pruned: Vec<RuleExclusion> = Vec::new();
     for file in files {
+        if keep_versioned_gm && is_versioned_gm_state(root, &file) {
+            kept.push(file);
+            continue;
+        }
         match own_state_entry_under_root(root, &file) {
             None => kept.push(file),
             Some(entry) => match pruned.iter_mut().find(|p| p.path == entry) {
@@ -477,10 +493,10 @@ pub fn absolute_root_for_message(root: &str) -> String {
     crate::pkfs::anchor(root).trim_end_matches("/.").to_string()
 }
 
-pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool) -> Result<ScanUniverse, String> {
-    let mut acc = list_scan_scope(root, scopes.first().copied(), max_files, cfg, origin, force_disk, no_ignore)?;
+pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool, keep_versioned_gm: bool) -> Result<ScanUniverse, String> {
+    let mut acc = list_scan_scope(root, scopes.first().copied(), max_files, cfg, origin, force_disk, no_ignore, keep_versioned_gm)?;
     for scope in scopes.iter().skip(1) {
-        let next = list_scan_scope(root, Some(scope), max_files, cfg, origin, force_disk, no_ignore)?;
+        let next = list_scan_scope(root, Some(scope), max_files, cfg, origin, force_disk, no_ignore, keep_versioned_gm)?;
         acc.files.extend(next.files);
         acc.excluded.extend(next.excluded);
         acc.listing_complete &= next.listing_complete;
@@ -494,7 +510,7 @@ pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &I
     Ok(acc)
 }
 
-fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool) -> Result<ScanUniverse, String> {
+fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &IndexConfig, origin: TargetOrigin, force_disk: bool, no_ignore: bool, keep_versioned_gm: bool) -> Result<ScanUniverse, String> {
     let rel = match scope {
         Some(s) => relative_scope(root, s)?,
         None => None,
@@ -533,7 +549,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                     let (files, mut pruned) = if named_scope {
                         (files, Vec::new())
                     } else {
-                        let (kept, mut pruned) = prune_own_state(root, files);
+                        let (kept, mut pruned) = prune_own_state(root, files, keep_versioned_gm);
                         report_unlisted_own_state(root, &kept, &mut pruned);
                         (kept, pruned)
                     };
@@ -593,7 +609,7 @@ pub fn project_source_files(root: &str, max_files: usize, cfg: &IndexConfig) -> 
     };
     let project_node_modules = join_under(base, "node_modules/");
     let origin = if absolute { TargetOrigin::CallerNamed } else { TargetOrigin::ProjectDefault };
-    match list_scan_universe(base, &scope.into_iter().collect::<Vec<&str>>(), max_files, cfg, origin, false, false) {
+    match list_scan_universe(base, &scope.into_iter().collect::<Vec<&str>>(), max_files, cfg, origin, false, false, false) {
         Ok(u) => u.files.into_iter().filter(|p| !p.starts_with(&project_node_modules)).take(max_files).collect(),
         Err(_) => Vec::new(),
     }

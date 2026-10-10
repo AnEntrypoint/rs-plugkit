@@ -1337,7 +1337,7 @@ pub(super) fn scan_no_ignore_requested(body: &Value) -> bool {
 
 pub(super) fn scan_scope_hint(scan_cap: u32) -> String {
     format!(
-        "to reach every match, scope the scan and repeat per subtree: pass \"path\":\"<dir-or-file>\" or \"paths\":[\"<one>\",\"<two>\"] and/or \"glob\":\"**/*.rs\" -- a scoped scan's cap is per call, so union the per-scope results; or raise the cap with \"max_results\": <n> (this call used {scan_cap}); \"output_mode\":\"files_with_matches\" or \"count\" covers far more files per call than \"content\""
+        "to reach every match, scope the scan and repeat per subtree: pass \"path\":\"<dir-or-file>\" or \"paths\":[\"<one>\",\"<two>\"] and/or \"glob\":\"**/*.rs\" -- a scoped scan's cap is per call, so union the per-scope results; or raise the cap with \"max_results\": <n> (this call used {scan_cap})"
     )
 }
 
