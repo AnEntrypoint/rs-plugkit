@@ -1235,31 +1235,6 @@ pub(super) fn git_push(body: &Value) -> u64 {
         }).to_string());
     }
     let porcelain = git_push_porcelain_in(repo.as_deref());
-    if !porcelain.trim().is_empty() && explicit_source_ref.is_none() {
-        log_deviation_push("push-dirty", &branch);
-        let porcelain_preview: String = porcelain.lines().take(8).collect::<Vec<_>>().join("\n");
-        let more = if porcelain.lines().count() > 8 {
-            format!("\n... +{} more", porcelain.lines().count() - 8)
-        } else {
-            String::new()
-        };
-        return pack(json!({
-            "ok": false,
-            "verb": "git_push",
-            "gate_denied": true,
-            "repo": repo,
-            "branch": branch,
-            "porcelain": porcelain_preview.clone() + &more,
-            "reason": format!(
-                "worktree dirty in {} -- commit or revert before pushing branch {}; an unpushed delta over a dirty tree is an unwitnessed slice. Porcelain:\n{}{}",
-                repo.as_deref().unwrap_or("cwd"), branch, porcelain_preview, more
-            ),
-            "next_dispatch": "instruction",
-            "next_dispatch_hint": "instruction",
-            "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
-            "next_action_hint": "Read porcelain field, decide stage-and-commit OR revert, dispatch git_status to confirm clean, then re-dispatch git_push. Do NOT retry git_push with the same dirty tree -- the gate will deny again.",
-        }).to_string());
-    }
     let source_ref = explicit_source_ref.as_deref().unwrap_or("HEAD");
     let local_source_before = match resolve_ref(repo.as_deref(), source_ref) {
         Some(sha) => sha,
@@ -1270,6 +1245,15 @@ pub(super) fn git_push(body: &Value) -> u64 {
             )
         }
     };
+    if !porcelain.trim().is_empty() && explicit_source_ref.is_none() {
+        let scope = push_dirty_scope(repo.as_deref(), &branch, &local_source_before, &porcelain);
+        if scope.blocks() {
+            log_deviation_push("push-dirty", &branch);
+            let refusal =
+                push_dirty_refusal("git_push", repo.as_deref(), &branch, &porcelain, &scope);
+            return pack(refusal.to_string());
+        }
+    }
     let gate_inputs_dirty = porcelain.lines().any(|line| {
         let path = line.get(3..).unwrap_or("").trim().trim_matches('"');
         bin_drift_gate_input(path)
@@ -2953,7 +2937,28 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         }
     }
     if !leftover.trim().is_empty() {
-        return err("git_finalize", &format!("worktree still dirty after commit (untriaged residual) -- refusing push. Porcelain:\n{}", leftover.lines().take(8).collect::<Vec<_>>().join("\n")));
+        let head_sha = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
+        let branch_now = exec_git_in(cwd_ref, "rev-parse --abbrev-ref HEAD").trim().to_string();
+        let branch_now = if branch_now.is_empty() || branch_now == "HEAD" {
+            "main".to_string()
+        } else {
+            branch_now
+        };
+        let scope = push_dirty_scope(cwd_ref, &branch_now, &head_sha, &leftover);
+        if scope.blocks() {
+            return err(
+                "git_finalize",
+                &format!(
+                    "worktree still dirty after commit (untriaged residual) -- refusing push because the {} dirty path(s) are not separable from what this push carries (delta scoped against origin/{}: {}, fast-forward: {}, overlapping: [{}]). Porcelain:\n{}",
+                    scope.dirty_count,
+                    branch_now,
+                    scope.delta_known,
+                    scope.fast_forward,
+                    scope.overlapping.join(", "),
+                    leftover.lines().take(8).collect::<Vec<_>>().join("\n")
+                ),
+            );
+        }
     }
 
     let push_body = if scoped {
@@ -6265,6 +6270,192 @@ pub(super) fn porcelain_dirty_paths_all_within_committed_set(porcelain: &str, co
         }
     }
     any
+}
+
+pub(super) fn porcelain_dirty_paths(porcelain: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in porcelain.lines() {
+        let raw = line.get(3..).unwrap_or("").trim().trim_matches('"');
+        if raw.is_empty() {
+            continue;
+        }
+        match raw.split_once(" -> ") {
+            Some((old, new)) => {
+                for part in [old, new].iter().copied() {
+                    let normalized = part.trim().replace('\\', "/");
+                    if !normalized.is_empty() {
+                        out.push(normalized);
+                    }
+                }
+            }
+            None => out.push(raw.replace('\\', "/")),
+        }
+    }
+    out
+}
+
+pub(super) fn resolve_commit(cwd: Option<&str>, refspec: &str) -> Option<String> {
+    let peeled = format!("{}^{{commit}}", refspec);
+    let response = git_call_argv(&["rev-parse", "--verify", "--quiet", peeled.as_str()], cwd);
+    if response.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1) != 0 {
+        return None;
+    }
+    let sha = response
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
+pub(super) fn ref_is_ancestor(cwd: Option<&str>, ancestor: &str, descendant: &str) -> bool {
+    git_call_argv(&["merge-base", "--is-ancestor", ancestor, descendant], cwd)
+        .get("exit_code")
+        .and_then(|v| v.as_i64())
+        == Some(0)
+}
+
+pub(super) fn delta_paths_between(cwd: Option<&str>, from: &str, to: &str) -> Option<Vec<String>> {
+    let range = format!("{}..{}", from, to);
+    let response = git_call_argv(&["diff", "--name-only", "-z", range.as_str()], cwd);
+    if response.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1) != 0 {
+        return None;
+    }
+    Some(
+        response
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| entry.replace('\\', "/"))
+            .collect(),
+    )
+}
+
+pub(super) struct PushDirtyScope {
+    pub dirty_count: usize,
+    pub delta_known: bool,
+    pub fast_forward: bool,
+    pub overlapping: Vec<String>,
+}
+
+impl PushDirtyScope {
+    pub fn blocks(&self) -> bool {
+        self.dirty_count > 0
+            && !(self.delta_known && self.fast_forward && self.overlapping.is_empty())
+    }
+}
+
+pub(super) fn push_dirty_scope(
+    cwd: Option<&str>,
+    branch: &str,
+    source_sha: &str,
+    porcelain: &str,
+) -> PushDirtyScope {
+    let dirty_paths = porcelain_dirty_paths(porcelain);
+    if dirty_paths.is_empty() {
+        return PushDirtyScope {
+            dirty_count: 0,
+            delta_known: true,
+            fast_forward: true,
+            overlapping: Vec::new(),
+        };
+    }
+    let remote_ref = format!("refs/remotes/origin/{}", branch);
+    let remote_sha = match resolve_commit(cwd, remote_ref.as_str()) {
+        Some(sha) => sha,
+        None => {
+            return PushDirtyScope {
+                dirty_count: dirty_paths.len(),
+                delta_known: false,
+                fast_forward: false,
+                overlapping: Vec::new(),
+            }
+        }
+    };
+    let delta = match delta_paths_between(cwd, remote_sha.as_str(), source_sha) {
+        Some(paths) => paths,
+        None => {
+            return PushDirtyScope {
+                dirty_count: dirty_paths.len(),
+                delta_known: false,
+                fast_forward: false,
+                overlapping: Vec::new(),
+            }
+        }
+    };
+    let dirty_count = dirty_paths.len();
+    let overlapping: Vec<String> = dirty_paths
+        .into_iter()
+        .filter(|path| delta.iter().any(|changed| changed == path))
+        .collect();
+    PushDirtyScope {
+        dirty_count,
+        delta_known: true,
+        fast_forward: ref_is_ancestor(cwd, &remote_sha, source_sha),
+        overlapping,
+    }
+}
+
+pub(super) fn push_dirty_refusal(
+    verb: &str,
+    cwd: Option<&str>,
+    branch: &str,
+    porcelain: &str,
+    scope: &PushDirtyScope,
+) -> Value {
+    let preview: String = porcelain.lines().take(8).collect::<Vec<_>>().join("\n");
+    let more = if porcelain.lines().count() > 8 {
+        format!("\n... +{} more", porcelain.lines().count() - 8)
+    } else {
+        String::new()
+    };
+    let reason = if !scope.delta_known {
+        format!(
+            "worktree dirty in {} and the delta of branch {} cannot be bounded: refs/remotes/origin/{} does not resolve, so no path can be shown to sit outside what the push would carry. Commit or revert before pushing; an unpushed delta that cannot be separated from a dirty tree is an unwitnessed slice. Porcelain:\n{}{}",
+            cwd.unwrap_or("cwd"), branch, branch, preview, more
+        )
+    } else if !scope.fast_forward {
+        format!(
+            "worktree dirty in {} and branch {} is not a fast-forward of refs/remotes/origin/{}: publishing needs a pull first, and a pull over {} dirty path(s) can clobber them. Commit or revert, then push. Porcelain:\n{}{}",
+            cwd.unwrap_or("cwd"), branch, branch, scope.dirty_count, preview, more
+        )
+    } else {
+        format!(
+            "worktree dirty in {} and {} of its {} dirty path(s) are files the delta of branch {} over origin/{} also touches, so those uncommitted edits belong to what the push would carry: {}. Commit or revert them, then push. Porcelain:\n{}{}",
+            cwd.unwrap_or("cwd"),
+            scope.overlapping.len(),
+            scope.dirty_count,
+            branch,
+            branch,
+            scope.overlapping.join(", "),
+            preview,
+            more
+        )
+    };
+    json!({
+        "ok": false,
+        "verb": verb,
+        "gate_denied": true,
+        "repo": cwd,
+        "branch": branch,
+        "porcelain": format!("{}{}", preview, more),
+        "dirty_count": scope.dirty_count,
+        "dirty_overlapping_delta": scope.overlapping,
+        "push_delta_scoped": scope.delta_known,
+        "fast_forward": scope.fast_forward,
+        "reason": reason,
+        "next_dispatch": "instruction",
+        "next_dispatch_hint": "instruction",
+        "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
+        "next_action_hint": "Dirty paths the pushed commits do not touch are not part of the delta and no longer block this push; only dirty_overlapping_delta does. Commit or revert those, dispatch git_status to confirm, then re-dispatch git_push.",
+    })
 }
 
 pub(super) fn exec_git_push_in(
