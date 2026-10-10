@@ -1597,10 +1597,7 @@ pub(super) fn grep_counted_files(matches: &[Value]) -> Vec<Value> {
 pub(super) fn grep_route_globs(body: &Value) -> Result<(Vec<String>, Vec<String>), String> {
     let mut include_globs: Vec<String> = Vec::new();
     let mut exclude_globs: Vec<String> = Vec::new();
-    let include_field = ["glob", "include", "path_glob"]
-        .into_iter()
-        .find(|field| body.get(*field).is_some());
-    if let Some(field) = include_field {
+    for field in ["glob", "include", "path_glob"] {
         for pattern in glob_patterns_from(body.get(field)).map_err(|e| format!("{field} {e}"))? {
             match pattern.strip_prefix('!') {
                 Some(negated) => exclude_globs.push(negated.to_string()),
