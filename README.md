@@ -333,7 +333,7 @@ file), `witness_output_path` (that file, relative to the project root) and
 any mismatch, and a row closed by binding records `witness_binding`. A dispatch id
 that appears only inside `witness_evidence` is named in a refusal as
 `witness_dispatch_id_in_evidence` with `witness_dispatch_id_field`; it verifies only
-when passed as `witness_dispatch_id`. A verified reply names the bound id in `witness_dispatch_id_in_evidence` (null when a binding closed the row). An optional `commit_comment` attaches a
+when passed as `witness_dispatch_id`. A verified reply names the bound id in `witness_dispatch_id_in_evidence` (null when a binding closed the row); `witness_dispatch_id_in_ledger` is true when the bound id is in this project ledger, and `witness_dispatch_id_verified_via` names the store that verified it: `ledger`, or `spool_out` when the dispatch own JSON in `.gm/exec-spool/out` carries its id after the ledger aged it out. An optional `commit_comment` attaches a
 one-line resolution note to the next GM commit. `prd-list` takes `limit`, folds
 repeated blocks of an id to the last block, and replies with `total` (matches) and
 `store_total` (stored blocks).
