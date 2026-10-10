@@ -1840,6 +1840,14 @@ pub(super) fn staged_paths_now(cwd: Option<&str>) -> Vec<String> {
     nul_separated_git_paths(cwd, "diff --cached --name-only -z")
 }
 
+pub(super) fn commit_note_paths(cwd: Option<&str>, scoped_paths: &[String]) -> Vec<String> {
+    if scoped_paths.is_empty() {
+        staged_paths_now(cwd)
+    } else {
+        scoped_paths.to_vec()
+    }
+}
+
 pub(super) fn blanket_stage_would_take(cwd: Option<&str>) -> Vec<String> {
     let mut paths: Vec<String> = Vec::new();
     for args in [
@@ -2159,7 +2167,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 })));
             }
         }
-        let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd, &staged_paths_now(cwd));
+        let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd, &commit_note_paths(cwd, scoped_paths));
         let bundled_message = bundle_prd_commit_comments(message, &commit_notes);
         let identity = body_commit_identity(body);
         let r = git_step_replayed_by_call_order(
@@ -2913,9 +2921,9 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                 "requested_paths": paths,
             }));
         }
-        let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd_ref, &staged_paths_now(cwd_ref));
-        let bundled_message = bundle_prd_commit_comments(message.as_str(), &commit_notes);
         let scoped_paths: &[String] = if scoped { &paths } else { &[] };
+        let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd_ref, &commit_note_paths(cwd_ref, scoped_paths));
+        let bundled_message = bundle_prd_commit_comments(message.as_str(), &commit_notes);
         let identity = body_commit_identity(body);
         let cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, identity.as_ref())), cwd_ref);
         if cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
