@@ -1673,7 +1673,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     }
     let evidence_dispatch_id = dispatch_id_in_text(witness.as_deref().unwrap_or(""));
     #[cfg(target_arch = "wasm32")]
-    let (dispatch_verified, evidence_in_ledger) = {
+    let (dispatch_verified, evidence_in_ledger, bound_in_ledger, verified_via) = {
         let cwd = resolve_cwd.as_deref().unwrap_or("");
         let evidence_in_ledger = evidence_dispatch_id
             .as_deref()
@@ -1737,10 +1737,23 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 }
             }
         };
-        (dispatch_verified, evidence_in_ledger)
+        let bound_in_ledger = witness_dispatch_id
+            .as_deref()
+            .map(|id| crate::dispatch_ledger::lookup(cwd, id).is_some());
+        let verified_via = match (dispatch_verified, bound_in_ledger) {
+            (true, Some(true)) => Some("ledger"),
+            (true, _) => Some("spool_out"),
+            _ => None,
+        };
+        (dispatch_verified, evidence_in_ledger, bound_in_ledger, verified_via)
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let (dispatch_verified, evidence_in_ledger) = (witness_dispatch_id.is_some(), None::<bool>);
+    let (dispatch_verified, evidence_in_ledger, bound_in_ledger, verified_via) = (
+        witness_dispatch_id.is_some(),
+        None::<bool>,
+        None::<bool>,
+        None::<&'static str>,
+    );
     if !annotate_only
         && witness_binding.is_none()
         && witness_dispatch_id.is_none()
@@ -2008,9 +2021,10 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 "witness_bound": witness_binding.is_some(),
                 "witness_binding": witness_binding.as_ref().map(VerifiedWitness::to_json),
                 "witness_dispatch_id_verified": dispatch_verified,
+                "witness_dispatch_id_verified_via": verified_via,
                 "witness_dispatch_id_field": "witness_dispatch_id",
                 "witness_dispatch_id_in_evidence": witness_dispatch_id,
-                "witness_dispatch_id_in_ledger": witness_dispatch_id.as_ref().map(|_| dispatch_verified),
+                "witness_dispatch_id_in_ledger": bound_in_ledger,
                 "count_of_record": count_of_record,
             });
             (reply.to_string(), String::new(), 0)
