@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use super::super::pool_rank;
-use super::super::transitions::prd_open_rows_with_recency;
+use super::super::transitions::{prd_open_rows_with_recency, prd_row_ids};
 use super::admission::{dirty_target_verdict, row_by_id, worktree_dirt, writer_targets_of};
 use super::heartbeats::{count_of_record_live, declared_holds, held_rows, read_heartbeats};
 use super::{now_ms, pool_dir, DEFAULT_SPAWN_CEILING, LAUNCH_ID_PREFIX};
@@ -35,10 +35,7 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
         .iter()
         .filter(|(row, _)| row.get("id").and_then(Value::as_str).is_some_and(|id| id.starts_with(LAUNCH_ID_PREFIX)))
         .count();
-    let mut live_rows = held_rows(&live, &work);
-    live_rows.extend(declared_holds(&dir, now_ms()));
-    live_rows.sort();
-    live_rows.dedup();
+    let (live_rows, live_rows_unmatched) = reconcile_live_rows(held_rows(&live, &work), &work, &dir);
     let ranked = pool_rank::rank(&work, &blockers, &live_rows);
     let dirt = worktree_dirt();
     let mut claimed: HashSet<String> = work
@@ -105,6 +102,7 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
         "live_heartbeats": heartbeat_live,
         "aging_heartbeats": live.aging,
         "live_rows": live_rows,
+        "live_rows_unmatched": live_rows_unmatched,
         "live_sessions": live.sessions,
         "open_rows": open_rows,
         "witness_gap_open": witness_gap_open,
@@ -124,6 +122,34 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
         "reaped_heartbeats": live.reaped,
     });
     (slots, advertised)
+}
+
+/// Keeps only the live-row ids that exist as a row id in the prd store, so a
+/// scan of the prd text finds every id `slots.live_rows` lists. Ids dropped here
+/// are named in `slots.live_rows_unmatched` rather than silently discarded.
+fn reconcile_live_rows(rows: Vec<String>, work: &[(Value, usize)], dir: &str) -> (Vec<String>, Vec<String>) {
+    let mut rows = rows;
+    rows.extend(declared_holds(dir, now_ms()));
+    rows.sort();
+    rows.dedup();
+    let open_ids: BTreeSet<&str> = work
+        .iter()
+        .filter_map(|(row, _)| row.get("id").and_then(Value::as_str))
+        .collect();
+    if rows.iter().all(|id| open_ids.contains(id.as_str())) {
+        return (rows, Vec::new());
+    }
+    let prd_ids = prd_row_ids();
+    let mut kept = Vec::with_capacity(rows.len());
+    let mut unmatched = Vec::new();
+    for id in rows {
+        if open_ids.contains(id.as_str()) || prd_ids.contains(&id) {
+            kept.push(id);
+        } else {
+            unmatched.push(id);
+        }
+    }
+    (kept, unmatched)
 }
 
 pub fn spawn_ceiling(slots: &Value) -> usize {
