@@ -1247,13 +1247,20 @@ Ranged replies add \"total_lines\", \"start_line\", \"end_line\", \"returned_lin
 \"next_start_line\" and \"offset\" (the 0-based first line, kept for compatibility).";
 
 pub(super) const FS_WRITE_HELP: &str = "\
-fs_write writes a file inside the project. There is no append mode: a write replaces the whole file.
+fs_write writes a file inside the project. A write replaces the whole file unless append is set.
   {\"path\":\"<relative path>\"}     required, relative and within the project
   {\"content\":\"<text>\"}           required, as a JSON string with \\n for each newline;
                                    \"data\" and \"text\" are aliases
   {\"content\":[\"<line>\", ...]}    an array of lines is accepted too, joined with \\n plus a trailing
                                    newline, so a caller never has to escape newlines by hand
+  {\"append\":true}                 open for append, write, close: the line lands at the end of the file
+                                   and nothing already there is read or rewritten
   {\"allow_empty\":true}            permit writing \"\" on purpose (truncating the file)
+Append-only paths: a whole-file write of .gm/witness-log.md is REFUSED, never served -- with
+error_code append_only_shrink_refused when it would shrink the file and append_only_rewrite_refused
+otherwise, both naming bytes_on_disk and bytes_offered. Write that path with append:true only, one
+line per run, because a concurrent read-modify-write took it from 4675 lines to 3 on 2026-10-10.
+The append reply carries {\"bytes\": <written>, \"path\": ..., \"append\": true, \"size\": <bytes on disk>}.
 Raw (non-JSON) body: accepted when the first line is a path= directive, the rest is the contents:
   path=<relative path>
   <the file contents>

@@ -1,3 +1,19 @@
+## 2026-10-10 - fs_write: .gm/witness-log.md is append-only, and a whole-file write of it is refused
+
+**Changes:** `wasm_dispatch/verbs.rs` gains `APPEND_ONLY_PATH_SUFFIXES` (`/.gm/witness-log.md`), `is_append_only_path` and `append_only_bytes_on_disk`, so `fs_write` on that path no longer reaches `host_write`: it is refused with `append_only_shrink_refused` when the offered content is shorter than the bytes on disk (`host_stat` `size`) and `append_only_rewrite_refused` otherwise, each naming `bytes_on_disk`, `bytes_offered`, `shrinks` and the accepted shape. `{"append":true}` opens the file for append, writes and closes through `host_exec_js` + `fs.appendFileSync` -- the host ABI has no append import, and `config_sync.rs` reaches `fs.renameSync` the same way -- creating the parent directory, and replies with `bytes`, `path`, `append:true` and the resulting `size`. One append is one open/write/close, so three concurrent appenders cannot interleave into a lost update and no lane ever reads the file to rewrite it. `search.rs` `FS_WRITE_HELP` states the flag and both refusal codes; `orchestrator/instructions/prose/entry.md` and `skills/gm-prd/SKILL.md` instruct the append shape for every witness line.
+
+**Not changed:** every other path still resolves through `host_write` byte for byte, and `path_within_project`, `allow_empty`, the empty-content refusal and the outside-root refusal are untouched.
+
+**Not yet measured:** built on Actions; the running guest predates it, so the live witness waits on a CI build and a runner reload.
+
+## 2026-10-10 - fs_read: a requested line range is honoured, and every range alias is 1-based and inclusive
+
+**Changes:** `wasm_dispatch/verbs.rs` `fs_read` now slices the file whenever a range alias is present. `fs_read_line_range` resolves the first pair present out of `startLine`/`endLine`, `start`/`end` (with `start`/`count`), `from`/`to`, `offset`/`limit`, `line`/`lines` -- in that order -- and `fs_read_reply` answers with `content`, `total_lines`, `range_basis`, `start_line`, `end_line`, `returned_lines`, `has_more_lines`, `next_start_line`, a 0-based `offset` kept for compatibility, and `clamped_to_total_lines` plus `end_line_requested` when the end was clamped. `limit`/`count`/`lines` is a number of lines, never an end line. A start of 0, a start past the last line, an end before the start and any range on an empty file are errors naming the file's line count instead of a silent whole-file reply, and `fs_read_range_looking_keys` refuses near-miss keys (`start_line`, `endline`, `firstLine`, ...) by name, as `unknown_range_keys`, so an unknown range key can never again silently return the whole file. `search.rs` `FS_READ_HELP` documents the aliases.
+
+**Not changed:** a call with no range key still returns the whole file through the same `ok("fs_read", Value::String(content))` path, byte for byte as before, and `max_bytes`, `allowOutsideRoot` and the path rejection behave as they did.
+
+**Not yet measured:** built on Actions; the running guest predates it, so the live witness waits on a CI build and a runner reload.
+
 ## 2026-10-10 - codesearch: the per-path `excluded_by_rule` listing rides only when a rule dropped code
 
 **Changes:** `scan_universe.rs` `GM_STATE_EXCLUSION_RULES` (`gm_state_dir`, `agentplug_kv_cache`) is the single source of truth for the rules that drop gm's own state instead of code. `code_index.rs` `insert_excluded_by_rule` inserts `excluded_by_rule` only when at least one exclusion outside that set exists, and lists only those code exclusions (first five). `excluded_by_rule_summary` and `excluded_by_rule_count` still ride on every reply, so the dropped gm state stays named and `finish_scan_reply`'s `exhaustive` decision is unchanged.
