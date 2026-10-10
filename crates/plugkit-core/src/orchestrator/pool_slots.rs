@@ -706,7 +706,7 @@ pub fn floor_gate(verb: &str, body_live: Option<u64>, exclude_row: Option<&str>)
     let ceiling = read_ceiling(&pool_dir(".")).unwrap_or(DEFAULT_SPAWN_CEILING as u64);
     let floor = REFILL_FLOOR.min(ceiling);
     let open_rows = open_work_rows(exclude_row);
-    if open_rows == 0 || live >= floor {
+    if verb == "prd-resolve" || open_rows == 0 || live >= floor {
         return Ok(json!(live));
     }
     let refill_needed = floor - live;
@@ -1208,7 +1208,7 @@ const POOL_RULES: [&str; 8] = [
     "Floor 10: while open_rows > 0 keep live at or above the floor, which is 10 or the recorded spawn ceiling when that is lower; the floor is a gate, not a launch count: refill is measured against the ceiling (rule 3).",
     "Pass the ListAgents count of running subagents as body.live on every call: it is the count of record, kept 5 minutes in .gm/pool/count-of-record.json. prd-resolve and transition use that record when they carry no live field; with no fresh record they do not deny and reply count_of_record: absent. slots.live_heartbeats is only the heartbeat cross-check.",
     "Spawn ceiling 20, or the N a spawn refusal recorded: while open_rows > 0 fill toward it. free_slots = ceiling - live; refill_needed = min(free_slots, launchable + traversal slot), where launchable = admitted witness-gap node candidates that pass the dirty-target filter and the traversal slot is 1 while traversal.needed; idle_slots = free_slots - refill_needed. shortfall = floor - live is what the floor needs; unfilled_shortfall = shortfall - refill_needed must come from slots.candidates. Launch exactly the ids in slots.launch.",
-    "A live count under the floor while open_rows > 0 is a gate denial (error_code floor_gate_denied) on pool-observe, prd-resolve and transition: launch the advertised gm-worker subagents from slots.launch, then launch unfilled_shortfall more from slots.candidates (node-first, then any open row), then retry. It is also a FAILURE: append `FAILURE: <UTC timestamp> live count fell to <live> with <open_rows> pending rows` to .gm/witness-log.md.",
+    "A live count under the floor while open_rows > 0 is a gate denial (error_code floor_gate_denied) on pool-observe and transition (never on prd-resolve: a closure adds no launch): launch the advertised gm-worker subagents from slots.launch, then launch unfilled_shortfall more from slots.candidates (node-first, then any open row), then retry. It is also a FAILURE: append `FAILURE: <UTC timestamp> live count fell to <live> with <open_rows> pending rows` to .gm/witness-log.md.",
     "Refill on every completion, in the same turn: launch one replacement per freed slot from launch (node-first candidates). Never launch a row that is in slots.live_rows.",
     "Pass body.held = the row id of every running worker on every call, including a worker whose heartbeat is not written yet. The newest held list is kept for 30 minutes; send held: [] to clear it.",
     "A heartbeat refreshes at least every 5 minutes and counts as live for 10 minutes; one older than 5 minutes is listed in slots.aging_heartbeats, not dropped. On a spawn refusal, call pool-observe with body.refusal set to the refusal text.",
