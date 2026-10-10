@@ -37,39 +37,57 @@ fn list_surfaces(project_root: &str) -> Vec<String> {
     surfaces
 }
 
-pub(super) fn read_surface_state(dir: &str) -> std::collections::BTreeMap<String, u64> {
-    let mut state = std::collections::BTreeMap::new();
-    let Some(text) = pkfs::read_to_string(&format!("{}/{}", dir, TRAVERSAL_SURFACES_FILE)) else {
-        return state;
-    };
-    let Ok(record) = serde_json::from_str::<Value>(&text) else {
-        return state;
-    };
-    if let Some(scanned) = record.get("scanned").and_then(Value::as_object) {
-        for (name, ts) in scanned {
-            if let Some(ts) = ts.as_u64() {
-                state.insert(name.clone(), ts);
-            }
-        }
+fn surface_state_path(dir: &str) -> String {
+    format!("{}/{}", dir, TRAVERSAL_SURFACES_FILE)
+}
+
+fn refused(path: &str, cause: &str) -> String {
+    format!("{path} {cause}; no surface leased or recorded and the file is left unchanged; delete or repair it to resume")
+}
+
+pub(super) fn read_surface_state(dir: &str) -> Result<std::collections::BTreeMap<String, u64>, String> {
+    let path = surface_state_path(dir);
+    if !pkfs::exists(&path) {
+        return Ok(std::collections::BTreeMap::new());
     }
-    state
+    let Some(text) = pkfs::read_to_string(&path) else {
+        return Err(refused(&path, "exists but cannot be read"));
+    };
+    let record: Value = serde_json::from_str(&text)
+        .map_err(|error| refused(&path, &format!("is not valid JSON ({error})")))?;
+    let scanned = record
+        .get("scanned")
+        .and_then(Value::as_object)
+        .ok_or_else(|| refused(&path, "has no scanned object"))?;
+    scanned
+        .iter()
+        .map(|(name, ts)| {
+            ts.as_u64()
+                .map(|ts| (name.clone(), ts))
+                .ok_or_else(|| refused(&path, &format!("holds a non-integer lease time for {name}")))
+        })
+        .collect()
 }
 
 fn write_surface_state(dir: &str, state: &std::collections::BTreeMap<String, u64>) -> bool {
     pkfs::write(&format!("{}/{}", dir, TRAVERSAL_SURFACES_FILE), &json!({"scanned": state}).to_string())
 }
 
-pub(super) fn record_scanned_surfaces(dir: &str, names: &[String], now: u64) -> bool {
-    let mut state = read_surface_state(dir);
+pub(super) fn record_scanned_surfaces(dir: &str, names: &[String], now: u64) -> Result<(), String> {
+    let mut state = read_surface_state(dir)?;
     for name in names {
         state.insert(name.clone(), now);
     }
-    write_surface_state(dir, &state)
+    if write_surface_state(dir, &state) {
+        Ok(())
+    } else {
+        Err(format!("could not write {}", surface_state_path(dir)))
+    }
 }
 
 pub(super) fn assign_traversal_surface(project_root: &str, now: u64) -> Result<Option<String>, String> {
     let dir = pool_dir(project_root);
-    let mut state = read_surface_state(&dir);
+    let mut state = read_surface_state(&dir).map_err(|reason| format!("pool-brief: {reason}"))?;
     let Some(surface) = traversal_candidates(project_root, &state, now).into_iter().next() else {
         return Ok(None);
     };
@@ -136,7 +154,7 @@ pub(super) fn assign_row_traversal_surface(
         ));
     };
     let dir = pool_dir(project_root);
-    let mut state = read_surface_state(&dir);
+    let mut state = read_surface_state(&dir).map_err(|reason| format!("pool-brief: {reason}"))?;
     if let Some(&leased_at) = state.get(&surface) {
         let expires_at = leased_at.saturating_add(TRAVERSAL_SURFACE_TTL_MS);
         if now <= expires_at {
