@@ -1517,14 +1517,17 @@ pub(super) fn git_commit_argv(
     argv
 }
 
-pub(super) fn bundle_prd_commit_comments(cwd: Option<&str>, message: &str) -> String {
-    let notes = crate::orchestrator::prd::drain_pending_commit_comments(cwd);
+pub(super) fn staged_paths_now(cwd: Option<&str>) -> Vec<String> {
+    nul_separated_git_paths(cwd, "diff --cached --name-only -z")
+}
+
+pub(super) fn bundle_prd_commit_comments(message: &str, notes: &[(String, String)]) -> String {
     if notes.is_empty() {
         return message.to_string();
     }
     let mut out = message.to_string();
     out.push_str("\n\nResolved PRD rows:\n");
-    for (id, comment) in &notes {
+    for (id, comment) in notes {
         out.push_str(&format!("- {}: {}\n", id, comment));
     }
     out
@@ -1852,7 +1855,8 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 })));
             }
         }
-        let bundled_message = bundle_prd_commit_comments(cwd, message);
+        let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd, &staged_paths_now(cwd));
+        let bundled_message = bundle_prd_commit_comments(message, &commit_notes);
         let identity = body_commit_identity(body);
         let r = git_step_replayed_by_call_order(
             plan,
@@ -1884,6 +1888,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         if head_after.is_empty() || head_after == head_before {
             return Ok(err("git_commit", "commit reported success (exit 0) but HEAD did not move -- refusing to claim committed:true without a real new sha"));
         }
+        crate::orchestrator::prd::drain_commit_comments(cwd, &commit_notes);
         let sha = head_after[..head_after.len().min(10)].to_string();
         let summary = message.lines().next().unwrap_or("").to_string();
         git_commit_dedup_record(&dedup_key, &head_after, &sha, &summary);
@@ -2296,7 +2301,8 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                 "requested_paths": paths,
             }));
         }
-        let bundled_message = bundle_prd_commit_comments(cwd_ref, message.as_str());
+        let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd_ref, &staged_paths_now(cwd_ref));
+        let bundled_message = bundle_prd_commit_comments(message.as_str(), &commit_notes);
         let scoped_paths: &[String] = if scoped { &paths } else { &[] };
         let identity = body_commit_identity(body);
         let cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, identity.as_ref())), cwd_ref);
@@ -2325,6 +2331,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             if head_after.is_empty() || head_after == head_before_any_commit {
                 return err("git_finalize", "commit reported success (exit 0) but HEAD did not move -- refusing to claim committed:true without a real new sha");
             }
+            crate::orchestrator::prd::drain_commit_comments(cwd_ref, &commit_notes);
             committed = true;
             sha = head_after[..head_after.len().min(10)].to_string();
             summary = message.lines().next().unwrap_or("").to_string();
@@ -2340,14 +2347,14 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             steps.push(commit_step);
         }
     } else if !scoped {
-        let pending_notes = crate::orchestrator::prd::peek_pending_commit_comments(cwd_ref);
-        if !pending_notes.is_empty() {
+        let flush_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd_ref, &[PRD_STATE_PATHSPEC.to_string()]);
+        if !flush_notes.is_empty() {
             let flush_message = if message.is_empty() {
                 "chore: flush resolved PRD notes".to_string()
             } else {
                 message.clone()
             };
-            let bundled_message = bundle_prd_commit_comments(cwd_ref, flush_message.as_str());
+            let bundled_message = bundle_prd_commit_comments(flush_message.as_str(), &flush_notes);
             let bundled_summary = bundled_message.lines().next().unwrap_or("").to_string();
             let prd_abs = format!(
                 "{}/{}",
@@ -2396,6 +2403,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             let ccode = cr.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
             let head_after = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
             if ccode == 0 && !head_after.is_empty() && head_after != head_before_any_commit {
+                crate::orchestrator::prd::drain_commit_comments(cwd_ref, &flush_notes);
                 committed = true;
                 sha = head_after[..head_after.len().min(10)].to_string();
                 summary = bundled_summary;
