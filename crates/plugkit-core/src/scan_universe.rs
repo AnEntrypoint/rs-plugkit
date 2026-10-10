@@ -47,12 +47,17 @@ pub struct RuleExclusion {
 
 pub const OWN_STATE_RULE: &str = "gm_state_dir";
 
+/// Every unscoped scan drops gm's own state, so naming it per path in each reply is noise no caller
+/// can act on: these rules stay in `excluded_by_rule_summary` and never clear `exhaustive`, and they
+/// are the only rules a scan reply does not list. Every other rule drops code.
+pub const GM_STATE_EXCLUSION_RULES: &[&str] = &[OWN_STATE_RULE, "agentplug_kv_cache"];
+
 pub fn is_own_state_name(name: &str) -> bool {
     name == ".gm" || name.starts_with(".agentplug")
 }
 
 /// The entry a pruned own-state file is reported under: the child of the own-state directory that
-/// holds it (`.gm/prd.yml`, `.gm/memories`), so `excluded_by_rule` names the file a caller is
+/// holds it (`.gm/prd.yml`, `.gm/memories`), so the rule exclusion names the file a caller is
 /// missing, not only the directory around it.
 fn own_state_entry_under_root(root: &str, path: &str) -> Option<String> {
     let prefix = join_under(root, "");
