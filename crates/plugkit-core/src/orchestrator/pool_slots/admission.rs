@@ -261,6 +261,19 @@ pub(super) fn row_by_id<'a>(work: &'a [(Value, usize)], id: &str) -> Option<&'a 
 }
 
 pub fn slots_prose(slots: &Value) -> String {
+    let open_rows = slots["open_rows"].as_u64().unwrap_or(0);
+    let no_candidate = slots["candidates"].as_array().map_or(true, |list| list.is_empty());
+    if open_rows > 0 && no_candidate {
+        let scan = &slots["candidates_route"];
+        let route = scan["route"].as_str().unwrap_or("no route named");
+        return format!(
+            "No launchable candidate out of {open_rows} pending rows: route={route}; the pending-row scan scanned={}, ranked={}, skipped_by_rank={}, removed_by_gate={}.",
+            scan["scanned_pending_rows"].as_u64().unwrap_or(open_rows),
+            scan["ranked_rows"].as_u64().unwrap_or(0),
+            scan["skipped_by_rank"].clone(),
+            scan["removed_by_gate"].clone(),
+        );
+    }
     match slots["action"].as_str() {
         Some("none") => "No open PRD rows: launch no workers.".to_string(),
         Some("hold") => "All slots are full: wait for a completion and relaunch its replacement in the same turn.".to_string(),

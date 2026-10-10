@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 use super::super::pool_rank;
 use super::super::transitions::prd_open_rows_with_recency;
@@ -76,6 +77,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         .filter(|n| *n > 0)
         .map_or(DEFAULT_LIST_LIMIT, |n| n as usize);
     cap_candidates(&mut slots, limit);
+    cap_acceptance(&mut slots);
     for key in ["live_rows", "live_rows_unmatched", "live_sessions", "candidates_removed", "launch_filters", "already_fixed_on_head"] {
         cap_list(&mut slots, key, limit);
     }
@@ -137,6 +139,12 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         .filter_map(|item| item["id"].as_str().map(str::to_string))
         .collect();
     let sufficient = open_rows == 0 || shortfall == 0 || (launch_ids.len() as u64) >= shortfall;
+    let route = pool_route(open_rows, &launch_ids, traversal_needed, next_surface.as_deref(), launchable);
+    let candidates_shown = slots["candidates"].as_array().map_or(0, Vec::len) as u64;
+    if let Some(fields) = slots["candidates_route"].as_object_mut() {
+        fields.insert("next_verb".to_string(), json!(route.kind));
+        fields.insert("candidates_shown".to_string(), json!(candidates_shown));
+    }
     let traversal = json!({
         "needed": traversal_needed,
         "state_error": state_error,
@@ -151,6 +159,9 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         if let Some(fields) = monitor.as_object_mut() {
             fields.remove("alarm_action");
         }
+    } else if let Some(fields) = monitor.as_object_mut() {
+        fields.insert("alarm_route".to_string(), json!(route.text.clone()));
+        fields.insert("alarm_route_kind".to_string(), json!(route.kind));
     }
     let count_of_record = observed.map_or(json!("absent"), |(count, _)| json!(count));
     slots["launch"] = json!(launch.clone());
@@ -174,6 +185,8 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     out["shortfall"] = json!(shortfall);
     out["unfilled_shortfall"] = json!(unfilled_shortfall);
     out["sufficient"] = json!(sufficient);
+    out["route"] = json!(route.text.clone());
+    out["route_kind"] = json!(route.kind);
     if body.get("rules").and_then(Value::as_bool) == Some(true) {
         out["rules"] = json!(POOL_RULES);
     } else {
@@ -183,7 +196,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         out["blocker_notes"] = blocker_notes_block(limit);
     }
     if observed.is_some() && open_rows > 0 && live < floor {
-        let launch_text = launch_instruction(&launch_ids, shortfall);
+        let launch_text = launch_instruction(&launch_ids, shortfall, &route.text);
         let mut text = floor_denial_text("pool-observe", live, floor, open_rows, refill_needed, shortfall, &launch_text);
         if refill_needed == 0 {
             text.push_str(&format!(" Advertised launchable={launchable}, free_slots={free_slots}, traversal_needed={traversal_needed}."));
@@ -265,6 +278,66 @@ fn cap_candidates(slots: &mut Value, limit: usize) {
         fields.insert("candidates_total".to_string(), json!(total));
         fields.insert("candidates_witness_gap_total".to_string(), json!(gap_total));
         fields.insert("candidates_witness_gap_shown".to_string(), json!(gap_shown));
+    }
+}
+
+struct PoolRoute {
+    kind: &'static str,
+    text: String,
+}
+
+fn pool_route(
+    open_rows: u64,
+    launch_ids: &[String],
+    traversal_needed: bool,
+    next_surface: Option<&str>,
+    launchable: u64,
+) -> PoolRoute {
+    if open_rows == 0 {
+        return PoolRoute { kind: "none", text: "none: open_rows=0, so no row is scanned and no launch is advertised".to_string() };
+    }
+    if !launch_ids.is_empty() {
+        let shown = launch_ids.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
+        return PoolRoute {
+            kind: "launch",
+            text: format!("launch: launch the {} advertised ids from slots.launch in order, node-first ({})", launch_ids.len(), shown),
+        };
+    }
+    if traversal_needed {
+        let surface = next_surface.unwrap_or("unknown");
+        return PoolRoute {
+            kind: "traversal",
+            text: format!(
+                "traversal: no row is launchable, so take the traversal route: call pool-brief {{\"role\":\"traversal\",\"row\":\"{traversal}\",\"session\":\"<your SESSION_ID>\"}} and scan surface {surface}",
+                traversal = TRAVERSAL_LAUNCH_ID
+            ),
+        };
+    }
+    PoolRoute {
+        kind: "blocked",
+        text: format!(
+            "blocked: launchable={launchable}, no launch is advertised and traversal.needed is false, so no row can be launched now; slots.candidates_route names the pending-row scan that emptied slots.candidates; wait {{\"ms\":60000}} and re-dispatch pool-observe with body.live and body.held"
+        ),
+    }
+}
+
+fn cap_acceptance(slots: &mut Value) {
+    let kept: HashSet<String> = slots["candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    let filtered: serde_json::Map<String, Value> = slots["candidate_acceptance"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(id, _)| kept.contains(id))
+        .map(|(id, text)| (id.clone(), text.clone()))
+        .collect();
+    if let Some(fields) = slots.as_object_mut() {
+        fields.insert("candidate_acceptance".to_string(), Value::Object(filtered));
     }
 }
 

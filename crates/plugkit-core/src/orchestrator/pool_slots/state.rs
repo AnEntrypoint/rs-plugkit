@@ -1,11 +1,11 @@
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::super::pool_rank;
 use super::super::transitions::{prd_open_rows_with_recency, prd_row_ids};
 use super::admission::{dirty_target_verdict, row_by_id, worktree_dirt, writer_targets_of};
 use super::heartbeats::{count_of_record_live, declared_holds, held_rows, read_heartbeats};
-use super::{now_ms, pool_dir, DEFAULT_SPAWN_CEILING, LAUNCH_ID_PREFIX};
+use super::{now_ms, pool_dir, DEFAULT_SPAWN_CEILING, LAUNCH_ID_PREFIX, TRAVERSAL_LAUNCH_ID};
 use crate::pkfs;
 
 pub(super) fn read_ceiling(dir: &str) -> Option<u64> {
@@ -86,6 +86,9 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
         .filter(|id| row_by_id(&work, id.as_str()).is_some_and(|row| pool_rank::arm(row).is_none()))
         .count();
     let candidate_values: Vec<Value> = candidates.iter().map(|id| json!(id)).collect();
+    let ranked_rows = ranked["candidates"].as_array().map_or(0, Vec::len);
+    let scan = candidates_route(&ranked["supply"], &gate_tally(&candidates_removed), open_rows, ranked_rows, candidates.len());
+    let acceptance = candidate_acceptance(&work, &candidates);
     let launch_filters: Vec<Value> = candidates
         .iter()
         .filter(|id| !advertised.contains(*id))
@@ -108,6 +111,8 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
         "witness_gap_open": witness_gap_open,
         "blocker_rows": blockers.len(),
         "candidates": candidate_values,
+        "candidate_acceptance": acceptance,
+        "candidates_route": scan,
         "launchable": candidates.len(),
         "node_launchable": node_launchable,
         "advertised": advertised.clone(),
@@ -122,6 +127,91 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
         "reaped_heartbeats": live.reaped,
     });
     (slots, advertised)
+}
+
+const ACCEPTANCE_FIELDS: [&str; 3] = ["acceptance_criteria", "acceptance", "acceptance_text"];
+const ACCEPTANCE_MAP_CAP: usize = 32;
+const ACCEPTANCE_TEXT_CHARS: usize = 240;
+
+const RANK_SKIP_FIELDS: [&str; 6] = [
+    "design_decision_rows",
+    "excluded_outcome_rows",
+    "excluded_refuted_rows",
+    "blocker_notes_rows",
+    "live_skipped_rows",
+    "rows_with_pending_blocker",
+];
+
+fn clipped_text(text: &str, limit: usize) -> String {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= limit {
+        return flat;
+    }
+    let mut clipped: String = flat.chars().take(limit).collect();
+    clipped.push_str(" ...");
+    clipped
+}
+
+fn candidate_acceptance(work: &[(Value, usize)], candidates: &[String]) -> Value {
+    let mut map = serde_json::Map::new();
+    for id in candidates.iter().take(ACCEPTANCE_MAP_CAP) {
+        let Some(row) = row_by_id(work, id) else { continue };
+        let Some(text) = ACCEPTANCE_FIELDS
+            .iter()
+            .filter_map(|key| row.get(*key).and_then(Value::as_str))
+            .find(|text| !text.trim().is_empty())
+        else {
+            continue;
+        };
+        map.insert(id.clone(), json!(clipped_text(text, ACCEPTANCE_TEXT_CHARS)));
+    }
+    Value::Object(map)
+}
+
+fn gate_tally(removed: &[Value]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for entry in removed {
+        if let Some(filter) = entry["filter"].as_str() {
+            *counts.entry(filter.to_string()).or_insert(0usize) += 1;
+        }
+    }
+    counts
+}
+
+fn candidates_route(
+    supply: &Value,
+    gates: &BTreeMap<String, usize>,
+    open_rows: usize,
+    ranked_rows: usize,
+    survived: usize,
+) -> Value {
+    let mut skipped = serde_json::Map::new();
+    for key in RANK_SKIP_FIELDS {
+        skipped.insert((*key).to_string(), json!(supply[key].as_u64().unwrap_or(0)));
+    }
+    let mut removed = serde_json::Map::new();
+    for (filter, count) in gates {
+        removed.insert(filter.clone(), json!(*count));
+    }
+    let route = if survived > 0 {
+        "launch: launch the ids in slots.launch in order, node-first; slots.candidate_acceptance carries each shown candidate's acceptance text".to_string()
+    } else if open_rows == 0 {
+        "none: no open row, so no row is scanned and no launch is advertised".to_string()
+    } else {
+        format!(
+            "no-candidate: the pending-row scan ranked {ranked_rows} of {open_rows} open rows and every one was skipped by rank or removed by a gate, so slots.candidates is empty and no row can be launched; take the traversal route while traversal.needed is true (pool-brief {{\"role\":\"traversal\",\"row\":\"{traversal}\",\"session\":\"<your SESSION_ID>\"}}), else wait {{\"ms\":60000}} and re-dispatch pool-observe with body.live and body.held; skipped_by_rank and removed_by_gate below name the class that emptied the list",
+            traversal = TRAVERSAL_LAUNCH_ID
+        )
+    };
+    json!({
+        "scanned_pending_rows": open_rows,
+        "ranked_rows": ranked_rows,
+        "skipped_by_rank": skipped,
+        "removed_by_gate": removed,
+        "survived": survived,
+        "empty": survived == 0,
+        "route": route,
+    })
 }
 
 fn reconcile_live_rows(rows: Vec<String>, work: &[(Value, usize)], dir: &str) -> (Vec<String>, Vec<String>) {

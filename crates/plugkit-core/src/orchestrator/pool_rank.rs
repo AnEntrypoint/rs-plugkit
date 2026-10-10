@@ -145,6 +145,7 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -
     let mut browser_offered = live_arms.contains(&"browser");
     let (mut gpu, mut browser, mut design, mut node, mut blocked) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let (mut outcome, mut refuted) = (0usize, 0usize);
+    let (mut blocker_notes, mut live_skipped) = (0usize, 0usize);
     let mut ranked: Vec<Ranked> = Vec::new();
     for (row, recency) in work {
         let Some(id) = row_id(row) else { continue };
@@ -174,9 +175,13 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -
             continue;
         }
         if is_live(id) {
+            live_skipped += 1;
             continue;
         }
         if is_pending_blocked || has_blocker_notes(row) {
+            if !is_pending_blocked {
+                blocker_notes += 1;
+            }
             continue;
         }
         ranked.push(Ranked {
@@ -220,6 +225,8 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -
             "design_decision_rows": design,
             "excluded_outcome_rows": outcome,
             "excluded_refuted_rows": refuted,
+            "blocker_notes_rows": blocker_notes,
+            "live_skipped_rows": live_skipped,
         },
     })
 }
