@@ -743,7 +743,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         "threshold": traversal_threshold,
         "unscanned_surfaces": unscanned.iter().take(TRAVERSAL_SURFACE_SHOWN).collect::<Vec<&String>>(),
         "unscanned_total": unscanned.len(),
-        "rule": "traversal is needed only while node witness candidates are below 2 x floor and candidate surfaces remain; a candidate is unscanned, unleased, and has a module (up to 3 levels deep, .js/.mjs/.cjs/.ts/.jsx/.tsx) that no scripts/ file names (a scripts/ file name containing <surface>-<module path without extension>); pool-observe advertises the first candidate in launch and leases nothing; a traversal hop leases the candidate assigned in its pool-brief when that brief is issued; a surface named in scanned_surfaces is leased for 6 hours",
+        "rule": "traversal is needed only while node witness candidates are below 2 x floor and candidate surfaces remain; a candidate is unscanned, unleased, and has a module (up to 3 levels deep, .js/.mjs/.cjs/.ts/.jsx/.tsx) that no scripts/ file names (a scripts/ file name containing <surface>-<module path without extension>); pool-observe advertises the first candidate in launch and leases nothing; a traversal brief for an open row leases the surface that row names when that surface is unscanned, and is refused otherwise; a traversal brief for traversal-node-supply leases the first candidate when it is issued; a surface named in scanned_surfaces is leased for 6 hours",
     });
     let mut monitor = monitor_block(&slots);
     if monitor["alarm"] == json!(false) {
@@ -864,6 +864,78 @@ fn assign_traversal_surface(project_root: &str, now: u64) -> Result<Option<Strin
         return Err(format!("pool-brief: could not lease {} in {}/{}", surface, dir, TRAVERSAL_SURFACES_FILE));
     }
     Ok(Some(surface))
+}
+
+fn open_row_named(row_id: &str) -> Option<Value> {
+    prd_open_rows_with_recency()
+        .into_iter()
+        .map(|(row, _)| row)
+        .find(|row| row.get("id").and_then(Value::as_str) == Some(row_id))
+}
+
+fn surface_token_of(token: &str) -> String {
+    let unquoted = token.trim_matches(|c: char| {
+        matches!(c, '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>')
+    });
+    unquoted
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_end_matches(|c: char| c == '.' || c == ':')
+        .to_string()
+}
+
+fn names_surface(token: &str, surface: &str) -> bool {
+    token
+        .strip_prefix(surface)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+fn named_traversal_surface(row: &Value, surfaces: &[String]) -> Option<String> {
+    row.get("surface")
+        .and_then(Value::as_str)
+        .into_iter()
+        .flat_map(str::split_whitespace)
+        .map(surface_token_of)
+        .find_map(|token| {
+            surfaces
+                .iter()
+                .find(|surface| names_surface(&token, surface.as_str()))
+                .cloned()
+        })
+}
+
+fn assign_row_traversal_surface(
+    project_root: &str,
+    row_id: &str,
+    now: u64,
+) -> Result<String, String> {
+    let Some(row) = open_row_named(row_id) else {
+        return Err(format!(
+            "pool-brief: row {row_id} is not an open row in the gm store (absent, resolved, blocked, or the store did not read); no surface leased"
+        ));
+    };
+    let surfaces = list_surfaces(project_root);
+    let Some(surface) = named_traversal_surface(&row, &surfaces) else {
+        let field = row.get("surface").and_then(Value::as_str).unwrap_or_default();
+        return Err(format!(
+            "pool-brief: row {row_id} names no traversal surface (surface: \"{field}\"); a traversal surface is a directory under src, apps or client; no surface leased"
+        ));
+    };
+    let dir = pool_dir(project_root);
+    let mut state = read_surface_state(&dir);
+    if let Some(&leased_at) = state.get(&surface) {
+        let expires_at = leased_at.saturating_add(TRAVERSAL_SURFACE_TTL_MS);
+        if now <= expires_at {
+            return Err(format!(
+                "pool-brief: row {row_id} names {surface}, which is already scanned or leased until epoch ms {expires_at}; no surface leased"
+            ));
+        }
+    }
+    state.insert(surface.clone(), now);
+    if !write_surface_state(&dir, &state) {
+        return Err(format!("pool-brief: could not lease {} in {}/{}", surface, dir, TRAVERSAL_SURFACES_FILE));
+    }
+    Ok(surface)
 }
 
 fn unscanned_surfaces(surfaces: &[String], state: &std::collections::BTreeMap<String, u64>, now: u64) -> Vec<String> {
@@ -1096,7 +1168,12 @@ pub fn handle_brief(content: &str) -> (String, String, i32) {
         .replace("{role}", &role);
     let mut surface = Value::Null;
     if role == "traversal" {
-        match assign_traversal_surface(".", now_ms()) {
+        let assigned = if row == TRAVERSAL_LAUNCH_ID {
+            assign_traversal_surface(".", now_ms())
+        } else {
+            assign_row_traversal_surface(".", &row, now_ms()).map(Some)
+        };
+        match assigned {
             Ok(Some(name)) => {
                 brief.push_str(&format!(
                     "\nAssigned traversal surface: {name}. This brief leases it to your session. Scan only this surface, whatever surface your spawn prompt names, and list it under surfaces scanned in your receipt.\n"
