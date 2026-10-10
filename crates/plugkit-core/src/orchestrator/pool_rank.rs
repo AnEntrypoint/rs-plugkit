@@ -186,6 +186,7 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -
     ranked.sort();
     let mut seen: HashSet<String> = HashSet::new();
     let mut candidates: Vec<String> = Vec::new();
+    let mut node_candidates: Vec<String> = Vec::new();
     for entry in ranked {
         match entry.arm {
             Some("gpu") if gpu_offered => continue,
@@ -195,11 +196,15 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -
             _ => {}
         }
         if seen.insert(entry.id.clone()) {
+            if entry.arm.is_none() {
+                node_candidates.push(entry.id.clone());
+            }
             candidates.push(entry.id);
         }
     }
     json!({
         "candidates": candidates,
+        "node_candidates": node_candidates,
         "supply": {
             "open_work": work.len(),
             "pending_blocker_rows": blockers.len(),

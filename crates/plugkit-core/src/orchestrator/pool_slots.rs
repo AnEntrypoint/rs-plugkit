@@ -8,6 +8,7 @@ pub const HEARTBEAT_LIVE_MS: u64 = 5 * 60 * 1000;
 const HEARTBEAT_REAP_MS: u64 = 60 * 60 * 1000;
 const DEFAULT_SPAWN_CEILING: usize = 20;
 const CEILING_KEYWORDS: [&str; 3] = ["maximum", "ceiling", "limit"];
+const REFILL_FLOOR: u64 = 12;
 
 #[cfg(target_arch = "wasm32")]
 fn now_ms() -> u64 {
@@ -210,6 +211,10 @@ fn held_rows(live: &LiveHeartbeats, work: &[(Value, usize)]) -> Vec<String> {
 }
 
 pub fn slot_state(project_root: &str) -> Value {
+    slot_parts(project_root).0
+}
+
+fn slot_parts(project_root: &str) -> (Value, Vec<String>) {
     let dir = pool_dir(project_root);
     let live = read_heartbeats(&dir, now_ms());
     let ceiling = read_ceiling(&dir);
@@ -222,12 +227,18 @@ pub fn slot_state(project_root: &str) -> Value {
     let live_rows = held_rows(&live, &work);
     let ranked = super::pool_rank::rank(&work, &blockers, &live_rows);
     let candidates = ranked["candidates"].clone();
+    let node_candidates: Vec<String> = ranked["node_candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str().map(str::to_string))
+        .collect();
     let action = match (open_rows, free) {
         (0, _) => "none",
         (_, Some(0)) => "hold",
         _ => "launch",
     };
-    json!({
+    let slots = json!({
         "live": live.count,
         "live_rows": live_rows,
         "live_sessions": live.sessions,
@@ -239,7 +250,8 @@ pub fn slot_state(project_root: &str) -> Value {
         "free": free,
         "action": action,
         "reaped_heartbeats": live.reaped,
-    })
+    });
+    (slots, node_candidates)
 }
 
 pub fn spawn_ceiling(slots: &Value) -> usize {
@@ -285,11 +297,25 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
             return (String::new(), "pool-observe: could not write .gm/pool/ceiling.json".to_string(), 1);
         }
     }
+    let (slots, node_candidates) = slot_parts(".");
+    let live = slots["live"].as_u64().unwrap_or(0);
+    let ceiling = spawn_ceiling(&slots) as u64;
+    let refill_needed = REFILL_FLOOR.saturating_sub(live);
+    let launch_cap = refill_needed.min(ceiling.saturating_sub(live)) as usize;
+    let launch: Vec<Value> = node_candidates
+        .into_iter()
+        .take(launch_cap)
+        .map(|id| json!({"id": id}))
+        .collect();
     let out = json!({
         "ok": true,
         "verb": "pool-observe",
         "refusal_ceiling": refused_ceiling,
-        "slots": slot_state("."),
+        "floor": REFILL_FLOOR,
+        "ceiling": ceiling,
+        "refill_needed": refill_needed,
+        "launch": launch,
+        "slots": slots,
     });
     (out.to_string(), String::new(), 0)
 }
@@ -322,7 +348,18 @@ pub fn handle_brief(content: &str) -> (String, String, i32) {
             .map(str::to_string)
     };
     let (Some(row), Some(session), Some(role)) = (field("row"), field("session"), field("role")) else {
-        return (String::new(), "pool-brief: body requires non-empty row, session and role".to_string(), 1);
+        let missing: Vec<&str> = ["row", "session", "role"]
+            .into_iter()
+            .filter(|&key| field(key).is_none())
+            .collect();
+        return (
+            String::new(),
+            format!(
+                "pool-brief: body must be JSON with non-empty string fields row (a PRD row id), session (the subagent's SESSION_ID; the key is spelled session, not session_id) and role (one of: resolver, traversal). Missing or empty: {}",
+                missing.join(", ")
+            ),
+            1,
+        );
     };
     if role != "resolver" && role != "traversal" {
         return (String::new(), format!("pool-brief: role must be resolver or traversal, got {}", role), 1);
