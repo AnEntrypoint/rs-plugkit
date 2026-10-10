@@ -1098,6 +1098,99 @@ fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool)
         .map(|detail| format!("bin drift gate refused the commit: {detail}"))
 }
 
+pub(super) fn push_url_is_no_push_sentinel(url: &str) -> bool {
+    let normalized = url.trim().to_ascii_lowercase();
+    let normalized = normalized.trim_end_matches('/');
+    normalized.is_empty()
+        || matches!(
+            normalized,
+            "no-push" | "no_push" | "nopush" | "disable" | "disabled" | "none" | "null"
+        )
+}
+
+pub(super) fn push_url_is_real_target(url: &str, repo: Option<&str>) -> bool {
+    let url = url.trim();
+    if url.is_empty() {
+        return false;
+    }
+    if url.contains("://") {
+        return true;
+    }
+    if let Some((_, host)) = url.split_once('@') {
+        if !host.is_empty() && (host.contains(':') || host.contains('/')) {
+            return true;
+        }
+    }
+    if url.contains('/') || url.contains('\\') || crate::pkfs::is_absolute(url) {
+        return true;
+    }
+    match repo {
+        Some(repo) => {
+            let joined = format!("{}/{}", repo.trim_end_matches(['/', '\\']), url);
+            crate::pkfs::exists(&joined)
+        }
+        None => crate::pkfs::exists(url),
+    }
+}
+
+pub(super) fn configured_push_url(repo: Option<&str>, remote: &str) -> Option<String> {
+    let result = git_call_argv(&["remote", "get-url", "--push", remote], repo);
+    if result.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1) != 0 {
+        return None;
+    }
+    let url = result
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
+pub(super) fn push_disabled_refusal(
+    repo: Option<&str>,
+    branch: &str,
+    source_ref: &str,
+) -> Option<Value> {
+    const REMOTE: &str = "origin";
+    let push_url = configured_push_url(repo, REMOTE)?;
+    if push_url_is_real_target(&push_url, repo) {
+        return None;
+    }
+    let kind = if push_url_is_no_push_sentinel(&push_url) {
+        "a configured no-push sentinel"
+    } else {
+        "not a real push target"
+    };
+    Some(json!({
+        "ok": false,
+        "verb": "git_push",
+        "gate_denied": true,
+        "remote_moved": false,
+        "repo": repo,
+        "branch": branch,
+        "remote": REMOTE,
+        "push_url": push_url,
+        "source_ref": source_ref,
+        "push_disabled_by_config": true,
+        "reason_code": "push_disabled_by_config",
+        "error_code": "push_disabled_by_config",
+        "reason": format!(
+            "remote '{}' of {} has pushurl '{}', which is {} -- no scheme, no user@host and no local path that exists. This repository is deliberately configured not to publish: it is not a broken remote, not a credentials failure and not a remote that moved, so pulling or retrying cannot fix it. Configure a real pushurl to publish -- git config --local remote.{}.pushurl <real push url> -- or drop the override with git config --local --unset remote.{}.pushurl so the fetch url is used.",
+            REMOTE, repo.unwrap_or("cwd"), push_url, kind, REMOTE, REMOTE
+        ),
+        "next_dispatch": "instruction",
+        "next_action_hint": format!(
+            "git config --local remote.{}.pushurl <real push url> then git_push again; recover_remote_moved and pull_first are refused on purpose here.",
+            REMOTE
+        ),
+    }))
+}
+
 pub(super) fn git_push(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let explicit_branch = body
@@ -1214,6 +1307,10 @@ pub(super) fn git_push(body: &Value) -> u64 {
             }),
         );
     }
+    if let Some(refusal) = push_disabled_refusal(repo.as_deref(), &branch, source_ref) {
+        log_deviation_push("push-disabled-by-config", &branch);
+        return pack(refusal.to_string());
+    }
     let mut ssh_fallback: Option<SshHttpsFallback> = None;
     let mut remote_before = git_fetch_and_resolve_remote(repo.as_deref(), &branch, None);
     let (mut push_out, mut push_succeeded) =
@@ -1319,6 +1416,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
         if remote_moved_recovery_opted_in(body) {
             refusal = pull_and_repush_remote_moved(body, &repo, &branch, refusal);
         }
+        hoist_identity_required(&mut refusal);
         return pack(refusal.to_string());
     }
     while !push_succeeded
@@ -2132,7 +2230,27 @@ pub(super) enum RemoteMovedPull {
     },
 }
 
-pub(super) fn pull_past_remote_moved(cwd: Option<&str>, push_resp: &Value) -> RemoteMovedPull {
+pub(super) fn pull_body_with_identity(
+    cwd: Option<&str>,
+    branch: &str,
+    ff_only: bool,
+    identity: Option<&(String, String)>,
+) -> Value {
+    let mut body = json!({ "cwd": cwd, "branch": branch, "ff_only": ff_only });
+    if let Some((name, email)) = identity {
+        if let Some(map) = body.as_object_mut() {
+            map.insert("user_name".to_string(), json!(name.clone()));
+            map.insert("user_email".to_string(), json!(email.clone()));
+        }
+    }
+    body
+}
+
+pub(super) fn pull_past_remote_moved(
+    cwd: Option<&str>,
+    push_resp: &Value,
+    identity: Option<&(String, String)>,
+) -> RemoteMovedPull {
     if !push_resp
         .get("remote_moved")
         .and_then(|v| v.as_bool())
@@ -2164,11 +2282,8 @@ pub(super) fn pull_past_remote_moved(cwd: Option<&str>, push_resp: &Value) -> Re
     }
     let remote_sha_before = resolve_ref(cwd, &format!("origin/{}", branch)).unwrap_or_default();
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-    let ff_resp = unpack_to_value(git_pull(&json!({
-        "cwd": cwd,
-        "branch": branch,
-        "ff_only": true,
-    })));
+    let ff_body = pull_body_with_identity(cwd, &branch, true, identity);
+    let ff_resp = unpack_to_value(git_pull(&ff_body));
     if ff_resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
         return RemoteMovedPull::Landed {
             ff_only: true,
@@ -2177,7 +2292,9 @@ pub(super) fn pull_past_remote_moved(cwd: Option<&str>, push_resp: &Value) -> Re
             remote_sha_before,
         };
     }
-    let merge_resp = unpack_to_value(git_pull(&json!({ "cwd": cwd, "branch": branch })));
+    let merge_resp = unpack_to_value(git_pull(&pull_body_with_identity(
+        cwd, &branch, false, identity,
+    )));
     let merged = merge_resp
         .get("ok")
         .and_then(|v| v.as_bool())
@@ -2247,7 +2364,7 @@ pub(super) fn pull_and_repush_remote_moved(
                 == 0
         })
         .unwrap_or(false);
-    match pull_past_remote_moved(cwd, &refusal) {
+    match pull_past_remote_moved(cwd, &refusal, body_pull_identity(body).as_ref()) {
         RemoteMovedPull::NotApplicable => refusal,
         RemoteMovedPull::Blocked(reason) => {
             refusal["recovered"] = json!(false);
@@ -2317,6 +2434,84 @@ pub(super) fn pull_and_repush_remote_moved(
     }
 }
 
+pub(super) fn push_refusal_code(push_resp: &Value) -> Option<String> {
+    for candidate in [Some(push_resp), push_resp.get("data")] {
+        if let Some(candidate) = candidate {
+            for key in ["reason_code", "error_code"] {
+                if let Some(code) = candidate.get(key).and_then(|v| v.as_str()) {
+                    return Some(code.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(super) fn apply_push_disabled_reason(refusal: &mut Value, push_resp: &Value) {
+    if push_refusal_code(push_resp).as_deref() != Some("push_disabled_by_config") {
+        return;
+    }
+    let mut text: Option<String> = None;
+    for candidate in [Some(push_resp), push_resp.get("data")] {
+        if let Some(candidate) = candidate {
+            if let Some(reason) = candidate.get("reason").and_then(|v| v.as_str()) {
+                if !reason.trim().is_empty() {
+                    text = Some(reason.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(text) = text {
+        refusal["reason"] = json!(text);
+    }
+    refusal["reason_code"] = json!("push_disabled_by_config");
+    refusal["error_code"] = json!("push_disabled_by_config");
+    refusal["push_disabled_by_config"] = json!(true);
+}
+
+pub(super) fn identity_required_in_pull_result(pull_result: &Value) -> Option<Value> {
+    for key in ["merge", "ff_only"] {
+        if let Some(candidate) = pull_result.get(key) {
+            if candidate.get("error_code").and_then(|v| v.as_str()) == Some("git_identity_required")
+            {
+                return Some(candidate.clone());
+            }
+        }
+    }
+    if pull_result.get("error_code").and_then(|v| v.as_str()) == Some("git_identity_required") {
+        return Some(pull_result.clone());
+    }
+    None
+}
+
+pub(super) fn hoist_identity_required(refusal: &mut Value) {
+    let pull_result = match refusal.get("auto_recovery").and_then(|r| r.get("pull_result")) {
+        Some(pull_result) => pull_result.clone(),
+        None => return,
+    };
+    let pull_resp = match identity_required_in_pull_result(&pull_result) {
+        Some(pull_resp) => pull_resp,
+        None => return,
+    };
+    refusal["reason"] = json!(pull_resp
+        .get("hint")
+        .and_then(|v| v.as_str())
+        .unwrap_or(
+            "Git needs a commit identity for this merge. Set this repository's user.name and user.email, then retry."
+        )
+        .to_string());
+    refusal["reason_code"] = json!("git_identity_required");
+    refusal["error_code"] = json!("git_identity_required");
+    refusal["identity_required"] = json!(true);
+    if let Some(argv) = pull_resp.get("repo_local_config_argv") {
+        refusal["repo_local_config_argv"] = argv.clone();
+    }
+    if let Some(error) = pull_resp.get("error") {
+        refusal["identity_error"] = error.clone();
+    }
+}
+
 pub(super) fn git_finalize(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let cwd = repo.clone();
@@ -2335,19 +2530,18 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if !pushed {
-            return pack(
-                json!({
-                    "ok": false,
-                    "verb": "git_finalize",
-                    "committed": false,
-                    "pushed": false,
-                    "source_ref": source_ref,
-                    "push_result": push_resp,
-                    "reason": "isolated-ref publication was refused -- read push_result.reason",
-                    "next_dispatch": "instruction",
-                })
-                .to_string(),
-            );
+            let mut refusal = json!({
+                "ok": false,
+                "verb": "git_finalize",
+                "committed": false,
+                "pushed": false,
+                "source_ref": source_ref,
+                "push_result": push_resp,
+                "reason": "isolated-ref publication was refused -- read push_result.reason",
+                "next_dispatch": "instruction",
+            });
+            apply_push_disabled_reason(&mut refusal, &push_resp);
+            return pack(refusal.to_string());
         }
         let push_data = push_resp.get("data").cloned().unwrap_or(Value::Null);
         let source_sha = push_data
@@ -2782,7 +2976,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         .unwrap_or(false);
     let mut recovery: Option<Value> = None;
     if !pushed {
-        match pull_past_remote_moved(cwd_ref, &push_resp) {
+        match pull_past_remote_moved(cwd_ref, &push_resp, body_pull_identity(body).as_ref()) {
             RemoteMovedPull::NotApplicable => {}
             RemoteMovedPull::Blocked(reason) => {
                 recovery = Some(json!({
@@ -2850,6 +3044,8 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             refusal["auto_recovery"] = recovery;
             refusal["auto_recovered"] = json!(false);
         }
+        apply_push_disabled_reason(&mut refusal, &push_resp);
+        hoist_identity_required(&mut refusal);
         return pack(refusal.to_string());
     }
     emit_event("git.push", json!({ "repo": repo, "sha": sha }));
@@ -3160,6 +3356,26 @@ pub(super) fn classify_pull_hang_phase(output: &str) -> &'static str {
     }
 }
 
+pub(super) fn body_pull_identity(body: &Value) -> Option<(String, String)> {
+    let field = |keys: &[&str]| -> String {
+        keys.iter()
+            .find_map(|key| {
+                body.get(*key)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+            })
+            .unwrap_or("")
+            .to_string()
+    };
+    let name = field(&["user_name", "author_name"]);
+    let email = field(&["user_email", "author_email"]);
+    if name.is_empty() || email.is_empty() {
+        return None;
+    }
+    Some((name, email))
+}
+
 pub(super) fn git_pull(body: &Value) -> u64 {
     let cwd = body_cwd(body);
     let remote = body
@@ -3177,17 +3393,27 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-    let mut argv = vec!["pull", "--no-edit", "--no-rebase"];
+    let mut argv: Vec<String> = Vec::new();
+    if let Some((name, email)) = body_pull_identity(body) {
+        argv.push("-c".to_string());
+        argv.push(format!("user.name={name}"));
+        argv.push("-c".to_string());
+        argv.push(format!("user.email={email}"));
+    }
+    argv.push("pull".to_string());
+    argv.push("--no-edit".to_string());
+    argv.push("--no-rebase".to_string());
     if ff_only {
-        argv.push("--ff-only");
+        argv.push("--ff-only".to_string());
     }
     if !remote.is_empty() {
-        argv.push(remote);
+        argv.push(remote.to_string());
     }
     if !branch.is_empty() {
-        argv.push(branch);
+        argv.push(branch.to_string());
     }
-    let r = git_call_argv(&argv, cwd);
+    let argv_refs: Vec<&str> = argv.iter().map(|arg| arg.as_str()).collect();
+    let r = git_call_argv(&argv_refs, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let output = format!(
         "{}{}",
