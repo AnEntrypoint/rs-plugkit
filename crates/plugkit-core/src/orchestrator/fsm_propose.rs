@@ -78,34 +78,56 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let Some(kind) = OverrideKind::parse(&kind_raw) else {
-        return (
-            json!({
-                "ok": false,
-                "error": "fsm-propose-override requires body.kind in {\"prose\",\"graph\",\"config\"}",
-            }).to_string(),
-            String::new(),
-            1,
-        );
-    };
+    let kind_parsed = OverrideKind::parse(&kind_raw);
+    let confirmation_witness = body
+        .get("confirmation_witness")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
-    if proposed_text.trim().is_empty() {
-        return (
-            json!({ "ok": false, "error": "fsm-propose-override requires non-empty body.proposed_text" }).to_string(),
-            String::new(),
-            1,
-        );
+    let mut missing: Vec<String> = Vec::new();
+    if kind_parsed.is_none() {
+        missing.push("body.kind: one of \"prose\", \"graph\", \"config\"".to_string());
     }
-    if reason.trim().is_empty() || witness.trim().is_empty() {
+    if proposed_text.trim().is_empty() {
+        missing.push("body.proposed_text: non-empty string, the full replacement text".to_string());
+    }
+    if reason.trim().is_empty() {
+        missing.push("body.reason: non-empty string citing the friction signal (gate-repeat count, deviation kind, file:line)".to_string());
+    }
+    if witness.trim().is_empty() {
+        missing.push("body.witness: non-empty string, the live observation the override rests on".to_string());
+    }
+    if kind_parsed == Some(OverrideKind::Prose) && key.trim().is_empty() {
+        missing.push("body.key: non-empty prose key (e.g. \"specify\") -- required when kind=\"prose\"".to_string());
+    }
+    if kind_parsed == Some(OverrideKind::Graph) && user_confirmed && confirmation_witness.trim().is_empty() {
+        missing.push("body.confirmation_witness: non-empty string citing the AskUserQuestion dispatch -- required when kind=\"graph\" and user_confirmed:true".to_string());
+    }
+    if !missing.is_empty() {
         return (
             json!({
                 "ok": false,
-                "error": "fsm-propose-override requires body.reason and body.witness -- a self-authored override with no cited friction signal (gate-repeat count, deviation kind, file:line) is a guess, not a proposal",
+                "error": format!(
+                    "fsm-propose-override rejected: {} required field(s) missing or invalid -- every required field and its accepted shape is listed here, so fix all in one pass; this shape is static and never needs two round trips. Missing: {}",
+                    missing.len(),
+                    missing.join(" | ")
+                ),
+                "required_fields": {
+                    "kind": "\"prose\" | \"graph\" | \"config\"",
+                    "proposed_text": "string, non-empty",
+                    "reason": "string, non-empty, citing the friction signal",
+                    "witness": "string, non-empty",
+                    "key": "string, non-empty -- required when kind=\"prose\"",
+                    "confirmation_witness": "string, non-empty -- required when kind=\"graph\" and user_confirmed:true",
+                },
+                "missing": missing,
             }).to_string(),
             String::new(),
             1,
         );
     }
+    let kind = kind_parsed.expect("kind parsed and validated non-None above");
 
     let target_path = match kind {
         OverrideKind::Prose => {
