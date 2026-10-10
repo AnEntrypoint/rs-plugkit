@@ -41,7 +41,8 @@ enum Materialized {
 
 pub fn ensure_default_cache() -> Result<(String, Option<String>), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("no working directory: {e}"))?;
-    let cache = cwd
+    let root = crate::config::normalize_project_root(&cwd.to_string_lossy().replace('\\', "/"));
+    let cache = Path::new(&root)
         .join(DEFAULT_REPO_CACHE_REL)
         .to_string_lossy()
         .replace('\\', "/");
