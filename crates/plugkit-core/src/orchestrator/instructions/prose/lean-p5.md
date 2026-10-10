@@ -60,7 +60,7 @@ Every piece of state a future reader must see is a commit, a PRD row, a mutable 
 
 Handover: The introducing commit read from history is handed to BISECT, which uses it as the reason for the changed region. cite git blame as the Index.
 
-Before committing a changed region, the agent learns why it exists: git_log {"path":"<file>","limit":10} on the file, then git_show {"rev":"<introducing sha>","stat":true} for the commit that introduced the region. That commit's message is the recorded reason. When the introducing commit explains nothing, the backreference to RULE5072 fires, and the new message records why the old line was written.
+Before committing a changed region, the agent learns why it exists: git_log {"path":"<file>","limit":10} on the file, then git_show {"rev":"<introducing sha>"} for the commit that introduced the region. That commit's message is the recorded reason. When the introducing commit explains nothing, the backreference to RULE5072 fires, and the new message records why the old line was written.
 
 ### BISECT - git bisect as the Regression Oracle - Linus Torvalds
 
