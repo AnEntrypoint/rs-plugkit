@@ -347,6 +347,7 @@ fn worktree_dirt() -> WorktreeDirt {
     let mut dirt = WorktreeDirt {
         unknown: status.failed || status.parked || (status.partial && status.skipped_paths.is_empty()),
         entries: BTreeSet::new(),
+        basenames: BTreeSet::new(),
     };
     dirt.entries.extend(
         status
