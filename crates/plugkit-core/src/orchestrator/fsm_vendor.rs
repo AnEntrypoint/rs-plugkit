@@ -466,7 +466,7 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
     results.push(json!({ "path": deviations_path, "ok": ok, "status": status }));
 
     let invariants_ref = {
-        let policy = crate::orchestrator::fsm::graph().policy;
+        let policy = crate::orchestrator::fsm::graph().policy.clone();
         let mut lines = vec![
             "# Frozen FSM invariants".to_string(),
             String::new(),

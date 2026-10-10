@@ -176,7 +176,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     let new_depends_on = extract_depends_on(&map);
     let path = mutables_path();
     let path_s = path.to_string_lossy().to_string();
-    let policy = super::fsm::graph().policy;
+    let policy = super::fsm::graph().policy.clone();
 
     let outcome = cas::cas_retry_write(
         &path_s,
@@ -453,7 +453,7 @@ pub fn pending_detailed() -> Vec<serde_json::Value> {
     };
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut slot_of_id: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let policy = super::fsm::graph().policy;
+    let policy = super::fsm::graph().policy.clone();
     let resolved_statuses = policy.mutables_resolved_statuses;
     if let Some(seq) = doc.as_sequence() {
         for item in seq {
@@ -525,7 +525,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    let policy = super::fsm::graph().policy;
+    let policy = super::fsm::graph().policy.clone();
 
     let outcome = cas::cas_retry_write(
         &path_s,
@@ -749,7 +749,7 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    let policy = super::fsm::graph().policy;
+    let policy = super::fsm::graph().policy.clone();
     let outcome = cas::cas_retry_write(
         &path_s,
         policy.cas_max_attempts,
