@@ -474,11 +474,16 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
+    let overwrite = item_map
+        .get(&Value::String("overwrite".to_string()))
+        .and_then(|v| v.as_bool())
+        == Some(true);
 
     let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-add", |mut doc: Value| {
         let mut add_outcome = AddOutcome::Added;
         if let Some(seq) = doc.as_sequence_mut() {
             let mut new_with_id = item_map.clone();
+            new_with_id.remove(&Value::String("overwrite".to_string()));
             new_with_id.insert(Value::String("id".to_string()), Value::String(id.clone()));
             if !new_with_id.contains_key(&Value::String("status".to_string())) {
                 new_with_id.insert(
@@ -497,8 +502,17 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                 Some(slot) => {
                     add_outcome = if *slot == new_row {
                         AddOutcome::AlreadyIdentical
-                    } else {
+                    } else if overwrite {
                         AddOutcome::Rescoped
+                    } else {
+                        return cas::CasOutcome::Abort(
+                            String::new(),
+                            format!(
+                                "prd-add refused: id '{}' already exists. Pass overwrite:true to rescope it",
+                                id
+                            ),
+                            1,
+                        );
                     };
                     *slot = new_row;
                 }
@@ -591,7 +605,7 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    let policy = super::fsm::graph().policy;
+    let policy = super::fsm::graph().policy.clone();
     let outcome = cas::cas_retry_write(
         &path_s,
         policy.cas_max_attempts,
@@ -838,7 +852,11 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         (parsed.0, parsed.1, parsed.2, parsed.3);
 #[cfg(target_arch = "wasm32")]
     let resolve_cwd = parsed.4;
-    let policy = super::fsm::graph().policy;
+    #[cfg(target_arch = "wasm32")]
+    let resolver_session = serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|v| v.get("session_id").and_then(|s| s.as_str()).map(|s| s.to_string()));
+    let policy = super::fsm::graph().policy.clone();
     let status_kept = keeps_status(trimmed);
     let has_witness = witness
         .as_ref()
@@ -863,16 +881,30 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         );
     }
     #[cfg(target_arch = "wasm32")]
+    let mut witness_session: Option<String> = None;
+    #[cfg(target_arch = "wasm32")]
     if let Some(dispatch_id) = witness_dispatch_id.as_ref() {
         let cwd = resolve_cwd.as_deref().unwrap_or("");
-        if crate::dispatch_ledger::lookup(cwd, dispatch_id).is_none() {
+        let witnessed = crate::dispatch_ledger::lookup(cwd, dispatch_id).is_some_and(|entry| {
+            entry.get("exit_code").and_then(|v| v.as_i64()) == Some(0)
+                && entry
+                    .get("verb")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|verb| {
+                        matches!(
+                            verb,
+                            "exec_js" | "codesearch" | "code_search" | "search" | "grep" | "rg"
+                        )
+                    })
+        });
+        if !witnessed {
             let body = serde_json::json!({
-                "error": format!("prd-resolve refused: witness_dispatch_id {} not found in this guest's dispatch ledger", dispatch_id),
+                "error": format!("prd-resolve refused: witness_dispatch_id {} not found, exited nonzero, or not a witness verb (exec_js, codesearch, grep) in this guest's dispatch ledger", dispatch_id),
                 "deviation_kind": "prd-resolve-fabricated-dispatch",
                 "deviation_severity": "deny",
                 "prd_id": id_target,
                 "witness_dispatch_id": dispatch_id,
-                "hint": "witness_dispatch_id must be the `dispatch_id` field returned in a PRIOR spool response (every verb's response now carries one). This id was not found in .gm/exec-spool/.dispatch-ledger.json, so it does not correspond to a real dispatch that actually ran -- either it was invented, or it belongs to a different cwd/project. Resolve again either omitting witness_dispatch_id, or with the exact dispatch_id copied from the response of the dispatch that produced this row's evidence.",
+                "hint": "witness_dispatch_id must be the `dispatch_id` field returned in a PRIOR spool response (every verb's response now carries one). This id was not found in .gm/exec-spool/.dispatch-ledger.json with exit_code 0, so it does not correspond to a real dispatch that actually succeeded -- either it was invented, it failed, or it belongs to a different cwd/project. Resolve again either omitting witness_dispatch_id, or with the exact dispatch_id copied from the response of the dispatch that produced this row's evidence.",
             }).to_string();
             return (
                 body,
@@ -883,7 +915,39 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 1,
             );
         }
+        witness_session = crate::dispatch_ledger::lookup(cwd, dispatch_id).and_then(|entry| {
+            entry
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+        if resolver_session.is_some() && witness_session == resolver_session {
+            let body = serde_json::json!({
+                "error": format!("prd-resolve refused: witness_dispatch_id {} was dispatched by the resolving session for {}", dispatch_id, id_target),
+                "deviation_kind": "prd-resolve-self-witness",
+                "deviation_severity": "deny",
+                "prd_id": id_target,
+                "witness_dispatch_id": dispatch_id,
+                "hint": "The witness and the resolve share one session_id, so the executor verified its own work. Resolve from a session other than the one that dispatched the witness; the executor reports BLOCKED until an independent session closes the row.",
+            }).to_string();
+            return (
+                body,
+                format!(
+                    "prd-resolve refused: witness dispatched by the resolving session for {}",
+                    id_target
+                ),
+                1,
+            );
+        }
     }
+    #[cfg(target_arch = "wasm32")]
+    let witness_verified = resolver_session.is_some()
+        && witness_session.is_some()
+        && witness_session != resolver_session;
+    #[cfg(not(target_arch = "wasm32"))]
+    let witness_verified = false;
+    #[cfg(not(target_arch = "wasm32"))]
+    let witness_session: Option<String> = None;
     let path = prd_path();
     let path_s = path.to_string_lossy().to_string();
     if !pkfs::exists(&path_s) {
@@ -1029,7 +1093,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 serde_json::json!({ "id": id_target }),
             );
             let outcome_key = if status_kept { "annotated" } else { "resolved" };
-            (serde_json::json!({ outcome_key: id_target, "status_kept": status_kept, "commit_comment_attached": commit_comment.is_some(), "witness_dispatch_id_verified": witness_dispatch_id.is_some() }).to_string(), String::new(), 0)
+            (serde_json::json!({ outcome_key: id_target, "status_kept": status_kept, "commit_comment_attached": commit_comment.is_some(), "witness_session": witness_session, "witness_dispatch_id_verified": witness_verified }).to_string(), String::new(), 0)
         }
         Err((out, err, rc)) => (out, err, rc),
     }
