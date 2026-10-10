@@ -9,7 +9,9 @@ pub const HEARTBEAT_LIVE_MS: u64 = 10 * 60 * 1000;
 const HEARTBEAT_REAP_MS: u64 = 60 * 60 * 1000;
 const DEFAULT_SPAWN_CEILING: usize = 20;
 const CEILING_KEYWORDS: [&str; 3] = ["maximum", "ceiling", "limit"];
-const REFILL_FLOOR: u64 = 12;
+const REFILL_FLOOR: u64 = 10;
+const COUNT_OF_RECORD_FILE: &str = "count-of-record.json";
+const COUNT_OF_RECORD_TTL_MS: u64 = 5 * 60 * 1000;
 const LAUNCH_ID_PREFIX: &str = "witness-gap-";
 const LAUNCH_ID_EXCLUDED_SEGMENTS: [&str; 3] = ["-blocker-", "-finding-", "-defect-"];
 const HELD_ROWS_FILE: &str = "held-rows.json";
@@ -216,6 +218,21 @@ fn read_ceiling(dir: &str) -> Option<u64> {
     serde_json::from_str::<Value>(&body).ok()?.get("ceiling")?.as_u64()
 }
 
+fn count_of_record_live(project_root: &str, now: u64) -> Option<u64> {
+    let body = pkfs::read_to_string(&format!("{}/{}", pool_dir(project_root), COUNT_OF_RECORD_FILE))?;
+    let record: Value = serde_json::from_str(&body).ok()?;
+    let ts = record.get("ts").and_then(Value::as_u64)?;
+    if now.saturating_sub(ts) > COUNT_OF_RECORD_TTL_MS {
+        return None;
+    }
+    record.get("live").and_then(Value::as_u64)
+}
+
+fn write_count_of_record(dir: &str, live: u64, now: u64) -> bool {
+    let record = json!({"live": live, "ts": now, "source": "pool-observe body.live"});
+    pkfs::write(&format!("{}/{}", dir, COUNT_OF_RECORD_FILE), &record.to_string())
+}
+
 fn ceiling_from_refusal(text: &str) -> Option<u64> {
     let lower = text.to_ascii_lowercase();
     let after_keyword = CEILING_KEYWORDS
@@ -315,15 +332,16 @@ fn held_rows(live: &LiveHeartbeats, work: &[(Value, usize)]) -> Vec<String> {
 }
 
 pub fn slot_state(project_root: &str) -> Value {
-    slot_parts(project_root, None).0
+    let observed = count_of_record_live(project_root, now_ms()).map(|live| (live, "count_of_record"));
+    slot_parts(project_root, observed).0
 }
 
-fn slot_parts(project_root: &str, observed_live: Option<u64>) -> (Value, Vec<String>) {
+fn slot_parts(project_root: &str, observed: Option<(u64, &'static str)>) -> (Value, Vec<String>) {
     let dir = pool_dir(project_root);
     let live = read_heartbeats(&dir, now_ms());
     let heartbeat_live = live.count as u64;
-    let live_count = observed_live.unwrap_or(heartbeat_live);
-    let live_source = if observed_live.is_some() { "listagents" } else { "heartbeats" };
+    let live_count = observed.map_or(heartbeat_live, |(count, _)| count);
+    let live_source = observed.map_or("heartbeats", |(_, source)| source);
     let ceiling = read_ceiling(&dir);
     let free = ceiling.map(|c| c.saturating_sub(live_count));
     let (blocker_entries, work): (Vec<(Value, usize)>, Vec<(Value, usize)>) = prd_open_rows_with_recency()
@@ -405,6 +423,46 @@ pub fn slots_prose(slots: &Value) -> String {
     }
 }
 
+fn floor_denial_text(verb: &str, live: u64, floor: u64, open_rows: u64, refill_needed: u64) -> String {
+    format!(
+        "{verb} refused: floor_gate_denied -- live={live} is under the floor of {floor} with open_rows={open_rows}; refill_needed={refill_needed}. Launch refill_needed gm-worker subagents now from slots.launch of a pool-observe reply (node-first candidates, then any open row). Then call pool-observe with body.live set to the ListAgents count and retry {verb}."
+    )
+}
+
+fn open_work_rows(exclude_row: Option<&str>) -> u64 {
+    prd_open_rows_with_recency()
+        .into_iter()
+        .filter(|(row, _)| !super::pool_rank::is_blocker_row(row))
+        .filter(|(row, _)| exclude_row.map_or(true, |id| row.get("id").and_then(Value::as_str) != Some(id)))
+        .count() as u64
+}
+
+pub fn floor_gate(verb: &str, body_live: Option<u64>, exclude_row: Option<&str>) -> Result<Value, Value> {
+    let Some(live) = body_live.or_else(|| count_of_record_live(".", now_ms())) else {
+        return Ok(json!("absent"));
+    };
+    let ceiling = read_ceiling(&pool_dir(".")).unwrap_or(DEFAULT_SPAWN_CEILING as u64);
+    let floor = REFILL_FLOOR.min(ceiling);
+    let open_rows = open_work_rows(exclude_row);
+    if open_rows == 0 || live >= floor {
+        return Ok(json!(live));
+    }
+    let refill_needed = floor - live;
+    let text = floor_denial_text(verb, live, floor, open_rows, refill_needed);
+    Err(json!({
+        "ok": false,
+        "verb": verb,
+        "error_code": "floor_gate_denied",
+        "error": text,
+        "live": live,
+        "floor": floor,
+        "ceiling": ceiling,
+        "open_rows": open_rows,
+        "refill_needed": refill_needed,
+        "count_of_record": live,
+    }))
+}
+
 pub fn handle_observe(content: &str) -> (String, String, i32) {
     let body: Value = serde_json::from_str(content).unwrap_or(Value::Null);
     let observed_live = body.get("live").and_then(Value::as_u64);
@@ -414,6 +472,15 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let dir = pool_dir(".");
+    let record_now = now_ms();
+    if let Some(live) = observed_live {
+        if !write_count_of_record(&dir, live, record_now) {
+            return (String::new(), "pool-observe: could not write .gm/pool/count-of-record.json".to_string(), 1);
+        }
+    }
+    let observed = observed_live
+        .map(|live| (live, "listagents"))
+        .or_else(|| count_of_record_live(".", record_now).map(|live| (live, "count_of_record")));
     let refused_ceiling = refusal.as_deref().and_then(ceiling_from_refusal);
     let record_path = format!("{}/ceiling.json", dir);
     if observed_live.is_some() || refusal.is_some() {
@@ -440,7 +507,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
             return (String::new(), "pool-observe: could not write .gm/pool/held-rows.json".to_string(), 1);
         }
     }
-    let (mut slots, node_candidates) = slot_parts(".", observed_live);
+    let (mut slots, node_candidates) = slot_parts(".", observed);
     let limit = body
         .get("limit")
         .and_then(Value::as_u64)
@@ -453,8 +520,9 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     let held = slots["live_rows_total"].as_u64().unwrap_or(0);
     let live = slots["live"].as_u64().unwrap_or(0);
     let ceiling = spawn_ceiling(&slots) as u64;
+    let floor = REFILL_FLOOR.min(ceiling);
     let open_rows = slots["open_rows"].as_u64().unwrap_or(0);
-    let refill_needed = if open_rows > 0 { REFILL_FLOOR.saturating_sub(live) } else { 0 };
+    let refill_needed = if open_rows > 0 { floor.saturating_sub(live) } else { 0 };
     let launch_cap = refill_needed.min(ceiling.saturating_sub(live)) as usize;
     let now = now_ms();
     let state_dir = pool_dir(".");
@@ -495,13 +563,16 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
             fields.remove("alarm_action");
         }
     }
+    let count_of_record = observed.map_or(json!("absent"), |(count, _)| json!(count));
+    slots["launch"] = json!(launch.clone());
     let mut out = json!({
         "ok": true,
         "verb": "pool-observe",
         "refusal_ceiling": refused_ceiling,
-        "floor": REFILL_FLOOR,
+        "floor": floor,
         "ceiling": ceiling,
         "held": held,
+        "count_of_record": count_of_record,
         "refill_needed": refill_needed,
         "launch": launch,
         "traversal": traversal,
@@ -515,6 +586,13 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     }
     if body.get("blocker_notes").and_then(Value::as_bool) == Some(true) {
         out["blocker_notes"] = blocker_notes_block(limit);
+    }
+    if observed.is_some() && open_rows > 0 && live < floor {
+        let text = floor_denial_text("pool-observe", live, floor, open_rows, refill_needed);
+        out["ok"] = json!(false);
+        out["error_code"] = json!("floor_gate_denied");
+        out["error"] = json!(text.as_str());
+        return (out.to_string(), text, 1);
     }
     (out.to_string(), String::new(), 0)
 }
@@ -670,10 +748,11 @@ fn cap_list(slots: &mut Value, key: &str, limit: usize) {
 
 const MONITOR_ALARM_ACTION: &str = "refill from launch (node-first candidates) in the same turn, one replacement per freed slot; when candidates run out, traversal is launched; loop: wait {\"ms\":60000}, then pool-observe with body.live (ListAgents count) and body.held, then launch";
 
-const POOL_RULES: [&str; 6] = [
-    "Floor 12: while open_rows > 0 keep live at or above 12; refill_needed = 12 - live.",
-    "Pass the ListAgents count of running subagents as body.live on every call: that count is the count of record. slots.live_heartbeats is only the heartbeat cross-check.",
-    "A live count under 12 while open_rows > 0 is a FAILURE: append `FAILURE: <UTC timestamp> live count fell to <live> with <open_rows> pending rows` to .gm/witness-log.md, then refill in the same turn.",
+const POOL_RULES: [&str; 7] = [
+    "Floor 10: while open_rows > 0 keep live at or above the floor, which is 10 or the recorded spawn ceiling when that is lower; refill_needed = floor - live.",
+    "Pass the ListAgents count of running subagents as body.live on every call: it is the count of record, kept 5 minutes in .gm/pool/count-of-record.json. prd-resolve and transition use that record when they carry no live field; with no fresh record they do not deny and reply count_of_record: absent. slots.live_heartbeats is only the heartbeat cross-check.",
+    "Spawn ceiling 20, or the N a spawn refusal recorded: while open_rows > 0 fill toward it; launch = min(refill_needed, ceiling - live) ids from slots.launch.",
+    "A live count under the floor while open_rows > 0 is a gate denial (error_code floor_gate_denied) on pool-observe, prd-resolve and transition: launch refill_needed gm-worker subagents from slots.launch, then retry. It is also a FAILURE: append `FAILURE: <UTC timestamp> live count fell to <live> with <open_rows> pending rows` to .gm/witness-log.md.",
     "Refill on every completion, in the same turn: launch one replacement per freed slot from launch (node-first candidates). Never launch a row that is in slots.live_rows.",
     "Pass body.held = the row id of every running worker on every call, including a worker whose heartbeat is not written yet. The newest held list is kept for 30 minutes; send held: [] to clear it.",
     "A heartbeat refreshes at least every 5 minutes and counts as live for 10 minutes; one older than 5 minutes is listed in slots.aging_heartbeats, not dropped. On a spawn refusal, call pool-observe with body.refusal set to the refusal text.",
@@ -683,10 +762,11 @@ const WORKER_BRIEF_PATH: &str = "C:/dev/spoint/.gm/config-source-cache-default/p
 pub fn monitor_block(slots: &Value) -> Value {
     let live = slots["live"].as_u64().unwrap_or(0);
     let open_work = slots["open_rows"].as_u64().unwrap_or(0);
-    let shortfall = if open_work > 0 { REFILL_FLOOR.saturating_sub(live) } else { 0 };
+    let floor = REFILL_FLOOR.min(spawn_ceiling(slots) as u64);
+    let shortfall = if open_work > 0 { floor.saturating_sub(live) } else { 0 };
     json!({
         "live": live,
-        "floor": REFILL_FLOOR,
+        "floor": floor,
         "open_work": open_work,
         "shortfall": shortfall,
         "alarm": shortfall > 0,

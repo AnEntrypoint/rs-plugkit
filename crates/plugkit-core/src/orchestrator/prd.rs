@@ -1274,6 +1274,19 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     }
     let policy = super::fsm::graph().policy;
     let annotate_only = keeps_status(trimmed);
+    let request_live = request_object(trimmed).get("live").and_then(|v| v.as_u64());
+    let count_of_record = match super::pool_slots::floor_gate(
+        "prd-resolve",
+        request_live,
+        Some(id_target.as_str()),
+    ) {
+        Ok(record) => record,
+        Err(denial) if !annotate_only => {
+            let message = denial["error"].as_str().unwrap_or_default().to_string();
+            return (denial.to_string(), message, 1);
+        }
+        Err(denial) => denial["count_of_record"].clone(),
+    };
     let has_witness = witness
         .as_ref()
         .map(|w| !w.trim().is_empty())
@@ -1692,6 +1705,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 "witness_dispatch_id_field": "witness_dispatch_id",
                 "witness_dispatch_id_in_evidence": witness_dispatch_id,
                 "witness_dispatch_id_in_ledger": witness_dispatch_id.as_ref().map(|_| dispatch_verified),
+                "count_of_record": count_of_record,
             });
             (reply.to_string(), String::new(), 0)
         }

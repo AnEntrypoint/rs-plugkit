@@ -118,10 +118,11 @@ pub(super) fn pred_pool_floor_met() -> bool {
 
 fn pool_floor_denial_detail() -> String {
     let slots = super::pool_slots::slot_state(".");
+    let refill_needed = super::pool_slots::monitor_block(&slots)["shortfall"].clone();
     let shortfall = pool_concurrency_shortfall();
     format!(
-        "pool-floor-met denied: open_rows={} live={} free={} action={} shortfall={}; launch gm-worker subagents for the candidates in .gm/pool slots, and on a spawn refusal dispatch pool-observe with its text.",
-        slots["open_rows"], slots["live"], slots["free"], slots["action"], shortfall
+        "pool-floor-met denied: floor_gate_denied open_rows={} live={} refill_needed={} free={} action={} shortfall={}; launch refill_needed gm-worker subagents from slots.launch in a pool-observe reply (node-first candidates, then any open row), then call pool-observe with body.live set to the ListAgents count; on a spawn refusal dispatch pool-observe with its text.",
+        slots["open_rows"], slots["live"], refill_needed, slots["free"], slots["action"], shortfall
     )
 }
 
@@ -1206,6 +1207,15 @@ pub fn handle(content: &str) -> (String, String, i32) {
         );
     }
 
+    if target.as_str() != cur_phase.as_str() {
+        let body_live = serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .and_then(|v| v.get("live").and_then(|live| live.as_u64()));
+        if let Err(denial) = super::pool_slots::floor_gate("transition", body_live, None) {
+            let message = denial["error"].as_str().unwrap_or_default().to_string();
+            return (denial.to_string(), message, 1);
+        }
+    }
     if let Some(r) = gate_rejection(&graph, cur_phase.as_str(), target.as_str()) {
         return r;
     }
