@@ -603,6 +603,11 @@ fn is_store_busy_error(err: &str) -> bool {
         || err.to_ascii_lowercase().contains("database is locked")
 }
 
+fn store_lock_directory_held(db: &str) -> Option<String> {
+    let lock_dir = format!("{db}.lock");
+    (crate::wasm_dispatch::host_stat_is_directory(&lock_dir) == Some(true)).then_some(lock_dir)
+}
+
 pub(crate) fn sync_files(
     files: &[String],
     project_path: Option<&str>,
@@ -613,6 +618,18 @@ pub(crate) fn sync_files(
     focus: Option<&str>,
 ) -> Value {
     let db = db_path(project_path);
+    if let Some(lock_dir) = store_lock_directory_held(&db) {
+        return json!({
+            "ok": false,
+            "complete": false,
+            "store_busy": true,
+            "lock_dir": lock_dir,
+            "error": format!(
+                "{} The refresh returned without waiting: the lock directory {} is present, and the WASI VFS records no owner in it, so a directory left by an unclean exit blocks every write until it is removed.",
+                STORE_BUSY_REFRESH_NOTE, lock_dir
+            )
+        });
+    }
     if let Err(e) = ensure_schema(&db) {
         if is_store_busy_error(&e) {
             return json!({ "ok": false, "complete": false, "store_busy": true, "error": STORE_BUSY_REFRESH_NOTE });
