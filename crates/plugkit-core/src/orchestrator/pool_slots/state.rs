@@ -3,10 +3,7 @@ use std::collections::HashSet;
 
 use super::super::pool_rank;
 use super::super::transitions::prd_open_rows_with_recency;
-use super::admission::{
-    dirty_target_verdict, launch_filter_of, node_only_module, row_by_id, witness_gap_admitted,
-    witness_gap_refusal, worktree_dirt, WorktreeDirt,
-};
+use super::admission::{dirty_target_verdict, row_by_id, worktree_dirt, writer_targets_of};
 use super::heartbeats::{count_of_record_live, declared_holds, held_rows, read_heartbeats};
 use super::{now_ms, pool_dir, DEFAULT_SPAWN_CEILING, LAUNCH_ID_PREFIX};
 use crate::pkfs;
@@ -42,61 +39,53 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
     live_rows.extend(declared_holds(&dir, now_ms()));
     live_rows.sort();
     live_rows.dedup();
-    let admitted: HashSet<String> = work
-        .iter()
-        .filter(|(row, _)| witness_gap_admitted(row, project_root))
-        .filter_map(|(row, _)| row.get("id").and_then(Value::as_str).map(str::to_string))
-        .collect();
-    let ranked = pool_rank::rank(&work, &blockers, &live_rows, &admitted);
+    let ranked = pool_rank::rank(&work, &blockers, &live_rows);
     let dirt = worktree_dirt();
+    let mut claimed: HashSet<String> = work
+        .iter()
+        .filter(|(row, _)| row.get("id").and_then(Value::as_str).is_some_and(|id| live_rows.iter().any(|live| live == id)))
+        .flat_map(|(row, _)| writer_targets_of(row))
+        .collect();
+    let budget = ceiling.unwrap_or(DEFAULT_SPAWN_CEILING as u64).saturating_sub(live_count);
     let mut candidates_removed: Vec<Value> = Vec::new();
-    let candidates: Vec<Value> = ranked["candidates"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|value| {
-            let Some(id) = value.as_str() else {
-                return true;
-            };
-            match row_by_id(&work, id).and_then(|row| dirty_target_verdict(row, &dirt)) {
-                Some((filter, field, file)) => {
-                    let mut entry = json!({"id": id, "filter": filter});
-                    entry[field] = json!(file);
-                    candidates_removed.push(entry);
-                    false
-                }
-                None => true,
-            }
-        })
-        .cloned()
-        .collect();
-    let node_candidates: Vec<String> = ranked["node_candidates"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|id| id.as_str())
-        .filter(|id| {
-            row_by_id(&work, id).is_some_and(|row| {
-                admitted.contains(*id)
-                    && pool_rank::node_arm(row, true).is_none()
-                    && node_only_module(row, project_root)
-                    && dirty_target_verdict(row, &dirt).is_none()
-            })
-        })
-        .map(str::to_string)
-        .collect();
+    let mut candidates: Vec<String> = Vec::new();
+    let mut advertised: Vec<String> = Vec::new();
+    for id in ranked["candidates"].as_array().into_iter().flatten().filter_map(|value| value.as_str()) {
+        let Some(row) = row_by_id(&work, id) else {
+            continue;
+        };
+        if let Some((filter, field, file)) = dirty_target_verdict(row, &dirt) {
+            let mut entry = json!({"id": id, "filter": filter});
+            entry[field] = json!(file);
+            candidates_removed.push(entry);
+            continue;
+        }
+        let targets = writer_targets_of(row);
+        if let Some(target) = targets.iter().find(|target| claimed.contains(target.as_str())) {
+            candidates_removed.push(json!({"id": id, "filter": "live_writer", "writer_target": target}));
+            continue;
+        }
+        if (advertised.len() as u64) < budget {
+            claimed.extend(targets);
+            advertised.push(id.to_string());
+        }
+        candidates.push(id.to_string());
+    }
+    let node_launchable = candidates
+        .iter()
+        .filter(|id| row_by_id(&work, id.as_str()).is_some_and(|row| pool_rank::arm(row).is_none()))
+        .count();
+    let candidate_values: Vec<Value> = candidates.iter().map(|id| json!(id)).collect();
     let launch_filters: Vec<Value> = candidates
         .iter()
-        .filter_map(|value| value.as_str())
-        .filter(|id| !node_candidates.iter().any(|node| node.as_str() == *id))
-        .map(|id| json!({"id": id, "filter": launch_filter_of(&work, id, &admitted, project_root)}))
+        .filter(|id| !advertised.contains(*id))
+        .map(|id| json!({"id": id, "filter": "beyond_refill"}))
         .collect();
     let action = match (open_rows, free) {
         (0, _) => "none",
         (_, Some(0)) => "hold",
         _ => "launch",
     };
-    let witness_gap = witness_gap_verdicts(&work, &blockers, &live_rows, &dirt, project_root);
     let slots = json!({
         "live": live_count,
         "live_source": live_source,
@@ -106,10 +95,11 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
         "live_sessions": live.sessions,
         "open_rows": open_rows,
         "witness_gap_open": witness_gap_open,
-        "witness_gap": witness_gap,
         "blocker_rows": blockers.len(),
-        "candidates": candidates,
-        "launchable": node_candidates.len(),
+        "candidates": candidate_values,
+        "launchable": candidates.len(),
+        "node_launchable": node_launchable,
+        "advertised": advertised.clone(),
         "candidates_removed": candidates_removed,
         "launch_filters": launch_filters,
         "dirty_check": {"source": "git status --porcelain -uall", "unknown": dirt.unknown, "entries": dirt.entries.len()},
@@ -119,54 +109,7 @@ pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str
         "action": action,
         "reaped_heartbeats": live.reaped,
     });
-    (slots, node_candidates)
-}
-
-const WITNESS_GAP_ROWS_SHOWN: usize = 60;
-
-fn witness_gap_verdicts(
-    work: &[(Value, usize)],
-    blockers: &[Value],
-    live_rows: &[String],
-    dirt: &WorktreeDirt,
-    project_root: &str,
-) -> Value {
-    let pending_blocked: HashSet<&str> = blockers
-        .iter()
-        .filter_map(|row| row.get("id").and_then(Value::as_str))
-        .filter_map(pool_rank::blocked_row_of)
-        .collect();
-    let mut counts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
-    let mut launchable = 0u64;
-    let mut rows: Vec<Value> = Vec::new();
-    for (row, _) in work {
-        let Some(id) = row.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        if !id.starts_with(LAUNCH_ID_PREFIX) {
-            continue;
-        }
-        let verdict = if let Some(reason) = witness_gap_refusal(row, project_root) {
-            reason
-        } else if pool_rank::is_outcome_row(row) || pool_rank::is_refuted_row(row) {
-            "excluded_outcome_or_refuted".to_string()
-        } else if live_rows.iter().any(|live| live == id) {
-            "held_by_live_heartbeat".to_string()
-        } else if pending_blocked.contains(id) {
-            "pending_blocker".to_string()
-        } else if let Some((_, _, target)) = dirty_target_verdict(row, dirt) {
-            format!("dirty_target:{target}")
-        } else {
-            launchable += 1;
-            "launchable".to_string()
-        };
-        let bucket = verdict.split(':').next().unwrap_or_default().to_string();
-        *counts.entry(bucket).or_insert(0) += 1;
-        rows.push(json!({"id": id, "reason": verdict}));
-    }
-    let open = rows.len();
-    rows.truncate(WITNESS_GAP_ROWS_SHOWN);
-    json!({"open": open, "launchable": launchable, "counts": counts, "rows": rows})
+    (slots, advertised)
 }
 
 pub fn spawn_ceiling(slots: &Value) -> usize {
