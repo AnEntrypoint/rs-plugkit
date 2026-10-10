@@ -723,6 +723,63 @@ pub(crate) fn is_hidden_segment(seg: &str) -> bool {
     seg.starts_with('.') && seg != "." && seg != ".."
 }
 
+/// DOS device names Win32 refuses to stat or open in any directory, with or without an
+/// extension. `readdir` still lists them, so a walk that trusts the listing hits an entry
+/// that exists by name and does not exist by stat.
+const WINDOWS_RESERVED_DEVICE_NAMES: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+pub(crate) fn is_windows_reserved_device_name(name: &str) -> bool {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return true;
+    }
+    let stem = if name.starts_with('.') {
+        name
+    } else {
+        name.split('.').next().unwrap_or(name)
+    };
+    WINDOWS_RESERVED_DEVICE_NAMES
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+}
+
+/// Cached once per process: the reserved-name pre-filter is only sound where Win32 path rules
+/// apply. Applying it on a POSIX host would silently drop legitimate sources named `aux.rs`
+/// or a `con/` directory.
+fn host_paths_use_windows_syntax() -> bool {
+    const UNKNOWN: u8 = 0;
+    const POSIX: u8 = 1;
+    const WINDOWS: u8 = 2;
+    static DETECTED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNKNOWN);
+    match DETECTED.load(std::sync::atomic::Ordering::Relaxed) {
+        POSIX => false,
+        WINDOWS => true,
+        _ => {
+            let windows = crate::wasm_dispatch::host_cwd_string()
+                .map(|cwd| cwd.contains('\\') || cwd.as_bytes().get(1) == Some(&b':'))
+                .unwrap_or(false);
+            DETECTED.store(
+                if windows { WINDOWS } else { POSIX },
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            windows
+        }
+    }
+}
+
+const UNSTATTABLE_SAMPLE_CAP: usize = 32;
+
+fn record_unstattable(skipped: &mut Vec<String>, path: &str) {
+    if skipped.len() < UNSTATTABLE_SAMPLE_CAP && !skipped.iter().any(|p| p == path) {
+        skipped.push(path.to_string());
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn collect_files(
     root: &str,
@@ -763,6 +820,7 @@ pub(crate) fn collect_files_within(
     collect_files_impl(root, max_files, cfg, false, Some(deadline_ms)).unwrap_or(FileEnumeration {
         files: Vec::new(),
         complete: false,
+        skipped_unstattable: Vec::new(),
     })
 }
 
@@ -792,6 +850,7 @@ fn collect_files_impl(
         return Ok(FileEnumeration {
             files: Vec::new(),
             complete: true,
+            skipped_unstattable: Vec::new(),
         });
     }
     let has_slashes = entries.iter().any(|e| e.contains('/'));
@@ -812,6 +871,11 @@ fn collect_files_impl(
                 if is_skipped_filename(name, cfg) {
                     return false;
                 }
+                if host_paths_use_windows_syntax()
+                    && p.split('/').any(is_windows_reserved_device_name)
+                {
+                    return false;
+                }
                 !gitignore_excludes(&gi, p, false)
             })
             .take(max_files)
@@ -819,23 +883,36 @@ fn collect_files_impl(
         return Ok(FileEnumeration {
             files,
             complete: true,
+            skipped_unstattable: Vec::new(),
         });
     }
     let mut files = Vec::new();
+    let mut skipped_unstattable = Vec::new();
     let mut clock = WalkClock {
         deadline_ms,
         expired: false,
     };
-    walk_posix(root, max_files, &mut files, &gi, cfg, checked, &mut clock)?;
+    walk_posix(
+        root,
+        max_files,
+        &mut files,
+        &gi,
+        cfg,
+        checked,
+        &mut clock,
+        &mut skipped_unstattable,
+    )?;
     Ok(FileEnumeration {
         files,
         complete: !clock.expired,
+        skipped_unstattable,
     })
 }
 
 pub(crate) struct FileEnumeration {
     pub(crate) files: Vec<String>,
     pub(crate) complete: bool,
+    pub(crate) skipped_unstattable: Vec<String>,
 }
 
 struct WalkClock {
@@ -865,6 +942,7 @@ fn walk_posix(
     cfg: &crate::ragconfig::IndexConfig,
     checked: bool,
     clock: &mut WalkClock,
+    skipped_unstattable: &mut Vec<String>,
 ) -> Result<(), String> {
     clock.observe_deadline();
     if files.len() >= max_files || clock.is_expired() {
@@ -897,11 +975,25 @@ fn walk_posix(
             if is_skipped_filename(&entry, cfg) {
                 continue;
             }
+            if host_paths_use_windows_syntax() && is_windows_reserved_device_name(&entry) {
+                continue;
+            }
         }
         let is_dir = crate::wasm_dispatch::host_stat_is_directory(&next);
         let is_dir_entry = match is_dir {
             Some(value) => value,
-            None if checked => return Err(format!("file stat failed for {next}")),
+            // An entry the host lists but cannot stat is skipped, never fatal. Aborting here
+            // used to cost one project its entire symbol index: a single `nul` entry made
+            // every enumeration return complete:false, so every `codeinsight` call answered
+            // "symbol index refresh is incomplete" forever.
+            None if is_windows_reserved_device_name(&entry) => {
+                record_unstattable(skipped_unstattable, &next);
+                continue;
+            }
+            None if checked => {
+                record_unstattable(skipped_unstattable, &next);
+                continue;
+            }
             None => !entry.contains('.'),
         };
         if !force_included && gitignore_excludes(gi, &next, is_dir_entry) {
@@ -910,7 +1002,16 @@ fn walk_posix(
         if !is_dir_entry {
             files.push(next);
         } else {
-            walk_posix(&next, max_files, files, gi, cfg, checked, clock)?;
+            walk_posix(
+                &next,
+                max_files,
+                files,
+                gi,
+                cfg,
+                checked,
+                clock,
+                skipped_unstattable,
+            )?;
         }
     }
     Ok(())
@@ -2315,6 +2416,7 @@ fn index_cfg_impl(
         };
     let enumeration_partial_reason = (!enumeration.complete).then_some("wall_budget_exhausted");
     let files_enumerated = enumeration.files.len();
+    let skipped_unstattable = enumeration.skipped_unstattable;
     let mut full_files = enumeration.files;
     let enumeration_was_complete = enumeration.complete && full_files.len() <= enumeration_cap;
     full_files.truncate(enumeration_cap);
@@ -2987,6 +3089,7 @@ fn index_cfg_impl(
         "enumeration_file_cap": enumeration_cap,
         "enumeration_partial_reason": enumeration_partial_reason,
         "files_enumerated": files_enumerated,
+        "skipped_unstattable": skipped_unstattable,
     })
 }
 
