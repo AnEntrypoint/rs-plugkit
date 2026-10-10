@@ -29,11 +29,11 @@ pub(super) fn floor_denial_text(verb: &str, live: u64, floor: u64, open_rows: u6
     )
 }
 
-pub(super) fn launch_instruction(advertised: &[String], shortfall: u64) -> String {
+pub(super) fn launch_instruction(advertised: &[String], shortfall: u64, route: &str) -> String {
     let count = advertised.len() as u64;
     if count == 0 {
         return format!(
-            "No launch is advertised for shortfall={shortfall}: no row in slots.candidates passes the dirty_target and live_writer gates while open work exists, which is a supply defect to report to gm."
+            "No launch is advertised for shortfall={shortfall}: the pending-row scan left no admissible row in slots.candidates; route: {route}. slots.candidates_route carries the scan: skipped_by_rank names how many open rows are not launchable work (design_decision, outcome, refuted, blocker_notes, pending_blocker, live) and removed_by_gate names how many passed rank but lost a gate (dirty_target, git_status_unknown, already_fixed_on_head, live_writer); a gate removal while open work exists is a supply defect to report to gm."
         );
     }
     let names = advertised.join(", ");
