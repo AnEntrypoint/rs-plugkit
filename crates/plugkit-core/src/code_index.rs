@@ -4732,8 +4732,11 @@ where
     out
 }
 
-/// Counts every path a scan-universe rule dropped and names the first few. The summary holds the
-/// count per rule; `finish_scan_reply` decides which rules clear `exhaustive`.
+/// Counts every path a scan-universe rule dropped. The per-path listing rides only on a scan where
+/// it changed the answer: gm's own state is dropped by every unscoped scan and never clears
+/// `exhaustive`, so naming it in each reply is noise no caller can act on. The rule summary and the
+/// count ride always -- they are the one place the dropped state is named, and the count is what
+/// `finish_scan_reply` reads to decide `exhaustive`, so the rules it counts are the ones listed.
 fn insert_excluded_by_rule(
     out: &mut serde_json::Map<String, Value>,
     excluded: &[crate::scan_universe::RuleExclusion],
@@ -4741,15 +4744,22 @@ fn insert_excluded_by_rule(
     if excluded.is_empty() {
         return;
     }
-    let cap = 5usize;
-    let shown: Vec<Value> = excluded
+    let code_dropped: Vec<&crate::scan_universe::RuleExclusion> = excluded
         .iter()
-        .take(cap)
-        .map(|e| match e.files {
-            Some(files) => json!({ "path": e.path, "rule": e.rule, "files": files }),
-            None => json!({ "path": e.path, "rule": e.rule }),
-        })
+        .filter(|e| !crate::scan_universe::GM_STATE_EXCLUSION_RULES.contains(&e.rule))
         .collect();
+    if !code_dropped.is_empty() {
+        let cap = 5usize;
+        let shown: Vec<Value> = code_dropped
+            .iter()
+            .take(cap)
+            .map(|e| match e.files {
+                Some(files) => json!({ "path": e.path, "rule": e.rule, "files": files }),
+                None => json!({ "path": e.path, "rule": e.rule }),
+            })
+            .collect();
+        out.insert("excluded_by_rule".to_string(), json!(shown));
+    }
     let mut paths_by_rule = serde_json::Map::new();
     for e in excluded {
         let seen = paths_by_rule
@@ -5599,7 +5609,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             out.insert("unsearched_gm_state".to_string(), json!({
                 "count": unsearched_gm_state,
                 "rule": crate::scan_universe::OWN_STATE_RULE,
-                "note": "untracked gm runtime state named in excluded_by_rule was not searched, so the absence above does not cover it; tracked .gm state is searched; pass path .gm to search the runtime state"
+                "note": "untracked gm runtime state counted under rule gm_state_dir was not searched, so the absence above does not cover it; tracked .gm state is searched; pass path .gm to search the runtime state"
             }));
         }
     }
