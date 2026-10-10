@@ -1517,10 +1517,6 @@ pub(super) fn git_commit_argv(
     argv
 }
 
-pub(super) fn staged_paths_now(cwd: Option<&str>) -> Vec<String> {
-    nul_separated_git_paths(cwd, "diff --cached --name-only -z")
-}
-
 pub(super) fn bundle_prd_commit_comments(message: &str, notes: &[(String, String)]) -> String {
     if notes.is_empty() {
         return message.to_string();
