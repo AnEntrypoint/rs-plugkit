@@ -3,28 +3,11 @@ use crate::scan_universe::GM_STATE_EXCLUSION_RULES;
 
 pub(super) const UNINDEXED_CANDIDATE_MAX: usize = 500;
 
-/// BM25 and the vector channel both lose the phrase: BM25 scores each query term independently
-/// and the embedder scores meaning, not wording. A verbatim match is therefore found by an
-/// exhaustive scan of the tree, run here within its own wall budget so a ranked query still
-/// answers in seconds. 6s covers a full scan of a tree the size of litebox-main (measured 2.1s).
 pub(super) const DUAL_PHRASE_SCAN_BUDGET_MS: u64 = 6_000;
 pub(super) const DUAL_PHRASE_SCAN_MAX_MATCHES: usize = 20;
 
-/// Matches the phrase scan may collect from one file before it moves on to the next. A scan that
-/// stops at its first `max_matches` hits answers with whatever the walk reached first, and the walk
-/// is ordered by path: on litebox-main a query for `cross_process_fork_slot` -- 43 matching lines --
-/// spent all 20 slots on `AGENTS.md`, `docs/*` and `litebox_shim_linux/src/lib.rs`, so
-/// `litebox_shim_linux/src/syscalls/process.rs`, which holds 19 of those 43 lines, answered with
-/// nothing at all and read to the caller as "this symbol does not exist". The phrase channel is the
-/// one channel that answers "which files contain this string verbatim", so a match-dense file must
-/// not be able to take another file's only slot.
 pub(super) const DUAL_PHRASE_SCAN_PER_FILE_MATCHES: usize = 8;
 
-/// Room to collect the per-file quota from each of the first `DUAL_PHRASE_SCAN_MAX_MATCHES`
-/// matching files. Only a phrase common enough to fill the old cap before the walk ends pays for
-/// the wider collection, and even then the scan early-exits at this cap and is wall-bounded by
-/// `DUAL_PHRASE_SCAN_BUDGET_MS`; a full scan of a tree the size of litebox-main measures under a
-/// second. A phrase rarer than the cap costs exactly what it cost before.
 pub(super) const DUAL_PHRASE_SCAN_COLLECT_MATCHES: usize =
     DUAL_PHRASE_SCAN_MAX_MATCHES * DUAL_PHRASE_SCAN_PER_FILE_MATCHES;
 
@@ -59,11 +42,7 @@ pub(super) fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::rag
     if out.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return (Vec::new(), 0, false);
     }
-    // `phrase_match_count` is the lines the phrase itself matched, so it stays honest when the
-    // returned rows are capped: `match_count` is the length of the returned array and would report
-    // a capped scan as complete. `exhaustive` is the scan's own verdict and is false when the
-    // budget, a size ceiling or a match cap cut the walk short.
-    let total = out
+    let phrase_matched_lines = out
         .get("phrase_match_count")
         .or_else(|| out.get("match_count"))
         .and_then(|v| v.as_u64())
@@ -79,15 +58,11 @@ pub(super) fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::rag
         .unwrap_or_default();
     (
         fair_share_phrase_hits(hits, DUAL_PHRASE_SCAN_MAX_MATCHES),
-        total,
+        phrase_matched_lines,
         exhaustive,
     )
 }
 
-/// Take one hit from every path, then a second from every path that still has one, and so on until
-/// the cap is filled. Walk order still decides which paths are seen first but no longer decides
-/// which of them are represented: a file matching once is not crowded out by a file matching fifty
-/// times. The selection is re-sorted by path then line so the answer reads grouped per file.
 pub(super) fn fair_share_phrase_hits(hits: Vec<Value>, cap: usize) -> Vec<Value> {
     if hits.len() <= cap {
         return hits;
@@ -113,10 +88,6 @@ pub(super) fn fair_share_phrase_hits(hits: Vec<Value>, cap: usize) -> Vec<Value>
     out
 }
 
-/// First dispatch on a tree with no digest at all. Bounded, not the full 110s index budget: a
-/// search that answers in half a minute with a full index beats one that times out at 120s. Measured
-/// on litebox-main (1834 files) a 30s pass indexes the whole tree, so every dispatch after it needs
-/// no index pass at all.
 pub(super) const COLD_INDEX_PASS_BUDGET_MS: u64 = 30_000;
 
 pub(super) fn unindexed_on_disk_candidates(namespace: &str) -> (Vec<Value>, usize) {
@@ -673,7 +644,7 @@ pub(super) fn codesearch_at_root(
             },
             "commits": { "independent": true, "indexed_root": root },
         },
-        "stage_ms": merge_stage_ms(prior_stage_ms, stage_ms),
+        "stage_ms": sum_stage_ms(prior_stage_ms, stage_ms),
         "degraded": degraded,
     });
     if let Some(scope) = scope.as_ref() {
@@ -682,9 +653,7 @@ pub(super) fn codesearch_at_root(
     ok("codesearch", compact_dual_reply(body, query, k, raw))
 }
 
-/// An index pass runs in the dispatch that discovered the stale digest and then recurses, so the
-/// stages measured before and after it are summed into one report.
-pub(super) fn merge_stage_ms(prior: Value, now: Value) -> Value {
+pub(super) fn sum_stage_ms(prior: Value, now: Value) -> Value {
     let mut out = match prior {
         Value::Object(m) => m,
         _ => serde_json::Map::new(),
@@ -779,8 +748,6 @@ pub(super) fn codesearch_result_limit(
     scan_result_limit(body, CODESEARCH_LIMIT_FIELDS, cfg.budget.default_k as u32)
 }
 
-/// The directory a scan searches. `root` and its alias `projectPath` win; `cwd` is the spelling an
-/// MCP client already has in hand for the same thing, so it is read rather than silently ignored.
 pub(super) fn scan_root(body: &Value) -> Option<&str> {
     body.get("root")
         .and_then(|v| v.as_str())
@@ -810,10 +777,6 @@ pub(super) fn scan_target_paths(body: &Value) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
-/// The nearest ancestor of `candidate` the host grants as a scan root, together with the part of
-/// `candidate` that sits below it. A subdirectory of a marked project carries no marker of its
-/// own, so the host refuses it as a root; searching the marked ancestor scoped to the remainder
-/// searches exactly the directory the caller named.
 pub(super) fn marked_ancestor_for_root(candidate: &str) -> Option<(String, String)> {
     let slashed = candidate.replace('\\', "/");
     let trimmed = slashed.trim_end_matches('/');
@@ -839,9 +802,6 @@ pub(super) fn marked_ancestor_for_root(candidate: &str) -> Option<(String, Strin
     }
 }
 
-/// A `root` the host refuses, rewritten as the marked ancestor that owns it plus the scope below
-/// that ancestor, so the caller's directory is searched rather than refused. The rewritten body
-/// carries the ancestor as `root` and the scope as `path`, which is the spelling every scan reads.
 pub(super) fn scope_under_marked_ancestor(body: &Value, root: &str) -> Option<(String, Value)> {
     let (ancestor, remainder) = marked_ancestor_for_root(root)?;
     let mut rewritten = body.clone();
@@ -982,17 +942,13 @@ pub(super) fn codesearch_exhaustive(
         .and_then(|v| v.as_str())
         .or_else(|| body.get("term_combination").and_then(|v| v.as_str()))
         .filter(|c| !c.is_empty());
-    // `verbatim` is the caller-facing spelling of "match the query as one string": it is the
-    // default for a multi-word query, so it is only named here to keep the intent in the body.
+    let verbatim_phrase_requested = body
+        .get("verbatim")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let combine = match explicit_combine {
         Some(c) => Some(c),
-        None if body
-            .get("verbatim")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false) =>
-        {
-            Some("phrase")
-        }
+        None if verbatim_phrase_requested => Some("phrase"),
         None => None,
     };
     if let Some(c) = combine {
@@ -1417,8 +1373,6 @@ pub(super) fn scan_refresh_requested(body: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// "no_ignore" is how ripgrep spells it; "include_ignored" says the same thing in the caller's own
-/// words. Both are opt-in, so neither changes a scan that does not name one.
 pub(super) fn scan_no_ignore_requested(body: &Value) -> bool {
     body.get("no_ignore").and_then(|v| v.as_bool()).unwrap_or(false)
         || body.get("include_ignored").and_then(|v| v.as_bool()).unwrap_or(false)
@@ -1431,11 +1385,6 @@ pub(super) fn scan_scope_hint(scan_cap: u32) -> String {
     )
 }
 
-/// Counters that describe the scan to a human sitting in front of it and nothing else: the cache is
-/// internal, the phase split is profiling, and the listed/unreadable counts are already folded into
-/// `partial_reason` on the scans where they left the answer incomplete. `excluded_by_rule`, its count
-/// and `excluded_by_rule_summary` stay: they name every path a code rule hid, which is what a caller
-/// acts on. gm's own state rides in the summary only -- see `GM_STATE_EXCLUSION_RULES`.
 pub(super) const SCAN_TELEMETRY_DROPPED: &[&str] = &[
     "scan_cache",
     "phase_ms",
@@ -1444,12 +1393,6 @@ pub(super) const SCAN_TELEMETRY_DROPPED: &[&str] = &[
     "files_with_nul_scanned",
 ];
 
-/// The rule-excluded paths that are code, the only exclusions that clear `exhaustive`.
-/// A bounded scan still answers, so it stays `ok` -- and `ok: true` beside an empty `matches` reads
-/// as "there is nothing there" when it means "this did not look at everything". The bound that fired
-/// rides at the top of the envelope, where a caller meets it before the answer. gm's own state
-/// (`scan_universe::GM_STATE_EXCLUSION_RULES`, `.gm/` and `.agentplug-kv/`) is not code: its
-/// exclusions are named in `excluded_by_rule_summary` and never counted here.
 pub(super) fn code_exclusion_count(out: &serde_json::Map<String, Value>) -> u64 {
     out.get("excluded_by_rule_summary")
         .and_then(|v| v.as_object())
@@ -1464,10 +1407,9 @@ pub(super) fn code_exclusion_count(out: &serde_json::Map<String, Value>) -> u64 
 }
 
 pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Option<String> {
-    // A whole-scope walk that returned fewer rows than it found is complete in coverage and cut in
-    // reply: it still owes the caller the warning, so the hit cap speaks here too.
-    let list_truncated = out.get("matches_truncated").and_then(|v| v.as_bool()) == Some(true);
-    if out.get("exhaustive").and_then(|v| v.as_bool()) != Some(false) && !list_truncated {
+    let reply_cut_by_hit_cap = out.get("matches_truncated").and_then(|v| v.as_bool()) == Some(true);
+    let coverage_incomplete = out.get("exhaustive").and_then(|v| v.as_bool()) == Some(false);
+    if !coverage_incomplete && !reply_cut_by_hit_cap {
         return None;
     }
     let num = |key: &str| out.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1480,7 +1422,7 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
             num("files_listed")
         ));
     }
-    if out.get("matches_truncated").and_then(|v| v.as_bool()) == Some(true) {
+    if reply_cut_by_hit_cap {
         bounds.push(format!(
             "the hit cap cut at {} matches",
             num("matches_truncated_at")
@@ -1546,8 +1488,6 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
 }
 
 pub(super) fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_cap: u32) -> Option<String> {
-    // A rule that dropped code paths from the scope is a coverage gap, as a bound is: the walk
-    // finished, but not over every code file in the scope. gm's own state is named, never counted.
     if code_exclusion_count(out) > 0 {
         out.insert("exhaustive".to_string(), json!(false));
     }
@@ -1576,12 +1516,6 @@ pub(super) const GREP_NON_CONTENT_SCAN_CAP: u32 = 50_000;
 
 pub(super) const GREP_REGEX_CLASS_ESCAPES: &[u8] = &[b'b', b'B', b'd', b'D', b'w', b'W', b's', b'S'];
 
-/// A grep pattern is read as a regex when it carries a construct nobody means literally: an
-/// alternation bar, a class escape such as `\d`, a `[a-z]`-shaped range, or an anchor pinned to
-/// an edge. Anything else stays a substring, so a plain call keeps matching the text it names.
-/// A doubled `||` is left literal -- in source that is the logical-or operator, not a union with
-/// an empty branch. Callers who want the decision made for them pass `"regex": true` or
-/// `"regex": false` (or `"fixed_strings": true`) and skip this entirely.
 pub(super) fn grep_regex_trigger(pattern: &str) -> Option<&'static str> {
     let bytes = pattern.as_bytes();
     let mut i = 0usize;
@@ -1682,9 +1616,6 @@ pub(super) fn grep_counted_files(matches: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// A `!`-prefixed entry in the include glob excludes instead, and every `exclude*` field is
-/// exclusion-only. Both feed the same `exclude_globs` the literal walker already honours, so an
-/// omitted exclude leaves the scan exactly as it was.
 pub(super) fn grep_route_globs(body: &Value) -> Result<(Vec<String>, Vec<String>), String> {
     let mut include_globs: Vec<String> = Vec::new();
     let mut exclude_globs: Vec<String> = Vec::new();
@@ -1859,11 +1790,8 @@ pub(super) fn grep(body: &Value) -> u64 {
     let scanned = crate::code_index::scan_literal(&scan, &cfg);
     if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
         let base = scanned.get("error").and_then(|e| e.as_str()).unwrap_or("grep scan failed").to_string();
-        // "error_kind":"pattern" is the matcher's own rejection. Anything else -- a scope that does
-        // not exist, a path outside the root -- says nothing about how the pattern was read, and
-        // appending the regex-detected note to it reads as "your path was compiled as a regex".
-        let pattern_rejected = scanned.get("error_kind").and_then(|k| k.as_str()) == Some("pattern");
-        return match auto_trigger.filter(|_| pattern_rejected) {
+        let pattern_rejected_by_matcher = scanned.get("error_kind").and_then(|k| k.as_str()) == Some("pattern");
+        return match auto_trigger.filter(|_| pattern_rejected_by_matcher) {
             Some(reason) => err("grep", &format!(
                 "{base} -- the pattern was read as a regex because of its {reason}; \
                  pass \"regex\": false (or \"fixed_strings\": true) to search for it literally"
@@ -2193,9 +2121,6 @@ pub(super) fn codesearch(body: &Value) -> u64 {
     pack(v.to_string())
 }
 
-/// `literal` answers path segments written as separate quoted arguments in `split_form_matches`.
-/// `regex` matches its pattern as written and ranked `dual` never scans for them, so their replies
-/// name that gap instead of reading as a complete answer.
 fn split_form_not_searched_note(body: &Value) -> Option<&'static str> {
     let query = body.get("query").and_then(|v| v.as_str())?;
     if !query.contains('/') || query.chars().any(char::is_whitespace) {
