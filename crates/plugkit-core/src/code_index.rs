@@ -3948,7 +3948,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
                 .any(|glob| glob.admits(root, scope, path))
     };
     let file_cap = cfg.index.digest_max_files.max(20000).min(LITERAL_SCAN_MAX_FILES).max(1);
-    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, false, false) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, false, false, false) {
         Ok(e) => e,
         Err(e) => return json!({ "ok": false, "error": e, "mode": "filename" }),
     };
@@ -4661,7 +4661,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let listing_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore, true) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
     };
@@ -4734,6 +4734,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut unreadable_sample: Vec<String> = Vec::new();
     let mut emitted_matches = 0usize;
     let mut files_scanned = 0usize;
+    let mut lines_scanned = 0usize;
     let mut files_with_matches = 0usize;
     let mut files_quota_truncated = 0usize;
     let mut files_skipped_too_large: Vec<String> = Vec::new();
@@ -4853,6 +4854,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             files_with_nul_scanned += 1;
         }
         files_scanned += 1;
+        lines_scanned += content.lines().count();
         let comment_spans = if req.comments_only {
             match crate::comment_spans::comment_spans(path, &content) {
                 Some(spans) => Some(spans),
@@ -5052,6 +5054,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         && universe.listing_complete
         && !glob_matched_no_files
         && glob_outside_path.is_empty();
+    let unsearched_gm_state = universe
+        .excluded
+        .iter()
+        .filter(|e| e.rule == crate::scan_universe::OWN_STATE_RULE)
+        .count();
 
     let match_count = match req.output {
         ScanOutput::Matches => matches.len(),
@@ -5067,6 +5074,14 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), json!(true));
     out.insert("mode".to_string(), json!(if req.regex { "regex" } else { "literal" }));
+    if req.regex {
+        out.insert("pattern_compiled".to_string(), json!(true));
+    } else if req.pattern.contains('|') {
+        out.insert("pipe_matched_literally".to_string(), json!(true));
+        out.insert("pipe_note".to_string(), json!(
+            "mode literal matched every character of the query, the | included, as plain text: it does not alternate. For alternation pass mode regex; a zero here means that exact text is absent"
+        ));
+    }
     if req.verbose || zero_hits {
         if req.output != ScanOutput::Matches { out.insert("output".to_string(), json!(req.output.label())); }
         out.insert("pattern".to_string(), json!(req.pattern));
@@ -5207,9 +5222,14 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 "no line matched the query as ONE phrase: \"{}\" was matched verbatim, spaces included; split it into terms and pass combine:\"or\", or combine:\"and\" to require all of them on one line",
                 req.pattern
             )
+        } else if req.pattern.contains('|') {
+            format!(
+                "no line matched \"{}\" in {} files scanned ({lines_scanned} lines read): mode literal matched the | as a plain character, so this zero means that exact text is absent from the searched files -- for alternation pass mode regex",
+                req.pattern, files_scanned
+            )
         } else {
             format!(
-                "no line matched \"{}\" in {} files scanned: the pattern was matched verbatim as a substring, every character of it, punctuation included -- it was never tokenized, so this zero means the text is absent from those files",
+                "no line matched \"{}\" in {} files scanned ({lines_scanned} lines read): the pattern was matched verbatim as a substring, every character of it, punctuation included -- it was never tokenized, so this zero means the text is absent from the searched files",
                 req.pattern, files_scanned
             )
         };
@@ -5219,6 +5239,13 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         }
         hint.truncate(hint_end);
         out.insert("hint".to_string(), json!(hint));
+        if unsearched_gm_state > 0 {
+            out.insert("unsearched_gm_state".to_string(), json!({
+                "count": unsearched_gm_state,
+                "rule": crate::scan_universe::OWN_STATE_RULE,
+                "note": "untracked gm runtime state named in excluded_by_rule was not searched, so the absence above does not cover it; tracked .gm state is searched; pass path .gm to search the runtime state"
+            }));
+        }
     }
     if cache_hits + cache_misses > 0 {
         out.insert(
@@ -5252,7 +5279,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         );
     } else {
         out.insert("count".to_string(), json!(format!(
-            "{lines_with_matches} lines, {occurrence_count} occurrences, {files_with_matches} files of {files_scanned} scanned"
+            "{lines_with_matches} lines, {occurrence_count} occurrences, {files_with_matches} files of {files_scanned} scanned ({lines_scanned} lines read)"
         )));
         if zero_hits {
             out.insert("files_scanned".to_string(), json!(files_scanned));
@@ -5262,6 +5289,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         }
     }
     out.insert("exhaustive".to_string(), json!(exhaustive));
+    out.insert("lines_scanned".to_string(), json!(lines_scanned));
     if !glob_outside_path.is_empty() {
         out.insert("glob_outside_path".to_string(), json!(glob_outside_path));
     }
@@ -6304,7 +6332,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     }
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore) {
+    let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore, false) {
         Ok(u) => u,
         Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
     };
