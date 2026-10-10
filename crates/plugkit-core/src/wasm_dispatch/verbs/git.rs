@@ -2109,6 +2109,119 @@ pub(super) fn pull_past_remote_moved(cwd: Option<&str>, push_resp: &Value) -> Re
     }))
 }
 
+/// `git_push` refuses a `remote_moved` explicit-ref publication rather than mutating the
+/// checkout, which leaves the caller to dispatch `git_pull` and `git_push` by hand. This is the
+/// opt-in recovery that does exactly those two dispatches: one pull through `git_pull` (strict
+/// fast-forward first, ordinary merge only if the local branch diverged) and then one push.
+/// The worktree and index must be clean, or it refuses unchanged with the original reason.
+pub(super) fn remote_moved_recovery_opted_in(body: &Value) -> bool {
+    body.get("recover_remote_moved")
+        .or_else(|| body.get("pull_first"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+pub(super) fn pull_and_repush_remote_moved(
+    body: &Value,
+    repo: &Option<String>,
+    branch: &str,
+    mut refusal: Value,
+) -> Value {
+    let cwd = repo.as_deref();
+    let dirty = git_push_porcelain_in(cwd);
+    if !dirty.trim().is_empty() {
+        refusal["recovered"] = json!(false);
+        refusal["auto_recovery"] = json!({
+            "attempted": false,
+            "skipped_reason": format!(
+                "worktree or index is not clean, so a pull could clobber uncommitted changes -- refusing exactly as before. Porcelain:\n{}",
+                dirty.lines().take(8).collect::<Vec<_>>().join("\n")
+            ),
+        });
+        return refusal;
+    }
+    let _ = git_call_argv(&["fetch", "origin", branch], cwd);
+    let remote_now = resolve_ref(cwd, &format!("origin/{}", branch));
+    let strict_fast_forward = remote_now
+        .as_deref()
+        .map(|remote| {
+            git_call_argv(&["merge-base", "--is-ancestor", "HEAD", remote], cwd)
+                .get("exit_code")
+                .and_then(|code| code.as_i64())
+                .unwrap_or(1)
+                == 0
+        })
+        .unwrap_or(false);
+    match pull_past_remote_moved(cwd, &refusal) {
+        RemoteMovedPull::NotApplicable => refusal,
+        RemoteMovedPull::Blocked(reason) => {
+            refusal["recovered"] = json!(false);
+            refusal["auto_recovery"] = json!({ "attempted": false, "skipped_reason": reason });
+            refusal
+        }
+        RemoteMovedPull::Failed(result) => {
+            refusal["recovered"] = json!(false);
+            refusal["auto_recovery"] = json!({ "attempted": true, "pull_result": result });
+            refusal
+        }
+        RemoteMovedPull::Landed {
+            ff_only,
+            result,
+            incoming_commits,
+            remote_sha_before,
+        } => {
+            let mut retry_body = body.clone();
+            if let Some(map) = retry_body.as_object_mut() {
+                map.insert("rev".to_string(), json!("HEAD"));
+                map.remove("recover_remote_moved");
+                map.remove("pull_first");
+            }
+            let mut retry_resp = unpack_to_value(git_push(&retry_body));
+            let repushed = retry_resp
+                .get("ok")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let pulled_to = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+            let pull_via = if ff_only { "ff_only" } else { "merge" };
+            let recovery = json!({
+                "attempted": true,
+                "pull_via": pull_via,
+                "strict_fast_forward": strict_fast_forward,
+                "pull_result": result.clone(),
+                "incoming_commits": incoming_commits,
+                "remote_sha_before": remote_sha_before,
+                "pulled_to": pulled_to.clone(),
+                "repushed": repushed,
+            });
+            if !repushed {
+                refusal["recovered"] = json!(false);
+                refusal["pulled_to"] = json!(pulled_to);
+                refusal["auto_recovery"] = json!({
+                    "attempted": true,
+                    "pull_via": pull_via,
+                    "strict_fast_forward": strict_fast_forward,
+                    "pull_result": result,
+                    "retry_result": retry_resp,
+                    "repushed": false,
+                });
+                return refusal;
+            }
+            log_deviation_push("push-remote-moved-auto-recovered", branch);
+            if let Some(data) = retry_resp.get_mut("data").and_then(|d| d.as_object_mut()) {
+                data.insert("recovered".to_string(), json!(true));
+                data.insert("pulled_to".to_string(), json!(pulled_to.clone()));
+                data.insert("auto_recovery".to_string(), recovery.clone());
+            }
+            if let Some(top) = retry_resp.as_object_mut() {
+                top.insert("recovered".to_string(), json!(true));
+                top.insert("pulled_to".to_string(), json!(pulled_to));
+                top.insert("auto_recovery".to_string(), recovery);
+            }
+            retry_resp
+        }
+    }
+}
+
 pub(super) fn git_finalize(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let cwd = repo.clone();
