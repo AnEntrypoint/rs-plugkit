@@ -2605,6 +2605,14 @@ pub(super) fn pull_body_with_identity(
     body
 }
 
+pub(super) fn pull_clashing_paths(cwd: Option<&str>, branch: &str) -> Vec<String> {
+    let incoming = incoming_changed_paths(cwd, branch);
+    local_dirty_paths(cwd)
+        .into_iter()
+        .filter(|path| incoming.iter().any(|incoming| incoming == path))
+        .collect()
+}
+
 pub(super) fn pull_past_remote_moved(
     cwd: Option<&str>,
     push_resp: &Value,
@@ -2627,12 +2635,7 @@ pub(super) fn pull_past_remote_moved(
         return RemoteMovedPull::Blocked("push refusal named no branch to pull".to_string());
     }
     let _ = git_call_argv(&["fetch", "origin", branch.as_str()], cwd);
-    let incoming = incoming_changed_paths(cwd, &branch);
-    let local = local_dirty_paths(cwd);
-    let clash: Vec<String> = local
-        .into_iter()
-        .filter(|path| incoming.iter().any(|incoming| incoming == path))
-        .collect();
+    let clash = pull_clashing_paths(cwd, &branch);
     if !clash.is_empty() {
         let clash_split = split_dirty_submodules(cwd, &clash);
         return RemoteMovedPull::Blocked(if clash_split.submodule_only() {
@@ -2775,25 +2778,6 @@ pub(super) fn pull_and_repush_remote_moved(
     let cwd = repo.as_deref();
     let dirty = git_push_porcelain_in(cwd);
     let dirty_split = split_dirty_submodules(cwd, &porcelain_dirty_paths(&dirty));
-    if !dirty.trim().is_empty() && !dirty_split.submodule_only() {
-        refusal["recovered"] = json!(false);
-        refusal["auto_recovery"] = json!({
-            "attempted": false,
-            "skipped_reason": format!(
-                "worktree or index is not clean, so a pull could clobber uncommitted changes -- refusing exactly as before. Dirty tracked files: {}. Dirty submodule pointers (these alone never block a pull): {}. Live lane markers: {}. Porcelain:\n{}",
-                list_or_none(&dirty_split.tracked_files),
-                list_or_none(&dirty_split.submodule_pointers),
-                lane_marker_summary(&live_lane_markers()),
-                dirty.lines().take(8).collect::<Vec<_>>().join("\n")
-            ),
-        });
-        stamp_dirty_split(&mut refusal, &dirty_split);
-        refusal["next_dispatch"] = json!("git_status");
-        refusal["next_action_hint"] = json!(
-            "Dispatch git_status {\"paths\":[...]} over dirty_tracked_files, commit or revert each in the lane named by live_lane_markers, then re-dispatch git_push with the same rev."
-        );
-        return refusal;
-    }
     let _ = git_call_argv(&["fetch", "origin", branch], cwd);
     let remote_now = resolve_ref(cwd, &format!("origin/{}", branch));
     let strict_fast_forward = remote_now
@@ -2809,22 +2793,48 @@ pub(super) fn pull_and_repush_remote_moved(
     match pull_past_remote_moved(cwd, &refusal, body_pull_identity(body).as_ref()) {
         RemoteMovedPull::NotApplicable => refusal,
         RemoteMovedPull::Blocked(reason) => {
+            let clash = pull_clashing_paths(cwd, branch);
+            let lanes = lane_marker_summary(&live_lane_markers());
+            let clean_tree_first = if clash.is_empty() {
+                format!("no path is both dirty here and changed by the incoming range, so a clean tree is not owed: resolve the condition named in auto_recovery.skipped_reason (live lane markers: {}), then re-dispatch git_push with the same rev", lanes)
+            } else {
+                format!(
+                    "git_status {{\"paths\":[\"{}\"]}} to read them, commit or revert each in the lane owning them ({}), then re-dispatch git_push with the same rev",
+                    clash.join("\",\""),
+                    lanes
+                )
+            };
             refusal["recovered"] = json!(false);
-            refusal["auto_recovery"] = json!({ "attempted": false, "skipped_reason": reason });
+            refusal["auto_recovery"] = json!({
+                "attempted": false,
+                "skipped_reason": reason,
+                "clashing_paths": clash.clone(),
+                "recovery_steps": [
+                    { "step": 1, "verb": "git_status", "paths": clash.clone(), "action": clean_tree_first.clone() },
+                    { "step": 2, "verb": "git_push", "rev": "HEAD", "action": "publish the committed sha; do not re-dispatch git_push unchanged, it repeats this same refusal" },
+                ],
+            });
             stamp_dirty_split(&mut refusal, &dirty_split);
             refusal["next_dispatch"] = json!("git_status");
-            refusal["next_action_hint"] = json!(
-                "The pull cannot proceed; dispatch git_status to read the paths named in auto_recovery.skipped_reason, resolve them in the lane named by live_lane_markers, then re-dispatch git_push. Do not re-dispatch git_push unchanged: it repeats this same refusal."
-            );
+            refusal["next_action_hint"] = json!(clean_tree_first);
             refusal
         }
         RemoteMovedPull::Failed(result) => {
+            let clash = pull_clashing_paths(cwd, branch);
             refusal["recovered"] = json!(false);
-            refusal["auto_recovery"] = json!({ "attempted": true, "pull_result": result });
+            refusal["auto_recovery"] = json!({
+                "attempted": true,
+                "pull_result": result,
+                "clashing_paths": clash.clone(),
+                "recovery_steps": [
+                    { "step": 1, "verb": "git_status", "paths": clash.clone(), "action": "git refused the pull over these dirty paths that the incoming range also changes: commit or revert each in the lane named by live_lane_markers" },
+                    { "step": 2, "verb": "git_push", "rev": "HEAD", "action": "publish the committed sha; do not re-dispatch git_push unchanged, it repeats this same refusal" },
+                ],
+            });
             stamp_dirty_split(&mut refusal, &dirty_split);
             refusal["next_dispatch"] = json!("git_status");
             refusal["next_action_hint"] = json!(
-                "Dispatch git_status to read the conflicted paths, resolve them in the lane named by live_lane_markers, then re-dispatch git_push with the resulting HEAD rev."
+                "Dispatch git_status {\"paths\":[...]} over clashing_paths, resolve them in the lane named by live_lane_markers, then re-dispatch git_push with the resulting HEAD rev."
             );
             refusal
         }
@@ -2854,6 +2864,8 @@ pub(super) fn pull_and_repush_remote_moved(
                 "attempted": true,
                 "pull_via": pull_via,
                 "strict_fast_forward": strict_fast_forward,
+                "dirty_before_pull": !dirty.trim().is_empty(),
+                "clash_free_pull": pull_clashing_paths(cwd, branch).is_empty(),
                 "pull_result": result.clone(),
                 "incoming_commits": incoming_commits,
                 "remote_sha_before": remote_sha_before,
