@@ -57,7 +57,29 @@ fn is_positional_row(line: &str) -> bool {
     !line.contains(char::is_whitespace) && !line.contains([':', '=']) && !dated
 }
 
+fn json_heartbeat_identity(body: &str) -> Option<HeartbeatIdentity> {
+    let record: Value = serde_json::from_str(body.trim_start_matches('\u{feff}').trim()).ok()?;
+    let fields = record.as_object()?;
+    let mut identity = HeartbeatIdentity::default();
+    identity.session = ["session_id", "session", "sessionId"]
+        .iter()
+        .find_map(|key| fields.get(*key).and_then(Value::as_str).and_then(non_empty));
+    for key in ["row", "row_id", "rows", "row_ids"] {
+        match fields.get(key) {
+            Some(Value::String(text)) => identity.rows.extend(row_names(text)),
+            Some(Value::Array(items)) => identity
+                .rows
+                .extend(items.iter().filter_map(Value::as_str).flat_map(|text| row_names(text))),
+            _ => {}
+        }
+    }
+    Some(identity)
+}
+
 fn heartbeat_identity(body: &str) -> HeartbeatIdentity {
+    if let Some(identity) = json_heartbeat_identity(body) {
+        return identity;
+    }
     let mut identity = HeartbeatIdentity::default();
     let lines: Vec<&str> = body
         .lines()
@@ -225,6 +247,13 @@ fn module_path_of(row: &Value) -> Option<String> {
 
 const MODULE_EXTENSIONS: [&str; 6] = [".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx"];
 
+fn node_only_witness(row: &Value) -> bool {
+    ["subject", "witness", "why", "title", "acceptance", "acceptance_criteria", "text"]
+        .iter()
+        .filter_map(|key| row.get(*key).and_then(Value::as_str))
+        .all(|text| !text.to_ascii_lowercase().contains("cargo"))
+}
+
 fn witness_gap_admitted(row: &Value, project_root: &str) -> bool {
     let id = row.get("id").and_then(Value::as_str).unwrap_or_default();
     let status = row.get("status").and_then(Value::as_str).unwrap_or("pending");
@@ -232,6 +261,7 @@ fn witness_gap_admitted(row: &Value, project_root: &str) -> bool {
         && !LAUNCH_ID_EXCLUDED_SEGMENTS.iter().any(|segment| id.contains(*segment))
         && status == "pending"
         && !super::pool_rank::has_blocker_notes(row)
+        && node_only_witness(row)
         && module_path_of(row).is_some_and(|module| pkfs::exists(&format!("{}/{}", project_root, module)))
 }
 
