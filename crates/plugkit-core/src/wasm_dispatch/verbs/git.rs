@@ -1982,15 +1982,22 @@ pub(super) fn untracked_worktree_paths(cwd: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn incoming_added_paths(cwd: Option<&str>, branch: &str) -> Vec<String> {
-    exec_git_in(
-        cwd,
-        &format!("diff --diff-filter=A --name-only HEAD...origin/{}", branch),
-    )
-    .lines()
-    .map(|line| line.trim().to_string())
-    .filter(|line| !line.is_empty())
-    .collect()
+pub(super) fn incoming_changed_paths(cwd: Option<&str>, branch: &str) -> Vec<String> {
+    exec_git_in(cwd, &format!("diff --name-only HEAD...origin/{}", branch))
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+pub(super) fn local_dirty_paths(cwd: Option<&str>) -> Vec<String> {
+    let mut paths: Vec<String> = exec_git_in(cwd, "diff --name-only HEAD")
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    paths.extend(untracked_worktree_paths(cwd));
+    paths
 }
 
 pub(super) fn commits_between(cwd: Option<&str>, from: &str, to: &str) -> Value {
@@ -2029,15 +2036,6 @@ pub(super) fn pull_past_remote_moved(cwd: Option<&str>, push_resp: &Value) -> Re
     {
         return RemoteMovedPull::NotApplicable;
     }
-    if push_resp
-        .get("preserved_dirty_worktree")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true)
-    {
-        return RemoteMovedPull::Blocked(
-            "push preserved a dirty worktree -- refusing to pull over it".to_string(),
-        );
-    }
     let branch = push_resp
         .get("branch")
         .and_then(|v| v.as_str())
@@ -2048,15 +2046,15 @@ pub(super) fn pull_past_remote_moved(cwd: Option<&str>, push_resp: &Value) -> Re
         return RemoteMovedPull::Blocked("push refusal named no branch to pull".to_string());
     }
     let _ = git_call_argv(&["fetch", "origin", branch.as_str()], cwd);
-    let added = incoming_added_paths(cwd, &branch);
-    let untracked = untracked_worktree_paths(cwd);
-    let clash: Vec<String> = untracked
+    let incoming = incoming_changed_paths(cwd, &branch);
+    let local = local_dirty_paths(cwd);
+    let clash: Vec<String> = local
         .into_iter()
-        .filter(|path| added.iter().any(|added| added == path))
+        .filter(|path| incoming.iter().any(|incoming| incoming == path))
         .collect();
     if !clash.is_empty() {
         return RemoteMovedPull::Blocked(format!(
-            "the incoming commit creates {} which this worktree also has untracked -- pulling would overwrite it",
+            "the incoming commit changes {} which this worktree also has uncommitted -- pulling would overwrite it",
             clash.join(", ")
         ));
     }
@@ -2604,6 +2602,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                     "attempted": true,
                     "pull_via": if ff_only { "ff_only" } else { "merge" },
                     "pull_result": result,
+                    "worktree_dirty": push_resp.get("preserved_dirty_worktree").cloned().unwrap_or(Value::Null),
                     "incoming_commits": incoming_commits,
                     "remote_sha_before": remote_sha_before,
                     "repushed": retry_pushed,
