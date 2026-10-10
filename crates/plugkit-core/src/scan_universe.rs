@@ -320,6 +320,70 @@ fn directory_is_gitignored(dir: &str) -> Result<bool, String> {
     }
 }
 
+/// A tracked submodule is a gitlink, and a gitlink divides the two listings a worktree is built from:
+/// `--cached --recurse-submodules` reaches the files the submodule tracks, while `--others` stops at
+/// the gitlink and never descends into it. Nothing therefore lists a submodule's own untracked files,
+/// and `complete` stayed true across that hole -- a scan could answer `exhaustive: true` over a set
+/// missing files that sit on disk inside a submodule. Mode `160000` in `ls-files --stage` is the
+/// gitlink, so these are the directories `--others` has to be re-run inside.
+fn gitlink_dirs(dir: &str, complete: &mut bool) -> Vec<String> {
+    let mut staged = Vec::new();
+    match git_list_into(dir, &["--stage"], None, 0, &mut staged) {
+        Ok(c) => {
+            *complete &= c;
+            staged
+                .iter()
+                .filter_map(|entry| {
+                    let after_mode = entry.strip_prefix("160000 ")?;
+                    let path = after_mode.split('\t').nth(1)?;
+                    (!path.is_empty()).then(|| join_under(dir, path))
+                })
+                .collect()
+        }
+        Err(_) => {
+            *complete = false;
+            Vec::new()
+        }
+    }
+}
+
+/// The untracked half of one nested repo and of every nested repo inside it, which is exactly what
+/// the parent's `--others` leaves out. Untracked directories are themselves nested repos, and
+/// gitlinks are read again per level, so a submodule of a submodule is covered the same way.
+fn nested_untracked(dir: &str, nesting: usize, no_ignore: bool) -> (Vec<String>, bool) {
+    if nesting >= NESTED_REPO_DEPTH_LIMIT {
+        return (Vec::new(), false);
+    }
+    let others_mode: &[&str] = if no_ignore {
+        &["--others"]
+    } else {
+        &["--others", "--exclude-standard"]
+    };
+    let mut listed = Vec::new();
+    let mut complete = match git_list_into(dir, others_mode, None, 0, &mut listed) {
+        Ok(c) => c,
+        Err(_) => false,
+    };
+    let mut files = Vec::with_capacity(listed.len());
+    for entry in listed {
+        match entry.strip_suffix('/') {
+            Some(nested_repo) => {
+                let (nested_files, nested_complete) =
+                    nested_untracked(&join_under(dir, nested_repo), nesting + 1, no_ignore);
+                files.extend(nested_files);
+                complete &= nested_complete;
+            }
+            None => files.push(join_under(dir, &entry)),
+        }
+    }
+    for nested_dir in gitlink_dirs(dir, &mut complete) {
+        let (nested_files, nested_complete) = nested_untracked(&nested_dir, nesting + 1, no_ignore);
+        files.extend(nested_files);
+        complete &= nested_complete;
+    }
+    (files, complete)
+}
+
 /// `--exclude-standard` is the only thing keeping an ignored file out of the untracked listing, so
 /// dropping it is the whole of "no_ignore": tracked, untracked and ignored files all come back. .git
 /// is not a worktree entry, so it stays out either way.
@@ -343,6 +407,11 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec
             }
             _ => complete = false,
         }
+    }
+    for nested_dir in gitlink_dirs(dir, &mut complete) {
+        let (nested_files, nested_complete) = nested_untracked(&nested_dir, nesting + 1, no_ignore);
+        files.extend(nested_files);
+        complete &= nested_complete;
     }
     files.sort_unstable();
     files.dedup();
