@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use super::transitions::prd_open_rows_with_recency;
 use crate::pkfs;
@@ -11,6 +11,10 @@ const CEILING_KEYWORDS: [&str; 3] = ["maximum", "ceiling", "limit"];
 const REFILL_FLOOR: u64 = 12;
 const LAUNCH_ID_PREFIX: &str = "witness-gap-";
 const LAUNCH_ID_EXCLUDED_SEGMENTS: [&str; 3] = ["-blocker-", "-finding-", "-defect-"];
+const HELD_ROWS_FILE: &str = "held-rows.json";
+const HELD_ROWS_TTL_MS: u64 = 30 * 60 * 1000;
+const TRAVERSAL_SUPPLY_FACTOR: u64 = 2;
+const TRAVERSAL_LAUNCH_ID: &str = "traversal-node-supply";
 
 #[cfg(target_arch = "wasm32")]
 fn now_ms() -> u64 {
@@ -199,14 +203,59 @@ fn ceiling_from_refusal(text: &str) -> Option<u64> {
         .ok()
 }
 
-fn is_launch_row(row: &Value) -> bool {
+fn module_path_of(row: &Value) -> Option<String> {
+    ["subject", "witness", "why", "title", "acceptance", "acceptance_criteria"]
+        .iter()
+        .filter_map(|key| row.get(*key).and_then(Value::as_str))
+        .flat_map(str::split_whitespace)
+        .map(|token| {
+            token
+                .trim_matches(|c: char| matches!(c, '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']'))
+                .trim_end_matches('.')
+        })
+        .map(|token| token.split(':').next().unwrap_or_default())
+        .find(|token| {
+            token.contains('/')
+                && !token.starts_with('/')
+                && !token.contains("..")
+                && MODULE_EXTENSIONS.iter().any(|extension| token.ends_with(*extension))
+        })
+        .map(str::to_string)
+}
+
+const MODULE_EXTENSIONS: [&str; 6] = [".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx"];
+
+fn witness_gap_admitted(row: &Value, project_root: &str) -> bool {
     let id = row.get("id").and_then(Value::as_str).unwrap_or_default();
     let status = row.get("status").and_then(Value::as_str).unwrap_or("pending");
     id.starts_with(LAUNCH_ID_PREFIX)
         && !LAUNCH_ID_EXCLUDED_SEGMENTS.iter().any(|segment| id.contains(*segment))
         && status == "pending"
         && !super::pool_rank::has_blocker_notes(row)
-        && super::pool_rank::arm(row).is_none()
+        && module_path_of(row).is_some_and(|module| pkfs::exists(&format!("{}/{}", project_root, module)))
+}
+
+fn declared_holds(dir: &str, now: u64) -> Vec<String> {
+    let Some(text) = pkfs::read_to_string(&format!("{}/{}", dir, HELD_ROWS_FILE)) else {
+        return Vec::new();
+    };
+    let Ok(record) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let fresh = record
+        .get("ts")
+        .and_then(Value::as_u64)
+        .is_some_and(|ts| now.saturating_sub(ts) <= HELD_ROWS_TTL_MS);
+    if !fresh {
+        return Vec::new();
+    }
+    record
+        .get("rows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.as_str().map(str::to_string))
+        .collect()
 }
 
 fn held_rows(live: &LiveHeartbeats, work: &[(Value, usize)]) -> Vec<String> {
@@ -236,19 +285,22 @@ fn slot_parts(project_root: &str) -> (Value, Vec<String>) {
         .partition(|(row, _)| super::pool_rank::is_blocker_row(row));
     let blockers: Vec<Value> = blocker_entries.into_iter().map(|(row, _)| row).collect();
     let open_rows = work.len();
-    let live_rows = held_rows(&live, &work);
-    let ranked = super::pool_rank::rank(&work, &blockers, &live_rows);
-    let candidates = ranked["candidates"].clone();
-    let launchable: BTreeSet<&str> = work
+    let mut live_rows = held_rows(&live, &work);
+    live_rows.extend(declared_holds(&dir, now_ms()));
+    live_rows.sort();
+    live_rows.dedup();
+    let admitted: HashSet<String> = work
         .iter()
-        .filter(|(row, _)| is_launch_row(row))
-        .filter_map(|(row, _)| row.get("id").and_then(Value::as_str))
+        .filter(|(row, _)| witness_gap_admitted(row, project_root))
+        .filter_map(|(row, _)| row.get("id").and_then(Value::as_str).map(str::to_string))
         .collect();
+    let ranked = super::pool_rank::rank(&work, &blockers, &live_rows, &admitted);
+    let candidates = ranked["candidates"].clone();
     let node_candidates: Vec<String> = ranked["node_candidates"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|id| id.as_str().filter(|id| launchable.contains(id)).map(str::to_string))
+        .filter_map(|id| id.as_str().filter(|id| admitted.contains(*id)).map(str::to_string))
         .collect();
     let action = match (open_rows, free) {
         (0, _) => "none",
@@ -314,16 +366,38 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
             return (String::new(), "pool-observe: could not write .gm/pool/ceiling.json".to_string(), 1);
         }
     }
+    if let Some(held) = body.get("held").and_then(Value::as_array) {
+        let rows: Vec<String> = held
+            .iter()
+            .filter_map(|row| row.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string))
+            .collect();
+        let record = json!({"rows": rows, "ts": now_ms()});
+        if !pkfs::write(&format!("{}/{}", dir, HELD_ROWS_FILE), &record.to_string()) {
+            return (String::new(), "pool-observe: could not write .gm/pool/held-rows.json".to_string(), 1);
+        }
+    }
     let (slots, node_candidates) = slot_parts(".");
     let live = slots["live"].as_u64().unwrap_or(0);
     let ceiling = spawn_ceiling(&slots) as u64;
     let refill_needed = REFILL_FLOOR.saturating_sub(live);
     let launch_cap = refill_needed.min(ceiling.saturating_sub(live)) as usize;
-    let launch: Vec<Value> = node_candidates
+    let node_supply = node_candidates.len() as u64;
+    let traversal_threshold = TRAVERSAL_SUPPLY_FACTOR * REFILL_FLOOR;
+    let traversal_needed = node_supply < traversal_threshold;
+    let mut launch: Vec<Value> = node_candidates
         .into_iter()
         .take(launch_cap)
-        .map(|id| json!({"id": id}))
+        .map(|id| json!({"id": id, "role": "resolver"}))
         .collect();
+    if traversal_needed && launch.len() < launch_cap {
+        launch.push(json!({"id": TRAVERSAL_LAUNCH_ID, "role": "traversal"}));
+    }
+    let traversal = json!({
+        "needed": traversal_needed,
+        "node_witness_candidates": node_supply,
+        "threshold": traversal_threshold,
+        "rule": "node witness candidates below 2 x floor: launch a traversal hop, which logs node-only PRDs and resolves none",
+    });
     let out = json!({
         "ok": true,
         "verb": "pool-observe",
@@ -332,6 +406,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         "ceiling": ceiling,
         "refill_needed": refill_needed,
         "launch": launch,
+        "traversal": traversal,
         "slots": slots,
     });
     (out.to_string(), String::new(), 0)

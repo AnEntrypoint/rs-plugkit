@@ -95,14 +95,19 @@ fn is_refuted_row(row: &Value) -> bool {
     by_id || by_title
 }
 
-pub(super) fn has_blocker_notes(row: &Value) -> bool {
-    match row.get("blocker_notes") {
-        None | Some(Value::Null) => false,
-        Some(Value::Array(notes)) => !notes.is_empty(),
-        Some(Value::String(note)) => !note.trim().is_empty(),
-        Some(Value::Object(fields)) => !fields.is_empty(),
-        Some(_) => true,
+fn is_blank_note(note: &Value) -> bool {
+    match note {
+        Value::Null => true,
+        Value::Bool(flag) => !*flag,
+        Value::Number(number) => number.as_f64() == Some(0.0),
+        Value::String(text) => text.trim().is_empty(),
+        Value::Array(items) => items.iter().all(is_blank_note),
+        Value::Object(fields) => fields.values().all(is_blank_note),
     }
+}
+
+pub(super) fn has_blocker_notes(row: &Value) -> bool {
+    row.get("blocker_notes").is_some_and(|notes| !is_blank_note(notes))
 }
 
 fn severity_rank(row: &Value) -> u8 {
@@ -124,7 +129,7 @@ struct Ranked {
     arm: Option<&'static str>,
 }
 
-pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -> Value {
+pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String], admitted: &HashSet<String>) -> Value {
     let pending_blocked: Vec<&str> = blockers
         .iter()
         .filter_map(row_id)
@@ -147,13 +152,14 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -
         if is_pending_blocked {
             blocked += 1;
         }
-        let row_arm = arm(row);
+        let admitted_row = admitted.contains(id);
+        let row_arm = if admitted_row { None } else { arm(row) };
         match row_arm {
             Some("gpu") => gpu += 1,
             Some("browser") => browser += 1,
             _ => {}
         }
-        if needs_design(row) {
+        if !admitted_row && needs_design(row) {
             design += 1;
             continue;
         }
@@ -171,7 +177,7 @@ pub fn rank(work: &[(Value, usize)], blockers: &[Value], live_rows: &[String]) -
         if is_live(id) {
             continue;
         }
-        if has_blocker_notes(row) {
+        if is_pending_blocked || has_blocker_notes(row) {
             continue;
         }
         ranked.push(Ranked {
