@@ -533,7 +533,7 @@ fn extract_file(
     size: u64,
     mtime_ms: u64,
 ) -> (FileSymbols, u32) {
-    let analysis = code_index::analyze_source(content, lang);
+    let analysis = code_index::analyze_source(fp, content, lang);
     let file_is_test = is_test_path(fp);
     let mut metrics = analysis.metrics.into_iter();
     let symbols = analysis
@@ -570,6 +570,154 @@ fn extract_file(
     (file, failed)
 }
 
+const DEFERRED_SET_NAMES_LIMIT: usize = 256;
+const DEFERRED_PARTIAL_REASON: &str = "the symbol refresh deferred this file in this pass, so the outline is its cached row and may be stale; codeinsight_index.deferred_set names the deferred files, and deferred_set_truncated says when that list is cut short";
+const DEFERRED_NEVER_INDEXED_REASON: &str = "the symbol refresh deferred this file before it was ever indexed, so the empty outline is not evidence that the file has no symbols; codeinsight_index.deferred_set names the deferred files";
+const UNLISTED_PARTIAL_REASON: &str = "the file is not in the current listing, so the outline is its cached row from an earlier pass";
+const FAILED_PARTIAL_REASON: &str = "the symbol refresh could not fully read, parse or store this file in this pass, so the outline is its cached row and may be stale or incomplete";
+const REFRESH_NOT_RUN_PARTIAL_REASON: &str = "the symbol refresh did not reach the file listing in this pass, so the outline is its cached row, if one exists, and may be stale; codeinsight_index.error names the cause";
+const UNINDEXED_IN_PASS_REASON: &str = "the symbol refresh did not index this file in this pass, so the empty outline is not evidence that the file has no symbols";
+
+fn record_deferred(
+    deferred_paths: &mut Vec<String>,
+    focus_deferred: &mut bool,
+    focus: Option<&str>,
+    fp: &str,
+) {
+    if focus == Some(fp) {
+        *focus_deferred = true;
+    }
+    deferred_paths.push(fp.to_string());
+}
+
+fn record_focus_failure(focus_failed: &mut bool, focus: Option<&str>, fp: &str) {
+    if focus == Some(fp) {
+        *focus_failed = true;
+    }
+}
+
+const STORE_BUSY_REFRESH_NOTE: &str = "the shared libsql store is held by another writer (its lock directory is present), so this pass did not refresh the symbol index; the raw store error is withheld";
+
+fn is_store_busy_error(err: &str) -> bool {
+    libsql_wasm::classify_error(err) == libsql_wasm::LibsqlErrorKind::Busy
+        || err.to_ascii_lowercase().contains("database is locked")
+}
+
+/// A `<db>.lock` directory is libsql's mutual-exclusion marker under this VFS: the writer removes it
+/// when it finishes, so a process killed mid-write leaves it forever and every later write fails with
+/// no holder to wait on. Every dispatch that writes gm.db records its pid and a heartbeat timestamp
+/// beside it in `<db>.lock.owner` (the daemon's store-owner claim), so that record is the liveness
+/// evidence the directory itself cannot carry: no record means no writer ever claimed it, a dead pid
+/// means the writer is provably gone, and a heartbeat older than STORE_LOCK_STALE_MS means a writer
+/// that stopped heartbeating. A lock whose recorded pid is alive is never touched -- only its owner
+/// may remove it.
+const STORE_LOCK_STALE_MS: u64 = 900_000;
+
+/// Runs on the host because the WASI VFS offers no directory removal: `fs.rmSync` is the only way to
+/// clear a lock directory from here. Prints one JSON object: `state` is clear, reaped or held.
+const STORE_LOCK_SETTLE_JS: &str = r#"(function () {
+  var fs = require('node:fs');
+  var now = Date.now();
+  var out = function (o) { process.stdout.write(JSON.stringify(o)); };
+  if (!fs.existsSync(P.dir)) { out({ state: 'clear' }); return; }
+  var pid = null, ts = 0;
+  try {
+    var lines = fs.readFileSync(P.own, 'utf8').split('\n');
+    pid = parseInt(lines[0], 10);
+    ts = parseInt(lines[1], 10) || 0;
+  } catch (e) { pid = null; ts = 0; }
+  var hasPid = typeof pid === 'number' && isFinite(pid) && pid > 0;
+  var alive = false;
+  if (hasPid) {
+    if (pid === process.pid) { alive = true; }
+    else { try { process.kill(pid, 0); alive = true; } catch (e) { alive = !!(e && e.code === 'EPERM'); } }
+  }
+  var ownerAge = ts > 0 ? now - ts : 0;
+  var stale = !hasPid || !alive || (ts > 0 && ownerAge >= P.ttl);
+  var shape = function (state, extra) {
+    var o = { state: state, owner_pid: hasPid ? pid : null, owner_alive: alive, owner_age_ms: ts > 0 ? ownerAge : null };
+    for (var k in extra) { o[k] = extra[k]; }
+    return o;
+  };
+  if (!stale) { out(shape('held', {})); return; }
+  try {
+    fs.rmSync(P.dir, { recursive: true, force: true });
+    fs.rmSync(P.own, { force: true });
+    out(shape('reaped', { stale_reason: !hasPid ? 'no owner record' : (!alive ? 'owner pid is not alive' : 'owner heartbeat is older than ' + P.ttl + ' ms') }));
+  } catch (e) {
+    out(shape('held', { reap_error: String((e && e.message) || e) }));
+  }
+})();"#;
+
+fn store_busy_lock_bail(lock_dir: &str, reason: &str, info: Value) -> Value {
+    json!({
+        "ok": false,
+        "complete": false,
+        "store_busy": true,
+        "lock_dir": lock_dir,
+        "lock_settle": info,
+        "error": format!(
+            "{} The refresh returned without waiting: the lock directory {} is present and {}.",
+            STORE_BUSY_REFRESH_NOTE, lock_dir, reason
+        )
+    })
+}
+
+/// Clears a lock directory no live writer owns and returns None, or returns the store-busy bail that
+/// sync_files must answer with. A lock whose recorded owner pid is alive is left alone.
+fn settle_stale_store_lock(db: &str) -> Option<Value> {
+    let lock_dir = format!("{db}.lock");
+    if crate::wasm_dispatch::host_stat_is_directory(&lock_dir) != Some(true) {
+        return None;
+    }
+    let params = serde_json::to_string(&json!({
+        "dir": lock_dir,
+        "own": format!("{lock_dir}.owner"),
+        "ttl": STORE_LOCK_STALE_MS,
+    }))
+    .unwrap_or_else(|_| "{}".to_string());
+    let timeout = json!({ "timeoutMs": 5000 }).to_string();
+    let code = format!("const P = {params};\n{STORE_LOCK_SETTLE_JS}");
+    let packed = unsafe {
+        crate::wasm_dispatch::host_exec_js(
+            code.as_ptr(),
+            code.len() as u32,
+            timeout.as_ptr(),
+            timeout.len() as u32,
+        )
+    };
+    let result = crate::wasm_dispatch::unpack_to_value_pub(packed);
+    if result.get("timed_out").and_then(Value::as_bool) == Some(true)
+        || result.get("exit_code").and_then(Value::as_i64) != Some(0)
+    {
+        return Some(store_busy_lock_bail(
+            &lock_dir,
+            "its owner could not be checked, so it was left in place",
+            result,
+        ));
+    }
+    let settle: Value = result
+        .get("stdout")
+        .and_then(Value::as_str)
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(Value::Null);
+    match settle.get("state").and_then(Value::as_str) {
+        Some("clear") | Some("reaped") => None,
+        Some("held") => {
+            let reason = match settle.get("reap_error").and_then(Value::as_str) {
+                Some(_) => "it is stale but could not be removed",
+                None => "a live writer still owns it",
+            };
+            Some(store_busy_lock_bail(&lock_dir, reason, settle))
+        }
+        _ => Some(store_busy_lock_bail(
+            &lock_dir,
+            "its owner could not be determined, so it was left in place",
+            settle,
+        )),
+    }
+}
+
 pub(crate) fn sync_files(
     files: &[String],
     project_path: Option<&str>,
@@ -577,9 +725,16 @@ pub(crate) fn sync_files(
     budget_ms: u64,
     max_file_bytes: usize,
     prune_absent: bool,
+    focus: Option<&str>,
 ) -> Value {
     let db = db_path(project_path);
+    if let Some(busy) = settle_stale_store_lock(&db) {
+        return busy;
+    }
     if let Err(e) = ensure_schema(&db) {
+        if is_store_busy_error(&e) {
+            return json!({ "ok": false, "complete": false, "store_busy": true, "error": STORE_BUSY_REFRESH_NOTE });
+        }
         return json!({ "ok": false, "error": e });
     }
     purge_legacy_edges(started_ms, budget_ms);
@@ -614,9 +769,13 @@ pub(crate) fn sync_files(
         mut parse_failures,
     ) = (0u32, 0u32, 0u32, 0usize, 0usize, 0u32);
     let mut seen: HashSet<String> = HashSet::new();
+    let mut deferred_paths: Vec<String> = Vec::new();
+    let mut focus_deferred = false;
+    let mut focus_failed = false;
     let mut unreadable = 0u32;
     let mut oversized = 0u32;
     let mut store_failures = 0u32;
+    let mut store_busy = false;
     let mut unsupported = 0u32;
     for raw in files {
         let fp = raw
@@ -633,16 +792,22 @@ pub(crate) fn sync_files(
             if known.contains_key(&fp) {
                 if host_now_ms().saturating_sub(started_ms) > budget_ms {
                     deferred += 1;
+                    record_deferred(&mut deferred_paths, &mut focus_deferred, focus, &fp);
                     continue;
                 }
                 if !write_edges(&fp, &[], project_path) {
                     store_failures += 1;
+                    record_focus_failure(&mut focus_failed, focus, &fp);
                     continue;
                 }
                 let path = sql_text(&fp);
                 let script = format!("BEGIN; DELETE FROM {SYMBOLS_TABLE} WHERE path={path}; DELETE FROM {IMPORTS_TABLE} WHERE path={path}; DELETE FROM {FILES_TABLE} WHERE path={path}; COMMIT;");
-                if libsql_wasm::exec(&db, &script).is_err() {
+                if let Err(e) = libsql_wasm::exec(&db, &script) {
+                    if is_store_busy_error(&e) {
+                        store_busy = true;
+                    }
                     store_failures += 1;
+                    record_focus_failure(&mut focus_failed, focus, &fp);
                 }
             }
             continue;
@@ -656,6 +821,7 @@ pub(crate) fn sync_files(
         seen.insert(fp.clone());
         if host_now_ms().saturating_sub(started_ms) > budget_ms {
             deferred += 1;
+            record_deferred(&mut deferred_paths, &mut focus_deferred, focus, &fp);
             continue;
         }
         let stat = host_stat(&fp).or_else(|| host_stat(raw));
@@ -669,10 +835,12 @@ pub(crate) fn sync_files(
             .or_else(|| host_read(&format!("/{fp}")))
         else {
             unreadable += 1;
+            record_focus_failure(&mut focus_failed, focus, &fp);
             continue;
         };
         if content.len() > size_cap {
             oversized += 1;
+            record_focus_failure(&mut focus_failed, focus, &fp);
             continue;
         }
         let source_hash = format!("{:016x}", crate::hash::fnv1a64(content.as_bytes()));
@@ -699,12 +867,22 @@ pub(crate) fn sync_files(
             unsafe { crate::wasm_dispatch::host_log(2, msg.as_ptr(), msg.len() as u32) };
         }
         parse_failures += failed;
-        if store_file(&db, &fp, &file, project_path).is_ok() {
-            synced += 1;
-            symbols_written += file.symbols.len();
-            edges_written += file.edges.len();
-        } else {
-            store_failures += 1;
+        if failed > 0 {
+            record_focus_failure(&mut focus_failed, focus, &fp);
+        }
+        match store_file(&db, &fp, &file, project_path) {
+            Ok(()) => {
+                synced += 1;
+                symbols_written += file.symbols.len();
+                edges_written += file.edges.len();
+            }
+            Err(e) => {
+                if is_store_busy_error(&e) {
+                    store_busy = true;
+                }
+                store_failures += 1;
+                record_focus_failure(&mut focus_failed, focus, &fp);
+            }
         }
     }
     let mut removed = 0u32;
@@ -718,7 +896,10 @@ pub(crate) fn sync_files(
                 .collect::<Vec<_>>()
                 .join(",");
             let script = format!("BEGIN; DELETE FROM {SYMBOLS_TABLE} WHERE path IN ({list}); DELETE FROM {IMPORTS_TABLE} WHERE path IN ({list}); DELETE FROM {FILES_TABLE} WHERE path IN ({list}); COMMIT;");
-            if libsql_wasm::exec(&db, &script).is_err() {
+            if let Err(e) = libsql_wasm::exec(&db, &script) {
+                if is_store_busy_error(&e) {
+                    store_busy = true;
+                }
                 store_failures += 1;
                 continue;
             }
@@ -727,7 +908,7 @@ pub(crate) fn sync_files(
             }
         }
     }
-    let report = json!({
+    let mut report = json!({
         "ok": true,
         "files_synced": synced,
         "files_unchanged": unchanged,
@@ -739,10 +920,32 @@ pub(crate) fn sync_files(
         "files_unreadable": unreadable,
         "files_oversized": oversized,
         "store_failures": store_failures,
+        "store_busy": store_busy,
         "files_without_symbol_support": unsupported,
         "complete": deferred == 0 && parse_failures == 0 && unreadable == 0 && oversized == 0 && store_failures == 0,
         "elapsed_ms": host_now_ms().saturating_sub(started_ms),
     });
+    if !deferred_paths.is_empty() {
+        let listed: Vec<String> = deferred_paths
+            .iter()
+            .take(DEFERRED_SET_NAMES_LIMIT)
+            .cloned()
+            .collect();
+        report["deferred_set"] = json!(listed);
+        report["deferred_set_truncated"] = json!(deferred_paths.len() > DEFERRED_SET_NAMES_LIMIT);
+    }
+    if let Some(path) = focus {
+        let state = if focus_deferred {
+            "deferred"
+        } else if focus_failed {
+            "failed"
+        } else if seen.contains(path) {
+            "covered"
+        } else {
+            "unlisted"
+        };
+        report["focus"] = json!({ "path": path, "state": state });
+    }
     if synced > 0 || removed > 0 || deferred > 0 {
         crate::wasm_dispatch::emit_event("codeinsight_symbols_synced", report.clone());
     }
@@ -750,13 +953,14 @@ pub(crate) fn sync_files(
 }
 
 pub(crate) fn sync_tree(cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> Value {
-    sync_tree_with_budget(cfg, project_path, cfg.index.wall_budget_ms)
+    sync_tree_with_budget(cfg, project_path, cfg.index.wall_budget_ms, None)
 }
 
 fn sync_tree_with_budget(
     cfg: &crate::ragconfig::RagConfig,
     project_path: Option<&str>,
     budget_ms: u64,
+    focus: Option<&str>,
 ) -> Value {
     let started = host_now_ms();
     let root = project_path.filter(|p| !p.is_empty()).unwrap_or(".");
@@ -766,6 +970,7 @@ fn sync_tree_with_budget(
             "ok": false,
             "complete": false,
             "listing_complete": false,
+            "root_granted": false,
             "error": format!("root '{root}' is not an existing project directory the host will grant access to"),
         });
     }
@@ -789,6 +994,7 @@ fn sync_tree_with_budget(
         budget_ms,
         cfg.index.max_file_bytes,
         listing_complete,
+        focus,
     );
     let empty_listing_with_cached_files = files.is_empty()
         && !rows(
@@ -1757,14 +1963,43 @@ fn status(project_path: Option<&str>) -> Value {
     })
 }
 
-fn outline(db: &str, path: &str) -> Result<Value, String> {
+fn outline_partial_reason(focus_state: Option<&str>) -> Option<&'static str> {
+    match focus_state {
+        Some("covered") => None,
+        Some("deferred") => Some(DEFERRED_PARTIAL_REASON),
+        Some("failed") => Some(FAILED_PARTIAL_REASON),
+        Some("unlisted") => Some(UNLISTED_PARTIAL_REASON),
+        _ => Some(REFRESH_NOT_RUN_PARTIAL_REASON),
+    }
+}
+
+fn outline(db: &str, path: &str, refresh: &Value) -> Result<Value, String> {
     let normalized = normalized_path(path);
+    let refresh_complete = refresh.get("complete").and_then(Value::as_bool) == Some(true);
+    let focus_state = refresh.pointer("/focus/state").and_then(Value::as_str);
     let file = rows(
         db,
         &format!("SELECT lang, loc, symbols FROM {FILES_TABLE} WHERE path=?1"),
         &[&normalized],
     );
     let Some(file) = file.first() else {
+        if !refresh_complete && matches!(focus_state, Some("deferred") | Some("failed") | None) {
+            let reason = if focus_state == Some("deferred") {
+                DEFERRED_NEVER_INDEXED_REASON
+            } else {
+                UNINDEXED_IN_PASS_REASON
+            };
+            return Ok(json!({
+                "path": normalized,
+                "lang": Value::Null,
+                "loc": Value::Null,
+                "symbol_count": 0,
+                "outline": Vec::<String>::new(),
+                "partial": true,
+                "current": false,
+                "partial_reason": reason,
+            }));
+        }
         let like = format!("%{normalized}%");
         let near: Vec<String> = rows(
             db,
@@ -1803,9 +2038,22 @@ fn outline(db: &str, path: &str) -> Result<Value, String> {
             )
         })
         .collect();
-    Ok(
-        json!({ "path": normalized, "lang": string(file, "lang"), "loc": number(file.get("loc")), "symbol_count": symbols.len(), "outline": lines }),
-    )
+    let mut result = json!({
+        "path": normalized,
+        "lang": string(file, "lang"),
+        "loc": number(file.get("loc")),
+        "symbol_count": symbols.len(),
+        "outline": lines,
+    });
+    if !refresh_complete {
+        let reason = outline_partial_reason(focus_state);
+        result["partial"] = json!(reason.is_some());
+        result["current"] = json!(reason.is_none());
+        if let Some(reason) = reason {
+            result["partial_reason"] = json!(reason);
+        }
+    }
+    Ok(result)
 }
 
 fn like_escaped(text: &str) -> String {
@@ -2142,12 +2390,31 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     if action == "sync" {
         return Ok(sync_tree(&cfg, project_path));
     }
+    let focus = if action == "outline" {
+        text_field(body, &["path", "file"]).map(normalized_path)
+    } else {
+        None
+    };
     let refresh = sync_tree_with_budget(
         &cfg,
         project_path,
         cfg.index.incremental_topup_wall_budget_ms,
+        focus.as_deref(),
     );
-    if refresh.get("complete").and_then(Value::as_bool) != Some(true) {
+    let refresh_complete = refresh.get("complete").and_then(Value::as_bool) == Some(true);
+    let answer_from_index = refresh.get("store_busy").and_then(Value::as_bool) == Some(true) && action == "callers";
+    if !refresh_complete && action != "outline" && !answer_from_index {
+        if refresh.get("root_granted").and_then(Value::as_bool) == Some(false) {
+            return Err(format!(
+                "root '{}' is not a directory the host grants access to, so {action} read no index for it; a retry does not grant access",
+                project_path.unwrap_or_default()
+            ));
+        }
+        if let Some(root) = project_path {
+            return Err(format!(
+                "root '{root}': symbol index refresh is incomplete, so {action} read no current answer from it; cached graph is not current evidence. Run action=sync and retry. Refresh: {refresh}"
+            ));
+        }
         return Err(format!("symbol index refresh is incomplete; cached graph is not current evidence. Run action=sync and retry. Refresh: {refresh}"));
     }
     let limit = body
@@ -2164,7 +2431,7 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     let mut output = match action {
         "overview" => Ok(overview(project_path, limit)),
         "status" => Ok(status(project_path)),
-        "outline" => outline(&db, need_path()?),
+        "outline" => outline(&db, need_path()?, &refresh),
         "find" => Ok(find(
             &db,
             need_symbol()?,
@@ -2233,6 +2500,11 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
             ACTIONS.join(", ")
         )),
     }?;
+    if answer_from_index {
+        output["store"] = json!("busy");
+        output["index_current"] = json!(false);
+        output["answered_from"] = json!("persisted call-edge index (host KV); the symbol index was not refreshed because the libsql store was busy, and definition lookups read that store and may be empty this pass");
+    }
     output["codeinsight_index"] = refresh;
     Ok(output)
 }

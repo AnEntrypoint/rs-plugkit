@@ -12,7 +12,6 @@ use super::recall;
 use super::state::{read_state, Phase};
 #[cfg(target_arch = "wasm32")]
 use crate::pkfs;
-#[cfg(target_arch = "wasm32")]
 use serde_json::json;
 
 #[cfg(target_arch = "wasm32")]
@@ -228,7 +227,7 @@ pub fn fnv1a64(text: &str) -> u64 {
     hash
 }
 
-pub fn get_instruction(phase: &str) -> String {
+pub fn get_instruction(phase: &str) -> (String, Option<String>) {
     let upper = phase.trim().to_ascii_uppercase();
     let g = super::fsm::graph();
     let pseudo = g
@@ -245,13 +244,18 @@ pub fn get_instruction(phase: &str) -> String {
             .map(|s| s.prose_key.clone())
             .unwrap_or_else(|| "entry".to_string()),
     };
-    let phase_prose = crate::prose::resolve(&key, compiled_default_for_prose_key(&key));
+    let (phase_prose, phase_degraded) =
+        crate::prose::resolve_with_degradation(&key, compiled_default_for_prose_key(&key));
 
     if key == "entry" {
-        return phase_prose;
+        return (phase_prose, phase_degraded);
     }
-    let entry_prose = crate::prose::resolve("entry", entry::TEXT);
-    format!("{}\n\n{}", entry_prose, phase_prose)
+    let (entry_prose, entry_degraded) =
+        crate::prose::resolve_with_degradation("entry", entry::TEXT);
+    (
+        format!("{}\n\n{}", entry_prose, phase_prose),
+        phase_degraded.or(entry_degraded),
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -293,34 +297,32 @@ fn prd_items_json() -> Vec<serde_json::Value> {
     Vec::new()
 }
 
+const LAUNCH_LIST_MAX: usize = 32;
+
 pub(crate) fn concurrency_shortfall(
     running: usize,
-    slices_available: usize,
+    spawn_ceiling: usize,
+    candidates: &[String],
 ) -> Option<serde_json::Value> {
-    let shortfall = slices_available.saturating_sub(running);
+    let shortfall = spawn_ceiling.saturating_sub(running);
     if shortfall == 0 {
         return None;
     }
+    let launch: Vec<&str> = candidates
+        .iter()
+        .take(shortfall.min(LAUNCH_LIST_MAX))
+        .map(String::as_str)
+        .collect();
+    let launch_count = launch.len();
     Some(json!({
         "running": running,
-        "slices_available": slices_available,
+        "spawn_ceiling": spawn_ceiling,
         "shortfall": shortfall,
+        "launch": launch,
+        "launch_count": launch_count,
+        "unfilled_slots": shortfall.saturating_sub(candidates.len()),
+        "refill_on": "completion_notice",
     }))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn running_subagents(session: Option<&str>, window_ms: u64) -> usize {
-    let Some(parent) = session.filter(|s| !s.is_empty()) else {
-        return 0;
-    };
-    let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-    let now = unsafe { crate::wasm_dispatch::host_now_ms() };
-    crate::dispatch_ledger::subagent_running_count(&cwd, parent, now, window_ms)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn running_subagents(_session: Option<&str>, _window_ms: u64) -> usize {
-    0
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -537,25 +539,119 @@ pub(crate) fn body_requests_investigate_readonly(body: &serde_json::Value) -> bo
 
 #[cfg(target_arch = "wasm32")]
 fn investigate_readonly_instruction() -> &'static str {
-    "# READ-ONLY INVESTIGATION (lightweight mode)\n\n\
-This dispatch was marked `mode: \"investigate_readonly\"`, so it bypassed the \
-SPECIFY -> PROVE -> EMIT -> STATE -> CONC -> SEC -> RES -> DECIDE -> COMPLETE \
-orchestrator trajectory entirely: no phase was read or changed, no PRD row was \
-required or opened, no mutables/state file was touched.\n\n\
-Do the investigation/scan/search the prompt asked for using whatever verbs fit \
-(exec_js/bash/python for shell + grep-equivalents, fs_read/fs_readdir, codesearch, \
-callers/callees/impact, git_log/git_diff/git_show, recall, etc.) and report findings \
-directly in your final response.\n\n\
-Constraints: make NO code changes, NO commits, NO PRD rows, NO mutable writes -- this \
-mode exists for read-only forensic/audit/investigate asks where a PRD and a phase walk \
-would be pure ceremony over a result. If mid-investigation you discover the task actually \
-needs a code change, stop and re-dispatch `instruction` without `mode` (or with a fresh \
-prompt) to enter the normal phase-managed flow for that change -- do not make the edit \
-under this mode's cover.\n\n\
-This mode is exempt from the continuation invariant that would otherwise demand a final \
-`gm-continue` dispatch: it never entered the phase machine and leaves no open PRD/phase \
-state behind, so a plain final response (no further tool call) is a valid end to this turn \
-once findings are reported.\n"
+    "# READ-ONLY INVESTIGATION\n\n\
+This mode skipped the phase trajectory: no phase read or changed, no PRD row or mutable written. \
+Investigate with any verbs and report findings in your final response. Make no code change, \
+commit, PRD row or mutable write; if the task needs one, re-dispatch instruction without mode. \
+A plain final response with no tool call ends this turn; no gm-continue is needed."
+}
+
+#[cfg(target_arch = "wasm32")]
+const READONLY_LIST_CAP: usize = 8;
+
+#[cfg(target_arch = "wasm32")]
+const READONLY_REPLY_BYTE_BUDGET: usize = 3800;
+
+#[cfg(target_arch = "wasm32")]
+fn readonly_node_candidates(slots: &serde_json::Value) -> Vec<String> {
+    let filtered: std::collections::HashSet<&str> = slots["launch_filters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    slots["candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str())
+        .filter(|id| !filtered.contains(id))
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn investigate_readonly_reply(
+    session_id: Option<String>,
+    instruction: &str,
+    instruction_hash: &str,
+    slots: &serde_json::Value,
+) -> String {
+    let node_candidates = readonly_node_candidates(slots);
+    let mut cap = READONLY_LIST_CAP;
+    loop {
+        let reply = investigate_readonly_payload(&session_id, instruction, instruction_hash, slots, &node_candidates, cap).to_string();
+        if reply.len() <= READONLY_REPLY_BYTE_BUDGET || cap == 0 {
+            return reply;
+        }
+        cap -= 1;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn investigate_readonly_payload(
+    session_id: &Option<String>,
+    instruction: &str,
+    instruction_hash: &str,
+    slots: &serde_json::Value,
+    node_candidates: &[String],
+    cap: usize,
+) -> serde_json::Value {
+    let live = slots["live"].as_u64().unwrap_or(0) as usize;
+    let ceiling = super::pool_slots::spawn_ceiling(slots);
+    let open_rows = slots["open_rows"].as_u64().unwrap_or(0) as usize;
+    let candidates: Vec<String> = slots["candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str().map(str::to_string))
+        .collect();
+    let refill_needed = if open_rows > 0 {
+        ceiling.saturating_sub(live).min(node_candidates.len())
+    } else {
+        0
+    };
+    let launch: Vec<&str> = node_candidates
+        .iter()
+        .take(refill_needed.min(cap))
+        .map(String::as_str)
+        .collect();
+    let shortfall = concurrency_shortfall(live, ceiling, &candidates).map(|mut value| {
+        if let Some(list) = value.get_mut("launch").and_then(serde_json::Value::as_array_mut) {
+            list.truncate(cap);
+        }
+        let launched = value.get("launch").and_then(serde_json::Value::as_array).map_or(0, Vec::len);
+        value["launch_count"] = json!(launched);
+        value
+    });
+    let slots_view = json!({
+        "live": live,
+        "live_source": slots["live_source"],
+        "open_rows": open_rows,
+        "blocker_rows": slots["blocker_rows"],
+        "ceiling": slots["ceiling"],
+        "free": slots["free"],
+        "action": slots["action"],
+        "launchable": node_candidates.len(),
+        "candidates_total": candidates.len(),
+        "candidates": candidates.iter().take(cap).collect::<Vec<_>>(),
+        "launch_total": refill_needed,
+        "launch": launch,
+    });
+    json!({
+        "mode": "investigate_readonly",
+        "session_id": session_id,
+        "instruction": instruction,
+        "instruction_hash": instruction_hash,
+        "note": "read-only: no phase, mutable or PRD row written; lists hold list_cap ids, and candidates_total and launch_total give the full counts; the reply is capped at 4 KB",
+        "read_only": true,
+        "list_cap": cap,
+        "subagents_running": live,
+        "concurrency_shortfall": shortfall,
+        "launchable": node_candidates.len(),
+        "slots_prose": super::pool_slots::slots_prose(&slots_view),
+        "slots": slots_view,
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -570,6 +666,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     }
     let trimmed = content.trim();
     let mut session_id_opt: Option<String> = None;
+    let mut lease_sessions_opt: Option<Vec<serde_json::Value>> = None;
     let mut prompt_opt: Option<String> = None;
     let mut asserted_instruction_hash: Option<String> = None;
     let mut asserted_policy_hash: Option<String> = None;
@@ -585,6 +682,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         if let Some(sid) = crate::validation::session_id_from_body(&v) {
             session_id_opt = Some(sid);
         }
+        lease_sessions_opt = v.get("_lease_sessions").and_then(serde_json::Value::as_array).cloned();
         if let Some(p) = v.get("prompt").and_then(|s| s.as_str()) {
             prompt_opt = Some(p.to_string());
         }
@@ -628,17 +726,11 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
 
     if let Some(mode) = mode_opt.as_deref() {
         if is_investigate_readonly_mode(mode) {
-            ilog("instruction::handle mode=investigate_readonly -- bypassing phase/PRD orchestration, no state touched");
+            ilog("instruction::handle mode=investigate_readonly -- bypassing phase/PRD orchestration, no phase or PRD state written");
             let instruction = investigate_readonly_instruction().to_string();
             let instruction_hash = format!("{:016x}", fnv1a64(&instruction));
-            let payload = json!({
-                "mode": "investigate_readonly",
-                "session_id": session_id_opt,
-                "instruction": instruction,
-                "instruction_hash": instruction_hash,
-                "note": "lightweight read-only dispatch: no phase/PRD/mutables state was read or written for this call; this bypasses the SPECIFY->...->COMPLETE trajectory entirely and is not resumable via instruction_hash/phase machinery -- dispatch `instruction` again with no `mode` (or a fresh prompt) to re-enter the normal phase-managed flow",
-            });
-            let s = payload.to_string();
+            let slots = super::pool_slots::slot_state(".");
+            let s = investigate_readonly_reply(session_id_opt, &instruction, &instruction_hash, &slots);
             ilog(&format!(
                 "instruction::handle investigate_readonly done out_len={}",
                 s.len()
@@ -648,8 +740,17 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     }
 
     let prior_session_owner = read_state().session_id;
+    let owner_lease: Option<serde_json::Value> = match (&lease_sessions_opt, &prior_session_owner) {
+        (Some(facts), Some(owner)) => facts
+            .iter()
+            .find(|fact| fact.get("session_id").and_then(serde_json::Value::as_str) == Some(owner.as_str()))
+            .cloned(),
+        _ => None,
+    };
     let session_mismatch = match (&session_id_opt, &prior_session_owner) {
-        (Some(incoming), Some(prior)) => incoming != prior,
+        (Some(incoming), Some(prior)) => {
+            incoming != prior && (lease_sessions_opt.is_none() || owner_lease.is_some())
+        }
         _ => false,
     };
 
@@ -769,8 +870,8 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         .as_deref()
         .map(|p| p.trim().eq_ignore_ascii_case("entry-extended"))
         .unwrap_or(false);
-    let instruction = if requests_entry_extended {
-        crate::prose::resolve("entry-extended", entry_extended::TEXT)
+    let (instruction, instruction_degraded) = if requests_entry_extended {
+        crate::prose::resolve_with_degradation("entry-extended", entry_extended::TEXT)
     } else {
         get_instruction(&phase)
     };
@@ -979,13 +1080,22 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         graph.policy.longgap_threshold_ms,
     );
 
-    let subagents_running = running_subagents(
-        session_id_opt.as_deref(),
-        graph.policy.concurrency_window_ms,
-    );
-    let concurrency_shortfall_field = concurrency_shortfall(subagents_running, prd_pending);
-
     let slots = super::pool_slots::slot_state(".");
+    let subagents_running = slots["live"].as_u64().unwrap_or(0) as usize;
+    let launch_candidates: Vec<String> = slots["candidates"]
+        .as_array()
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|id| id.as_str().map(str::to_string))
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+    let concurrency_shortfall_field = concurrency_shortfall(
+        subagents_running,
+        super::pool_slots::spawn_ceiling(&slots),
+        &launch_candidates,
+    );
+
     let slots_prose = super::pool_slots::slots_prose(&slots);
     let monitor = super::pool_slots::monitor_block(&slots);
     let mut payload = json!({
@@ -1008,10 +1118,13 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "session_id": session_id_opt,
         "session_owner_before_this_dispatch": prior_session_owner,
         "session_mismatch": session_mismatch,
+        "session_owner_lease": owner_lease,
         "sub_phase": if await_result.is_some() { "AWAIT-RESULT" } else { "" },
         "await_result": await_result,
         "instruction": instruction_for_payload,
         "instruction_hash": instruction_hash,
+        "degraded": instruction_degraded.is_some(),
+        "degraded_reason": instruction_degraded,
         "instruction_unchanged": instruction_unchanged,
         "policy_hash": discipline_policies_hash,
         "instruction_suppressible_by_asserting_hash": instruction_suppressible_but_unasserted,

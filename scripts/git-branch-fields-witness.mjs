@@ -137,6 +137,13 @@ function main() {
       !isOk(nonBoolean) && lists(nonBoolean, 'invalid_fields').includes('remote'),
       `ok=${nonBoolean.ok} invalid_fields=${lists(nonBoolean, 'invalid_fields').join('|')}`,
     );
+
+    const envelope = dispatch(gm, project, work, { full_response: true });
+    expect(
+      'full_response_envelope_accepted',
+      isOk(envelope) && hasAll(envelope, ['main', 'feature-x']) && hasNone(envelope, ['origin/main', 'remotes/origin/main']),
+      `ok=${envelope.ok} branches=${lists(envelope, 'branches').join('|')}`,
+    );
   } catch (error) {
     failures.push('exception');
     console.log(`exception ${String(error.message || error).split('\n')[0]}`);

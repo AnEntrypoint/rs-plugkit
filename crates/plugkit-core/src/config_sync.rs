@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use crate::config::{RepoFetcher, RepoSource};
+use crate::config::{Freshness, RepoFetcher, RepoSource};
 
 const DEFAULT_DEBOUNCE_MS: u64 = 15 * 1000;
 
@@ -15,7 +15,7 @@ const LOCK_STALE_MS: u64 = 10 * 60 * 1000;
 pub struct SyncOutcome {
     pub sha: Option<String>,
     pub changed: bool,
-    pub degraded: bool,
+    pub degraded_reason: Option<String>,
     pub detail: String,
 }
 
@@ -24,6 +24,8 @@ struct SyncState {
     last_checked_ms: u64,
     last_sha: String,
     consecutive_failures: u32,
+    degraded_reason: Option<String>,
+    degraded_sticky: bool,
 }
 
 impl SyncState {
@@ -46,6 +48,14 @@ impl SyncState {
                 .get("consecutive_failures")
                 .and_then(|x| x.as_u64())
                 .unwrap_or(0) as u32,
+            degraded_reason: v
+                .get("degraded_reason")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+            degraded_sticky: v
+                .get("degraded_sticky")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
         }
     }
 
@@ -54,6 +64,8 @@ impl SyncState {
             "last_checked_ms": self.last_checked_ms,
             "last_sha": self.last_sha,
             "consecutive_failures": self.consecutive_failures,
+            "degraded_reason": self.degraded_reason,
+            "degraded_sticky": self.degraded_sticky,
         })
         .to_string()
     }
@@ -163,13 +175,19 @@ struct RefreshLock {
     token: String,
 }
 
-fn try_lock(src: &RepoSource) -> Option<RefreshLock> {
+enum LockProbe {
+    Acquired(RefreshLock),
+    Held,
+    Failed(String),
+}
+
+fn try_lock(src: &RepoSource) -> LockProbe {
     let path = lock_path(src);
     let Ok(p) = serde_json::to_string(&path) else {
-        return None;
+        return LockProbe::Failed("lock path is not representable".to_string());
     };
     let Ok(parent_p) = serde_json::to_string(&cache_root(src)) else {
-        return None;
+        return LockProbe::Failed("cache root is not representable".to_string());
     };
     let code = format!(
         "const fs=require('fs');const p={p};const staleMs={LOCK_STALE_MS};\
@@ -178,27 +196,35 @@ fn try_lock(src: &RepoSource) -> Option<RefreshLock> {
              process.stdout.write((function(){{\
              function acquire(){{\
                const token=process.pid+'-'+Date.now()+'-'+Math.random().toString(36).slice(2);\
-               try{{fs.mkdirSync(p);}}catch(e){{return 'busy';}}\
+               try{{fs.mkdirSync(p);}}catch(e){{return e.code==='EEXIST'?'busy':'failed:mkdir:'+e.code;}}\
                try{{fs.writeFileSync(p+'/owner',token,{{flag:'wx'}});return 'acquired:'+token;}}\
-               catch(e){{try{{fs.rmSync(p,{{recursive:true,force:true}});}}catch(e2){{}}return 'busy';}}\
+               catch(e){{try{{fs.rmSync(p,{{recursive:true,force:true}});}}catch(e2){{}}return 'failed:owner:'+e.code;}}\
              }}\
              let first=acquire();if(first!=='busy'){{return first;}}\
-             let st=null;try{{st=fs.statSync(p);}}catch(e2){{return 'busy';}}\
+             let st=null;try{{st=fs.statSync(p);}}catch(e2){{return e2.code==='ENOENT'?'busy':'failed:stat:'+e2.code;}}\
              if(Date.now()-st.mtimeMs<=staleMs){{return 'busy';}}\
              const aside=p+'.stale-'+process.pid+'-'+Date.now();\
-             try{{fs.renameSync(p,aside);}}catch(e3){{return 'busy';}}\
+             try{{fs.renameSync(p,aside);}}catch(e3){{return 'failed:stale-rename:'+e3.code;}}\
              try{{fs.rmSync(aside,{{recursive:true,force:true}});}}catch(e4){{}}\
              return acquire();\
              }})());"
     );
-    let token = exec_js_stdout(&code, 15000)?
-        .trim()
-        .strip_prefix("acquired:")?
-        .to_string();
-    if token.is_empty() {
-        None
-    } else {
-        Some(RefreshLock { path, token })
+    let Some(reply) = exec_js_stdout(&code, 15000) else {
+        return LockProbe::Failed("the host exec returned no stdout".to_string());
+    };
+    let text = reply.trim();
+    if text == "busy" {
+        return LockProbe::Held;
+    }
+    if let Some(token) = text.strip_prefix("acquired:").filter(|t| !t.is_empty()) {
+        return LockProbe::Acquired(RefreshLock {
+            path,
+            token: token.to_string(),
+        });
+    }
+    match text.strip_prefix("failed:") {
+        Some(kind) => LockProbe::Failed(kind.to_string()),
+        None => LockProbe::Failed("unexpected lock probe reply".to_string()),
     }
 }
 
@@ -332,7 +358,12 @@ fn recover_stranded(src: &RepoSource) {
     }
 }
 
-fn publish_staged(src: &RepoSource, staging: &str, lock: &RefreshLock) -> Result<(), String> {
+enum Publish {
+    Atomic,
+    InPlace { reason: String },
+}
+
+fn publish_staged(src: &RepoSource, staging: &str, lock: &RefreshLock) -> Result<Publish, String> {
     if !owns_lock(lock) {
         return Err("config refresh lock ownership was lost before publish".to_string());
     }
@@ -342,12 +373,19 @@ fn publish_staged(src: &RepoSource, staging: &str, lock: &RefreshLock) -> Result
     let had_live = crate::pkfs::exists(&src.cache_dir);
     if had_live && !rename(&src.cache_dir, &retired) {
         remove_tree(&staging);
-        return update_checkout_in_place(src).map_err(|e| {
-            format!(
-                "could not move {} aside to publish a new checkout, and the in-place update also failed: {e}",
-                src.cache_dir
-            )
-        });
+        return update_checkout_in_place(src)
+            .map(|()| Publish::InPlace {
+                reason: format!(
+                    "could not move {} aside to publish atomically; checkout updated in place, so readers can briefly see a mix of old and new files",
+                    src.cache_dir
+                ),
+            })
+            .map_err(|e| {
+                format!(
+                    "could not move {} aside to publish a new checkout, and the in-place update also failed: {e}",
+                    src.cache_dir
+                )
+            });
     }
     if !rename(&staging, &src.cache_dir) {
         if had_live {
@@ -360,7 +398,7 @@ fn publish_staged(src: &RepoSource, staging: &str, lock: &RefreshLock) -> Result
         ));
     }
     remove_tree(&retired);
-    Ok(())
+    Ok(Publish::Atomic)
 }
 
 /// Used when the live checkout cannot be renamed aside: a pack file held
@@ -386,7 +424,7 @@ fn update_checkout_in_place(src: &RepoSource) -> Result<(), String> {
     Ok(())
 }
 
-fn materialize(src: &RepoSource, reference: &str, lock: &RefreshLock) -> Result<(), String> {
+fn materialize(src: &RepoSource, reference: &str, lock: &RefreshLock) -> Result<Publish, String> {
     let staging = staging_dir(src, lock);
     remove_tree(&staging);
 
@@ -417,7 +455,7 @@ fn materialize(src: &RepoSource, reference: &str, lock: &RefreshLock) -> Result<
     publish_staged(src, &staging, lock)
 }
 
-fn fetch_to(src: &RepoSource, target_sha: &str, lock: &RefreshLock) -> Result<(), String> {
+fn fetch_to(src: &RepoSource, target_sha: &str, lock: &RefreshLock) -> Result<Publish, String> {
     let reference = src.reference.as_deref().unwrap_or("");
     if !reference.is_empty() && !is_sha_like(reference) {
         return materialize(src, reference, lock);
@@ -425,7 +463,7 @@ fn fetch_to(src: &RepoSource, target_sha: &str, lock: &RefreshLock) -> Result<()
     materialize(src, target_sha, lock)
 }
 
-fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcome {
+fn emit_degraded(sha: Option<String>, detail: &str, src: &RepoSource) {
     crate::wasm_dispatch::emit_event(
         "config_sync_degraded",
         json!({
@@ -436,10 +474,14 @@ fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcom
             "detail": detail,
         }),
     );
+}
+
+fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcome {
+    emit_degraded(sha.clone(), &detail, src);
     SyncOutcome {
         sha,
         changed: false,
-        degraded: true,
+        degraded_reason: Some(detail.clone()),
         detail,
     }
 }
@@ -458,7 +500,7 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
             return Ok(SyncOutcome {
                 sha: have_local,
                 changed: false,
-                degraded: false,
+                degraded_reason: st.degraded_reason.clone(),
                 detail: format!(
                     "debounced: checked {}ms ago, next probe in {}ms",
                     elapsed,
@@ -468,19 +510,36 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
         }
     }
 
-    let Some(lock) = try_lock(src) else {
-        return match have_local {
-            Some(sha) => Ok(SyncOutcome {
-                sha: Some(sha),
-                changed: false,
-                degraded: false,
-                detail: "another refresh in progress; serving current checkout".to_string(),
-            }),
-            None => Err(format!(
-                "another process is cloning {} and no local checkout exists yet",
-                src.repo
-            )),
-        };
+    let lock = match try_lock(src) {
+        LockProbe::Acquired(lock) => lock,
+        LockProbe::Held => {
+            return match have_local {
+                Some(sha) => Ok(SyncOutcome {
+                    sha: Some(sha),
+                    changed: false,
+                    degraded_reason: st.degraded_reason.clone(),
+                    detail: "another refresh in progress; serving current checkout".to_string(),
+                }),
+                None => Err(format!(
+                    "another process is cloning {} and no local checkout exists yet",
+                    src.repo
+                )),
+            };
+        }
+        LockProbe::Failed(reason) => {
+            let detail = format!("config refresh lock probe failed ({reason})");
+            return match have_local {
+                Some(sha) => Ok(degraded(
+                    Some(sha),
+                    format!("{detail}; serving current checkout"),
+                    src,
+                )),
+                None => {
+                    emit_degraded(None, &detail, src);
+                    Err(format!("{detail}; no local checkout to fall back to"))
+                }
+            };
+        }
     };
 
     let result = refresh_locked(src, &mut st, now, have_local.clone(), &lock);
@@ -510,13 +569,21 @@ fn refresh_locked(
         Err(e) => {
             st.last_checked_ms = now;
             st.consecutive_failures = st.consecutive_failures.saturating_add(1);
+            let detail = format!("remote probe failed ({e})");
             return match have_local {
-                Some(sha) => Ok(degraded(
-                    Some(sha),
-                    format!("remote probe failed ({e}); serving last good checkout"),
-                    src,
-                )),
-                None => Err(format!("{e}; no local checkout to fall back to")),
+                Some(sha) => {
+                    let detail = format!("{detail}; serving last good checkout");
+                    st.degraded_reason = Some(detail.clone());
+                    st.degraded_sticky = false;
+                    Ok(degraded(Some(sha), detail, src))
+                }
+                None => {
+                    let detail = format!("{e}; no local checkout to fall back to");
+                    st.degraded_reason = Some(detail.clone());
+                    st.degraded_sticky = false;
+                    emit_degraded(None, &detail, src);
+                    Err(detail)
+                }
             };
         }
     };
@@ -526,33 +593,56 @@ fn refresh_locked(
     if have_local.as_deref() == Some(remote.as_str()) {
         st.consecutive_failures = 0;
         st.last_sha = remote.clone();
+        if !st.degraded_sticky {
+            st.degraded_reason = None;
+        }
         return Ok(SyncOutcome {
             sha: Some(remote),
             changed: false,
-            degraded: false,
+            degraded_reason: st.degraded_reason.clone(),
             detail: "remote sha unchanged; no fetch needed".to_string(),
         });
     }
 
     let pre_fetch_config_text = crate::pkfs::read_to_string(&src.config_path());
 
-    let outcome = fetch_to(src, &remote, lock);
-
-    if let Err(e) = outcome {
-        st.consecutive_failures = st.consecutive_failures.saturating_add(1);
-        return match local_sha(src) {
-            Some(sha) => Ok(degraded(
-                Some(sha),
-                format!("update to {remote} failed ({e}); serving previous checkout"),
-                src,
-            )),
-            None => Err(format!("could not materialize {}: {e}", src.repo)),
-        };
-    }
+    let publish = match fetch_to(src, &remote, lock) {
+        Ok(publish) => publish,
+        Err(e) => {
+            st.consecutive_failures = st.consecutive_failures.saturating_add(1);
+            let attempt = format!("update to {remote} failed ({e})");
+            return match local_sha(src) {
+                Some(sha) => {
+                    let detail = format!("{attempt}; serving checkout at {sha}");
+                    st.degraded_reason = Some(detail.clone());
+                    st.degraded_sticky = true;
+                    Ok(degraded(Some(sha), detail, src))
+                }
+                None => {
+                    st.degraded_reason = Some(attempt.clone());
+                    st.degraded_sticky = true;
+                    emit_degraded(None, &attempt, src);
+                    Err(format!("could not materialize {}: {e}", src.repo))
+                }
+            };
+        }
+    };
 
     st.consecutive_failures = 0;
     let live = local_sha(src);
     st.last_sha = live.clone().unwrap_or_else(|| remote.clone());
+    let degraded_reason = match publish {
+        Publish::Atomic => {
+            st.degraded_reason = None;
+            st.degraded_sticky = false;
+            None
+        }
+        Publish::InPlace { reason } => {
+            st.degraded_reason = Some(reason.clone());
+            st.degraded_sticky = true;
+            Some(reason)
+        }
+    };
 
     crate::orchestrator::config_notify::record_change(
         &src.tier_label,
@@ -561,11 +651,18 @@ fn refresh_locked(
         &changed_config_paths(src, pre_fetch_config_text.as_deref()),
     );
 
+    if let Some(reason) = degraded_reason.as_deref() {
+        emit_degraded(live.clone(), reason, src);
+    }
+    let detail = match &degraded_reason {
+        Some(reason) => format!("updated to {remote}; {reason}"),
+        None => format!("updated to {remote}"),
+    };
     Ok(SyncOutcome {
         sha: live,
         changed: true,
-        degraded: false,
-        detail: format!("updated to {remote}"),
+        degraded_reason,
+        detail,
     })
 }
 
@@ -626,7 +723,11 @@ impl Default for GitRepoFetcher {
 }
 
 impl RepoFetcher for GitRepoFetcher {
-    fn refresh(&self, src: &RepoSource) -> Result<(), String> {
-        ensure_current(src, self.debounce_ms).map(|_| ())
+    fn refresh(&self, src: &RepoSource) -> Result<Freshness, String> {
+        let outcome = ensure_current(src, self.debounce_ms)?;
+        Ok(match outcome.degraded_reason {
+            Some(reason) => Freshness::Degraded { reason },
+            None => Freshness::Current,
+        })
     }
 }
