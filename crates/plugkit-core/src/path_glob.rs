@@ -64,9 +64,6 @@ pub fn looks_like_glob(pattern: &str) -> bool {
     pattern.contains(['*', '?', '[', '{'])
 }
 
-/// Glob alternatives that can match no file under `scopes`: each alternative's literal leading
-/// directory must lie inside a scope or contain one. A brace group in the first path segment is
-/// expanded into its alternatives; a leading wildcard keeps an alternative reachable.
 pub fn alternatives_outside_scopes(patterns: &[String], scopes: &[&str]) -> Vec<String> {
     let scopes: Vec<String> = scopes
         .iter()
@@ -80,15 +77,19 @@ pub fn alternatives_outside_scopes(patterns: &[String], scopes: &[&str]) -> Vec<
         .iter()
         .flat_map(|pattern| expand_first_segment(&normalize_pattern(pattern)))
         .filter(|alternative| {
-            let directory = literal_directory(alternative);
-            !scopes.iter().any(|scope| {
-                directory.is_empty()
-                    || directory == *scope
-                    || directory.starts_with(&format!("{scope}/"))
-                    || scope.starts_with(&format!("{directory}/"))
-            })
+            let directory = literal_directory_before_first_wildcard(alternative);
+            !scopes
+                .iter()
+                .any(|scope| directory_reaches_scope(&directory, scope))
         })
         .collect()
+}
+
+fn directory_reaches_scope(directory: &str, scope: &str) -> bool {
+    directory.is_empty()
+        || directory == scope
+        || directory.starts_with(&format!("{scope}/"))
+        || scope.starts_with(&format!("{directory}/"))
 }
 
 fn normalize_pattern(pattern: &str) -> String {
@@ -119,7 +120,7 @@ fn expand_first_segment(pattern: &str) -> Vec<String> {
     }
 }
 
-fn literal_directory(alternative: &str) -> String {
+fn literal_directory_before_first_wildcard(alternative: &str) -> String {
     let segments: Vec<&str> = alternative.split('/').collect();
     let mut literal: Vec<&str> = segments
         .iter()
