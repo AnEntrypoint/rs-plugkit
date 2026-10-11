@@ -4542,7 +4542,7 @@ const TERM_TRIM_CHARS: &[char] = &[
     '"', '\'', '`', ',', ';', ':', '<', '>', '(', ')', '[', ']', '{', '}',
 ];
 
-fn carries_regex_metacharacter(pattern: &str) -> bool {
+pub(crate) fn carries_regex_metacharacter(pattern: &str) -> bool {
     pattern.chars().any(|c| TERM_SPLIT_METACHARACTERS.contains(&c))
 }
 
