@@ -4148,35 +4148,115 @@ pub(super) fn ci_status_resolve_repo_preferring_unambiguous_github_repo_field(
     }
 }
 
-pub(super) fn ci_status_resolve_sha(body: &Value, cwd: Option<&str>) -> Result<String, u64> {
-    let requested = body
-        .get("sha")
-        .and_then(|v| v.as_str())
-        .or_else(|| body.get("ref").and_then(|v| v.as_str()))
-        .unwrap_or("latest")
-        .trim();
-    if requested.is_empty() || requested.eq_ignore_ascii_case("latest") {
-        let sha = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-        if sha.is_empty() {
-            return Err(err(
-                "ci-status",
-                "sha not provided and unable to resolve local HEAD",
-            ));
+pub(super) struct CiStatusShaResolution {
+    pub(super) sha: String,
+    pub(super) field: &'static str,
+    pub(super) requested: Option<String>,
+    pub(super) head_fallback: bool,
+}
+
+fn ci_status_requested_rev(body: &Value) -> (&'static str, Option<&str>) {
+    for field in ["rev", "sha", "ref"] {
+        if let Some(value) = body.get(field).and_then(Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("latest") {
+                return (field, Some(trimmed));
+            }
         }
-        return Ok(sha);
     }
+    ("", None)
+}
+
+fn ci_status_head_sha(cwd: Option<&str>, failure: &str) -> Result<CiStatusShaResolution, u64> {
+    let sha = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    if sha.is_empty() {
+        return Err(err("ci-status", failure));
+    }
+    Ok(CiStatusShaResolution {
+        sha,
+        field: "",
+        requested: None,
+        head_fallback: false,
+    })
+}
+
+pub(super) fn ci_status_resolve_sha(
+    body: &Value,
+    cwd: Option<&str>,
+) -> Result<CiStatusShaResolution, u64> {
+    let (field, requested) = ci_status_requested_rev(body);
+    let requested = match requested {
+        Some(requested) => requested,
+        None => {
+            return ci_status_head_sha(
+                cwd,
+                "rev/sha/ref not provided and unable to resolve local HEAD",
+            )
+        }
+    };
     if is_full_sha(requested) {
-        return Ok(requested.to_string());
+        return Ok(CiStatusShaResolution {
+            sha: requested.to_string(),
+            field,
+            requested: Some(requested.to_string()),
+            head_fallback: false,
+        });
     }
-    let resolved = exec_git_in(cwd, &format!("rev-parse --verify {}^{{commit}}", requested))
-        .trim()
-        .to_string();
-    if is_full_sha(&resolved) {
-        return Ok(resolved);
+    for query in [
+        format!("rev-parse --verify {}^{{commit}}", requested),
+        format!("rev-parse --verify {}", requested),
+    ] {
+        let resolved = exec_git_in(cwd, &query).trim().to_string();
+        if is_full_sha(&resolved) {
+            return Ok(CiStatusShaResolution {
+                sha: resolved,
+                field,
+                requested: Some(requested.to_string()),
+                head_fallback: false,
+            });
+        }
     }
-    Err(err("ci-status", &format!(
-        "{} is neither a 40-char commit sha nor a ref git can resolve here -- pass a full sha, or a ref git knows such as HEAD or a branch name",
-        requested)))
+    let mut head = ci_status_head_sha(
+        cwd,
+        &format!(
+            "{} \"{}\" is neither a 40-char commit sha nor a ref git can resolve here, and local HEAD is also unresolvable -- pass a full sha, or a ref git knows such as HEAD or a branch name",
+            field, requested
+        ),
+    )?;
+    head.field = field;
+    head.requested = Some(requested.to_string());
+    head.head_fallback = true;
+    Ok(head)
+}
+
+pub(super) fn ci_status_annotate_sha_resolution(
+    value: Value,
+    resolution: &CiStatusShaResolution,
+) -> Value {
+    let mut value = value;
+    let has_data = value.get("data").map(Value::is_object).unwrap_or(false);
+    let target = if has_data {
+        value.get_mut("data").expect("data is an object")
+    } else {
+        &mut value
+    };
+    let source = if resolution.head_fallback {
+        "head_after_unresolved_rev"
+    } else if resolution.field.is_empty() {
+        "head"
+    } else {
+        resolution.field
+    };
+    if let Some(fields) = target.as_object_mut() {
+        fields.insert("sha_source".to_string(), json!(source));
+        if let Some(requested) = &resolution.requested {
+            fields.insert("sha_requested".to_string(), json!(requested));
+        }
+        if resolution.head_fallback {
+            fields.insert("sha_requested_unresolved".to_string(), json!(true));
+        }
+    }
+    value
 }
 
 pub(super) fn is_full_sha(candidate: &str) -> bool {
@@ -4662,7 +4742,8 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     let cwd = body_cwd(body);
     let repo = ci_status_resolve_repo_preferring_unambiguous_github_repo_field(body, cwd)
         .map_err(|packed| unpack_to_value(packed))?;
-    let sha = ci_status_resolve_sha(body, cwd).map_err(|packed| unpack_to_value(packed))?;
+    let resolution = ci_status_resolve_sha(body, cwd).map_err(|packed| unpack_to_value(packed))?;
+    let sha = resolution.sha.clone();
     let runs_path = format!("repos/{}/actions/runs?head_sha={}&per_page=20", repo, sha);
     let tree_path = format!("repos/{}/git/trees/{}?recursive=1", repo, sha);
     let token = body
@@ -4701,14 +4782,17 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
             match ci_status_attempt(transport, &runs_path, &rest_opts, attempt) {
                 Ok(parsed) => {
                     let runs = ci_status_runs_from(&parsed);
-                    return Ok(ci_status_summarize(
-                        body,
-                        &repo,
-                        &sha,
-                        &runs,
-                        transport,
-                        &tree_path,
-                        &rest_opts,
+                    return Ok(ci_status_annotate_sha_resolution(
+                        ci_status_summarize(
+                            body,
+                            &repo,
+                            &sha,
+                            &runs,
+                            transport,
+                            &tree_path,
+                            &rest_opts,
+                        ),
+                        &resolution,
                     ));
                 }
                 Err(failure) => {
@@ -4752,48 +4836,54 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
             .last()
             .map(|f| f.transport.label())
             .unwrap_or("github_rest");
-        return Ok(json!({
-            "ok": true, "verb": "ci-status",
-            "data": {
-                "status": "unknown",
-                "repo": repo, "sha": sha,
-                "failed_jobs": [],
-                "run_url": Value::Null,
-                "reason": reason,
-                "rate_limited": true,
-                "rate_limit_reset_epoch": reset_epoch,
-                "rate_limit_reset_at": reset_epoch.map(ci_status_epoch_to_utc_iso),
-                "retry_after_secs": rate.retry_after_secs.or(seconds_until_reset),
-                "transport": last_transport,
-                "attempts": failures
-                    .iter()
-                    .map(|f| json!({
-                        "transport": f.transport.label(),
-                        "attempt": f.attempt,
-                        "reason": f.reason,
-                        "rate_limited": f.rate_limit.is_some(),
-                    }))
-                    .collect::<Vec<_>>(),
-            },
-        }));
+        return Ok(ci_status_annotate_sha_resolution(
+            json!({
+                "ok": true, "verb": "ci-status",
+                "data": {
+                    "status": "unknown",
+                    "repo": repo, "sha": sha,
+                    "failed_jobs": [],
+                    "run_url": Value::Null,
+                    "reason": reason,
+                    "rate_limited": true,
+                    "rate_limit_reset_epoch": reset_epoch,
+                    "rate_limit_reset_at": reset_epoch.map(ci_status_epoch_to_utc_iso),
+                    "retry_after_secs": rate.retry_after_secs.or(seconds_until_reset),
+                    "transport": last_transport,
+                    "attempts": failures
+                        .iter()
+                        .map(|f| json!({
+                            "transport": f.transport.label(),
+                            "attempt": f.attempt,
+                            "reason": f.reason,
+                            "rate_limited": f.rate_limit.is_some(),
+                        }))
+                        .collect::<Vec<_>>(),
+                },
+            }),
+            &resolution,
+        ));
     }
-    Err(json!({
-        "ok": false, "verb": "ci-status",
-        "error": format!(
-            "GitHub Actions state unreadable through every transport: {}",
-            failures
+    Err(ci_status_annotate_sha_resolution(
+        json!({
+            "ok": false, "verb": "ci-status",
+            "error": format!(
+                "GitHub Actions state unreadable through every transport: {}",
+                failures
+                    .iter()
+                    .map(|f| format!("{}: {}", f.transport.label(), f.reason))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            "repo": repo, "sha": sha,
+            "response": failures.last().map(|f| f.body.clone()).unwrap_or_default(),
+            "attempts": failures
                 .iter()
-                .map(|f| format!("{}: {}", f.transport.label(), f.reason))
-                .collect::<Vec<_>>()
-                .join("; ")
-        ),
-        "repo": repo, "sha": sha,
-        "response": failures.last().map(|f| f.body.clone()).unwrap_or_default(),
-        "attempts": failures
-            .iter()
-            .map(|f| json!({ "transport": f.transport.label(), "reason": f.reason }))
-            .collect::<Vec<_>>(),
-    }))
+                .map(|f| json!({ "transport": f.transport.label(), "reason": f.reason }))
+                .collect::<Vec<_>>(),
+        }),
+        &resolution,
+    ))
 }
 
 pub(super) fn ci_status_summarize(
@@ -5904,9 +5994,14 @@ pub(super) const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &[
     "root",
     "projectPath",
     "git_root_override",
-    "_plan",
     "full_response",
 ];
+
+pub(super) const HOST_RESERVED_BODY_KEY_PREFIX: &str = "_";
+
+pub(super) fn is_host_reserved_body_key(key: &str) -> bool {
+    key.starts_with(HOST_RESERVED_BODY_KEY_PREFIX)
+}
 pub(crate) const GIT_PROTECTED_PATHSPECS: &[(&str, &str)] = &[
     (".gm", ":(top,exclude).gm"),
     (".agentplug*", ":(top,exclude).agentplug*"),
@@ -5918,7 +6013,10 @@ pub(super) fn refuse_unknown_fields(verb: &str, body: &Value, accepted: &[&str])
         .as_object()?
         .keys()
         .filter(|k| {
-            !GIT_BODY_ENVELOPE_FIELDS.contains(&k.as_str()) && !accepted.contains(&k.as_str())
+            let key = k.as_str();
+            !is_host_reserved_body_key(key)
+                && !GIT_BODY_ENVELOPE_FIELDS.contains(&key)
+                && !accepted.contains(&key)
         })
         .collect();
     if unknown.is_empty() {
