@@ -246,7 +246,7 @@ pub fn enclosing_names_in(path: &str, source: &str, spans: &[ByteSpan]) -> Vec<S
         let body_start = *start + leading_whitespace(line);
         let body = line.trim_start_matches(|ch| ch == ' ' || ch == '\t');
         if indent_based {
-            if body.trim().is_empty() || crate::comment_spans::span_contains(spans, body_start) {
+            if body.trim().is_empty() {
                 out.push(top_name(&stack));
                 continue;
             }
@@ -254,8 +254,10 @@ pub fn enclosing_names_in(path: &str, source: &str, spans: &[ByteSpan]) -> Vec<S
             while stack.last().map(|entry| entry.0 >= indent).unwrap_or(false) {
                 stack.pop();
             }
-            if let Some(name) = python_declared_name(body) {
-                stack.push((indent, name));
+            if !crate::comment_spans::span_contains(spans, body_start) {
+                if let Some(name) = python_declared_name(body) {
+                    stack.push((indent, name));
+                }
             }
             out.push(top_name(&stack));
             continue;
