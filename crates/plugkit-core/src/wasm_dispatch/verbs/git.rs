@@ -823,6 +823,13 @@ pub(super) fn push_output_is_transient_remote_rejection(output: &str) -> bool {
         || low.contains("temporarily unavailable")
 }
 
+pub(super) fn push_output_is_refspec_destination_failure(output: &str) -> bool {
+    let low = output.to_ascii_lowercase();
+    low.contains("is not a full refname")
+        || (low.contains("the <src> part of the refspec is a commit object")
+            && low.contains("did you mean"))
+}
+
 pub(super) fn push_output_remote_request_ids(output: &str) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     for line in output.lines() {
@@ -1538,6 +1545,28 @@ pub(super) fn git_push(body: &Value) -> u64 {
                 &remote_request_ids,
                 &push_out,
             );
+        }
+        if push_output_is_refspec_destination_failure(&push_out) {
+            log_deviation_push("push-refspec-destination-not-full-refname", &branch);
+            return pack(json!({
+                "ok": false,
+                "verb": "git_push",
+                "gate_denied": true,
+                "remote_moved": false,
+                "refspec_invalid": true,
+                "repo": repo,
+                "branch": branch,
+                "source_ref": source_ref,
+                "source_sha": local_source_before,
+                "preserved_dirty_worktree": preserved_dirty_worktree,
+                "reason": format!(
+                    "git rejected the refspec git_push built for source ref '{}' to branch '{}': the destination is not a fully qualified refname, so git cannot tell which namespace to create on the remote. This is a refspec construction failure here, not a remote that moved on -- no git_pull changes it. Re-dispatch with the destination fully qualified as {{\"branch\":\"refs/heads/{}\"}}, or publish a branch tip instead of a bare commit object. Output:\n{}",
+                    source_ref, branch, branch, push_out
+                ),
+                "next_dispatch": "instruction",
+                "next_action_hint": format!("git_push {{\"rev\":\"{}\",\"branch\":\"refs/heads/{}\"}} -- pulling cannot create an unqualified destination ref", source_ref, branch),
+                "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
+            }).to_string());
         }
         log_deviation_push("push-explicit-ref-remote-moved", &branch);
         let mut refusal = json!({
@@ -7655,7 +7684,11 @@ pub(super) fn exec_git_push_in(
     branch: &str,
     fallback: Option<&SshHttpsFallback>,
 ) -> (String, bool) {
-    let refspec = format!("{}:{}", source_ref, branch);
+    let refspec = if is_full_sha(source_ref) && !branch.starts_with("refs/") {
+        format!("{}:refs/heads/{}", source_ref, branch)
+    } else {
+        format!("{}:{}", source_ref, branch)
+    };
     let push_argv = ["push", "origin", refspec.as_str()];
     let v = match fallback {
         Some(f) => f.call(&push_argv, repo),
