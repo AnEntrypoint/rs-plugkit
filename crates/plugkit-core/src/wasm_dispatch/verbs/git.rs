@@ -6886,13 +6886,27 @@ pub(super) fn caller_pathspec_covers(paths: &[String], candidate: &str) -> bool 
 }
 
 pub(super) fn excluded_pathspecs(paths: &[String], cwd: Option<&str>) -> Vec<String> {
-    let mut out = vec![".agentplug*".to_string()];
+    let mut out = Vec::new();
+    if agentplug_runtime_rule_applies(paths) {
+        out.push(".agentplug*".to_string());
+    }
     for (_, path) in withheld_dirty_entries(cwd) {
         if !path.starts_with(".agentplug") && !caller_pathspec_covers(paths, &path) {
             out.push(path);
         }
     }
     out
+}
+
+/// The `.agentplug*` rule bears on a request only when the request is unscoped (git
+/// resolves it against `:/`) or names a DOT-prefixed runtime path. The tracked
+/// submodule `agentplug` is a gitlink, not runtime state.
+fn agentplug_runtime_rule_applies(paths: &[String]) -> bool {
+    paths.is_empty()
+        || paths.iter().any(|spec| {
+            let spec = spec.replace('\\', "/");
+            spec.trim_start_matches("./").starts_with(".agentplug")
+        })
 }
 
 pub(super) fn git_pathspec_scope(paths: &[String], cwd: Option<&str>) -> Vec<String> {
