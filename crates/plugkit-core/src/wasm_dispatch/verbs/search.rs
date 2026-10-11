@@ -1385,6 +1385,26 @@ pub(super) fn help_requested(body: &Value) -> bool {
     }
 }
 
+pub(super) const COMMENT_AUDIT_HELP: &str = "\
+comment-audit walks a project's source files and returns one row per comment and per Python
+docstring, each with the name of the function or class enclosing it, so the list can be diffed
+against a file:line inventory a doc claims.
+  {\"root\":\"<dir>\"}                     project root; \"projectPath\" and \"cwd\" are aliases, in that
+                                       order, and the default is the resolved project root
+  {\"kind\":\"comment\"|\"docstring\"}        keep only that kind; omitted returns both
+  {\"max_files\":20000}                   cap on files listed and read (aliases maxFiles)
+  {\"limit\":2000}                        cap on rows returned (aliases max_results, maxResults)
+Rows carry \"file\", \"line\", \"text\", \"enclosing\" and \"kind\". \"file\" is relative to the root and \"line\" is
+1-based at the first line of the comment. \"enclosing\" is the innermost function or class name, or
+\"-\" at module level. \"text\" is the comment as written, whitespace collapsed and clamped at 240
+characters with a trailing \"...\" when clipped.
+The walk uses the project source list, so .git, node_modules, target, venv, .gm and every gitignored
+path are skipped. Comments come from the same language-agnostic scanner codesearch's \"comments\"
+mode uses, so every language that scanner covers is covered here; docstrings are the string literal
+at the start of a module, def or class body and are collected for .py files.
+The reply carries \"files_scanned\", \"files_unreadable\", \"findings_total\" and \"truncated\";
+\"truncated\" true means the \"limit\" cap fired and the rows are a prefix of the full list.";
+
 pub(super) fn verb_help_doc(verb: &str) -> Option<&'static str> {
     match verb {
         "grep" | "rg" => Some(GREP_HELP),
@@ -1396,6 +1416,7 @@ pub(super) fn verb_help_doc(verb: &str) -> Option<&'static str> {
         "prd-resolve" => Some(PRD_RESOLVE_HELP),
         "prd-add" => Some(PRD_ADD_HELP),
         "codeinsight" | "code_insight" => Some(CODEINSIGHT_HELP),
+        "comment-audit" => Some(COMMENT_AUDIT_HELP),
         "git_merge_abort" => Some(super::git::GIT_MERGE_ABORT_HELP),
         "git_worktree" => Some("git_worktree {action: list} returns worktrees; {action: add, path, ref?: HEAD, detach?: true} creates a linked checkout; detach false requires an existing local branch name; {action: remove, path} removes a clean unlocked checkout without force. Unknown fields are refused per action. Repository selectors and session fields are accepted."),
         _ => None,
