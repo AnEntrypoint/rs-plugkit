@@ -1873,6 +1873,8 @@ const EXTRACTION_RESERVE_MS: u64 = 500;
 
 const EMBED_BUDGET_DIVISOR: u64 = 3;
 
+const TOPUP_EMBED_BUDGET_MS: u64 = 1_500;
+
 const SYMBOL_SYNC_BUDGET_DIVISOR: u64 = 4;
 
 const ENUMERATION_BUDGET_DIVISOR: u64 = 4;
@@ -2504,7 +2506,7 @@ fn index_cfg_impl(
     let embed_budget_ms = if full_pass {
         index_wall_budget_ms / EMBED_BUDGET_DIVISOR
     } else {
-        0
+        TOPUP_EMBED_BUDGET_MS.min(index_wall_budget_ms)
     };
     let walk_share_ms = index_wall_budget_ms.saturating_sub(embed_budget_ms);
     let mut measured_embed_ms_per_chunk = pessimistic_ms_per_chunk;
