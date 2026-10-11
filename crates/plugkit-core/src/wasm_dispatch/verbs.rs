@@ -1410,6 +1410,33 @@ fn lang(body: &Value) -> u64 {
 
 const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "[timeoutMs=<ms>\\n]<code> (timeoutMs is the enforced wall-clock limit: default 300000, hard ceiling 900000, the process tree is killed at expiry). A child started inside the body does NOT outlive the dispatch -- the exec child and its whole tree are held in a kill-on-close job, so a daemon that must survive is created outside it: on Windows parent it to the WMI service with ([wmiclass]'Win32_Process').Create('cmd.exe /c \"<path>\"'), then confirm it is alive from a SEPARATE dispatch by pid";
 
+#[cfg(target_arch = "wasm32")]
+const EXEC_JS_WITNESS_MAX_BYTES: usize = 262_144;
+
+#[cfg(target_arch = "wasm32")]
+const ESM_REQUIRE_PRELUDE: &str = "import { createRequire as __gmCreateRequire } from 'node:module';\nconst require = __gmCreateRequire(process.cwd() + '/');\n";
+
+#[cfg(target_arch = "wasm32")]
+fn persist_exec_js_witness(verb: &str, body_s: &str, dispatch_id: &str) -> Option<String> {
+    if !matches!(verb, "exec_js" | "nodejs" | "javascript" | "node" | "js") {
+        return None;
+    }
+    if dispatch_id.is_empty()
+        || dispatch_id.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+    {
+        return None;
+    }
+    let (_, code) = strip_timeout_ms_prefix_directive(body_s);
+    if !code.contains("RESULT:") || code.len() > EXEC_JS_WITNESS_MAX_BYTES {
+        return None;
+    }
+    let path = crate::orchestrator::prd::persisted_witness_path(dispatch_id);
+    if !crate::pkfs::write(&path, &format!("{ESM_REQUIRE_PRELUDE}{code}")) {
+        return None;
+    }
+    Some(path)
+}
+
 fn exec_js(body: &Value, body_s: &str) -> u64 {
     if body.is_object() {
         return err_json(
@@ -2730,7 +2757,8 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     };
     set_caller_budget(None);
     super::events::set_dispatch_session_id(None);
-    let result_value = super::host_abi::unpack_to_value(result_packed);
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
+    let mut result_value = super::host_abi::unpack_to_value(result_packed);
     #[cfg(target_arch = "wasm32")]
     let recorded: Option<(String, i64, bool)> = {
         let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
@@ -2754,6 +2782,11 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
                 dispatch_session_id.as_deref(),
                 Some(crate::orchestrator::dream_rsi::dispatch_output_bytes(&result_value)),
             );
+            if let Some(path) = persist_exec_js_witness(&verb, &body_s, &dispatch_id) {
+                if let Some(map) = result_value.as_object_mut() {
+                    map.insert("witness_path".to_string(), json!(path));
+                }
+            }
             let gate_drift = exit_code != 0
                 && crate::orchestrator::dream_rsi::failure_is_gate_drift(&result_value);
             Some((dispatch_id, exit_code, gate_drift))
