@@ -264,7 +264,7 @@ GitHub Actions workflow-run query with each job's name and conclusion in `jobs`)
 `prd-status`, `mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
 `fsm-validate`, `fsm-propose-override`, `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/
 `sql_smoke`, `task-spawn`/`task-list`/`task-output`/`task-stop`,
-`background-convert`, `kill-port`, `similarity`, `claim-audit`.
+`background-convert`, `kill-port`, `similarity`, `claim-audit`, `comment-audit`.
 
 `crawl` takes a plain-text body (not JSON). Its first line is `engine=lightpanda` (the default when the line is absent) or `engine=cdp`; the rest is the crawl request (URLs and steps). `chrome` is an alias that routes to `crawl engine=cdp`: it drops any engine line and always drives Chrome. `cdp` is HEADFUL: the host drives a visible Chrome over CDP through its `crawl_cdp` entry point. `lightpanda` is HEADLESS: the guest calls the `lightpanda` sibling plugin's `crawl` verb with the same body, and the host keeps that lightpanda process warm. Both engines return the host's reply object unchanged, with `ok`, `engine`, `headless`, `stdout`, `stderr`, `exit_code` and `duration_ms`. Any other engine answers `ok: false` with `error_code: unknown_engine`, naming `cdp` and `lightpanda`.
 

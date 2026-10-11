@@ -3,6 +3,7 @@ pub mod capability_proxy;
 pub mod cas;
 pub mod claim_audit;
 pub mod codeinsight_component;
+pub mod comment_audit;
 pub mod coeffect_realm;
 pub mod component_loader;
 pub mod component_loader_dispatch;
@@ -416,6 +417,7 @@ orchestrator_dispatch_table! {
     "sleep" => wait::handle(content),
     "residual-scan" => residual::handle_scan(content),
     "claim-audit" => claim_audit::handle_audit(content),
+    "comment-audit" => comment_audit::handle_audit(content),
     "submodule-check" => submodule_drift::handle_check(content),
     "component-loader-reconcile" => component_loader_dispatch::handle_reconcile(content),
     "component-loader-hmr" => component_loader_dispatch::handle_hmr(content),
