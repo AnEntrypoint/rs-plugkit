@@ -468,6 +468,7 @@ struct RuleRecordingWalk<'a> {
     gitignore: Option<ignore::gitignore::Gitignore>,
     noise: NoiseDirs,
     named_scope: bool,
+    named_target: String,
     max_files: usize,
     deadline_ms: u64,
     reached_deadline: bool,
@@ -513,7 +514,7 @@ impl RuleRecordingWalk<'_> {
     }
 
     fn exclusion_rule(&self, name: &str, path: &str, is_dir: bool) -> Option<&'static str> {
-        if self.named_scope { return None; }
+        if self.named_target_is_at_or_above(path) { return None; }
         if gitignore_excludes(&self.gitignore, path, is_dir) { return Some("gitignore"); }
         if !is_dir { return None; }
         if is_hidden_segment(name) { return Some("hidden_dir"); }
@@ -524,6 +525,18 @@ impl RuleRecordingWalk<'_> {
             }
         };
         noise.then_some("noise_dir_name")
+    }
+
+    fn named_target_is_at_or_above(&self, path: &str) -> bool {
+        if !self.named_scope {
+            return false;
+        }
+        if self.named_target == path {
+            return true;
+        }
+        self.named_target
+            .strip_prefix(path)
+            .is_some_and(|rest| rest.starts_with('/'))
     }
 }
 
@@ -619,6 +632,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         },
         noise: policy.noise,
         named_scope,
+        named_target: target.clone(),
         max_files,
         deadline_ms: unsafe { host_now_ms() }
             .saturating_add(cfg.wall_budget_ms.min(LISTING_WALK_ANSWERABLE_BUDGET_MS)),

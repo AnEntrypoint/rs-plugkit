@@ -4270,6 +4270,39 @@ fn has_binary_extension(path: &str) -> bool {
         .any(|b| ext.eq_ignore_ascii_case(b))
 }
 
+fn insert_binary_extension_skips(
+    out: &mut serde_json::Map<String, Value>,
+    paths: &[String],
+    spill_stem: &str,
+    started_ms: u64,
+) {
+    if paths.is_empty() {
+        return;
+    }
+    out.insert(
+        "files_skipped_binary_extension".to_string(),
+        json!(paths.len()),
+    );
+    out.insert(
+        "files_skipped_binary_extension_paths".to_string(),
+        json!(paths
+            .iter()
+            .take(SKIPPED_SAMPLE_LEN)
+            .cloned()
+            .collect::<Vec<String>>()),
+    );
+    if paths.len() > SKIPPED_SAMPLE_LEN {
+        let listing_name = format!("{spill_stem}-{started_ms}.txt");
+        if let Some(file) = spill_lines_to_out_file(&listing_name, paths) {
+            out.insert("files_skipped_binary_extension_file".to_string(), json!(file));
+        }
+    }
+    out.insert(
+        "files_skipped_binary_extension_note".to_string(),
+        json!("these paths carry an extension on the binary list, so they were never opened; files_skipped_binary_extension is the total, files_skipped_binary_extension_paths the first sample, files_skipped_binary_extension_file (when present) lists every path, one per line"),
+    );
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ScanOutput {
     Matches,
@@ -5015,6 +5048,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut files_skipped_too_large: Vec<String> = Vec::new();
     let mut files_skipped_too_large_count = 0usize;
     let mut files_skipped_binary_extension = 0usize;
+    let mut files_skipped_binary_extension_paths: Vec<String> = Vec::new();
     let mut files_skipped_binary = 0usize;
     let mut files_with_nul_scanned = 0usize;
     let mut files_without_comment_syntax = 0usize;
@@ -5057,6 +5091,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         }
         if has_binary_extension(path) {
             files_skipped_binary_extension += 1;
+            files_skipped_binary_extension_paths.push(path.clone());
             continue;
         }
         let stat_started = unsafe { crate::wasm_dispatch::host_now_ms() };
@@ -5660,9 +5695,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         );
     }
     if req.verbose && files_skipped_binary_extension > 0 {
-        out.insert(
-            "files_skipped_binary_extension".to_string(),
-            json!(files_skipped_binary_extension),
+        insert_binary_extension_skips(
+            &mut out,
+            &files_skipped_binary_extension_paths,
+            "grep-binary-extension",
+            started_ms,
         );
     }
     if files_skipped_binary > 0 {
@@ -5678,9 +5715,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         );
     }
     if req.verbose && files_skipped_binary_extension > 0 {
-        out.insert(
-            "files_skipped_binary_extension".to_string(),
-            json!(files_skipped_binary_extension),
+        insert_binary_extension_skips(
+            &mut out,
+            &files_skipped_binary_extension_paths,
+            "grep-binary-extension",
+            started_ms,
         );
     }
     if files_skipped_binary > 0 {
@@ -5695,7 +5734,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             json!(files_with_nul_scanned),
         );
     }
-    if (req.verbose || matched_nothing_needs_coverage_fields) && files_skipped_binary_extension > 0 { out.insert("files_skipped_binary_extension".to_string(), json!(files_skipped_binary_extension)); }
+    if (req.verbose || matched_nothing_needs_coverage_fields) && files_skipped_binary_extension > 0 { insert_binary_extension_skips(&mut out, &files_skipped_binary_extension_paths, "grep-binary-extension", started_ms); }
     if files_skipped_binary > 0 { out.insert("files_skipped_binary".to_string(), json!(files_skipped_binary)); }
     if files_with_nul_scanned > 0 { out.insert("files_with_nul_scanned".to_string(), json!(files_with_nul_scanned)); }
     if files_unreadable > 0 {
@@ -6714,7 +6753,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     let mut files_with_comments = 0usize;
     let mut files_unreadable = 0usize;
     let mut files_skipped_binary = 0usize;
-    let mut files_skipped_binary_extension = 0usize;
+    let mut files_skipped_binary_extension_paths: Vec<String> = Vec::new();
     let mut files_skipped_too_large = 0usize;
     let mut files_skipped_no_syntax: Vec<String> = Vec::new();
     let mut matches_truncated = false;
@@ -6724,7 +6763,7 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         entered_paths += 1;
         if !includes.is_empty() && !includes.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, path))) { continue; }
         if exclude_globs.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, path))) { continue; }
-        if has_binary_extension(path) { files_skipped_binary_extension += 1; continue; }
+        if has_binary_extension(path) { files_skipped_binary_extension_paths.push(path.clone()); continue; }
         let Some(syntax) = comment_syntax_for_path(path) else {
             files_skipped_no_syntax.push(path.clone());
             continue;
@@ -6878,12 +6917,12 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
             }),
         );
     }
-    if files_skipped_binary_extension > 0 {
-        out.insert(
-            "files_skipped_binary_extension".to_string(),
-            json!(files_skipped_binary_extension),
-        );
-    }
+    insert_binary_extension_skips(
+        &mut out,
+        &files_skipped_binary_extension_paths,
+        "grep-comments-binary-extension",
+        started_ms,
+    );
     if files_skipped_binary > 0 {
         out.insert(
             "files_skipped_binary".to_string(),
