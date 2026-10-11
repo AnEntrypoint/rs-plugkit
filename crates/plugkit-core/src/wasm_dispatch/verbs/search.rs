@@ -147,15 +147,56 @@ pub(super) fn dual_channel_depth(body: &Value, k: u32) -> usize {
 
 pub(super) const LITERAL_FALLBACK_MIN_TERM_LEN: usize = 3;
 
+pub(super) const FALLBACK_SCOPE_PATH_FIELDS: &[&str] = &["path", "paths"];
+
+pub(super) const FALLBACK_SCOPE_GLOB_FIELDS: &[&str] = &["glob", "path_glob", "include"];
+
+pub(super) const FALLBACK_SCOPE_EXCLUDE_FIELDS: &[&str] = &["exclude", "exclude_glob", "exclude_globs"];
+
+fn fallback_scope_strings(body: &Value, fields: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for field in fields {
+        match body.get(*field) {
+            Some(Value::String(text)) => {
+                let text = text.trim();
+                if !text.is_empty() && !out.iter().any(|seen| seen == text) {
+                    out.push(text.to_string());
+                }
+            }
+            Some(Value::Array(entries)) => {
+                for entry in entries {
+                    let Some(text) = entry.as_str() else {
+                        continue;
+                    };
+                    let text = text.trim();
+                    if !text.is_empty() && !out.iter().any(|seen| seen == text) {
+                        out.push(text.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 pub(super) fn literal_fallback_scan(body: &Value, term: &str, k: usize) -> Option<Value> {
     let cfg = crate::ragconfig::RagConfig::resolved();
-    let named_paths: Vec<String> = body
-        .get("path")
-        .and_then(|v| v.as_str())
-        .filter(|p| !p.is_empty())
-        .map(|p| vec![p.to_string()])
-        .unwrap_or_default();
-    let path_refs: Vec<&str> = named_paths.iter().map(String::as_str).collect();
+    let literal_paths = fallback_scope_strings(body, FALLBACK_SCOPE_PATH_FIELDS);
+    let exclude_globs = fallback_scope_strings(body, FALLBACK_SCOPE_EXCLUDE_FIELDS);
+    let glob_scope_requested = FALLBACK_SCOPE_GLOB_FIELDS
+        .iter()
+        .any(|field| matches!(body.get(*field), Some(Value::String(_)) | Some(Value::Array(_))));
+    let scope_patterns = match PathScope::from_body(body) {
+        Ok(Some(scope)) => scope.patterns,
+        _ => Vec::new(),
+    };
+    let (scan_paths, include_globs) = if glob_scope_requested && !scope_patterns.is_empty() {
+        (Vec::new(), scope_patterns)
+    } else {
+        (literal_paths, Vec::new())
+    };
+    let path_refs: Vec<&str> = scan_paths.iter().map(String::as_str).collect();
     let scan = crate::code_index::LiteralScan {
         no_ignore: scan_no_ignore_requested(body),
         pattern: term,
@@ -169,8 +210,8 @@ pub(super) fn literal_fallback_scan(body: &Value, term: &str, k: usize) -> Optio
         case_insensitive: true,
         whole_word: false,
         comments_only: false,
-        include_globs: Vec::new(),
-        exclude_globs: Vec::new(),
+        include_globs,
+        exclude_globs,
         max_matches: k.max(1),
         max_files: crate::code_index::LITERAL_SCAN_MAX_FILES,
         output: crate::code_index::ScanOutput::Matches,
