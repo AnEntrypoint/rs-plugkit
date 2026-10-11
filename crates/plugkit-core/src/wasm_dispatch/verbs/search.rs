@@ -180,7 +180,7 @@ fn fallback_scope_strings(body: &Value, fields: &[&str]) -> Vec<String> {
     out
 }
 
-pub(super) fn literal_fallback_scan(body: &Value, term: &str, k: usize) -> Option<Value> {
+pub(super) fn literal_fallback_scan(body: &Value, term: &str, k: usize, regex: bool) -> Option<Value> {
     let cfg = crate::ragconfig::RagConfig::resolved();
     let literal_paths = fallback_scope_strings(body, FALLBACK_SCOPE_PATH_FIELDS);
     let exclude_globs = fallback_scope_strings(body, FALLBACK_SCOPE_EXCLUDE_FIELDS);
@@ -206,7 +206,7 @@ pub(super) fn literal_fallback_scan(body: &Value, term: &str, k: usize) -> Optio
             .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
             .filter(|p| !p.is_empty()),
         paths: &path_refs,
-        regex: false,
+        regex,
         case_insensitive: true,
         whole_word: false,
         comments_only: false,
@@ -221,8 +221,8 @@ pub(super) fn literal_fallback_scan(body: &Value, term: &str, k: usize) -> Optio
             "codesearch-fallback-{}.txt",
             dispatch_task_id().unwrap_or_else(|| unsafe { host_now_ms() }.to_string())
         ),
-        term_combination: Some("phrase"),
-        budget_ms: None,
+        term_combination: if regex { None } else { Some("phrase") },
+        budget_ms: regex.then_some(REGEX_SCAN_DEFAULT_BUDGET_MS),
         max_matches_per_file: None,
         walk_every_file_in_scope: false,
         context: 0,
@@ -257,7 +257,7 @@ pub(super) fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) 
     if term.len() < LITERAL_FALLBACK_MIN_TERM_LEN {
         return compact;
     }
-    let Some(scan) = literal_fallback_scan(body, term, k as usize) else {
+    let Some(scan) = literal_fallback_scan(body, term, k as usize, false) else {
         if let Some(map) = compact.as_object_mut() {
             note_map(
                 map,
@@ -285,12 +285,44 @@ pub(super) fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) 
         .get("exhaustive")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let regex_shaped = crate::code_index::carries_regex_metacharacter(term);
+    let regex_scan = if regex_shaped {
+        literal_fallback_scan(body, term, k as usize, true)
+    } else {
+        None
+    };
+    let regex_checked = regex_scan.is_some();
+    let regex_found = regex_scan
+        .as_ref()
+        .and_then(|s| s.get("matches"))
+        .and_then(|v| v.as_array())
+        .map_or(0, |matches| matches.len() as u64);
+    if regex_found > 0 {
+        let mut out = regex_scan.unwrap_or(scan);
+        if let Some(map) = out.as_object_mut() {
+            map.insert("mode".to_string(), json!("regex"));
+            map.insert("literal_scan_escalated".to_string(), json!(true));
+            map.insert("regex_scan_escalated".to_string(), json!(true));
+            note_map(
+                map,
+                format!("\"{term}\" carries regex metacharacters and no file contains it verbatim, so the same scan ran with the query compiled as ONE regular expression: every row below is a real match at its own path:line -- pass {{\"regex\":true}} for the full exhaustive regex scan"),
+            );
+        }
+        return out;
+    }
+    let regex_tail = if !regex_shaped {
+        ""
+    } else if regex_checked {
+        ", and compiling it as one regular expression matched no line either"
+    } else {
+        ", and it does not compile as one regular expression either"
+    };
     if let Some(map) = compact.as_object_mut() {
         map.insert("literal_scan_matches".to_string(), json!(0));
         map.insert("literal_scan_exhaustive".to_string(), json!(scan_exhaustive));
         note_map(
             map,
-            format!("{} contains \"{term}\" verbatim -- the rows above are ranked nearest neighbours, not occurrences", if scan_exhaustive { "no file in the scanned corpus" } else { "no file in the part of the corpus this scan reached" }),
+            format!("{} contains \"{term}\" verbatim{} -- the rows above are ranked nearest neighbours, not occurrences", if scan_exhaustive { "no file in the scanned corpus" } else { "no file in the part of the corpus this scan reached" }, regex_tail),
         );
     }
     compact
