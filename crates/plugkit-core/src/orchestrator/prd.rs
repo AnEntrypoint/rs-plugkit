@@ -287,7 +287,7 @@ fn row_to_json(item: &Value) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(out))
 }
 
-fn row_text(row: &serde_json::Value, fields: &[&str]) -> String {
+pub(super) fn row_text(row: &serde_json::Value, fields: &[&str]) -> String {
     fields
         .iter()
         .filter_map(|key| row.get(*key).and_then(|v| v.as_str()))
@@ -303,11 +303,11 @@ fn row_status(row: &serde_json::Value) -> String {
     }
 }
 
-fn one_line(s: &str) -> String {
+pub(super) fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn clamp_chars(s: &str, max: usize) -> String {
+pub(super) fn clamp_chars(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max).collect();
     if s.chars().count() > max {
         out.push_str("...");
@@ -323,7 +323,7 @@ fn brief_row(row: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-fn request_object(content: &str) -> serde_json::Value {
+pub(super) fn request_object(content: &str) -> serde_json::Value {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return serde_json::Value::Object(serde_json::Map::new());
@@ -339,7 +339,7 @@ fn request_object(content: &str) -> serde_json::Value {
     }
 }
 
-fn request_strings(request: &serde_json::Value, fields: &[&str]) -> Vec<String> {
+pub(super) fn request_strings(request: &serde_json::Value, fields: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
     for field in fields {
         match request.get(*field) {
@@ -363,7 +363,7 @@ fn request_strings(request: &serde_json::Value, fields: &[&str]) -> Vec<String> 
     out
 }
 
-fn request_flag(request: &serde_json::Value, fields: &[&str]) -> Option<bool> {
+pub(super) fn request_flag(request: &serde_json::Value, fields: &[&str]) -> Option<bool> {
     fields
         .iter()
         .filter_map(|field| request.get(*field))

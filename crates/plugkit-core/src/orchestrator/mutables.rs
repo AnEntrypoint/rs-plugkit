@@ -4,6 +4,7 @@ use super::memorize;
 use super::yaml_util::{invalidate_residual_marker, levenshtein, yaml_to_json};
 use crate::pkfs;
 use serde_yaml::Value;
+use std::collections::BTreeMap;
 
 pub fn mutables_path() -> std::path::PathBuf {
     gm_dir().join("mutables.yml")
@@ -276,22 +277,86 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     )
 }
 
-pub fn handle_list(_content: &str) -> (String, String, i32) {
+const MUTABLE_ROW_ID_FIELDS: &[&str] = &["id", "ids", "mutable_id", "slug", "key"];
+
+const MUTABLE_ROW_STATUS_FIELDS: &[&str] = &["status", "statuses"];
+
+const MUTABLE_ROW_ID_DISPLAY_FIELDS: &[&str] = &["id", "key", "slug"];
+
+const MUTABLE_ROW_KEY_FIELDS: &[&str] = &["key", "slug"];
+
+const MUTABLE_ROW_SUBJECT_FIELDS: &[&str] = &["subject", "title", "statement", "value", "description", "notes"];
+
+const MUTABLE_FULL_BODY_FIELDS: &[&str] = &["full", "verbose", "bodies"];
+
+const MUTABLE_BRIEF_BODY_FIELDS: &[&str] = &["brief", "compact"];
+
+const MUTABLE_BRIEF_TEXT_CHARS: usize = 80;
+
+fn json_row_ids(row: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for field in MUTABLE_ROW_ID_DISPLAY_FIELDS {
+        if let Some(s) = row.get(*field).and_then(|v| v.as_str()) {
+            if !s.trim().is_empty() {
+                out.push(s.trim().to_string());
+            }
+        }
+    }
+    out
+}
+
+fn json_row_status(row: &serde_json::Value, default_status: &str) -> String {
+    match row.get("status").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => default_status.to_string(),
+    }
+}
+
+fn json_brief_text(row: &serde_json::Value, fields: &[&str], max: usize) -> Option<String> {
+    let raw = super::prd::row_text(row, fields);
+    if raw.trim().is_empty() {
+        return None;
+    }
+    Some(super::prd::clamp_chars(
+        &super::prd::one_line(&raw),
+        max,
+    ))
+}
+
+fn json_brief_row(row: &serde_json::Value, default_status: &str) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "id".to_string(),
+        serde_json::Value::String(
+            super::prd::row_text(row, MUTABLE_ROW_ID_DISPLAY_FIELDS),
+        ),
+    );
+    out.insert(
+        "status".to_string(),
+        serde_json::Value::String(json_row_status(row, default_status)),
+    );
+    if let Some(text) = json_brief_text(row, MUTABLE_ROW_KEY_FIELDS, MUTABLE_BRIEF_TEXT_CHARS) {
+        out.insert("key".to_string(), serde_json::Value::String(text));
+    } else if let Some(text) =
+        json_brief_text(row, MUTABLE_ROW_SUBJECT_FIELDS, MUTABLE_BRIEF_TEXT_CHARS)
+    {
+        out.insert("subject".to_string(), serde_json::Value::String(text));
+    }
+    serde_json::Value::Object(out)
+}
+
+fn load_mutable_rows() -> Result<Vec<serde_json::Value>, (String, i32)> {
     let path = mutables_path();
     let path_s = path.to_string_lossy().to_string();
     if !pkfs::exists(&path_s) {
-        return (
-            serde_json::json!({ "items": [] }).to_string(),
-            String::new(),
-            0,
-        );
+        return Ok(Vec::new());
     }
     let raw = pkfs::read_to_string(&path_s).unwrap_or_default();
     let doc: Value = match serde_yaml::from_str(&raw) {
         Ok(v) => v,
-        Err(e) => return (String::new(), format!("parse failed: {}", e), 1),
+        Err(e) => return Err((format!("parse failed: {}", e), 1)),
     };
-    let items: Vec<serde_json::Value> = doc
+    Ok(doc
         .as_sequence()
         .map(|seq| {
             seq.iter()
@@ -307,12 +372,135 @@ pub fn handle_list(_content: &str) -> (String, String, i32) {
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    (
-        serde_json::json!({ "items": items }).to_string(),
-        String::new(),
-        0,
-    )
+        .unwrap_or_default())
+}
+
+fn fold_duplicate_ids_keeping_resolved_else_last(
+    rows: Vec<serde_json::Value>,
+    resolved_statuses: &[String],
+    default_status: &str,
+) -> Vec<serde_json::Value> {
+    let mut slot_of_id: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut kept: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = match row.get("id").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => {
+                kept.push(row);
+                continue;
+            }
+        };
+        match slot_of_id.get(&id).copied() {
+            Some(slot) => {
+                let kept_is_resolved = resolved_statuses
+                    .iter()
+                    .any(|s| s.as_str() == json_row_status(&kept[slot], default_status));
+                if !kept_is_resolved {
+                    kept[slot] = row;
+                }
+            }
+            None => {
+                slot_of_id.insert(id, kept.len());
+                kept.push(row);
+            }
+        }
+    }
+    kept
+}
+
+fn mutable_list_limit(request: &serde_json::Value) -> Result<Option<usize>, String> {
+    match request.get("limit") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+            .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
+            .ok_or_else(|| "mutable-list limit must be a non-negative integer".to_string()),
+    }
+}
+
+pub fn handle_list(content: &str) -> (String, String, i32) {
+    let request = super::prd::request_object(content);
+    let limit = match mutable_list_limit(&request) {
+        Ok(l) => l,
+        Err(message) => return (String::new(), message, 1),
+    };
+    let rows = match load_mutable_rows() {
+        Ok(rows) => rows,
+        Err((message, code)) => return (String::new(), message, code),
+    };
+    let policy = super::fsm::graph().policy.clone();
+    let default_status = policy.mutables_default_status.clone();
+    let resolved_statuses = policy.mutables_resolved_statuses.clone();
+    let folded = fold_duplicate_ids_keeping_resolved_else_last(
+        rows,
+        &resolved_statuses,
+        &default_status,
+    );
+    let store_total = folded.len();
+    let mut by_status: BTreeMap<String, usize> = BTreeMap::new();
+    for row in &folded {
+        *by_status
+            .entry(json_row_status(row, &default_status))
+            .or_insert(0) += 1;
+    }
+    let wanted_ids = super::prd::request_strings(&request, MUTABLE_ROW_ID_FIELDS);
+    let wanted_statuses = super::prd::request_strings(&request, MUTABLE_ROW_STATUS_FIELDS);
+    let selected: Vec<serde_json::Value> = folded
+        .into_iter()
+        .filter(|row| {
+            let id_ok = wanted_ids.is_empty()
+                || wanted_ids
+                    .iter()
+                    .any(|want| json_row_ids(row).iter().any(|have| have == want));
+            let status_ok = wanted_statuses.is_empty()
+                || wanted_statuses
+                    .iter()
+                    .any(|want| want == &json_row_status(row, &default_status));
+            id_ok && status_ok
+        })
+        .collect();
+    if !wanted_ids.is_empty() && selected.is_empty() {
+        return (
+            String::new(),
+            format!(
+                "no mutable row with id {} of the {} rows in .gm/mutables.yml -- pass no id for the listing",
+                wanted_ids.join(", "),
+                store_total
+            ),
+            1,
+        );
+    }
+    let matched = selected.len();
+    let shown = limit.map_or(matched, |n| n.min(matched));
+    let truncated = shown < matched;
+    let window: Vec<serde_json::Value> = selected.into_iter().take(shown).collect();
+    let brief_flag = super::prd::request_flag(&request, MUTABLE_BRIEF_BODY_FIELDS);
+    let full_flag = super::prd::request_flag(&request, MUTABLE_FULL_BODY_FIELDS);
+    let want_full = full_flag
+        .unwrap_or_else(|| brief_flag.map(|b| !b).unwrap_or(!wanted_ids.is_empty()));
+    let items: Vec<serde_json::Value> = if want_full {
+        window
+    } else {
+        window
+            .iter()
+            .map(|row| json_brief_row(row, &default_status))
+            .collect()
+    };
+    let reply = serde_json::json!({
+        "items": items,
+        "count": items.len(),
+        "total": matched,
+        "store_total": store_total,
+        "by_status": by_status,
+        "limit": limit,
+        "truncated": truncated,
+        "brief": !want_full,
+        "full": want_full,
+        "hint": "pass {\"id\":\"<mutable id>\"} for one full row (repeated rows of an id fold to the last one unless an earlier one is resolved), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), or {\"full\":true} for every full body",
+    });
+    (reply.to_string(), String::new(), 0)
 }
 
 pub const PROVE_OBLIGATION_KINDS: &[&str] = &[
