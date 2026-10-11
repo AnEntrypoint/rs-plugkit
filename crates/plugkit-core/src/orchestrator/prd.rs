@@ -583,7 +583,12 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-add", |mut doc: Value| {
+    let verify_id = id.clone();
+    let outcome = cas::cas_retry_write_verified(
+        &path_s,
+        cas_max_attempts,
+        "prd-add",
+        |mut doc: Value| {
         let mut add_outcome = AddOutcome::Added;
         if let Some(seq) = doc.as_sequence_mut() {
             let mut new_with_id = item_map.clone();
@@ -1466,6 +1471,30 @@ fn is_node_script_path(path: &str) -> bool {
         && !path.split('/').any(|segment| segment == "..")
 }
 
+const WITNESS_OUT_DIR: &str = ".gm/witness-out";
+
+pub fn persisted_witness_path(dispatch_id: &str) -> String {
+    format!("{WITNESS_OUT_DIR}/witness-{dispatch_id}.mjs")
+}
+
+/// `referenced_path_token` trims a leading `.`, so a witness text citing
+/// `.gm/witness-out/witness-<dispatch id>.mjs` reaches here as the dot-less
+/// `gm/witness-out/...`; both spellings name the same file.
+fn canonical_persisted_witness_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_start_matches("./");
+    let canonical = if trimmed.starts_with("gm/witness-out/") {
+        format!(".{trimmed}")
+    } else if trimmed.starts_with(".gm/witness-out/") {
+        trimmed.to_string()
+    } else {
+        return None;
+    };
+    let named = canonical.contains("/witness-")
+        && [".mjs", ".js"].iter().any(|ext| canonical.ends_with(ext));
+    let safe = !pkfs::is_absolute(path) && !path.split('/').any(|segment| segment == "..");
+    (named && safe).then_some(canonical)
+}
+
 fn bound_witness_script(map: &serde_yaml::Mapping) -> Option<String> {
     let text = match map.get(&Value::String("witness".to_string())) {
         Some(Value::String(s)) => s.clone(),
@@ -1478,7 +1507,13 @@ fn bound_witness_script(map: &serde_yaml::Mapping) -> Option<String> {
     };
     text.split(|c: char| c.is_whitespace() || "\"'`()[]{}<>,;|=*".contains(c))
         .filter_map(referenced_path_token)
-        .find(|path| is_node_script_path(path) && pkfs::exists(path))
+        .find_map(|path| {
+            if is_node_script_path(&path) {
+                return pkfs::exists(&path).then_some(path);
+            }
+            let canonical = canonical_persisted_witness_path(&path)?;
+            pkfs::exists(&canonical).then_some(canonical)
+        })
 }
 
 fn witness_source_is_node_only(source: &str) -> bool {
@@ -1644,7 +1679,7 @@ pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Valu
             report.push(serde_json::json!({
                 "id": id,
                 "state": "not_rerunnable",
-                "reason": "witness cites no existing scripts/*.mjs, .js or .cjs",
+                "reason": "witness cites no existing scripts/*.mjs, .js or .cjs and no persisted .gm/witness-out/witness-<dispatch id>.mjs",
                 "reasons": reasons,
             }));
             continue;
