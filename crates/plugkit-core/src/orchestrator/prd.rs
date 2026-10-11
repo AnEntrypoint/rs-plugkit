@@ -17,6 +17,38 @@ pub fn prd_path_for(cwd: Option<&str>) -> std::path::PathBuf {
     }
 }
 
+/// True when the document read back from disk still holds a row with `id`: the
+/// post-write read-back check that turns a vanished row into a reported lost
+/// update instead of a false ok.
+pub fn row_has_id(doc: &Value, id: &str) -> bool {
+    doc.as_sequence()
+        .map(|seq| {
+            seq.iter().any(|it| {
+                it.as_mapping()
+                    .and_then(|m| m.get(&Value::String("id".to_string())))
+                    .and_then(|v| v.as_str())
+                    == Some(id)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn row_status_for(doc: &Value, id: &str) -> Option<String> {
+    doc.as_sequence()
+        .and_then(|seq| {
+            seq.iter().rev().find(|it| {
+                it.as_mapping()
+                    .and_then(|m| m.get(&Value::String("id".to_string())))
+                    .and_then(|v| v.as_str())
+                    == Some(id)
+            })
+        })
+        .and_then(|it| it.as_mapping())
+        .and_then(|m| m.get(&Value::String("status".to_string())))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 pub fn pending_commit_comments_for_paths(cwd: Option<&str>, touched: &[String]) -> Vec<(String, String)> {
     let path = prd_path_for(cwd);
     let path_s = path.to_string_lossy().to_string();
@@ -500,6 +532,18 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             1,
         );
     }
+    if serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|b| b.get("repair").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+    {
+        if let Err((_, err, rc)) = super::prd_repair::repair_prd_store(
+            &prd_path().to_string_lossy(),
+            16,
+        ) {
+            return (String::new(), err, rc);
+        }
+    }
     let new_item: Value = match serde_yaml::from_str::<Value>(trimmed) {
         Ok(v) => v,
         Err(_) => match serde_json::from_str::<serde_json::Value>(trimmed)
@@ -667,10 +711,27 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             );
         }
         cas::CasOutcome::Write(doc, add_outcome)
-    });
+    },
+        |doc: &Value| row_has_id(doc, &verify_id),
+    );
     let add_outcome = match outcome {
         Ok(u) => u,
-        Err((out, err, rc)) => return (out, err, rc),
+        Err((out, err, rc)) => {
+            if cas::is_lost_update(&err) {
+                return (
+                    serde_json::json!({
+                        "ok": false,
+                        "added": false,
+                        "id": id,
+                        "reason": err,
+                    })
+                    .to_string(),
+                    String::new(),
+                    rc,
+                );
+            }
+            return (out, err, rc);
+        }
     };
     if add_outcome != AddOutcome::AlreadyIdentical {
         invalidate_residual_marker("prd-add");
@@ -2384,7 +2445,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             .unwrap_or_else(|| "completed".to_string())
     };
 
-    let outcome = cas::cas_retry_write(
+    let outcome = cas::cas_retry_write_verified(
         &path_s,
         policy.cas_max_attempts,
         "prd-resolve",
@@ -2481,6 +2542,11 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             }
             cas::CasOutcome::Write(doc, status_matches)
         },
+        |doc: &Value| {
+            row_has_id(doc, &id_target)
+                && (annotate_only
+                    || row_status_for(doc, &id_target).as_deref() == Some(resolved_status.as_str()))
+        },
     );
     match outcome {
         Ok(status_matches) => {
@@ -2556,3 +2622,4 @@ pub fn handle_block(content: &str) -> (String, String, i32) {
         Err((out, err, rc)) => (out, err, rc),
     }
 }
+
