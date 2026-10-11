@@ -4,7 +4,7 @@
 
 **Not changed:** no other verb, gate or config key; `comment_spans` keeps its Syntax table and its `ByteSpan` shape, and the reply is assembled the way `claim-audit` assembles its own.
 
-**Not yet measured:** built on Actions; the running guest predates it, so the live dispatch waits on a CI build and a runner reload.
+**Measured:** `native-check` (run 38098713799) and `release` (38098714120) both succeeded on the pushed commit, and the live runner serves the verb: `{"root":"C:/dev/gm/vendor/tencentdb-agent-memory/sdk/memory-core/python/tencentdb_agent_memory","limit":400}` answers `files_scanned: 11`, `files_unreadable: 0`, `findings_total: 186` and `truncated: false`, with `__init__.py:1` a `docstring` at `-`, the `_http.py:109-111` banner answering `-` and not the method above it, `cos.py:260` `# Step 1: SignKey` answering `enclosing: _cos_v5_sign` under a multi-line `def` header, and `v3/client.py:403` answering `list_scenarios`. `gm-mcp` lists `comment_audit` among its MCP tools after `npm run build` (`bin/gm-mcp-server.js` 910816 bytes, `npm run verify-build` reports no drift), `node test/catalog.test.js` passes 1 and `node test/transport.test.mjs` passes 5.
 
 ## 2026-10-11 - codesearch: regex:true, literal:true and "pattern" select the exhaustive scan, and the fallback note no longer contradicts its own rows
 
