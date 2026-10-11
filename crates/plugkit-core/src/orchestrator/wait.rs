@@ -3,6 +3,8 @@ use serde_json::{json, Value};
 const EXEC_JS_TIMEOUT_HARD_CEILING_MS: u64 = 900_000;
 const WAIT_HOST_TIMEOUT_GRACE_MS: u64 = 1_000;
 const MAX_WAIT_MS: u64 = 600_000;
+const MAX_WAIT_SECONDS: u64 = MAX_WAIT_MS / 1_000;
+const MS_PER_SECOND: u64 = 1_000;
 
 const _: () =
     assert!(MAX_WAIT_MS.saturating_add(WAIT_HOST_TIMEOUT_GRACE_MS) <= EXEC_JS_TIMEOUT_HARD_CEILING_MS);
@@ -20,19 +22,55 @@ fn reject(error: &str, received: Option<&Value>) -> (String, String, i32) {
     (body.to_string(), String::new(), 1)
 }
 
+fn wait_duration_field(body: &Value) -> Option<(&'static str, &Value, u64)> {
+    const MS_FIELDS: [&str; 2] = ["ms", "durationMs"];
+    const SECONDS_FIELDS: [&str; 4] = ["seconds", "secs", "durationSeconds", "durationSecs"];
+    for field in MS_FIELDS {
+        if let Some(value) = body.get(field) {
+            return Some((field, value, 1));
+        }
+    }
+    for field in SECONDS_FIELDS {
+        if let Some(value) = body.get(field) {
+            return Some((field, value, MS_PER_SECOND));
+        }
+    }
+    None
+}
+
+fn resolve_wait_ms(body: &Value) -> Result<u64, Option<&Value>> {
+    let (_, value, scale) = wait_duration_field(body).ok_or(None)?;
+    let amount = value.as_u64().ok_or(Some(value))?;
+    let ms = amount.checked_mul(scale).ok_or(Some(value))?;
+    if (1..=MAX_WAIT_MS).contains(&ms) {
+        Ok(ms)
+    } else {
+        Err(Some(value))
+    }
+}
+
+fn reject_duration(received: Option<&Value>) -> (String, String, i32) {
+    match received {
+        Some(received) => reject(
+            &format!(
+                "wait duration must be ms as a positive integer 1..={}, or seconds as a positive integer 1..={}",
+                MAX_WAIT_MS, MAX_WAIT_SECONDS
+            ),
+            Some(received),
+        ),
+        None => reject(
+            "wait requires ms as a positive integer duration in milliseconds, or seconds as a positive integer duration in seconds",
+            None,
+        ),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 pub fn handle(content: &str) -> (String, String, i32) {
     let body: Value = serde_json::from_str(content).unwrap_or(Value::Null);
-    let received = body.get("ms").or_else(|| body.get("durationMs"));
-    let ms = match received.and_then(Value::as_u64) {
-        Some(ms) if (1..=MAX_WAIT_MS).contains(&ms) => ms,
-        Some(_) => return reject("wait ms must be between 1 and max_ms", received),
-        None => {
-            return reject(
-                "wait requires ms as a positive integer duration in milliseconds",
-                received,
-            )
-        }
+    let ms = match resolve_wait_ms(&body) {
+        Ok(ms) => ms,
+        Err(received) => return reject_duration(received),
     };
     let code = format!("await new Promise(resolve => setTimeout(resolve, {ms}));");
     let opts = json!({ "timeoutMs": ms.saturating_add(WAIT_HOST_TIMEOUT_GRACE_MS) }).to_string();
@@ -108,16 +146,9 @@ pub fn handle(content: &str) -> (String, String, i32) {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn handle(content: &str) -> (String, String, i32) {
     let body: Value = serde_json::from_str(content).unwrap_or(Value::Null);
-    let received = body.get("ms").or_else(|| body.get("durationMs"));
-    let ms = match received.and_then(Value::as_u64) {
-        Some(ms) if (1..=MAX_WAIT_MS).contains(&ms) => ms,
-        Some(_) => return reject("wait ms must be between 1 and max_ms", received),
-        None => {
-            return reject(
-                "wait requires ms as a positive integer duration in milliseconds",
-                received,
-            )
-        }
+    let ms = match resolve_wait_ms(&body) {
+        Ok(ms) => ms,
+        Err(received) => return reject_duration(received),
     };
     std::thread::sleep(std::time::Duration::from_millis(ms));
     (
