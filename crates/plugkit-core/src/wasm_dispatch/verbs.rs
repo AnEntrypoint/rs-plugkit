@@ -16,6 +16,11 @@ mod git;
 mod search;
 mod memory;
 use git::*;
+
+/// `_`-prefixed keys a verb owns itself and must keep receiving: the async git replay id
+/// (`git_async_entry` reads it back to resume a parked plan) and the instruction lease list.
+/// Every other `_`-prefixed key is transport bookkeeping no verb is allowed to see.
+const VERB_OWNED_RESERVED_BODY_KEYS: &[&str] = &["_plan", "_lease_sessions"];
 pub(crate) use git::GIT_PROTECTED_PATHSPECS;
 use search::*;
 pub use memory::*;
@@ -2710,6 +2715,24 @@ fn raw_file_body_as_json(verb: &str, body_s: &str) -> Option<Value> {
     Some(json!({ "path": path, "content": contents }))
 }
 
+
+/// Drops the reserved `_` namespace from a body before any verb validates it.
+///
+/// gm-mcp stamps the lane-wait budget it is going to poll for onto every JSON body it publishes
+/// (`_agentplug_lane_wait_ms`, mirrored by `LANE_WAIT_MS_BODY_KEY` in agentplug-runner) so the
+/// runner can bound the lane wait by the caller's budget. The caller never writes those keys, so
+/// a strict per-verb field validator that has never heard of the transport refused bodies it
+/// should have served: codesearch and the git verbs answered `unknown body fields` for
+/// bookkeeping alone. Stripping here, at the one point every body passes through, keeps a
+/// misspelled caller field refused while the host's own keys never reach a validator.
+fn strip_reserved_body_keys(body: &mut Value) {
+    if let Some(map) = body.as_object_mut() {
+        map.retain(|key, _| {
+            !is_host_reserved_body_key(key) || VERB_OWNED_RESERVED_BODY_KEYS.contains(&key.as_str())
+        });
+    }
+}
+
 fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
     let verb = read_str(verb_ptr as *const u8, verb_len);
     let raw_body_s = read_str(body_ptr as *const u8, body_len);
@@ -2735,6 +2758,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
             parse_failure = None;
         }
     }
+    strip_reserved_body_keys(&mut body);
     let body_parse_failed = parse_failure.is_some();
     set_caller_budget(caller_timeout_ms);
     let dispatch_session_id = body.get("sessionId").and_then(|v| v.as_str())
