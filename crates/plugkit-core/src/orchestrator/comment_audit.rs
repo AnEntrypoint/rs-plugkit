@@ -239,6 +239,8 @@ pub fn enclosing_names_in(path: &str, source: &str, spans: &[ByteSpan]) -> Vec<S
     let ranges = line_ranges(source);
     let depths = line_depths(source, spans);
     let indent_based = is_indent_language(path);
+    let mask = masked_spans(path, source, spans);
+    let open_depth = bracket_depths(source, &mask);
     let mut stack: Vec<(i64, String)> = Vec::new();
     let mut out = Vec::with_capacity(ranges.len());
     for (index, (start, end)) in ranges.iter().enumerate() {
@@ -246,7 +248,11 @@ pub fn enclosing_names_in(path: &str, source: &str, spans: &[ByteSpan]) -> Vec<S
         let body_start = *start + leading_whitespace(line);
         let body = line.trim_start_matches(|ch| ch == ' ' || ch == '\t');
         if indent_based {
-            if body.trim().is_empty() {
+            let continuation = *open_depth.get(index).unwrap_or(&0) > 0;
+            if body.trim().is_empty()
+                || continuation
+                || crate::comment_spans::span_contains(&mask, body_start)
+            {
                 out.push(top_name(&stack));
                 continue;
             }
@@ -254,7 +260,7 @@ pub fn enclosing_names_in(path: &str, source: &str, spans: &[ByteSpan]) -> Vec<S
             while stack.last().map(|entry| entry.0 >= indent).unwrap_or(false) {
                 stack.pop();
             }
-            if !crate::comment_spans::span_contains(spans, body_start) {
+            if !crate::comment_spans::span_contains(&mask, body_start) {
                 if let Some(name) = python_declared_name(body) {
                     stack.push((indent, name));
                 }
@@ -264,7 +270,7 @@ pub fn enclosing_names_in(path: &str, source: &str, spans: &[ByteSpan]) -> Vec<S
         }
         let before = *depths.get(index).unwrap_or(&0);
         let after = *depths.get(index + 1).unwrap_or(&before);
-        if !crate::comment_spans::span_contains(spans, body_start) {
+        if !crate::comment_spans::span_contains(&mask, body_start) {
             if let Some(name) = declared_name(body) {
                 stack.push((before as i64 + 1, name));
             }
@@ -308,6 +314,97 @@ pub fn line_depths(source: &str, spans: &[ByteSpan]) -> Vec<i32> {
             }
             b'"' | b'`' => index = skip_quoted(source, index),
             b'\'' => index = skip_single_quote(source, index),
+            _ => index += 1,
+        }
+    }
+    depths
+}
+
+pub fn masked_spans(path: &str, source: &str, spans: &[ByteSpan]) -> Vec<ByteSpan> {
+    if !is_python(path) {
+        return spans.to_vec();
+    }
+    let mut out = spans.to_vec();
+    out.extend(python_string_spans(source, spans));
+    out.sort_by_key(|item| item.0);
+    out
+}
+
+pub fn python_string_spans(source: &str, spans: &[ByteSpan]) -> Vec<ByteSpan> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    let mut span_index = 0usize;
+    while index < bytes.len() {
+        while span_index < spans.len() && spans[span_index].1 <= index {
+            span_index += 1;
+        }
+        if span_index < spans.len() && spans[span_index].0 <= index {
+            index = spans[span_index].1;
+            span_index += 1;
+            continue;
+        }
+        let byte = bytes[index];
+        if byte != b'"' && byte != b'\'' {
+            index += 1;
+            continue;
+        }
+        let triple = bytes.get(index + 1) == Some(&byte) && bytes.get(index + 2) == Some(&byte);
+        let close = if triple {
+            skip_triple_quote(source, index, byte)
+        } else {
+            skip_quoted(source, index)
+        };
+        out.push((index, close.max(index)));
+        index = close.max(index + 1);
+    }
+    out
+}
+
+pub fn skip_triple_quote(source: &str, start: usize, quote: u8) -> usize {
+    let bytes = source.as_bytes();
+    let mut index = start + 3;
+    while index + 3 <= bytes.len() {
+        if bytes[index] == quote && bytes[index + 1] == quote && bytes[index + 2] == quote {
+            return index + 3;
+        }
+        if bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+pub fn bracket_depths(source: &str, spans: &[ByteSpan]) -> Vec<i32> {
+    let bytes = source.as_bytes();
+    let mut depths = vec![0i32];
+    let mut depth = 0i32;
+    let mut index = 0usize;
+    let mut span_index = 0usize;
+    while index < bytes.len() {
+        while span_index < spans.len() && spans[span_index].1 <= index {
+            span_index += 1;
+        }
+        if span_index < spans.len() && spans[span_index].0 <= index {
+            index = spans[span_index].1;
+            span_index += 1;
+            continue;
+        }
+        match bytes[index] {
+            b'\n' => {
+                depths.push(depth);
+                index += 1;
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' | b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
             _ => index += 1,
         }
     }
