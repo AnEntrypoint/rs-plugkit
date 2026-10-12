@@ -2721,6 +2721,400 @@ pub(super) fn pull_past_remote_moved(
     }))
 }
 
+pub(super) enum RemoteMovedScopeFix {
+    NotApplicable,
+    Blocked(String),
+    Failed(String),
+    Landed {
+        new_sha: String,
+        local_sha: String,
+        remote_tip: String,
+        merge_base: String,
+        scope_paths: Vec<String>,
+        rebased_commits: Vec<Value>,
+        out_of_scope_commit_paths: Vec<String>,
+    },
+}
+
+fn scope_path_key(path: &str) -> String {
+    path.replace('\\', "/").trim().trim_matches('/').to_string()
+}
+
+fn scope_covers(scope: &[String], path: &str) -> bool {
+    let path = scope_path_key(path);
+    if path.is_empty() {
+        return false;
+    }
+    for entry in scope {
+        let entry = scope_path_key(entry);
+        if entry.is_empty() {
+            continue;
+        }
+        if entry.contains('*') {
+            let head = scope_path_key(entry.split('*').next().unwrap_or(""));
+            if !head.is_empty() && path.starts_with(head.as_str()) {
+                return true;
+            }
+            continue;
+        }
+        if path == entry || path.starts_with(format!("{}/", entry).as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+pub(super) fn body_scope_paths(body: &Value) -> Vec<String> {
+    body.get("paths")
+        .or_else(|| body.get("files"))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn ls_tree_scoped(
+    cwd: Option<&str>,
+    treeish: &str,
+    scope: &[String],
+) -> std::collections::BTreeMap<String, (String, String)> {
+    let mut argv: Vec<String> = vec![
+        "ls-tree".to_string(),
+        "-r".to_string(),
+        "-z".to_string(),
+        "--full-tree".to_string(),
+        treeish.to_string(),
+        "--".to_string(),
+    ];
+    for entry in scope {
+        argv.push(entry.clone());
+    }
+    let out = git_call_argv(&as_argv(&argv), cwd)
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut map = std::collections::BTreeMap::new();
+    let records: Vec<&str> = if out.contains('\u{0}') {
+        out.split('\u{0}').collect()
+    } else {
+        out.lines().collect()
+    };
+    for record in records {
+        let record = record.trim_matches('\r');
+        let (meta, path) = match record.split_once('\t') {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let mut fields = meta.split_whitespace();
+        let mode = fields.next().unwrap_or("").to_string();
+        let sha = fields.nth(1).unwrap_or("").to_string();
+        let path = if path.starts_with('"') {
+            path.trim_matches('"').to_string()
+        } else {
+            path.to_string()
+        };
+        let key = scope_path_key(&path);
+        if mode.is_empty() || sha.is_empty() || key.is_empty() {
+            continue;
+        }
+        map.insert(key, (mode, sha));
+    }
+    map
+}
+
+fn scope_reland_commits(
+    cwd: Option<&str>,
+    remote_tip: &str,
+    merge_base: &str,
+    commits: &[(String, Vec<String>)],
+    scope: &[String],
+    identity: Option<&(String, String)>,
+) -> Result<(String, Vec<Value>), String> {
+    let tree_of = |rev: &str| -> String {
+        exec_git_in(cwd, &format!("rev-parse {}^{{tree}}", rev))
+            .trim()
+            .to_string()
+    };
+    let mut parent = remote_tip.to_string();
+    let mut parent_tree = tree_of(remote_tip);
+    if parent_tree.is_empty() {
+        return Err("could not read the tree of the remote tip".to_string());
+    }
+    let mut rebased: Vec<Value> = Vec::new();
+    for (commit, parents) in commits {
+        let base_commit = parents
+            .first()
+            .cloned()
+            .unwrap_or_else(|| merge_base.to_string());
+        let read = git_call_argv(&["read-tree", parent_tree.as_str()], cwd);
+        if read.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1) != 0 {
+            return Err(format!(
+                "read-tree {} failed: {}",
+                parent_tree,
+                read.get("stderr")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+            ));
+        }
+        let entries = ls_tree_scoped(cwd, commit, scope);
+        let changed = exec_git_in(
+            cwd,
+            &format!("diff --name-status --no-renames {} {}", base_commit, commit),
+        );
+        for line in changed.lines() {
+            let mut fields = line.split('\t');
+            let status = fields.next().unwrap_or("").trim().to_string();
+            let path = fields.next().unwrap_or("").trim().to_string();
+            if status.is_empty() || path.is_empty() || !scope_covers(scope, &path) {
+                continue;
+            }
+            let key = scope_path_key(&path);
+            match entries.get(&key) {
+                Some((mode, sha)) => {
+                    let cacheinfo = format!("{},{},{}", mode, sha, key);
+                    let r = git_call_argv(
+                        &["update-index", "--add", "--cacheinfo", cacheinfo.as_str()],
+                        cwd,
+                    );
+                    if r.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1) != 0 {
+                        return Err(format!(
+                            "update-index --cacheinfo failed for {}: {}",
+                            key,
+                            r.get("stderr")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .trim()
+                        ));
+                    }
+                }
+                None => {
+                    let _ = git_call_argv(&["update-index", "--force-remove", key.as_str()], cwd);
+                }
+            }
+        }
+        let written = git_call_argv(&["write-tree"], cwd);
+        let tree = written
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if tree.is_empty() {
+            return Err(format!(
+                "write-tree failed while re-landing {}: {}",
+                commit,
+                written
+                    .get("stderr")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+            ));
+        }
+        if tree == parent_tree {
+            continue;
+        }
+        let message = exec_git_in(cwd, &format!("log -1 --pretty=%B {}", commit))
+            .trim_end()
+            .to_string();
+        let subject = message.lines().next().unwrap_or("").to_string();
+        let mut argv: Vec<String> = Vec::new();
+        if let Some((name, email)) = identity {
+            argv.push("-c".to_string());
+            argv.push(format!("user.name={}", name));
+            argv.push("-c".to_string());
+            argv.push(format!("user.email={}", email));
+        }
+        argv.push("commit-tree".to_string());
+        argv.push(tree.clone());
+        argv.push("-p".to_string());
+        argv.push(parent.clone());
+        argv.push("-m".to_string());
+        argv.push(message);
+        let r = git_call_argv(&as_argv(&argv), cwd);
+        let new_commit = r
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !is_full_sha(&new_commit) {
+            return Err(format!(
+                "commit-tree failed while re-landing {}: {}",
+                commit,
+                r.get("stderr")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+            ));
+        }
+        rebased.push(json!({
+            "from": commit,
+            "to": new_commit,
+            "subject": subject,
+        }));
+        parent = new_commit;
+        parent_tree = tree;
+    }
+    if parent == remote_tip {
+        return Err(
+            "the commit being published changes none of the scoped paths, so there is nothing of this lane's to re-land onto the remote tip"
+                .to_string(),
+        );
+    }
+    Ok((parent, rebased))
+}
+
+pub(super) fn scope_recommit_past_remote_moved(
+    cwd: Option<&str>,
+    branch: &str,
+    local_sha: &str,
+    scope: &[String],
+    identity: Option<&(String, String)>,
+) -> RemoteMovedScopeFix {
+    if scope.is_empty() {
+        return RemoteMovedScopeFix::NotApplicable;
+    }
+    if !is_full_sha(local_sha) {
+        return RemoteMovedScopeFix::Failed(format!(
+            "the commit being published resolves to '{}', which is not a full sha; a scope-only re-land needs the exact commit",
+            local_sha
+        ));
+    }
+    let Some(remote_tip) = resolve_ref(cwd, &format!("origin/{}", branch)) else {
+        return RemoteMovedScopeFix::Failed(format!(
+            "could not resolve origin/{} after fetch, so the remote tip to re-land onto is unknown",
+            branch
+        ));
+    };
+    if remote_tip == local_sha
+        || ref_is_ancestor(cwd, local_sha, remote_tip.as_str())
+        || ref_is_ancestor(cwd, remote_tip.as_str(), local_sha)
+    {
+        return RemoteMovedScopeFix::NotApplicable;
+    }
+    let merge_base = exec_git_in(cwd, &format!("merge-base {} {}", remote_tip, local_sha))
+        .trim()
+        .to_string();
+    if !is_full_sha(&merge_base) {
+        return RemoteMovedScopeFix::Failed(
+            "the remote tip and the commit being published share no merge base, so there is no common ancestor to re-land onto"
+                .to_string(),
+        );
+    }
+    let incoming = delta_paths_between(cwd, &merge_base, &remote_tip).unwrap_or_default();
+    let conflicting: Vec<String> = incoming
+        .iter()
+        .filter(|path| scope_covers(scope, path))
+        .cloned()
+        .collect();
+    if !conflicting.is_empty() {
+        return RemoteMovedScopeFix::Blocked(format!(
+            "the incoming range ({}..{}) also changes {}, which this dispatch scoped for publication ({}); re-landing only the scoped paths onto the new tip would revert that incoming work, so this refuses instead of choosing content",
+            merge_base,
+            remote_tip,
+            list_or_none(&conflicting),
+            scope.join(", ")
+        ));
+    }
+    let local_delta = delta_paths_between(cwd, &merge_base, local_sha).unwrap_or_default();
+    let out_of_scope_commit_paths: Vec<String> = local_delta
+        .iter()
+        .filter(|path| !scope_covers(scope, path))
+        .cloned()
+        .collect();
+    let range = exec_git_in(
+        cwd,
+        &format!("rev-list --reverse --parents {}..{}", merge_base, local_sha),
+    );
+    let mut commits: Vec<(String, Vec<String>)> = Vec::new();
+    for line in range.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.is_empty() {
+            continue;
+        }
+        commits.push((
+            fields[0].to_string(),
+            fields[1..].iter().map(|s| s.to_string()).collect(),
+        ));
+    }
+    if commits.is_empty() {
+        return RemoteMovedScopeFix::Failed(
+            "the commit being published carries no commit over the merge base".to_string(),
+        );
+    }
+    if commits.iter().any(|(_, parents)| parents.len() > 1) {
+        return RemoteMovedScopeFix::Blocked(format!(
+            "the range {}..{} contains a merge commit; re-landing only the scoped paths would have to choose a parent, so this refuses rather than guess",
+            merge_base, local_sha
+        ));
+    }
+    let snapshot = git_call_argv(&["write-tree"], cwd);
+    if snapshot.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1) != 0 {
+        return RemoteMovedScopeFix::Failed(format!(
+            "could not snapshot the current index with write-tree ({}), so a scope-only re-land cannot restore it",
+            snapshot
+                .get("stderr")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+        ));
+    }
+    let saved_tree = snapshot
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if saved_tree.is_empty() {
+        return RemoteMovedScopeFix::Failed(
+            "write-tree returned no tree, so a scope-only re-land cannot restore the index"
+                .to_string(),
+        );
+    }
+    let relanded = scope_reland_commits(cwd, &remote_tip, &merge_base, &commits, scope, identity);
+    let restored = git_call_argv(&["read-tree", saved_tree.as_str()], cwd);
+    let restore_failed = restored
+        .get("exit_code")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1)
+        != 0;
+    match relanded {
+        Err(reason) => RemoteMovedScopeFix::Failed(reason),
+        Ok((new_sha, rebased_commits)) => {
+            if restore_failed {
+                return RemoteMovedScopeFix::Failed(format!(
+                    "re-landed {} onto {} but restoring the index from {} failed: {}",
+                    new_sha,
+                    remote_tip,
+                    saved_tree,
+                    restored
+                        .get("stderr")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                ));
+            }
+            RemoteMovedScopeFix::Landed {
+                new_sha,
+                local_sha: local_sha.to_string(),
+                remote_tip,
+                merge_base,
+                scope_paths: scope.to_vec(),
+                rebased_commits,
+                out_of_scope_commit_paths,
+            }
+        }
+    }
+}
+
 pub(super) enum RemoteMovedRecoveryOpt {
     Explicit(bool),
     Defaulted,
@@ -2808,6 +3202,128 @@ pub(super) fn pull_and_repush_remote_moved(
     let dirty = git_push_porcelain_in(cwd);
     let dirty_split = split_dirty_submodules(cwd, &porcelain_dirty_paths(&dirty));
     let _ = git_call_argv(&["fetch", "origin", branch], cwd);
+    let scope = body_scope_paths(body);
+    if !scope.is_empty() {
+        let local_sha = refusal
+            .get("source_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !local_sha.is_empty() {
+            let fix = scope_recommit_past_remote_moved(
+                cwd,
+                branch,
+                &local_sha,
+                &scope,
+                body_commit_identity(body).as_ref(),
+            );
+            match fix {
+                RemoteMovedScopeFix::NotApplicable => {}
+                RemoteMovedScopeFix::Blocked(reason) => {
+                    log_deviation_push("push-remote-moved-scope-blocked", branch);
+                    refusal["recovered"] = json!(false);
+                    refusal["auto_recovery"] = json!({
+                        "attempted": false,
+                        "via": "scope-recommit",
+                        "skipped_reason": reason.clone(),
+                        "scope_paths": scope.clone(),
+                        "recovery_steps": [
+                            { "step": 1, "verb": "git_log", "action": "read the incoming range that also touches a scoped path, then merge or re-land it deliberately" },
+                            { "step": 2, "verb": "git_push", "action": "publish the deliberate result; re-dispatching this body unchanged repeats this refusal" },
+                        ],
+                    });
+                    refusal["next_dispatch"] = json!("git_log");
+                    refusal["next_action_hint"] = json!(reason);
+                    stamp_dirty_split(&mut refusal, &dirty_split);
+                    return refusal;
+                }
+                RemoteMovedScopeFix::Failed(reason) => {
+                    refusal["auto_recovery"] = json!({
+                        "attempted": false,
+                        "via": "scope-recommit",
+                        "skipped_reason": reason,
+                        "scope_paths": scope.clone(),
+                    });
+                }
+                RemoteMovedScopeFix::Landed {
+                    new_sha,
+                    local_sha,
+                    remote_tip,
+                    merge_base,
+                    scope_paths,
+                    rebased_commits,
+                    out_of_scope_commit_paths,
+                } => {
+                    let (push_out, push_ok) = exec_git_push_in(cwd, new_sha.as_str(), branch, None);
+                    let recovery = json!({
+                        "attempted": true,
+                        "via": "scope-recommit",
+                        "merge_base": merge_base.clone(),
+                        "remote_tip": remote_tip.clone(),
+                        "scope_paths": scope_paths.clone(),
+                        "relanded_commit": new_sha.clone(),
+                        "rebased_commits": rebased_commits.clone(),
+                        "local_commit": local_sha.clone(),
+                        "local_commit_is_stranded": true,
+                        "worktree_paths_written": [],
+                        "out_of_scope_commit_paths": out_of_scope_commit_paths.clone(),
+                        "push_output": push_out.clone(),
+                    });
+                    if !push_ok {
+                        refusal["recovered"] = json!(false);
+                        refusal["auto_recovery"] = recovery;
+                        refusal["relanded_commit"] = json!(new_sha);
+                        stamp_dirty_split(&mut refusal, &dirty_split);
+                        return refusal;
+                    }
+                    log_deviation_push("push-remote-moved-scope-recommitted", branch);
+                    let (remote_sha, already_current) = match verify_push_landed(
+                        cwd,
+                        branch,
+                        new_sha.as_str(),
+                        Some(remote_tip.as_str()),
+                        None,
+                    ) {
+                        Ok(v) => v,
+                        Err(reason) => {
+                            refusal["recovered"] = json!(false);
+                            refusal["verification_failed"] = json!(true);
+                            refusal["auto_recovery"] = recovery;
+                            refusal["reason"] = json!(reason);
+                            return refusal;
+                        }
+                    };
+                    return unpack_to_value(ok(
+                        "git_push",
+                        json!({
+                            "branch": branch,
+                            "repo": repo,
+                            "output": push_out,
+                            "rebased": true,
+                            "rebase_retries": 0,
+                            "remote_advanced": !already_current,
+                            "already_current": already_current,
+                            "remote_sha": remote_sha.clone(),
+                            "source_ref": new_sha.clone(),
+                            "source_sha": new_sha.clone(),
+                            "recovered": true,
+                            "auto_recovery": recovery.clone(),
+                            "relanded_commit": new_sha.clone(),
+                            "stranded_local_commit": local_sha.clone(),
+                            "stranded_local_commit_note": format!(
+                                "the content of {} is published as {}; this checkout still points at {}, so it now reads diverged (1 ahead, 1 behind). No later verb reconciles that on its own: dispatch git_reset or git_pull once this lane owns the whole worktree, or keep using path-scoped git_finalize, which re-lands onto the remote tip again on the next push.",
+                                local_sha, new_sha, local_sha
+                            ),
+                            "out_of_scope_commit_paths": out_of_scope_commit_paths,
+                            "preserved_dirty_worktree": true,
+                            "pushed_commits": pushed_commits_published(cwd, Some(remote_tip.as_str()), new_sha.as_str()),
+                        }),
+                    ));
+                }
+            }
+        }
+    }
     let remote_now = resolve_ref(cwd, &format!("origin/{}", branch));
     let strict_fast_forward = remote_now
         .as_deref()
@@ -3537,7 +4053,10 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let mut recovery: Option<Value> = None;
-    if !pushed {
+    if !pushed
+        && push_resp.get("auto_recovery").is_none()
+        && push_resp.get("recovered").is_none()
+    {
         match pull_past_remote_moved(cwd_ref, &push_resp, body_pull_identity(body).as_ref()) {
             RemoteMovedPull::NotApplicable => {}
             RemoteMovedPull::Blocked(reason) => {
@@ -3634,6 +4153,17 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         .unwrap_or("")
         .to_string();
     steps.push(json!({ "step": "push", "branch": branch, "remote_advanced": remote_advanced, "already_current": already_current }));
+    let stranded_local_commit = push_data
+        .and_then(|d| d.get("stranded_local_commit"))
+        .cloned();
+    if let Some(local_commit) = stranded_local_commit.as_ref() {
+        steps.push(json!({
+            "step": "scope-recommit",
+            "local_commit": local_commit,
+            "published_commit": remote_sha,
+            "note": "the push was refused non-fast-forward, so the remote tip was re-landed carrying only this lane's scoped paths; the worktree and every out-of-scope path were left byte-identical and the local branch still points at the original commit",
+        }));
+    }
 
     let head_sha = exec_git_in(cwd_ref, "rev-parse HEAD").trim().to_string();
     let (ci_status_summary, ci_validated_written) =
@@ -3705,6 +4235,18 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             rows.len(),
             prd_foreign_row_count
         ));
+    }
+    if let Some(local_commit) = stranded_local_commit {
+        finalize_payload["stranded_local_commit"] = json!(local_commit);
+        finalize_payload["local_checkout_diverged"] = json!(true);
+        finalize_payload["scope_recommit"] = push_data
+            .and_then(|d| d.get("auto_recovery"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        finalize_payload["stranded_local_commit_note"] = push_data
+            .and_then(|d| d.get("stranded_local_commit_note"))
+            .cloned()
+            .unwrap_or(Value::Null);
     }
     let step_refs: Vec<&Value> = write_steps.iter().collect();
     ok(
