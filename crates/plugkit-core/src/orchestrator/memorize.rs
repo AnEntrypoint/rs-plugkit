@@ -29,11 +29,16 @@ pub fn fire(body: &str) -> Result<String, std::io::Error> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn parsed_kind_or_default(content: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(content)
-        .ok()
-        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(String::from))
-        .unwrap_or_else(|| "l0".to_string())
+fn memo_kind(content: &str) -> Result<String, String> {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(content).ok();
+    let Some(raw) = parsed.as_ref().and_then(|v| v.get("kind")) else {
+        return Ok("l0".to_string());
+    };
+    let Some(kind) = raw.as_str() else {
+        return Err("memorize-fire: kind must be a string naming a tier".to_string());
+    };
+    crate::tencentdb_memory::validate_tier(kind)?;
+    Ok(kind.to_string())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -484,6 +489,10 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     if text.is_empty() {
         return (String::new(), "empty memorize text".to_string(), 1);
     }
+    let kind = match memo_kind(content) {
+        Ok(kind) => kind,
+        Err(e) => return (String::new(), e, 1),
+    };
     if namespace == "default" {
         for tok in text.split_whitespace() {
             if let Some(rest) = tok.strip_prefix('@') {
@@ -558,7 +567,6 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
         );
     }
     if crate::tencentdb_memory::namespace_is_routed(&namespace) {
-        let kind = parsed_kind_or_default(content);
         let emb = match crate::embed::embed_text_json(&text) {
             Some(v) => v,
             None => {
@@ -642,7 +650,6 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
                     "degraded_to": "stored_without_vector",
                 }),
             );
-            let kind = parsed_kind_or_default(content);
             return store_without_vector(&namespace, &key, &kind, &text, &why, false, now as i64);
         }
     };
