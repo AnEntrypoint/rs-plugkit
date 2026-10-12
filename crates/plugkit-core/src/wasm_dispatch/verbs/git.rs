@@ -8051,9 +8051,14 @@ pub(super) fn with_exclusion_report(mut data: Value, cwd: Option<&str>, paths: &
             json!(withheld.len()),
         );
         if !withheld.is_empty() {
+            let tracked: Vec<&str> = crate::gitignore::MUST_STAY_TRACKED
+                .iter()
+                .filter_map(|entry| entry.strip_prefix(".gm/"))
+                .collect();
             map.insert("excluded_but_dirty_warning".to_string(), json!(format!(
-                "{} dirty path(s) under .gm/.agentplug* are NOT committed: they are runtime/transient state, not tracked-by-design (memories, disciplines, prd.yml, mutables.yml, config, code-search). If any are real work, stage them explicitly or add them to the tracked-by-design set.",
-                withheld.len()
+                "{} dirty path(s) under .gm/.agentplug* are NOT committed: they are runtime/transient state, not tracked-by-design ({}). If any are real work, stage them explicitly or add them to the tracked-by-design set.",
+                withheld.len(),
+                tracked.join(", ")
             )));
         }
     }
