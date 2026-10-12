@@ -56,10 +56,6 @@ const GM_CONFIG_EXAMPLE: &str = r#"{
 }
 "#;
 
-const EXAMPLE_HOOK: &str = r#"const fs = require('fs');
-return fs.existsSync('.gm/ship-approved');
-"#;
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MergePolicy {
     PerKeyWholeFile,
@@ -217,16 +213,6 @@ fn merge_policy_rows() -> Vec<PolicyRow> {
             )),
         });
     }
-
-    rows.push(PolicyRow {
-        path: ".gm/instructions/hooks/example.js".to_string(),
-        class: "gate hook",
-        policy: MergePolicy::NoMergeStandalone,
-        reader: "fsm::evaluate_gate, only when a GateDef names it in `hook`",
-        placeholders: Vec::new(),
-        derived: "the single hook path the vendor pass scaffolds",
-        note: Some("Hooks execute ONLY from the project-vendored graph tier; a hook named by a graph arriving from a config repo is refused and its gate falls back to predicate-only.".to_string()),
-    });
 
     for (key, default_text) in GATE_DEFAULTS {
         rows.push(PolicyRow {
@@ -549,10 +535,6 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
     let merge_policy_path = ".gm/instructions/fsm/merge-policy.md";
     let (ok, status) = write_if_absent_or_forced(merge_policy_path, &merge_policy_doc(), force);
     results.push(json!({ "path": merge_policy_path, "ok": ok, "status": status }));
-
-    let hook_path = ".gm/instructions/hooks/example.js";
-    let (ok, status) = write_if_absent_or_forced(hook_path, EXAMPLE_HOOK, force);
-    results.push(json!({ "path": hook_path, "ok": ok, "status": status }));
 
     for (key, default_text) in GATE_DEFAULTS {
         let path = format!(".gm/instructions/gates/{}.md", key);
