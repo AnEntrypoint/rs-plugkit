@@ -475,13 +475,17 @@ fn err(verb: &str, reason: &str) -> u64 {
 }
 
 fn err_coded(verb: &str, code: &str, reason: &str) -> u64 {
+    err_coded_hinted(verb, code, reason, next_dispatch_hint_for(verb))
+}
+
+fn err_coded_hinted(verb: &str, code: &str, reason: &str, next_dispatch_hint: Value) -> u64 {
     pack(
         json!({
             "ok": false,
             "verb": verb,
             "error": reason,
             "error_code": code,
-            "next_dispatch_hint": next_dispatch_hint_for(verb),
+            "next_dispatch_hint": next_dispatch_hint,
         })
         .to_string(),
     )
@@ -2856,7 +2860,7 @@ fn codeinsight_action(verb: &str, action: &str, body: &Value) -> u64 {
     }
     match crate::code_symbols::handle(&routed) {
         Ok(data) => ok(verb, data),
-        Err(reason) => err(verb, &reason),
+        Err(reason) => err_coded_hinted(verb, ERR_CODE_FAILED, &reason, json!("codeinsight")),
     }
 }
 
