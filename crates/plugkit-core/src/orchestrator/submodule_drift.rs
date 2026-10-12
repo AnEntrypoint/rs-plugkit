@@ -154,8 +154,21 @@ fn commit_present(_path: &str, _sha: &str) -> bool {
 }
 
 fn descendant_in_submodule(path: &str, old_sha: &str, new_sha: &str) -> bool {
-    commit_present(path, old_sha) && commit_present(path, new_sha) && is_ancestor(old_sha, new_sha, path)
+    pin_direction_known(path, old_sha, new_sha) && is_ancestor(old_sha, new_sha, path)
 }
+
+/// Whether any direction can be claimed at all. Both ends have to be objects
+/// this clone holds: `merge-base --is-ancestor` fails on a commit that was
+/// never fetched exactly as it fails on one that is genuinely unrelated, so
+/// "not a descendant" computed over an absent end is a fact about the clone,
+/// not about the pin. A pin leaving a local-only phantom for a published tip is
+/// a forward correction, and reporting it as a regression is the opposite of
+/// what happened.
+fn pin_direction_known(path: &str, old_sha: &str, new_sha: &str) -> bool {
+    commit_present(path, old_sha) && commit_present(path, new_sha)
+}
+
+
 
 pub fn submodule_paths() -> Vec<String> {
     let parsed = crate::pkfs::read_to_string(".gitmodules")
@@ -198,7 +211,10 @@ pub fn pin_regressions() -> Vec<PinRegression> {
             continue;
         };
         if let Some(staged) = staged_gitlink_sha(&path) {
-            if staged != pinned && !descendant_in_submodule(&path, &pinned, &staged) {
+            if staged != pinned
+                && pin_direction_known(&path, &pinned, &staged)
+                && !descendant_in_submodule(&path, &pinned, &staged)
+            {
                 out.push(PinRegression {
                     path: path.clone(),
                     old_sha: pinned.clone(),
@@ -252,6 +268,7 @@ pub fn drifted_submodules() -> Vec<DriftedSubmodule> {
             continue;
         };
         if gm_tracked_sha != submodule_head_sha
+            && pin_direction_known(&path, &gm_tracked_sha, &submodule_head_sha)
             && !is_ancestor(&gm_tracked_sha, &submodule_head_sha, &path)
         {
             drifted.push(DriftedSubmodule {
