@@ -87,6 +87,7 @@ impl Config {
             "db_path",
             "memory_md_tables",
             "retention",
+            "traversal",
         ];
         let Some(obj) = self.value.as_object() else {
             return Vec::new();
