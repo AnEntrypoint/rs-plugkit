@@ -172,13 +172,22 @@ impl RemoteRecord {
 /// A recorded probe failure replaces both with a backoff counted in failures. A
 /// project whose checkout is behind a freshly recorded tip never probes: the machine
 /// already holds the answer, and the project materializes to that tip.
+///
+/// `forced` is the one caller that may not be answered from the record: a forced
+/// refresh exists to ask the remote itself, so it is always `Due`. Without that, the
+/// record's interval (an hour for a ref whose change cadence this machine has never
+/// measured) outlives a publish, and a forced sync answers "already current" from a
+/// tip the remote stopped advertising.
 enum ProbeDecision {
     Due,
     Skip { sha: String },
     Backoff { reason: String },
 }
 
-fn probe_decision(rec: &RemoteRecord, now: u64) -> ProbeDecision {
+fn probe_decision(rec: &RemoteRecord, now: u64, forced: bool) -> ProbeDecision {
+    if forced {
+        return ProbeDecision::Due;
+    }
     if rec.remote_sha.is_empty() {
         return ProbeDecision::Due;
     }
@@ -337,9 +346,21 @@ fn write_remote_record(paths: &RemoteProbePaths, rec: &RemoteRecord) {
 /// machine asks the same question, so at most one of them runs `git ls-remote`
 /// per window and the rest adopt the recorded answer.
 fn global_remote_tip(src: &RepoSource, now: u64) -> GlobalTip {
+    global_remote_tip_with(src, now, false)
+}
+
+/// The forced twin: it asks the remote instead of adopting a recorded tip, so a
+/// refresh the operator asked for by hand cannot be answered from a record that has
+/// not expired yet. Single-flight still holds -- one `git ls-remote` per window, and
+/// a second forced caller adopts the probe that is already running or hears `Held`.
+fn global_remote_tip_forced(src: &RepoSource, now: u64) -> GlobalTip {
+    global_remote_tip_with(src, now, true)
+}
+
+fn global_remote_tip_with(src: &RepoSource, now: u64, forced: bool) -> GlobalTip {
     let paths = remote_probe_paths(src);
     let rec = read_remote_record(&paths);
-    match probe_decision(&rec, now) {
+    match probe_decision(&rec, now, forced) {
         ProbeDecision::Skip { sha } => return GlobalTip::Known(sha),
         ProbeDecision::Backoff { reason } => return GlobalTip::Unavailable(reason),
         ProbeDecision::Due => {}
@@ -348,7 +369,7 @@ fn global_remote_tip(src: &RepoSource, now: u64) -> GlobalTip {
     match try_lock_at(&paths.lock(), &paths.root) {
         LockProbe::Acquired(lock) => {
             let under_lock = read_remote_record(&paths);
-            let outcome = match probe_decision(&under_lock, now) {
+            let outcome = match probe_decision(&under_lock, now, forced) {
                 ProbeDecision::Skip { sha } => GlobalTip::Known(sha),
                 ProbeDecision::Backoff { reason } => GlobalTip::Unavailable(reason),
                 ProbeDecision::Due => probe_and_record(src, &paths, &under_lock, now),
@@ -778,14 +799,16 @@ fn degraded(sha: Option<String>, detail: String, src: &RepoSource) -> SyncOutcom
     }
 }
 
-pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome, String> {
+pub fn ensure_current(src: &RepoSource, debounce_ms: u64, forced: bool) -> Result<SyncOutcome, String> {
     let mut st = read_state(src);
     let now = now_ms();
     let have_local = local_sha(src);
 
+    // A forced refresh is the operator asking for the answer the remote gives now, so
+    // neither the debounce nor an unexpired machine-global tip may answer it.
     let last_probe = st.last_checked_ms.max(remembered_probe_ms(src));
     let clock_sane = last_probe > 0 && last_probe <= now;
-    if clock_sane {
+    if !forced && clock_sane {
         let elapsed = now.saturating_sub(last_probe);
         let required = st.next_probe_delay_ms(debounce_ms);
         if elapsed < required {
@@ -805,7 +828,9 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
     let probe_paths = remote_probe_paths(src);
     // At the recorded tip: no probe and no fetch. Behind it, fall through and
     // materialize to the tip this machine already recorded.
-    if let ProbeDecision::Skip { sha } = probe_decision(&read_remote_record(&probe_paths), now) {
+    if let ProbeDecision::Skip { sha } =
+        probe_decision(&read_remote_record(&probe_paths), now, forced)
+    {
         if have_local.as_deref() == Some(sha.as_str()) {
             return Ok(SyncOutcome {
                 sha: have_local,
@@ -819,13 +844,28 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
     let lock = match try_lock(src) {
         LockProbe::Acquired(lock) => lock,
         LockProbe::Held => {
+            // Serving the current checkout is the right answer for a background
+            // refresh and the wrong one for a forced one: a forced call that cannot
+            // hold the lock never learns the tip, so it must not report success.
+            let detail = "another refresh in progress; serving current checkout".to_string();
             return match have_local {
-                Some(sha) => Ok(SyncOutcome {
-                    sha: Some(sha),
-                    changed: false,
-                    degraded_reason: st.degraded_reason.clone(),
-                    detail: "another refresh in progress; serving current checkout".to_string(),
-                }),
+                Some(sha) => {
+                    if forced {
+                        let reason = format!(
+                            "a forced refresh of {} could not run: {detail}, so the tip it now advertises is unknown",
+                            src.repo
+                        );
+                        emit_degraded(Some(sha), &reason, src);
+                        Err(reason)
+                    } else {
+                        Ok(SyncOutcome {
+                            sha: Some(sha),
+                            changed: false,
+                            degraded_reason: st.degraded_reason.clone(),
+                            detail,
+                        })
+                    }
+                }
                 None => Err(format!(
                     "another process is cloning {} and no local checkout exists yet",
                     src.repo
@@ -848,9 +888,29 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
         }
     };
 
-    let result = refresh_locked(src, &mut st, now, have_local.clone(), &lock);
+    let result = refresh_locked(src, &mut st, now, have_local.clone(), &lock, forced);
     if unlock(&lock) {
         write_state(src, &st);
+    }
+    // The post-condition a forced call promises: the checkout on disk now stands at
+    // the sha this call reports. Reading it back turns any path above that answered
+    // without touching the checkout into a failure naming what it served.
+    if forced {
+        if let Ok(outcome) = &result {
+            match (local_sha(src), outcome.sha.clone()) {
+                (Some(live), Some(reported)) if live == reported => {}
+                (live, reported) => {
+                    let reason = format!(
+                        "a forced refresh of {} reported {} but left the checkout at {}",
+                        src.repo,
+                        reported.as_deref().unwrap_or("no sha"),
+                        live.as_deref().unwrap_or("no checkout")
+                    );
+                    emit_degraded(live, &reason, src);
+                    return Err(reason);
+                }
+            }
+        }
     }
     result
 }
@@ -861,6 +921,7 @@ fn refresh_locked(
     now: u64,
     have_local: Option<String>,
     lock: &RefreshLock,
+    forced: bool,
 ) -> Result<SyncOutcome, String> {
     if !owns_lock(lock) {
         return Err("config refresh lock ownership was lost before refresh".to_string());
@@ -870,16 +931,31 @@ fn refresh_locked(
     remember_probe_ms(src, now);
     let have_local = local_sha(src).or(have_local);
 
-    let remote = match global_remote_tip(src, now) {
+    let remote = match if forced {
+        global_remote_tip_forced(src, now)
+    } else {
+        global_remote_tip(src, now)
+    } {
         GlobalTip::Known(sha) => sha,
         GlobalTip::Held => {
+            let detail = "another refresh in progress; serving current checkout".to_string();
             return match have_local {
-                Some(sha) => Ok(SyncOutcome {
-                    sha: Some(sha),
-                    changed: false,
-                    degraded_reason: st.degraded_reason.clone(),
-                    detail: "another refresh in progress; serving current checkout".to_string(),
-                }),
+                Some(sha) => {
+                    if forced {
+                        let reason = format!(
+                            "a forced refresh of {} could not run: {detail}, so the tip it now advertises is unknown",
+                            src.repo
+                        );
+                        emit_degraded(Some(sha), &reason, src);
+                        return Err(reason);
+                    }
+                    Ok(SyncOutcome {
+                        sha: Some(sha),
+                        changed: false,
+                        degraded_reason: st.degraded_reason.clone(),
+                        detail,
+                    })
+                }
                 None => Err(format!(
                     "another process is cloning {} and no local checkout exists yet",
                     src.repo
@@ -1020,19 +1096,37 @@ fn changed_config_paths(src: &RepoSource, pre_fetch_text: Option<&str>) -> Vec<S
     }
 }
 
+/// Refresh one config repo checkout.
+///
+/// `forced` marks a refresh the caller asked for by hand (`config-sync-now`): it
+/// probes the remote instead of adopting a recorded tip, and it fails when it cannot
+/// leave the checkout at the tip it reports, so `ok` on that verb means the vendored
+/// files on disk really are the published ones.
 pub struct GitRepoFetcher {
     pub debounce_ms: u64,
+    pub forced: bool,
 }
 
 impl GitRepoFetcher {
     pub fn new() -> GitRepoFetcher {
         GitRepoFetcher {
             debounce_ms: DEFAULT_DEBOUNCE_MS,
+            forced: false,
         }
     }
 
     pub fn with_debounce_ms(debounce_ms: u64) -> GitRepoFetcher {
-        GitRepoFetcher { debounce_ms }
+        GitRepoFetcher {
+            debounce_ms,
+            forced: false,
+        }
+    }
+
+    pub fn forced() -> GitRepoFetcher {
+        GitRepoFetcher {
+            debounce_ms: 0,
+            forced: true,
+        }
     }
 }
 
@@ -1044,7 +1138,7 @@ impl Default for GitRepoFetcher {
 
 impl RepoFetcher for GitRepoFetcher {
     fn refresh(&self, src: &RepoSource) -> Result<Freshness, String> {
-        let outcome = ensure_current(src, self.debounce_ms)?;
+        let outcome = ensure_current(src, self.debounce_ms, self.forced)?;
         Ok(match outcome.degraded_reason {
             Some(reason) => Freshness::Degraded { reason },
             None => Freshness::Current,

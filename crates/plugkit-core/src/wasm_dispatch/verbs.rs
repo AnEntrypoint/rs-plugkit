@@ -2301,7 +2301,23 @@ fn config_sync_now_force_immediate_refresh(_body: &Value) -> u64 {
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("forced".to_string(), json!(true));
     }
-    ok("config-sync-now", payload)
+    // "Force immediate refresh" is a promise about the files on disk, not about the
+    // dispatch: the verb is the one caller that may not answer ok while the vendored
+    // config is still the previous version. A forced refresh that could not confirm
+    // the checkout stands at the published tip reports that as a failure naming why,
+    // so a stale graph cannot be mistaken for a synced one.
+    match r.degraded.clone() {
+        Some(reason) => err_json(
+            "config-sync-now",
+            json!({
+                "error_code": "forced_refresh_unconfirmed",
+                "error": format!("the forced config refresh did not leave this project at the published tip: {reason}"),
+                "degraded_reason": reason,
+                "data": payload,
+            }),
+        ),
+        None => ok("config-sync-now", payload),
+    }
 }
 
 fn config_resolve_report_winning_tier_and_any_rejected_tier(_body: &Value) -> u64 {
