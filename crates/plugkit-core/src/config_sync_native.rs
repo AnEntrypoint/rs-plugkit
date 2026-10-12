@@ -124,8 +124,8 @@ impl RemoteRecord {
 /// machine cannot already answer it:
 ///
 /// * no tip is recorded for this (repo, reference) yet, or
-/// * the recorded tip has stood longer than the interval at which this ref was last
-///   observed to move.
+/// * the last probe is older than the interval at which this ref was last observed to
+///   move.
 ///
 /// A recorded probe failure replaces both with a backoff counted in failures. A
 /// project whose checkout is behind a freshly recorded tip never probes: the machine
@@ -160,7 +160,7 @@ fn probe_decision(rec: &RemoteRecord, now: u64) -> ProbeDecision {
     } else {
         UNMEASURED_REF_INTERVAL_MS
     };
-    if now.saturating_sub(rec.advertised_since_ms) >= interval {
+    if now.saturating_sub(rec.last_probe_ms) >= interval {
         ProbeDecision::Due
     } else {
         ProbeDecision::Skip {
