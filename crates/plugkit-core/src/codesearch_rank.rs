@@ -514,6 +514,19 @@ pub fn compact_dual(query: &str, raw: &Value, opts: &RankOptions) -> Value {
     out.insert("hits".into(), json!(shown));
     out.insert("total_candidates".into(), json!(total));
     out.insert("literal_matches".into(), json!(literal_total));
+    // files_scanned is the difference between "nothing matched" and "nothing was read": it rides
+    // the compact shape too, or a scoped reply that opened no file is read as a zero-match.
+    if let Some(files_scanned) = raw.get("files_scanned") {
+        out.insert("files_scanned".into(), files_scanned.clone());
+    }
+    out.insert("count".into(), json!(total));
+    // The applied scope rides the compact shape too: without it a scoped reply is indistinguishable
+    // from an unscoped one, so a caller cannot tell that the scope was honoured.
+    for key in ["path_glob", "files_matching_glob", "glob_matched_no_files"] {
+        if let Some(value) = raw.get(key) {
+            out.insert(key.into(), value.clone());
+        }
+    }
     if literal_total == 0 && total > 0 {
         out.insert("hits_are_nearest_neighbours".into(), json!(true));
         out.insert(

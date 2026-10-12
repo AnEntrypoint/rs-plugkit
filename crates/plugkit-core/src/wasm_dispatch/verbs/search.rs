@@ -11,12 +11,12 @@ pub(super) const DUAL_PHRASE_SCAN_PER_FILE_MATCHES: usize = 8;
 pub(super) const DUAL_PHRASE_SCAN_COLLECT_MATCHES: usize =
     DUAL_PHRASE_SCAN_MAX_MATCHES * DUAL_PHRASE_SCAN_PER_FILE_MATCHES;
 
-pub(super) fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::ragconfig::RagConfig, no_ignore: bool) -> (Vec<Value>, u64, bool) {
-    if rs_search::tokenize::tokenize(query).len() < 2 { return (Vec::new(), 0, false); }
+pub(super) fn dual_phrase_hits(query: &str, root: Option<&str>, paths: &[&str], cfg: &crate::ragconfig::RagConfig, no_ignore: bool) -> (Vec<Value>, u64, bool, u64) {
+    if rs_search::tokenize::tokenize(query).len() < 2 { return (Vec::new(), 0, false, 0); }
     let scan = crate::code_index::LiteralScan {
         pattern: query,
         root,
-        paths: &[],
+        paths,
         regex: false,
         case_insensitive: true,
         whole_word: false,
@@ -40,8 +40,12 @@ pub(super) fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::rag
     };
     let out = crate::code_index::scan_literal(&scan, cfg);
     if out.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-        return (Vec::new(), 0, false);
+        return (Vec::new(), 0, false, 0);
     }
+    let files_scanned = out
+        .get("files_scanned")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let phrase_matched_lines = out
         .get("phrase_match_count")
         .or_else(|| out.get("match_count"))
@@ -60,6 +64,7 @@ pub(super) fn dual_phrase_hits(query: &str, root: Option<&str>, cfg: &crate::rag
         fair_share_phrase_hits(hits, DUAL_PHRASE_SCAN_MAX_MATCHES),
         phrase_matched_lines,
         exhaustive,
+        files_scanned,
     )
 }
 
@@ -445,6 +450,16 @@ impl PathScope {
         self.globs.iter().any(|glob| glob.admits(root, None, path))
     }
 
+    // The patterns a caller named that are plain paths, not globs. These are the ones a scan can
+    // be pointed at directly; a glob can only filter what a wider scan already listed.
+    fn literal_scopes(&self) -> Vec<String> {
+        self.patterns
+            .iter()
+            .filter(|pattern| !crate::path_glob::looks_like_glob(pattern))
+            .cloned()
+            .collect()
+    }
+
     fn applied(&self) -> String {
         if self.patterns.len() == 1 {
             return self.patterns[0].clone();
@@ -486,6 +501,21 @@ pub(super) fn push_scope_pattern(out: &mut Vec<String>, raw: &str, field: &str) 
 }
 
 pub(super) const SCOPED_CANDIDATE_MULTIPLIER: usize = 8;
+
+// A named scope that resolves to nothing under the root is answered as an error, never as an
+// empty match set: the two differ by whether the scope was opened at all, and a caller who
+// cannot tell them apart reports "no match" for a hit that is really there.
+pub(super) fn scope_paths_resolve(root: &str, scope: &PathScope) -> Result<(), String> {
+    for pattern in scope.literal_scopes() {
+        if !crate::scan_universe::scope_path_exists(root, &pattern) {
+            return Err(format!(
+                "path '{pattern}' does not exist under search root '{}' -- nothing was searched, so this reply is an error and not a zero-match result; name a directory or a file that exists under that root, or narrow with a glob such as '{pattern}/**'",
+                crate::scan_universe::absolute_root_for_message(root),
+            ));
+        }
+    }
+    Ok(())
+}
 
 pub(super) const SCOPED_CANDIDATE_FLOOR: usize = 50;
 
@@ -578,6 +608,11 @@ pub(super) fn codesearch_at_root(
         Ok(scope) => scope,
         Err(e) => return err("codesearch", &e),
     };
+    if let Some(scope) = scope.as_ref() {
+        if let Err(e) = scope_paths_resolve(root, scope) {
+            return err("codesearch", &e);
+        }
+    }
     let already_indexed = body
         .get("auto_indexed")
         .and_then(|v| v.as_bool())
@@ -656,8 +691,10 @@ pub(super) fn codesearch_at_root(
         .collect();
     let commits = crate::code_index::git_commit_rank_at(root, query, 10);
     let commits_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let (mut phrase_hits, mut phrase_total, phrase_exhaustive) =
-        dual_phrase_hits(query, Some(root), cfg, scan_no_ignore_requested(body));
+    let scope_paths: Vec<String> = scope.as_ref().map(|s| s.literal_scopes()).unwrap_or_default();
+    let scope_refs: Vec<&str> = scope_paths.iter().map(String::as_str).collect();
+    let (mut phrase_hits, mut phrase_total, phrase_exhaustive, phrase_files_scanned) =
+        dual_phrase_hits(query, Some(root), &scope_refs, cfg, scan_no_ignore_requested(body));
     let vector_reserve_ms = if prior_stage_ms.get("index_pass").is_some() {
         VECTOR_CHANNEL_COLD_RESERVE_MS
     } else {
@@ -695,6 +732,8 @@ pub(super) fn codesearch_at_root(
     let mut raw = json!({
         "mode": "dual",
         "root": root,
+        "files_scanned": phrase_files_scanned,
+        "count": (vector_hits.len() + bm25_hits.len() + phrase_hits.len()) as u64,
         "vector_hits": vector_hits,
         "bm25_hits": bm25_hits,
         "phrase_hits": phrase_hits,
@@ -801,11 +840,10 @@ pub(super) fn scan_result_limit(body: &Value, fields: &[&str], default: u32) -> 
     for field in fields {
         if let Some(v) = body.get(*field) {
             match v.as_u64() {
-                Some(0) => seen.push((field, u64::MAX)),
-                Some(n) => seen.push((field, n)),
-                None => {
+                Some(n) if n > 0 => seen.push((field, n)),
+                _ => {
                     return Err(format!(
-                        "body field \"{field}\" must be a non-negative integer result limit (0 means unlimited), got {v}"
+                        "body field \"{field}\" must be a positive integer result limit, got {v}"
                     ))
                 }
             }
@@ -859,6 +897,98 @@ pub(super) fn scan_target_paths(body: &Value) -> Result<Vec<String>, String> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     paths.retain(|p| seen.insert(p.clone()));
     Ok(paths)
+}
+
+pub(super) fn normalize_scope_text(raw: &str) -> String {
+    raw.trim()
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+// A glob written under "path" reached the scan as a literal path, where it names no file and the
+// scan was refused outright. Move those entries to "glob", which every route already honours: the
+// scan listing takes it as a filter and PathScope takes it as a scope.
+pub(super) fn hoist_glob_paths(body: &Value) -> Result<Option<Value>, String> {
+    let mut literal: Vec<Value> = Vec::new();
+    let mut globs: Vec<String> = Vec::new();
+    let mut named = false;
+    for field in ["path", "paths", "files"] {
+        match body.get(field) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(text)) => {
+                named = true;
+                let normalized = normalize_scope_text(text);
+                if normalized.is_empty() {
+                    continue;
+                }
+                if crate::path_glob::looks_like_glob(&normalized) {
+                    globs.push(normalized);
+                } else {
+                    literal.push(Value::String(normalized));
+                }
+            }
+            Some(Value::Array(items)) => {
+                named = true;
+                for item in items {
+                    match item.as_str() {
+                        Some(text) => {
+                            let normalized = normalize_scope_text(text);
+                            if normalized.is_empty() {
+                                continue;
+                            }
+                            if crate::path_glob::looks_like_glob(&normalized) {
+                                globs.push(normalized);
+                            } else {
+                                literal.push(Value::String(normalized));
+                            }
+                        }
+                        None => {
+                            return Err(format!(
+                                "{field} entries must all be path strings, got {item}"
+                            ))
+                        }
+                    }
+                }
+            }
+            Some(other) => {
+                return Err(format!(
+                    "{field} must be a path string or an array of path strings, got {other}"
+                ))
+            }
+        }
+    }
+    if !named || globs.is_empty() {
+        return Ok(None);
+    }
+    let mut out = body.clone();
+    if let Some(map) = out.as_object_mut() {
+        map.remove("paths");
+        map.remove("files");
+        if literal.is_empty() {
+            map.remove("path");
+        } else if literal.len() == 1 {
+            map.insert("path".to_string(), literal.remove(0));
+        } else {
+            map.insert("path".to_string(), Value::Array(literal.clone()));
+        }
+        let mut merged: Vec<Value> = match map.get("glob") {
+            Some(Value::String(text)) if !text.trim().is_empty() => {
+                vec![Value::String(text.clone())]
+            }
+            Some(Value::Array(items)) => items.clone(),
+            _ => Vec::new(),
+        };
+        for glob in globs {
+            let entry = Value::String(glob);
+            if !merged.contains(&entry) {
+                merged.push(entry);
+            }
+        }
+        map.insert("glob".to_string(), Value::Array(merged));
+    }
+    Ok(Some(out))
 }
 
 pub(super) fn marked_ancestor_for_root(candidate: &str) -> Option<(String, String)> {
@@ -2094,7 +2224,7 @@ pub(super) struct IdentifierScan<'a> {
     whole_word: bool,
 }
 
-pub(super) fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: Option<&str>, include_globs: &[String], exclude_globs: &[String], cfg: &crate::ragconfig::RagConfig) -> Result<(Vec<String>, bool), String> {
+pub(super) fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: Option<&str>, include_globs: &[String], exclude_globs: &[String], cfg: &crate::ragconfig::RagConfig) -> Result<(Vec<String>, bool, u64), String> {
     let named = scan_target_paths(body)?;
     let path_refs = scan_path_refs(&named);
     let request = crate::code_index::LiteralScan {
@@ -2120,7 +2250,7 @@ pub(super) fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: O
         list_limit: None,
         max_chars: usize::MAX,
         spill_name: String::new(),
-        verbose: false,
+        verbose: true,
     };
     let out = crate::code_index::scan_literal(&request, cfg);
     if out.get("ok").and_then(|b| b.as_bool()) == Some(false) {
@@ -2130,6 +2260,10 @@ pub(super) fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: O
             .unwrap_or("identifier scan failed")
             .to_string());
     }
+    let files_scanned = out
+        .get("files_scanned")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let lines = out
         .get("matches")
         .and_then(|m| m.as_array())
@@ -2144,6 +2278,7 @@ pub(super) fn identifier_scan_lines(scan: &IdentifierScan, body: &Value, root: O
         out.get("exhaustive")
             .and_then(|b| b.as_bool())
             .unwrap_or(false),
+        files_scanned,
     ))
 }
 
@@ -2215,13 +2350,15 @@ pub(super) fn codesearch_identifier(
             true,
         ),
     ];
+    let mut scan_files_scanned = 0u64;
     for (scan, substring) in &passes {
-        let (lines, complete) =
+        let (lines, complete, files_scanned) =
             match identifier_scan_lines(scan, body, scan_root, &include_globs, &exclude_globs, cfg)
             {
                 Ok(found) => found,
                 Err(e) => return Some(Err(e)),
             };
+        scan_files_scanned = scan_files_scanned.max(files_scanned);
         if lines.is_empty() {
             continue;
         }
@@ -2242,7 +2379,10 @@ pub(super) fn codesearch_identifier(
                 &exclude_globs,
                 cfg,
             ) {
-                Ok(found) => found,
+                Ok((definition_lines, definitions_complete, definition_files_scanned)) => {
+                    scan_files_scanned = scan_files_scanned.max(definition_files_scanned);
+                    (definition_lines, definitions_complete)
+                }
                 Err(e) => return Some(Err(e)),
             }
         };
@@ -2255,6 +2395,26 @@ pub(super) fn codesearch_identifier(
         if let Some(report) =
             crate::codesearch_rank::identifier_report(query, &scan_lines, opts, *substring)
         {
+            let mut report = report;
+            if let Some(map) = report.as_object_mut() {
+                let found = map
+                    .get("counts")
+                    .map(|counts| {
+                        counts
+                            .get("definitions")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0)
+                            + counts
+                                .get("references")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                    })
+                    .unwrap_or(lines.len() as u64);
+                // A reply that names no files_scanned cannot be told apart from one whose scope
+                // was never opened, so both numbers ride every report.
+                map.insert("files_scanned".to_string(), json!(scan_files_scanned));
+                map.insert("count".to_string(), json!(found));
+            }
             return Some(Ok(report));
         }
     }
@@ -2355,16 +2515,20 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             CODESEARCH_MODES.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(", "),
         ));
     }
+    // A glob under "path" is a scope, not a path: hand it to the field every route reads.
+    let hoisted_body;
+    let body: &Value = match hoist_glob_paths(body) {
+        Ok(Some(rewritten)) => {
+            hoisted_body = rewritten;
+            &hoisted_body
+        }
+        Ok(None) => body,
+        Err(e) => return err("codesearch", &e),
+    };
     let (k, limit_was_explicit) = match codesearch_result_limit(body, &cfg) {
         Ok(v) => v,
         Err(e) => return err("codesearch", &e),
     };
-    if k == u32::MAX && mode == "dual" {
-        return err(
-            "codesearch",
-            "result limit 0 (unlimited) applies to the exhaustive modes \"literal\", \"regex\" and \"filename\" only -- \"dual\" is ranked top-k, so pass a positive k",
-        );
-    }
     if mode == "literal" || mode == "regex" || mode == "filename" {
         if let Some(refusal) =
             refuse_unknown_fields("codesearch", body, CODESEARCH_EXHAUSTIVE_FIELDS)
@@ -2404,6 +2568,19 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             Some(Ok(report)) => return ok("codesearch", report),
             Some(Err(e)) => return err("codesearch", &e),
             None => {}
+        }
+    }
+    // "dual" ranks the whole project unless the named scope is applied here. The scan-backed
+    // routes take "path" from scan_target_paths, but this one used to leave the ranked channels
+    // unscoped, so a scoped query answered with project-wide hits and a zero-match reply carried
+    // no files_scanned -- indistinguishable from a scope that was never opened.
+    let scope = match PathScope::from_body(body) {
+        Ok(scope) => scope,
+        Err(e) => return err("codesearch", &e),
+    };
+    if let Some(scope) = scope.as_ref() {
+        if let Err(e) = scope_paths_resolve(".", scope) {
+            return err("codesearch", &e);
         }
     }
     if let Some(root) = root {
@@ -2497,10 +2674,10 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             return codesearch_dispatch(&retry);
         }
     }
-    let cand_k = cfg.budget.pool(k as usize).max(50) as u32;
+    let cand_k = scoped_candidate_k(cfg.budget.pool(k as usize).max(50) as u32, scope.as_ref());
     let embedding = embed_query(query);
     let code_ns = cfg.namespaces.code.as_str();
-    let vec_hits = vec_search_local(&embedding, code_ns, cand_k);
+    let vec_hits = vec_search_local(&embedding, code_ns, cand_k as u32);
     let vec_ids: Vec<String> = vec_hits
         .as_array()
         .map(|a| {
@@ -2511,7 +2688,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         .unwrap_or_default();
     let mut corpus = crate::code_index::FusionCorpus::load();
     let vec_ids: Vec<String> = if vec_ids.is_empty() {
-        let vres = crate::code_index::search(query, cand_k as usize, Some(&embedding));
+        let vres = crate::code_index::search(query, cand_k, Some(&embedding));
         vres.get("rows")
             .and_then(|r| r.as_array())
             .map(|rows| {
@@ -2527,14 +2704,17 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
     } else {
         vec_ids
     };
-    let bm25_ranked = corpus.bm25_rank_cfg(query, cand_k as usize, &cfg.scoring);
+    let bm25_ranked = corpus.bm25_rank_cfg(query, cand_k, &cfg.scoring);
     let bm25_ids: Vec<String> = bm25_ranked.iter().map(|(key, _)| key.clone()).collect();
     let commit_ranked = crate::code_index::git_commit_rank(query, 10);
     let commits: Vec<Value> = commit_ranked
         .iter()
         .map(|(hash, message, score)| json!({ "hash": hash, "message": message, "score": score }))
         .collect();
-    let (phrase_hits, phrase_total, phrase_exhaustive) = dual_phrase_hits(query, None, &cfg, scan_no_ignore_requested(body));
+    let scope_paths: Vec<String> = scope.as_ref().map(|s| s.literal_scopes()).unwrap_or_default();
+    let scope_refs: Vec<&str> = scope_paths.iter().map(String::as_str).collect();
+    let (mut phrase_hits, mut phrase_total, phrase_exhaustive, phrase_files_scanned) =
+        dual_phrase_hits(query, None, &scope_refs, &cfg, scan_no_ignore_requested(body));
     let build_hit = |corpus: &mut crate::code_index::FusionCorpus, key: &str, score: Option<f64>, fallback_text: Option<&str>| -> Value {
         let text = corpus.text_for_key(key)
             .or_else(|| fallback_text.map(String::from))
@@ -2554,7 +2734,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         Value::Object(obj)
     };
     let shown_k = dual_channel_depth(body, k);
-    let vector_ranked: Vec<Value> = vec_hits
+    let mut vector_ranked: Vec<Value> = vec_hits
         .as_array()
         .filter(|a| !a.is_empty())
         .map(|a| {
@@ -2570,29 +2750,33 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
                 .map(|key| build_hit(&mut corpus, key, None, None))
                 .collect()
         });
-    let bm25_ranked_response: Vec<Value> = bm25_ranked
+    let mut bm25_ranked_response: Vec<Value> = bm25_ranked
         .iter()
         .take(shown_k)
         .map(|(key, score)| build_hit(&mut corpus, key, Some(*score), None))
         .collect();
+    retain_hits_in_scope(&mut vector_ranked, ".", scope.as_ref());
+    retain_hits_in_scope(&mut bm25_ranked_response, ".", scope.as_ref());
+    if scope.is_some() {
+        retain_hits_in_scope(&mut phrase_hits, ".", scope.as_ref());
+        phrase_total = phrase_hits.len() as u64;
+    }
     if !vec_ids.is_empty() || !bm25_ids.is_empty() || !phrase_hits.is_empty() {
-        return ok(
-            "codesearch",
-            compact_dual_reply(
-                body,
-                query,
-                k,
-                json!({
+        let mut raw = json!({
                     "mode": "dual",
+                    "files_scanned": phrase_files_scanned,
+                    "count": (vector_ranked.len() + bm25_ranked_response.len() + phrase_hits.len()) as u64,
                     "vector_hits": vector_ranked,
                     "bm25_hits": bm25_ranked_response,
                     "phrase_hits": phrase_hits,
                     "phrase_hits_total": phrase_total,
                     "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
                     "commits": commits,
-                }),
-            ),
-        );
+                });
+        if let Some(scope) = scope.as_ref() {
+            apply_scope_echo(&mut raw, scope, &[&vector_ranked, &bm25_ranked_response]);
+        }
+        return ok("codesearch", compact_dual_reply(body, query, k, raw));
     }
     let ns = cfg.namespaces.code.as_str();
     let packed = unsafe {
@@ -2650,6 +2834,8 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             k,
             json!({
                 "mode": "fallback_kv", "degraded": vec_unavailable,
+                "files_scanned": phrase_files_scanned,
+                "count": (vector_ranked.len() + bm25_ranked_response.len() + phrase_hits.len()) as u64,
                 "hits": hits, "commits": commits, "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response,
                 "phrase_hits": phrase_hits,
                 "phrase_hits_total": phrase_total,
