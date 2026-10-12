@@ -119,22 +119,24 @@ impl RemoteRecord {
     }
 }
 
-/// Whether a remote probe is warranted. Derived from the pin being checked and the
-/// last known remote sha, never from a fixed TTL:
+/// Whether a remote probe is warranted. The probe answers exactly one question:
+/// "what is the tip of this (repo, reference)", so it is warranted only when this
+/// machine cannot already answer it:
 ///
 /// * no tip is recorded for this (repo, reference) yet, or
-/// * this project's checkout HEAD is not the recorded tip, or
 /// * the recorded tip has stood longer than the interval at which this ref was last
 ///   observed to move.
 ///
-/// A recorded probe failure replaces all three with a backoff counted in failures.
+/// A recorded probe failure replaces both with a backoff counted in failures. A
+/// project whose checkout is behind a freshly recorded tip never probes: the machine
+/// already holds the answer, and the project materializes to that tip.
 enum ProbeDecision {
     Due,
     Skip { sha: String },
     Backoff { reason: String },
 }
 
-fn probe_decision(rec: &RemoteRecord, have: Option<&str>, now: u64) -> ProbeDecision {
+fn probe_decision(rec: &RemoteRecord, now: u64) -> ProbeDecision {
     if rec.remote_sha.is_empty() {
         return ProbeDecision::Due;
     }
@@ -152,9 +154,6 @@ fn probe_decision(rec: &RemoteRecord, have: Option<&str>, now: u64) -> ProbeDeci
                     .unwrap_or_else(|| "the last remote probe failed".to_string()),
             }
         };
-    }
-    if have != Some(rec.remote_sha.as_str()) {
-        return ProbeDecision::Due;
     }
     let interval = if rec.change_interval_ms > 0 {
         rec.change_interval_ms
@@ -229,7 +228,7 @@ pub fn ensure_current(
     let have = local_sha(cache);
 
     let (remote, probed) =
-        match global_remote_tip(repo, reference, cache, have.as_deref(), now, debounce_ms) {
+        match global_remote_tip(repo, reference, cache, now, debounce_ms) {
             GlobalTip::Known { sha, probed } => (sha, probed),
             GlobalTip::Held => {
                 return match have {
@@ -383,13 +382,12 @@ fn global_remote_tip(
     repo: &str,
     reference: &str,
     cache: &str,
-    have: Option<&str>,
     now: u64,
     wait_budget_ms: u64,
 ) -> GlobalTip {
     let paths = probe_paths(repo, reference, cache);
     let rec = read_remote_record(&paths);
-    match probe_decision(&rec, have, now) {
+    match probe_decision(&rec, now) {
         ProbeDecision::Skip { sha } => return GlobalTip::Known { sha, probed: false },
         ProbeDecision::Backoff { reason } => return GlobalTip::Unavailable(reason),
         ProbeDecision::Due => {}
@@ -401,7 +399,7 @@ fn global_remote_tip(
     match acquire(&paths.lock()) {
         LockOutcome::Acquired => {
             let under_lock = read_remote_record(&paths);
-            let outcome = match probe_decision(&under_lock, have, now) {
+            let outcome = match probe_decision(&under_lock, now) {
                 ProbeDecision::Skip { sha } => GlobalTip::Known { sha, probed: false },
                 ProbeDecision::Backoff { reason } => GlobalTip::Unavailable(reason),
                 ProbeDecision::Due => probe_and_record(repo, reference, &paths, &under_lock, now),
