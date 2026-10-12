@@ -211,6 +211,115 @@ pub fn handle_output(content: &str) -> (String, String, i32) {
     ok_resp("task-output", result)
 }
 
+const WAIT_FOR_TASK_POLL_MS: u64 = 2_000;
+const WAIT_FOR_TASK_DEFAULT_MS: u64 = 100_000;
+const WAIT_FOR_TASK_MAX_MS: u64 = 100_000;
+
+#[cfg(target_arch = "wasm32")]
+fn host_sleep_ms(ms: u64) -> bool {
+    let code = format!("await new Promise(resolve => setTimeout(resolve, {ms}));");
+    let opts = json!({ "timeoutMs": ms.saturating_add(5_000) }).to_string();
+    let packed = unsafe {
+        crate::wasm_dispatch::host_exec_js(
+            code.as_ptr(),
+            code.len() as u32,
+            opts.as_ptr(),
+            opts.len() as u32,
+        )
+    };
+    let host = crate::wasm_dispatch::unpack_to_value_pub(packed);
+    host.get("exit_code").and_then(Value::as_i64) == Some(0)
+        && host.get("timed_out").and_then(Value::as_bool) != Some(true)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn host_sleep_ms(ms: u64) -> bool {
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+    true
+}
+
+pub fn handle_wait_for_task(content: &str) -> (String, String, i32) {
+    let body: Value = serde_json::from_str(content).unwrap_or(Value::Null);
+    let id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("task_id").and_then(|v| v.as_str()))
+        .or_else(|| body.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if id.is_empty() {
+        return err_resp("wait-for-task", "task id required");
+    }
+    let requested = body
+        .get("timeout_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(WAIT_FOR_TASK_DEFAULT_MS);
+    if requested == 0 || requested > WAIT_FOR_TASK_MAX_MS {
+        return err_resp(
+            "wait-for-task",
+            &format!("timeout_ms must be an integer 1..={WAIT_FOR_TASK_MAX_MS}"),
+        );
+    }
+    let started = host_now_ms();
+    let deadline = started.saturating_add(requested);
+    loop {
+        let listed = host_task("list", &json!({}));
+        if listed.get("ok").and_then(Value::as_bool) == Some(false) {
+            let msg = listed
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("task list failed")
+                .to_string();
+            return err_resp("wait-for-task", &msg);
+        }
+        let task = listed
+            .get("tasks")
+            .and_then(Value::as_array)
+            .and_then(|tasks| {
+                tasks
+                    .iter()
+                    .find(|t| t.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            })
+            .cloned();
+        let Some(task) = task else {
+            return err_resp("wait-for-task", &format!("task {id} not found"));
+        };
+        let now = host_now_ms();
+        let waited_ms = now.saturating_sub(started);
+        if task.get("status").and_then(Value::as_str) != Some("running") {
+            let output = host_task("output", &json!({ "id": id, "max_bytes": 65536 }));
+            return ok_resp(
+                "wait-for-task",
+                json!({
+                    "completed": true,
+                    "timed_out": false,
+                    "task": task,
+                    "output": output,
+                    "waited_ms": waited_ms,
+                }),
+            );
+        }
+        if now >= deadline {
+            return ok_resp(
+                "wait-for-task",
+                json!({
+                    "completed": false,
+                    "timed_out": true,
+                    "status": "running",
+                    "task": task,
+                    "timeout_ms": requested,
+                    "waited_ms": waited_ms,
+                    "note": "the task is still running when timeout_ms passed; dispatch wait-for-task with the same id again to keep waiting",
+                }),
+            );
+        }
+        if !host_sleep_ms((deadline - now).min(WAIT_FOR_TASK_POLL_MS)) {
+            return err_resp("wait-for-task", "the poll sleep host call failed");
+        }
+    }
+}
+
 pub fn live_running_tasks() -> Value {
     let result = host_task("list", &json!({}));
     let tasks = result
