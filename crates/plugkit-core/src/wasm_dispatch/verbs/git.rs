@@ -6677,6 +6677,17 @@ pub(super) fn body_pathspecs(body: &Value) -> Vec<String> {
     specs
 }
 
+fn git_stdout_lines(argv: &[&str], cwd: Option<&str>) -> Vec<String> {
+    git_call_argv(argv, cwd)
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 pub(super) fn git_stash(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_stash",
@@ -6698,33 +6709,44 @@ pub(super) fn git_stash(body: &Value) -> u64 {
     let paths = body_pathspecs(body);
     let mut scope: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
     scope.extend(GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
+    let mut stash_scope: Vec<String> = scope.iter().map(|s| s.to_string()).collect();
+    let mut untracked_count = 0usize;
+    let mut skipped_embedded: Vec<String> = Vec::new();
+    let mut skipped_ignored: Vec<String> = Vec::new();
     if include_untracked {
         let mut probe: Vec<&str> = vec!["ls-files", "--others", "--exclude-standard", "--"];
         probe.extend(scope.iter().copied());
-        let untracked = git_call_argv(&probe, cwd)
-            .get("stdout")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .lines()
-            .count();
-        if untracked > GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD {
+        let entries = git_stdout_lines(&probe, cwd);
+        untracked_count = entries.len();
+        if untracked_count > GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD {
             return err_json(
                 "git_stash",
                 json!({
-                    "error": format!("refusing to stash {} untracked files (limit {}): a stash that size runs for minutes and its clean phase deletes them from the worktree", untracked, GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD),
-                    "untracked_count": untracked,
+                    "error": format!("refusing to stash {} untracked files (limit {}): a stash that size runs for minutes and its clean phase deletes them from the worktree", untracked_count, GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD),
+                    "untracked_count": untracked_count,
                     "threshold": GIT_STASH_UNTRACKED_REFUSAL_THRESHOLD,
                     "hint": "pass paths:[...] to shelve only the files you mean, or include_untracked:false to shelve tracked changes only"
                 }),
             );
         }
+        for entry in entries {
+            if entry.ends_with('/') {
+                stash_scope.push(format!(":(exclude,literal){entry}"));
+                skipped_embedded.push(entry);
+            }
+        }
+        stash_scope.retain(|spec| !spec.starts_with(":(top,exclude).agentplug"));
+        skipped_ignored = git_stdout_lines(
+            &["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--", ".agentplug*"],
+            cwd,
+        );
     }
     let mut argv = vec!["stash", "push", "--message", message];
     if include_untracked {
         argv.push("--include-untracked");
     }
     argv.push("--");
-    argv.extend(scope.iter().copied());
+    argv.extend(stash_scope.iter().map(String::as_str));
     let r = git_call_argv(&argv, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let output = format!(
@@ -6749,8 +6771,13 @@ pub(super) fn git_stash(body: &Value) -> u64 {
             "created": created,
             "stash": if stash.is_empty() { Value::Null } else { json!(stash) },
             "include_untracked": include_untracked,
+            "untracked_count": untracked_count,
             "paths": paths,
             "excluded": GIT_PROTECTED_PATHSPECS.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            "skipped": {
+                "embedded_repos": skipped_embedded,
+                "ignored": skipped_ignored
+            },
             "output": output
         }),
     )
