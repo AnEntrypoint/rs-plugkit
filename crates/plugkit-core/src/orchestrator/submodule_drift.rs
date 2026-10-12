@@ -8,8 +8,12 @@ const KNOWN_SUBMODULES: &[&str] = &[
     "agentplug-treesitter",
 ];
 
-#[cfg(target_arch = "wasm32")]
 const SUBMODULE_GITLINK_MODE: &str = "160000";
+
+/// How far back a pin's previous value is searched for. The walk stops at the
+/// first commit that pinned anything other than HEAD's pin, so this bounds the
+/// search and is not the number of commits inspected.
+const PIN_HISTORY_COMMITS: usize = 50;
 
 #[derive(serde::Serialize)]
 pub struct DriftedSubmodule {
@@ -18,24 +22,72 @@ pub struct DriftedSubmodule {
     submodule_head_sha: String,
 }
 
+/// One submodule pointer that moved backwards: `new_sha` is not a descendant of
+/// `old_sha`, so this repo now points at a commit that does not contain one it
+/// already pointed at.
+#[derive(serde::Serialize)]
+pub struct PinRegression {
+    path: String,
+    old_sha: String,
+    new_sha: String,
+    where_found: String,
+}
+
 #[cfg(target_arch = "wasm32")]
-fn gm_tracked_gitlink_sha(path: &str) -> Option<String> {
-    let result = crate::wasm_dispatch::git_call_argv(&["ls-tree", "HEAD", "--", path], None);
-    let stdout = result
+fn call_stdout(argv: &[&str], cwd: Option<&str>) -> String {
+    crate::wasm_dispatch::git_call_argv(argv, cwd)
         .get("stdout")
         .and_then(|value| value.as_str())
-        .unwrap_or("");
-    let first_line = stdout.lines().next()?;
-    let mut fields = first_line.split_whitespace();
-    let mode = fields.next()?;
-    if mode != SUBMODULE_GITLINK_MODE {
+        .unwrap_or("")
+        .to_string()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn call_stdout(_argv: &[&str], _cwd: Option<&str>) -> String {
+    String::new()
+}
+
+/// `160000 commit <sha>\t<path>` -- the shape `git ls-tree <rev>` writes.
+fn parse_tree_gitlink(stdout: &str) -> Option<String> {
+    let mut fields = stdout.lines().next()?.split_whitespace();
+    if fields.next()? != SUBMODULE_GITLINK_MODE {
         return None;
     }
-    let object_type = fields.next()?;
-    if object_type != "commit" {
+    if fields.next()? != "commit" {
         return None;
     }
     fields.next().map(|sha| sha.trim().to_string())
+}
+
+/// `160000 <sha> <stage>\t<path>` -- the shape `git ls-files --stage` writes,
+/// which carries no object type between the mode and the sha.
+fn parse_index_gitlink(stdout: &str) -> Option<String> {
+    let mut fields = stdout.lines().next()?.split_whitespace();
+    if fields.next()? != SUBMODULE_GITLINK_MODE {
+        return None;
+    }
+    fields.next().map(|sha| sha.trim().to_string())
+}
+
+fn gm_tracked_gitlink_sha(path: &str) -> Option<String> {
+    parse_tree_gitlink(&call_stdout(&["ls-tree", "HEAD", "--", path], None))
+}
+
+/// The pin the *next* commit in this repo will write: `git add` has already put
+/// it in the index, so it is the value a pin commit lands even though HEAD does
+/// not carry it yet.
+fn staged_gitlink_sha(path: &str) -> Option<String> {
+    parse_index_gitlink(&call_stdout(&["ls-files", "--stage", "--", path], None))
+}
+
+fn pin_history_commits(path: &str) -> Vec<String> {
+    let limit = format!("-n{}", PIN_HISTORY_COMMITS);
+    call_stdout(&["log", limit.as_str(), "--format=%H", "--", path], None)
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -75,10 +127,19 @@ fn is_ancestor(ancestor: &str, descendant: &str, path: &str) -> bool {
     result.get("exit_code").and_then(|value| value.as_i64()) == Some(0)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn gm_tracked_gitlink_sha(_path: &str) -> Option<String> {
-    None
+/// An object the submodule's own clone has never fetched makes
+/// `merge-base --is-ancestor` fail, and a failed check is not proof that a pin
+/// moved backwards. Both ends are required to be present before either
+/// direction is claimed.
+#[cfg(target_arch = "wasm32")]
+fn commit_present(path: &str, sha: &str) -> bool {
+    let result = crate::wasm_dispatch::git_call_argv(
+        &["cat-file", "-e", &format!("{}^{{commit}}", sha)],
+        Some(path),
+    );
+    result.get("exit_code").and_then(|value| value.as_i64()) == Some(0)
 }
+
 #[cfg(not(target_arch = "wasm32"))]
 fn submodule_head_sha(_path: &str) -> Option<String> {
     None
@@ -86,6 +147,14 @@ fn submodule_head_sha(_path: &str) -> Option<String> {
 #[cfg(not(target_arch = "wasm32"))]
 fn is_ancestor(_ancestor: &str, _descendant: &str, _path: &str) -> bool {
     false
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn commit_present(_path: &str, _sha: &str) -> bool {
+    false
+}
+
+fn descendant_in_submodule(path: &str, old_sha: &str, new_sha: &str) -> bool {
+    commit_present(path, old_sha) && commit_present(path, new_sha) && is_ancestor(old_sha, new_sha, path)
 }
 
 pub fn submodule_paths() -> Vec<String> {
@@ -119,6 +188,60 @@ fn parse_gitmodules_paths(raw: &str) -> Vec<String> {
     out
 }
 
+/// Pins that moved backwards, from both places one can be observed: the index,
+/// which is the pin the next commit writes, and this repo's own history, which
+/// is where a pin that already landed backwards is visible.
+pub fn pin_regressions() -> Vec<PinRegression> {
+    let mut out = Vec::new();
+    for path in submodule_paths() {
+        let Some(pinned) = gm_tracked_gitlink_sha(&path) else {
+            continue;
+        };
+        if let Some(staged) = staged_gitlink_sha(&path) {
+            if staged != pinned && !descendant_in_submodule(&path, &pinned, &staged) {
+                out.push(PinRegression {
+                    path: path.clone(),
+                    old_sha: pinned.clone(),
+                    new_sha: staged,
+                    where_found: "the index -- the pin the next commit writes".to_string(),
+                });
+            }
+        }
+        for commit in pin_history_commits(&path) {
+            let Some(previous) = parse_tree_gitlink(&call_stdout(&["ls-tree", commit.as_str(), "--", path.as_str()], None)) else {
+                continue;
+            };
+            if previous == pinned {
+                continue;
+            }
+            if descendant_in_submodule(&path, &pinned, &previous) {
+                out.push(PinRegression {
+                    path: path.clone(),
+                    old_sha: previous,
+                    new_sha: pinned.clone(),
+                    where_found: format!("parent commit {} -- already published", commit),
+                });
+            }
+            break;
+        }
+    }
+    out
+}
+
+pub fn pin_regression_message(entry: &PinRegression) -> String {
+    format!(
+        "[submodule-pin-regression] SUBMODULE PIN MOVED BACKWARDS: {} -- old {}, new {}, and {} is NOT a descendant of {} ({}). This repo is pointing at a commit that does not contain one it already pointed at, which is what a stale read of the submodule tip looks like when another lane published after this one read it: that lane's commit is dropped from the pin. Not refused -- the pin is written as asked. Re-read the tip (git -C {} fetch origin, then git -C {} rev-parse origin/main) and bump the pin forward, or leave it if the older commit is deliberate.",
+        entry.path,
+        entry.old_sha,
+        entry.new_sha,
+        entry.new_sha,
+        entry.old_sha,
+        entry.where_found,
+        entry.path,
+        entry.path,
+    )
+}
+
 pub fn drifted_submodules() -> Vec<DriftedSubmodule> {
     let mut drifted = Vec::new();
     for path in submodule_paths() {
@@ -147,6 +270,7 @@ pub fn submodules_clean() -> bool {
 
 pub fn handle_check(_content: &str) -> (String, String, i32) {
     let drifted = drifted_submodules();
+    let regressions = pin_regressions();
     let recovery_command = if drifted.is_empty() {
         None
     } else {
@@ -160,6 +284,7 @@ pub fn handle_check(_content: &str) -> (String, String, i32) {
             drifted_paths,
         ))
     };
+    let warnings: Vec<String> = regressions.iter().map(pin_regression_message).collect();
     let payload = serde_json::json!({
         "ok": true,
         "clean": drifted.is_empty(),
@@ -169,6 +294,14 @@ pub fn handle_check(_content: &str) -> (String, String, i32) {
             "submodule_head_sha": entry.submodule_head_sha,
         })).collect::<Vec<_>>(),
         "recovery": recovery_command,
+        "pin_regressions": regressions.iter().map(|entry| serde_json::json!({
+            "path": entry.path,
+            "old_sha": entry.old_sha,
+            "new_sha": entry.new_sha,
+            "where_found": entry.where_found,
+        })).collect::<Vec<_>>(),
+        "pin_regression_count": regressions.len(),
+        "pin_regression_warning": if warnings.is_empty() { None } else { Some(warnings.join("\n")) },
     });
     (payload.to_string(), String::new(), 0)
 }
