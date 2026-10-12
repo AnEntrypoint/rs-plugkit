@@ -1873,8 +1873,6 @@ const EXTRACTION_RESERVE_MS: u64 = 500;
 
 const EMBED_BUDGET_DIVISOR: u64 = 3;
 
-const TOPUP_EMBED_BUDGET_MS: u64 = 1_500;
-
 const SYMBOL_SYNC_BUDGET_DIVISOR: u64 = 4;
 
 const ENUMERATION_BUDGET_DIVISOR: u64 = 4;
@@ -2506,7 +2504,7 @@ fn index_cfg_impl(
     let embed_budget_ms = if full_pass {
         index_wall_budget_ms / EMBED_BUDGET_DIVISOR
     } else {
-        TOPUP_EMBED_BUDGET_MS.min(index_wall_budget_ms)
+        0
     };
     let walk_share_ms = index_wall_budget_ms.saturating_sub(embed_budget_ms);
     let mut measured_embed_ms_per_chunk = pessimistic_ms_per_chunk;
@@ -4088,6 +4086,21 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
         Err(e) => return json!({ "ok": false, "error": e, "mode": "filename" }),
     };
     let listed = universe.files;
+    if listed.is_empty() && !crate::scan_universe::scope_has_no_entries(root, scope) {
+        return json!({
+            "ok": false,
+            "error": crate::scan_universe::empty_universe_refusal(
+                root,
+                scope,
+                universe.source,
+                universe.listing_complete,
+                universe.walk_reason.as_deref(),
+                file_cap,
+            ),
+            "error_kind": "empty_corpus",
+            "mode": "filename",
+        });
+    }
     let files_truncated = listed.len() > file_cap;
     let full_files: &[String] = if files_truncated {
         &listed[..file_cap]
@@ -4952,6 +4965,21 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
     };
     let listed = universe.files;
+    if listed.is_empty() && !crate::scan_universe::scope_has_no_entries(root, scope) {
+        return json!({
+            "ok": false,
+            "error": crate::scan_universe::empty_universe_refusal(
+                root,
+                scope,
+                universe.source,
+                universe.listing_complete,
+                universe.walk_reason.as_deref(),
+                file_cap,
+            ),
+            "error_kind": "empty_corpus",
+            "pattern": req.pattern,
+        });
+    }
     let files_truncated = listed.len() > file_cap;
     let files: &[String] = if files_truncated {
         &listed[..file_cap]
