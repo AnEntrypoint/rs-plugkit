@@ -687,7 +687,7 @@ pub fn resolve() -> Resolution {
 #[cfg(target_arch = "wasm32")]
 pub fn resolve_forced(project_root: &str) -> Resolution {
     let project_root = normalize_project_root(project_root);
-    let forced_fetcher = crate::config_sync::GitRepoFetcher::with_debounce_ms(0);
+    let forced_fetcher = crate::config_sync::GitRepoFetcher::forced();
     let resolution = resolve_with(&project_root, &forced_fetcher);
     if let Ok(mut cache) = RESOLVE_CACHE.lock() {
         if let Some(map) = cache.as_mut() {
