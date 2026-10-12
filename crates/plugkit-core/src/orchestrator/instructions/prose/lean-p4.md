@@ -1,8 +1,10 @@
-# LEAN-P4 VERIFY
+# LEAN VERIFY
 
-VERIFY attacks the built change with a verifier that has not read the implementation. It finds every way the change is false by live execution against real inputs, and discharges every SEC and RES obligation with a witness that names the kind discharged. The phase exits when the eight adversarial classes each have a live witness, every SEC and RES mutable is resolved, a multi-file diff has an independent review witness, the sanitizer gate is clean, and transition to=PRESSURE is dispatched.
+This is a concern of the method, not a stage of a pipeline: it is entered from whichever node the work reaches it from, and left as soon as what it asks for holds. No concern gates entry to a set of nodes.
 
-Principles in this phase are applied as work, from the lean method (AnEntrypoint/lean, skills/lean/SKILL.md). Each principle's attribution is the label used in fsm/graph.json, given in its heading below.
+VERIFY attacks the built change with a verifier that has not read the implementation. It finds every way the change is false by live execution against real inputs, and discharges every SEC and RES obligation with a witness that names the kind discharged. The node exits when the eight adversarial classes each have a live witness, every SEC and RES mutable is resolved, a multi-file diff has an independent review witness, the sanitizer gate is clean, and transition to=PRESSURE is dispatched.
+
+Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's attribution is the label used in fsm/graph.json, given in its heading below.
 
 ## Verbs
 
@@ -18,7 +20,7 @@ Dispatch the eight adversarial classes one at a time, each as its own exec_js pr
 
 For a multi-file diff, dispatch independent reviewers with the Agent tool. A reviewer gets the file list, the PRD rows and the changed signatures, never the implementer's reasoning. Its prompt opens with "use the gm skill for this; code questions go to codeinsight (callers/impact) first, then codesearch, and Read only a located path", carries its own SESSION_ID built from the parent id plus an index (for example "<parent_session_id>-sub1"), and says "assume this is broken, find why".
 
-Rows and mutables are handled with prd-add {"id":"<kebab-case-slug>","subject":"<what it proves or repairs>"}, prd-resolve {"id":"<row id>","witness_evidence":"<file:line or exec output>"}, mutable-add {"id":"<kebab-case-slug>","value":"<the unknown>","obligation_kind":"<kind>","depends_on":["<id>"]} and mutable-resolve {"mutable_id":"<id>","witness_evidence":"<witness>"}.
+Rows and mutables are handled with prd-add {"id":"<kebab-case-slug>","subject":"<what it proves or repairs>"}, prd-resolve {"id":"<row id>","witness_evidence":"<file:line or exec output>","witness_dispatch_id":"<dispatch id of your live run>"}, mutable-add {"id":"<kebab-case-slug>","value":"<the unknown>","obligation_kind":"<kind>","depends_on":["<id>"]} and mutable-resolve {"mutable_id":"<id>","witness_evidence":"<witness>"}.
 
 ## PRD rows
 
@@ -32,7 +34,7 @@ Every SEC and RES obligation is added as a mutable when found, with obligation_k
 
 mutable-add refuses a depends_on that closes a cycle and names the cycle path. mutable-resolve refuses while a depends_on id is pending and names it; resolve dependencies first, in order, never around them. The gates sec-obligations-ready and res-obligations-ready refuse on any untyped or blocked pending kind of their family and name the offender.
 
-Each resolution's witness names the kind discharged and how. After two genuine failed attempts on one mutable, stop repeating the approach: add a fresh mutable with a new id and a narrower scope that states what the failures revealed, and transition to=SHAPE if that reshapes the plan. Closure requires mutables-all-resolved, so a pending mutable of any kind blocks it, including kinds owned by other phases.
+Each resolution's witness names the kind discharged and how. After two genuine failed attempts on one mutable, stop repeating the approach: add a fresh mutable with a new id and a narrower scope that states what the failures revealed, and transition to=SHAPE if that reshapes the plan. Closure requires mutables-all-resolved, so a pending mutable of any kind blocks it, including kinds owned by other nodes.
 
 ## Security obligations
 
@@ -62,7 +64,7 @@ Handover: Presence witnessed on real inputs is handed to ORACLEBIAS so the probe
 
 Before claiming correctness, the agent names the one red-capable command that drives the reported behaviour on the real surface, runs it, and records the output. A pass is recorded as presence of the behaviour on that input. Each absence claim (no panic, no leak, no injection, no duplicate effect) moves into the adversarial classes or the SEC and RES sweeps, where it is witnessed on inputs that could falsify it.
 
-No standing test file is introduced. no-synthetic-test-files refuses a new *.test.* or *.spec.* file, a test or __tests__ directory, or a testing-framework import. Such a file is deleted, its assertions are re-expressed as an exec_js probe against the real boundary that prints observed values, and the probe is not committed.
+No standing test file is introduced. no-synthetic-test-files is diff-scoped as predicates.md:19 defines it: it is true when the working diff introduces no standing test file (*.test.*, *.spec.*, or a test, tests or __tests__ directory). A test file this walk created is deleted: untracked or staged as a new file now, and absent from both `git ls-files` and the untracked set recorded at session start. Its assertions are re-expressed as an exec_js probe against the real boundary that prints observed values, and the probe is not committed. A tracked test file, such as `gm-mcp/test/*`, is never deleted or edited by this rule: leave it byte-identical and report it as tracked.
 
 ### ORACLEBIAS - Implementation-Biased Test Generation - LLM test-generation study
 
@@ -74,7 +76,7 @@ Every probe's expected value comes from the row's pre and post conditions and th
 
 Handover: The independent verifier's probes are handed to ADVERSARIAL so a red reviewer tries to refute the change. cite Independence-Based Verification - Grabowski.
 
-The verifier is a separate agent with its own SESSION_ID. It receives the contract (rows, signatures, types, stated invariants) and the exec_js commands the phase will run, and nothing from the implementer's transcript. Its report lists each probe with the exact command and output. The implementer never writes the verifier's probes or edits its report. When the two turn out to share context, the backreference to ADVERSARIAL fires and a second independent agent re-runs the findings before any is accepted.
+The verifier is a separate agent with its own SESSION_ID. It receives the contract (rows, signatures, types, stated invariants) and the exec_js commands the node will run, and nothing from the implementer's transcript. Its report lists each probe with the exact command and output. The implementer never writes the verifier's probes or edits its report. When the two turn out to share context, the backreference to ADVERSARIAL fires and a second independent agent re-runs the findings before any is accepted.
 
 ### ADVERSARIAL - Adversarial Red-Blue Agent Verification - Thukkaram
 
@@ -88,7 +90,7 @@ The eight classes, each one exec_js probe: empty, overflow and reentrant input (
 
 Handover: Property results on pure functions are handed to PBTAGENT so candidate properties are admitted only from the contract. cite QuickCheck Property-Based Testing - Claessen and Hughes.
 
-For each pure function the diff adds or changes, one exec_js script generates inputs from a seeded pseudo-random generator, runs at least one thousand cases, and prints the first counterexample in full. Properties come from the contract: round trips where an inverse exists, idempotence where a row states it, invariant preservation over outputs, totality over the stated domain. A falsified property fires the backreference to ILLEGAL: transition to=CONTRACT, because the type cannot express the rule.
+For each pure function the diff adds or changes, one exec_js script generates inputs from a seeded pseudo-random generator, runs at least one thousand cases, and on the first falsified case runs a shrink pass that reduces the input to a minimal counterexample, then prints that minimal case in full. Properties come from the contract: round trips where an inverse exists, idempotence where a row states it, invariant preservation over outputs, totality over the stated domain. A falsified property fires the backreference to ILLEGAL: transition to=CONTRACT, because the type cannot express the rule.
 
 ### PBTAGENT - Agentic Property-Based Testing - Hypothesis agent study
 
@@ -175,10 +177,10 @@ A recurring failure class found by a probe is persisted when confirmed: memorize
 
 ## Transition
 
-The phase is entered from BUILD through G_INDEP, the gate for "verifier has not read the implementation". Its predicate lean-verifier-independent is advisory and always passes, so independence is held by dispatching a fresh verifier agent before transition {"to":"VERIFY"}, not by the gate.
+The node is entered from BUILD through G_INDEP, the gate for "verifier has not read the implementation". Its predicate lean-verifier-independent is advisory and always passes, so independence is held by dispatching a fresh verifier agent before transition {"to":"VERIFY"}, not by the gate.
 
-The exit runs SANITIZE to G_NET, the gate for "change closes net-negative, or states why not", whose predicate lean-net-negative is blocking: it passes only when added lines in the working diff are at most the removed lines. Leave with transition {"to":"PRESSURE"} once every mutable and row of this phase is resolved and the net count passes. A denial names next_dispatch; dispatch it first, which removes superseded or duplicated code in the same change, then re-dispatch transition {"to":"PRESSURE"}. The predicate reads no growth reason, so a growing change is refused until it shrinks.
+The exit runs SANITIZE to G_NET, the gate for "change closes net-negative, or states why not", whose predicate lean-net-negative is blocking: it passes only when added lines in the working diff are at most the removed lines. Leave with transition {"to":"PRESSURE"} once every mutable and row of this node is resolved and the net count passes. A denial names next_dispatch; dispatch it first, which removes superseded or duplicated code in the same change, then re-dispatch transition {"to":"PRESSURE"}. The predicate reads no growth reason, so a growing change is refused until it shrinks.
 
-Feedback routes each discovery to the earliest phase able to fix it. A gap between spec and code routes to SHAPE. A boundary or ownership defect routes to CONTRACT when the type cannot express the rule (ILLEGAL), and to BUILD when the repair is code. A panic, unchecked error or partial-failure repair routes to BUILD. A failing invariant or property routes to CONTRACT through DBC or ILLEGAL. A sanitizer finding the type system could have prevented routes to BUILD. An assertion that mirrors the code routes to G_INDEP for a fresh verifier. Take the graph edge whose label matches the discovery and re-walk from where it lands.
+Feedback routes each discovery to the earliest node able to fix it. A gap between spec and code routes to SHAPE. A boundary or ownership defect routes to CONTRACT when the type cannot express the rule (ILLEGAL), and to BUILD when the repair is code. A panic, unchecked error or partial-failure repair routes to BUILD. A failing invariant or property routes to CONTRACT through DBC or ILLEGAL. A sanitizer finding the type system could have prevented routes to BUILD. An assertion that mirrors the code routes to G_INDEP for a fresh verifier. Take the graph edge whose label matches the discovery and re-walk from where it lands.
 
 A gate denial is never retried blind: dispatch the next_dispatch verb the denial names, then continue. An identical denial repeated three times is escalated by the repeat threshold, and the escalation is read before any further dispatch.

@@ -1,12 +1,14 @@
-# LEAN-P6 PRESSURE
+# LEAN PRESSURE
 
-PRESSURE removes what the change did not need. It finds every superseded path, fallback, duplicate, dead function and unreachable entry point the change left behind, deletes each one only after callers, codesearch and a build check prove nothing still depends on it, and keeps the diff net-negative or records why it is not. The phase exits when the deletion-completeness check and reachability analysis pass for every removed or superseded symbol, the diff budget holds, and transition to=RECORD is dispatched.
+This is a concern of the method, not a stage of a pipeline: it is entered from whichever node the work reaches it from, and left as soon as what it asks for holds. No concern gates entry to a set of nodes.
 
-Principles in this phase are applied as work, from the lean method (AnEntrypoint/lean, skills/lean/SKILL.md). Each principle's attribution is the label used in fsm/graph.json, given in its heading below.
+PRESSURE removes what the change did not need. It finds every superseded path, fallback, duplicate, dead function and unreachable entry point the change left behind, deletes each one only after callers, codesearch and a build check prove nothing still depends on it, and keeps the diff net-negative or records why it is not. The node exits when the deletion-completeness check and reachability analysis pass for every removed or superseded symbol, the diff budget holds, and transition to=RECORD is dispatched.
+
+Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's attribution is the label used in fsm/graph.json, given in its heading below.
 
 ## Verbs
 
-Enter from VERIFY through gate G_NET (predicate lean-net-negative), after the net-negative gate has passed; the walk then sits at state NODELETE, the phase's first node in fsm/graph.json. Read the size with git_diff {"stat":true}, then each file's diff with git_diff {"path":"<file>"}, so every added line traces to a row. git_log {"path":"<file>","limit":20} shows the churn on each touched file.
+Enter from VERIFY through gate G_NET (predicate lean-net-negative), after the net-negative gate has passed; the walk then sits at state NODELETE, the node's first node in fsm/graph.json. Read the size with git_diff {"stat":true}, then each file's diff with git_diff {"path":"<file>"}, so every added line traces to a row. git_log {"path":"<file>","limit":20} shows the churn on each touched file.
 
 For each symbol the change removed or left beside its replacement, prove removal with three checks: callers {"symbol":"<name>","limit":50} returns no edges; codesearch {"query":"<name>","mode":"literal","root":"<absolute project root>"} returns no hit outside history; codeinsight {"action":"orphans"} does not list it. For each removed file, codesearch {"query":"<file path>","mode":"filename","root":"<absolute project root>"} returns no hit.
 
@@ -16,11 +18,11 @@ Reachability runs impact {"symbol":"<entry name>","max_depth":6,"direction":"cal
 
 A deletion is made by fs_read {"path":"<file>","offset":<line>,"limit":<count>} to read the exact span, then fs_write {"path":"<file>","content":"<whole file with the span removed>"}. fs_write takes the whole file, so the complete file is read first. Each deletion is verified by exec_js running the project's build check through execFileSync: cargo check for the crate or node --check for the file, with timeoutMs of at least 120000 for a Rust crate. git_status and git_diff {"stat":true} follow each deletion to show the net count and any dirty file. Git runs only through the git_* verbs, never a Bash or PowerShell tool call.
 
-Re-dispatch instruction between deletions, after a failed build check, and whenever a removed symbol turns out to have a caller, since the deletion order matters and this phase drifts easily.
+Re-dispatch instruction between deletions, after a failed build check, and whenever a removed symbol turns out to have a caller, since the deletion order matters and this node drifts easily.
 
 ## PRD rows
 
-A superseded path, fallback, duplicate or dead symbol becomes a row the moment it is spotted: prd-add {"id":"<kebab-case-slug>","subject":"<the symbol or path and what replaces it>"}. Each removal closes with prd-resolve {"id":"<row id>","witness_evidence":"<zero-hit codesearch reply and build output for that symbol>"}. Identical witness text across rows is refused, so each row cites its own zero-hit reply.
+A superseded path, fallback, duplicate or dead symbol becomes a row the moment it is spotted: prd-add {"id":"<kebab-case-slug>","subject":"<the symbol or path and what replaces it>"}. Each removal closes with prd-resolve {"id":"<row id>","witness_evidence":"<zero-hit codesearch reply and build output for that symbol>","witness_dispatch_id":"<dispatch id of your live run>"}. Identical witness text across rows is refused, so each row cites its own zero-hit reply.
 
 A removal that cannot yet be proven safe is a row whose subject is the proof it needs, such as "prove the legacy parser has no callers in the crates outside the workspace", and that proof is run with codesearch against the other root. A row is never closed by reasoning that a symbol looks unused.
 
@@ -28,7 +30,7 @@ The agent never writes deferral wording into a row or a transition note. Wording
 
 ## Mutables
 
-PRESSURE owns no obligation kind. A mutable is created only when a removal reveals an unknown a previous phase must answer, such as an unproven caller in another repository: mutable-add {"id":"<kebab-case-slug>","value":"<the unknown>","depends_on":["<ids>"]}, with no obligation_kind, resolved by mutable-resolve {"mutable_id":"<id>","witness_evidence":"<codesearch hit or zero-hit reply>"}.
+PRESSURE owns no obligation kind. A mutable is created only when a removal reveals an unknown a previous node must answer, such as an unproven caller in another repository: mutable-add {"id":"<kebab-case-slug>","value":"<the unknown>","depends_on":["<ids>"]}, with no obligation_kind, resolved by mutable-resolve {"mutable_id":"<id>","witness_evidence":"<codesearch hit or zero-hit reply>"}.
 
 ## Principles
 
@@ -163,10 +165,10 @@ Deleted symbol and file lists live in the commit and the rows. Diff stats live i
 
 ## Transition
 
-The phase is entered from VERIFY through G_NET, the gate for "change closes net-negative, or states why not". Its predicate lean-net-negative is blocking: it passes only when added lines in the working diff against HEAD are at most the removed lines. Enter the walk at state NODELETE only after the G_NET gate passes. A denial names next_dispatch: dispatch it, which removes superseded or duplicated code in this change, then re-dispatch the G_NET transition. The predicate reads no growth reason, so the denial clears by shrinking the diff, not by describing it.
+The node is entered from VERIFY through G_NET, the gate for "change closes net-negative, or states why not". Its predicate lean-net-negative is blocking: it passes only when added lines in the working diff against HEAD are at most the removed lines. Enter the walk at state NODELETE only after the G_NET gate passes. A denial names next_dispatch: dispatch it, which removes superseded or duplicated code in this change, then re-dispatch the G_NET transition. The predicate reads no growth reason, so the denial clears by shrinking the diff, not by describing it.
 
 The exit is DIFFBUDGET to CONVCOM, a forward edge with no gate. Dispatch transition {"to":"RECORD"} once every removal has its zero-hit or reachability witness, and the net count passes. The gate lean-contract-recorded is checked at the next boundary, in RECORD, where it refuses until every PRD row is closed and the worktree is clean.
 
-Feedback routes each discovery to the earliest phase able to fix it. A net-positive diff that removals cannot shrink returns to G_NET and BUILD, because the grown code must be rebuilt in a smaller shape. A superseded path still reachable is cut under DELETIONGATE here. A new symbol with no entry point is removed here. An accidental state caused by a type that does not express its invariant returns to CONTRACT through ILLEGAL. A description that exceeds its content returns to CONTRACT through DEEPMOD. Duplicate behaviour is merged in BUILD through DRY. A drift finding returns to VERIFY through INVARIANTRUN, because behaviour is re-witnessed there rather than accepted here.
+Feedback routes each discovery to the earliest node able to fix it. A net-positive diff that removals cannot shrink returns to G_NET and BUILD, because the grown code must be rebuilt in a smaller shape. A superseded path still reachable is cut under DELETIONGATE here. A new symbol with no entry point is removed here. An accidental state caused by a type that does not express its invariant returns to CONTRACT through ILLEGAL. A description that exceeds its content returns to CONTRACT through DEEPMOD. Duplicate behaviour is merged in BUILD through DRY. A drift finding returns to VERIFY through INVARIANTRUN, because behaviour is re-witnessed there rather than accepted here.
 
 A gate denial is never retried blind: dispatch the next_dispatch verb the denial names, then re-dispatch the transition. An identical denial repeated three times is escalated by the repeat threshold, and the escalation is read before any further dispatch.

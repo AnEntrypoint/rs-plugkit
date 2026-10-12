@@ -1,5 +1,5 @@
 # git bisect as the Regression Oracle - Linus Torvalds
 
-Principle `BISECT`, phase P5 RECORD. Apply "git bisect as the Regression Oracle - Linus Torvalds" to the work of the P5 RECORD phase.
+Principle `BISECT`. Apply "git bisect as the Regression Oracle - Linus Torvalds" to the work this node stands on. The node is entered from any neighbour that leads here and left to any neighbour it links to; its place in a walk is decided by the work it applies to, not by a bucket.
 
 The walk is recorded by the transition that leaves this node.

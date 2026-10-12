@@ -1,8 +1,10 @@
-# LEAN-P3 BUILD
+# LEAN BUILD
 
-BUILD writes the source that inhabits the CONTRACT phase's signatures. Every new function is total, every resource has exactly one owner, every operation replays to the same state, and every concurrent access is ordered by a sync point or provably disjoint. Each property is witnessed live. The phase writes only the artifacts the PRD names, verifies each one from disk, and exits when every STATE-kind and CONC-kind mutable is resolved, the diff passes the source hygiene predicates, and `transition to=VERIFY` is dispatched through the G_INDEP gate.
+This is a concern of the method, not a stage of a pipeline: it is entered from whichever node the work reaches it from, and left as soon as what it asks for holds. No concern gates entry to a set of nodes.
 
-Principles in this phase are applied as work, from the lean method (AnEntrypoint/lean, skills/lean/SKILL.md). Each H3 below carries a principle key, then the attribution exactly as fsm/graph.json labels it.
+BUILD writes the source that inhabits the CONTRACT node's signatures. Every new function is total, every resource has exactly one owner, every operation replays to the same state, and every concurrent access is ordered by a sync point or provably disjoint. Each property is witnessed live. The node writes only the artifacts the PRD names, verifies each one from disk, and exits when every STATE-kind and CONC-kind mutable is resolved, the diff passes the source hygiene predicates, and `transition to=VERIFY` is dispatched through the G_INDEP gate.
+
+Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each H3 below carries a principle key, then the attribution exactly as fsm/graph.json labels it.
 
 ## Verbs
 
@@ -22,7 +24,7 @@ Route every mutation through the PRD, a mutable, or a memo. The audit tuple of e
 
 Resolve a row with prd-resolve once its witness has printed its output. The row's route family selects the bar. A row tagged `observability` is resolved only when its inspection point (a queryable endpoint, a debug hook, a structured log line) ships in the same pass as the subsystem it covers. A subsystem shipped without its inspection point is an unresolved row, and resolving it is a false completion.
 
-Write-then-check exposes adjacent artifacts: a generated file the build needs, a document that names the new artifact, a witness script. Each becomes `prd-add` in the same turn, because an observation not recorded in the turn it appears evaporates with the turn. An unrelated issue found mid-build is also a prd-add row, never fixed inline in this phase and never dropped.
+Write-then-check exposes adjacent artifacts: a generated file the build needs, a document that names the new artifact, a witness script. Each becomes `prd-add` in the same turn, because an observation not recorded in the turn it appears evaporates with the turn. An unrelated issue found mid-build is also a prd-add row, never fixed inline in this node and never dropped.
 
 Pass `commit_comment` on prd-resolve for a row whose resolution deserves a line of history. Omit it for rows too granular to warrant one.
 
@@ -36,7 +38,7 @@ Dependency rule: resolve in order. A mutable whose depends_on are all resolved i
 
 Two-pass rule: a mutable that survives two genuine resolution attempts without a witness is reclassified as a fresh unknown with a new id, the affected rows are re-cut, and the walk reshapes with `transition to=SHAPE`. The same discipline holds for a repair attempt that fails twice: change the approach in the next attempt, witness the result, and do not repeat the identical approach.
 
-Gate-driven repair: a finding that is a code repair is an Edit followed by a disk Read of the touched path and the same live witness, all inside this phase. A finding that changes the state model (the ownership or disjointness boundary is wrong) is a new STATE or CONC mutable, and the sweep repeats for the new boundary.
+Gate-driven repair: a finding that is a code repair is an Edit followed by a disk Read of the touched path and the same live witness, all inside this node. A finding that changes the state model (the ownership or disjointness boundary is wrong) is a new STATE or CONC mutable, and the sweep repeats for the new boundary.
 
 ## Machine fit
 
@@ -86,7 +88,7 @@ Contention is also bounded here. Every wait has a bound, every retry a cap, and 
 
 Handover: Hands the merged single definitions to KISS, so the simplest construction that satisfies the contract is written; nominated next node: KISS; cite Don't Repeat Yourself - Hunt and Thomas.
 
-One fact has one representation. Before a new function is written, codesearch in literal mode for its behaviour's distinctive tokens finds the existing copy, and the reuse decision is recorded in the mutable's witness. Two representations of one fact fire the backreference to KOLMOGOROV, which belongs to the pressure phase (P6). Two functions that mean the same thing are merged rather than kept side by side. The witness is the exhaustive codesearch reply showing one definition and its call sites.
+One fact has one representation. Before a new function is written, codesearch in literal mode for its behaviour's distinctive tokens finds the existing copy, and the reuse decision is recorded in the mutable's witness. Two representations of one fact fire the backreference to KOLMOGOROV, which belongs to the pressure node (P6). Two functions that mean the same thing are merged rather than kept side by side. The witness is the exhaustive codesearch reply showing one definition and its call sites.
 
 ### KISS - KISS - Kelly Johnson
 
@@ -100,9 +102,9 @@ Each obligation kind is discharged by a live exec_js run, same turn, and witness
 
 A sweep that depends on the interleaving that happened to occur is not a pass. Each sweep is run again under a different seed before it resolves. A happy-path-only run has not audited anything.
 
-Before the phase closes, three diff predicates must hold. no-synthetic-test-files: the diff adds no standing test file, no test or tests or __tests__ directory, and no test framework or assertion or mocking library. Verification is a live exec_js witness against real code, never a suite. no-graphical-symbols-in-diff: new lines contain no decorative non-ASCII glyph such as arrows, box drawing, stars, bullets, checks, crosses or emoji. no-admit-deferral-markers: new source lines contain no colon-form admit marker, no placeholder macro that panics or is unimplemented, and no phrase saying a path is not implemented. A marker stands in for a complete proof, so it is rejected. A failing predicate names the offending lines, and each one is fixed and re-witnessed in this phase.
+Before the node closes, three diff predicates must hold. no-synthetic-test-files: the working diff introduces no standing test file (*.test.*, *.spec.*, or a test, tests or __tests__ directory), as predicates.md:19 defines it. Verification is a live exec_js witness against real code, never a suite. no-graphical-symbols-in-diff: new lines contain no decorative non-ASCII glyph such as arrows, box drawing, stars, bullets, checks, crosses or emoji. no-admit-deferral-markers: new source lines contain no colon-form admit marker, no placeholder macro that panics or is unimplemented, and no phrase saying a path is not implemented. A marker stands in for a complete proof, so it is rejected. A failing predicate names the offending lines, and each one is fixed and re-witnessed in this node.
 
-Idempotent-dispatch-replay-safe is checked against the audit tuples of the replays. A same-input replay that reached a different outcome is a violation, and it returns the walk to this phase's replay mutable.
+Idempotent-dispatch-replay-safe is checked against the audit tuples of the replays. A same-input replay that reached a different outcome is a violation, and it returns the walk to this node's replay mutable.
 
 ## Memorize
 
@@ -110,10 +112,10 @@ Memorize the decisions that a subsequent task would otherwise re-derive: the sin
 
 ## Transition
 
-The exit is `transition to=VERIFY`, the lean verification phase, dispatched only when every STATE-kind and CONC-kind mutable is resolved and witnessed, every row is resolved, and the three diff predicates above hold. The state-obligations-ready and conc-obligations-ready predicates name any pending row they refuse, and that row is resolved next.
+The exit is `transition to=VERIFY`, the lean verification node, dispatched only when every STATE-kind and CONC-kind mutable is resolved and witnessed, every row is resolved, and the three diff predicates above hold. The state-obligations-ready and conc-obligations-ready predicates name any pending row they refuse, and that row is resolved next.
 
-The edge from KISS runs through the G_INDEP gate, verifier has not read the implementation. The gate predicate is advisory and never refuses, so this phase enforces the rule itself: the verifier is a fresh subagent with its own session_id, given only the contract text (the PRD rows and the signatures) and no reading of the implementation. A verifier that has read the code inherits its assumptions, and its verdict is discarded.
+The edge from KISS runs through the G_INDEP gate, verifier has not read the implementation. The gate predicate is advisory and never refuses, so this node enforces the rule itself: the verifier is a fresh subagent with its own session_id, given only the contract text (the PRD rows and the signatures) and no reading of the implementation. A verifier that has read the code inherits its assumptions, and its verdict is discarded.
 
-Feedback routes to the earliest capable phase. A partial function that escaped its domain goes to CONTRACT through PARSEDV. A function that mixes abstraction levels goes to CONTRACT through DEEPMOD. A surplus generality goes to SHAPE through YAGNI. A reshaping discovery (the ownership or disjointness boundary is wrong, the spec assumed a shape that reality does not have) goes to `transition to=SHAPE`, with the affected rows re-cut in place by prd-add on their existing ids. A code repair stays in BUILD and is witnessed again in this phase.
+Feedback routes to the earliest capable node. A partial function that escaped its domain goes to CONTRACT through PARSEDV. A function that mixes abstraction levels goes to CONTRACT through DEEPMOD. A surplus generality goes to SHAPE through YAGNI. A reshaping discovery (the ownership or disjointness boundary is wrong, the spec assumed a shape that reality does not have) goes to `transition to=SHAPE`, with the affected rows re-cut in place by prd-add on their existing ids. A code repair stays in BUILD and is witnessed again in this node.
 
 A transition refused with a next_dispatch is dispatched next, not narrated. Repeated identical refusals escalate at gate_repeat_escalate_threshold (default 3), and the named recovery verb is dispatched instead of the denied transition.

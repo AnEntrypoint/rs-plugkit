@@ -1,6 +1,6 @@
 # INVEST - Bill Wake
 
-Principle `INVEST`, phase P1 SHAPE. Apply "INVEST - Bill Wake" to the work of the P1 SHAPE phase.
+Principle `INVEST`. Apply "INVEST - Bill Wake" to the work this node stands on. The node is entered from any neighbour that leads here and left to any neighbour it links to; its place in a walk is decided by the work it applies to, not by a bucket.
 
 Check each PRD row against six INVEST criteria. Each check is proven by a live exec_js dispatch, never by a test file, and the row's witness line records the expected output before the dispatch runs.
 

@@ -1,6 +1,6 @@
 # Stateful Invariant Runs over Random Call Sequences - Foundry and Hypothesis
 
-Principle `INVARIANTRUN`, phase P4 VERIFY. Apply "Stateful Invariant Runs over Random Call Sequences - Foundry and Hypothesis" to the work of the P4 VERIFY phase.
+Principle `INVARIANTRUN`. Apply "Stateful Invariant Runs over Random Call Sequences - Foundry and Hypothesis" to the work this node stands on. The node is entered from any neighbour that leads here and left to any neighbour it links to; its place in a walk is decided by the work it applies to, not by a bucket.
 
 Handover: Invariant results over call sequences are handed to METAMORPH so outputs without an oracle are checked by stated relations. cite Stateful Invariant Runs over Random Call Sequences - Foundry and Hypothesis.
 

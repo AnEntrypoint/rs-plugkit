@@ -1,814 +1,883 @@
 {
   "schema_version": 2,
-  "source": "skills/dream-rsi/lean-graph.json (lean SKILL.md Graph section)",
+  "source": "hand-authored in this file; no generator produces it",
   "states": [
     {
       "key": "G_START",
       "prose_key": "g_start",
       "label": "one task in flight",
-      "kind": "gate",
-      "phase": null
+      "kind": "gate"
     },
     {
       "key": "G_CONTRACT",
       "prose_key": "g_contract",
       "label": "contract is the only durable description",
-      "kind": "gate",
-      "phase": null
+      "kind": "gate"
     },
     {
       "key": "G_INDEP",
       "prose_key": "g_indep",
       "label": "verifier has not read the implementation",
-      "kind": "gate",
-      "phase": null
+      "kind": "gate"
     },
     {
       "key": "G_NET",
       "prose_key": "g_net",
       "label": "change closes net-negative, or states why not",
-      "kind": "gate",
-      "phase": null
+      "kind": "gate"
     },
     {
       "key": "G_DONE",
       "prose_key": "g_done",
       "label": "contract satisfied and recorded",
-      "kind": "gate",
-      "phase": null
+      "kind": "gate"
     },
     {
       "key": "G_SWEEP",
       "prose_key": "g_sweep",
       "label": "full sweep, all phases",
-      "kind": "gate",
-      "phase": null
+      "kind": "gate"
     },
     {
       "key": "G_FIXPOINT",
       "prose_key": "g_fixpoint",
       "label": "sweep changed nothing",
-      "kind": "terminal",
-      "phase": null
+      "kind": "terminal"
     },
     {
       "key": "G_SURFACE",
       "prose_key": "g_surface",
       "label": "variant did not decrease",
-      "kind": "gate",
-      "phase": null
+      "kind": "gate"
     },
     {
       "key": "COMPLETE",
       "prose_key": "complete",
       "label": "walk complete",
-      "kind": "terminal",
-      "phase": null
+      "kind": "terminal"
     },
     {
       "key": "JTBD",
       "prose_key": "jtbd",
       "label": "Jobs To Be Done - Clayton Christensen",
-      "kind": "principle",
-      "phase": "P1",
-      "skill": "gm-lean-p1"
+      "kind": "principle"
     },
     {
       "key": "XYPROB",
       "prose_key": "xyprob",
       "label": "XY Problem",
-      "kind": "principle",
-      "phase": "P1",
-      "skill": "gm-lean-p1"
+      "kind": "principle"
     },
     {
       "key": "EARS",
       "prose_key": "ears",
       "label": "EARS Requirements Syntax - Alistair Mavin",
-      "kind": "principle",
-      "phase": "P1",
-      "skill": "gm-lean-p1"
+      "kind": "principle"
     },
     {
       "key": "INVEST",
       "prose_key": "invest",
       "label": "INVEST - Bill Wake",
-      "kind": "principle",
-      "phase": "P1",
-      "skill": "gm-lean-p1"
+      "kind": "principle"
     },
     {
       "key": "THINSLICE",
       "prose_key": "thinslice",
       "label": "Thin Vertical Slice - Alistair Cockburn",
-      "kind": "principle",
-      "phase": "P1",
-      "skill": "gm-lean-p1"
+      "kind": "principle"
     },
     {
       "key": "SPIKE",
       "prose_key": "spike",
       "label": "Spike Solution - Kent Beck",
-      "kind": "principle",
-      "phase": "P1",
-      "skill": "gm-lean-p1"
+      "kind": "principle"
     },
     {
       "key": "YAGNI",
       "prose_key": "yagni",
       "label": "YAGNI - Ron Jeffries",
-      "kind": "principle",
-      "phase": "P1",
-      "skill": "gm-lean-p1"
+      "kind": "principle"
     },
     {
       "key": "LIVEPLAN",
       "prose_key": "liveplan",
       "label": "Live Plan, Current Task Only",
-      "kind": "principle",
-      "phase": "P1",
-      "skill": "gm-lean-p1"
+      "kind": "principle"
     },
     {
       "key": "UBIQ",
       "prose_key": "ubiq",
       "label": "Ubiquitous Language - Eric Evans",
-      "kind": "principle",
-      "phase": "P2",
-      "skill": "gm-lean-p2"
+      "kind": "principle"
     },
     {
       "key": "CLEANNAME",
       "prose_key": "cleanname",
       "label": "Intention-Revealing Names - Robert C. Martin",
-      "kind": "principle",
-      "phase": "P2",
-      "skill": "gm-lean-p2"
+      "kind": "principle"
     },
     {
       "key": "MILNER",
       "prose_key": "milner",
       "label": "Well-Typed Programs Cannot Go Wrong - Robin Milner",
-      "kind": "principle",
-      "phase": "P2",
-      "skill": "gm-lean-p2"
+      "kind": "principle"
     },
     {
       "key": "ILLEGAL",
       "prose_key": "illegal",
       "label": "Make Illegal States Unrepresentable - Yaron Minsky",
-      "kind": "principle",
-      "phase": "P2",
-      "skill": "gm-lean-p2"
+      "kind": "principle"
     },
     {
       "key": "PARSEDV",
       "prose_key": "parsedv",
       "label": "Parse, Don't Validate - Alexis King",
-      "kind": "principle",
-      "phase": "P2",
-      "skill": "gm-lean-p2"
+      "kind": "principle"
     },
     {
       "key": "WADLER",
       "prose_key": "wadler",
       "label": "Theorems for Free - Philip Wadler",
-      "kind": "principle",
-      "phase": "P2",
-      "skill": "gm-lean-p2"
+      "kind": "principle"
     },
     {
       "key": "DBC",
       "prose_key": "dbc",
       "label": "Design by Contract - Bertrand Meyer",
-      "kind": "principle",
-      "phase": "P2",
-      "skill": "gm-lean-p2"
+      "kind": "principle"
     },
     {
       "key": "CQS",
       "prose_key": "cqs",
       "label": "Command-Query Separation - Bertrand Meyer",
-      "kind": "principle",
-      "phase": "P2",
-      "skill": "gm-lean-p2"
+      "kind": "principle"
     },
     {
       "key": "PARNAS",
       "prose_key": "parnas",
       "label": "Information Hiding - David Parnas",
-      "kind": "principle",
-      "phase": "P2",
-      "skill": "gm-lean-p2"
+      "kind": "principle"
     },
     {
       "key": "DEEPMOD",
       "prose_key": "deepmod",
       "label": "Deep Modules - John Ousterhout",
-      "kind": "principle",
-      "phase": "P2",
-      "skill": "gm-lean-p2"
+      "kind": "principle"
     },
     {
       "key": "ACCEPTPORT",
       "prose_key": "acceptport",
       "label": "Ports and Adapters - Alistair Cockburn",
-      "kind": "principle",
-      "phase": "P2",
-      "skill": "gm-lean-p2"
+      "kind": "principle"
     },
     {
       "key": "COMMENTSMELL",
       "prose_key": "commentsmell",
       "label": "A Comment Is a Deodorant for Bad Smells - Fowler and Beck",
-      "kind": "principle",
-      "phase": "P2",
-      "skill": "gm-lean-p2"
+      "kind": "principle"
     },
     {
       "key": "TOTALITY",
       "prose_key": "totality",
       "label": "Total Functional Programming - David Turner",
-      "kind": "principle",
-      "phase": "P3",
-      "skill": "gm-lean-p3"
+      "kind": "principle"
     },
     {
       "key": "GUARD",
       "prose_key": "guard",
       "label": "Guard Clause - Martin Fowler",
-      "kind": "principle",
-      "phase": "P3",
-      "skill": "gm-lean-p3"
+      "kind": "principle"
     },
     {
       "key": "SLAP",
       "prose_key": "slap",
       "label": "Single Level of Abstraction - Kent Beck",
-      "kind": "principle",
-      "phase": "P3",
-      "skill": "gm-lean-p3"
+      "kind": "principle"
     },
     {
       "key": "STRUCTPROG",
       "prose_key": "structprog",
       "label": "Structured Programming - Edsger Dijkstra",
-      "kind": "principle",
-      "phase": "P3",
-      "skill": "gm-lean-p3"
+      "kind": "principle"
     },
     {
       "key": "IMMUT",
       "prose_key": "immut",
       "label": "Purely Functional Data Structures - Chris Okasaki",
-      "kind": "principle",
-      "phase": "P3",
-      "skill": "gm-lean-p3"
+      "kind": "principle"
     },
     {
       "key": "OWNERSHIP",
       "prose_key": "ownership",
       "label": "Ownership and Borrowing - Matsakis and Klock",
-      "kind": "principle",
-      "phase": "P3",
-      "skill": "gm-lean-p3"
+      "kind": "principle"
     },
     {
       "key": "DRY",
       "prose_key": "dry",
       "label": "Don't Repeat Yourself - Hunt and Thomas",
-      "kind": "principle",
-      "phase": "P3",
-      "skill": "gm-lean-p3"
+      "kind": "principle"
     },
     {
       "key": "KISS",
       "prose_key": "kiss",
       "label": "KISS - Kelly Johnson",
-      "kind": "principle",
-      "phase": "P3",
-      "skill": "gm-lean-p3"
+      "kind": "principle"
     },
     {
       "key": "DIJKSTRATEST",
       "prose_key": "dijkstratest",
       "label": "Testing Shows Presence, Never Absence - Edsger Dijkstra",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "ORACLEBIAS",
       "prose_key": "oraclebias",
       "label": "Implementation-Biased Test Generation - LLM test-generation study",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "INDEPVER",
       "prose_key": "indepver",
       "label": "Independence-Based Verification - Grabowski",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "ADVERSARIAL",
       "prose_key": "adversarial",
       "label": "Adversarial Red-Blue Agent Verification - Thukkaram",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "HUGHES",
       "prose_key": "hughes",
       "label": "QuickCheck Property-Based Testing - Claessen and Hughes",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "PBTAGENT",
       "prose_key": "pbtagent",
       "label": "Agentic Property-Based Testing - Hypothesis agent study",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "INVARIANTRUN",
       "prose_key": "invariantrun",
       "label": "Stateful Invariant Runs over Random Call Sequences - Foundry and Hypothesis",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "METAMORPH",
       "prose_key": "metamorph",
       "label": "Metamorphic Testing - T. Y. Chen",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "FUZZ",
       "prose_key": "fuzz",
       "label": "Coverage-Guided Fuzzing - Michal Zalewski",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "CONTRACTTEST",
       "prose_key": "contracttest",
       "label": "Consumer-Driven Contract Test - Ian Robinson",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "CHARTEST",
       "prose_key": "chartest",
       "label": "Characterization Test, Legacy Only - Michael Feathers",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "AGENTQA",
       "prose_key": "agentqa",
       "label": "Agent-Native QA over MCP",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "LLMJUDGE",
       "prose_key": "llmjudge",
       "label": "LLM as a Judge",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "SANITIZE",
       "prose_key": "sanitize",
       "label": "Sanitizer and Static Analysis Gate",
-      "kind": "principle",
-      "phase": "P4",
-      "skill": "gm-lean-p4"
+      "kind": "principle"
     },
     {
       "key": "CONVCOM",
       "prose_key": "convcom",
       "label": "Conventional Commits",
-      "kind": "principle",
-      "phase": "P5",
-      "skill": "gm-lean-p5"
+      "kind": "principle"
     },
     {
       "key": "RULE5072",
       "prose_key": "rule5072",
       "label": "50/72 Commit Format - Tim Pope",
-      "kind": "principle",
-      "phase": "P5",
-      "skill": "gm-lean-p5"
+      "kind": "principle"
     },
     {
       "key": "WHYNOTWHAT",
       "prose_key": "whynotwhat",
       "label": "The Diff Records What, the Message Records Why",
-      "kind": "principle",
-      "phase": "P5",
-      "skill": "gm-lean-p5"
+      "kind": "principle"
     },
     {
       "key": "GITSTATE",
       "prose_key": "gitstate",
       "label": "Git Is the State - stateless runtime, Kapale",
-      "kind": "principle",
-      "phase": "P5",
-      "skill": "gm-lean-p5"
+      "kind": "principle"
     },
     {
       "key": "BLAME",
       "prose_key": "blame",
       "label": "git blame as the Index",
-      "kind": "principle",
-      "phase": "P5",
-      "skill": "gm-lean-p5"
+      "kind": "principle"
     },
     {
       "key": "BISECT",
       "prose_key": "bisect",
       "label": "git bisect as the Regression Oracle - Linus Torvalds",
-      "kind": "principle",
-      "phase": "P5",
-      "skill": "gm-lean-p5"
+      "kind": "principle"
     },
     {
       "key": "SEMVER",
       "prose_key": "semver",
       "label": "Semantic Versioning - Tom Preston-Werner",
-      "kind": "principle",
-      "phase": "P5",
-      "skill": "gm-lean-p5"
+      "kind": "principle"
     },
     {
       "key": "ADRN",
       "prose_key": "adrn",
       "label": "ADR, Irreversible Forks Only - Michael Nygard",
-      "kind": "principle",
-      "phase": "P5",
-      "skill": "gm-lean-p5"
+      "kind": "principle"
     },
     {
       "key": "NODELETE",
       "prose_key": "nodelete",
       "label": "Agents Avoid Deleting Code - Ebrahimi et al.",
-      "kind": "principle",
-      "phase": "P6",
-      "skill": "gm-lean-p6"
+      "kind": "principle"
     },
     {
       "key": "GUARDANDGO",
       "prose_key": "guardandgo",
       "label": "Guard-and-Go Fallback Accumulation - Vector Labs",
-      "kind": "principle",
-      "phase": "P6",
-      "skill": "gm-lean-p6"
+      "kind": "principle"
     },
     {
       "key": "TYPE4",
       "prose_key": "type4",
       "label": "Type-4 Semantic Clones in Agent Pull Requests",
-      "kind": "principle",
-      "phase": "P6",
-      "skill": "gm-lean-p6"
+      "kind": "principle"
     },
     {
       "key": "CHURN",
       "prose_key": "churn",
       "label": "Rising Churn and Duplication - Harding and Kloster, GitClear",
-      "kind": "principle",
-      "phase": "P6",
-      "skill": "gm-lean-p6"
+      "kind": "principle"
     },
     {
       "key": "SLOPDRIFT",
       "prose_key": "slopdrift",
       "label": "Behavioural Drift over Long Trajectories - Orlanski et al.",
-      "kind": "principle",
-      "phase": "P6",
-      "skill": "gm-lean-p6"
+      "kind": "principle"
     },
     {
       "key": "DELETIONGATE",
       "prose_key": "deletiongate",
       "label": "Deletion-Completeness Check",
-      "kind": "principle",
-      "phase": "P6",
-      "skill": "gm-lean-p6"
+      "kind": "principle"
     },
     {
       "key": "DIFFBUDGET",
       "prose_key": "diffbudget",
       "label": "Net-Negative Diff Target",
-      "kind": "principle",
-      "phase": "P6",
-      "skill": "gm-lean-p6"
+      "kind": "principle"
     },
     {
       "key": "REACHABLE",
       "prose_key": "reachable",
       "label": "Reachability Analysis",
-      "kind": "principle",
-      "phase": "P6",
-      "skill": "gm-lean-p6"
+      "kind": "principle"
     },
     {
       "key": "TARPIT",
       "prose_key": "tarpit",
       "label": "Out of the Tar Pit - Moseley and Marks",
-      "kind": "principle",
-      "phase": "P6",
-      "skill": "gm-lean-p6"
+      "kind": "principle"
     },
     {
       "key": "LEANSW",
       "prose_key": "leansw",
       "label": "A Plea for Lean Software - Niklaus Wirth",
-      "kind": "principle",
-      "phase": "P6",
-      "skill": "gm-lean-p6"
+      "kind": "principle"
     },
     {
       "key": "KOLMOGOROV",
       "prose_key": "kolmogorov",
       "label": "Kolmogorov Complexity - Kolmogorov and Chaitin",
-      "kind": "principle",
-      "phase": "P6",
-      "skill": "gm-lean-p6"
+      "kind": "principle"
     },
     {
       "key": "SMALLESTSET",
       "prose_key": "smallestset",
       "label": "The Smallest Set of High-Signal Tokens",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "CONTEXTROT",
       "prose_key": "contextrot",
       "label": "Context Rot - Hong et al.",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "REWORK",
       "prose_key": "rework",
       "label": "Rework Loops Dominate Token Spend",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "PROGDISC",
       "prose_key": "progdisc",
       "label": "Progressive Disclosure via SKILL.md",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "HEADERONLY",
       "prose_key": "headeronly",
       "label": "Header Loads, Body Fires on Trigger",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "AGENTSMD",
       "prose_key": "agentsmd",
       "label": "AGENTS.md Hierarchical, Not Encyclopaedic",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "NODUPEDOC",
       "prose_key": "nodupedoc",
       "label": "Reference, Never Restate",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "SUBAGENT",
       "prose_key": "subagent",
       "label": "Subagent Context Isolation",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "COMPACT",
       "prose_key": "compact",
       "label": "Phase-Boundary Compaction",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "OBSCOMPRESS",
       "prose_key": "obscompress",
       "label": "Observational Context Compression",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "MEMTOOL",
       "prose_key": "memtool",
       "label": "Server-Side Memory Across Sessions",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "STABLEPREFIX",
       "prose_key": "stableprefix",
       "label": "Stable Prefix for Cache Hits",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "TOOLBUDGET",
       "prose_key": "toolbudget",
       "label": "Tool and MCP Definition Overhead",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "GREPFIRST",
       "prose_key": "grepfirst",
       "label": "Exact-String Retrieval Before Embedding Retrieval",
-      "kind": "principle",
-      "phase": "P7",
-      "skill": "gm-lean-p7"
+      "kind": "principle"
     },
     {
       "key": "OUSTERHOUTC",
       "prose_key": "ousterhoutc",
       "label": "Comments Capture What Code Cannot - John Ousterhout",
-      "kind": "tension",
-      "phase": "P8",
-      "skill": "gm-lean-p8"
+      "kind": "tension"
     },
     {
       "key": "NAURTHEORY",
       "prose_key": "naurtheory",
       "label": "Programming as Theory Building - Peter Naur",
-      "kind": "tension",
-      "phase": "P8",
-      "skill": "gm-lean-p8"
+      "kind": "tension"
     },
     {
       "key": "TACIT",
       "prose_key": "tacit",
       "label": "Tacit Knowledge Resists Specification",
-      "kind": "tension",
-      "phase": "P8",
-      "skill": "gm-lean-p8"
+      "kind": "tension"
     },
     {
       "key": "HYRUM",
       "prose_key": "hyrum",
       "label": "Hyrum's Law - Hyrum Wright",
-      "kind": "tension",
-      "phase": "P8",
-      "skill": "gm-lean-p8"
+      "kind": "tension"
     },
     {
       "key": "REGEVIDENCE",
       "prose_key": "regevidence",
       "label": "Regulated Environments Need an Evidence Trail",
-      "kind": "tension",
-      "phase": "P8",
-      "skill": "gm-lean-p8"
+      "kind": "tension"
     },
     {
       "key": "MAINTCOST",
       "prose_key": "maintcost",
       "label": "Measured Maintenance Cost of Agent Code",
-      "kind": "tension",
-      "phase": "P8",
-      "skill": "gm-lean-p8"
+      "kind": "tension"
     },
     {
       "key": "SPECDRIFT",
       "prose_key": "specdrift",
       "label": "Silent Spec-Code Drift - Grabowski",
-      "kind": "tension",
-      "phase": "P8",
-      "skill": "gm-lean-p8"
+      "kind": "tension"
     },
     {
       "key": "CTXEXPLODE",
       "prose_key": "ctxexplode",
       "label": "Context Explosion in Whole-Repo Reasoning - Grabowski",
-      "kind": "tension",
-      "phase": "P8",
-      "skill": "gm-lean-p8"
+      "kind": "tension"
     },
     {
       "key": "FIXPOINT",
       "prose_key": "fixpoint",
       "label": "Least Fixed Point - Kleene and Tarski",
-      "kind": "principle",
-      "phase": "P9",
-      "skill": "gm-lean-p9"
+      "kind": "principle"
     },
     {
       "key": "MONOTONE",
       "prose_key": "monotone",
       "label": "Monotonic Improvement Only",
-      "kind": "principle",
-      "phase": "P9",
-      "skill": "gm-lean-p9"
+      "kind": "principle"
     },
     {
       "key": "REGRESSGUARD",
       "prose_key": "regressguard",
       "label": "No Regression Across Sweeps",
-      "kind": "principle",
-      "phase": "P9",
-      "skill": "gm-lean-p9"
+      "kind": "principle"
     },
     {
       "key": "VARIANT",
       "prose_key": "variant",
       "label": "Well-Founded Variant - Robert Floyd",
-      "kind": "principle",
-      "phase": "P9",
-      "skill": "gm-lean-p9"
+      "kind": "principle"
     },
     {
       "key": "BOUNDEDRETRY",
       "prose_key": "boundedretry",
       "label": "Bounded Retry, Then Surface",
-      "kind": "principle",
-      "phase": "P9",
-      "skill": "gm-lean-p9"
+      "kind": "principle"
     },
     {
       "key": "RICE",
-      "entry": true,
       "prose_key": "rice",
       "label": "Rice's Theorem - Henry Gordon Rice",
       "kind": "principle",
-      "phase": "P9",
-      "skill": "gm-lean-p9"
+      "entry": true
     },
     {
       "key": "HALTING",
       "prose_key": "halting",
       "label": "Halting Problem - Alan Turing",
-      "kind": "principle",
-      "phase": "P9",
-      "skill": "gm-lean-p9"
+      "kind": "principle"
     },
     {
       "key": "LEHMAN",
       "prose_key": "lehman",
       "label": "Lehman's Laws of Software Evolution - Meir Lehman",
-      "kind": "principle",
-      "phase": "P9",
-      "skill": "gm-lean-p9"
+      "kind": "principle"
     },
     {
       "key": "KNUTHOPT",
       "prose_key": "knuthopt",
       "label": "Premature Optimization - Donald Knuth",
-      "kind": "principle",
-      "phase": "P9",
-      "skill": "gm-lean-p9"
+      "kind": "principle"
     },
     {
       "key": "LOWERBOUND",
       "prose_key": "lowerbound",
       "label": "Lower Bound Reached - information-theoretic argument",
-      "kind": "principle",
-      "phase": "P9",
-      "skill": "gm-lean-p9"
+      "kind": "principle"
+    },
+    {
+      "key": "LAMPORT",
+      "prose_key": "lamport",
+      "label": "Time, Clocks and the Ordering of Events - Leslie Lamport",
+      "kind": "principle"
+    },
+    {
+      "key": "SOLID",
+      "prose_key": "solid",
+      "label": "SOLID Principles - Robert C. Martin",
+      "kind": "principle"
+    },
+    {
+      "key": "CLEANARCH",
+      "prose_key": "cleanarch",
+      "label": "Clean Architecture - Robert C. Martin",
+      "kind": "principle"
+    },
+    {
+      "key": "CYNEFIN",
+      "prose_key": "cynefin",
+      "label": "Cynefin Framework - Dave Snowden",
+      "kind": "principle"
+    },
+    {
+      "key": "WARDLEY",
+      "prose_key": "wardley",
+      "label": "Wardley Mapping - Simon Wardley",
+      "kind": "principle"
+    },
+    {
+      "key": "FIVEWHYS",
+      "prose_key": "fivewhys",
+      "label": "Five Whys - Taiichi Ohno",
+      "kind": "principle"
+    },
+    {
+      "key": "FIRSTPRIN",
+      "prose_key": "firstprin",
+      "label": "First Principles Thinking - Aristotle",
+      "kind": "principle"
+    },
+    {
+      "key": "MECE",
+      "prose_key": "mece",
+      "label": "MECE - Barbara Minto",
+      "kind": "principle"
+    },
+    {
+      "key": "MORPHBOX",
+      "prose_key": "morphbox",
+      "label": "Morphological Box - Fritz Zwicky",
+      "kind": "principle"
+    },
+    {
+      "key": "PUGH",
+      "prose_key": "pugh",
+      "label": "Pugh Matrix - Stuart Pugh",
+      "kind": "principle"
+    },
+    {
+      "key": "SOLIDSRP",
+      "prose_key": "solidsrp",
+      "label": "SOLID-SRP - Robert C. Martin",
+      "kind": "principle"
+    },
+    {
+      "key": "OCCAM",
+      "prose_key": "occam",
+      "label": "Occam's Razor - William of Ockham",
+      "kind": "principle"
+    },
+    {
+      "key": "DEVILADV",
+      "prose_key": "deviladv",
+      "label": "Devil's Advocate - Catholic Canonization Process",
+      "kind": "principle"
+    },
+    {
+      "key": "FEYNMAN",
+      "prose_key": "feynman",
+      "label": "Feynman Technique - Richard Feynman",
+      "kind": "principle"
+    },
+    {
+      "key": "SWOT",
+      "prose_key": "swot",
+      "label": "SWOT - Albert Humphrey",
+      "kind": "principle"
+    },
+    {
+      "key": "MOSCOW",
+      "prose_key": "moscow",
+      "label": "MoSCoW - Dai Clegg",
+      "kind": "principle"
+    },
+    {
+      "key": "USECASES",
+      "prose_key": "usecases",
+      "label": "Cockburn Use Cases - Alistair Cockburn",
+      "kind": "principle"
+    },
+    {
+      "key": "PERT",
+      "prose_key": "pert",
+      "label": "PERT - US Navy",
+      "kind": "principle"
+    },
+    {
+      "key": "VERTSLICE",
+      "prose_key": "vertslice",
+      "label": "Vertical Slice Architecture - Jimmy Bogard",
+      "kind": "principle"
+    },
+    {
+      "key": "CONWAY",
+      "prose_key": "conway",
+      "label": "Conway's Law - Melvin Conway",
+      "kind": "principle"
+    },
+    {
+      "key": "COHESION",
+      "prose_key": "cohesion",
+      "label": "Cohesion Criteria - Larry Constantine",
+      "kind": "principle"
+    },
+    {
+      "key": "GOFSTRATEGY",
+      "prose_key": "gofstrategy",
+      "label": "GoF-Strategy - Gamma Helm Johnson Vlissides",
+      "kind": "principle"
+    },
+    {
+      "key": "GOFOBSERVER",
+      "prose_key": "gofobserver",
+      "label": "GoF-Observer - Gamma Helm Johnson Vlissides",
+      "kind": "principle"
+    },
+    {
+      "key": "WALKSKEL",
+      "prose_key": "walkskel",
+      "label": "Walking Skeleton - Alistair Cockburn",
+      "kind": "principle"
+    },
+    {
+      "key": "GITHUBFLOW",
+      "prose_key": "githubflow",
+      "label": "GitHub Flow - GitHub",
+      "kind": "principle"
+    },
+    {
+      "key": "EDA",
+      "prose_key": "eda",
+      "label": "Event-Driven Architecture - Distributed Systems Convention",
+      "kind": "principle"
+    },
+    {
+      "key": "FALLACIES",
+      "prose_key": "fallacies",
+      "label": "Fallacies of Distributed Computing - Peter Deutsch",
+      "kind": "principle"
+    },
+    {
+      "key": "CAP",
+      "prose_key": "cap",
+      "label": "CAP Theorem - Eric Brewer",
+      "kind": "principle"
+    },
+    {
+      "key": "STRIDE",
+      "prose_key": "stride",
+      "label": "STRIDE Threat Model - Loren Kohnfelder",
+      "kind": "principle"
+    },
+    {
+      "key": "OWASP",
+      "prose_key": "owasp",
+      "label": "OWASP Top 10 - OWASP Foundation",
+      "kind": "principle"
+    },
+    {
+      "key": "LINDDUN",
+      "prose_key": "linddun",
+      "label": "LINDDUN Privacy Threat Model - KU Leuven",
+      "kind": "principle"
+    },
+    {
+      "key": "REGENV",
+      "prose_key": "regenv",
+      "label": "Regulated Environment - Compliance Convention",
+      "kind": "principle"
+    },
+    {
+      "key": "SIL61508",
+      "prose_key": "sil61508",
+      "label": "IEC 61508 SIL Levels - IEC",
+      "kind": "principle"
+    },
+    {
+      "key": "REDGREEN",
+      "prose_key": "redgreen",
+      "label": "Red/Green TDD - Kent Beck",
+      "kind": "principle"
+    },
+    {
+      "key": "TDDCHICAGO",
+      "prose_key": "tddchicago",
+      "label": "TDD Chicago School - Chicago/Detroit Tradition",
+      "kind": "principle"
+    },
+    {
+      "key": "TESTPYRAMID",
+      "prose_key": "testpyramid",
+      "label": "Testing Pyramid - Mike Cohn",
+      "kind": "principle"
+    },
+    {
+      "key": "MUTATION",
+      "prose_key": "mutation",
+      "label": "Mutation Testing - Richard Lipton",
+      "kind": "principle"
+    },
+    {
+      "key": "FAGAN",
+      "prose_key": "fagan",
+      "label": "Fagan Inspection - Michael Fagan",
+      "kind": "principle"
+    },
+    {
+      "key": "PYRAMIDPRIN",
+      "prose_key": "pyramidprin",
+      "label": "Pyramid Principle - Barbara Minto",
+      "kind": "principle"
+    },
+    {
+      "key": "BLUF",
+      "prose_key": "bluf",
+      "label": "BLUF - US Military Doctrine",
+      "kind": "principle"
+    },
+    {
+      "key": "INVPYRAMID",
+      "prose_key": "invpyramid",
+      "label": "Inverted Pyramid Style - Journalism Convention",
+      "kind": "principle"
+    },
+    {
+      "key": "PLAINENG",
+      "prose_key": "plaineng",
+      "label": "Plain English - William Strunk Jr",
+      "kind": "principle"
+    },
+    {
+      "key": "DIATAXIS",
+      "prose_key": "diataxis",
+      "label": "Diataxis Framework - Daniele Procida",
+      "kind": "principle"
+    },
+    {
+      "key": "DOCSASCODE",
+      "prose_key": "docsascode",
+      "label": "Docs-as-Code - Ralf D. Muller",
+      "kind": "principle"
     }
   ],
   "edges": [
@@ -1466,6 +1535,7 @@
       "label": null,
       "gates": [
         "prd-all-closed",
+        "pool-floor-met",
         "worktree-clean",
         "residual-scan-fired",
         "ci-validated-fresh",
@@ -2151,6 +2221,1329 @@
       "kind": "forward",
       "label": null,
       "gates": []
+    },
+    {
+      "from": "DBC",
+      "to": "LAMPORT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "LAMPORT",
+      "to": "INVARIANTRUN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_FIXPOINT",
+      "to": "LOWERBOUND",
+      "kind": "backreference",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_FIXPOINT",
+      "to": "G_SWEEP",
+      "kind": "backreference",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "INVARIANTRUN",
+      "to": "LAMPORT",
+      "kind": "backreference",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "LAMPORT",
+      "to": "DBC",
+      "kind": "backreference",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "INVARIANTRUN",
+      "to": "RICE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "JTBD",
+      "to": "CYNEFIN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CYNEFIN",
+      "to": "WARDLEY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "WARDLEY",
+      "to": "FIRSTPRIN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "WARDLEY",
+      "to": "KNUTHOPT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FIRSTPRIN",
+      "to": "MECE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FIRSTPRIN",
+      "to": "TOTALITY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MECE",
+      "to": "MORPHBOX",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MECE",
+      "to": "PYRAMIDPRIN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MORPHBOX",
+      "to": "PUGH",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MORPHBOX",
+      "to": "VARIANT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PUGH",
+      "to": "SWOT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PUGH",
+      "to": "REACHABLE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SWOT",
+      "to": "MOSCOW",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SWOT",
+      "to": "LEHMAN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MOSCOW",
+      "to": "USECASES",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MOSCOW",
+      "to": "INVEST",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "USECASES",
+      "to": "PERT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "USECASES",
+      "to": "EARS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PERT",
+      "to": "VERTSLICE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PERT",
+      "to": "LIVEPLAN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "VERTSLICE",
+      "to": "THINSLICE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "BISECT",
+      "to": "FIVEWHYS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FIVEWHYS",
+      "to": "OCCAM",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FIVEWHYS",
+      "to": "GUARDANDGO",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "OCCAM",
+      "to": "DEVILADV",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "OCCAM",
+      "to": "KOLMOGOROV",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "OCCAM",
+      "to": "YAGNI",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DEVILADV",
+      "to": "FEYNMAN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DEVILADV",
+      "to": "ADVERSARIAL",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DEVILADV",
+      "to": "FAGAN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FEYNMAN",
+      "to": "SOLIDSRP",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FEYNMAN",
+      "to": "COMMENTSMELL",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SOLIDSRP",
+      "to": "SOLID",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SOLIDSRP",
+      "to": "CQS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SOLID",
+      "to": "CLEANARCH",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SOLID",
+      "to": "PARNAS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CLEANARCH",
+      "to": "DEEPMOD",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CLEANARCH",
+      "to": "ACCEPTPORT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "XYPROB",
+      "to": "OCCAM",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SPIKE",
+      "to": "WARDLEY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SUBAGENT",
+      "to": "CONWAY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CONWAY",
+      "to": "COHESION",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CONWAY",
+      "to": "PARNAS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "COHESION",
+      "to": "GOFSTRATEGY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "COHESION",
+      "to": "SLAP",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GOFSTRATEGY",
+      "to": "GOFOBSERVER",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GOFSTRATEGY",
+      "to": "ILLEGAL",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GOFOBSERVER",
+      "to": "WALKSKEL",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GOFOBSERVER",
+      "to": "EDA",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GOFOBSERVER",
+      "to": "ACCEPTPORT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "WALKSKEL",
+      "to": "THINSLICE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "EDA",
+      "to": "FALLACIES",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "EDA",
+      "to": "GITSTATE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FALLACIES",
+      "to": "CAP",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FALLACIES",
+      "to": "CONTRACTTEST",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CAP",
+      "to": "LAMPORT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CONVCOM",
+      "to": "GITHUBFLOW",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GITHUBFLOW",
+      "to": "SEMVER",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GUARD",
+      "to": "STRIDE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "STRIDE",
+      "to": "OWASP",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "OWASP",
+      "to": "LINDDUN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "OWASP",
+      "to": "SANITIZE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "LINDDUN",
+      "to": "REGENV",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "LINDDUN",
+      "to": "SUBAGENT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REGENV",
+      "to": "SIL61508",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REGENV",
+      "to": "REGEVIDENCE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SIL61508",
+      "to": "GUARDANDGO",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SIL61508",
+      "to": "BOUNDEDRETRY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FAGAN",
+      "to": "REDGREEN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REDGREEN",
+      "to": "TDDCHICAGO",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REDGREEN",
+      "to": "CHARTEST",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "TDDCHICAGO",
+      "to": "TESTPYRAMID",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "TDDCHICAGO",
+      "to": "AGENTQA",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "TESTPYRAMID",
+      "to": "MUTATION",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "TESTPYRAMID",
+      "to": "FUZZ",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MUTATION",
+      "to": "METAMORPH",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MUTATION",
+      "to": "REGRESSGUARD",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FAGAN",
+      "to": "BLAME",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PBTAGENT",
+      "to": "MUTATION",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "LLMJUDGE",
+      "to": "FAGAN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PYRAMIDPRIN",
+      "to": "BLUF",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "BLUF",
+      "to": "INVPYRAMID",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "INVPYRAMID",
+      "to": "PLAINENG",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PLAINENG",
+      "to": "DIATAXIS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DIATAXIS",
+      "to": "DOCSASCODE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DOCSASCODE",
+      "to": "NODUPEDOC",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PYRAMIDPRIN",
+      "to": "WHYNOTWHAT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "BLUF",
+      "to": "RULE5072",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "INVPYRAMID",
+      "to": "HEADERONLY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PLAINENG",
+      "to": "CLEANNAME",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DIATAXIS",
+      "to": "AGENTSMD",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DOCSASCODE",
+      "to": "SEMVER",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MILNER",
+      "to": "HALTING",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "WADLER",
+      "to": "LEANSW",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "STRUCTPROG",
+      "to": "TDDCHICAGO",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "IMMUT",
+      "to": "GITSTATE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "OWNERSHIP",
+      "to": "CONWAY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CONTEXTROT",
+      "to": "DIATAXIS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "COMPACT",
+      "to": "PYRAMIDPRIN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "OBSCOMPRESS",
+      "to": "INVPYRAMID",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "STABLEPREFIX",
+      "to": "DOCSASCODE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "TOOLBUDGET",
+      "to": "PUGH",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GREPFIRST",
+      "to": "OCCAM",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MONOTONE",
+      "to": "KOLMOGOROV",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "UBIQ",
+      "to": "CYNEFIN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DIJKSTRATEST",
+      "to": "REDGREEN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "ORACLEBIAS",
+      "to": "OCCAM",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "NODELETE",
+      "to": "COHESION",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CHURN",
+      "to": "TESTPYRAMID",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SMALLESTSET",
+      "to": "MECE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REWORK",
+      "to": "PERT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FIXPOINT",
+      "to": "CONWAY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "LOWERBOUND",
+      "to": "KOLMOGOROV",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_START",
+      "to": "SMALLESTSET",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_SWEEP",
+      "to": "G_DONE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_SURFACE",
+      "to": "VARIANT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "EARS",
+      "to": "XYPROB",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "INVEST",
+      "to": "EARS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "YAGNI",
+      "to": "SPIKE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PARNAS",
+      "to": "CQS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "COMMENTSMELL",
+      "to": "FEYNMAN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "IMMUT",
+      "to": "STRUCTPROG",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DRY",
+      "to": "OWNERSHIP",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "G_INDEP",
+      "to": "KISS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "ORACLEBIAS",
+      "to": "DIJKSTRATEST",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "INDEPVER",
+      "to": "ORACLEBIAS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "INVARIANTRUN",
+      "to": "PBTAGENT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CHARTEST",
+      "to": "CONTRACTTEST",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SEMVER",
+      "to": "BISECT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GUARDANDGO",
+      "to": "NODELETE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CHURN",
+      "to": "TYPE4",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SLOPDRIFT",
+      "to": "CHURN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DELETIONGATE",
+      "to": "SLOPDRIFT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DIFFBUDGET",
+      "to": "REACHABLE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REACHABLE",
+      "to": "DELETIONGATE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "LEANSW",
+      "to": "TARPIT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REWORK",
+      "to": "CONTEXTROT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PROGDISC",
+      "to": "REWORK",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "HEADERONLY",
+      "to": "PROGDISC",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "AGENTSMD",
+      "to": "HEADERONLY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "TOOLBUDGET",
+      "to": "STABLEPREFIX",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GREPFIRST",
+      "to": "TOOLBUDGET",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "TACIT",
+      "to": "NAURTHEORY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "ADRN",
+      "to": "TACIT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REGEVIDENCE",
+      "to": "HYRUM",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DELETIONGATE",
+      "to": "MAINTCOST",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CTXEXPLODE",
+      "to": "SPECDRIFT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PROGDISC",
+      "to": "CTXEXPLODE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MONOTONE",
+      "to": "FIXPOINT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REGRESSGUARD",
+      "to": "MONOTONE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "BOUNDEDRETRY",
+      "to": "VARIANT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "HALTING",
+      "to": "RICE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "LEHMAN",
+      "to": "HALTING",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CLEANARCH",
+      "to": "SOLID",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DEEPMOD",
+      "to": "CLEANARCH",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CYNEFIN",
+      "to": "JTBD",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "OCCAM",
+      "to": "FIVEWHYS",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MECE",
+      "to": "FIRSTPRIN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PUGH",
+      "to": "MORPHBOX",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SOLID",
+      "to": "SOLIDSRP",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FEYNMAN",
+      "to": "DEVILADV",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "MOSCOW",
+      "to": "SWOT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "USECASES",
+      "to": "MOSCOW",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "PERT",
+      "to": "USECASES",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "VERTSLICE",
+      "to": "PERT",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "THINSLICE",
+      "to": "VERTSLICE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GOFOBSERVER",
+      "to": "GOFSTRATEGY",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "WALKSKEL",
+      "to": "GOFOBSERVER",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "THINSLICE",
+      "to": "WALKSKEL",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GITHUBFLOW",
+      "to": "CONVCOM",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SEMVER",
+      "to": "GITHUBFLOW",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "FALLACIES",
+      "to": "EDA",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "CAP",
+      "to": "FALLACIES",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "LAMPORT",
+      "to": "CAP",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "STRIDE",
+      "to": "GUARD",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "OWASP",
+      "to": "STRIDE",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "LINDDUN",
+      "to": "OWASP",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "REGENV",
+      "to": "LINDDUN",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "SIL61508",
+      "to": "REGENV",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "GUARDANDGO",
+      "to": "SIL61508",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "INVPYRAMID",
+      "to": "BLUF",
+      "kind": "forward",
+      "label": null,
+      "gates": []
+    },
+    {
+      "from": "DIATAXIS",
+      "to": "PLAINENG",
+      "kind": "forward",
+      "label": null,
+      "gates": []
     }
   ],
   "gates": [
@@ -2185,13 +3578,19 @@
       "name": "lean-contract-recorded",
       "predicate": "lean-contract-recorded",
       "hook_mode": "predicate-only",
-      "message": "transition rejected (blocking, lean gate \"contract satisfied and recorded\"): a .gm/prd.yml row is still open or the worktree is not clean. Close every row and commit the change. The reason text in the commit message is not checked by code."
+      "message": "transition rejected (blocking, lean gate \"contract satisfied and recorded\"): a .gm/prd/ row file is still open or the worktree is not clean. Close every row and commit the change. The reason text in the commit message is not checked by code."
     },
     {
       "name": "prd-all-closed",
       "predicate": "prd-all-closed",
       "hook_mode": "predicate-only",
       "message": "transition rejected (blocking, closure gate \"prd-all-closed\"): the predicate of that name in gm-config/fsm/predicates.md is false. Satisfy it, then re-attempt."
+    },
+    {
+      "name": "pool-floor-met",
+      "predicate": "pool-floor-met",
+      "hook_mode": "predicate-only",
+      "message": "transition rejected (blocking, closure gate \"pool-floor-met\"): pool slots are not free to fill (floor_gate_denied when the count of record is under the floor). Call pool-observe with body.live set to the ListAgents count, launch the refill_needed ids it lists in slots.launch as gm-worker subagents, then re-attempt."
     },
     {
       "name": "worktree-clean",

@@ -1,5 +1,5 @@
 # Header Loads, Body Fires on Trigger
 
-Principle `HEADERONLY`, phase P7 CONTEXT ECONOMY. Apply "Header Loads, Body Fires on Trigger" to the work of the P7 CONTEXT ECONOMY phase.
+Principle `HEADERONLY`. Apply "Header Loads, Body Fires on Trigger" to the work this node stands on. The node is entered from any neighbour that leads here and left to any neighbour it links to; its place in a walk is decided by the work it applies to, not by a bucket.
 
 The walk is recorded by the transition that leaves this node.

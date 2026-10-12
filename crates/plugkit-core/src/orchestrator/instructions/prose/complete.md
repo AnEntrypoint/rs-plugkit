@@ -8,7 +8,7 @@ A row closes only with a witness: a dispatch id from its own live run. A row wit
 
 ## Parallel PRD fan-out
 
-Fan-out: one worker per independent slice, as many as the work allows, up to the machine limit the user has set. A shortfall is available independent slices not yet launched, and the orchestrator must close that shortfall before advancing. 12 is a monitoring threshold for alerting only, never a target or a cap. Each worker takes its own session id.
+Fan-out: one worker per independent slice, as many as the work allows. A shortfall is available independent slices not yet launched, and the orchestrator must close that shortfall before advancing. The floor is min(10, ceiling): `REFILL_FLOOR` at `rs-plugkit/crates/plugkit-core/src/orchestrator/pool_slots/mod.rs:17`, capped by the ceiling. The ceiling is the spawn refusal limit, measured 20.
 
 Every open row is resolved by its own parallel worker, with its own session id.
 
@@ -20,10 +20,20 @@ Every open row is resolved by its own parallel worker, with its own session id.
 
 Continuation: never stop while a row is open. Ask only for a world-scoped one-way door; every other unknown becomes a row.
 
-Publishing: workers do not commit or push. The parent session publishes every change in one delivery: commit with the work's own paths, push the submodule, point the parent gitlink at that submodule's `main` tip (every submodule tracks `main`; never a sha off `main`), then push the parent. Nothing stays local. A walk is complete only when the PRD is empty and the worktree is clean; until then, the next node is dispatched.
+Publishing: workers do not commit or push. The parent session publishes every change in one delivery: commit with the work's own paths, push the submodule to its main, then push the parent; the parent gitlink tracks each submodule's main tip (bump-pins advances it). Nothing stays local. A walk is complete only when the PRD is empty and the worktree is clean; until then, the next node is dispatched.
 
-- Before and after every git_pull, git_push, merge, update or delivery step, the orchestrator reads the live `.gm/pool/*.live` count and launches the available independent slices, so the step never lowers the count. A delivery step is never a reason to drop running subagents; a step that cannot run while subagents are running is run by a subagent.
+- Before and after every git_pull, git_push, merge, update or delivery step, the orchestrator counts live subagents with ListAgents, the count of record, cross-checked against the fresh `.gm/pool/*.live` heartbeats (at most 5 minutes old), dispatches `instruction`, and launches the available independent slices, so the step never lowers the count. Every worker writes its `.gm/pool/<session>.live` heartbeat on start, refreshes it at least every 5 minutes, and deletes it on finish. the same-turn refill is what holds the count at the ceiling, and no step lowers it. A delivery step is never a reason to drop running subagents; a step that cannot run while subagents are running is run by a subagent.
 
 ## Automatic decisions
 
 When an instruction already settles a choice, apply it without asking. Commit identity: use the repository's configured identity; where none is set, use the identity the user approved for authorship (anentrypoint <admin@coas.co.za>) written as repository-local config, never global. Publishing: push every commit and bump every pin in the same delivery. Runner: a restart of agentplug is approved at any time; load a rebuilt plugin through the isolated recipe first, then restart. Ask only for a world-scoped one-way door.
+
+## Worker handover
+
+Every fan-out worker ends its reply with these three lines, in this order.
+
+- `successor:` a pending row from `prd-list {"status":"pending"}` with its row id and first action. Never invent an id; never leave the chain without one while pending rows remain.
+- `advanced:` the PRD row this worker advanced, by id, with its closing witness dispatch id or the blocker that kept it open.
+- `rhetoric:` the one-sentence motivation for the successor, copied verbatim from `next_choice.why` when present, otherwise the unresolved question that drove the row.
+
+The orchestrator reads these three lines on every completion, counts live subagents with ListAgents and the fresh `.gm/pool/*.live` heartbeats, and relaunches one successor from `successor:` in the same turn per freed slot while pending rows are open and live is under the floor. The floor is min(10, ceiling): while pending rows are open, live subagents must be at least the floor, and a shortfall is launched to the floor in the same message. No turn ends and no completion report is made while live is under the floor and independent slices remain. Pass the ListAgents count as `body.live` on every `pool-observe` and `transition` call, because with no fresh record the gate reports count_of_record absent and does not deny. Dip causes and counter-instructions: `skills/gm-orchestrate/SKILL.md`, "Never let the pool dip".
