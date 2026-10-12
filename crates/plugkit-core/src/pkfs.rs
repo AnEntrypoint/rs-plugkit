@@ -113,6 +113,13 @@ pub fn stat(path: &str) -> Option<serde_json::Value> {
     crate::wasm_dispatch::host_stat(&anchor(path))
 }
 
+/// Remove one regular file. A directory is never removed: the host refuses it, so
+/// a caller that resolves the wrong path deletes nothing instead of a whole store.
+#[cfg(target_arch = "wasm32")]
+pub fn remove_file(path: &str) -> bool {
+    crate::wasm_dispatch::host_remove_file_never_directory(&anchor(path))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_to_string(_path: &str) -> Option<String> {
     None
@@ -136,4 +143,8 @@ pub fn readdir(_path: &str) -> Option<serde_json::Value> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn stat(_path: &str) -> Option<serde_json::Value> {
     None
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub fn remove_file(_path: &str) -> bool {
+    false
 }

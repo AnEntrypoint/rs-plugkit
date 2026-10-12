@@ -132,7 +132,7 @@ The phase closes at one of its two terminals, and each has its own witness. G_FI
 
 ## Memorize
 
-`memorize-fire` records the surfaced ambiguity with the decision a person must make, in the project memory type, so that a resuming session does not sweep it again blind. It records the environment hashes of LEHMAN so that a following comparison has its baseline, and the measure set of a fixed point with its sha. `memorize-prune {key}` removes a recorded sweep or environment entry that the live tree has contradicted. Not memorized: the sweep counts themselves, which are re-derived from the ledger on each sweep, the PRD text (which lives in `prd.yml`), and the gate states, which the gates report.
+`memorize-fire` records the surfaced ambiguity with the decision a person must make, in the project memory type, so that a resuming session does not sweep it again blind. It records the environment hashes of LEHMAN so that a following comparison has its baseline, and the measure set of a fixed point with its sha. `memorize-prune {key}` removes a recorded sweep or environment entry that the live tree has contradicted. Not memorized: the sweep counts themselves, which are re-derived from the ledger on each sweep, the PRD text (which lives in `.gm/prd/<id>.yml` per row, and in `.gm/prd-log.jsonl` once resolved), and the gate states, which the gates report.
 
 ## Transition
 

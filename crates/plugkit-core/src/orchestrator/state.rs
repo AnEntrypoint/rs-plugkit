@@ -9,7 +9,7 @@ pub fn dispatch_session_id() -> Option<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn dispatch_session_id() -> Option<String> {
+pub fn dispatch_session_id() -> Option<String> {
     None
 }
 

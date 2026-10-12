@@ -24,7 +24,7 @@ A need is either a row now or it is not a need. A row or a transition note in th
 
 ## Mutables
 
-A mutable in this phase is an open question about context spend, with a witness that would settle it. It is added with `mutable-add`. P7, P8 and P9 own no obligation kind of their own. An open item here is therefore added with the `obligation_kind` of the phase that discharges it: a question that changes a contract shape takes `precondition` or `type-shape`, and an observable output a consumer depends on takes `postcondition`. The kind names the owner, and the item is resolved in that owner's phase. The sweep closure needs zero pending rows, because the edge from G_DONE to G_SWEEP is gated by `lean-contract-recorded`, which refuses while any `.gm/prd.yml` row is open or the worktree is dirty.
+A mutable in this phase is an open question about context spend, with a witness that would settle it. It is added with `mutable-add`. P7, P8 and P9 own no obligation kind of their own. An open item here is therefore added with the `obligation_kind` of the phase that discharges it: a question that changes a contract shape takes `precondition` or `type-shape`, and an observable output a consumer depends on takes `postcondition`. The kind names the owner, and the item is resolved in that owner's phase. The sweep closure needs zero pending rows, because the edge from G_DONE to G_SWEEP is gated by `lean-contract-recorded`, which refuses while any `.gm/prd/` row is open or the worktree is dirty.
 
 Set `depends_on` to the ids of mutables this one needs resolved first. `mutable-add` refuses a cycle and names the full cycle path. Resolve a mutable with `mutable-resolve {mutable_id, witness_evidence}`, where the evidence is a `file:line`, a `codesearch` hit or an `exec_js` snippet. A prose claim is not evidence. Surface-to-mutable applies here too: state that diverges from the PRD's assumed shape becomes a new mutable with its name, its witness and its resume step. A witness that cannot be reached because a tool is broken makes a mutable to repair or replace the tool, then the witness is taken.
 
@@ -56,7 +56,7 @@ When a long session's reasoning degrades (a dispatch misreads a file read earlie
 
 Handover: a repeated artifact stops the loop and the affected rows are rescoped in place, so the walk passes the bodies it actually loaded to PROGDISC for disclosure review; cite Rework Loops Dominate Token Spend.
 
-Fan-out: none. The dispatch count and the rescope of rows write one shared surface, `.gm/prd.yml`, which has the parent as its single writer; the count runs in one session. Canary: a `rescoped` reply absent for a repeated row means the rescope did not run.
+Fan-out: none. The dispatch count and the rescope of rows write the row's own file under `.gm/prd/`, and each row file has one owner, so rescopes of two different rows never contend; the count runs in one session. Canary: a `rescoped` reply absent for a repeated row means the rescope did not run.
 
 Nominations (set): {PROGDISC}. Backreferences in from {}; out to {G_INDEP}.
 
@@ -140,7 +140,7 @@ Fan-out: each recall hit's live-tree re-verification is an independent slice: on
 
 Nominations (set): {STABLEPREFIX}. Backreferences in from {NAURTHEORY}; out to {COMPACT}.
 
-A fact that a resuming session needs and that the live tree cannot supply is written with `memorize-fire`, under the storage-tier kind that fits it: `l0` or `l1`. A recall that opens this phase is a lead. Re-verify that the named file, function or flag still exists before acting on it. A stale, superseded or wrong hit is removed on sight with `memorize-prune {key}`. For an uncertain set, `memorize-prune {query}` returns review-only candidates, and the chosen ones are removed by `{keys}`. The backreference NAURTHEORY to MEMTOOL ("the theory died with the session") is taken when a theory exists only in the window. Witness: a `recall` after the write returns the new key with its text, and after a prune the same query no longer returns the key.
+A fact that a resuming session needs and that the live tree cannot supply is written with `memorize-fire`, as one of the four memory types: user, feedback, project or reference. A recall that opens this phase is a lead. Re-verify that the named file, function or flag still exists before acting on it. A stale, superseded or wrong hit is removed on sight with `memorize-prune {key}`. For an uncertain set, `memorize-prune {query}` returns review-only candidates, and the chosen ones are removed by `{keys}`. The backreference NAURTHEORY to MEMTOOL ("the theory died with the session") is taken when a theory exists only in the window. Witness: a `recall` after the write returns the new key with its text, and after a prune the same query no longer returns the key.
 
 ### STABLEPREFIX - Stable Prefix for Cache Hits
 
@@ -178,7 +178,7 @@ The phase closes when a sweep records no context-spend measure that rose per uni
 
 ## Memorize
 
-`memorize-fire` writes what a resuming session needs and cannot re-derive cheaply: which search mode answered a class of question, a subagent SESSION_ID pattern that held, a correction the user gave about context handling, and the reason a recall key was pruned. Each write carries a storage-tier kind, `l0` or `l1`, in the default namespace. Nothing derivable from the live tree is written: file paths, function names, code patterns, git history and document contents. A stored derivable fact becomes a second source that drifts. Pruning is part of this phase. A recall hit the live tree contradicts is removed with `memorize-prune {key}` in the same pass that found it.
+`memorize-fire` writes what a resuming session needs and cannot re-derive cheaply: which search mode answered a class of question, a subagent SESSION_ID pattern that held, a correction the user gave about context handling, and the reason a recall key was pruned. Each write is one of the four types (user, feedback, project, reference) in the default namespace. Nothing derivable from the live tree is written: file paths, function names, code patterns, git history and document contents. A stored derivable fact becomes a second source that drifts. Pruning is part of this phase. A recall hit the live tree contradicts is removed with `memorize-prune {key}` in the same pass that found it.
 
 ## Transition
 
