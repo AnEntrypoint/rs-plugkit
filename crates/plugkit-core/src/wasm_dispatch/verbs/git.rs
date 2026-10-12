@@ -4548,22 +4548,37 @@ pub(super) fn body_pull_identity(body: &Value) -> Option<(String, String)> {
     Some((name, email))
 }
 
+pub(super) const GIT_PULL_ACCEPTED_FIELDS: &[&str] = &[
+    "remote",
+    "branch",
+    "ff_only",
+    "user_name",
+    "author_name",
+    "user_email",
+    "author_email",
+];
+
 pub(super) fn git_pull(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_pull", body, GIT_PULL_ACCEPTED_FIELDS) {
+        return refusal;
+    }
     let cwd = body_cwd(body);
     let remote = body
         .get("remote")
         .and_then(|v| v.as_str())
         .unwrap_or("origin")
         .trim();
+
     let branch = body
         .get("branch")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    let ff_only = body
-        .get("ff_only")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let ff_only = match body_bool_flag(body, "ff_only", "git_pull") {
+        Ok(v) => v,
+        Err(detail) => return err_json("git_pull", detail),
+    };
+
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
     let mut argv: Vec<String> = Vec::new();
     if let Some((name, email)) = body_pull_identity(body) {
@@ -6465,7 +6480,11 @@ pub(super) fn git_merge_abort(body: &Value) -> u64 {
 }
 
 pub(super) fn git_cherry_pick(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_cherry_pick", body, &["rev", "ref"]) {
+        return refusal;
+    }
     let cwd = body_cwd(body);
+
     let refspec = body
         .get("rev")
         .or_else(|| body.get("ref"))
@@ -6589,6 +6608,18 @@ pub(super) fn refuse_unknown_fields(verb: &str, body: &Value, accepted: &[&str])
             "accepted_fields": accepted,
         }),
     ))
+}
+
+pub(super) fn body_bool_flag(body: &Value, field: &str, verb: &str) -> Result<bool, Value> {
+    match body.get(field) {
+        None => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(raw) => Err(json!({
+            "error": format!("{} {} must be a boolean, got {}", verb, field, raw),
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "field": field,
+        })),
+    }
 }
 
 pub(super) fn body_revision(body: &Value) -> &str {
@@ -6984,7 +7015,15 @@ pub(super) fn git_stash_pop(body: &Value) -> u64 {
     )
 }
 
+pub(super) const GIT_BRANCH_DELETE_ACCEPTED_FIELDS: &[&str] =
+    &["branch", "remote", "remote_name", "force"];
+
 pub(super) fn git_branch_delete(body: &Value) -> u64 {
+    if let Some(refusal) =
+        refuse_unknown_fields("git_branch_delete", body, GIT_BRANCH_DELETE_ACCEPTED_FIELDS)
+    {
+        return refusal;
+    }
     let cwd = body_cwd(body);
     let name = body
         .get("branch")
@@ -6994,11 +7033,15 @@ pub(super) fn git_branch_delete(body: &Value) -> u64 {
     if name.is_empty() {
         return err("git_branch_delete", "branch required");
     }
-    let remote = body
-        .get("remote")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let remote = match body_bool_flag(body, "remote", "git_branch_delete") {
+        Ok(v) => v,
+        Err(detail) => return err_json("git_branch_delete", detail),
+    };
+    let force = match body_bool_flag(body, "force", "git_branch_delete") {
+        Ok(v) => v,
+        Err(detail) => return err_json("git_branch_delete", detail),
+    };
+
     if remote {
         let remote_name = body
             .get("remote_name")
@@ -7121,10 +7164,107 @@ pub(super) fn git_revert(body: &Value) -> u64 {
     )
 }
 
+pub(super) const GIT_RESET_MODES: &[&str] = &["soft", "mixed", "hard"];
+pub(super) const GIT_RESET_ACCEPTED_FIELDS: &[&str] = &["ref", "rev", "mode", "hard", "paths", "files"];
+
+pub(super) fn git_reset_refspec(body: &Value) -> Result<String, Value> {
+    let mut picked: Option<&str> = None;
+    for key in ["ref", "rev"] {
+        let Some(raw) = body.get(key) else {
+            continue;
+        };
+        let Some(spec) = raw.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            return Err(json!({
+                "error": format!("git_reset {} must be a non-empty string revision, got {}", key, raw),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "field": key,
+            }));
+        };
+        match picked {
+            Some(prev) if prev != spec => {
+                return Err(json!({
+                    "error": format!("git_reset ref and rev disagree: {} vs {} -- name the target once", prev, spec),
+                    "error_code": ERR_CODE_INVALID_ARGS,
+                    "conflicting_fields": ["ref", "rev"],
+                }));
+            }
+            Some(_) => {}
+            None => picked = Some(spec),
+        }
+    }
+    Ok(picked.unwrap_or("HEAD").to_string())
+}
+
+pub(super) fn git_reset_mode(body: &Value) -> Result<&'static str, Value> {
+    let mut mode: Option<&'static str> = None;
+    if let Some(raw) = body.get("mode") {
+        let Some(requested) = raw.as_str() else {
+            return Err(json!({
+                "error": format!("git_reset mode must be a string, got {}", raw),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "field": "mode",
+                "accepted_modes": GIT_RESET_MODES,
+            }));
+        };
+        let Some(matched) = GIT_RESET_MODES
+            .iter()
+            .find(|candidate| **candidate == requested.trim())
+            .copied()
+        else {
+            return Err(json!({
+                "error": format!("unsupported git_reset mode {:?}: accepted modes are {}", requested, GIT_RESET_MODES.join("|")),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "field": "mode",
+                "unsupported_mode": requested,
+                "accepted_modes": GIT_RESET_MODES,
+            }));
+        };
+        mode = Some(matched);
+    }
+    if let Some(raw) = body.get("hard") {
+        let Some(wants_hard) = raw.as_bool() else {
+            return Err(json!({
+                "error": format!("git_reset hard must be a boolean, got {}", raw),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "field": "hard",
+                "hint": "pass hard:true for a hard reset, or mode:\"hard\"; omit both for mixed",
+            }));
+        };
+        if wants_hard {
+            match mode {
+                Some(named) if named != "hard" => {
+                    return Err(json!({
+                        "error": format!("git_reset hard:true conflicts with mode:{:?} -- name one", named),
+                        "error_code": ERR_CODE_INVALID_ARGS,
+                        "conflicting_fields": ["mode", "hard"],
+                    }));
+                }
+                _ => mode = Some("hard"),
+            }
+        } else if mode == Some("hard") {
+            return Err(json!({
+                "error": "git_reset hard:false conflicts with mode:\"hard\" -- name one",
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "conflicting_fields": ["mode", "hard"],
+            }));
+        }
+    }
+    Ok(mode.unwrap_or("mixed"))
+}
+
 pub(super) fn git_reset(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_reset", body, GIT_RESET_ACCEPTED_FIELDS) {
+        return refusal;
+    }
     let cwd = body_cwd(body);
-    let refspec = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
-    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("mixed");
+    let refspec = match git_reset_refspec(body) {
+        Ok(v) => v,
+        Err(detail) => return err_json("git_reset", detail),
+    };
+    let mode = match git_reset_mode(body) {
+        Ok(v) => v,
+        Err(detail) => return err_json("git_reset", detail),
+    };
     let paths: Vec<String> = body
         .get("paths")
         .or_else(|| body.get("files"))
@@ -7133,18 +7273,30 @@ pub(super) fn git_reset(body: &Value) -> u64 {
         .unwrap_or_default();
     if !paths.is_empty() {
         if mode != "mixed" {
-            return err("git_reset", "paths scope the index only: mode must be mixed or omitted");
+            return err_json(
+                "git_reset",
+                json!({
+                    "error": format!("git_reset paths scope the index only: mode must be mixed or omitted, got {}", mode),
+                    "error_code": ERR_CODE_INVALID_ARGS,
+                    "requested_mode": mode,
+                    "accepted_modes_for_paths": ["mixed"],
+                    "hint": "drop paths to reset the whole worktree, or drop mode/hard to reset only the named paths"
+                }),
+            );
         }
         let blocked = hard_excluded_pathspecs(&paths);
         if !blocked.is_empty() {
             return err_json("git_reset", protected_pathspec_refusal("git_reset", &blocked));
         }
-        let mut argv: Vec<&str> = vec!["reset", refspec, "--"];
+        let mut argv: Vec<&str> = vec!["reset", refspec.as_str(), "--"];
         argv.extend(paths.iter().map(String::as_str));
         if let Err(e) = run_git_checked(&argv, cwd, "git_reset", "reset failed") {
             return e;
         }
-        return ok("git_reset", json!({ "reset_to": refspec, "mode": "mixed", "paths": paths }));
+        return ok(
+            "git_reset",
+            json!({ "reset_to": refspec, "mode": mode, "hard": false, "scope": "paths", "paths": paths }),
+        );
     }
     let mode_flag = match mode {
         "soft" => "--soft",
@@ -7152,15 +7304,19 @@ pub(super) fn git_reset(body: &Value) -> u64 {
         _ => "--mixed",
     };
     if let Err(e) = run_git_checked(
-        &["reset", mode_flag, refspec],
+        &["reset", mode_flag, refspec.as_str()],
         cwd,
         "git_reset",
         "reset failed",
     ) {
         return e;
     }
-    ok("git_reset", json!({ "reset_to": refspec, "mode": mode }))
+    ok(
+        "git_reset",
+        json!({ "reset_to": refspec, "mode": mode, "hard": mode == "hard", "scope": "worktree" }),
+    )
 }
+
 
 pub(super) fn git_worktree_protected_segment(unified: &str) -> bool {
     unified.split('/').any(|segment| {
