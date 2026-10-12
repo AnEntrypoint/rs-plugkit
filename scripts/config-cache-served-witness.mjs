@@ -1,16 +1,28 @@
 // Witness for the gm-config prose cache that the wasm instruction verb reads.
 // PASS only when the cache checkout HEAD equals the remote reference tip and the
 // entry prose the cache serves contains the standing-rules marker.
+//
+// It also measures the remote probe: `config_sync_native::ensure_current` answers
+// "what is the tip of <repo> <reference>" once per machine, not once per project
+// root, and its freshness is derived from the pin and the last known remote sha.
+// The measurement runs the real native entry point (ensure_default_cache) in N
+// concurrent processes, each with its own project root, under a `git` shim that
+// records every argv and refuses to clone. N out-of-sync roots must cost exactly
+// one `ls-remote`, and one more root already at the recorded tip must cost none.
 // Usage: node scripts/config-cache-served-witness.mjs [--cache=<dir>] [--repo=<url>]
-//        [--ref=<branch>] [--key=<prose key>] [--must=<marker>]
+//        [--ref=<branch>] [--key=<prose key>] [--must=<marker>] [--probe-roots=<n>]
 // Defaults: cache = <cwd>/.gm/config-source-cache-default, the implicit default tier
 // that config::resolve() selects for a project without its own config source.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const DEFAULT_REPO = 'https://github.com/AnEntrypoint/gm-config';
-const DEFAULT_MUST = '## Parallel slots (standing rules)';
+const DEFAULT_MUST = '## Parallel slots';
+const GLOBAL_PROBE_DIR = 'config-source-remote-probe';
+const STALE_HEAD = 'a'.repeat(40);
 
 function parseArgs(argv) {
   const out = {};
@@ -35,13 +47,226 @@ function firstLine(error) {
   return String(error.stderr || error.message).trim().split('\n')[0];
 }
 
-function main() {
+function fail(reason) {
+  console.log(`RESULT: FAIL ${reason}`);
+  process.exitCode = 1;
+  return 1;
+}
+
+// A `git` that records every invocation and refuses the ones that would move a
+// checkout: the witness measures the probe, so a clone would only add network noise.
+const SHIM_SOURCE = `use std::process::Command;
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let dir = std::env::var("GIT_SHIM_LOG").unwrap_or_default();
+    if !dir.is_empty() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let name = format!("{}/{}-{}.argv", dir, std::process::id(), nanos);
+        let _ = std::fs::write(name, args.join(" "));
+    }
+    if args.iter().any(|a| a == "clone" || a == "fetch") {
+        eprintln!("git {} refused by the remote-probe witness", args.first().map(|s| s.as_str()).unwrap_or("?"));
+        std::process::exit(1);
+    }
+    let real = std::env::var("GIT_SHIM_REAL").unwrap_or_else(|_| "git".to_string());
+    let status = Command::new(real).args(&args).status();
+    std::process::exit(status.map(|s| s.code().unwrap_or(1)).unwrap_or(1));
+}
+`;
+
+// The real native entry point: prose.rs reads gm-config prose through it.
+const HARNESS_SOURCE = `fn main() {
+    match rs_plugkit::config_sync_native::ensure_default_cache() {
+        Ok((cache, degraded)) => println!("ok cache={} degraded={}", cache, degraded.unwrap_or_else(|| "none".to_string())),
+        Err(reason) => println!("err {}", reason),
+    }
+}
+`;
+
+function repoRoot() {
+  return path.resolve(path.join(path.dirname(fileURLToPath(import.meta.url)), '..'));
+}
+
+function run(cmd, argv, cwd, timeoutMs) {
+  const r = execFileSync(cmd, argv, {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: timeoutMs,
+    windowsHide: true,
+  });
+  return r;
+}
+
+function realGitPath() {
+  const raw =
+    process.platform === 'win32'
+      ? run('where', ['git'], undefined, 30000)
+      : run('sh', ['-c', 'command -v git'], undefined, 30000);
+  const first = raw.split('\n').map((l) => l.trim()).filter(Boolean)[0];
+  if (!first) throw new Error('no git on PATH for the shim to forward to');
+  return first;
+}
+
+function ensureNativeRlib(root) {
+  const rlib = path.join(root, 'target', 'debug', 'librs_plugkit.rlib');
+  if (!fs.existsSync(rlib)) {
+    run('cargo', ['build', '--features', 'slim'], root, 900000);
+  }
+  if (!fs.existsSync(rlib)) throw new Error(`no native rlib at ${rlib} after cargo build`);
+  return rlib;
+}
+
+function buildHarness(root, tmp, rlib) {
+  const src = path.join(tmp, 'harness.rs');
+  fs.writeFileSync(src, HARNESS_SOURCE);
+  const bin = path.join(tmp, process.platform === 'win32' ? 'harness.exe' : 'harness');
+  run(
+    'rustc',
+    ['--edition', '2021', src, '-o', bin, '--extern', `rs_plugkit=${rlib}`, '-L', `dependency=${path.join(root, 'target', 'debug', 'deps')}`],
+    tmp,
+    600000,
+  );
+  return bin;
+}
+
+function buildShim(tmp, realGit) {
+  const src = path.join(tmp, 'shim.rs');
+  fs.writeFileSync(src, SHIM_SOURCE);
+  const binDir = path.join(tmp, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  const bin = path.join(binDir, process.platform === 'win32' ? 'git.exe' : 'git');
+  run('rustc', ['--edition', '2021', '-O', src, '-o', bin], tmp, 600000);
+  if (process.platform !== 'win32') fs.chmodSync(bin, 0o755);
+  return { binDir, realGit };
+}
+
+function seedRoot(tmp, index, head) {
+  const root = path.join(tmp, 'roots', `r${index}`);
+  const cache = path.join(root, '.gm', 'config-source-cache-default');
+  const gitDir = path.join(cache, '.git');
+  fs.mkdirSync(path.join(gitDir, 'objects'), { recursive: true });
+  fs.mkdirSync(path.join(gitDir, 'refs', 'heads'), { recursive: true });
+  fs.writeFileSync(path.join(gitDir, 'HEAD'), `${head}\n`);
+  return root;
+}
+
+function spawnHarness(bin, cwd, env) {
+  return new Promise((resolve) => {
+    const child = spawn(bin, [], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (out += d));
+    child.on('error', (e) => resolve({ code: -1, out: String(e.message) }));
+    child.on('close', (code) => resolve({ code, out: out.trim() }));
+  });
+}
+
+function countProbes(logDir) {
+  let n = 0;
+  for (const name of fs.readdirSync(logDir)) {
+    const text = fs.readFileSync(path.join(logDir, name), 'utf8');
+    if (/^ls-remote\b/.test(text.trim())) n += 1;
+  }
+  return n;
+}
+
+
+async function probeSection(root, originTip, roots) {
+  const nativeSrc = fs.readFileSync(
+    path.join(root, 'crates', 'plugkit-core', 'src', 'config_sync_native.rs'),
+    'utf8',
+  );
+  const links = [
+    ['no magic debounce constant remains', () => !/const DEBOUNCE_MS/.test(nativeSrc)],
+    ['freshness is a derived decision', () => /fn probe_decision\(/.test(nativeSrc) && /enum ProbeDecision \{\s*Due,/.test(nativeSrc)],
+    ['a project at the recorded tip must not trigger a probe', () => /rec\.remote_sha\.is_empty\(\)/.test(nativeSrc) && /have != Some\(rec\.remote_sha\.as_str\(\)\)/.test(nativeSrc)],
+    ['the measured change interval replaces the constant', () => /rec\.change_interval_ms/.test(nativeSrc) && /UNMEASURED_REF_INTERVAL_MS/.test(nativeSrc)],
+    ['the record is machine-global', () => /crate::config::global_probe_root\(/.test(nativeSrc)],
+    ['the record key is (repo, reference)', () => /format!\("\{repo\}\\u\{0\}\{reference\}"\)/.test(nativeSrc)],
+    ['the probe is single-flight and its answer is shared', () => /fn wait_for_shared_probe\(/.test(nativeSrc)],
+    ['the record is kept in memory as well as on disk', () => /static REMEMBERED_REMOTE/.test(nativeSrc) && /fn remember_remote\(/.test(nativeSrc)],
+  ];
+  let missing = 0;
+  for (const [name, holds] of links) {
+    const pass = holds();
+    console.log(`${pass ? 'ok     ' : 'MISSING'} ${name}`);
+    if (!pass) missing += 1;
+  }
+  if (missing > 0) return `remote probe: ${missing} missing link(s) in config_sync_native.rs`;
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'config-remote-probe-'));
+  try {
+    const rlib = ensureNativeRlib(root);
+    const harness = buildHarness(root, tmp, rlib);
+    const { binDir, realGit } = buildShim(tmp, realGitPath());
+    const logDir = path.join(tmp, 'gitlog');
+    fs.mkdirSync(logDir, { recursive: true });
+    const home = path.join(tmp, 'home');
+    fs.mkdirSync(home, { recursive: true });
+    const env = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      PATH: [binDir, process.env.PATH].filter(Boolean).join(path.delimiter),
+      GIT_SHIM_LOG: logDir,
+      GIT_SHIM_REAL: realGit,
+      GIT_TERMINAL_PROMPT: '0',
+    };
+
+    const behind = [];
+    for (let i = 0; i < roots; i += 1) behind.push(seedRoot(tmp, i, STALE_HEAD));
+    const runs = await Promise.all(behind.map((cwd) => spawnHarness(harness, cwd, env)));
+    const probes = countProbes(logDir);
+    const recordDir = path.join(home, '.gm', GLOBAL_PROBE_DIR);
+    const record = firstRecord(recordDir);
+    console.log(`probe_roots=${roots}`);
+    console.log(`ls_remote_calls=${probes}`);
+    console.log(`record_probe_count=${record ? record.probe_count : 'absent'}`);
+    console.log(`record_remote_sha=${record ? record.remote_sha : 'absent'}`);
+    if (runs.some((r) => r.code !== 0)) return `a harness process exited nonzero: ${runs.map((r) => r.code).join(',')}`;
+    if (probes !== 1) return `${roots} project roots behind the recorded tip cost ${probes} ls-remote, expected exactly 1`;
+    if (!record) return 'no machine-global remote-tip record was written';
+    if (record.probe_count !== 1) return `the record counts ${record.probe_count} probes, expected 1`;
+    if (record.remote_sha !== originTip) return `the record holds ${record.remote_sha}, expected ${originTip}`;
+
+    const settled = seedRoot(tmp, roots, originTip);
+    const settledRun = await spawnHarness(harness, settled, env);
+    const afterProbes = countProbes(logDir);
+    const afterRecord = firstRecord(recordDir);
+    console.log(`settled_root_ls_remote_calls=${afterProbes - probes}`);
+    console.log(`settled_root_out=${settledRun.out}`);
+    if (settledRun.code !== 0) return `a root already at the recorded tip exited ${settledRun.code}`;
+    if (afterProbes !== probes) return `a root at the recorded tip triggered ${afterProbes - probes} more ls-remote, expected 0`;
+    if (afterRecord.probe_count !== 1) return `a root at the recorded tip advanced the probe count to ${afterRecord.probe_count}`;
+    console.log(`RESULT: PASS ${probes} ls-remote for ${roots} project roots`);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+function firstRecord(dir) {
+  if (!fs.existsSync(dir)) return null;
+  for (const name of fs.readdirSync(dir)) {
+    if (name.endsWith('.json')) return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+  }
+  return null;
+}
+
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cache = path.resolve(args.cache || path.join(process.cwd(), '.gm', 'config-source-cache-default'));
   const repo = args.repo || DEFAULT_REPO;
   const ref = args.ref || 'main';
   const key = args.key || 'entry';
   const must = args.must || DEFAULT_MUST;
+  const roots = Number.parseInt(args['probe-roots'] ?? '8', 10);
 
   let cacheHead;
   try {
@@ -77,14 +302,12 @@ function main() {
     return fail(`cache HEAD ${cacheHead} differs from origin ${ref} ${originTip}`);
   }
   if (!standing) return fail(`${key} prose lacks the marker "${must}"`);
+
+  const probeFailure = await probeSection(repoRoot(), originTip, roots);
+  if (probeFailure) return fail(probeFailure);
+
   console.log('RESULT: PASS');
   return 0;
 }
 
-function fail(reason) {
-  console.log(`RESULT: FAIL ${reason}`);
-  process.exitCode = 1;
-  return 1;
-}
-
-process.exitCode = main() === 0 ? 0 : 1;
+process.exitCode = (await main()) === 0 ? 0 : 1;
