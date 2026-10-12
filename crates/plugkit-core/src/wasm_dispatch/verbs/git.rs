@@ -4723,7 +4723,6 @@ pub(super) struct CiStatusShaResolution {
     pub(super) sha: String,
     pub(super) field: &'static str,
     pub(super) requested: Option<String>,
-    pub(super) head_fallback: bool,
 }
 
 fn ci_status_requested_rev(body: &Value) -> (&'static str, Option<&str>) {
@@ -4747,7 +4746,6 @@ fn ci_status_head_sha(cwd: Option<&str>, failure: &str) -> Result<CiStatusShaRes
         sha,
         field: "",
         requested: None,
-        head_fallback: false,
     })
 }
 
@@ -4770,7 +4768,6 @@ pub(super) fn ci_status_resolve_sha(
             sha: requested.to_string(),
             field,
             requested: Some(requested.to_string()),
-            head_fallback: false,
         });
     }
     for query in [
@@ -4783,21 +4780,16 @@ pub(super) fn ci_status_resolve_sha(
                 sha: resolved,
                 field,
                 requested: Some(requested.to_string()),
-                head_fallback: false,
             });
         }
     }
-    let mut head = ci_status_head_sha(
-        cwd,
+    Err(err(
+        "ci-status",
         &format!(
-            "{} \"{}\" is neither a 40-char commit sha nor a ref git can resolve here, and local HEAD is also unresolvable -- pass a full sha, or a ref git knows such as HEAD or a branch name",
+            "{} \"{}\" is neither a 40-char commit sha nor a ref git can resolve here -- refusing to report local HEAD in its place, because an answer about HEAD is not an answer about the rev that was asked for; pass a full 40-char sha, or a ref git knows such as HEAD or a branch name",
             field, requested
         ),
-    )?;
-    head.field = field;
-    head.requested = Some(requested.to_string());
-    head.head_fallback = true;
-    Ok(head)
+    ))
 }
 
 pub(super) fn ci_status_annotate_sha_resolution(
@@ -4811,9 +4803,7 @@ pub(super) fn ci_status_annotate_sha_resolution(
     } else {
         &mut value
     };
-    let source = if resolution.head_fallback {
-        "head_after_unresolved_rev"
-    } else if resolution.field.is_empty() {
+    let source = if resolution.field.is_empty() {
         "head"
     } else {
         resolution.field
@@ -4822,9 +4812,6 @@ pub(super) fn ci_status_annotate_sha_resolution(
         fields.insert("sha_source".to_string(), json!(source));
         if let Some(requested) = &resolution.requested {
             fields.insert("sha_requested".to_string(), json!(requested));
-        }
-        if resolution.head_fallback {
-            fields.insert("sha_requested_unresolved".to_string(), json!(true));
         }
     }
     value
@@ -5523,8 +5510,9 @@ pub(super) fn ci_status_summarize(
             "ok": true, "verb": "ci-status", "data": {
                 "status": "unknown", "repo": repo, "sha": sha,
                 "failed_jobs": [], "run_url": Value::Null,
-                "reason": "no workflow runs found for this sha; absence of workflow definitions could not be proven from a complete GitHub git tree",
+                "reason": format!("no workflow runs found for sha {} and that commit could not be read back from GitHub, so it is unpushed or otherwise absent from {} -- CI state for it is unknown, never success", sha, repo),
                 "workflow_tree_error": tree_result.err().map(|f| f.reason).unwrap_or_default(),
+                "sha_on_remote": false,
                 "transport": source,
             }
         });
