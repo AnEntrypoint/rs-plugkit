@@ -43,7 +43,7 @@ Route KV writes to `<cwd>/.gm/disciplines/<ns>/`. `@<name>` prefix sets namespac
 
 ## Memorize
 
-`kind` is a storage tier, not a memory type; `memorize-fire` passes it through as free text (the code defaults it to `l0` and `l1`). The four memory types, `user`, `feedback`, `project` and `reference`, are a separate classification: `user` (profile/role/preference), `feedback` (behavioral correction/confirmation), `project` (work context/deadlines/decisions), `reference` (external-system pointer). Every memory written is classified as one of these four types.
+`kind` is a storage tier, not a memory type; `memorize-fire` passes it through as free text (the code defaults it to `l0` and `l1`).
 
 **Exclusion principle.** Anything derivable from live project state -- code patterns, architecture, paths, git history, prior debugging -- never enters the store. Storing a derivable fact creates a second, driftable source of truth alongside the real one; the live tree always wins that race, so the memo only ever goes stale, never authoritative.
 
