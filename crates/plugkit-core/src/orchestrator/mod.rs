@@ -27,6 +27,7 @@ pub mod pool_rank;
 pub mod pool_slots;
 pub mod recall;
 pub mod residual;
+pub mod row_store;
 pub mod state;
 pub mod subagent;
 pub mod submodule_drift;
@@ -402,7 +403,6 @@ orchestrator_dispatch_table! {
     "dream-world-seal" => dream_rsi::handle_seal(content),
     "dream-replay-round" => dream_rsi::handle_replay_round(content),
     "dream-round" => dream_rsi::handle_dream_round(content),
-    "dream-strategy-propose" => dream_rsi::handle_strategy_propose(content),
     "dream-replay" => dream_rsi::handle(content),
     "dream-replay-cycle" => dream_cycle::handle(content),
     "memorize-fire" => memorize::handle_fire(content),

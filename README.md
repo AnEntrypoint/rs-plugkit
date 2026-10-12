@@ -18,9 +18,13 @@ per spool dispatch. The guest routes shared capabilities (`host_plugin_call`,
 that agentplug-runner loads alongside it; background task management is
 native in `agentplug-host`, not implemented in this crate at all.
 
-State lives on disk under a project's `.gm/` directory: `prd.yml`,
-`mutables.yml`, `exec-spool/{in,out}/`, `gm.db`, `disciplines/<ns>/`,
-`code-search/`.
+State lives on disk under a project's `.gm/` directory: `prd/<id>.yml`
+(one file per PRD row) and `prd-log.jsonl` (the commit log a resolved row is
+moved into), `mutables/<id>.yml` and `mutables-log.jsonl` (the same for
+mutables), `exec-spool/{in,out}/`, `gm.db`, `disciplines/<ns>/`,
+`code-search/`. The folder is the index; the legacy single files `prd.yml`
+and `mutables.yml` are still read and absorbed into the folders on the first
+write.
 
 ## Spool dispatch ABI
 
@@ -37,13 +41,6 @@ returns `kind: "observations"`, `status: "replayed"`, `owner_session_id`, the ec
 verified dispatch returns `status: "deferred"` with a reason and no acknowledgment
 ID. Ordinary pending-pipeline gates remain authoritative. This maintenance verb
 does not refresh agent phase-prose timestamps.
-
-`dream-strategy-propose` takes no body fields and owns the calling dispatch session.
-It replays that session's `automatic_replay` evidence and writes
-`.gm/dream-rsi/<session>/proposed-strategy.json` (`kind: "strategy-proposal"`, with
-`proposed_selection` and `replay`), returning the same object. It is propose-only:
-it never writes `active-strategy.json`, is not called by `dream-replay-cycle`, and
-deploys nothing.
 
 Callers write request JSON to `.gm/exec-spool/in/<verb>/<N>.txt` (or
 `in/<lang>/<N>.<ext>` for language-execution stems); the watcher processes on
@@ -95,7 +92,7 @@ phase it recorded, one step at a time -- the accumulator/inverse pairing a
 Cordis-style revertible effect gives a state transformation, applied to gm's
 own phase graph so a feedback-edge re-entry (e.g. DECIDE->SPECIFY) can be
 undone precisely rather than only via the separately-tracked
-mutables.yml/prd.yml side state.
+mutables/prd row side state.
 
 `discipline-check-removal` ({"discipline": name}) reports whether disabling
 a discipline right now would break a dependent: `orchestrator/discipline_note.rs`'s
@@ -377,9 +374,10 @@ refusing. `git_push {rev: "HEAD"}` publishes an existing commit over a dirty
 worktree without touching it; it never rebases, so a remote that moved is
 reported rather than reconciled. `paths` together with `rev` on
 `git_finalize` is refused, as is an empty or non-string `paths`. Resolved-PRD
-`commit_comment` notes are bundled only by a commit whose scope covers
-`.gm/prd.yml` (no `paths`, or `paths` naming it or `.gm`); a narrower scoped
-    commit leaves them pending so the row removal and its note land together.
+`commit_comment` notes are bundled only by a commit whose scope covers the PRD
+store (no `paths`, or `paths` naming `.gm/prd/`, a row file under it, the legacy
+`.gm/prd.yml`, or `.gm`); a narrower scoped commit leaves them pending so the row
+removal and its note land together.
 
     `git_cherry_pick {rev, cwd?|repo?|root?|projectPath?}` first requires a clean
     worktree, applies one existing commit without merging unrelated history, and

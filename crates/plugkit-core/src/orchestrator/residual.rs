@@ -42,41 +42,23 @@ fn status_is_open(s: Option<&str>) -> bool {
 
 #[cfg(target_arch = "wasm32")]
 fn prd_empty_or_missing() -> bool {
-    let prd = gm_dir().join("prd.yml");
-    let ps = prd.to_string_lossy().to_string();
-    if !pkfs::exists(&ps) {
+    // One file per row under .gm/prd/ plus any legacy .gm/prd.yml not yet absorbed.
+    let blocks = match super::row_store::read_blocks(&super::row_store::Store::prd()) {
+        Ok(read) => read.blocks,
+        Err(_) => return true,
+    };
+    if blocks.is_empty() {
         return true;
     }
-    match pkfs::read_to_string(&ps) {
-        Some(content) => {
-            let trimmed = content.trim();
-            if trimmed.is_empty() {
-                return true;
-            }
-            if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(trimmed) {
-                let items_opt = yaml
-                    .as_sequence()
-                    .or_else(|| yaml.get("items").and_then(|v| v.as_sequence()));
-                if let Some(items) = items_opt {
-                    if items.is_empty() {
-                        return true;
-                    }
-                    let any_open = items.iter().any(|item| {
-                        let status = item.get("status").and_then(|v| v.as_str());
-                        let blocked_external = item
-                            .get("blockedBy")
-                            .and_then(|v| v.as_sequence())
-                            .map(|seq| seq.iter().any(|x| x.as_str() == Some("external")))
-                            .unwrap_or(false);
-                        status_is_open(status) && !blocked_external
-                    });
-                    return !any_open;
-                }
-            }
-            true
-        }
-        None => true,
-    }
+    !blocks.iter().any(|item| {
+        let status = item.get("status").and_then(|v| v.as_str());
+        let blocked_external = item
+            .get("blockedBy")
+            .and_then(|v| v.as_sequence())
+            .map(|seq| seq.iter().any(|x| x.as_str() == Some("external")))
+            .unwrap_or(false);
+        status_is_open(status) && !blocked_external
+    })
 }
 
 #[cfg(target_arch = "wasm32")]

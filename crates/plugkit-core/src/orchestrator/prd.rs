@@ -1,5 +1,6 @@
 use super::cas;
 use super::gm_dir;
+use super::row_store;
 use super::yaml_util::{
     defer_marker_in_text, invalidate_residual_marker, levenshtein, yaml_to_json,
 };
@@ -8,6 +9,16 @@ use serde_yaml::Value;
 
 pub fn prd_path() -> std::path::PathBuf {
     gm_dir().join("prd.yml")
+}
+
+/// The folder that holds one file per PRD row. Read on every access: it is the index.
+pub fn prd_dir() -> std::path::PathBuf {
+    gm_dir().join("prd")
+}
+
+/// The append-only commit log a resolved row's material is moved into.
+pub fn prd_log_path() -> std::path::PathBuf {
+    gm_dir().join("prd-log.jsonl")
 }
 
 pub fn prd_path_for(cwd: Option<&str>) -> std::path::PathBuf {
@@ -50,54 +61,44 @@ fn row_status_for(doc: &Value, id: &str) -> Option<String> {
 }
 
 pub fn pending_commit_comments_for_paths(cwd: Option<&str>, touched: &[String]) -> Vec<(String, String)> {
-    let path = prd_path_for(cwd);
-    let path_s = path.to_string_lossy().to_string();
-    if !pkfs::exists(&path_s) {
-        return Vec::new();
-    }
-    let raw = match read_prd_text(&path_s) {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-    let doc: Value = match serde_yaml::from_str(&raw) {
-        Ok(v) => v,
+    let store = row_store::Store::for_cwd(row_store::Kind::Prd, cwd);
+    let seq = match row_store::read_blocks(&store) {
+        Ok(read) => read.blocks,
         Err(_) => return Vec::new(),
     };
     let mut out = Vec::new();
-    if let Some(seq) = doc.as_sequence() {
-        for item in seq {
-            let Some(map) = item.as_mapping() else {
-                continue;
-            };
-            let status = map
-                .get(&Value::String("status".to_string()))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if status_is_open(status) {
-                continue;
-            }
-            let Some(comment) = map
-                .get(&Value::String("commit_comment".to_string()))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|c| !c.is_empty())
-            else {
-                continue;
-            };
-            let referenced = row_referenced_paths(map);
-            let touches_referenced = referenced
-                .iter()
-                .any(|r| touched.iter().any(|t| path_reference_matches(r, t)));
-            if !touches_referenced {
-                continue;
-            }
-            let id = map
-                .get(&Value::String("id".to_string()))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            out.push((id, comment.to_string()));
+    for item in &seq {
+        let Some(map) = item.as_mapping() else {
+            continue;
+        };
+        let status = map
+            .get(&Value::String("status".to_string()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if status_is_open(status) {
+            continue;
         }
+        let Some(comment) = map
+            .get(&Value::String("commit_comment".to_string()))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        else {
+            continue;
+        };
+        let referenced = row_referenced_paths(map);
+        let touches_referenced = referenced
+            .iter()
+            .any(|r| touched.iter().any(|t| path_reference_matches(r, t)));
+        if !touches_referenced {
+            continue;
+        }
+        let id = map
+            .get(&Value::String("id".to_string()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        out.push((id, comment.to_string()));
     }
     out
 }
@@ -249,14 +250,13 @@ pub fn drain_commit_comments(cwd: Option<&str>, notes: &[(String, String)]) {
     if notes.is_empty() {
         return;
     }
-    let path = prd_path_for(cwd);
-    let path_s = path.to_string_lossy().to_string();
-    if !pkfs::exists(&path_s) {
+    let store = row_store::Store::for_cwd(row_store::Kind::Prd, cwd);
+    if !pkfs::exists(&store.dir) && !pkfs::exists(&store.legacy) {
         return;
     }
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
-    let _ = cas::cas_retry_write(
-        &path_s,
+    let _ = row_store::cas_retry_write(
+        &store,
         cas_max_attempts,
         "prd-drain-commit-comments",
         |mut doc: Value| {
@@ -376,26 +376,14 @@ const PRD_BRIEF_BODY_FIELDS: &[&str] = &["brief", "compact"];
 
 const PRD_TITLE_FIELDS: &[&str] = &["title", "subject"];
 
+/// Every block in the store: one file per row under `.gm/prd/`, plus any legacy
+/// `.gm/prd.yml` rows not yet absorbed into it.
+fn load_blocks() -> Result<Vec<Value>, (String, i32)> {
+    Ok(row_store::read_blocks(&row_store::Store::prd())?.blocks)
+}
+
 fn load_rows() -> Result<Vec<serde_json::Value>, (String, i32)> {
-    let path = prd_path();
-    let path_s = path.to_string_lossy().to_string();
-    if !pkfs::exists(&path_s) {
-        return Ok(Vec::new());
-    }
-    let raw = match read_prd_text(&path_s) {
-        Some(s) => s,
-        None => return Err(("read failed".to_string(), 1)),
-    };
-    let doc: Value = match serde_yaml::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => return Err((format!("parse failed: {}", e), 1)),
-    };
-    let seq = doc
-        .as_sequence()
-        .cloned()
-        .or_else(|| doc.get("items").and_then(|v| v.as_sequence()).cloned())
-        .unwrap_or_default();
-    Ok(seq.iter().filter_map(row_to_json).collect())
+    Ok(load_blocks()?.iter().filter_map(row_to_json).collect())
 }
 
 fn row_to_json(item: &Value) -> Option<serde_json::Value> {
@@ -559,11 +547,40 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             id_ok && status_ok
         })
         .collect();
+    // A resolved row is moved out of the folder into the commit log, so an id stays
+    // answerable here: the log is searched for any id the folder no longer holds.
+    let store = row_store::Store::prd();
+    let mut selected = selected;
+    if !wanted_ids.is_empty() {
+        for want in &wanted_ids {
+            if selected.iter().any(|row| row_text(row, &["id"]) == *want) {
+                continue;
+            }
+            if let Some(row) = row_store::log_row(&store, want) {
+                selected.push(row);
+            }
+        }
+    } else if !wanted_statuses.is_empty() {
+        let closed = super::fsm::graph().policy.prd_closed_statuses.clone();
+        if wanted_statuses
+            .iter()
+            .any(|want| closed.iter().any(|c| c.eq_ignore_ascii_case(want)))
+        {
+            for row in row_store::log_rows_with_status(&store, &closed) {
+                if wanted_statuses
+                    .iter()
+                    .any(|want| want.eq_ignore_ascii_case(&row_status(&row)))
+                {
+                    selected.push(row);
+                }
+            }
+        }
+    }
     if !wanted_ids.is_empty() && selected.is_empty() {
         return (
             String::new(),
             format!(
-                "no PRD row with id {} of the {} rows in .gm/prd.yml -- pass no id for the listing",
+                "no PRD row with id {} of the {} rows in .gm/prd/ or the resolved rows in .gm/prd-log.jsonl -- pass no id for the listing",
                 wanted_ids.join(", "),
                 store_total
             ),
@@ -592,7 +609,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         "truncated": truncated,
         "brief": !want_full,
         "full": want_full,
-        "hint": "pass {\"id\":\"<row id>\"} for one full row (repeated blocks of an id fold to the last one), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), or {\"full\":true} for every full body",
+        "hint": "pass {\"id\":\"<row id>\"} for one full row (repeated blocks of an id fold to the last one), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), or {\"full\":true} for every full body. .gm/prd/ holds OPEN work only: a resolved row is moved to .gm/prd-log.jsonl, and an id or a closed status asked for here is answered from that log.",
     });
     (reply.to_string(), String::new(), 0)
 }
@@ -709,8 +726,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .clone()
         .or_else(|| slug.clone())
         .unwrap_or_else(|| format!("item-{}", crate::orchestrator::state::now_ms()));
-    let path = prd_path();
-    let path_s = path.to_string_lossy().to_string();
+    let store = row_store::Store::prd();
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
     let overwrite = item_map
         .get(&Value::String("overwrite".to_string()))
@@ -718,8 +734,8 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .unwrap_or(false);
 
     let verify_id = id.clone();
-    let outcome = cas::cas_retry_write_verified(
-        &path_s,
+    let outcome = row_store::cas_retry_write_verified(
+        &store,
         cas_max_attempts,
         "prd-add",
         |mut doc: Value| {
@@ -904,18 +920,17 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
         );
         return (String::new(), err, 1);
     }
-    let path = prd_path();
-    let path_s = path.to_string_lossy().to_string();
-    if !pkfs::exists(&path_s) {
+    let store = row_store::Store::prd();
+    if !pkfs::exists(&store.dir) && !pkfs::exists(&store.legacy) {
         return (
             String::new(),
-            format!("{} does not exist", path.display()),
+            format!("{} does not exist", store.dir),
             1,
         );
     }
     let policy = super::fsm::graph().policy.clone();
-    let outcome = cas::cas_retry_write(
-        &path_s,
+    let outcome = row_store::cas_retry_write(
+        &store,
         policy.cas_max_attempts,
         "prd-defer",
         |mut doc: Value| {
@@ -1285,14 +1300,30 @@ fn path_is_within(path: &str, other: &str) -> bool {
 fn is_runtime_state_path(path: &str) -> bool {
     let anchored = format!("/{path}");
     anchored.ends_with("/.gm/witness-log.md")
-        || anchored.ends_with("/.gm/prd.yml")
-        || anchored.ends_with("/.gm/mutables.yml")
+        || is_prd_state_pathspec(path)
         || anchored.contains("/.gm/pool/")
         || anchored.contains("/.gm/witness-out/")
 }
 
 pub fn is_prd_yml_pathspec(path: &str) -> bool {
     path.trim().replace('\\', "/").trim_start_matches("./") == ".gm/prd.yml"
+}
+
+/// True for any path that carries PRD or mutable state: the legacy single files, the
+/// one-file-per-row folders and the commit logs. One file per row is what makes the
+/// git verbs' whole-file foreign-row filter unnecessary -- a row file has one owner.
+pub fn is_prd_state_pathspec(path: &str) -> bool {
+    let trimmed = path.trim().replace('\\', "/");
+    let p = trimmed.trim_start_matches("./");
+    if p == ".gm/prd.yml"
+        || p == ".gm/mutables.yml"
+        || p == ".gm/prd-log.jsonl"
+        || p == ".gm/mutables-log.jsonl"
+    {
+        return true;
+    }
+    let anchored = format!("/{p}");
+    anchored.contains("/.gm/prd/") || anchored.contains("/.gm/mutables/")
 }
 
 fn prd_row_blocks(text: &str) -> Vec<&str> {
@@ -1814,16 +1845,17 @@ pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Valu
     if changed.is_empty() {
         return vec![];
     }
-    let path_s = prd_path().to_string_lossy().to_string();
-    let Some(text) = read_prd_text(&path_s) else {
-        return prd_unreadable_report(&path_s, format!("{path_s} is missing or unreadable"));
-    };
-    let doc: Value = match serde_yaml::from_str(&text) {
-        Ok(doc) => doc,
-        Err(e) => {
-            return prd_unreadable_report(&path_s, format!("{path_s} does not parse as YAML: {e}"))
+    let store = row_store::Store::prd();
+    let blocks = match row_store::read_blocks(&store) {
+        Ok(read) => read.blocks,
+        Err((reason, _)) => {
+            return prd_unreadable_report(
+                &store.dir,
+                format!("{} is unreadable: {}", store.dir, reason),
+            )
         }
     };
+    let doc: Value = Value::Sequence(blocks);
     let stale = stale_completed_rows(&doc, &changed);
     if stale.is_empty() {
         return vec![];
@@ -1913,7 +1945,7 @@ pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Valu
         return report;
     }
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
-    let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-reverify", |mut doc: Value| {
+    let outcome = row_store::cas_retry_write(&store, cas_max_attempts, "prd-reverify", |mut doc: Value| {
         let still_completed: Vec<(String, Vec<String>)> = failed
             .iter()
             .filter(|(id, _)| row_status_is_completed(&doc, id))
@@ -2428,12 +2460,15 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    let path = prd_path();
-    let path_s = path.to_string_lossy().to_string();
-    if !pkfs::exists(&path_s) {
+    let store = row_store::Store::prd();
+    let existing_blocks = match row_store::read_blocks(&store) {
+        Ok(read) => read.blocks,
+        Err((message, code)) => return (String::new(), message, code),
+    };
+    if existing_blocks.is_empty() {
         return (
             String::new(),
-            format!("{} does not exist", path.display()),
+            format!("{} holds no PRD rows", store.dir),
             1,
         );
     }
@@ -2443,50 +2478,44 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         && deviation_refuses("prd-resolve-duplicate-witness")
     {
         if let Some(binding) = witness_binding.as_ref() {
-            if let Some(existing) = read_prd_text(&path_s) {
-                if let Ok(doc) = serde_yaml::from_str::<Value>(&existing) {
-                    if let Some(seq) = doc.as_sequence() {
-                        for item in seq {
-                            let Some(map) = item.as_mapping() else {
-                                continue;
-                            };
-                            let other_id = map
-                                .get(&Value::String("id".to_string()))
-                                .and_then(|v| v.as_str());
-                            if other_id == Some(id_target.as_str()) {
-                                continue;
-                            }
-                            let other_sha = map
-                                .get(&Value::String("witness_binding".to_string()))
-                                .and_then(|b| b.as_mapping())
-                                .and_then(|b| b.get(&Value::String("output_sha256".to_string())))
-                                .and_then(|v| v.as_str());
-                            if other_sha == Some(binding.output_sha256.as_str()) {
-                                let body = serde_json::json!({
-                                    "error": format!(
-                                        "prd-resolve refused: witness binding for {} reuses output_sha256 {}, already bound to {}. Each witness output closes one row: make the witness print a run identity (its dispatch id or a run timestamp) into its output, re-run it, and bind the new output file",
-                                        id_target,
-                                        binding.output_sha256,
-                                        other_id.unwrap_or("?")
-                                    ),
-                                    "deviation_kind": "prd-resolve-duplicate-witness",
-                                    "deviation_severity": "deny",
-                                    "prd_id": id_target,
-                                    "duplicate_of": other_id,
-                                    "hint": "One witness output closes one row. A witness that prints no run identity writes the same bytes on every run, so a second row cannot bind a distinct output: make the witness print its dispatch id or a run timestamp into the output file, re-run it, and bind the new file by its witness_output_sha256. A row that really shares a witness with another row should be re-scoped with prd-add, not closed with the same output file.",
-                                })
-                                .to_string();
-                                return (
-                                    body,
-                                    format!(
-                                        "prd-resolve refused: duplicate witness binding for {}",
-                                        id_target
-                                    ),
-                                    1,
-                                );
-                            }
-                        }
-                    }
+            for item in &existing_blocks {
+                let Some(map) = item.as_mapping() else {
+                    continue;
+                };
+                let other_id = map
+                    .get(&Value::String("id".to_string()))
+                    .and_then(|v| v.as_str());
+                if other_id == Some(id_target.as_str()) {
+                    continue;
+                }
+                let other_sha = map
+                    .get(&Value::String("witness_binding".to_string()))
+                    .and_then(|b| b.as_mapping())
+                    .and_then(|b| b.get(&Value::String("output_sha256".to_string())))
+                    .and_then(|v| v.as_str());
+                if other_sha == Some(binding.output_sha256.as_str()) {
+                    let body = serde_json::json!({
+                        "error": format!(
+                            "prd-resolve refused: witness binding for {} reuses output_sha256 {}, already bound to {}. Each witness output closes one row: make the witness print a run identity (its dispatch id or a run timestamp) into its output, re-run it, and bind the new output file",
+                            id_target,
+                            binding.output_sha256,
+                            other_id.unwrap_or("?")
+                        ),
+                        "deviation_kind": "prd-resolve-duplicate-witness",
+                        "deviation_severity": "deny",
+                        "prd_id": id_target,
+                        "duplicate_of": other_id,
+                        "hint": "One witness output closes one row. A witness that prints no run identity writes the same bytes on every run, so a second row cannot bind a distinct output: make the witness print its dispatch id or a run timestamp into the output file, re-run it, and bind the new file by its witness_output_sha256. A row that really shares a witness with another row should be re-scoped with prd-add, not closed with the same output file.",
+                    })
+                    .to_string();
+                    return (
+                        body,
+                        format!(
+                            "prd-resolve refused: duplicate witness binding for {}",
+                            id_target
+                        ),
+                        1,
+                    );
                 }
             }
         }
@@ -2498,37 +2527,32 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         if let Some(w) = witness.as_ref() {
             let trimmed_w = w.trim();
             if trimmed_w.len() >= 24 {
-                if let Some(existing) = read_prd_text(&path_s) {
-                    if let Ok(doc) = serde_yaml::from_str::<Value>(&existing) {
-                        if let Some(seq) = doc.as_sequence() {
-                            for item in seq {
-                                if let Some(map) = item.as_mapping() {
-                                    let other_id = map
-                                        .get(&Value::String("id".to_string()))
-                                        .and_then(|v| v.as_str());
-                                    if other_id == Some(id_target.as_str()) {
-                                        continue;
-                                    }
-                                    let other_witness = map
-                                        .get(&Value::String("witness".to_string()))
-                                        .and_then(|v| v.as_str());
-                                    if other_witness
-                                        .map(|ow| ow.trim() == trimmed_w)
-                                        .unwrap_or(false)
-                                    {
-                                        let body = serde_json::json!({
-                                        "error": format!("prd-resolve refused: witness_evidence for {} is byte-identical to the witness already recorded for {}", id_target, other_id.unwrap_or("?")),
-                                        "deviation_kind": "prd-resolve-duplicate-witness",
-                                        "deviation_severity": "deny",
-                                        "prd_id": id_target,
-                                        "duplicate_of": other_id,
-                                        "hint": "Identical witness text across structurally distinct PRD rows is the rubber-stamp tell -- generic phrasing like 'code written and tested' copy-pasted across multiple ids means the rows were marked completed without each one's own real, distinct evidence. Every row's witness_evidence must be specific to what THAT row actually did: a distinct file:line, a distinct exec_js output, a distinct codesearch hit. If the rows genuinely share one piece of evidence (rare), that itself is a sign they should have been one row, not three -- re-scope via prd-add instead of resolving separately with copy-pasted text.",
-                                    }).to_string();
-                                        return (body, format!("prd-resolve refused: duplicate witness_evidence for {}", id_target), 1);
-                                    }
-                                }
-                            }
-                        }
+                for item in &existing_blocks {
+                    let Some(map) = item.as_mapping() else {
+                        continue;
+                    };
+                    let other_id = map
+                        .get(&Value::String("id".to_string()))
+                        .and_then(|v| v.as_str());
+                    if other_id == Some(id_target.as_str()) {
+                        continue;
+                    }
+                    let other_witness = map
+                        .get(&Value::String("witness".to_string()))
+                        .and_then(|v| v.as_str());
+                    if other_witness
+                        .map(|ow| ow.trim() == trimmed_w)
+                        .unwrap_or(false)
+                    {
+                        let body = serde_json::json!({
+                            "error": format!("prd-resolve refused: witness_evidence for {} is byte-identical to the witness already recorded for {}", id_target, other_id.unwrap_or("?")),
+                            "deviation_kind": "prd-resolve-duplicate-witness",
+                            "deviation_severity": "deny",
+                            "prd_id": id_target,
+                            "duplicate_of": other_id,
+                            "hint": "Identical witness text across structurally distinct PRD rows is the rubber-stamp tell -- generic phrasing like 'code written and tested' copy-pasted across multiple ids means the rows were marked completed without each one's own real, distinct evidence. Every row's witness_evidence must be specific to what THAT row actually did: a distinct file:line, a distinct exec_js output, a distinct codesearch hit. If the rows genuinely share one piece of evidence (rare), that itself is a sign they should have been one row, not three -- re-scope via prd-add instead of resolving separately with copy-pasted text.",
+                        }).to_string();
+                        return (body, format!("prd-resolve refused: duplicate witness_evidence for {}", id_target), 1);
                     }
                 }
             }
@@ -2553,8 +2577,8 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         .into_iter()
         .flatten()
         .collect();
-    let outcome = cas::cas_retry_write_verified(
-        &path_s,
+    let outcome = row_store::cas_retry_write_verified(
+        &store,
         policy.cas_max_attempts,
         "prd-resolve",
         |mut doc: Value| {
@@ -2664,6 +2688,30 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     );
     match outcome {
         Ok(status_matches) => {
+            // Resolution moves the material: the row's content is appended to the
+            // commit log and its file is cleared, so the folder holds open work only.
+            let filed = if annotate_only {
+                None
+            } else {
+                match row_store::retire_to_log(
+                    &store,
+                    &id_target,
+                    &resolved_status,
+                    resolution.as_deref(),
+                ) {
+                    Ok(entry) => Some(entry),
+                    Err(reason) => {
+                        return (
+                            String::new(),
+                            format!(
+                                "prd-resolve: {} was set to {} but could not be moved into {}: {}",
+                                id_target, resolved_status, store.log, reason
+                            ),
+                            1,
+                        )
+                    }
+                }
+            };
             #[cfg(target_arch = "wasm32")]
             crate::wasm_dispatch::emit_event(
                 if annotate_only {
@@ -2674,7 +2722,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 serde_json::json!({ "id": id_target }),
             );
             let outcome_key = if annotate_only { "annotated" } else { "resolved" };
-            let reply = serde_json::json!({
+            let mut reply = serde_json::json!({
                 outcome_key: id_target,
                 "status_kept": status_matches,
                 "commit_comment_attached": commit_comment.is_some() || commit_sha.is_some(),
@@ -2689,6 +2737,19 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 "witness_dispatch_id_in_ledger": bound_in_project,
                 "count_of_record": count_of_record,
             });
+            if let Some(entry) = filed {
+                if let Some(map) = reply.as_object_mut() {
+                    map.insert(
+                        "filed_to".to_string(),
+                        serde_json::Value::String(format!(".gm/{}", "prd-log.jsonl")),
+                    );
+                    map.insert("filed_at".to_string(), entry.get("ts").cloned().unwrap_or(serde_json::Value::Null));
+                    map.insert(
+                        "row_file_cleared".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
+            }
             (reply.to_string(), String::new(), 0)
         }
         Err((out, err, rc)) => (out, err, rc),
@@ -2706,11 +2767,11 @@ pub fn handle_block(content: &str) -> (String, String, i32) {
     ) else {
         return (String::new(), "prd-block requires id and note".to_string(), 1);
     };
-    let path_s = prd_path().to_string_lossy().to_string();
+    let store = row_store::Store::prd();
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
-    let outcome = cas::cas_retry_write(&path_s, cas_max_attempts, "prd-block", |mut doc: Value| {
+    let outcome = row_store::cas_retry_write(&store, cas_max_attempts, "prd-block", |mut doc: Value| {
         let Some(seq) = doc.as_sequence_mut() else {
-            return cas::CasOutcome::Abort(String::new(), "prd.yml is not a sequence".to_string(), 1);
+            return cas::CasOutcome::Abort(String::new(), "the PRD store is not a sequence".to_string(), 1);
         };
         let key = Value::String("id".to_string());
         let Some(row) = seq
